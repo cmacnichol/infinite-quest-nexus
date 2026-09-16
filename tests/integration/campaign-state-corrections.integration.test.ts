@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
+import { loadCurrentContinuityCorrection } from "../../packages/database/src/campaign-continuity-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createCorrectionFixture, snapshotCorrectionEvidence } from "../helpers/campaign-state-correction-fixtures.js";
 import { buildContextPreview, getCampaignRuntimeState, rebuildCampaignMemories, rewindCampaign, updateCampaignRuntimeState } from "../helpers/memory-aware-services.js";
@@ -67,6 +68,17 @@ integration("campaign state corrections", () => {
       activeTurnNumber: 0,
       canonicalFacts: [{ id: factId, content: "The bell is silver." }]
     });
+    const ownerUserId = await initialOwnerId(pool);
+    const campaignRow = await pool.query<{ world_version_id: string }>("SELECT world_version_id FROM campaigns WHERE id=$1", [imported.campaignId]);
+    const scope = { ownerUserId, campaignId: imported.campaignId, worldVersionId: campaignRow.rows[0]!.world_version_id };
+    const read = () => withTransaction(pool, (client) => loadCurrentContinuityCorrection(client, scope, 0, { complete: true }));
+    expect((await read())?.canonicalFacts).toEqual([{ id: factId, content: "The bell is silver." }]);
+    const latest = await getCampaignRuntimeState(pool, imported.campaignId);
+    await updateCampaignRuntimeState(pool, imported.campaignId, { ...latest,
+      expectedTurnNumber: 0, expectedRevision: latest.revision,
+      continuitySummary: "", openThreads: [], canonicalFacts: [], scratchpad: ""
+    });
+    expect(await read()).toMatchObject({ continuitySummary: "", openThreads: [], canonicalFacts: [], scratchpad: "" });
   });
 
   it("persists a complete append-only correction without rewriting the accepted turn", async () => {

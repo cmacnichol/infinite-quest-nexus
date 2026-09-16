@@ -60,6 +60,10 @@ export type RuntimeConfig = {
   systemArchiveLimits: ArchiveLimits;
   credentialEncryptionKey: string;
   worldSharingEnabled?: boolean;
+  /** Operator capability; campaigns remain legacy until separately enrolled. */
+  storyMemoryCapability?: "r1" | "r2" | "r3" | null;
+  /** Enables R3 enforce enrollments; disabled by default. */
+  storyMemoryEnforceEnabled?: boolean;
   security: RuntimeSecurityConfig;
 };
 
@@ -186,6 +190,13 @@ function booleanSetting(name: string, fallback: boolean): boolean {
   throw new Error(`${name} must be true or false.`);
 }
 
+function storyMemoryCapabilitySetting(): "r1" | "r2" | "r3" | null {
+  const raw = process.env.STORY_MEMORY_CAPABILITY?.trim().toLowerCase();
+  if (!raw || raw === "off") return null;
+  if (raw === "r1" || raw === "r2" || raw === "r3") return raw;
+  throw new Error("STORY_MEMORY_CAPABILITY must be off, r1, r2, or r3.");
+}
+
 export function loadRuntimeConfig(): RuntimeConfig {
   const roleValue = process.env.APP_ROLE ?? process.argv[2] ?? "all";
   if (!(["all", "api", "worker", "migrate"] as const).includes(roleValue as RuntimeConfig["role"])) {
@@ -254,6 +265,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
     }, systemArchiveAllowLimitIncrease),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
+    storyMemoryCapability: storyMemoryCapabilitySetting(),
+    storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", false),
     security: {
       corsAllowedOrigins: parseExactOriginList(process.env.CORS_ALLOWED_ORIGINS, "CORS_ALLOWED_ORIGINS"),
       providerNetworkAllowlist: parseProviderAllowlist(process.env.PROVIDER_NETWORK_ALLOWLIST),

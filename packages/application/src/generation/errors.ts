@@ -26,6 +26,8 @@ export type GenerationApplicationErrorReason =
   | "active_illustration"
   | "result_not_completed"
   | "retry_protocol_incompatible"
+  | "story_memory_capability_unavailable"
+  | "story_memory_enforce_disabled"
   | "retry_source_state"
   | "cancel_source_state"
   | "discard_source_state";

@@ -12,6 +12,11 @@ applicable correction (including an intentional empty value), and authorized
 canonical facts. Public context previews remain sanitized and cannot request
 private authority data.
 
+Campaign story context settings support 32k through 4m tokens; these are upper
+targets, subject to the provider request limit. The separate public memory
+context-preview query remains capped at 1m. See
+[Story Memory rollout](../runbooks/story-memory-rollout.md#budget-terminology).
+
 The planner applies two ceilings to the exact serialized request:
 
 ```text
@@ -32,13 +37,19 @@ model tokenizer. Provider-reported overflow remains recoverable and informs
 future calibration; it does not authorize clipping protected state or lowering
 the configured output reserve.
 
-Protected records are complete. The planner adds optional recent turns and
+Protected records are complete. The legacy planner adds optional recent turns and
 historical facts as complete records only when they fit, records omissions, and
 renders selected records in chronology. A protected-context shortfall returns a
 safe recovery diagnostic. Before transport it also checks that the complete
 replacement shape can fit within the configured output reserve. That feasibility
 check prevents a known impossible request; it does not promise that a model will
 produce a complete answer.
+
+The versioned Story Memory policy may permit verified narrative excerpts after
+its capability is explicitly enabled. A selected canonical fact remains complete;
+an excerpt cannot grant a canonical fact ID or supersession authority. Protected
+current state is never excerpted. Bounded world references and historical facts
+are selected evidence, not a claim that all world/history records were supplied.
 
 All story-generation operations use the same serialized-payload guard: initial
 generation, schema/mechanics recovery, scene validation and rewrite, RPG
@@ -65,6 +76,91 @@ override must be acknowledged against the current protocol and otherwise gives
 an actionable compatibility notice; the service never rewrites the override.
 
 ## Durable execution
+
+### Continuity-context protocol and rollout
+
+`current-continuity-v3` has a typed private context envelope. It binds the
+owner, campaign, pinned world version, versioned generation base identity,
+complete protected authority, selected evidence, and a hash of the complete
+evidence manifest. It does not make all historical records mandatory prompt
+content: selected reference records and recent/retrieved evidence are bounded
+and every omission has a fixed reason. Current protected state remains whole;
+an overflow is recoverable rather than a reason to truncate or substitute a
+summary.
+
+Story Memory capability is operational. An operator enables an installed
+capability, then the server may explicitly enroll a campaign. Neither archive
+import nor installation enrolls a campaign. The enqueue transaction freezes the
+resolved policy, its canonical hash, protocol identities, and effective provider
+configuration fingerprint. Later enrollment, prompt, or provider changes apply
+only to new jobs. A worker that cannot read the frozen policy reports a
+discard-and-reenqueue recovery requirement; it never silently downgrades a job.
+
+Historical jobs with no Story Memory policy and old base identities use their
+named legacy readers. A v3 base identity requires every declared dependency,
+including the effective character revision/fingerprint; no reader fills missing
+fields from mutable campaign data. The v3 review envelope is optional and
+operational. A review pass means only that no evidence-supported contradiction
+was found in the supplied manifest, not that all campaign history was checked.
+
+### Private contract seams
+
+`packages/application/src/memory/generation-context.ts` owns the canonical
+authority, candidate and base-identity types used by application ports and the
+database/runtime adapters. The baseline authority retains complete current
+continuity, rules, world canon, selected character ID, latest accepted action and
+narration, and the existing internal mechanics fields. Those internal fields do
+not grant permission to send mechanics to fiction providers. Character capture
+extends the same authority with `characterAuthority`; it is required by the v3
+snapshot and absent from unchanged legacy captures.
+
+`legacyGenerationBaseIdentitySchema` and `readLegacyGenerationBaseIdentity`
+preserve the old dependency set. `generationBaseIdentityV3Schema` adds the
+explicit `generation-base-v3` discriminator and mandatory character profile
+revision/fingerprint while retaining every old dependency. Capturing and checking
+these new dependencies is a separate executor/source integration step. Merely
+parsing a snapshot never manufactures a missing profile fence.
+
+Evidence uses `fiction-safe-json-v1`: callers first supply a scoped, fiction-safe
+JSON document; object keys are sorted by code-unit order, array order is retained,
+and string fields retain their exact UTF-16 text. The source hash covers the
+complete canonical document. `sourcePath` resolves only own JSON properties.
+`sourceLength` bounds spans within the resolved field representation; disjoint
+ordered spans join with an explicit `\n[…]\n` separator. Empty strings and empty
+arrays remain distinct values. `readStoryEvidenceFromSource` rebinds persisted
+metadata/content to the captured source instead of trusting a self-reported hash.
+
+Evidence IDs include source kind, ID, revision, turn, content hash, pointer, role,
+normalization version, form and spans. Ranking and entry order do not change
+individual IDs. Manifest hashes exclude their own hash, canonicalize object keys,
+and retain array order so a changed selection order changes the request-bound
+manifest hash. Required-review IDs are a unique subset of supplied entries.
+Review references use the contracts package's single source/candidate union;
+omission findings identify an output field without fabricating a quotation.
+
+`createStoryContinuityCheckpointV3Schema(payloadSchema)` creates the explicit
+`{ version: 3, metadata, checkpoint }` envelope. Metadata fixes context v3 and
+output v2 and binds policy/manifest hashes; review state is optional. It is not a
+schema for the full executor payload. The caller must supply that payload's
+complete validator and retain its existing provenance/commit checks.
+`readStoryContinuityCheckpoint` names the v2 path `legacy_v2`, validates either
+payload without defaults, and rejects unsupported or malformed envelopes with
+`discard_and_reenqueue`. This contract does not turn an old checkpoint into new
+authority or enable reviewer dispatch. Existing execution continues to use its
+v2 checkpoint until the later executor integration supplies the compatible schema.
+
+The actual historical query variants are `action`, `entity_expanded`, `scene`
+and `open_thread` with `query` and `entityIds`. The named legacy reader retains
+that shape and `legacy_sum`. New variants use `story-memory-query-v1`, stable
+family/variant IDs, action segment positions and optional temporal hints, with
+the `query_family_max_v1` contract. Cache/diagnostic serialization preserves the
+entire versioned identity. The current planner and rank adapter remain explicitly
+typed as legacy until the balanced planner is implemented.
+
+Executable serialized examples, including intentional empty corrections, complete
+executor payloads and negative records, live in
+`tests/fixtures/story-continuity-contracts.v1.json` and are exercised by
+`tests/unit/story-continuity-serialized-fixtures.test.ts`.
 
 The worker records a versioned private checkpoint after it validates the main
 draft. The checkpoint binds owner, campaign, world version, base identity,
@@ -191,3 +287,23 @@ kind `canonical_fact`. In the generation cutoff path those entry IDs are the
 scoped canonical fact UUIDs, not grouped memory IDs. Facts omitted by the final
 planner, prose containing a UUID, and rejected drafts do not grant authority.
 Active-fact and generation-base checks still apply at acceptance.
+
+### Exact derived source spans
+
+New chunk jobs certify contiguous UTF-16 spans against the complete fiction-safe
+`story-fiction-source-v1` representation. That normalization applies NFKC and LF,
+removes mechanics with the shared sanitizer, and retains turn intent/narration
+labels. Every certified chunk records its normalized source hash and offsets in
+`chronicle_memory_chunks.metadata.sourceEvidence`; capability splitting preserves
+those offsets. The batch writer reconstructs and verifies the span before saving.
+Existing chunks without this metadata remain retrievable, but their historical
+computed offsets do not constitute evidence certification.
+
+Chunk rows and their certification metadata remain `rebuildable` in the portability
+registry. Accepted turns are unchanged. Turn-memory rebuilds read the saved input
+mode and label scene input `Story Direction (intent)`; old `Player action` memories
+remain readable. Parent normalization metadata describes a derived representation,
+not new story authority. Work and processed-prefix signatures include the source
+normalization version. A campaign-scoped queued chunk job can resume an unchanged
+prefix or rebuild uncertified parents; deployment performs no synchronous global
+reindex. Only verified spans may later support excerpt evidence.

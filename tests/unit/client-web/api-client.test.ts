@@ -81,7 +81,7 @@ describe("createNexusApiClient", () => {
     expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
-      "branch", "correctTurnNarration", "create", "getTurnCorrection", "inspectState", "list", "readableExport", "rewind", "state", "turns", "updateState"
+      "branch", "correctTurnNarration", "create", "getCharacterProfile", "getTurnCorrection", "inspectState", "list", "readableExport", "rewind", "state", "turns", "updateCharacterProfile", "updateState"
     ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
@@ -139,6 +139,8 @@ describe("createNexusApiClient", () => {
     expect(typeof campaigns.state).toBe("function");
     expect(typeof campaigns.inspectState).toBe("function");
     expect(typeof campaigns.updateState).toBe("function");
+    expect(typeof campaigns.getCharacterProfile).toBe("function");
+    expect(typeof campaigns.updateCharacterProfile).toBe("function");
     expect(typeof campaigns.getTurnCorrection).toBe("function");
     expect(typeof campaigns.correctTurnNarration).toBe("function");
     expect("classifyTurnInput" in campaigns).toBe(false);
@@ -147,6 +149,69 @@ describe("createNexusApiClient", () => {
     expect(typeof shell.session).toBe("object");
     expect(typeof shell.meta).toBe("object");
     expect("request" in client).toBe(false);
+  });
+
+  it("accepts the distinct GET and PUT campaign character-profile response projections", async () => {
+    const fetchedProfile = {
+      campaignId,
+      characterId: "mira-vale",
+      revision: 4,
+      name: "Mira Vale",
+      profile: { story: { role: "Harbor scout" } },
+      storedProfile: null,
+      inheritedFromSnapshot: true,
+      legacyCharacterText: "Trusts the lighthouse keeper.",
+      rpgStats: [{ id: "resolve", name: "Resolve", value: 7, note: "Steady under pressure." }],
+      defaultTriggers: [{ id: "lantern", name: "Lantern", value: "lit", rules: "Keep it lit at night." }]
+    };
+    const updatedProfile = {
+      campaignId,
+      revision: 5,
+      name: "Mira Vale",
+      profile: { story: { role: "Harbor warden" } }
+    };
+    const client = createNexusApiClient({
+      basePath: "/api/v1",
+      session: createNoopSessionPort(),
+      fetchImpl: async (_input, init) => new Response(JSON.stringify(init?.method === "PUT" ? updatedProfile : fetchedProfile), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    });
+
+    await expect(client.campaigns.getCharacterProfile(campaignId)).resolves.toMatchObject(fetchedProfile);
+    await expect(client.campaigns.updateCharacterProfile(campaignId, {
+      expectedRevision: 4,
+      name: "Mira Vale",
+      profile: { story: { role: "Harbor warden" } } as never,
+      editSource: "manual"
+    })).resolves.toMatchObject(updatedProfile);
+  });
+
+  it("rejects malformed campaign character-profile response fields", async () => {
+    const client = createNexusApiClient({
+      basePath: "/api/v1",
+      session: createNoopSessionPort(),
+      fetchImpl: async () => new Response(JSON.stringify({
+        campaignId,
+        characterId: "mira-vale",
+        revision: 4,
+        name: "Mira Vale",
+        profile: {},
+        storedProfile: { name: "Mira Vale", profile: {}, unexpected: true },
+        inheritedFromSnapshot: false,
+        legacyCharacterText: "",
+        rpgStats: [],
+        defaultTriggers: []
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    });
+
+    await expect(client.campaigns.getCharacterProfile(campaignId)).rejects.toMatchObject({
+      phase: "response",
+      kind: "response_schema_mismatch",
+      path: `/campaigns/${campaignId}/character-profile`,
+      issues: [expect.objectContaining({ path: ["storedProfile"], keys: ["unexpected"] })]
+    });
   });
 
   it("maps every adopted method to its API-relative endpoint and validates successful response schemas", async () => {
@@ -182,6 +247,13 @@ describe("createNexusApiClient", () => {
         rpgStats: [],
         eventTriggers: [],
         pendingEventTriggers: []
+      }, signal),
+      () => client.campaigns.getCharacterProfile(campaignId, signal),
+      () => client.campaigns.updateCharacterProfile(campaignId, {
+        expectedRevision: 4,
+        name: "Mira Vale",
+        profile: {} as never,
+        editSource: "manual"
       }, signal),
       () => client.campaigns.getTurnCorrection(campaignId, worldVersionId, signal),
       () => client.campaigns.correctTurnNarration(campaignId, worldVersionId, {
@@ -229,6 +301,8 @@ describe("createNexusApiClient", () => {
       "/api/v1/campaigns/campaign%20%2F%20id/state?turnNumber=3",
       "/api/v1/campaigns/campaign%20%2F%20id/state/inspection?turnNumber=3",
       `/api/v1/campaigns/${campaignId}/state`,
+      `/api/v1/campaigns/${campaignId}/character-profile`,
+      `/api/v1/campaigns/${campaignId}/character-profile`,
       `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
       `/api/v1/campaigns/${campaignId}/turns/${worldVersionId}/correction`,
       `/api/v1/campaigns/${campaignId}/rewind`,
@@ -256,15 +330,21 @@ describe("createNexusApiClient", () => {
       "/api/v1/turns/turn%20%2F%20id/illustration-match"
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
-      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "GET", "PATCH", "GET", "PATCH", "POST", "POST",
+      "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "GET", "PATCH", "GET", "PUT", "GET", "PATCH", "POST", "POST",
       "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET",
       "GET", "GET", "GET", "POST", "POST", "POST", "GET", "POST"
     ]);
-    expect(queue.options[17]?.body).toBe(JSON.stringify(generationRequest));
-    expect(queue.options[18]?.body).toBe(JSON.stringify(replacementRequest));
-    expect(queue.options.slice(21, 24).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
-    expect(queue.options[32]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
-    expect(queue.options[33]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
+    expect(JSON.parse(String(queue.options[12]?.body))).toMatchObject({
+      expectedRevision: 4,
+      name: "Mira Vale",
+      profile: { identity: { aliases: [], pronouns: "" }, story: { role: "" }, appearance: { distinguishingFeatures: [] }, unclassifiedNotes: "" },
+      editSource: "manual"
+    });
+    expect(queue.options[19]?.body).toBe(JSON.stringify(generationRequest));
+    expect(queue.options[20]?.body).toBe(JSON.stringify(replacementRequest));
+    expect(queue.options.slice(23, 26).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
+    expect(queue.options[34]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
+    expect(queue.options[35]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 

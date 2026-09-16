@@ -211,6 +211,52 @@ provider usage from ordinary generation. An application-image rollback
 requires no accounting migration or data rewrite; preserve existing campaign
 budgets and investigate provider overflows rather than silently raising them.
 
+Story Memory enrollment, capability gates, copied-campaign canaries, and rollback
+are documented in [Story Memory rollout](story-memory-rollout.md).
+
+## Existing-campaign continuity repair proposals
+
+Use `corepack pnpm exec tsx scripts/propose-continuity-repair.ts` only for a
+campaign whose owner has authorized a private review. Supply `--campaign`,
+`--owner-user`, `--world-version`, `--base-turn`, `--base-revision`,
+`--authorized-by`, and an existing
+`--private-artifact-dir`; it also requires `DATABASE_URL` or
+`TEST_DATABASE_URL`. The tool reads the owner-scoped campaign in one
+repeatable, read-only transaction and refuses stale base revisions or any
+`--apply` mode.
+
+Run this operator command only with database access granted under the current
+owner's review authorization. `--authorized-by` records that authorization's
+reference; it is audit metadata, not authentication. The database credential
+establishes operator access, and the owner/campaign/world-version query binds
+the source scope. Do not expose this command as an unauthenticated API.
+The artifact directory must be absolute, already exist, and resolve outside
+the repository and public-serving directories. Existing files are never overwritten.
+
+The private artifact records retained accepted snapshots, effective narration
+correction revisions, explicit state corrections, and per-fact proposals. A
+proposal contains the exact `PATCH /api/v1/campaigns/:campaignId/state` body
+with the captured `expectedRevision` and `expectedTurnNumber`. Review each
+proposal independently. Empty later corrections, superseded values, missing
+authority, and conflicting retained evidence are vetoes or unrecoverable
+findings, never a guessed replacement.
+
+Applying a reviewed proposal is a separate, authorized API operation. Immediately
+before that action, run the same command with the same scope and revision
+arguments plus `--check-artifact <absolute-artifact-path>` instead of
+`--private-artifact-dir`. This read-only preflight compares the active turn,
+state revision, and every retained narration correction revision. Reject a
+stale artifact and prepare a new review; the existing state PATCH guard alone
+does not detect narration-only corrections. Generated proposals also include
+`expectedNarrationRevisionFingerprint`; the state API verifies this complete
+revision-set hash under the campaign lock shared with narration corrections,
+closing the interval between preflight and PATCH. Do not remove this guard.
+Each proposed PATCH is independent:
+after applying one, regenerate proposals against the new revision. Obtain a
+separate authorization before rebuilding derived Chronicle records. Keep
+artifacts outside source control and public-serving roots under the current
+owner/operator review access policy.
+
 ## Worker Concurrency and Graceful Shutdown
 
 `WORKER_GENERATION_CONCURRENCY` controls the number of story generations that one worker process may execute concurrently. It accepts integers from `1` through `4` and defaults to `1`. Keep it at `1` for behavior equivalent to the original serial worker; raise it only after checking text-provider capacity and database connection headroom. Illustration, Chronicle, and asset work use separate scheduler lanes with capacity `1` each, so an unavailable image provider cannot block or invalidate a completed story turn.

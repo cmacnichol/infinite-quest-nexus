@@ -106,7 +106,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       query: vi.fn(async (sql: string) => {
       if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 1, world_version_id: "world-version", revision: 3 }] };
       if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [{ state_snapshot_private: { continuitySummary: "The warden is dead.", scratchpad: "password: moonfall", canonicalFacts: [], openThreads: [] }, revision: 5 }] };
-      if (sql.includes("FROM effective_turn_narrations") && sql.includes("correction_revision")) return { rows: [{ id: "turn-1", effective_narration: "The warden dies at dawn.", correction_revision: 2 }] };
+      if (sql.includes("FROM effective_turn_narrations") && sql.includes("correction_revision")) return { rows: [{ id: "11111111-1111-4111-8111-111111111111", effective_narration: "The warden dies at dawn.", correction_revision: 2 }] };
       if (sql.includes("generation_context_state")) return { rows: [{
         world_content: { world: { rules: "Never resurrect the warden." } }, selected_character_id: "hero",
         initial_state_snapshot: { continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: [] }, scratchpad_private: ""
@@ -140,7 +140,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       query: vi.fn(async (sql: string) => {
         if (sql.includes("FOR UPDATE OF campaign, state")) return { rows: [{ active_turn_number: 1, world_version_id: "world-version", revision: 3 }] };
         if (sql.includes("FROM campaign_state_edits") && sql.includes("state_snapshot_private, revision")) return { rows: [] };
-        if (sql.includes("FROM effective_turn_narrations") && sql.includes("correction_revision")) return { rows: [{ id: "turn-1", effective_narration: "The warden dies at dawn.", correction_revision: 2 }] };
+        if (sql.includes("FROM effective_turn_narrations") && sql.includes("correction_revision")) return { rows: [{ id: "11111111-1111-4111-8111-111111111111", effective_narration: "The warden dies at dawn.", correction_revision: 2 }] };
         if (sql.includes("generation_context_state")) return { rows: [{
           world_content: { world: { rules: "First rule.\nSecond rule.", glossary: { warden: "keeper" }, conditions: ["dawn"] } },
           selected_character_id: "hero",
@@ -439,6 +439,7 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
       ...scope,
       turnId: "turn-1",
       ordinal: 4,
+      inputMode: "scene",
       action: "Open the ancient gate. [[ROLL d20=19]]",
       narration: "The gate opens. Difficulty: hard. Beyond it waits the Moon Warden."
     });
@@ -452,6 +453,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     ]);
     expect(String(inserted[5])).toContain("The gate opens.");
     expect(String(inserted[5])).toContain("Moon Warden");
+    expect(String(inserted[5])).toContain("Story Direction (intent):");
+    expect(String(inserted.at(-1))).toContain('"inputMode":"scene"');
     expect(String(inserted[5])).not.toMatch(/ROLL|Difficulty|d20/i);
     expect(String(inserted.at(-1))).toContain('"generated":true');
   });

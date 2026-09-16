@@ -4,7 +4,26 @@ import { z } from "zod";
 export const STORY_PROMPT_PROTOCOL_VERSION = "story-v13-current-state-corrections";
 export const STORY_PROMPT_SCHEMA_VERSION = "story-output-v2";
 export const STORY_CONTEXT_POLICY_VERSION = "current-continuity-v2";
+/**
+ * The Story Memory route is explicitly opted into by a frozen job policy.
+ * Keep the pre-enrollment v13 constants above unchanged for historic jobs.
+ */
+export const STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v14-continuity-context";
+export const STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v3";
 export const MAX_CONTINUITY_OPEN_THREADS = 500;
+
+/**
+ * This contract is appended after an acknowledged creative override so the
+ * override remains byte-for-byte intact while authority semantics stay fixed.
+ */
+export const STORY_MEMORY_MANDATORY_CONTRACT = [
+  "Story Memory authority contract: application scope and privacy boundaries come first. Pinned world rules and approved corrections outrank profile guidance, accepted state, selected history, summaries, plans, and the current player request.",
+  "Treat effective character profile guidance as portrayal authority. Preserve accepted historical references with their source time. Dynamic location, possessions, clothing, and relationship status use the latest applicable accepted change or explicit correction; an origin profile is never a reset. A personality guideline does not make an unusual accepted action a contradiction.",
+  "If an immutable world rule conflicts with an approved correction or profile edit, preserve the conflict as uncertainty for an explicit user decision; do not invent a retcon. Apply explicit corrections exactly at their effective base. An empty corrected summary, scratchpad, or thread list is intentional and must not be restored from older material.",
+  "Label supplied material by role: player input is intent, accepted narration is an outcome, selected world records are reference authority, and optional excerpts are limited historical evidence. The player input is intent, not proof that its requested outcome happened. Omitted history is unknown, not evidence that it never happened. Older narration remains true at its labeled source time even when current state later changed.",
+  "continuity_summary, scratchpad, and open_threads are complete replacements for current continuity and may intentionally be empty. canonical_facts and canonical_fact_updates describe only additions or structured current-turn updates; never repeat all historical facts merely to make those arrays comprehensive. A proposed output cannot grant itself source authority or authorize a new supersession ID. Supersede only a visible, supplied canonical fact ID, and only when the update actually replaces that fact.",
+  "Use only the bounded supplied context. Do not claim that all campaign history was verified or that an omitted record is absent. Derived summaries, plans, and candidate output are navigation or proposals, never authority overrides."
+].join("\n");
 
 export const STORY_PROSE_GUIDANCE = `Narration prose: Write clear, concrete prose with varied sentence lengths. Prefer one main action or observation per sentence. Split sequences of three or more independent clauses joined by "and" into separate sentences. Allow ordinary conjunctions in lists and natural dialogue.
 Each sentence should contribute a distinct action, perception, relevant thought, or consequence. Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning. Keep introspection connected to the character's immediate situation.
@@ -83,7 +102,7 @@ export const storyTurnOutputHistoricalSchema = z.object(storyTurnOutputFields).p
 
 export const generationDiagnosticOperationSchema = z.enum([
   "story_generation", "story_choice_repair", "rpg_assessment", "event_trigger", "event_extension",
-  "turn_intent", "scene_coverage", "scene_coverage_rewrite", "event_coverage"
+  "turn_intent", "scene_coverage", "scene_coverage_rewrite", "event_coverage", "story_continuity_review", "story_continuity_repair"
 ]);
 
 const diagnosticActionByCode = {
@@ -95,8 +114,48 @@ const diagnosticActionByCode = {
   prompt_override_incompatible: "update_prompt",
   prompt_protocol_upgrade_required: "discard_and_reenqueue",
   event_coverage_failed: "retry_event",
-  extension_narration_limit_exceeded: "shorten_or_replace_turn"
+  extension_narration_limit_exceeded: "shorten_or_replace_turn",
+  context_evidence_omitted: "adjust_context",
+  context_ready: "adjust_context",
+  source_validation_failed: "repair_authority",
+  continuity_review_conflict: "discard_and_reenqueue",
+  continuity_review_unavailable: "discard_and_reenqueue"
 } as const;
+
+const safeDiagnosticReasonCodeSchema = z.enum([
+  "context_limit", "request_limit", "recent_gap", "unsupported_world_shape",
+  "source_revision_changed", "unverifiable_excerpt", "duplicate_source",
+  "missing_authority", "source_validation_failed", "review_unavailable"
+]);
+
+const safeDiagnosticCountsSchema = z.object({
+  authorityComponents: z.number().int().nonnegative().max(10_000).optional(),
+  optionalEvidenceOmitted: z.number().int().nonnegative().max(10_000).optional(),
+  recentTurnsTarget: z.number().int().nonnegative().max(500).optional(),
+  recentTurnsIncluded: z.number().int().nonnegative().max(500).optional(),
+  worldReferencesIncluded: z.number().int().nonnegative().max(10_000).optional(),
+  worldReferencesOmitted: z.number().int().nonnegative().max(10_000).optional(),
+  excerptsComplete: z.number().int().nonnegative().max(10_000).optional(),
+  excerptsPartial: z.number().int().nonnegative().max(10_000).optional(),
+  sourceValidationFailures: z.number().int().nonnegative().max(10_000).optional(),
+  duplicateSources: z.number().int().nonnegative().max(10_000).optional()
+}).strict();
+
+const safeDiagnosticReviewSchema = z.object({
+  status: z.enum(["off", "observed", "passed", "conflict", "uncertain", "unavailable"]),
+  automaticRepair: z.enum(["not_consumed", "consumed", "unavailable"])
+}).strict();
+
+const safeProtectedComponentEstimatesSchema = z.object({
+  rules: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  world_canon: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  character_profile: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  current_state: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  current_scene: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  direction: z.number().int().nonnegative().max(1_000_000_000).optional()
+}).strict();
+
+const safeDiagnosticIdentitySchema = z.string().regex(/^[a-z0-9][a-z0-9._|:-]{0,499}$/);
 
 export const safeGenerationDiagnosticSchema = z.object({
   code: z.enum(Object.keys(diagnosticActionByCode) as [keyof typeof diagnosticActionByCode, ...Array<keyof typeof diagnosticActionByCode>]),
@@ -109,12 +168,98 @@ export const safeGenerationDiagnosticSchema = z.object({
   requiredCharacters: z.number().int().nonnegative().optional(),
   availableCharacters: z.number().int().nonnegative().optional(),
   countMode: z.literal("estimated").optional(),
-  estimatorVersion: z.literal("story-token-estimate-v1").optional()
+  estimatorVersion: z.literal("story-token-estimate-v1").optional(),
+  protocolIdentity: safeDiagnosticIdentitySchema.optional(),
+  policyIdentity: safeDiagnosticIdentitySchema.optional(),
+  queryVariantCount: z.number().int().nonnegative().max(32).optional(),
+  reasonCodes: z.array(safeDiagnosticReasonCodeSchema).max(20).optional(),
+  counts: safeDiagnosticCountsSchema.optional(),
+  review: safeDiagnosticReviewSchema.optional(),
+  protectedComponents: safeProtectedComponentEstimatesSchema.optional()
 }).strict().superRefine((value, context) => {
   if (diagnosticActionByCode[value.code] !== value.action) context.addIssue({ code: "custom", path: ["action"], message: "Diagnostic action must match its code." });
 });
 
 export type SafeGenerationDiagnostic = z.infer<typeof safeGenerationDiagnosticSchema>;
+
+export type SafeGenerationContextDiagnostic = Readonly<{
+  reasonCodes?: readonly NonNullable<SafeGenerationDiagnostic["reasonCodes"]>[number][];
+  counts?: Readonly<NonNullable<SafeGenerationDiagnostic["counts"]>>;
+}>;
+
+function safeDiagnosticInteger(value: unknown, maximum: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum
+    ? value
+    : undefined;
+}
+
+function safeDiagnosticRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/**
+ * Reduces private planner diagnostics to the fixed public vocabulary. It
+ * intentionally ignores component names, source IDs, source paths, excerpts,
+ * and token values.
+ */
+export function projectSafeGenerationContextDiagnostic(value: unknown): SafeGenerationContextDiagnostic {
+  const source = safeDiagnosticRecord(value);
+  if (!source) return {};
+  const layers = safeDiagnosticRecord(source.layers);
+  const world = safeDiagnosticRecord(source.worldReferenceOmissions);
+  const counts: Record<string, number> = {};
+  const reasons = new Set<z.infer<typeof safeDiagnosticReasonCodeSchema>>();
+  const recent = safeDiagnosticRecord(layers?.recent);
+  const target = safeDiagnosticInteger(recent?.target, 500);
+  const included = safeDiagnosticInteger(recent?.included, 500);
+  if (target !== undefined) counts.recentTurnsTarget = target;
+  if (included !== undefined) counts.recentTurnsIncluded = included;
+  if (recent?.firstGapReason === "recent_gap" || recent?.firstGapReason === "context_limit" || recent?.firstGapReason === "request_limit") {
+    reasons.add(recent.firstGapReason);
+  }
+  const duplicateSources = safeDiagnosticInteger(layers?.duplicateSourceCount, 10_000);
+  if (duplicateSources) {
+    counts.duplicateSources = duplicateSources;
+    reasons.add("duplicate_source");
+  }
+  const components = safeDiagnosticRecord(layers?.components);
+  if (components) {
+    const count = Object.values(components).filter((entry) => safeDiagnosticInteger(entry, Number.MAX_SAFE_INTEGER) !== undefined).length;
+    if (count) counts.authorityComponents = count;
+  }
+  const excerptsComplete = safeDiagnosticInteger(layers?.excerptsComplete, 10_000);
+  const excerptsPartial = safeDiagnosticInteger(layers?.excerptsPartial, 10_000);
+  const sourceValidationFailures = safeDiagnosticInteger(layers?.sourceValidationFailures, 10_000);
+  if (excerptsComplete !== undefined) counts.excerptsComplete = excerptsComplete;
+  if (excerptsPartial !== undefined) counts.excerptsPartial = excerptsPartial;
+  if (sourceValidationFailures !== undefined) {
+    counts.sourceValidationFailures = sourceValidationFailures;
+    if (sourceValidationFailures) reasons.add("source_validation_failed");
+  }
+  const omitted = Array.isArray(layers?.omitted) ? layers.omitted : [];
+  let omittedCount = 0;
+  for (const entry of omitted) {
+    const reason = safeDiagnosticRecord(entry)?.reason;
+    if (reason === "context_limit" || reason === "request_limit" || reason === "recent_gap" || reason === "unsupported_world_shape" || reason === "source_revision_changed" || reason === "unverifiable_excerpt" || reason === "duplicate_source") {
+      omittedCount += 1;
+      reasons.add(reason);
+    }
+  }
+  if (omittedCount) counts.optionalEvidenceOmitted = Math.min(omittedCount, 10_000);
+  const worldOmitted = ["unrecognizedRecordCount", "missingEndpointCount", "ambiguousAliasCount", "oversizedRecordCount", "entityCapCount", "relationshipCapCount"]
+    .map((key) => safeDiagnosticInteger(world?.[key], 10_000) ?? 0)
+    .reduce((total, count) => Math.min(10_000, total + count), 0);
+  if (worldOmitted) {
+    counts.worldReferencesOmitted = worldOmitted;
+    reasons.add("unsupported_world_shape");
+  }
+  return {
+    ...(reasons.size ? { reasonCodes: safeDiagnosticReasonCodeSchema.options.filter((reason) => reasons.has(reason)) } : {}),
+    ...(Object.keys(counts).length ? { counts: safeDiagnosticCountsSchema.parse(counts) } : {})
+  };
+}
 
 /** Drops private or malformed persisted diagnostics before a public projection. */
 export function projectSafeGenerationDiagnostic(value: unknown): SafeGenerationDiagnostic | null {
@@ -125,6 +270,18 @@ export type StoryTurnOutput = z.infer<typeof storyTurnOutputSchema>;
 
 export function storyPromptCompatibilityIdentity(): string {
   return `${STORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_CONTEXT_POLICY_VERSION}`;
+}
+
+export function storyMemoryPromptCompatibilityIdentity(): string {
+  return `${STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
+}
+
+export function composeStoryMemorySystemPrompt(creativePrompt: string, supplement = ""): string {
+  const prompt = creativePrompt === STORY_SYSTEM_PROMPT
+    ? creativePrompt.replace("scratchpad, continuity_summary, canonical_facts, canonical_fact_updates, and open_threads are required complete replacement values.",
+      "scratchpad, continuity_summary, and open_threads are required complete replacement values. canonical_facts and canonical_fact_updates contain only this turn's additions and structured updates.")
+    : creativePrompt;
+  return `${prompt}${supplement ? `\n\n${supplement}` : ""}\n\n${STORY_MEMORY_MANDATORY_CONTRACT}`;
 }
 
 export function storyPromptProtocolIdentity(templateHashes: Readonly<Record<string, string>>): string {

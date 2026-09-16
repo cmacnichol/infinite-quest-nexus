@@ -1,3 +1,5 @@
+import { chunkChronicleMemory } from "../../packages/domain/src/chronicle-chunking.js";
+import { STORY_EVIDENCE_NORMALIZATION_VERSION } from "../../packages/domain/src/story-evidence-spans.js";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -261,6 +263,7 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         estimatedTokens: 4,
         sourceStartOffset: 0,
         sourceEndOffset: 18,
+        sourceEvidence: chunkChronicleMemory({ id: parent.id, memoryKind: "campaign_summary", content: parent.content })[0]!.sourceEvidence!,
         embedding: [0.1, 0.2],
         skipReason: null
       }],
@@ -268,7 +271,12 @@ integration("PostgreSQL Chronicle chunk repository", () => {
       costResults: [{ embeddings: [[0.1, 0.2]], responseId: "response-a", usage: {}, reportedCost: null }],
       progress
     };
+    await expect(batches.commitParentBatch(claim, { ...input, chunks: input.chunks.map((chunk) => ({
+      ...chunk, sourceEvidence: { ...chunk.sourceEvidence, sourceHash: "0".repeat(64) }
+    })) })).rejects.toMatchObject({ statusCode: 400 });
     await expect(batches.commitParentBatch(claim, input)).resolves.toBe(true);
+    expect((await pool.query<{ metadata: unknown }>("SELECT metadata FROM chronicle_memory_chunks WHERE parent_memory_id=$1", [parent.id])).rows[0]!.metadata)
+      .toMatchObject({ sourceEvidence: input.chunks[0]!.sourceEvidence });
     await expect(batches.commitParentBatch(claim, input)).rejects.toMatchObject({ statusCode: 400 });
     expect(await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM chronicle_memory_chunks WHERE parent_memory_id=$1",
@@ -793,6 +801,12 @@ integration("PostgreSQL Chronicle chunk repository", () => {
         value.parents[0]!.id, value.parents[0]!.content_hash]
     );
 
+    // Historical offsets are retrievable but are not certified merely by their old protocol label.
+    const uncertified = await parents.loadForClaim(claim, { batchLimit: 10, cursor: null });
+    expect(uncertified.parents).toHaveLength(2);
+    const certified = chunkChronicleMemory({ id: value.parents[0]!.id, memoryKind: "campaign_summary", content: "First safe parent." })[0]!;
+    await pool.query("UPDATE chronicle_memory_chunks SET metadata=$2::jsonb WHERE parent_memory_id=$1",
+      [value.parents[0]!.id, JSON.stringify({ sourceEvidence: certified.sourceEvidence })]);
     const afterIndexing = await parents.loadForClaim(claim, { batchLimit: 10, cursor: null });
     expect(afterIndexing.parents.map((parent) => parent.id)).toEqual([value.parents[1]!.id]);
     // Scope total stays stable so the worker's mid-run parent-total invariant still holds.
@@ -813,7 +827,7 @@ integration("PostgreSQL Chronicle chunk repository", () => {
     const jobId = await enqueuePostgresChronicleChunkIndex(pool, value);
     const cursor = `1:${value.parents[0]!.id}`;
     const processedSignature = (await pool.query<{ signature: string }>(
-      `SELECT encode(digest(COALESCE(string_agg(
+      `SELECT encode(digest('${STORY_EVIDENCE_NORMALIZATION_VERSION}' || COALESCE(string_agg(
                 m.ordinal::text || ':' || m.id::text || ':' || m.content_hash, E'\\x1e'
                 ORDER BY m.ordinal,m.id), ''),'sha256'),'hex') AS signature
          FROM chronicle_memories m

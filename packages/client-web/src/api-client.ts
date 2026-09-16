@@ -9,6 +9,9 @@ import {
   campaignRewindSchema,
   campaignRuntimeStateResponseSchema,
   campaignRuntimeStateUpdateRequestSchema,
+  campaignCharacterProfileViewSchema,
+  campaignCharacterProfileUpdateSchema,
+  campaignCharacterProfileUpdateResponseSchema,
   campaignSyncStatusSchema,
   generationActionResponseSchema,
   generationEnqueueResponseSchema,
@@ -43,6 +46,9 @@ import type {
   CampaignRewindResponse,
   CampaignRuntimeStateResponse,
   CampaignRuntimeStateUpdate,
+  CampaignCharacterProfileView,
+  CampaignCharacterProfileUpdate,
+  CampaignCharacterProfileUpdateResponse,
   CampaignSyncStatus,
   GenerationActionResponse,
   GenerationEnqueueResponse,
@@ -83,6 +89,8 @@ export interface CampaignApi {
   state(campaignId: string, turnNumber?: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   inspectState(campaignId: string, turnNumber: number, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
   updateState(campaignId: string, request: CampaignRuntimeStateUpdate, signal?: AbortSignal): Promise<CampaignRuntimeStateResponse>;
+  getCharacterProfile(campaignId: string, signal?: AbortSignal): Promise<CampaignCharacterProfileView>;
+  updateCharacterProfile(campaignId: string, request: CampaignCharacterProfileUpdate, signal?: AbortSignal): Promise<CampaignCharacterProfileUpdateResponse>;
   getTurnCorrection(campaignId: string, turnId: string, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
   correctTurnNarration(campaignId: string, turnId: string, request: Omit<AcceptedTurnCorrectionRequest, "turnId">, signal?: AbortSignal): Promise<AcceptedTurnCorrectionView>;
   rewind(campaignId: string, request: CampaignRewindRequest, signal?: AbortSignal): Promise<CampaignRewindResponse>;
@@ -212,6 +220,15 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
       const path = `/campaigns/${encodedPathSegment(campaignId)}/state`;
       const body = validatedRequest(campaignRuntimeStateUpdateRequestSchema, request, method, path);
       return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: campaignRuntimeStateResponseSchema }, signal));
+    },
+    getCharacterProfile: (campaignId, signal) => http.request(withSignal({
+      method: "GET", path: `/campaigns/${encodedPathSegment(campaignId)}/character-profile`, responseSchema: campaignCharacterProfileViewSchema
+    }, signal)),
+    async updateCharacterProfile(campaignId, request, signal) {
+      const method: HttpMethod = "PUT";
+      const path = `/campaigns/${encodedPathSegment(campaignId)}/character-profile`;
+      const body = validatedRequest(campaignCharacterProfileUpdateSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: campaignCharacterProfileUpdateResponseSchema }, signal));
     },
     getTurnCorrection: (campaignId, turnId, signal) => http.request(withSignal({
       method: "GET",

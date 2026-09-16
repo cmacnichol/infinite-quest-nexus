@@ -6,7 +6,12 @@ import {
   generationRetryLatestRequestSchema,
   storyTurnOutputSchema
 } from "../../packages/contracts/src/generation.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import {
+  campaignCharacterProfileUpdateSchema,
+  characterProfileSchema
+} from "../../packages/contracts/src/world-library.js";
 import {
   createPostgresGenerationExecutionRepository,
   type AcceptedGenerationCommit,
@@ -14,7 +19,9 @@ import {
   type GenerationLeaseScope
 } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
+import { createPostgresCharacterProfileRepository } from "../../packages/database/src/campaign-transfer-character-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
 import {
   createDatabasePool,
   initialOwnerId,
@@ -27,7 +34,7 @@ import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../hel
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
-import { stableStringify } from "../../packages/domain/src/index.js";
+import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -79,6 +86,24 @@ integration("PostgreSQL generation execution repository", () => {
     });
   }
 
+  function enrolledPolicyCommands(capability: "r1" | "r2" = "r1") {
+    const policy = defaultStoryMemoryPolicy(capability);
+    return createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) =>
+        loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
+        readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
+      resolveStoryMemoryPolicySnapshot: async () => ({
+        policy,
+        policyHash: storyMemoryPolicyHash(policy),
+        contextProtocol: "current-continuity-v3",
+        promptProtocol: "story-v14-continuity-context",
+        providerConfigurationFingerprint: "a".repeat(64)
+      })
+    });
+  }
+
   async function queue(campaignId: string, action: string) {
     return commands().enqueueAppend(
       { ownerUserId, campaignId },
@@ -86,6 +111,16 @@ integration("PostgreSQL generation execution repository", () => {
         action,
         providerProfileId,
         idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+      })
+    );
+  }
+
+  async function queueEnrolledPolicy(campaignId: string, action: string, capability: "r1" | "r2" = "r1") {
+    return enrolledPolicyCommands(capability).enqueueAppend(
+      { ownerUserId, campaignId },
+      generationRequestSchema.parse({
+        action, providerProfileId, idempotencyKey: crypto.randomUUID(),
         context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
       })
     );
@@ -632,7 +667,7 @@ integration("PostgreSQL generation execution repository", () => {
 
   it("claims a minimal job once and reclaims an expired lease without an initial-owner lookup", async () => {
     const imported = await campaign();
-    const queued = await queue(imported.campaignId, "Open the lease observatory.");
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Open the lease observatory.");
     const repository = createPostgresGenerationExecutionRepository(pool);
 
     const claims = await Promise.all([
@@ -673,7 +708,8 @@ integration("PostgreSQL generation execution repository", () => {
       id: queued.id,
       owner_user_id: ownerUserId,
       campaign_id: imported.campaignId,
-      attempts: 2
+      attempts: 2,
+      generation_base_identity: { version: "generation-base-v3" }
     });
   });
 
@@ -748,6 +784,214 @@ integration("PostgreSQL generation execution repository", () => {
       lease_owner: null,
       lease_expires_at: null
     }] });
+  });
+
+  it("marks an enrolled v3 attempt recoverable after an out-of-band profile edit and revert", async () => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Defend the v3 profile authority.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "profile-fence-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const original = (await pool.query<{ character_profile: unknown }>(
+      "SELECT character_profile FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+      [imported.campaignId, ownerUserId]
+    )).rows[0]!.character_profile;
+
+    // Defensive stale-data simulation. Normal profile writes are rejected while this job is active.
+    await pool.query(
+      `UPDATE campaigns
+          SET character_profile=$3::jsonb, character_profile_revision=character_profile_revision + 1
+        WHERE id=$1 AND owner_user_id=$2`,
+      [imported.campaignId, ownerUserId, JSON.stringify({ name: "Out-of-band Mira", profile: { story: { role: "Changed" } } })]
+    );
+    if (original === null) {
+      await pool.query(
+        `UPDATE campaigns
+            SET character_profile=NULL, character_profile_revision=character_profile_revision + 1
+          WHERE id=$1 AND owner_user_id=$2`,
+        [imported.campaignId, ownerUserId]
+      );
+    } else {
+      await pool.query(
+        `UPDATE campaigns
+            SET character_profile=$3::jsonb, character_profile_revision=character_profile_revision + 1
+          WHERE id=$1 AND owner_user_id=$2`,
+        [imported.campaignId, ownerUserId, JSON.stringify(original)]
+      );
+    }
+
+    await expect(repository.loadExecutionPayload({
+      workerId: "profile-fence-worker", leaseSeconds: 30, claim: claim!
+    })).resolves.toBeNull();
+    await expect(pool.query(
+      "SELECT status,error_code,recovery_metadata FROM generation_jobs WHERE id=$1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{
+      status: "recoverable", error_code: "generation_authority_stale",
+      recovery_metadata: { reason: "generation_authority_stale" }
+    }] });
+  });
+
+  it("marks an enrolled v3 attempt recoverable when a non-null persisted profile is malformed", async () => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Fail closed for a malformed character authority.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "malformed-profile-fence-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+
+    // This direct SQL mutation represents corrupted persisted authority. A null profile remains a supported fallback.
+    await pool.query(
+      "UPDATE campaigns SET character_profile='{\"name\":\"Incomplete\"}'::jsonb WHERE id=$1 AND owner_user_id=$2",
+      [imported.campaignId, ownerUserId]
+    );
+
+    await expect(repository.loadExecutionPayload({
+      workerId: "malformed-profile-fence-worker", leaseSeconds: 30, claim: claim!
+    })).resolves.toBeNull();
+    await expect(pool.query(
+      "SELECT status,error_code,recovery_metadata FROM generation_jobs WHERE id=$1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{
+      status: "recoverable", error_code: "generation_checkpoint_incompatible",
+      recovery_metadata: { reason: "authoritative_context_invalid", field: "character_profile" }
+    }] });
+  });
+
+  it("keeps the existing narration-correction source fence for an enrolled v3 attempt", async () => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Fence a corrected accepted narration.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "narration-correction-fence-worker", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const baseTurn = (await pool.query<{ id: string; narration: string }>(
+      `SELECT id,narration FROM turns
+        WHERE campaign_id=$1 AND owner_user_id=$2 AND turn_number=2`,
+      [imported.campaignId, ownerUserId]
+    )).rows[0];
+    if (!baseTurn) throw new Error("Expected the accepted base turn for narration correction.");
+
+    // Defensive stale-data simulation. Accepted narration corrections use their append-only repository path in normal work.
+    await pool.query(
+      `INSERT INTO turn_narration_corrections (
+         owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,
+         reason,source,created_by_user_id
+       ) VALUES ($1,$2,$3,1,$4,$5,'Fence source revision','administrative',$1)`,
+      [ownerUserId, imported.campaignId, baseTurn.id,
+        "The corrected base narration changes the next-turn authority.", sha256(baseTurn.narration)]
+    );
+
+    await expect(repository.loadExecutionPayload({
+      workerId: "narration-correction-fence-worker", leaseSeconds: 30, claim: claim!
+    })).resolves.toBeNull();
+    await expect(pool.query(
+      "SELECT status,error_code,recovery_metadata FROM generation_jobs WHERE id=$1",
+      [queued.id]
+    )).resolves.toMatchObject({ rows: [{
+      status: "recoverable", error_code: "generation_authority_stale",
+      recovery_metadata: { reason: "generation_authority_stale" }
+    }] });
+  });
+
+  it("allows discard, a revision-checked profile edit, and a newly enrolled v3 enqueue", async () => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Recover the profile authority workflow.");
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const workerId = "discard-edit-enqueue-worker";
+    const claim = await execution.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    await expect(execution.markRecoverable({
+      jobId: queued.id, ownerUserId, workerId,
+      providerResponseId: null, providerFinishReason: null,
+      errorCode: "synthetic_recoverable", errorMessage: "Fixture recovery.", recoveryMetadata: {}
+    })).resolves.toBe(true);
+    await expect(enrolledPolicyCommands().discard({ ownerUserId, jobId: queued.id }))
+      .resolves.toMatchObject({ status: "discarded" });
+
+    const profiles = createPostgresCharacterProfileRepository();
+    const transactions = createPostgresWorldCampaignTransactionPort(pool);
+    const profile = characterProfileSchema.parse({ story: { role: "Edited after discard" } });
+    const current = (await pool.query<{ character_profile_revision: number }>(
+      "SELECT character_profile_revision FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+      [imported.campaignId, ownerUserId]
+    )).rows[0];
+    if (!current) throw new Error("Expected the campaign profile revision after discard.");
+    await expect(transactions.command((transaction) => profiles.updateCampaignCharacterProfile(
+      transaction,
+      { ownerUserId, campaignId: imported.campaignId },
+      campaignCharacterProfileUpdateSchema.parse({
+        expectedRevision: current.character_profile_revision,
+        name: "Recovered authority", profile, editSource: "manual"
+      })
+    ))).resolves.toMatchObject({ ok: true, value: {
+      revision: current.character_profile_revision + 1, name: "Recovered authority"
+    } });
+
+    const requeued = await queueEnrolledPolicy(imported.campaignId, "Queue using the revised authority.");
+    await expect(pool.query<{ generation_base_identity: Record<string, unknown> }>(
+      "SELECT generation_base_identity FROM generation_jobs WHERE id=$1 AND owner_user_id=$2",
+      [requeued.id, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ generation_base_identity: {
+      version: "generation-base-v3", characterProfileRevision: current.character_profile_revision + 1
+    } }] });
+    await expect(enrolledPolicyCommands().cancel({ ownerUserId, jobId: requeued.id }))
+      .resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  it("refuses to commit an enrolled v3 attempt after an out-of-band profile change", async () => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Commit only the frozen profile authority.");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = "profile-commit-fence-worker";
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId };
+    const job = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    if (!job) throw new Error("Expected a loaded enrolled policy job.");
+    await expect(repository.markGenerating(scope)).resolves.toBe(true);
+    await expect(repository.markValidating(scope)).resolves.toBe(true);
+    await expect(repository.markCommitting(scope)).resolves.toBe(true);
+
+    // Defensive stale-data simulation after capture, distinct from supported profile editing.
+    await pool.query(
+      `UPDATE campaigns
+          SET character_profile=$3::jsonb, character_profile_revision=character_profile_revision + 1
+        WHERE id=$1 AND owner_user_id=$2`,
+      [imported.campaignId, ownerUserId, JSON.stringify({ name: "Changed after capture", profile: { story: { role: "Changed" } } })]
+    );
+    await expect(repository.commitAcceptedTurn(acceptedCommitInput({
+      scope, job, story: supersedingStory([])
+    }))).rejects.toMatchObject({ code: "stale_campaign" });
+    await expect(pool.query("SELECT status FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "committing" }] });
+  });
+
+  it.each(["load", "commit"])("fences a corrected R2 predecessor at %s using the enqueue snapshot", async (phase) => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Bind the direct recent history.", "r2");
+    const frozen = await pool.query<{ generation_base_identity: { recentWindowFingerprint?: string } }>("SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [queued.id]);
+    expect(frozen.rows[0]!.generation_base_identity.recentWindowFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `recent-${phase}-fence-worker`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId };
+    const job = phase === "commit" ? await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! }) : null;
+    if (phase === "commit") {
+      expect(job).not.toBeNull();
+      await repository.markGenerating(scope); await repository.markValidating(scope); await repository.markCommitting(scope);
+    }
+    const predecessor = await pool.query<{ id: string; narration: string }>(
+      "SELECT t.id,t.narration FROM turns t JOIN campaigns c ON c.id=t.campaign_id WHERE t.campaign_id=$1 AND t.turn_number=c.active_turn_number-1", [imported.campaignId]);
+    expect(predecessor.rows).toHaveLength(1);
+    await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,reason,source,created_by_user_id)
+      VALUES($1,$2,$3,1,'Corrected recent history.', $4,'Fence test','administrative',$1)`,
+    [ownerUserId, imported.campaignId, predecessor.rows[0]!.id, sha256(predecessor.rows[0]!.narration)]);
+    if (phase === "load") {
+      await expect(repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+      expect((await pool.query("SELECT error_code FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]).toMatchObject({ error_code: "generation_authority_stale" });
+    } else {
+      await expect(repository.commitAcceptedTurn(acceptedCommitInput({ scope, job: job!, story: supersedingStory([]) }))).rejects.toMatchObject({ code: "stale_campaign" });
+    }
   });
 
   it("applies lease and phase mutations only to the claimed owner, worker, and source state", async () => {

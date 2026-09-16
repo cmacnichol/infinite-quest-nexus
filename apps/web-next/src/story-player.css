@@ -297,6 +297,7 @@ main[data-page="story-player"] {
 .story-recovery { margin: 0; }
 
 .story-generation-degraded { font-size: .78rem; }
+.story-recovery-details { display: grid; gap: 4px; margin: 0; padding-left: 20px; color: var(--text-secondary); font-size: .86rem; line-height: 1.4; }
 
 .story-campaign-spine-content {
   display: grid;
@@ -570,4 +571,27 @@ main[data-ui-implementation="web-awesome"] .quiet-leaf[data-story-width="full"] 
   .story-recovery p
 ) {
   max-width: none;
+}
+
+[data-story-tool-dialog] .story-character-profile-field {
+  display: grid;
+  gap: 0.45rem;
+  width: 100%;
+}
+
+[data-story-tool-dialog] .story-character-profile-field :is(input, textarea) {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+[data-story-tool-dialog] .story-character-profile-field textarea {
+  max-height: 40vh;
+}
+
+[data-story-tool-dialog] [data-action="save-character-profile"] {
+  margin-top: 0.5rem;
+}
+
+[data-story-tool-dialog]:has(.story-character-profile-field) {
+  background: var(--surface-page);
 }

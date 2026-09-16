@@ -770,7 +770,10 @@ export function mountSourceAuthoringPanel(host: HTMLElement, dependencies: Sourc
       }
       if (submittedGeneration === editGeneration) {
         publishJob(received);
-        localReview = null; localDirty = false; reviewSaved = true; reviewConflict = null; commandStatus = received.source?.acceptedFactIds.length ? "Source review saved." : "Review saved. No facts are accepted; accept at least one fact to generate a world draft.";
+        const acceptedFactCount = received.kind === "story_source"
+          ? received.source?.acceptedFactIds.length ?? 0
+          : 0;
+        localReview = null; localDirty = false; reviewSaved = true; reviewConflict = null; commandStatus = acceptedFactCount > 0 ? "Source review saved." : "Review saved. No facts are accepted; accept at least one fact to generate a world draft.";
       } else {
         const rebased = localReview && rebaseReviewAfterSave(localReview, submitted, previous, received);
         publishJob(received);

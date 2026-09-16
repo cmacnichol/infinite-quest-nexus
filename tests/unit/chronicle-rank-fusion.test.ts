@@ -21,6 +21,26 @@ function candidate(
   };
 }
 
+describe("query family maximum aggregation", () => {
+  it("does not grant repeated action fragments extra votes and retains late-only and thread candidates", () => {
+    const early = candidate("early", "early");
+    const late = candidate("late", "late");
+    const thread = candidate("thread", "thread");
+    const inputs = [0, 1, 2, 3].map((index) => ({
+      signal: "semantic" as const, variant: "action" as const, variantId: `segment-${index}`,
+      candidates: index === 3 ? [early, late] : [early]
+    }));
+    const profile = { rrfK: 60, weights: {}, rankAggregation: "query_family_max_v1" as const };
+    const fused = fuseChronicleRanks([...inputs, { signal: "semantic", variant: "open_thread", variantId: "thread", candidates: [thread] }], profile);
+    expect(fused.find((value) => value.candidateId === "early")?.score).toBe(1 / 61);
+    expect(fused.find((value) => value.candidateId === "thread")?.score).toBe(1 / 61);
+    expect(fused.find((value) => value.candidateId === "late")?.score).toBe(1 / 62);
+    expect(fused.find((value) => value.candidateId === "early")?.contributions).toHaveLength(4);
+    expect(fuseChronicleRanks(inputs, profile)).toEqual(fuseChronicleRanks([...inputs].reverse(), profile));
+    expect(fuseChronicleRanks(inputs, { rrfK: 60, weights: {} })[0]?.score).toBe(4 / 61);
+  });
+});
+
 describe("Chronicle reciprocal-rank fusion", () => {
   it("fuses separate signal lists and breaks equal scores by parent id", () => {
     const parentA = candidate("chunk-a", "parent-a");

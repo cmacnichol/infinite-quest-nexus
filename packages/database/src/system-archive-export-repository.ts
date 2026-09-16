@@ -1531,7 +1531,7 @@ export function createPostgresSystemArchiveExportRepository(
         const ownerRow = ownerResult.rows[0];
         if (!ownerRow) throw Object.assign(new Error("System Archive owner was not found."), { statusCode: 404 });
         const migrationResult = await client.query<{ name: string }>(
-          "SELECT name FROM schema_migrations ORDER BY run_on DESC,name DESC LIMIT 1",
+          "SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1",
         );
         const sourceMigration = migrationResult.rows[0]?.name;
         if (!sourceMigration) throw exportError("System Archive source migration watermark is unavailable.");

@@ -669,7 +669,8 @@ integration("generation job notification delivery", () => {
           "0091_story_source_authoring",
           "0092_source_synthesis_review_fence",
           "0093_portable_source_material_authority_paths",
-          "0094_story_generation_policy"
+          "0094_story_generation_policy",
+          "0095_story_memory_capability_enrollment"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

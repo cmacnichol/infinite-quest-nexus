@@ -300,6 +300,63 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("keeps the native composer node and pending input across same-turn background refreshes", async () => {
+    const page = fixture();
+    const campaignStore = createCampaignStore();
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([7]) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      campaignStore, syncStatus: vi.fn().mockResolvedValue(loaded)
+    }));
+    await settle();
+    const draft = page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")!;
+    // Native input may change before its input event is delivered. A background
+    // projection must not detach that input target or reset its pending value.
+    draft.value = "The harbor draft is still being typed.";
+    campaignStore.load({ ...loaded, syncToken: "background-refresh" });
+    expect(page.document.querySelector("[data-story-draft]")).toBe(draft);
+    expect(draft.value).toBe("The harbor draft is still being typed.");
+    draft.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    campaignStore.load({ ...loaded, syncToken: "another-refresh" });
+    expect(page.document.querySelector("[data-story-draft]")).toBe(draft);
+    expect(draft.value).toBe("The harbor draft is still being typed.");
+    page.document.querySelector<HTMLButtonElement>("[data-action='clear-story-draft']")!.click();
+    expect(draft.value).toBe("");
+    draft.value = "A new draft on the old turn.";
+    draft.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    campaignStore.load({ ...loaded, campaign: { ...loaded.campaign, activeTurnNumber: 8 }, activeTurnNumber: 8, turns: turnWindow([8]) });
+    expect(page.document.querySelector("[data-story-draft]")).not.toBe(draft);
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")!.value).toBe("");
+    mounted.dispose();
+  });
+
+  it.each([false, true])("preserves the current composer intent across a state save and reload (newer edit: %s)", async (newerEdit) => {
+    const page = fixture();
+    const base = historicalState(7, "The observatory waits.");
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 7 }, activeTurnNumber: 7, turns: turnWindow([7]) });
+    const pendingSave = deferred<CampaignRuntimeStateResponse>();
+    const updateState = vi.fn().mockReturnValue(pendingSave.promise);
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: null }, composition({
+      syncStatus: vi.fn().mockResolvedValue(loaded), state: vi.fn().mockResolvedValue(base), updateState
+    }));
+    await settle();
+    const typeDraft = (value: string) => {
+      const draft = page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")!;
+      draft.value = value;
+      draft.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+    };
+    typeDraft("Keep my original direction.");
+    page.document.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']")!.click();
+    await vi.waitFor(() => expect(page.document.querySelector("[data-scratchpad]")).toBeTruthy());
+    page.document.querySelector<HTMLButtonElement>("[data-action='save-current-state']")!.click();
+    await vi.waitFor(() => expect(updateState).toHaveBeenCalledTimes(1));
+    if (newerEdit) typeDraft("Keep my newer direction.");
+    pendingSave.resolve({ ...base, revision: 5 });
+    await vi.waitFor(() => expect(page.document.querySelector("[data-story-tool-dialog]")).toBeNull());
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")!.value)
+      .toBe(newerEdit ? "Keep my newer direction." : "Keep my original direction.");
+    mounted.dispose();
+  });
+
   it("saves the Story continuity editor against its captured current state without JSON list fields", async () => {
     const page = fixture();
     const base = historicalState(7, "The observatory waits.");
@@ -940,7 +997,7 @@ describe("Story Player page shell", () => {
     expect(reader?.textContent).toContain("The tested story continues.");
     expect(reader?.textContent).not.toMatch(/Resolve Check|mechanics|difficulty/i);
     expect(page.document.querySelector('[data-story-recovery]')?.textContent).toContain("Try again");
-    expect(page.document.querySelector('[data-story-recovery]')?.textContent).toContain("Adjust the campaign context");
+    expect(page.document.querySelector('[data-story-recovery]')?.textContent).toContain("Review the campaign context settings");
     mounted.dispose();
   });
 

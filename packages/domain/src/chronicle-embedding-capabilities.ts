@@ -1,3 +1,4 @@
+import { splitStorySourceSpans } from "./story-evidence-spans.js";
 import { chronicleContentHash, modelAwareEmbeddingPrefixes } from "./chronicle-memory-helpers.js";
 import { estimateTokens } from "./text.js";
 import { CHRONICLE_CHUNK_PROTOCOL_VERSION, type ChronicleChunkDraft } from "./chronicle-chunking.js";
@@ -95,35 +96,7 @@ function contentBudget(capability: EmbeddingCapability): number {
 type ContentSpan = Readonly<{ startOffset: number; endOffset: number }>;
 
 function splitContent(content: string, maximumTokens: number): readonly ContentSpan[] {
-  if (estimateTokens(content) <= maximumTokens) {
-    return [{ startOffset: 0, endOffset: content.length }];
-  }
-  const spans: ContentSpan[] = [];
-  let currentStart: number | null = null;
-  let currentEnd = 0;
-  for (const match of content.matchAll(/\S+/gu)) {
-    const word = match[0];
-    const wordStart = match.index!;
-    const wordEnd = wordStart + word.length;
-    if (currentStart !== null && estimateTokens(content.slice(currentStart, wordEnd)) > maximumTokens) {
-      spans.push({ startOffset: currentStart, endOffset: currentEnd });
-      currentStart = null;
-    }
-    if (currentStart === null && estimateTokens(word) > maximumTokens) {
-      const characters = Math.max(1, maximumTokens * 4);
-      for (let offset = 0; offset < word.length; offset += characters) {
-        spans.push({
-          startOffset: wordStart + offset,
-          endOffset: Math.min(wordEnd, wordStart + offset + characters)
-        });
-      }
-      continue;
-    }
-    if (currentStart === null) currentStart = wordStart;
-    currentEnd = wordEnd;
-  }
-  if (currentStart !== null) spans.push({ startOffset: currentStart, endOffset: currentEnd });
-  return spans;
+  return splitStorySourceSpans(content, maximumTokens).map((span) => ({ startOffset: span.start, endOffset: span.end }));
 }
 
 /** Replaces one draft with input-safe deterministic subchunks for a provider capability. */
@@ -142,7 +115,8 @@ export function splitChunkForCapability(
       contentHash: chronicleContentHash(content),
       estimatedTokens: estimateTokens(content),
       sourceStartOffset: chunk.sourceStartOffset + span.startOffset,
-      sourceEndOffset: chunk.sourceStartOffset + span.endOffset
+      sourceEndOffset: chunk.sourceStartOffset + span.endOffset,
+      ...(chunk.sourceEvidence ? { sourceEvidence: { ...chunk.sourceEvidence, start: chunk.sourceStartOffset + span.startOffset, end: chunk.sourceStartOffset + span.endOffset } } : {})
     });
   }));
 }

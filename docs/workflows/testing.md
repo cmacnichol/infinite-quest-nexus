@@ -293,3 +293,7 @@ blocks; execution times were 0.870 ms campaign-list, 0.273 ms sync-status,
 0.765 ms history fingerprint, and 0.123 ms history page. These figures replace
 the pre-B5 route-composition counts as the current regression reference without
 changing the frozen public payload contracts.
+
+## Story continuity evaluation
+
+The [continuity evaluator runbook](../runbooks/story-continuity-evaluation.md) covers the deterministic PostgreSQL authority-to-provider matrix and explicitly authorized live copied-campaign runs. Record release applicability and absent evidence in the [release-readiness report](../review/story-memory-release-readiness-2026-09-16.md); synthetic-provider tests do not establish live model quality.

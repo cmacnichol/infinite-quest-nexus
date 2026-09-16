@@ -1,0 +1,1559 @@
+{
+  "version": "story-continuity-evaluation-report-v1",
+  "corpusVersion": "story-continuity-evaluator-corpus-v1",
+  "strata": [
+    {
+      "trajectory": "teacher_forced",
+      "outputMode": "baseline",
+      "layers": {
+        "sourceAvailable": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "candidateRetrieved": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "evidenceSent": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "acceptedOutputConsistent": {
+          "numerator": 16,
+          "denominator": 20,
+          "pass": 16,
+          "fail": 4,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.5839782779742401,
+            "upper": 0.9193436467288,
+            "numerator": 16,
+            "denominator": 20
+          }
+        }
+      },
+      "replacementState": {
+        "numerator": 34,
+        "denominator": 40,
+        "pass": 34,
+        "fail": 6,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.7092737396097997,
+          "upper": 0.9293890829149256,
+          "numerator": 34,
+          "denominator": 40
+        }
+      },
+      "replay": {
+        "numerator": 16,
+        "denominator": 20,
+        "pass": 16,
+        "fail": 4,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.5839782779742401,
+          "upper": 0.9193436467288,
+          "numerator": 16,
+          "denominator": 20
+        }
+      },
+      "contradictions": {
+        "proposed": 0,
+        "validated": 0,
+        "precision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "recall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        }
+      },
+      "adjudication": {
+        "status": "skipped",
+        "labelled": 0,
+        "unlabelled": 20,
+        "contradictionPrecision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "contradictionRecall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "semanticFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "operationalFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "completionRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        },
+        "writingQuality": [],
+        "directionCoverage": []
+      },
+      "operational": {
+        "p50LatencyMs": 149.92649999999958,
+        "p95LatencyMs": 168.76170000000275,
+        "inputTokens": 1600,
+        "outputTokens": 600,
+        "costUsd": 0,
+        "extraProviderCalls": 0,
+        "repairRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        }
+      }
+    },
+    {
+      "trajectory": "rollout",
+      "outputMode": "baseline",
+      "layers": {
+        "sourceAvailable": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "candidateRetrieved": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "evidenceSent": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "acceptedOutputConsistent": {
+          "numerator": 14,
+          "denominator": 20,
+          "pass": 14,
+          "fail": 6,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.4810232237710206,
+            "upper": 0.854524726031006,
+            "numerator": 14,
+            "denominator": 20
+          }
+        }
+      },
+      "replacementState": {
+        "numerator": 34,
+        "denominator": 42,
+        "pass": 34,
+        "fail": 8,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.6669893264500356,
+          "upper": 0.9001811039014357,
+          "numerator": 34,
+          "denominator": 42
+        }
+      },
+      "replay": {
+        "numerator": 14,
+        "denominator": 20,
+        "pass": 14,
+        "fail": 6,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.4810232237710206,
+          "upper": 0.854524726031006,
+          "numerator": 14,
+          "denominator": 20
+        }
+      },
+      "contradictions": {
+        "proposed": 0,
+        "validated": 0,
+        "precision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "recall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        }
+      },
+      "adjudication": {
+        "status": "skipped",
+        "labelled": 0,
+        "unlabelled": 20,
+        "contradictionPrecision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "contradictionRecall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "semanticFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "operationalFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "completionRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        },
+        "writingQuality": [],
+        "directionCoverage": []
+      },
+      "operational": {
+        "p50LatencyMs": 145.8173999999999,
+        "p95LatencyMs": 157.3661000000011,
+        "inputTokens": 1600,
+        "outputTokens": 600,
+        "costUsd": 0,
+        "extraProviderCalls": 0,
+        "repairRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        }
+      }
+    },
+    {
+      "trajectory": "teacher_forced",
+      "outputMode": "observe",
+      "layers": {
+        "sourceAvailable": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "candidateRetrieved": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "evidenceSent": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "acceptedOutputConsistent": {
+          "numerator": 16,
+          "denominator": 20,
+          "pass": 16,
+          "fail": 4,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.5839782779742401,
+            "upper": 0.9193436467288,
+            "numerator": 16,
+            "denominator": 20
+          }
+        }
+      },
+      "replacementState": {
+        "numerator": 34,
+        "denominator": 40,
+        "pass": 34,
+        "fail": 6,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.7092737396097997,
+          "upper": 0.9293890829149256,
+          "numerator": 34,
+          "denominator": 40
+        }
+      },
+      "replay": {
+        "numerator": 16,
+        "denominator": 20,
+        "pass": 16,
+        "fail": 4,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.5839782779742401,
+          "upper": 0.9193436467288,
+          "numerator": 16,
+          "denominator": 20
+        }
+      },
+      "contradictions": {
+        "proposed": 0,
+        "validated": 0,
+        "precision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "recall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        }
+      },
+      "adjudication": {
+        "status": "skipped",
+        "labelled": 0,
+        "unlabelled": 20,
+        "contradictionPrecision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "contradictionRecall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "semanticFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "operationalFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "completionRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        },
+        "writingQuality": [],
+        "directionCoverage": []
+      },
+      "operational": {
+        "p50LatencyMs": 167.45690000000468,
+        "p95LatencyMs": 188.41570000000138,
+        "inputTokens": 3200,
+        "outputTokens": 1200,
+        "costUsd": 0,
+        "extraProviderCalls": 20,
+        "repairRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        }
+      }
+    },
+    {
+      "trajectory": "rollout",
+      "outputMode": "observe",
+      "layers": {
+        "sourceAvailable": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "candidateRetrieved": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "evidenceSent": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "acceptedOutputConsistent": {
+          "numerator": 14,
+          "denominator": 20,
+          "pass": 14,
+          "fail": 6,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.4810232237710206,
+            "upper": 0.854524726031006,
+            "numerator": 14,
+            "denominator": 20
+          }
+        }
+      },
+      "replacementState": {
+        "numerator": 34,
+        "denominator": 42,
+        "pass": 34,
+        "fail": 8,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.6669893264500356,
+          "upper": 0.9001811039014357,
+          "numerator": 34,
+          "denominator": 42
+        }
+      },
+      "replay": {
+        "numerator": 14,
+        "denominator": 20,
+        "pass": 14,
+        "fail": 6,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.4810232237710206,
+          "upper": 0.854524726031006,
+          "numerator": 14,
+          "denominator": 20
+        }
+      },
+      "contradictions": {
+        "proposed": 0,
+        "validated": 0,
+        "precision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "recall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        }
+      },
+      "adjudication": {
+        "status": "skipped",
+        "labelled": 0,
+        "unlabelled": 20,
+        "contradictionPrecision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "contradictionRecall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "semanticFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "operationalFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "completionRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        },
+        "writingQuality": [],
+        "directionCoverage": []
+      },
+      "operational": {
+        "p50LatencyMs": 169.41300000000047,
+        "p95LatencyMs": 206.36099999999715,
+        "inputTokens": 3200,
+        "outputTokens": 1200,
+        "costUsd": 0,
+        "extraProviderCalls": 20,
+        "repairRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        }
+      }
+    },
+    {
+      "trajectory": "teacher_forced",
+      "outputMode": "repaired",
+      "layers": {
+        "sourceAvailable": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "candidateRetrieved": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "evidenceSent": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        },
+        "acceptedOutputConsistent": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        }
+      },
+      "replacementState": {
+        "numerator": 40,
+        "denominator": 40,
+        "pass": 40,
+        "fail": 0,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.9123754607496077,
+          "upper": 1,
+          "numerator": 40,
+          "denominator": 40
+        }
+      },
+      "replay": {
+        "numerator": 16,
+        "denominator": 20,
+        "pass": 16,
+        "fail": 4,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.5839782779742401,
+          "upper": 0.9193436467288,
+          "numerator": 16,
+          "denominator": 20
+        }
+      },
+      "contradictions": {
+        "proposed": 0,
+        "validated": 0,
+        "precision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "recall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        }
+      },
+      "adjudication": {
+        "status": "skipped",
+        "labelled": 0,
+        "unlabelled": 20,
+        "contradictionPrecision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "contradictionRecall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "semanticFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "operationalFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "completionRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        },
+        "writingQuality": [],
+        "directionCoverage": []
+      },
+      "operational": {
+        "p50LatencyMs": 291.67259999999806,
+        "p95LatencyMs": 400.053899999999,
+        "inputTokens": 6400,
+        "outputTokens": 2400,
+        "costUsd": 0,
+        "extraProviderCalls": 60,
+        "repairRate": {
+          "lower": 0.8388698745050668,
+          "upper": 0.9999999999999999,
+          "numerator": 20,
+          "denominator": 20
+        }
+      }
+    },
+    {
+      "trajectory": "rollout",
+      "outputMode": "repaired",
+      "layers": {
+        "sourceAvailable": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "candidateRetrieved": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "evidenceSent": {
+          "numerator": 0,
+          "denominator": 20,
+          "pass": 0,
+          "fail": 20,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0,
+            "upper": 0.1611301254949332,
+            "numerator": 0,
+            "denominator": 20
+          }
+        },
+        "acceptedOutputConsistent": {
+          "numerator": 20,
+          "denominator": 20,
+          "pass": 20,
+          "fail": 0,
+          "skipped": 0,
+          "uncertain": 0,
+          "interval": {
+            "lower": 0.8388698745050668,
+            "upper": 0.9999999999999999,
+            "numerator": 20,
+            "denominator": 20
+          }
+        }
+      },
+      "replacementState": {
+        "numerator": 42,
+        "denominator": 42,
+        "pass": 42,
+        "fail": 0,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.9161983874908382,
+          "upper": 1,
+          "numerator": 42,
+          "denominator": 42
+        }
+      },
+      "replay": {
+        "numerator": 14,
+        "denominator": 20,
+        "pass": 14,
+        "fail": 6,
+        "skipped": 0,
+        "uncertain": 0,
+        "interval": {
+          "lower": 0.4810232237710206,
+          "upper": 0.854524726031006,
+          "numerator": 14,
+          "denominator": 20
+        }
+      },
+      "contradictions": {
+        "proposed": 0,
+        "validated": 0,
+        "precision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "recall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        }
+      },
+      "adjudication": {
+        "status": "skipped",
+        "labelled": 0,
+        "unlabelled": 20,
+        "contradictionPrecision": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "contradictionRecall": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "semanticFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "operationalFalseBlocks": {
+          "lower": 0,
+          "upper": 0,
+          "numerator": 0,
+          "denominator": 0
+        },
+        "completionRate": {
+          "lower": 0,
+          "upper": 0.1611301254949332,
+          "numerator": 0,
+          "denominator": 20
+        },
+        "writingQuality": [],
+        "directionCoverage": []
+      },
+      "operational": {
+        "p50LatencyMs": 275.10789999998815,
+        "p95LatencyMs": 307.8469000000041,
+        "inputTokens": 6400,
+        "outputTokens": 2400,
+        "costUsd": 0,
+        "extraProviderCalls": 60,
+        "repairRate": {
+          "lower": 0.8388698745050668,
+          "upper": 0.9999999999999999,
+          "numerator": 20,
+          "denominator": 20
+        }
+      }
+    }
+  ],
+  "errors": {
+    "missingEvidence": [
+      {
+        "scenarioId": "quoted-lie-dream-flashback:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:quoted-lie-dream-flashback:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "legitimate-change-resolved-thread:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:legitimate-change-resolved-thread:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "malicious-retrieved-instructions:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:malicious-retrieved-instructions:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "review-repair-crash-reclaim:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:review-repair-crash-reclaim:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "immediate-event-extension:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:immediate-event-extension:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "branch-transfer-archive-import:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:branch-transfer-archive-import:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "multilingual-unicode:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:multilingual-unicode:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "quoted-lie-dream-flashback:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:quoted-lie-dream-flashback:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "legitimate-change-resolved-thread:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:legitimate-change-resolved-thread:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "malicious-retrieved-instructions:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:malicious-retrieved-instructions:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "review-repair-crash-reclaim:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:review-repair-crash-reclaim:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "immediate-event-extension:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:immediate-event-extension:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "branch-transfer-archive-import:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:branch-transfer-archive-import:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "multilingual-unicode:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:multilingual-unicode:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "quoted-lie-dream-flashback:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:quoted-lie-dream-flashback:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "legitimate-change-resolved-thread:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:legitimate-change-resolved-thread:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "malicious-retrieved-instructions:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:malicious-retrieved-instructions:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "review-repair-crash-reclaim:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:review-repair-crash-reclaim:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "immediate-event-extension:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:immediate-event-extension:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "branch-transfer-archive-import:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:branch-transfer-archive-import:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "multilingual-unicode:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:multilingual-unicode:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-01:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-01:repaired"
+      },
+      {
+        "scenarioId": "quoted-lie-dream-flashback:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:quoted-lie-dream-flashback:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "legitimate-change-resolved-thread:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:legitimate-change-resolved-thread:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "malicious-retrieved-instructions:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:malicious-retrieved-instructions:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "review-repair-crash-reclaim:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:review-repair-crash-reclaim:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "immediate-event-extension:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:immediate-event-extension:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "branch-transfer-archive-import:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:branch-transfer-archive-import:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "multilingual-unicode:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:multilingual-unicode:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "quoted-lie-dream-flashback:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:quoted-lie-dream-flashback:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "legitimate-change-resolved-thread:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:legitimate-change-resolved-thread:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "malicious-retrieved-instructions:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:malicious-retrieved-instructions:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "review-repair-crash-reclaim:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:review-repair-crash-reclaim:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "immediate-event-extension:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:immediate-event-extension:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "branch-transfer-archive-import:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:branch-transfer-archive-import:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "multilingual-unicode:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:multilingual-unicode:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "quoted-lie-dream-flashback:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:quoted-lie-dream-flashback:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "legitimate-change-resolved-thread:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:legitimate-change-resolved-thread:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "malicious-retrieved-instructions:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:malicious-retrieved-instructions:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "review-repair-crash-reclaim:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:review-repair-crash-reclaim:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "immediate-event-extension:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:immediate-event-extension:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "branch-transfer-archive-import:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:branch-transfer-archive-import:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "multilingual-unicode:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:multilingual-unicode:t15-local-repeat-02:repaired"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-02:repaired",
+        "trajectory": "rollout",
+        "outputMode": "repaired",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-02:repaired"
+      }
+    ],
+    "evidencePresentButIgnored": [
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-01:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-01:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-01:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-01:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-02:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-02:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-02:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-02:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-02:observe"
+      }
+    ],
+    "narrationContradictions": [
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-01:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-01:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-02:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-02:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-02:observe"
+      }
+    ],
+    "unsupportedProposedState": [
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-01:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-01:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-01:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-01:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-02:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-02:baseline",
+        "trajectory": "teacher_forced",
+        "outputMode": "baseline",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "structured-only-base-fact:t15-local-repeat-02:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:structured-only-base-fact:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "old-fact-among-distractors:t15-local-repeat-02:observe",
+        "trajectory": "teacher_forced",
+        "outputMode": "observe",
+        "evidenceId": "source:old-fact-among-distractors:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "rejected-draft-valid-looking-id:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:rejected-draft-valid-looking-id:t15-local-repeat-02:observe"
+      },
+      {
+        "scenarioId": "accepted-chain-propagation:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:accepted-chain-propagation:t15-local-repeat-02:observe"
+      }
+    ],
+    "omissionWarnings": [
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-01:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-01:baseline"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-01:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-01:observe"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-02:baseline",
+        "trajectory": "rollout",
+        "outputMode": "baseline",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-02:baseline"
+      },
+      {
+        "scenarioId": "lost-unresolved-thread:t15-local-repeat-02:observe",
+        "trajectory": "rollout",
+        "outputMode": "observe",
+        "evidenceId": "source:lost-unresolved-thread:t15-local-repeat-02:observe"
+      }
+    ],
+    "excludedPrivateFields": [],
+    "invalidReviewEvidence": []
+  },
+  "preregistration": {
+    "scenarioCount": 20,
+    "sampleCount": 120,
+    "seeds": [
+      "t15-local-repeat-01",
+      "t15-local-repeat-02"
+    ],
+    "pairedMethod": "identical-sanitized-inputs-and-heldout-candidates-by-scenario-and-repeat",
+    "frozenLabelVersion": "story-continuity-heldout-oracles-v1",
+    "blindedRubricVersion": "not-run-local-capture-only"
+  },
+  "evidenceLayer": {
+    "fixtureEvidence": "deterministic",
+    "realExecutorIntegration": "completed",
+    "liveProvider": "not_run",
+    "note": "Measured isolated PostgreSQL executor captures. These deterministic fixtures do not establish live narrative quality."
+  },
+  "artifactManifest": {
+    "status": "not_created",
+    "reason": "No raw request or state artifacts were requested. Only measured aggregate scores are emitted."
+  }
+}

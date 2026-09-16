@@ -9,7 +9,13 @@ import {
   type GenerationJob,
   type GenerationMutationResult
 } from "../../application/src/index.js";
-import { promptSnapshotSchema, type PromptSnapshot } from "../../contracts/src/prompt-library.js";
+import {
+  assertStoryMemoryPromptCompatibility,
+  assertContinuityReviewPromptSnapshot,
+  readPromptSnapshot,
+  type PromptSnapshot,
+  type PromptSnapshotV2
+} from "../../contracts/src/prompt-library.js";
 import { campaignTurnControlStyleSchema, generationPolicySnapshotSchema, type GenerationPolicySnapshot } from "../../contracts/src/campaign-generation-policy.js";
 import { storyLengthProfileFromUnknown, storyLengthWordRange } from "../../contracts/src/story-settings.js";
 import { parseStoredChronicleRetrievalAudit } from "../../contracts/src/memory.js";
@@ -18,6 +24,7 @@ import { extractPartialNarration, formatNarrationParagraphs, generationExecution
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
+import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
@@ -102,8 +109,12 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
     client: DatabaseClient,
     ownerUserId: string,
     campaignId: string,
-  ) => Promise<PromptSnapshot>;
+    storyMemoryPolicy?: StoryMemoryPolicySnapshot | null
+  ) => Promise<PromptSnapshot | PromptSnapshotV2>;
   promptProtocolVersion: (snapshot: PromptSnapshot) => string;
+  resolveStoryMemoryPolicySnapshot?: (client: DatabaseClient, scope: Readonly<{
+    ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string; modelContextWindowTokens?: number;
+  }>) => Promise<StoryMemoryPolicySnapshot | null>;
   readTurnReportedCosts: (
     ownerUserId: string,
     campaignId: string,
@@ -113,6 +124,15 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
+}
+
+function executionProtocolIdentity(
+  promptProtocol: string,
+  generationPolicy: GenerationPolicySnapshot,
+  storyMemoryPolicy: StoryMemoryPolicySnapshot | null
+): string {
+  const legacyIdentity = generationExecutionProtocolIdentity(promptProtocol, generationPolicy);
+  return storyMemoryPolicy ? `story-memory-v1|${legacyIdentity}` : legacyIdentity;
 }
 
 function sqlState(error: unknown): string | null {
@@ -325,6 +345,9 @@ export function createPostgresGenerationCommandRepository(
         const generationPolicy = generationPolicyForStyle(campaign.turn_control_style);
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
+        const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
+          ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
+          : null;
         const storyLengthProfile = request.storyLengthProfileOverride
           ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
@@ -332,15 +355,23 @@ export function createPostgresGenerationCommandRepository(
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,
           operationKind: "append",
-          expectedTurnNumber: campaign.active_turn_number + 1
+          expectedTurnNumber: campaign.active_turn_number + 1,
+          ...(storyMemoryPolicy ? {
+            baseIdentityVersion: "generation-base-v3" as const,
+            captureRecentWindow: storyMemoryPolicy.policy.recentTurnTarget > 1
+          } : {})
         });
-        const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
+        const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId, storyMemoryPolicy);
+        const readablePromptSnapshot = storyMemoryPolicy
+          ? assertContinuityReviewPromptSnapshot(assertStoryMemoryPromptCompatibility(promptSnapshot), storyMemoryPolicy.policy.continuityReview)
+          : readPromptSnapshot(promptSnapshot);
         const contextSnapshot = {
           ...request.context,
           budgetTokens: campaign.story_context_budget_tokens,
           storyLengthProfile,
           narrationMinWords: storyLength.minWords,
           narrationMaxWords: storyLength.maxWords
+          , ...(storyMemoryPolicy ? { storyMemoryPolicy } : {})
         };
         await client.query("SAVEPOINT enqueue_generation_insert");
         try {
@@ -357,7 +388,7 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), generationExecutionProtocolIdentity(dependencies.promptProtocolVersion(promptSnapshot), generationPolicy),
+              request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy),
               json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy)]
           );
           return enqueueResult(inserted.rows[0]!, false);
@@ -435,6 +466,9 @@ export function createPostgresGenerationCommandRepository(
         );
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
+        const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
+          ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
+          : null;
         const baseTurnNumber = campaign.active_turn_number - 1;
         let baseState: Record<string, unknown> = {};
         let baseScratchpadSafeForPrompt = false;
@@ -472,15 +506,23 @@ export function createPostgresGenerationCommandRepository(
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,
           operationKind: "replace_latest",
-          expectedTurnNumber: campaign.active_turn_number
+          expectedTurnNumber: campaign.active_turn_number,
+          ...(storyMemoryPolicy ? {
+            baseIdentityVersion: "generation-base-v3" as const,
+            captureRecentWindow: storyMemoryPolicy.policy.recentTurnTarget > 1
+          } : {})
         });
-        const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId);
+        const promptSnapshot = await dependencies.resolvePromptSnapshot(client, scope.ownerUserId, scope.campaignId, storyMemoryPolicy);
+        const readablePromptSnapshot = storyMemoryPolicy
+          ? assertContinuityReviewPromptSnapshot(assertStoryMemoryPromptCompatibility(promptSnapshot), storyMemoryPolicy.policy.continuityReview)
+          : readPromptSnapshot(promptSnapshot);
         const contextSnapshot = {
           ...request.context,
           budgetTokens: campaign.story_context_budget_tokens,
           storyLengthProfile,
           narrationMinWords: storyLength.minWords,
           narrationMaxWords: storyLength.maxWords
+          , ...(storyMemoryPolicy ? { storyMemoryPolicy } : {})
         };
         await client.query("SAVEPOINT enqueue_replacement_insert");
         try {
@@ -498,7 +540,7 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), generationExecutionProtocolIdentity(dependencies.promptProtocolVersion(promptSnapshot), generationPolicy),
+               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy)]
           );
@@ -612,13 +654,16 @@ export function createPostgresGenerationCommandRepository(
         const source = await client.query<MutationRow & {
           generationStatus: JobStatus;
           promptSnapshot: PromptSnapshot;
-          promptProtocolVersion: string;
-          generationPolicy: GenerationPolicySnapshot | null;
+           promptProtocolVersion: string;
+           generationPolicy: GenerationPolicySnapshot | null;
+           contextOptions: Record<string, unknown>;
+           errorCode: string | null;
         }>(
           `SELECT id, status AS "generationStatus", campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
                   expected_turn_number AS "expectedTurnNumber", attempts, operation_kind AS "operationKind",
                   replacement_turn_id AS "replacementTurnId", prompt_snapshot AS "promptSnapshot",
-                  prompt_protocol_version AS "promptProtocolVersion", generation_policy AS "generationPolicy"
+                   prompt_protocol_version AS "promptProtocolVersion", generation_policy AS "generationPolicy",
+                   context_options AS "contextOptions", error_code AS "errorCode"
              FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
           [scope.jobId, scope.ownerUserId]
         );
@@ -627,19 +672,29 @@ export function createPostgresGenerationCommandRepository(
         if (job.generationStatus !== "recoverable" && job.generationStatus !== "failed") {
           throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: job.generationStatus });
         }
-        const promptSnapshot = promptSnapshotSchema.safeParse(job.promptSnapshot);
+        const storedPolicy = job.contextOptions && Object.hasOwn(job.contextOptions, "storyMemoryPolicy")
+          ? storyMemoryPolicySnapshotSchema.safeParse(job.contextOptions.storyMemoryPolicy) : null;
+        if (storedPolicy && (!storedPolicy.success
+          || ["generation_checkpoint_incompatible", "story_memory_policy_worker_incompatible", "story_memory_policy_invalid", "generation_authority_stale", "generation_prompt_snapshot_invalid"].includes(job.errorCode ?? ""))) {
+          throw new GenerationApplicationError("conflict", { reason: "retry_protocol_incompatible" });
+        }
+        let promptSnapshot: ReturnType<typeof readPromptSnapshot> | null = null;
+        try {
+          promptSnapshot = storedPolicy
+            ? assertContinuityReviewPromptSnapshot(assertStoryMemoryPromptCompatibility(job.promptSnapshot), storedPolicy.data.policy.continuityReview)
+            : readPromptSnapshot(job.promptSnapshot);
+        } catch { promptSnapshot = null; }
         const generationPolicy = job.generationPolicy === null
           ? null
           : generationPolicySnapshotSchema.safeParse(job.generationPolicy);
         let protocolCompatible = false;
         try {
-          protocolCompatible = promptSnapshot.success
+          protocolCompatible = promptSnapshot !== null
             && (generationPolicy === null || generationPolicy.success)
-            && generationExecutionProtocolIdentity(
-              dependencies.promptProtocolVersion(promptSnapshot.data),
-              generationPolicy === null
-                ? { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" }
-                : generationPolicy.data
+            && executionProtocolIdentity(
+              dependencies.promptProtocolVersion(promptSnapshot.templates as PromptSnapshot),
+              generationPolicy === null ? { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" } : generationPolicy.data,
+              storedPolicy?.success ? storedPolicy.data : null
             ) === job.promptProtocolVersion;
         } catch {
           protocolCompatible = false;
@@ -651,7 +706,10 @@ export function createPostgresGenerationCommandRepository(
           `UPDATE generation_jobs
               SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
                   lease_owner = NULL, lease_expires_at = NULL, error_code = NULL, error_message = NULL, updated_at = now()
-                  , orchestration_private = orchestration_private - 'automaticRepair'
+                  , orchestration_private = (orchestration_private - 'automaticRepair' - 'continuityReview' - 'semanticRepair' - 'eventCoverageRepair') || jsonb_build_object(
+                    'logicalAttempt', jsonb_build_object('version', 1, 'id', gen_random_uuid()::text,
+                      'semanticRepairsConsumed', 0, 'reviewsConsumed', 0, 'automaticRepairsConsumed', 0,
+                      'choiceRepairsConsumed', 0, 'eventCoverageRepairsConsumed', 0))
             WHERE id = $1 AND owner_user_id = $2
             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
           [scope.jobId, scope.ownerUserId]

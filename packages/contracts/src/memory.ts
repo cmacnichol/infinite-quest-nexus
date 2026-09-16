@@ -144,7 +144,17 @@ export const chronicleRetrievalAuditSchema = z.object({
   providerCallOutcome: z.enum(["not_attempted", "succeeded", "failed", "mixed"]),
   queryEmbeddingRequests: nonnegativeIntegerSchema,
   queryCacheHits: nonnegativeIntegerSchema,
-  queryCacheMisses: nonnegativeIntegerSchema
+  queryCacheMisses: nonnegativeIntegerSchema,
+  queryPlanning: z.object({
+    planner: z.literal("balanced-v1"),
+    rankAggregation: z.literal("query_family_max_v1"),
+    variantCount: z.number().int().min(0).max(8),
+    segmentCount: nonnegativeIntegerSchema,
+    uncoveredSegmentCount: nonnegativeIntegerSchema,
+    totalCharacters: z.number().int().min(0).max(8_000),
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/)
+  }).strict().refine((value) => value.uncoveredSegmentCount <= value.segmentCount,
+    { message: "Uncovered segments cannot exceed planned segments." }).optional()
 }).strict().superRefine((audit, context) => {
   const expectedQueryVectorPath = audit.queryEmbeddingRequests > 0
     ? audit.queryCacheHits > 0 ? "cache_and_provider" : "provider_only"

@@ -15,13 +15,13 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "pnpm --filter @infinite-quest/web-legacy exec vite --host 127.0.0.1 --port 43173 --strictPort",
+      command: "corepack pnpm --filter @infinite-quest/web-legacy exec vite --host 127.0.0.1 --port 43173 --strictPort",
       url: "http://127.0.0.1:43173/nexus/index.html",
       reuseExistingServer: false,
       timeout: 30_000
     },
     {
-      command: "pnpm --filter @infinite-quest/web-next exec vite --host 127.0.0.1 --port 43174 --strictPort",
+      command: "corepack pnpm --filter @infinite-quest/web-next exec vite --host 127.0.0.1 --port 43174 --strictPort",
       url: "http://127.0.0.1:43174/app/data-transfer",
       reuseExistingServer: false,
       timeout: 30_000

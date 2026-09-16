@@ -41,6 +41,7 @@ import {
 import {
   createCampaignContinuityDraft,
   formatChronicleRetrievalAudit,
+  generationDiagnosticPresentation,
   generationRecoveryGuidance
 } from "@infinite-quest/client-core";
 
@@ -103,6 +104,7 @@ const state = {
   playerConfig: null,
   runtimeState: null,
   editStateSession: null,
+  characterProfileEditSession: null,
   responseEditSession: null,
   turns: [],
   historyNextCursor: null,
@@ -153,6 +155,8 @@ let discardModalAction = null;
 let completeHistoryLoad = null;
 let storyTurnWindowEpoch = 0;
 let nextEditStateSessionId = 0;
+let nextCharacterProfileEditSessionId = 0;
+let characterProfileEditRequestToken = 0;
 let nextResponseEditSessionId = 0;
 const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
 
@@ -322,6 +326,9 @@ function syncInputState() {
   const editStateLocked = generationLocked || recoveryVisible || Boolean(state.editStateSession?.saving);
   const editStateButton = $("btnOpenEditState");
   if (editStateButton) editStateButton.disabled = editStateLocked;
+  const editCharacterProfileLocked = generationLocked || recoveryVisible || Boolean(state.characterProfileEditSession?.saving);
+  const editCharacterProfileButton = $("btnOpenEditCharacterProfile");
+  if (editCharacterProfileButton) editCharacterProfileButton.disabled = editCharacterProfileLocked;
   const editResponseButton = $("btnOpenEditResponse");
   if (editResponseButton) {
     editResponseButton.disabled = !canEditCurrentResponse()
@@ -331,6 +338,11 @@ function syncInputState() {
   if (state.editStateSession) {
     document.querySelectorAll("#editStateDialog textarea, #editStateDialog button").forEach(control => {
       control.disabled = editStateLocked;
+    });
+  }
+  if (state.characterProfileEditSession) {
+    document.querySelectorAll("#editCharacterProfileDialog input, #editCharacterProfileDialog textarea, #editCharacterProfileDialog button").forEach(control => {
+      control.disabled = editCharacterProfileLocked;
     });
   }
   const turnCount = state.turns ? state.turns.length : 0;
@@ -471,11 +483,13 @@ async function loadCampaign(campaignId, options = {}) {
     state.campaignLoaded = true;
     if (!state.pendingGeneration && (state.generationRecovery?.status === "recoverable" || state.generationRecovery?.status === "failed")) {
       const guidance = generationRecoveryGuidance(state.generationRecovery.diagnostic);
+      const presentation = generationDiagnosticPresentation(state.generationRecovery.diagnostic);
       showGenerationRecovery(
         state.generationRecovery.id,
         guidance?.message || "This durable generation needs your direction.",
         "generation",
-        guidance
+        guidance,
+        presentation
       );
     }
     return true;
@@ -1457,18 +1471,28 @@ async function cancelActiveGeneration() {
   });
 }
 
-function showGenerationRecovery(jobId, message, kind = "generation", guidance = null) {
+function showGenerationRecovery(jobId, message, kind = "generation", guidance = null, presentation = null) {
   const panel = $("generationRecoveryPanel");
   const messageEl = $("generationRecoveryMessage");
   const continueButton = $("btnContinueGeneration");
   const retryButton = $("btnRetryGeneration");
   const discardButton = $("btnDiscardGenerationRecovery");
+  const details = $("generationRecoveryDetails");
   state.generationRecoveryKind = kind;
   if (panel) {
     panel.dataset.jobId = jobId;
     panel.classList.remove("hidden");
   }
   if (messageEl) messageEl.textContent = message || "The durable generation needs attention.";
+  if (details) {
+    details.replaceChildren();
+    for (const detail of presentation?.details || []) {
+      const item = document.createElement("li");
+      item.textContent = detail;
+      details.append(item);
+    }
+    details.classList.toggle("hidden", !details.childElementCount);
+  }
   if (continueButton) continueButton.classList.toggle("hidden", kind === "result");
   if (retryButton) {
     retryButton.classList.toggle("hidden", kind !== "result" && guidance?.retryable === false);
@@ -1483,6 +1507,11 @@ function hideGenerationRecovery() {
     panel.dataset.jobId = "";
     panel.classList.add("hidden");
   }
+  const details = $("generationRecoveryDetails");
+  if (details) {
+    details.replaceChildren();
+    details.classList.add("hidden");
+  }
   state.generationRecoveryKind = null;
 }
 
@@ -1496,6 +1525,8 @@ function resetGenerationStateForCampaignLoad() {
   state.generationDisplayAction = "";
   state.generationJobId = null;
   state.cancellationConfirmed = false;
+  state.characterProfileEditSession = null;
+  characterProfileEditRequestToken += 1;
   clearStreamingPreview();
   hideGenerationRecovery();
 }
@@ -1531,8 +1562,10 @@ async function discardRecoveryJob() {
   if (!jobId || state.busy) return;
   showBusy("Discarding generation job…");
   try {
-    if (!state.generationRun) throw new Error("No active generation run is available to discard.");
-    await state.generationRun.discardGeneration();
+    const run = state.generationRun || await composition.workflow.resume(state.campaignId);
+    if (!run) throw new Error("No active generation run is available to discard.");
+    state.generationRun = run;
+    await run.discardGeneration();
     clearPendingSubmission();
     state.pendingGeneration = null;
     hideGenerationRecovery();
@@ -1665,8 +1698,9 @@ async function observeGenerationRun(run, action, retryFirst = false) {
   pollImageJobs();
   let terminalError = null;
   let resultUnavailable = false;
+  let lastSnapshot = null;
   await observeGenerationRunEvents(run, retryFirst, state, (events) => presentGenerationEvents(events, {
-    onStatus: updateGenerationProgress,
+    onStatus: (snapshot) => { lastSnapshot = snapshot; updateGenerationProgress(snapshot); },
     onNarration: (text) => renderStreamingPreview(text, action || state.generationDisplayAction),
     onDegraded: (reason, failures) => recordActivity("system", "Generation monitoring degraded", `${reason} (${failures})`),
     onDetached: () => recordActivity("system", "Generation monitoring detached", `jobId=${run.jobId}`),
@@ -1692,7 +1726,11 @@ async function observeGenerationRun(run, action, retryFirst = false) {
     onTerminalFailure: (error, outcome) => {
       clearPendingSubmission();
       state.pendingGeneration = null;
-      if (outcome === "unrecoverable") showGenerationRecovery(run.jobId, "Generation is recoverable but needs your direction.");
+      if (outcome === "unrecoverable") {
+        const guidance = generationRecoveryGuidance(lastSnapshot?.diagnostic);
+        const presentation = generationDiagnosticPresentation(lastSnapshot?.diagnostic);
+        showGenerationRecovery(run.jobId, guidance?.message || "Generation is recoverable but needs your direction.", "generation", guidance, presentation);
+      }
       terminalError = error;
     }
   }));
@@ -1739,7 +1777,10 @@ function updateGenerationProgress(job) {
 
 async function resumePendingGeneration() {
   // Check sync-status for any in-flight generation jobs
-  if (!state.campaignId || !state.campaign) return false;
+  // A recoverable job is already rendered as an explicit recovery choice by
+  // loadCampaign. Do not reattach to it during boot: doing so briefly marks
+  // it as pending and prevents the player from retaining a new draft.
+  if (!state.campaignId || !state.campaign || !state.pendingGeneration) return false;
   let completeButLoading = false;
   try {
     const run = await composition.workflow.resume(state.campaignId);
@@ -2699,6 +2740,98 @@ async function saveEditState() {
   }
 }
 
+// ── Character Profile Dialog ───────────────────────────────────
+async function openEditCharacterProfile() {
+  const dialog = $("editCharacterProfileDialog");
+  if (!dialog || !state.campaignId) return;
+  const recoveryPanel = $("generationRecoveryPanel");
+  const recoveryVisible = Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
+  if (state.busy || state.pendingGeneration || recoveryVisible) {
+    toast("Finish or resolve the active generation before editing the character profile.");
+    return;
+  }
+
+  const campaignId = state.campaignId;
+  const requestToken = ++characterProfileEditRequestToken;
+  try {
+    showBusy("Loading campaign character profile…");
+    const profile = await apiClient.campaigns.getCharacterProfile(campaignId);
+    if (requestToken !== characterProfileEditRequestToken || state.campaignId !== campaignId || dialog.open) return;
+    const name = $("editCharacterProfileName");
+    const editor = $("editCharacterProfileJson");
+    const status = $("editCharacterProfileStatus");
+    if (!name || !editor) return;
+    state.characterProfileEditSession = {
+      id: `edit-character-profile:${++nextCharacterProfileEditSessionId}`,
+      campaignId,
+      revision: profile.revision,
+      saving: false
+    };
+    name.value = profile.name;
+    editor.value = JSON.stringify(profile.profile, null, 2);
+    if (status) status.textContent = `Editing character profile revision ${profile.revision}.`;
+    openManagedModal(dialog);
+    syncInputState();
+  } catch (error) {
+    if (requestToken === characterProfileEditRequestToken && state.campaignId === campaignId && !dialog.open) {
+      toast(`Character profile could not be loaded: ${error.message}`);
+    }
+  } finally {
+    if (requestToken === characterProfileEditRequestToken && state.campaignId === campaignId) hideBusy();
+  }
+}
+
+async function saveEditCharacterProfile() {
+  const session = state.characterProfileEditSession;
+  const name = $("editCharacterProfileName");
+  const editor = $("editCharacterProfileJson");
+  const status = $("editCharacterProfileStatus");
+  if (!session || session.saving || !name || !editor) return;
+
+  let profile;
+  try {
+    profile = JSON.parse(editor.value);
+  } catch (_) {
+    if (status) status.textContent = "Profile JSON must be valid before it can be saved.";
+    return;
+  }
+  if (!profile || Array.isArray(profile) || typeof profile !== "object") {
+    if (status) status.textContent = "Profile JSON must be an object.";
+    return;
+  }
+
+  session.saving = true;
+  try {
+    showBusy("Saving character profile…");
+    const saved = await apiClient.campaigns.updateCharacterProfile(session.campaignId, {
+      expectedRevision: session.revision,
+      name: name.value,
+      profile,
+      editSource: "manual"
+    });
+    if (state.campaignId !== session.campaignId || state.characterProfileEditSession?.id !== session.id) return;
+    state.playerConfig = {
+      ...(state.playerConfig || {}),
+      selectedCharacterName: saved.name,
+      characterProfile: { name: saved.name, profile: saved.profile },
+      characterProfileRevision: saved.revision
+    };
+    state.characterProfileEditSession = null;
+    const dialog = $("editCharacterProfileDialog");
+    if (dialog?.close) dialog.close();
+    toast("Campaign character profile saved. The next story turn will use these changes.");
+  } catch (error) {
+    if (status) {
+      status.textContent = (error?.status === 409 || error?.statusCode === 409)
+        ? "The character profile changed. Reopen it to load the latest revision."
+        : `Profile could not be saved: ${error.message}`;
+    }
+  } finally {
+    if (state.characterProfileEditSession?.id === session.id) state.characterProfileEditSession.saving = false;
+    hideBusy();
+  }
+}
+
 // ── World Setup Dialog ────────────────────────────────────────
 function openWorldSetup() {
   const dlg = $("worldSetupDialog");
@@ -2986,6 +3119,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnExportPdf) btnExportPdf.addEventListener("click", () => { closeNavigationMenus(); printStory(); });
   const btnOpenEditState = $("btnOpenEditState");
   if (btnOpenEditState) btnOpenEditState.addEventListener("click", () => { closeNavigationMenus(); openEditState(); });
+  const btnOpenEditCharacterProfile = $("btnOpenEditCharacterProfile");
+  if (btnOpenEditCharacterProfile) btnOpenEditCharacterProfile.addEventListener("click", () => { closeNavigationMenus(); void openEditCharacterProfile(); });
   const btnOpenEditResponse = $("btnOpenEditResponse");
   if (btnOpenEditResponse) btnOpenEditResponse.addEventListener("click", () => {
     closeNavigationMenus();
@@ -3060,6 +3195,22 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.querySelectorAll("#editStateDialog .tab").forEach(tab => {
     tab.addEventListener("click", () => switchEditStateTab(tab.dataset.tab));
+  });
+
+  // Character profile dialog
+  const btnSaveEditCharacterProfile = $("btnSaveEditCharacterProfile");
+  if (btnSaveEditCharacterProfile) btnSaveEditCharacterProfile.addEventListener("click", () => { void saveEditCharacterProfile(); });
+  ["btnCloseEditCharacterProfile", "btnCancelEditCharacterProfile"].forEach((id) => {
+    const button = $(id);
+    if (button) button.addEventListener("click", () => {
+      const dialog = $("editCharacterProfileDialog");
+      if (dialog) requestModalDismissal(dialog);
+    });
+  });
+  const editCharacterProfileDialog = $("editCharacterProfileDialog");
+  if (editCharacterProfileDialog) editCharacterProfileDialog.addEventListener("close", () => {
+    characterProfileEditRequestToken += 1;
+    if (!state.characterProfileEditSession?.saving) state.characterProfileEditSession = null;
   });
 
   // Turn History / Navigation dialog and pills

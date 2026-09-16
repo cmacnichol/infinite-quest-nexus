@@ -5,6 +5,7 @@ import {
 } from "../../packages/contracts/src/world-library.js";
 import {
   characterLegacyText,
+  characterFictionAuthority,
   characterNarrativeContext,
   characterVisualReference,
   effectiveCampaignCharacter,
@@ -42,6 +43,89 @@ const profile = characterProfileSchema.parse({
 });
 
 describe("structured character profiles", () => {
+  it("projects every known fiction field without preview caps and denies extensions and mechanics", () => {
+    const relationship = "trusted navigator ".repeat(120);
+    const authority = characterFictionAuthority({
+      name: "Campaign Mira",
+      profile: characterProfileSchema.parse({
+        identity: { aliases: ["The Fox"], pronouns: "she/her", unknownIdentity: "PRIVATE_EXTENSION" },
+        story: { role: "Scout", keyRelationships: relationship, unknownStory: "PRIVATE_EXTENSION" },
+        appearance: { clothing: "blue cloak", unknownAppearance: "PRIVATE_EXTENSION" },
+        unclassifiedNotes: "A complete private fiction note.",
+        extension: "PRIVATE_EXTENSION"
+      })
+    }, {
+      name: "Origin Mira",
+      characterText: "Dice roll: 19. Original guidance."
+    });
+
+    expect(authority).toMatchObject({
+      source: "campaign_profile",
+      name: "Campaign Mira",
+      profile: {
+        identity: { aliases: ["The Fox"], pronouns: "she/her" },
+        story: { role: "Scout", keyRelationships: relationship.trim() },
+        appearance: { clothing: "blue cloak" },
+        unclassifiedNotes: "A complete private fiction note."
+      },
+      omittedExtensionFieldCount: 4
+    });
+    expect(JSON.stringify(authority)).not.toContain("PRIVATE_EXTENSION");
+    expect(JSON.stringify(authority)).not.toContain("Original guidance.");
+    expect(JSON.stringify(authority)).not.toMatch(/dice|rpgStats|defaultTriggers/i);
+  });
+
+  it("removes recognized credential and configuration leakage from every admitted fiction field", () => {
+    const secret = "fixture-private-provider-token-T04";
+    const authority = characterFictionAuthority({
+      name: "Mira",
+      profile: characterProfileSchema.parse({
+        identity: { aliases: [`Provider token: ${secret}`, "The Fox"] },
+        story: { role: `API key=${secret}`, background: "Mira maps safe roads." },
+        appearance: { clothing: `Authorization: Bearer ${secret}`, distinguishingFeatures: [`token=${secret}`, "silver pin"] },
+        unclassifiedNotes: `https://example.test/path?api_key=${secret}\nShe trusts the old bridge.`
+      })
+    }, null);
+
+    expect(JSON.stringify(authority)).not.toContain(secret);
+    expect(authority.profile).toMatchObject({
+      identity: { aliases: ["The Fox"] },
+      story: { background: "Mira maps safe roads." },
+      appearance: { distinguishingFeatures: ["silver pin"] },
+      unclassifiedNotes: "She trusts the old bridge."
+    });
+  });
+
+  it("keeps complete known fiction or reports protected overflow to the caller; it never clips it", () => {
+    const longBackground = "The complete background remains whole. ".repeat(500);
+    const storedProfile = characterProfileSchema.parse({ story: { background: longBackground } });
+    const authority = characterFictionAuthority({
+      name: "Mira",
+      profile: storedProfile
+    }, null);
+
+    expect(authority.profile?.story.background).toBe(storedProfile.story.background);
+    expect(authority.profile?.story.background).toHaveLength(storedProfile.story.background.length);
+  });
+
+  it("keeps profile guidance separate from dynamic continuity precedence", () => {
+    const authority = characterFictionAuthority({
+      name: "Mira Renamed",
+      profile: characterProfileSchema.parse({
+        story: { background: "Earlier dialogue may retain the old name." },
+        appearance: { clothing: "starting blue cloak", equipmentAndAccessories: "starting sword" }
+      })
+    }, null);
+
+    expect(authority).toMatchObject({
+      source: "campaign_profile",
+      name: "Mira Renamed",
+      profile: { appearance: { clothing: "starting blue cloak", equipmentAndAccessories: "starting sword" } }
+    });
+    // Current location, possessions, clothing, and relationship state are resolved
+    // by the correction-aware continuity component, never merged into this origin.
+    expect(authority).not.toHaveProperty("currentContinuity");
+  });
   it("keeps schema-v4 legacy worlds readable and round-trips schema-v5 profiles", () => {
     const legacy = worldContentSchema.parse({
       schemaVersion: 4,

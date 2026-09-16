@@ -348,6 +348,7 @@ export const campaignRuntimeStateContentSchema = z.object({
 export const campaignRuntimeStateUpdateSchema = campaignRuntimeStateContentSchema.extend({
   expectedTurnNumber: z.coerce.number().int().min(0),
   expectedRevision: z.coerce.number().int().min(0),
+  expectedNarrationRevisionFingerprint: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   effectiveTurnNumber: z.coerce.number().int().min(0).optional()
 });
 
@@ -444,7 +445,7 @@ export const PUBLIC_GENERATION_FAILURE_MESSAGE = "Generation could not be comple
 const publicGenerationFailureFields = {
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
-  diagnostic: safeGenerationDiagnosticSchema.nullable().optional()
+  diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null)
 };
 
 const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({

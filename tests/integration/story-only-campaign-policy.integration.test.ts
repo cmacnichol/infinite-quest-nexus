@@ -33,7 +33,7 @@ integration("story-only campaign policy migration", () => {
     const migrationDirectory = await mkdtemp(join(tmpdir(), "infinitequest-pre0094-"));
     try {
       for (const file of await readdir(resolve("database/migrations"))) {
-        if (file.endsWith(".sql") && !file.startsWith("0094_")) {
+        if (file.endsWith(".sql") && file < "0094_") {
           await copyFile(join(resolve("database/migrations"), file), join(migrationDirectory, file));
         }
       }

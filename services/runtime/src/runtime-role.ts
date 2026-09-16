@@ -47,7 +47,11 @@ export type RuntimeRoleDependencies = Readonly<{
     transport: ProviderTransport
   ): WorkerProviderApplicationComposition;
   createProviderApiAdapter(composition: ApiProviderApplicationComposition): ProviderApiTransportAdapter;
-  createApiGeneration(pool: DatabasePool, providers: ApiProviderApplicationComposition["generation"]): GenerationApplication;
+  createApiGeneration(
+    pool: DatabasePool,
+    providers: ApiProviderApplicationComposition["generation"],
+    operatorConfig: Readonly<{ installedCapability: "r1" | "r2" | "r3" | null; enforceEnabled: boolean }>
+  ): GenerationApplication;
   createApiIllustration(
     pool: DatabasePool,
     providers: ApiProviderApplicationComposition["illustration"] | WorkerProviderApplicationComposition["illustration"],
@@ -153,7 +157,10 @@ export async function dispatchRuntimeRole(
       config.credentialEncryptionKey,
       providerTransport
     );
-    const generation = dependencies.createApiGeneration(pool, providerGraph.generation);
+    const generation = dependencies.createApiGeneration(pool, providerGraph.generation, {
+      installedCapability: config.storyMemoryCapability ?? null,
+      enforceEnabled: config.storyMemoryEnforceEnabled === true
+    });
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
     const worldCampaign = dependencies.createApiWorldCampaign(pool, providerGraph);
@@ -195,7 +202,10 @@ export async function dispatchRuntimeRole(
     providerTransport
   );
   const workerProviderGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
-  const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation);
+  const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation, {
+    installedCapability: config.storyMemoryCapability ?? null,
+    enforceEnabled: config.storyMemoryEnforceEnabled === true
+  });
   const illustration = dependencies.createApiIllustration(pool, apiProviderGraph.illustration);
   const memory = dependencies.createApiMemory(pool, apiProviderGraph.chronicle);
   const workerIllustrationTransactions = dependencies.createApiIllustration(pool, workerProviderGraph.illustration);

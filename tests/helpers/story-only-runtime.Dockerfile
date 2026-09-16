@@ -1,7 +1,8 @@
 FROM node:26-bookworm-slim
 WORKDIR /app
-RUN npm install --global pnpm@11.24.0
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.build.json ./
+COPY package.json ./
+RUN npm install --global "$(node -p "require('./package.json').packageManager.split('+')[0]")"
+COPY pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.build.json ./
 COPY database ./database
 COPY packages ./packages
 COPY services ./services

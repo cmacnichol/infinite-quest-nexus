@@ -200,6 +200,16 @@ export function createStoryUiModel(
         if (state.requestedInputMode !== requestedInputMode) publish({ ...state, requestedInputMode });
         return;
       }
+      if (state.draftOwnerKey === null && state.draft) {
+        composerPolicy = nextComposerPolicy;
+        publish({
+          ...state,
+          draftOwnerKey: ownerKey,
+          draftOwnerTurnNumber: acceptedTurnNumber,
+          requestedInputMode
+        });
+        return;
+      }
       const selection = createChoiceDraftSelection();
       composerPolicy = nextComposerPolicy;
       publish({

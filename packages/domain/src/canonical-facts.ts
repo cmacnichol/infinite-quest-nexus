@@ -28,6 +28,12 @@ export function canonicalFactDeduplicationKey(value: string): string {
   return normalizeCanonicalFactContent(value).toLocaleLowerCase("en-US");
 }
 
+/** Preserve the established correction projector identity; accepted turns use a different scheme. */
+export function createCorrectionCanonicalFactId(campaignId: string, stateEditId: string, factIndex: number): string {
+  const hash = createHash("sha256").update(`${campaignId}:${stateEditId}:${factIndex}`).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
 function lengthPrefixed(value: string): string {
   return `${Buffer.byteLength(value, "utf8")}:${value}`;
 }

@@ -3,8 +3,12 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import {
   buildPromptPreview,
+  assertContinuityReviewPromptSnapshot,
+  assertStoryMemoryPromptCompatibility,
   PROMPT_TEMPLATE_CATALOG,
+  CONTINUITY_REVIEW_PROMPT_CATALOG,
   promptCompatibilityRequirement,
+  storyMemoryPromptCompatibilityRequirement,
   promptTemplateOverrideSchema,
   renderPromptTemplate,
   sampleValuesForPrompt
@@ -20,9 +24,38 @@ import {
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
-import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
+import { createPromptRepository, resolveStoryMemoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
 
 describe("Prompt Library catalog", () => {
+  it("requires an intact frozen review and repair pair for enabled modes", () => {
+    const templates = Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG)
+      .map(([key, definition]) => [key, { content: definition.defaultContent, hash: createHash("sha256").update(definition.defaultContent).digest("hex"), source: "shipped" }]));
+    const review = CONTINUITY_REVIEW_PROMPT_CATALOG.review.defaultContent;
+    const repair = CONTINUITY_REVIEW_PROMPT_CATALOG.repair.defaultContent;
+    const snapshot = { version: 2, templates, continuityReview: { review: { content: review, hash: createHash("sha256").update(review).digest("hex"), source: "shipped", protocolIdentity: "story-continuity-review-v1" }, repair: { content: repair, hash: createHash("sha256").update(repair).digest("hex"), source: "shipped", protocolIdentity: "story-continuity-repair-v1" } } };
+    expect(assertContinuityReviewPromptSnapshot(snapshot, "observe").continuityReview?.review.content).toBe(review);
+    expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, continuityReview: null }, "enforce")).toThrow("requires a frozen");
+    expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, continuityReview: { ...snapshot.continuityReview!, review: { ...snapshot.continuityReview!.review, hash: "0".repeat(64) } } }, "observe")).toThrow("hash");
+    expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, templates: { ...templates, story_continuity_review: snapshot.continuityReview!.review } }, "observe")).toThrow("Unsupported");
+  });
+  it("freezes the effective review pair at enqueue rather than consulting later overrides", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const review = "Campaign review v1.";
+    const repair = "Application repair v1.";
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{}] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [
+        { prompt_key: "story_continuity_review", content: "Application review.", campaign_id: null },
+        { prompt_key: "story_continuity_review", content: review, campaign_id: campaignId },
+        { prompt_key: "story_continuity_repair", content: repair, campaign_id: null }
+      ] });
+    const first = await resolveStoryMemoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId }, "observe");
+    expect(first.continuityReview).toMatchObject({ review: { content: review, source: "campaign" }, repair: { content: repair, source: "application" } });
+    const frozen = JSON.parse(JSON.stringify(first));
+    expect(assertContinuityReviewPromptSnapshot(frozen, "observe").continuityReview).toEqual(first.continuityReview);
+  });
   it("uses the shared shipped story-system definition", () => {
     expect(PROMPT_TEMPLATE_CATALOG.story_system.defaultContent).toBe(STORY_SYSTEM_PROMPT);
     expect(STORY_SYSTEM_PROMPT).toContain("currentContinuity");
@@ -188,6 +221,92 @@ describe("Prompt Library catalog", () => {
     expect(promptCompatibilityRequirement("illustration_direct")).toBeNull();
   });
 
+  it("keeps a legacy override acknowledgement valid while publishing the distinct v14 Story Memory requirement", () => {
+    expect(promptCompatibilityRequirement("story_system")?.protocolIdentity)
+      .toBe("story-v13-current-state-corrections|story-output-v2|current-continuity-v2");
+    expect(storyMemoryPromptCompatibilityRequirement("story_system")?.protocolIdentity)
+      .toBe("story-v14-continuity-context|story-output-v2|current-continuity-v3");
+    expect(storyMemoryPromptCompatibilityRequirement("event_extension")?.requiredShapePreview)
+      .toContain('"canonical_fact_updates"');
+    expect(storyMemoryPromptCompatibilityRequirement("illustration_direct")).toBeNull();
+  });
+
+  it("requires a v14 acknowledgement and freezes its exact content proof for enrolled Story Memory jobs", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const content = "Keep the established creative voice.";
+    const hash = createHash("sha256").update(content).digest("hex");
+    const requirement = storyMemoryPromptCompatibilityRequirement("story_system")!;
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{}] })
+      .mockResolvedValueOnce({ rows: [{
+        prompt_key: "story_system", content, campaign_id: null,
+        compatibility_required_shape_version: requirement.requiredShapeVersion,
+        compatibility_protocol_identity: requirement.protocolIdentity,
+        compatibility_content_hash: hash
+      }] });
+
+    const snapshot = await resolveStoryMemoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId });
+
+    expect(snapshot.storyMemoryCompatibility).toEqual({
+      protocolIdentity: requirement.protocolIdentity,
+      templateHashes: {
+        story_system: hash,
+        event_extension: snapshot.templates.event_extension.hash
+      }
+    });
+    expect(assertStoryMemoryPromptCompatibility(snapshot).template("story_system").content).toBe(content);
+    await expect(resolveStoryMemoryPromptSnapshot({
+      query: vi.fn().mockResolvedValueOnce({ rows: [{}] }).mockResolvedValueOnce({ rows: [{
+        prompt_key: "story_system", content, campaign_id: null,
+        compatibility_required_shape_version: "story-output-v2",
+        compatibility_protocol_identity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
+        compatibility_content_hash: hash
+      }] })
+    } as never, { ownerUserId, scope: "campaign", campaignId })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+  });
+
+  it.each(["story_system", "event_extension"] as const)("validates only the effective campaign %s override", async (key) => {
+    const campaignId = crypto.randomUUID();
+    const requirement = storyMemoryPromptCompatibilityRequirement(key)!;
+    const content = PROMPT_TEMPLATE_CATALOG[key].defaultContent;
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{}] }).mockResolvedValueOnce({ rows: [
+      { prompt_key: key, campaign_id: null, content: "Unacknowledged unused application override." },
+      { prompt_key: key, campaign_id: campaignId, content,
+        compatibility_required_shape_version: requirement.requiredShapeVersion,
+        compatibility_protocol_identity: requirement.protocolIdentity,
+        compatibility_content_hash: createHash("sha256").update(content).digest("hex") }
+    ] });
+    const snapshot = await resolveStoryMemoryPromptSnapshot({ query } as never, { ownerUserId: crypto.randomUUID(), scope: "campaign", campaignId });
+    expect(snapshot.templates[key]).toMatchObject({ content, source: "campaign" });
+    expect(JSON.stringify(snapshot)).not.toContain("Unacknowledged unused");
+  });
+
+  it("rejects edited frozen Story Memory override content even when its old v14 proof remains", () => {
+    const templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }> = Object.fromEntries(Object.values(PROMPT_TEMPLATE_CATALOG).map((definition) => [definition.key, {
+      content: definition.defaultContent,
+      hash: createHash("sha256").update(definition.defaultContent).digest("hex"),
+      source: "shipped" as const
+    }]));
+    templates.story_system = {
+      content: "Edited after enqueue.",
+      hash: createHash("sha256").update("Edited after enqueue.").digest("hex"),
+      source: "campaign"
+    };
+    expect(() => assertStoryMemoryPromptCompatibility({
+      version: 2,
+      templates,
+      continuityReview: null,
+      storyMemoryCompatibility: {
+        protocolIdentity: storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity,
+        templateHashes: {
+          story_system: createHash("sha256").update("Earlier acknowledged content.").digest("hex"),
+          event_extension: templates.event_extension!.hash
+        }
+      }
+    })).toThrow("does not match captured content");
+  });
+
   it("rejects an unacknowledged continuity override before persistence can lead to provider execution", async () => {
     const query = vi.fn();
     const prompts = createPromptRepository({ query } as never);
@@ -290,6 +409,26 @@ describe("Prompt Library catalog", () => {
       expect.stringContaining("compatibility_protocol_identity"),
       expect.arrayContaining([requirement.requiredShapeVersion, requirement.protocolIdentity])
     );
+  });
+
+  it("shows the v14 acknowledgement requirement for an enrolled campaign without changing legacy views", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const library = await prompts.listPromptLibrary({ ownerUserId, scope: "campaign", campaignId });
+    const compatibility = library.templates.find((template) => template.key === "story_system")?.compatibility;
+
+    expect(compatibility).toMatchObject({
+      ...storyMemoryPromptCompatibilityRequirement("story_system"),
+      acknowledged: true
+    });
+    expect(compatibility?.protocolIdentity).not.toBe(promptCompatibilityRequirement("story_system")?.protocolIdentity);
   });
 
   it("blocks a saved protected override acknowledged under an earlier prompt protocol identity", async () => {

@@ -327,6 +327,40 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
     ))).rejects.toMatchObject({ kind: "unavailable", reason: "invalid_transition" });
   });
 
+  it.each([
+    "queued", "replacement_queued", "assessing", "generating", "validating", "committing", "recoverable"
+  ] as const)("rejects a normal profile save while a %s generation is present", async (status) => {
+    const { campaign } = await campaignFixture(`Profile ${status} guard`);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id,name,provider_type,provider_role,base_url,default_model
+       ) VALUES ($1,$2,'lmstudio','text','http://provider.invalid','synthetic-model') RETURNING id`,
+      [ownerUserId, `Profile status guard ${crypto.randomUUID()}`]
+    );
+    const providerId = provider.rows[0]!.id;
+    providerIds.push(providerId);
+    await pool.query(
+      `INSERT INTO generation_jobs (
+         owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status
+       ) VALUES ($1,$2,$3,$4,1,'Guarded profile save',$5)`,
+      [ownerUserId, campaign.id, providerId, crypto.randomUUID(), status]
+    );
+    const transactions = createPostgresWorldCampaignTransactionPort(pool);
+    const repository = repositoryModule.createPostgresCharacterProfileRepository();
+    const blocked = await transactions.command((transaction) => repository.updateCampaignCharacterProfile(
+      transaction,
+      { ownerUserId, campaignId: campaign.id },
+      campaignCharacterProfileUpdateSchema.parse({
+        expectedRevision: 1, name: "Blocked profile", profile: characterProfileSchema.parse({ story: { role: "Blocked" } }), editSource: "manual"
+      })
+    ));
+    expect(blocked).toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
+    await expect(pool.query(
+      "SELECT character_profile_revision,character_profile FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+      [campaign.id, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ character_profile_revision: 1 }] });
+  });
+
   it("persists AI organizer protocol provenance and refuses an unversioned organized edit", async () => {
     const { campaign } = await campaignFixture("Profile organizer audit");
     const transactions = createPostgresWorldCampaignTransactionPort(pool);
@@ -435,6 +469,49 @@ integration("campaign transfer and character PostgreSQL adapters", () => {
     ]));
     expect((await pool.query("SELECT count(*)::int AS count FROM campaigns WHERE owner_user_id = $1", [ownerUserId])).rows)
       .toEqual(before.rows);
+  });
+
+  it("blocks a world migration while a queued generation retains its frozen authority", async () => {
+    const source = await campaignFixture("Transfer generation authority");
+    const target = await publishedWorld("Transfer generation target", "transfer-generation-target");
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id,name,provider_type,provider_role,base_url,default_model
+       ) VALUES ($1,$2,'lmstudio','text','http://provider.invalid','synthetic-model') RETURNING id`,
+      [ownerUserId, `Transfer generation provider ${crypto.randomUUID()}`]
+    );
+    const providerId = provider.rows[0]!.id;
+    providerIds.push(providerId);
+    await pool.query(
+      `INSERT INTO generation_jobs (
+         owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status
+       ) VALUES ($1,$2,$3,$4,1,'Fence world transfer authority','queued')`,
+      [ownerUserId, source.campaign.id, providerId, crypto.randomUUID()]
+    );
+    const transactions = createPostgresWorldCampaignTransactionPort(pool);
+    const repository = transferRepository();
+    const request = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId: target.worldVersionId });
+    const preview = await transactions.read((transaction) => repository.previewCampaignWorldTransfer(
+      transaction, { ownerUserId, campaignId: source.campaign.id }, request
+    ));
+    expect(preview).toMatchObject({ allowed: false });
+    expect(preview.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "active_generation_job", severity: "blocking" })
+    ]));
+    await expect(transactions.command((transaction) => repository.transferCampaignWorld(
+      transaction,
+      { ownerUserId, campaignId: source.campaign.id },
+      campaignTransferCommitRequestSchema.parse({
+        ...request, idempotencyKey: crypto.randomUUID(),
+        expectedActiveTurnNumber: preview.expectedActiveTurnNumber,
+        expectedStateRevision: preview.expectedStateRevision,
+        sourceFingerprint: preview.sourceFingerprint
+      })
+    ))).resolves.toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
+    await expect(pool.query(
+      "SELECT count(*)::int AS count FROM campaign_world_transfers WHERE source_campaign_id=$1",
+      [source.campaign.id]
+    )).resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
   it("keeps transfer source and target owner-invisible and rejects malformed persisted targets safely", async () => {

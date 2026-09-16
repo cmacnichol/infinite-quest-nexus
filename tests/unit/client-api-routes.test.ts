@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -41,6 +42,7 @@ import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions as serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import { legacyDashboardRouteContracts, legacyStoryRouteContracts } from "../helpers/legacy-ui-route-contracts.js";
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
+import { generationExecutionProtocolIdentity } from "../../packages/story-engine/src/story-only-prompt.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";
@@ -95,7 +97,11 @@ const WORLD_CONTENT = {
 };
 const RETRY_PROMPT_SNAPSHOT = Object.fromEntries(Object.values(PROMPT_TEMPLATE_CATALOG).map((template) => [
   template.key,
-  { content: template.defaultContent, hash: "test-prompt-hash", source: "shipped" }
+  {
+    content: template.defaultContent,
+    hash: createHash("sha256").update(template.defaultContent).digest("hex"),
+    source: "shipped"
+  }
 ])) as PromptSnapshot;
 
 type MockPoolOptions = {
@@ -542,7 +548,10 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       operationKind: "append",
       replacementTurnId: null,
       promptSnapshot: RETRY_PROMPT_SNAPSHOT,
-      promptProtocolVersion: providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT),
+      promptProtocolVersion: generationExecutionProtocolIdentity(
+        providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT),
+        { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" }
+      ),
       generationPolicy: null
     }] };
 
@@ -784,11 +793,40 @@ describe("client API route contracts without PostgreSQL", () => {
 
   it("projects one allowlisted recovery diagnostic identically to polling and SSE", async () => {
     const diagnostic = {
-      code: "context_budget_exceeded",
+      code: "context_evidence_omitted",
       operation: "story_generation",
       action: "adjust_context",
-      requiredTokens: 33_000,
-      availableTokens: 32_000
+      protocolIdentity: "story-v14-continuity-context|story-output-v2|current-continuity-v3",
+      policyIdentity: "story-memory-v1",
+      queryVariantCount: 4,
+      reasonCodes: ["recent_gap", "context_limit"],
+      counts: { recentTurnsTarget: 3, recentTurnsIncluded: 1, optionalEvidenceOmitted: 2, worldReferencesIncluded: 4, worldReferencesOmitted: 1, excerptsComplete: 2, excerptsPartial: 1, sourceValidationFailures: 1 },
+      protectedComponents: { world_canon: 12, current_state: 4, direction: 3 },
+      review: { status: "uncertain", automaticRepair: "not_consumed" }
+    };
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot),
+      pool: mockPool({ rawGenerationError: true, generationDiagnostic: diagnostic })
+    }));
+    try {
+      const polling = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
+      const stream = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      const frame = JSON.parse(stream.body.trim().replace(/^data: /, ""));
+
+      expect(polling.json().diagnostic).toEqual(diagnostic);
+      expect(frame.diagnostic).toEqual(diagnostic);
+      expect(polling.body).not.toContain("MODEL_SECRET=distinctive-raw-provider-detail");
+      expect(stream.body).not.toContain("MODEL_SECRET=distinctive-raw-provider-detail");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("projects protocol-upgrade refusal with only its discard-and-reenqueue action", async () => {
+    const diagnostic = {
+      code: "prompt_protocol_upgrade_required",
+      operation: "story_generation",
+      action: "discard_and_reenqueue"
     };
     const app = await buildServer(serverOptions({
       config: config(storageRoot),

@@ -18,6 +18,7 @@ import type {
   AuthoringApplication
 } from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
+import { saveStoryMemoryEnrollment, clearStoryMemoryEnrollment } from "../../../packages/database/src/story-memory-policy-repository.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
@@ -183,6 +184,7 @@ export type BuildServerOptions = {
 };
 
 const uuidSchema = z.uuid();
+const storyMemoryEnrollmentSchema = z.object({ capability: z.enum(["r1", "r2", "r3"]), reviewMode: z.enum(["off", "observe", "enforce"]) }).strict();
 const worldShareCreateSchema = z.object({
   worldVersionId: z.uuid(),
   expiresInSeconds: z.coerce.number().int().min(300).max(2_592_000).default(604_800)
@@ -1632,6 +1634,19 @@ export async function buildServer({
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
     return memoryAdapter.metrics(ownerUserId, uuidSchema.parse(request.params.campaignId));
+  });
+
+  app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/story-memory-enrollment", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: uuidSchema.parse(request.params.campaignId) }, storyMemoryEnrollmentSchema.parse(request.body), {
+      installedCapability: config.storyMemoryCapability ?? null,
+      enforceEnabled: config.storyMemoryEnforceEnabled === true
+    });
+    return { enrolled: true };
+  });
+  app.delete<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/story-memory-enrollment", async (request) => {
+    await clearStoryMemoryEnrollment(pool, { ownerUserId: await initialOwnerId(pool), campaignId: uuidSchema.parse(request.params.campaignId) });
+    return { enrolled: false };
   });
 
   app.get<{ Params: { campaignId: string }; Querystring: Record<string, unknown> }>(

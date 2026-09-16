@@ -124,9 +124,9 @@ export async function createStoryOnlyFixture(options: Readonly<{
   seed?: string;
 }>): Promise<StoryOnlyFixture> {
   const setupStartedAt = performance.now();
-  const configured = JSON.parse(await readFile(resolve("tmp/story-only-test/database.json"), "utf8")) as { url?: unknown };
-  if (typeof configured.url !== "string") throw new Error("Story-only fixture requires a configured dedicated test database target.");
-  const target = assertStoryOnlyRuntimeTarget(configured.url);
+  const configuredUrl = process.env.TEST_DATABASE_URL ?? (JSON.parse(await readFile(resolve("tmp/story-only-test/database.json"), "utf8")) as { url?: unknown }).url;
+  if (typeof configuredUrl !== "string") throw new Error("Story-only fixture requires a configured dedicated test database target.");
+  const target = assertStoryOnlyRuntimeTarget(configuredUrl);
   const databaseName = `infinitequest_storyonly_fixture_${randomUUID().replaceAll("-", "")}`;
   const admin = createDatabasePool(adminUrl(target.baseUrl), 1);
   await admin.query(`CREATE DATABASE "${databaseName}"`);

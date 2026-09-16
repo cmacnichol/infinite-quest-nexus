@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { sha256Hex } from "./hash.js";
 import {
   STORY_PROMPT_SCHEMA_VERSION,
   STORY_PROMPT_REQUIRED_SHAPE_PREVIEW,
   STORY_SYSTEM_PROMPT,
   STORY_PROSE_GUIDANCE,
+  storyMemoryPromptCompatibilityIdentity,
   storyPromptCompatibilityIdentity
 } from "./story-prompt.js";
 
@@ -16,6 +18,9 @@ export const promptTemplateKeySchema = z.enum([
   "infinite_worlds_batch", "infinite_worlds_final_turn", "illustration_refinement", "illustration_direct", "illustration_character_reference"
 ]);
 export type PromptTemplateKey = z.infer<typeof promptTemplateKeySchema>;
+export const continuityPromptTemplateKeySchema = z.enum(["story_continuity_review", "story_continuity_repair"]);
+export type ContinuityPromptTemplateKey = z.infer<typeof continuityPromptTemplateKeySchema>;
+export type PromptCatalogKey = PromptTemplateKey | ContinuityPromptTemplateKey;
 
 export type PromptCompatibilityRequirement = Readonly<{
   requiredShapeVersion: string;
@@ -37,17 +42,43 @@ export function promptCompatibilityRequirement(key: PromptTemplateKey): PromptCo
   };
 }
 
+/**
+ * New Story Memory jobs bind this requirement to their frozen v14 policy.
+ * The legacy requirement above remains the compatibility contract for v13
+ * snapshots and existing creative overrides.
+ */
+export function storyMemoryPromptCompatibilityRequirement(key: PromptTemplateKey): PromptCompatibilityRequirement | null {
+  if (key !== "story_system" && key !== "event_extension") return null;
+  return {
+    requiredShapeVersion: STORY_PROMPT_SCHEMA_VERSION,
+    protocolIdentity: storyMemoryPromptCompatibilityIdentity(),
+    requiredShapePreview: STORY_PROMPT_REQUIRED_SHAPE_PREVIEW
+  };
+}
+
 export const promptCompatibilityAcknowledgementSchema = z.object({
   requiredShapeVersion: z.string().trim().min(1).max(200),
   protocolIdentity: z.string().trim().min(1).max(500),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict();
 
-export type PromptSnapshot = Record<PromptTemplateKey, {
+export const legacyPromptTemplateKeys = [
+  "story_system", "story_recovery_output_limit", "story_recovery_mechanics", "story_recovery_schema",
+  "rpg_assessment", "event_trigger", "event_extension", "turn_intent", "scene_coverage", "scene_coverage_rewrite",
+  "world_generation", "world_generation_recovery", "world_character_generation", "world_character_generation_recovery", "world_roster_supplement", "character_generation",
+  "source_extraction", "source_extraction_recovery", "character_profile_organizer", "character_profile_repair", "infinite_worlds_conversion", "infinite_worlds_recovery",
+  "infinite_worlds_batch", "infinite_worlds_final_turn", "illustration_refinement", "illustration_direct", "illustration_character_reference"
+] as const;
+export type LegacyPromptTemplateKey = typeof legacyPromptTemplateKeys[number];
+
+export type PromptSnapshotEntry = Readonly<{
   content: string;
   hash: string;
   source: "shipped" | "application" | "campaign";
 }>;
+
+/** Historical job snapshots deliberately retain this fixed pre-continuity catalog. */
+export type PromptSnapshot = Record<LegacyPromptTemplateKey, PromptSnapshotEntry>;
 
 const promptSnapshotEntrySchema = z.object({
   content: z.string(),
@@ -56,14 +87,115 @@ const promptSnapshotEntrySchema = z.object({
 }).strict();
 
 export const promptSnapshotSchema = z.object(
-  Object.fromEntries(promptTemplateKeySchema.options.map((key) => [key, promptSnapshotEntrySchema])) as Record<
-    PromptTemplateKey,
+  Object.fromEntries(legacyPromptTemplateKeys.map((key) => [key, promptSnapshotEntrySchema])) as Record<
+    LegacyPromptTemplateKey,
     typeof promptSnapshotEntrySchema
   >
 ).strict();
 
+const storyMemoryCompatibilitySchema = z.object({
+  protocolIdentity: z.literal(storyMemoryPromptCompatibilityIdentity()),
+  templateHashes: z.object({
+    story_system: z.string().regex(/^[a-f0-9]{64}$/),
+    event_extension: z.string().regex(/^[a-f0-9]{64}$/)
+  }).strict()
+}).strict();
+
+const promptSnapshotV2Schema = z.object({
+  version: z.literal(2),
+  templates: promptSnapshotSchema,
+  continuityReview: z.union([
+    z.null(),
+    z.object({
+      review: promptSnapshotEntrySchema.extend({ protocolIdentity: z.string().min(1).max(500) }).strict(),
+      repair: promptSnapshotEntrySchema.extend({ protocolIdentity: z.string().min(1).max(500) }).strict()
+    }).strict()
+  ]),
+  /** Optional for pre-T07 v2 snapshots. New Story Memory work freezes it. */
+  storyMemoryCompatibility: storyMemoryCompatibilitySchema.nullable().optional()
+}).strict();
+
+export type PromptSnapshotV2 = Readonly<z.infer<typeof promptSnapshotV2Schema>>;
+export type ReadPromptSnapshot = Readonly<{
+  kind: "legacy" | "v2";
+  templates: Readonly<Record<string, PromptSnapshotEntry>>;
+  continuityReview: PromptSnapshotV2["continuityReview"];
+  storyMemoryCompatibility: PromptSnapshotV2["storyMemoryCompatibility"];
+  template(key: string): PromptSnapshotEntry;
+}>;
+
+function validateSnapshotEntry(entry: PromptSnapshotEntry): PromptSnapshotEntry {
+  if (sha256Hex(entry.content) !== entry.hash) throw new Error("Prompt snapshot hash does not match frozen content.");
+  return entry;
+}
+
+/**
+ * The sole historical/v2 reader. It never fills a missing entry from the
+ * current catalog, so queued work either uses its captured bytes or stops.
+ */
+export function readPromptSnapshot(input: unknown): ReadPromptSnapshot {
+  const v2 = promptSnapshotV2Schema.safeParse(input);
+  const parsed = v2.success ? { kind: "v2" as const, templates: v2.data.templates, continuityReview: v2.data.continuityReview, storyMemoryCompatibility: v2.data.storyMemoryCompatibility ?? null } : (() => {
+    const legacy = promptSnapshotSchema.safeParse(input);
+    if (!legacy.success) {
+      if (input && typeof input === "object" && "version" in input) throw new Error("Unsupported prompt snapshot version.");
+      throw new Error("Invalid frozen legacy prompt snapshot.");
+    }
+    return { kind: "legacy" as const, templates: legacy.data as Record<string, PromptSnapshotEntry>, continuityReview: null, storyMemoryCompatibility: null };
+  })();
+  for (const entry of Object.values(parsed.templates)) validateSnapshotEntry(entry);
+  if (parsed.continuityReview) {
+    validateSnapshotEntry(parsed.continuityReview.review);
+    validateSnapshotEntry(parsed.continuityReview.repair);
+  }
+  return {
+    ...parsed,
+    template(key) {
+      const entry = (parsed.templates as Readonly<Record<string, PromptSnapshotEntry>>)[key];
+      if (!entry) throw new Error(`Frozen prompt snapshot has no ${key} template.`);
+      return entry;
+    }
+  };
+}
+
+/** The generic reader accepts valid off snapshots.  An enabled review stage
+ * must additionally prove that both immutable prompts were captured. */
+export function assertContinuityReviewPromptSnapshot(input: unknown, mode: "off" | "observe" | "enforce"): ReadPromptSnapshot {
+  const snapshot = input && typeof input === "object" && "kind" in input && "template" in input
+    ? input as ReadPromptSnapshot
+    : readPromptSnapshot(input);
+  // Read objects can cross private persistence seams; revalidate the complete pair
+  // instead of trusting a caller-supplied kind/template marker.
+  if (snapshot.continuityReview) {
+    for (const key of ["review", "repair"] as const) {
+      validateSnapshotEntry(snapshot.continuityReview[key]);
+      if (snapshot.continuityReview[key].protocolIdentity !== CONTINUITY_REVIEW_PROMPT_CATALOG[key].protocolIdentity) throw new Error("Frozen continuity prompt protocol is incompatible.");
+    }
+  }
+  if (mode === "off") {
+    if (snapshot.kind === "v2" && snapshot.continuityReview !== null) throw new Error("Review-off snapshot contains a frozen continuity pair.");
+    return snapshot;
+  }
+  if (snapshot.kind !== "v2" || !snapshot.continuityReview) throw new Error("Enabled continuity review requires a frozen review and repair prompt pair.");
+  return snapshot;
+}
+
+export function assertStoryMemoryPromptCompatibility(input: unknown): ReadPromptSnapshot {
+  const snapshot = readPromptSnapshot(input);
+  const nonShipped = ["story_system", "event_extension"] as const;
+  const proof = snapshot.storyMemoryCompatibility;
+  if (!proof) {
+    if (nonShipped.some((key) => snapshot.template(key).source !== "shipped")) throw new Error("Frozen Story Memory prompt override lacks v14 acknowledgement.");
+    return snapshot;
+  }
+  for (const key of nonShipped) {
+    if (proof.templateHashes[key] !== snapshot.template(key).hash) throw new Error("Frozen Story Memory prompt acknowledgement does not match captured content.");
+  }
+  return snapshot;
+}
+
 export type PromptTemplateDefinition = {
-  key: PromptTemplateKey;
+  key: PromptCatalogKey;
   title: string;
   category: "Story Engine" | "World authoring" | "Imports" | "Illustrations";
   description: string;
@@ -72,6 +204,7 @@ export type PromptTemplateDefinition = {
   variables: readonly string[];
   defaultContent: string;
 };
+type LegacyPromptTemplateDefinition = Omit<PromptTemplateDefinition, "key"> & { key: PromptTemplateKey };
 
 export type PromptPreview = {
   sections: Array<{ label: string; role: "system" | "input" | "recovery" | "image"; content: string }>;
@@ -117,7 +250,7 @@ const generatedWorldCharacterSeedRequirements = `Return exactly 3 or 4 distinct 
 ]
 Keep every seed compact; complete character profiles are generated separately.`;
 
-export const PROMPT_TEMPLATE_CATALOG: Record<PromptTemplateKey, PromptTemplateDefinition> = {
+export const PROMPT_TEMPLATE_CATALOG: Record<PromptTemplateKey, LegacyPromptTemplateDefinition> = {
   story_system: { key: "story_system", title: "Story writer", category: "Story Engine", description: "Produces the validated next-turn story object.", campaignOverrideAllowed: true, maxLength: 16000, variables: [], defaultContent: STORY_SYSTEM_PROMPT },
   story_recovery_output_limit: { key: "story_recovery_output_limit", title: "Story recovery: output limit", category: "Story Engine", description: "Recovers a truncated story response.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["minWords", "maxWords"], defaultContent: "Return one complete replacement JSON object from the same supported fictional events. Do not continue the fragment. The {{minWords}}-{{maxWords}} narration range is a soft pacing goal: preserve the requested scope when supported, but end early rather than adding unsupported facts or shortening a complete valid turn merely to fit a compact range. Keep continuity fields concise and close every field." + "\n\n" + STORY_PROSE_GUIDANCE },
   story_recovery_mechanics: { key: "story_recovery_mechanics", title: "Story recovery: fiction boundary", category: "Story Engine", description: "Rewrites narration that leaks mechanics.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["details"], defaultContent: "Rewrite the rejected response as one complete JSON object. Preserve only the supported fictional outcome, required player-input beats, and valid continuity.{{details}} Remove mechanics language without adding new material events, canon facts, characters, locations, motives, time jumps, or plot developments. Length is a soft pacing goal; prefer a concise complete turn to padding." + "\n\n" + STORY_PROSE_GUIDANCE },
@@ -158,8 +291,21 @@ Output ONLY a valid JSON object containing a single "image_prompt" field. The im
   illustration_character_reference: { key: "illustration_character_reference", title: "Character visual reference", category: "Illustrations", description: "Appends canonical visual character detail to an image prompt.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["scene", "character"], defaultContent: "{{scene}}\n\nCANONICAL CHARACTER REFERENCE:\nUse these appearance details only if this character is depicted in the requested scene. Do not add the character merely because this reference is present.\n{{character}}" }
 };
 
+/** These prompts are intentionally outside the legacy editable-template key
+ * set. They can only enter a generation through the v2 frozen pair. */
+export const CONTINUITY_REVIEW_PROMPT_CATALOG: Record<"review" | "repair", PromptTemplateDefinition & { protocolIdentity: string }> = {
+  review: { key: "story_continuity_review", title: "Story continuity review", category: "Story Engine", description: "Finds observable, evidence-quoted continuity conflicts.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Review only the supplied fiction-safe evidence and candidate projection. Return the story-continuity-review-v1 JSON object. Cite exact supplied source and candidate quotations. Report ambiguity or a missing unresolved thread as a warning; never invent an absent quotation. Give short observable explanations only; do not reveal reasoning.", protocolIdentity: "story-continuity-review-v1" },
+  repair: { key: "story_continuity_repair", title: "Story continuity repair", category: "Story Engine", description: "Repairs a bounded rejected story output from verified findings.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Return one complete replacement story output using only the supplied authority, direction, rejected fiction-safe projection, and verified continuity findings. Do not add facts, mechanics, private reasoning, or supersession authority. Preserve intentional empty correction fields.", protocolIdentity: "story-continuity-repair-v1" }
+} as const;
+
+export const PROMPT_CATALOG = {
+  ...PROMPT_TEMPLATE_CATALOG,
+  [CONTINUITY_REVIEW_PROMPT_CATALOG.review.key]: CONTINUITY_REVIEW_PROMPT_CATALOG.review,
+  [CONTINUITY_REVIEW_PROMPT_CATALOG.repair.key]: CONTINUITY_REVIEW_PROMPT_CATALOG.repair
+} as Record<PromptCatalogKey, PromptTemplateDefinition>;
+
 export const promptTemplateOverrideSchema = z.object({
-  key: promptTemplateKeySchema,
+  key: z.union([promptTemplateKeySchema, continuityPromptTemplateKeySchema]),
   scope: z.enum(["application", "campaign"]),
   campaignId: z.uuid().optional(),
   content: z.string().min(1).max(16_000).refine((content) => content.trim().length > 0, {
@@ -167,7 +313,7 @@ export const promptTemplateOverrideSchema = z.object({
   }),
   compatibilityAcknowledgement: promptCompatibilityAcknowledgementSchema.optional()
 }).superRefine((value, ctx) => {
-  const definition = PROMPT_TEMPLATE_CATALOG[value.key];
+  const definition = PROMPT_CATALOG[value.key];
   const suppliedVariables = new Set(promptTemplateVariables(value.content));
   const allowedVariables = new Set(definition.variables);
   const unknown = [...suppliedVariables].filter((variable) => !allowedVariables.has(variable));

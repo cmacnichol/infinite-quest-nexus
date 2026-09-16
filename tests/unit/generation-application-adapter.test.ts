@@ -74,6 +74,8 @@ const mappingFixtures: Record<GenerationApplicationErrorReason, MappingFixture> 
   active_illustration: { kind: "active_job", details: {}, expectedStatusCode: 409, expectedMessage: "Wait for the latest turn illustration to finish before retrying the turn." },
   result_not_completed: { kind: "invalid_state", details: { generationStatus: "failed" }, expectedStatusCode: 409, expectedMessage: "Generation could not be completed." },
   retry_protocol_incompatible: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "This generation uses an incompatible prompt protocol. Discard it and enqueue a new generation." },
+  story_memory_capability_unavailable: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "Story Memory capability is unavailable. Update the campaign enrollment or operator capability before enqueuing." },
+  story_memory_enforce_disabled: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "Story Memory enforce mode is disabled. Update the campaign enrollment or operator configuration before enqueuing." },
   retry_source_state: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Only recoverable or failed generation jobs can be retried." },
   cancel_source_state: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Only active generation jobs can be cancelled." },
   discard_source_state: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Only recoverable or failed generation jobs can be discarded." }

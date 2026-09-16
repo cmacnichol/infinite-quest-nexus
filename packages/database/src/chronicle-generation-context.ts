@@ -2,41 +2,22 @@ import type {
   MemoryGenerationAuthorityContext,
   MemoryGenerationAuthorityScope
 } from "../../application/src/memory/types.js";
-import type { CampaignRuntimeStateContent } from "../../contracts/src/generation.js";
+import {
+  isGenerationBaseIdentityV3,
+  memoryGenerationAuthorityContextSchema,
+  type GenerationContextCandidate
+} from "../../application/src/memory/generation-context.js";
 import type { DatabaseClient } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
-import { stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
+import { characterFictionAuthority, stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
 import { loadPostgresChronicleGenerationCandidates } from "./chronicle-context-repository.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import {
   loadCurrentContinuityCorrection,
-  materializeGenerationContinuity
+  materializeGenerationContinuity,
+  loadAcceptedGenerationContinuity,
+  materializeInitialGenerationContinuity
 } from "./campaign-continuity-repository.js";
-
-type GenerationContextCandidate = Readonly<{
-  id: string;
-  turnId: string | null;
-  ordinal: number;
-  kind: "turn_fiction" | "legacy_summary" | "campaign_summary" | "canonical_fact" | "open_thread";
-  content: string;
-  tokenEstimate: number;
-  rank: number;
-}>;
-
-type GenerationContextAuthority = Readonly<{
-  rules: readonly string[];
-  worldCanon: Readonly<Record<string, unknown>>;
-  selectedCharacterId: string | null;
-  currentContinuity: CampaignRuntimeStateContent;
-  scratchpad: string;
-  openThreads: readonly string[];
-  canonicalFacts: readonly Readonly<{ id: string | null; content: string }>[];
-  trackers: CampaignRuntimeStateContent["trackers"];
-  rpgStats: CampaignRuntimeStateContent["rpgStats"];
-  eventTriggers: CampaignRuntimeStateContent["eventTriggers"];
-  pendingEventTriggers: CampaignRuntimeStateContent["pendingEventTriggers"];
-  latestTurn: Readonly<{ action: string; narration: string }> | null;
-}>;
 
 function invalidRules(): never {
   throw Object.assign(new Error("The authoritative rules are invalid."), {
@@ -65,7 +46,12 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   client: DatabaseClient,
   scope: MemoryGenerationAuthorityScope,
 ): Promise<MemoryGenerationAuthorityContext> {
-  const resolved = await resolveGenerationAuthoritySnapshot(client, scope);
+  const resolved = await resolveGenerationAuthoritySnapshot(client, {
+    ...scope,
+    ...(scope.expectedBaseIdentity && isGenerationBaseIdentityV3(scope.expectedBaseIdentity)
+      ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined }
+      : {})
+  });
   if (scope.expectedBaseIdentity
     && stableStringify(resolved.baseIdentity) !== stableStringify(scope.expectedBaseIdentity)) {
     throw Object.assign(new Error("Generation authority no longer matches the enqueued identity."), {
@@ -79,9 +65,11 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const baseTurnNumber = resolved.baseIdentity.baseTurnNumber;
   const campaign = await client.query<{
     world_content: Record<string, unknown>; selected_character_id: string | null;
+    character_profile: unknown; character_snapshot: unknown; character_profile_revision: number;
     initial_state_snapshot: unknown; scratchpad_private: string;
   }>(
     `SELECT /* generation_context_state */ wv.content AS world_content, c.selected_character_id,
+            c.character_profile, c.character_snapshot, c.character_profile_revision,
             cs.initial_state_snapshot, cs.scratchpad_private
        FROM campaigns c
        JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
@@ -91,14 +79,15 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   );
   const campaignRow = campaign.rows[0];
   if (!campaignRow) throw new Error("Generation authority campaign was not found.");
-  const currentContinuity = await loadCurrentContinuityCorrection(client, scope, baseTurnNumber);
+  const v3 = isGenerationBaseIdentityV3(resolved.baseIdentity);
+  const currentContinuity = await loadCurrentContinuityCorrection(client, scope, baseTurnNumber, v3 ? { complete: true } : {});
   const acceptedState = baseTurnNumber > 0 ? await client.query<{ state_snapshot_private: unknown; model_metadata: Record<string, unknown> }>(
     `SELECT state_snapshot_private, model_metadata FROM turns
       WHERE owner_user_id = $1 AND campaign_id = $2 AND turn_number = $3`,
     [scope.ownerUserId, scope.campaignId, baseTurnNumber]
   ) : null;
-  const latest = baseTurnNumber === 0 ? null : await client.query<{ action: string; narration: string }>(
-    `SELECT turn_row.action, effective.effective_narration AS narration
+  const latest = baseTurnNumber === 0 ? null : await client.query<{ action: string; narration: string; input_mode: "action" | "scene" }>(
+    `SELECT turn_row.action, turn_row.input_mode, effective.effective_narration AS narration
        FROM effective_turn_narrations effective
        JOIN turns turn_row ON turn_row.id = effective.turn_id
         AND turn_row.owner_user_id = effective.owner_user_id AND turn_row.campaign_id = effective.campaign_id
@@ -108,9 +97,16 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const worldCanon = typeof campaignRow.world_content.world === "object" && campaignRow.world_content.world !== null
     ? campaignRow.world_content.world as Record<string, unknown>
     : campaignRow.world_content;
-  const acceptedContinuity = materializeGenerationContinuity(
-    baseTurnNumber === 0 ? campaignRow.initial_state_snapshot : acceptedState?.rows[0]?.state_snapshot_private ?? currentContinuity
-  );
+  const sourceSnapshot = baseTurnNumber === 0 ? campaignRow.initial_state_snapshot : acceptedState?.rows[0]?.state_snapshot_private ?? currentContinuity;
+  if (v3 && baseTurnNumber > 0 && !resolved.baseIdentity.baseTurnId) {
+    throw Object.assign(new Error("The accepted turn authority is unavailable."), { code: "authoritative_context_invalid", field: "canonical_facts" });
+  }
+  const acceptedContinuity = v3
+    ? currentContinuity ?? (baseTurnNumber === 0 ? materializeInitialGenerationContinuity(sourceSnapshot)
+      : await loadAcceptedGenerationContinuity(client, scope, {
+        turnId: resolved.baseIdentity.baseTurnId!, turnNumber: baseTurnNumber, snapshot: sourceSnapshot
+      }))
+    : materializeGenerationContinuity(sourceSnapshot);
   // Legacy snapshots may retain imported scratchpad text that was never
   // validated for prompt use. Only accepted generation output may carry a
   // scratchpad forward into a later provider request.
@@ -124,11 +120,15 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const continuity = currentContinuity === null
     ? promptSafeContinuity
     : currentContinuity;
-  return {
+  return memoryGenerationAuthorityContextSchema.parse({
     authority: {
       rules: completeRules(worldCanon.rules ?? worldCanon.story_rules ?? ""),
       worldCanon,
       selectedCharacterId: campaignRow.selected_character_id,
+      ...(isGenerationBaseIdentityV3(resolved.baseIdentity)
+        ? { characterAuthority: characterFictionAuthority(campaignRow.character_profile, campaignRow.character_snapshot),
+          worldReferenceSource: { worldVersionId: scope.worldVersionId, worldContent: campaignRow.world_content } }
+        : {}),
       currentContinuity: continuity,
       scratchpad: continuity?.scratchpad ?? "",
       openThreads: continuity?.openThreads ?? [],
@@ -138,13 +138,15 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
       eventTriggers: continuity.eventTriggers,
       pendingEventTriggers: continuity.pendingEventTriggers,
       latestTurn: latest?.rows[0] ? {
+        ...(v3 ? { inputMode: latest.rows[0].input_mode } : {}),
         action: stripMechanicsLeakage(latest.rows[0].action).text,
         narration: stripMechanicsLeakage(latest.rows[0].narration).text
       } : null
     },
     candidates: [],
+    ...(resolved.recentTurns ? { recentTurns: resolved.recentTurns } : {}),
     baseIdentity: resolved.baseIdentity
-  };
+  });
 }
 
 /**
@@ -167,7 +169,8 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
     worldVersionId: scope.worldVersionId,
     query: scope.query,
     throughTurnNumber: baseTurnNumber,
-    ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens })
+    ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
+    ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy })
   }, dependencies, options);
   const candidates: readonly GenerationContextCandidate[] = retrieval.candidates;
   return {

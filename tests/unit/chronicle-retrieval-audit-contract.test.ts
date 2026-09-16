@@ -15,6 +15,15 @@ const requiredChronicleRetrieval: ChronicleRetrievalAudit = null as unknown as C
 void requiredChronicleRetrieval;
 
 describe("Chronicle retrieval audit contract", () => {
+  it("accepts bounded planner counts and rejects raw content or impossible coverage", () => {
+    const queryPlanning = { planner: "balanced-v1", rankAggregation: "query_family_max_v1",
+      variantCount: 4, segmentCount: 8, uncoveredSegmentCount: 4, totalCharacters: 4_000, fingerprint: "a".repeat(64) };
+    expect(chronicleRetrievalAuditSchema.safeParse({ ...LEXICAL_NO_PROVIDER_AUDIT, queryPlanning }).success).toBe(true);
+    for (const changes of [{ query: "private direction" }, { uncoveredSegmentCount: 9 }, { variantCount: 9 }]) {
+      expect(chronicleRetrievalAuditSchema.safeParse({ ...LEXICAL_NO_PROVIDER_AUDIT,
+        queryPlanning: { ...queryPlanning, ...changes } }).success).toBe(false);
+    }
+  });
   it("parses every valid observed audit fixture", () => {
     expect(chronicleRetrievalAuditSchema.parse(DEDICATED_CHUNKED_AUDIT)).toEqual(DEDICATED_CHUNKED_AUDIT);
     expect(chronicleRetrievalAuditSchema.parse(TEXT_FALLBACK_LEGACY_AUDIT)).toEqual(TEXT_FALLBACK_LEGACY_AUDIT);

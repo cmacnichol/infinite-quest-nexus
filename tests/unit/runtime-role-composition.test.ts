@@ -88,6 +88,11 @@ function config(role: RuntimeConfig["role"]): RuntimeConfig {
   } as RuntimeConfig;
 }
 
+const defaultStoryMemoryOperatorConfig = {
+  installedCapability: null,
+  enforceEnabled: false
+} as const;
+
 function dependencies(controller: AbortController) {
   const server = {
     listen: vi.fn(async () => {
@@ -157,7 +162,7 @@ describe("runtime role generation composition", () => {
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
     expect(values.createWorkerProviders).not.toHaveBeenCalled();
-    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders);
+    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, defaultStoryMemoryOperatorConfig);
     expect(values.createApiIllustration).toHaveBeenCalledWith(pool, apiIllustrationProviders);
     expect(values.createApiMemory).toHaveBeenCalledWith(pool, apiChronicleProviders);
     expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
@@ -228,7 +233,7 @@ describe("runtime role generation composition", () => {
     expect(values.createApiGeneration).toHaveBeenCalledOnce();
     expect(values.createApiProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
     expect(values.createWorkerProviders).toHaveBeenCalledWith(pool, "role-secret", providerTransport);
-    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders);
+    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, defaultStoryMemoryOperatorConfig);
     expect(values.createApiWorldCampaign).toHaveBeenCalledOnce();
     expect(values.createApiWorldCampaign).toHaveBeenCalledWith(pool, apiProviders);
     expect(values.createWorkerGeneration).toHaveBeenCalledOnce();
@@ -261,6 +266,20 @@ describe("runtime role generation composition", () => {
       }
     );
     expect(server.close).toHaveBeenCalledOnce();
+  });
+
+  it("passes the resolved Story Memory operator configuration to the API graph", async () => {
+    const controller = new AbortController();
+    const { values } = dependencies(controller);
+
+    await dispatchRuntimeRole({
+      ...config("api"), storyMemoryCapability: "r3", storyMemoryEnforceEnabled: true
+    }, pool, controller.signal, values, providerTransport, generationEvents);
+
+    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, {
+      installedCapability: "r3",
+      enforceEnabled: true
+    });
   });
 
   it("constructs no generation graph, provider collaborator, or server for migrate", async () => {

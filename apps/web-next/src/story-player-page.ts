@@ -9,6 +9,7 @@ import {
 } from "@infinite-quest/client-core";
 import type {
   AcceptedTurnCorrectionView,
+  CampaignCharacterProfileUpdate,
   CampaignRuntimeStateResponse,
   CampaignSummary,
   MetaResponse,
@@ -174,10 +175,16 @@ export function mountStoryPlayerPage(
   let continuityFocus: HTMLElement | null = null;
   let correction: AcceptedTurnCorrectionView | null = null;
   let about: MetaResponse | null = null;
+  let characterProfile: Readonly<{ revision: number; name: string; profile: CampaignCharacterProfileUpdate["profile"] }> | null = null;
+  let characterProfileDraft: Readonly<{ name: string; profileJson: string }> | null = null;
+  let characterProfileError: string | null = null;
+  let characterProfileRequestToken = 0;
+  let characterProfileSaveInFlight = false;
   let replacementTurnId: string | null = null;
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
+  let composerDraftEditRevision = 0;
   let programmaticFollowTarget: ViewportPosition | null = null;
   let illustrationRequestKey: string | null = null;
   let quietLeaf: QuietLeafPresenter | null = null;
@@ -432,6 +439,7 @@ export function mountStoryPlayerPage(
         continuityEditor = null;
         continuityDirty = false;
       }
+      if (ui.get().activeDialog === "character-profile") characterProfileRequestToken += 1;
       tools.closeActiveDialog();
       toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
       restoreToolDialogFocus();
@@ -534,6 +542,7 @@ export function mountStoryPlayerPage(
       ui.setMessage("That suggestion would exceed the 12,000-character prompt limit.");
       return;
     }
+    composerDraftEditRevision += 1;
     ui.setChoiceDraft(result.selection, result.text);
     if (result.selected && autoSubmitTurnChoices) void submitComposer();
   };
@@ -543,6 +552,7 @@ export function mountStoryPlayerPage(
     const latest = campaign === null ? null : projection.turns.find((turn) => turn.turnNumber === campaign.activeTurnNumber) ?? null;
     if (!latest) return;
     replacementTurnId = latest.id;
+    composerDraftEditRevision += 1;
     ui.restoreComposerDraft(latest.action);
     focusDraft();
   };
@@ -556,10 +566,11 @@ export function mountStoryPlayerPage(
   };
   const composerActions: ComposerActions = {
     draft: (text) => {
+      composerDraftEditRevision += 1;
       ui.setComposerDraft(text);
       if (quietLeaf) render();
     },
-    clearDraft: () => { ui.clearComposerDraft(); focusDraft(); },
+    clearDraft: () => { composerDraftEditRevision += 1; ui.clearComposerDraft(); focusDraft(); },
     mode: (mode) => selectInputMode(mode),
     choose: (index) => chooseStoryChoice(index),
     length: (profile) => ui.setStoryLengthProfileOverride(profile),
@@ -577,6 +588,7 @@ export function mountStoryPlayerPage(
   function render(): void {
     const activeElement = root.ownerDocument.activeElement as HTMLElement | null;
     continuityFocus = continuityEditor?.element.contains(activeElement) ? activeElement : null;
+    const recoveryFocusAction = activeElement?.closest("[data-story-recovery]") ? activeElement.dataset.action : undefined;
     const currentStateGenerationLocked = projection.generation !== null;
     const currentStateReloadLocked = currentStateGenerationLocked || currentStateSaveInFlight || currentStateReloading;
     const currentStateLocked = currentStateReloadLocked || currentStateStale;
@@ -599,6 +611,11 @@ export function mountStoryPlayerPage(
       currentStateError,
       correction,
       about,
+      characterProfile,
+      characterProfileDraft,
+      characterProfileError,
+      characterProfileLocked: projection.generation !== null || characterProfileSaveInFlight,
+      characterProfileSaveInFlight,
       activityRecords: tools.activity(),
       illustrations: illustrations.get()
     };
@@ -630,14 +647,20 @@ export function mountStoryPlayerPage(
     } else {
       renderStoryPlayerView(root, state);
     }
+    if (recoveryFocusAction && ["retry-generation", "discard-generation", "resume-generation"].includes(recoveryFocusAction)) {
+      root.querySelector<HTMLElement>(`[data-story-recovery] [data-action="${recoveryFocusAction}"]`)?.focus({ preventScroll: true });
+    }
     const editState = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
     if (editState) editState.disabled = !canEditCurrentState();
+    const editProfile = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']");
+    if (editProfile) editProfile.disabled = activeCampaign === null || projection.generation !== null;
     const selectedTurnNumber = ui.get().viewTurnNumber ?? projection.campaign?.activeTurnNumber ?? null;
     const selectedTurn = selectedTurnNumber === null ? null : projection.turns.find((turn) => turn.turnNumber === selectedTurnNumber) ?? null;
     if (selectedUiImplementation === "web-awesome") {
       shell.setCampaignCommands([
         { id: "open-world-setup", label: "Current World Setup", disabled: activeCampaign === null },
         { id: "edit-campaign-state", label: "Edit Campaign State", disabled: !canEditCurrentState() },
+        { id: "edit-character-profile", label: "Edit Character Profile", disabled: activeCampaign === null || projection.generation !== null },
         { id: "open-campaign-history", label: "Turn History & State", disabled: activeCampaign === null },
         { id: "open-activity", label: "Activity Log", disabled: activeCampaign === null },
         { id: "open-about", label: "About", disabled: activeCampaign === null },
@@ -780,12 +803,21 @@ export function mountStoryPlayerPage(
         if (base === null || editor === null) return;
         try {
           const request = buildCurrentStateUpdate(base, editor.readDraft());
+          const preservedDraft = ui.get().draft;
+          const preservedDraftRevision = composerDraftEditRevision;
+          const preservedCampaignId = projection.campaign?.id;
+          const preservedTurnNumber = projection.campaign?.activeTurnNumber;
           currentStateSaveInFlight = true;
           currentStateError = null;
           render();
           void tools.saveCurrentState(request).then((result) => {
             if (result !== null && !disposed && continuityEditor === editor) {
               currentState = result;
+              if (projection.campaign?.id === preservedCampaignId
+                && projection.campaign?.activeTurnNumber === preservedTurnNumber
+                && composerDraftEditRevision === preservedDraftRevision) {
+                ui.restoreComposerDraft(preservedDraft);
+              }
               continuityEditor?.dispose();
               continuityEditor = null;
               continuityDirty = false;
@@ -806,6 +838,62 @@ export function mountStoryPlayerPage(
           const message = root.querySelector<HTMLElement>("[data-story-tool-dialog] [data-story-status]");
           if (message) message.textContent = "Current state could not be saved. Your edits are preserved.";
         }
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-character-profile']")) {
+      control.addEventListener("click", () => {
+        const campaign = projection.campaign;
+        const profile = characterProfile;
+        if (control.disabled || campaign === null || profile === null || projection.generation !== null || characterProfileSaveInFlight) return;
+        const name = root.querySelector<HTMLInputElement>("[data-story-tool-dialog] [data-character-profile-name]")?.value.trim() ?? "";
+        const profileText = root.querySelector<HTMLTextAreaElement>("[data-story-tool-dialog] [data-character-profile-json]")?.value ?? "";
+        let nextProfile: CampaignCharacterProfileUpdate["profile"];
+        try {
+          const parsed: unknown = JSON.parse(profileText);
+          if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("Profile must be an object.");
+          nextProfile = parsed as CampaignCharacterProfileUpdate["profile"];
+        } catch {
+          const message = root.querySelector<HTMLElement>("[data-story-tool-dialog] [data-story-status]");
+          if (message) message.textContent = "Character profile JSON must be an object. Your story draft is preserved.";
+          return;
+        }
+        const requestToken = ++characterProfileRequestToken;
+        characterProfileSaveInFlight = true;
+        characterProfileError = null;
+        render();
+        void composition.api.campaigns.updateCharacterProfile(campaign.id, {
+          expectedRevision: profile.revision,
+          name,
+          profile: nextProfile,
+          editSource: "manual"
+        }).then(async (result) => {
+          if (disposed || requestToken !== characterProfileRequestToken || projection.campaign?.id !== campaign.id
+            || result.campaignId !== campaign.id || ui.get().activeDialog !== "character-profile") return;
+          const preservedDraft = ui.get().draft;
+          const preservedDraftRevision = composerDraftEditRevision;
+          characterProfile = { revision: result.revision, name: result.name, profile: result.profile };
+          characterProfileDraft = null;
+          characterProfileError = null;
+          ui.setActiveDialog(null);
+          await load();
+          if (!disposed && requestToken === characterProfileRequestToken && projection.campaign?.id === campaign.id
+            && composerDraftEditRevision === preservedDraftRevision) {
+            ui.restoreComposerDraft(preservedDraft);
+            ui.setMessage("Character profile saved. Your story draft is ready to submit.");
+          }
+        }).catch((error: unknown) => {
+          if (!disposed && requestToken === characterProfileRequestToken && projection.campaign?.id === campaign.id
+            && ui.get().activeDialog === "character-profile") {
+            characterProfileError = error instanceof NexusApiError && error.statusCode === 409
+              ? "Character profile changed elsewhere. Reload it before saving again; your story draft is preserved."
+              : "Character profile could not be saved. Your story draft is preserved.";
+          }
+        }).finally(() => {
+          if (!disposed && requestToken === characterProfileRequestToken) {
+            characterProfileSaveInFlight = false;
+            render();
+          }
+        });
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='reload-current-state']")) {
@@ -841,6 +929,18 @@ export function mountStoryPlayerPage(
             render();
           }
         });
+      });
+    }
+    for (const input of root.querySelectorAll<HTMLInputElement>("[data-story-tool-dialog] [data-character-profile-name]")) {
+      input.addEventListener("input", () => {
+        const current = characterProfileDraft;
+        characterProfileDraft = { name: input.value, profileJson: current?.profileJson ?? "" };
+      });
+    }
+    for (const input of root.querySelectorAll<HTMLTextAreaElement>("[data-story-tool-dialog] [data-character-profile-json]")) {
+      input.addEventListener("input", () => {
+        const current = characterProfileDraft;
+        characterProfileDraft = { name: current?.name ?? "", profileJson: input.value };
       });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-narration-correction']")) {
@@ -882,6 +982,7 @@ export function mountStoryPlayerPage(
           continuityEditor = null;
           continuityDirty = false;
         }
+        if (ui.get().activeDialog === "character-profile") characterProfileRequestToken += 1;
         tools.closeActiveDialog();
         toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
         restoreToolDialogFocus();
@@ -916,10 +1017,13 @@ export function mountStoryPlayerPage(
       });
     }
     for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-draft]")) {
-      textarea.addEventListener("input", () => {
+      // The native view retains this node across same-owner refreshes.
+      // Replace the handler rather than accumulating listeners on that node.
+      textarea.oninput = () => {
+        composerDraftEditRevision += 1;
         ui.setComposerDraft(textarea.value);
         updateComposerDraftDom(textarea);
-      });
+      };
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-story-choice]")) {
       control.addEventListener("click", () => {
@@ -929,6 +1033,7 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='clear-story-draft']")) {
       control.addEventListener("click", () => {
+        composerDraftEditRevision += 1;
         ui.clearComposerDraft();
         focusDraft();
       });
@@ -1000,6 +1105,13 @@ export function mountStoryPlayerPage(
     }
   }
   const unsubscribeStore = composition.campaignStore.store.subscribe((next) => {
+    if (projection.campaign?.id !== next.campaign?.id) {
+      characterProfileRequestToken += 1;
+      characterProfile = null;
+      characterProfileDraft = null;
+      characterProfileError = null;
+      characterProfileSaveInFlight = false;
+    }
     projection = next;
     inspectionRequestToken += 1;
     history.sync(next);
@@ -1103,6 +1215,7 @@ export function mountStoryPlayerPage(
       return;
     }
     if (action === "edit-campaign-state" && !canEditCurrentState()) return;
+    if (action === "edit-character-profile" && (!campaign || projection.generation !== null)) return;
     if (action === "open-world-setup") {
       tools.openWorldSetup();
       return;
@@ -1128,6 +1241,29 @@ export function mountStoryPlayerPage(
           render();
         }
       }).catch(() => undefined);
+      return;
+    }
+    if (action === "edit-character-profile") {
+      if (!campaign) return;
+      const requestToken = ++characterProfileRequestToken;
+      characterProfile = null;
+      characterProfileDraft = null;
+      characterProfileError = null;
+      ui.setActiveDialog("character-profile");
+      void composition.api.campaigns.getCharacterProfile(campaign!.id).then((result) => {
+        if (!disposed && requestToken === characterProfileRequestToken && projection.campaign?.id === campaign.id
+          && result.campaignId === campaign.id && ui.get().activeDialog === "character-profile") {
+          characterProfile = { revision: result.revision, name: result.name, profile: result.profile };
+          characterProfileDraft = { name: result.name, profileJson: JSON.stringify(result.profile, null, 2) };
+          render();
+        }
+      }).catch(() => {
+        if (!disposed && requestToken === characterProfileRequestToken && projection.campaign?.id === campaign.id
+          && ui.get().activeDialog === "character-profile") {
+          characterProfileError = "Character profile could not be loaded. Your story draft is preserved.";
+          render();
+        }
+      });
       return;
     }
     if (action === "open-campaign-history") {

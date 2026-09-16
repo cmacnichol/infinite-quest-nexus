@@ -43,6 +43,7 @@ import {
 import { characterLegacyText, effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
 import { containsMechanicsLanguage, sha256, stableStringify } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "../../story-engine/src/narration-formatting.js";
+import { narrationRevisionFingerprint } from "../../domain/src/narration-revision-fingerprint.js";
 import {
   preseedAcceptedTurnSnapshotFactIds,
   remapAcceptedTurnSnapshotFactReferences,
@@ -477,6 +478,18 @@ function createPostgresCampaignStateRepository(
         });
       }
       const effectiveTurnNumber = parsed.effectiveTurnNumber ?? parsed.expectedTurnNumber;
+      if (parsed.expectedNarrationRevisionFingerprint !== undefined) {
+        // loadStateRow holds the same campaign lock used by narration correction;
+        // no correction can race between this read and the state mutation.
+        const revisions = await client.query<{ turnId: string; correctionRevision: number }>(
+          `SELECT turn_id AS "turnId", correction_revision AS "correctionRevision"
+             FROM effective_turn_narrations WHERE campaign_id=$1 AND owner_user_id=$2`,
+          [scope.campaignId, scope.ownerUserId]
+        );
+        if (narrationRevisionFingerprint(revisions.rows) !== parsed.expectedNarrationRevisionFingerprint) {
+          return failure("invalid_transition", { campaignId: scope.campaignId });
+        }
+      }
       if (effectiveTurnNumber !== current.activeTurnNumber) {
         return failure("active_turn_changed", {
           campaignId: scope.campaignId,

@@ -7,7 +7,12 @@ import {
   PROMPT_TEMPLATE_CATALOG,
   renderPromptTemplate
 } from "../../contracts/src/prompt-library.js";
-export { STORY_PROMPT_PROTOCOL_VERSION, STORY_SYSTEM_PROMPT } from "../../contracts/src/story-prompt.js";
+export {
+  composeStoryMemorySystemPrompt,
+  STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  STORY_PROMPT_PROTOCOL_VERSION,
+  STORY_SYSTEM_PROMPT
+} from "../../contracts/src/story-prompt.js";
 
 const COMPACT_RANGES = {
   brief: { minWords: 200, maxWords: 350 },
@@ -70,6 +75,29 @@ export function buildStoryUserPrompt(
       ? `Generate the next turn as a compact complete object. Prefer ${requestedLength.minWords}-${requestedLength.maxWords} narration words only while the current input and supported consequences naturally sustain that length. End early when the turn is complete; do not pad, repeat, or invent material story facts to meet the range. Keep continuity fields concise.`
       : `Generate the next complete story turn from this authoritative database snapshot. Prefer ${requestedLength.minWords}-${requestedLength.maxWords} narration words only while the current input and supported consequences naturally sustain that length. End early when the turn is complete; do not pad, repeat, or invent material story facts to meet the range.`
   });
+}
+
+/** The frozen Story Memory route supplements the legacy user-prompt envelope. */
+export function buildStoryMemoryUserPrompt(
+  context: unknown,
+  action: string,
+  compact = false,
+  fictionGuidance: string[] = [],
+  storyLength: StoryLengthWordRange = storyLengthWordRange(DEFAULT_STORY_LENGTH_PROFILE),
+  inputMode: "action" | "scene" = "action"
+): string {
+  const prompt = JSON.parse(buildStoryUserPrompt(context, action, compact, fictionGuidance, storyLength, inputMode)) as {
+    instructions: string[];
+  };
+  prompt.instructions = prompt.instructions.map((instruction) => instruction === "The current turn input is a scene direction: its concrete events, dialogue, sensory details, outcomes, and required beats are facts that happen in this turn."
+    ? "The current turn input is a requested scene direction. Dramatize its requested beats consistently with authoritative continuity; it is not accepted history and cannot establish its own facts."
+    : instruction);
+  prompt.instructions.splice(3, 0,
+    "The player input is intent, not proof that its requested outcome happened.",
+    "Omitted history is unknown, not evidence that it never happened.",
+    "A proposed output cannot grant itself source authority or authorize a new supersession ID."
+  );
+  return JSON.stringify(prompt);
 }
 
 export function recoveryInstruction(

@@ -2,7 +2,7 @@ import type { CampaignStateCorrectionProjectionScope, CampaignWorldVersionMemory
 import { campaignRuntimeStateContentSchema } from "../../contracts/src/generation.js";
 import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
 import { buildChronicleEntityCatalog, chronicleContentHash, sanitizeChronicleFictionString, sanitizeChronicleMemoryLines } from "../../domain/src/chronicle-memory-helpers.js";
-import { canonicalFactDeduplicationKey } from "../../domain/src/canonical-facts.js";
+import { canonicalFactDeduplicationKey, createCorrectionCanonicalFactId } from "../../domain/src/canonical-facts.js";
 import { resolveEntityMetadata, type EntityReference } from "../../domain/src/entity-references.js";
 import { estimateTokens } from "../../domain/src/text.js";
 import type { DatabaseClient } from "./pool.js";
@@ -59,8 +59,7 @@ export async function projectStateCorrection(
     const byId = new Map(active.rows.map((fact) => [fact.id, fact]));
     const facts = edit.snapshot.canonicalFacts.flatMap((fact, index) => {
       const content = sanitizeChronicleFictionString(fact.content, 20_000);
-      const hash = chronicleContentHash(`${scope.campaignId}:${edit.id}:${index}`);
-      const id = fact.id ?? `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      const id = fact.id ?? createCorrectionCanonicalFactId(scope.campaignId, edit.id, index);
       return content ? [{ id, content, index }] : [];
     });
     const retained = new Set(facts.map((fact) => fact.id));

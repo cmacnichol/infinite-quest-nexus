@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabasePool, withTransaction } from "../../packages/database/src/pool.js";
+import { loadAcceptedGenerationContinuity } from "../../packages/database/src/campaign-continuity-repository.js";
 import { createCanonicalFactId } from "../../packages/domain/src/canonical-facts.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -198,6 +199,15 @@ integration("campaign-state correction replay", () => {
     expect(copied.rows[0]!.turn_snapshot.canonicalFactUpdates?.[0]?.supersedesFactIds)
       .toEqual([destinationCorrectionFactId]);
     await rebuildCampaignMemories(pool, branch.id);
+    const destination = await pool.query<{ id: string; world_version_id: string; state_snapshot_private: unknown }>(
+      `SELECT t.id,c.world_version_id,t.state_snapshot_private FROM turns t JOIN campaigns c ON c.id=t.campaign_id
+       WHERE t.owner_user_id=$1 AND t.campaign_id=$2 AND t.turn_number=2`, [ownerUserId, branch.id]);
+    const destinationFactId = createCanonicalFactId({ campaignId: branch.id, sourceTurnId: destination.rows[0]!.id,
+      factIndex: 0, content: replacementContent });
+    const materialized = await withTransaction(pool, (client) => loadAcceptedGenerationContinuity(client,
+      { ownerUserId, campaignId: branch.id, worldVersionId: destination.rows[0]!.world_version_id },
+      { turnId: destination.rows[0]!.id, turnNumber: 2, snapshot: destination.rows[0]!.state_snapshot_private }));
+    expect(materialized.canonicalFacts).toEqual([{ id: destinationFactId, content: replacementContent }]);
     expect(await pool.query<{
       id: string;
       content: string;

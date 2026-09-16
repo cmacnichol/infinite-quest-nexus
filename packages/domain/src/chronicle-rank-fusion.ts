@@ -24,6 +24,7 @@ export type ChronicleRankCandidate = Readonly<{
 export type ChronicleRankInput = Readonly<{
   signal: ChronicleRankSignal;
   variant: ChronicleQueryKind;
+  variantId?: string;
   candidates: readonly ChronicleRankCandidate[];
 }>;
 
@@ -35,6 +36,7 @@ export type ChronicleRankFusionWeights = Readonly<{
 export type ChronicleRankFusionProfile = Readonly<{
   rrfK: number;
   weights: ChronicleRankFusionWeights;
+  rankAggregation?: "legacy_sum" | "query_family_max_v1";
 }>;
 
 export type ChronicleProductionRankFusionProfile = ChronicleRankFusionProfile & Readonly<{
@@ -48,6 +50,8 @@ export type ChronicleRankContribution = Readonly<{
   rank: number;
   weight: number;
   score: number;
+  variantId?: string;
+  counted?: boolean;
 }>;
 
 export type FusedChronicleCandidate = ChronicleRankCandidate & Readonly<{
@@ -93,8 +97,26 @@ export function fuseChronicleRanks(
       const score = weight / (profile.rrfK + rank);
       const existing = fused.get(candidate.candidateId) ?? { candidate, score: 0, contributions: [] };
       existing.score += score;
-      existing.contributions.push({ signal: input.signal, variant: input.variant, rank, weight, score });
+      existing.contributions.push({ signal: input.signal, variant: input.variant, rank, weight, score,
+        ...(input.variantId === undefined ? {} : { variantId: input.variantId }) });
       fused.set(candidate.candidateId, existing);
+    }
+  }
+  if (profile.rankAggregation === "query_family_max_v1") {
+    for (const value of fused.values()) {
+      const winners = new Map<string, ChronicleRankContribution>();
+      for (const contribution of value.contributions) {
+        const key = `${contribution.signal}:${contribution.variant}`;
+        const previous = winners.get(key);
+        if (!previous || contribution.score > previous.score
+          || (contribution.score === previous.score && compareDeterministically(contribution.variantId ?? "", previous.variantId ?? "") < 0)) {
+          winners.set(key, contribution);
+        }
+      }
+      value.score = [...winners.entries()].sort(([a], [b]) => compareDeterministically(a, b))
+        .reduce((sum, [, contribution]) => sum + contribution.score, 0);
+      value.contributions = value.contributions.map((contribution) => ({ ...contribution,
+        counted: winners.get(`${contribution.signal}:${contribution.variant}`) === contribution }));
     }
   }
   return Object.freeze([...fused.values()]
@@ -105,6 +127,7 @@ export function fuseChronicleRanks(
         compareDeterministically(left.signal, right.signal)
         || compareDeterministically(left.variant, right.variant)
         || left.rank - right.rank
+        || compareDeterministically(left.variantId ?? "", right.variantId ?? "")
       )))
     }))
     .sort((left, right) => right.score - left.score
