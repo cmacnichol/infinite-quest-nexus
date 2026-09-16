@@ -1,14 +1,16 @@
 # Story Memory rollout and rollback
 
-Use this procedure only after the release evidence and operator approval are recorded.
+The current campaign default is **Max**, using R3 with enforced continuity review.
+The operator requested this default for existing and new campaigns. Record the
+deployment's verification evidence and use the coordinated upgrade procedure below.
 See [deployment](deployment.md) for the surrounding platform procedure.
 
 ## Capability default and configuration boundary
 
-Story Memory is disabled unless an operator enables a capability. The runtime
-configuration parser treats an omitted `STORY_MEMORY_CAPABILITY` value and the
-literal `off` as no installed capability. It also defaults
-`STORY_MEMORY_ENFORCE_ENABLED` to `false`.
+The runtime defaults `STORY_MEMORY_CAPABILITY` to `r3` and
+`STORY_MEMORY_ENFORCE_ENABLED` to `true`. Compose and Swarm forward these settings.
+An explicit `off` capability or `false` enforcement value remains an operator
+restriction; it is never silently ignored or used to downgrade an enrolled job.
 
 ```text
 STORY_MEMORY_CAPABILITY=off|r1|r2|r3
@@ -25,10 +27,38 @@ silently interpret a frozen Story Memory job as legacy.
 
 The operator must first deploy compatible API and worker binaries with intake
 stopped and no old worker process or unexpired old-worker lease. Only then may
-the API capability be enabled. Installation alone does not enroll any campaign,
-and archive import never enrolls its destination campaign.
+generation intake resume. Migration `0096_campaign_memory_defaults.sql` sets
+every existing campaign to R3/enforce once, including lower-level enrollments.
+A database insertion trigger gives newly created, branched and imported
+campaigns the same Max default. Later user selections persist; choosing Off is
+not undone at startup.
+
+Enrollment remains installation-owned and excluded from portable archives.
+Imports receive the destination's Max default rather than copying the source's
+operational enrollment. Accepted turns, current facts, character profiles and
+previously queued job snapshots are not rewritten by this migration.
 
 ## Campaign enrollment and frozen jobs
+
+Both active interfaces expose **Memory level** in campaign settings and the Story
+player's campaign tools/settings. The options are:
+
+| Level | Policy | Review |
+| --- | --- | --- |
+| Off | Named legacy generation path | Off |
+| Standard | R1 authority and retrieval | Off |
+| Enhanced | R2 recent-history handling | Off |
+| Max (default) | R3 history and evidence | Enforce: bounded repair, then recovery if unresolved |
+
+The dropdown loads the saved server selection and disables unavailable levels.
+Saving applies to future generation jobs and leaves the separately configured
+campaign context budget unchanged.
+
+Automation may read `GET /api/v1/campaigns/:campaignId/story-memory` or send
+`PUT` to that path with `{"level":"max"}`. The permitted level values are
+`off`, `standard`, `enhanced` and `max`. The response includes `level`,
+`reviewMode`, and `availableLevels`. The older enrollment API below remains
+available for operator-specific R3 observe/off configurations.
 
 After compatible binaries are present, an operator may use the trusted API
 surface to enroll a single campaign:
@@ -52,8 +82,9 @@ Allowed bodies are exactly:
 
 `r1` and `r2` reject `observe` and `enforce`. R3 `enforce` also rejects unless
 the API has the explicit `STORY_MEMORY_ENFORCE_ENABLED=true` operator gate.
-Enforcement remains disabled by default. Use R3 observe before considering
-enforce; observation is not a promotion result.
+Enforcement is enabled by default. Explicit operator restrictions still reject
+an incompatible Max selection. Observe remains available through this operator
+API for diagnostic evaluation; it is not equivalent to enforced review.
 
 To stop future enrollment-derived policies for one campaign:
 
@@ -118,20 +149,23 @@ this is used as a release procedure.
    unexpired old-worker leases using the final query above. Do not use a rolling
    overlap when an old worker could claim a new frozen policy/protocol.
 4. Apply only additive migrations, including
-   `0095_story_memory_capability_enrollment.sql`, and deploy compatible API,
+   `0095_story_memory_capability_enrollment.sql` and
+   `0096_campaign_memory_defaults.sql`, and deploy compatible API,
    runtime, worker, and both Story-interface builds.
-5. Keep capability off until the applicable R1/R2/R3 release gate passes. For
-   a limited approved cohort, set the API capability to the target release and
-   enroll campaigns one at a time. R3 begins with `reviewMode: "observe"` and
-   `STORY_MEMORY_ENFORCE_ENABLED=false`.
+5. Check automatic Max enrollment and resolved operator settings while intake
+   remains stopped. Existing custom creative prompt overrides retain their
+   bytes and still require v14 compatibility acknowledgement in the Prompt
+   Library; never automatically acknowledge or rewrite them. Use campaign
+   settings or the operator API for any deliberately reduced level.
 6. Run copied-campaign canaries at 32k and at one larger window actually
    supported by the selected provider. A configured 2m or 4m campaign budget
    is not proof that a provider supports that request size. Inspect exact
    request budgeting, accepted commit, replay/next turn, recovery state, safe
    usage/cost telemetry, and latency.
-7. Resume intake only after the corresponding release report records passing
-   applicable gates. Maintain a small explicit cohort; never mass-enroll all
-   campaigns by default.
+7. Resume intake after deployment verification. Record review, repair and
+   recovery rates; deterministic tests do not establish live-model narrative
+   quality. The migration intentionally enrolls all existing campaigns at Max;
+   any later reduction is an explicit campaign setting change.
 
 Use the canary inventory below. Each item must be a copied destination,
 preserve its source authorization, and have a recorded destination ID:
@@ -224,4 +258,4 @@ operator authorization after review of this dry run.
 
 ## Release decisions and evaluator
 
-Use the versioned [September 16 release-readiness record](../review/story-memory-release-readiness-2026-09-16.md) for separate R1, R2, R3 observe and R3 enforce decisions. Local deterministic verification does not approve live enrollment. Follow the [continuity evaluator runbook](story-continuity-evaluation.md) for reproducible local runs and separately authorized copied-campaign evaluation.
+The [September 16 release-readiness record](../review/story-memory-release-readiness-2026-09-16.md) retains the original R1, R2, R3 observe and R3 enforce evaluation evidence. The subsequent user decision to enable Max for all campaigns supersedes its opt-in rollout policy; it does not supply the missing live-provider quality or latency measurements. Follow the [continuity evaluator runbook](story-continuity-evaluation.md) for reproducible local runs and separately authorized copied-campaign evaluation.

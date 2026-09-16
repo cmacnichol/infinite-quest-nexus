@@ -18,7 +18,7 @@ import type {
   AuthoringApplication
 } from "../../../packages/application/src/index.js";
 import { initialOwnerId } from "../../../packages/database/src/pool.js";
-import { saveStoryMemoryEnrollment, clearStoryMemoryEnrollment } from "../../../packages/database/src/story-memory-policy-repository.js";
+import { clearStoryMemoryEnrollment, readStoryMemorySettings, saveStoryMemoryEnrollment, saveStoryMemorySettings } from "../../../packages/database/src/story-memory-policy-repository.js";
 import { createLoggerOptions, logger } from "../../../packages/logger/src/index.js";
 import { infiniteWorldsImportRequestSchema, storyImportPreviewRequestSchema } from "../../../packages/contracts/src/imports.js";
 import { campaignEmbeddingConfigSchema, memoryContextQuerySchema } from "../../../packages/contracts/src/memory.js";
@@ -46,6 +46,7 @@ import {
   providerTextRequestSchema
 } from "../../../packages/contracts/src/generation.js";
 import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
+import { storyMemorySettingsUpdateSchema } from "../../../packages/contracts/src/story-memory-policy.js";
 import {
   campaignCreateSchema,
   campaignCharacterProfileUpdateSchema,
@@ -1634,6 +1635,23 @@ export async function buildServer({
   app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/memory/metrics", async (request) => {
     const ownerUserId = await initialOwnerId(pool);
     return memoryAdapter.metrics(ownerUserId, uuidSchema.parse(request.params.campaignId));
+  });
+
+  app.get<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/story-memory", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    return readStoryMemorySettings(pool, { ownerUserId, campaignId: uuidSchema.parse(request.params.campaignId) }, {
+      installedCapability: config.storyMemoryCapability ?? null,
+      enforceEnabled: config.storyMemoryEnforceEnabled === true
+    });
+  });
+
+  app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/story-memory", async (request) => {
+    const ownerUserId = await initialOwnerId(pool);
+    const update = storyMemorySettingsUpdateSchema.parse(request.body);
+    return saveStoryMemorySettings(pool, { ownerUserId, campaignId: uuidSchema.parse(request.params.campaignId) }, update.level, {
+      installedCapability: config.storyMemoryCapability ?? null,
+      enforceEnabled: config.storyMemoryEnforceEnabled === true
+    });
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/story-memory-enrollment", async (request) => {

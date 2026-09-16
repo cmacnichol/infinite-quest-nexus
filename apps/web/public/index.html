@@ -249,6 +249,16 @@
                     <option value="1000000">1m tokens</option>
                   </select>
                 </label>
+                <label title="Sets the durable Story Memory review level for future generated turns. Story context budget remains independent.">
+                  Story memory level
+                  <select id="campaignStoryMemoryLevel" disabled>
+                    <option value="off">Off</option>
+                    <option value="standard">Standard</option>
+                    <option value="enhanced">Enhanced</option>
+                    <option value="max">Max</option>
+                  </select>
+                </label>
+                <p id="campaignStoryMemoryStatus" class="field-note" role="status" aria-live="polite">Loading the saved Story Memory level for this campaign.</p>
               </div>
             </section>
 

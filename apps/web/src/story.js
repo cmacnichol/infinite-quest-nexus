@@ -102,6 +102,8 @@ const state = {
   campaignLoaded: false,
   world: null,
   playerConfig: null,
+  storyMemorySettings: null,
+  storyMemoryRequestId: 0,
   runtimeState: null,
   editStateSession: null,
   characterProfileEditSession: null,
@@ -430,6 +432,8 @@ async function loadCampaign(campaignId, options = {}) {
   resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
   state.campaignLoaded = false;
+  state.storyMemorySettings = null;
+  renderStoryMemorySettings(null, "Loading the saved Story Memory level for this campaign.");
   completeHistoryLoad = null;
   setTurnHistoryLoadStatus("");
   showBusy("Loading campaign…");
@@ -447,6 +451,7 @@ async function loadCampaign(campaignId, options = {}) {
     syncTurnInputModeFromCampaign();
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
+    void loadStoryMemorySettings(campaignId, storyTurnWindowEpoch);
     state.runtimeState = await apiClient.campaigns.state(campaignId);
     markEditStateStaleForCurrentRuntimeState(state.runtimeState);
     try {
@@ -2507,6 +2512,69 @@ function openActivityLog() {
   openManagedModal(d);
 }
 
+const STORY_MEMORY_LEVELS = new Set(["off", "standard", "enhanced", "max"]);
+
+function storyMemoryDescription(settings) {
+  if (settings.level === "max" && settings.reviewMode === "enforce") {
+    return "Max reviews continuity before accepting each future turn, repairs eligible issues, and blocks unresolved conflicts. Story context budget remains separate.";
+  }
+  if (settings.level === "max") return `Max continuity review is currently in ${settings.reviewMode} mode. It applies to future turns; Story context budget remains separate.`;
+  return `Saved level: ${settings.level}. It applies to future turns; Story context budget remains separate.`;
+}
+
+function renderStoryMemorySettings(settings, message = null, draftLevel = null, disabled = false) {
+  const selector = $("storyMemoryLevel");
+  const status = $("storyMemoryStatus");
+  if (!selector || !status) return;
+  if (!settings) {
+    selector.disabled = true;
+    status.textContent = message || "Story Memory controls are unavailable for this campaign.";
+    return;
+  }
+  const available = new Set(settings.availableLevels);
+  for (const option of selector.options) {
+    option.disabled = !available.has(option.value);
+    option.toggleAttribute("disabled", !available.has(option.value));
+  }
+  selector.value = draftLevel || settings.level;
+  selector.disabled = disabled || !state.campaignId;
+  status.textContent = message || storyMemoryDescription(settings);
+}
+
+async function loadStoryMemorySettings(campaignId, loadEpoch) {
+  const requestId = ++state.storyMemoryRequestId;
+  if (!composition.storyMemory) return;
+  try {
+    const settings = await composition.storyMemory.get(campaignId);
+    if (state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch || requestId !== state.storyMemoryRequestId) return;
+    state.storyMemorySettings = settings;
+    renderStoryMemorySettings(settings);
+  } catch (error) {
+    if (state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch || requestId !== state.storyMemoryRequestId) return;
+    renderStoryMemorySettings(null, `Story Memory settings are unavailable: ${error.message || String(error)}`);
+  }
+}
+
+async function saveStoryMemorySettings() {
+  const campaignId = state.campaignId;
+  const selector = $("storyMemoryLevel");
+  const settings = state.storyMemorySettings;
+  const level = selector?.value;
+  const requestId = state.storyMemoryRequestId;
+  if (!campaignId || !selector || !settings || !level || !STORY_MEMORY_LEVELS.has(level) || !composition.storyMemory) return;
+  renderStoryMemorySettings(settings, "Saving Story Memory level…", level, true);
+  try {
+    const saved = await composition.storyMemory.update(campaignId, { level });
+    if (state.campaignId !== campaignId || requestId !== state.storyMemoryRequestId) return;
+    state.storyMemorySettings = saved;
+    renderStoryMemorySettings(saved);
+    toast("Story Memory level saved for future turns. Existing and in-flight turns keep their frozen policy.", 3500);
+  } catch (error) {
+    if (state.campaignId !== campaignId || requestId !== state.storyMemoryRequestId) return;
+    renderStoryMemorySettings(settings, `Story Memory level was not saved: ${error.message || String(error)}`, level);
+  }
+}
+
 function openUserProfile() {
   const dlg = $("userProfileDialog");
   if (!dlg) return;
@@ -2518,6 +2586,7 @@ function openUserProfile() {
   if (cbSubmit) cbSubmit.checked = state.user?.settings?.autoSubmitTurnChoices !== false;
   if (cbContinuous) cbContinuous.checked = Boolean(state.user?.settings?.continuousReading);
   if (defaultTurnStyle) defaultTurnStyle.value = state.user?.settings?.defaultTurnControlStyle === "flexible_scene" ? "flexible_scene" : "flexible_action";
+  renderStoryMemorySettings(state.storyMemorySettings);
   openManagedModal(dlg);
 }
 
@@ -3143,6 +3212,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnCancelUserProfile) btnCancelUserProfile.addEventListener("click", () => { const d = $("userProfileDialog"); if (d && d.close) d.close(); });
   const btnSaveUserProfile = $("btnSaveUserProfile");
   if (btnSaveUserProfile) btnSaveUserProfile.addEventListener("click", saveUserProfile);
+  const storyMemoryLevel = $("storyMemoryLevel");
+  if (storyMemoryLevel) storyMemoryLevel.addEventListener("change", () => { void saveStoryMemorySettings(); });
 
   // Edit State dialog
   const btnSaveEditState = $("btnSaveEditState") || $("btnSaveScratch");

@@ -29,7 +29,9 @@ const securitySettingNames = [
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
   "SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE",
   "SYSTEM_ARCHIVE_ALLOW_UNKNOWN_FREE_SPACE",
-  "SYSTEM_ARCHIVE_MAX_COMPRESSED_BYTES"
+  "SYSTEM_ARCHIVE_MAX_COMPRESSED_BYTES",
+  "STORY_MEMORY_CAPABILITY",
+  "STORY_MEMORY_ENFORCE_ENABLED"
 ] as const;
 
 afterEach(() => {
@@ -42,6 +44,17 @@ function minimumEnvironment(): void {
 }
 
 describe("runtime security configuration", () => {
+  it("defaults Story Memory to Max and preserves explicit operator restrictions", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ storyMemoryCapability: "r3", storyMemoryEnforceEnabled: true });
+    process.env.STORY_MEMORY_CAPABILITY = "off";
+    process.env.STORY_MEMORY_ENFORCE_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ storyMemoryCapability: null, storyMemoryEnforceEnabled: false });
+    process.env.STORY_MEMORY_CAPABILITY = "r2";
+    expect(loadRuntimeConfig().storyMemoryCapability).toBe("r2");
+    process.env.STORY_MEMORY_CAPABILITY = "r4";
+    expect(() => loadRuntimeConfig()).toThrow("STORY_MEMORY_CAPABILITY");
+  });
   it("defaults browser access to same-origin and provider access to localhost", () => {
     minimumEnvironment();
     const config = loadRuntimeConfig();

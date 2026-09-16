@@ -8,10 +8,11 @@ The selected campaign provides:
 - **Text provider profile**
 - **Default story response length**
 - **Turn control style**
+- **Memory level**: Off, Standard, Enhanced, or Max (default)
 
 Select a campaign, then use **Overview**, **Story behavior**, **Illustrations**, **Chronicle**, and **Usage & more** in the settings rail.
 
-**Save campaign** covers **Overview** and **Story behavior** only. Migration, illustrations, Semantic Retrieval, preview, and deletion retain separate actions.
+**Save campaign** covers **Overview** and **Story behavior** fields other than memory level. Memory level, migration, illustrations, Semantic Retrieval, preview, and deletion retain separate actions.
 
 The response-length preference guides narration size and remains independent from the provider profile's maximum-output ceiling. When the provider reports request costs, **Reported provider cost** summarizes the durable campaign ledger separately for **text generation**, **image generation**, and **semantic memory**, with a campaign total for each reported currency. It can include failed, rewound, or unattributed provider calls that are not visible as accepted turns. Local or unsupported providers are not represented as estimated zero-cost calls.
 
@@ -27,6 +28,30 @@ is blocked while generation is unresolved. A queued, recoverable, or accepted
 job keeps its stored policy and is never converted by a later campaign save.
 Story Direction preserves stored RPG and pending-event data while skipping
 mechanics and independent scene-coverage work.
+
+## Choose a memory level
+
+Use the **Memory level** dropdown in campaign settings or the Story player's
+campaign tools/settings. Legacy dropdown changes save immediately; the new
+interface provides a separate **Save memory level** or **Save Campaign Memory**
+button. Both interfaces read the same saved value.
+
+- **Off** uses the legacy context path without continuity review.
+- **Standard** improves authoritative character/world context and history retrieval.
+- **Enhanced** also reserves space for a recent window of up to three accepted turns.
+- **Max** adds evidence-based continuity review. It can repair a conflict once;
+  unresolved conflicts or unavailable required review leave the turn in recovery
+  instead of accepting it.
+
+Upgrading assigns Max to existing campaigns. New campaigns, branches and imports
+also start at Max. Later selections, including Off, remain saved across restarts.
+Changes apply to newly queued turns; accepted history and jobs already queued are
+unchanged. Story context size is a separate setting and still respects provider
+limits. Max adds review calls and may add a repair call.
+
+Existing custom prompt overrides may require the current protocol acknowledgement
+in the Prompt Library before new generation can start. Disabled options indicate
+that an operator has restricted the available levels.
 
 ## Correct current continuity
 

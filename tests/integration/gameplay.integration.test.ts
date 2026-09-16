@@ -2,7 +2,8 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { clearStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { readTurnPage } from "../../packages/database/src/play-loop-read-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
@@ -144,6 +145,8 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     });
     expect(response.statusCode).toBe(201);
     const imported = response.json();
+    // These provider fixtures exercise the legacy protocol; Max has dedicated coverage.
+    await clearStoryMemoryEnrollment(pool, { ownerUserId: await initialOwnerId(pool), campaignId: imported.campaignId });
     expect(imported).toMatchObject({
       campaignId: expect.any(String),
       worldVersionId: expect.any(String),

@@ -14,7 +14,7 @@ import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
 import { createWorkerIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../helpers/illustration-job-fixtures.js";
-import { createWorld, getWorld, importLegacyStory } from "../helpers/memory-aware-services.js";
+import { createWorld, getWorld, importLegacyStoryWithMemoryOff as importLegacyStory } from "../helpers/memory-aware-services.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { listAssets, persistOriginalImage, queryAssets, readAssetDerivative, runAssetMetadataBackfill, selectTurnIllustration, selectWorldCover, updateAssetMetadata } from "../legacy-api/src/asset-service.js";
 import { getTurnIllustrationResolution, runIllustrationResolutionJob } from "../helpers/illustration-job-fixtures.js";

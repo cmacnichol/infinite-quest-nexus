@@ -64,7 +64,8 @@ describe("Nexus management UI contracts", () => {
       loadEmbeddingConfig: async () => undefined,
       loadIllustrationConfig: async () => undefined,
       loadLatestImageJob: async () => undefined,
-      previewContext: async () => undefined
+      previewContext: async () => undefined,
+      loadCampaignStoryMemory: () => undefined
     });
     const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: `world-${suffix}`, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
     const firstSelection = functions.selectCampaign(campaign("a"));
@@ -336,7 +337,9 @@ describe("Nexus management UI contracts", () => {
       renderDashboardCampaigns: () => undefined,
       loadDashboardStats: async () => undefined,
       updateStoryViewLink: () => undefined,
-      renderIllustrationSettingsVisibility: () => undefined
+      renderIllustrationSettingsVisibility: () => undefined,
+      campaignStoryMemorySettings: null,
+      renderCampaignStoryMemorySettings: () => undefined
     });
     const staleControlIds = [
       "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
@@ -418,6 +421,8 @@ describe("Nexus management UI contracts", () => {
       selectedCampaign: { id: "deleted-campaign", title: "Deleted campaign" },
       selectedWorld: null,
       requestTypedDelete: async () => true,
+      campaignStoryMemorySettings: null,
+      renderCampaignStoryMemorySettings: () => undefined,
       api: async (path: string, options?: { method?: string }) => {
         if (options?.method === "DELETE") return {};
         if (path === "/api/v1/campaigns") return { campaigns: [] };

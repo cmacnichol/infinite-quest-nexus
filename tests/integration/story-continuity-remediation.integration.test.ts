@@ -12,7 +12,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
-import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { importLegacyStoryWithMemoryOff as importLegacyStory } from "../helpers/memory-aware-services.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 

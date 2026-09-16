@@ -124,6 +124,9 @@ describe("Story campaign tools", () => {
   it("offers character profile recovery from Campaign Tools", () => {
     expect(storyCampaignToolsMarkup()).toContain('data-tool-action="edit-character-profile"');
   });
+  it("offers campaign memory settings from Campaign Tools", () => {
+    expect(storyCampaignToolsMarkup()).toContain('data-tool-action="edit-story-memory"');
+  });
   it("renders Campaign Tools only through the optional Story header slot", () => {
     const { document } = parseHTML("<body><div id=app></div></body>").window;
     const root = document.querySelector<HTMLElement>("#app");

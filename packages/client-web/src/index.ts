@@ -1,5 +1,8 @@
 import type { SessionPort } from "@infinite-quest/client-core";
 
+export { createStoryMemoryApi } from "./story-memory-api.js";
+export type { StoryMemoryApi } from "./story-memory-api.js";
+
 export {
   createNexusHttpClient
 } from "./http-client.js";

@@ -7,6 +7,7 @@ import {
   type CampaignProjection,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
+import { createStoryMemoryApi } from "@infinite-quest/client-web";
 import type {
   AcceptedTurnCorrectionView,
   CampaignCharacterProfileUpdate,
@@ -15,6 +16,7 @@ import type {
   MetaResponse,
   ProviderListResponse,
   StoryLengthProfile,
+  StoryMemorySettings,
   TurnInputModeSource
 } from "@infinite-quest/contracts";
 import { mountAppShell } from "./app-shell-lifecycle";
@@ -180,6 +182,12 @@ export function mountStoryPlayerPage(
   let characterProfileError: string | null = null;
   let characterProfileRequestToken = 0;
   let characterProfileSaveInFlight = false;
+  const storyMemoryApi = createStoryMemoryApi();
+  let storyMemorySettings: StoryMemorySettings | null = null;
+  let storyMemoryDraft: StoryMemorySettings["level"] | null = null;
+  let storyMemoryError: string | null = null;
+  let storyMemoryRequestToken = 0;
+  let storyMemorySaveInFlight = false;
   let replacementTurnId: string | null = null;
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
@@ -440,6 +448,7 @@ export function mountStoryPlayerPage(
         continuityDirty = false;
       }
       if (ui.get().activeDialog === "character-profile") characterProfileRequestToken += 1;
+      if (ui.get().activeDialog === "story-memory") storyMemoryRequestToken += 1;
       tools.closeActiveDialog();
       toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
       restoreToolDialogFocus();
@@ -616,6 +625,11 @@ export function mountStoryPlayerPage(
       characterProfileError,
       characterProfileLocked: projection.generation !== null || characterProfileSaveInFlight,
       characterProfileSaveInFlight,
+      storyMemorySettings,
+      storyMemoryDraft,
+      storyMemoryError,
+      storyMemoryLocked: storyMemorySaveInFlight,
+      storyMemorySaveInFlight,
       activityRecords: tools.activity(),
       illustrations: illustrations.get()
     };
@@ -654,6 +668,8 @@ export function mountStoryPlayerPage(
     if (editState) editState.disabled = !canEditCurrentState();
     const editProfile = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']");
     if (editProfile) editProfile.disabled = activeCampaign === null || projection.generation !== null;
+    const editMemory = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-story-memory']");
+    if (editMemory) editMemory.disabled = activeCampaign === null;
     const selectedTurnNumber = ui.get().viewTurnNumber ?? projection.campaign?.activeTurnNumber ?? null;
     const selectedTurn = selectedTurnNumber === null ? null : projection.turns.find((turn) => turn.turnNumber === selectedTurnNumber) ?? null;
     if (selectedUiImplementation === "web-awesome") {
@@ -661,6 +677,7 @@ export function mountStoryPlayerPage(
         { id: "open-world-setup", label: "Current World Setup", disabled: activeCampaign === null },
         { id: "edit-campaign-state", label: "Edit Campaign State", disabled: !canEditCurrentState() },
         { id: "edit-character-profile", label: "Edit Character Profile", disabled: activeCampaign === null || projection.generation !== null },
+        { id: "edit-story-memory", label: "Campaign Memory", disabled: activeCampaign === null },
         { id: "open-campaign-history", label: "Turn History & State", disabled: activeCampaign === null },
         { id: "open-activity", label: "Activity Log", disabled: activeCampaign === null },
         { id: "open-about", label: "About", disabled: activeCampaign === null },
@@ -896,6 +913,40 @@ export function mountStoryPlayerPage(
         });
       });
     }
+    for (const input of root.querySelectorAll<HTMLSelectElement>("[data-story-tool-dialog] [data-story-memory-level]")) {
+      input.addEventListener("change", () => {
+        if (input.value === "off" || input.value === "standard" || input.value === "enhanced" || input.value === "max") storyMemoryDraft = input.value;
+      });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='save-story-memory']")) {
+      control.addEventListener("click", () => {
+        const campaign = projection.campaign;
+        const settings = storyMemorySettings;
+        const level = storyMemoryDraft;
+        if (control.disabled || campaign === null || settings === null || level === null || storyMemorySaveInFlight || !settings.availableLevels.includes(level)) return;
+        const requestToken = ++storyMemoryRequestToken;
+        storyMemorySaveInFlight = true;
+        storyMemoryError = null;
+        render();
+        void storyMemoryApi.update(campaign.id, { level }).then((saved) => {
+          if (disposed || requestToken !== storyMemoryRequestToken || projection.campaign?.id !== campaign.id || ui.get().activeDialog !== "story-memory") return;
+          storyMemorySettings = saved;
+          storyMemoryDraft = saved.level;
+          storyMemoryError = null;
+          ui.setActiveDialog(null);
+          ui.setMessage("Campaign memory saved for newly queued turns. Existing jobs keep their saved memory policy.");
+        }).catch(() => {
+          if (!disposed && requestToken === storyMemoryRequestToken && projection.campaign?.id === campaign.id && ui.get().activeDialog === "story-memory") {
+            storyMemoryError = "Campaign memory could not be saved. Your story draft is preserved.";
+          }
+        }).finally(() => {
+          if (!disposed && requestToken === storyMemoryRequestToken) {
+            storyMemorySaveInFlight = false;
+            render();
+          }
+        });
+      });
+    }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='reload-current-state']")) {
       control.addEventListener("click", () => {
         if (control.disabled || currentStateReloadLocked) return;
@@ -983,6 +1034,7 @@ export function mountStoryPlayerPage(
           continuityDirty = false;
         }
         if (ui.get().activeDialog === "character-profile") characterProfileRequestToken += 1;
+        if (ui.get().activeDialog === "story-memory") storyMemoryRequestToken += 1;
         tools.closeActiveDialog();
         toolsDisclosure?.querySelector<HTMLElement>("summary")?.focus();
         restoreToolDialogFocus();
@@ -1111,6 +1163,11 @@ export function mountStoryPlayerPage(
       characterProfileDraft = null;
       characterProfileError = null;
       characterProfileSaveInFlight = false;
+      storyMemoryRequestToken += 1;
+      storyMemorySettings = null;
+      storyMemoryDraft = null;
+      storyMemoryError = null;
+      storyMemorySaveInFlight = false;
     }
     projection = next;
     inspectionRequestToken += 1;
@@ -1261,6 +1318,28 @@ export function mountStoryPlayerPage(
         if (!disposed && requestToken === characterProfileRequestToken && projection.campaign?.id === campaign.id
           && ui.get().activeDialog === "character-profile") {
           characterProfileError = "Character profile could not be loaded. Your story draft is preserved.";
+          render();
+        }
+      });
+      return;
+    }
+    if (action === "edit-story-memory") {
+      if (!campaign) return;
+      const requestToken = ++storyMemoryRequestToken;
+      storyMemorySettings = null;
+      storyMemoryDraft = null;
+      storyMemoryError = null;
+      storyMemorySaveInFlight = false;
+      ui.setActiveDialog("story-memory");
+      void storyMemoryApi.get(campaign.id).then((settings) => {
+        if (!disposed && requestToken === storyMemoryRequestToken && projection.campaign?.id === campaign.id && ui.get().activeDialog === "story-memory") {
+          storyMemorySettings = settings;
+          storyMemoryDraft = settings.level;
+          render();
+        }
+      }).catch(() => {
+        if (!disposed && requestToken === storyMemoryRequestToken && projection.campaign?.id === campaign.id && ui.get().activeDialog === "story-memory") {
+          storyMemoryError = "Campaign memory settings could not be loaded. Your story draft is preserved.";
           render();
         }
       });

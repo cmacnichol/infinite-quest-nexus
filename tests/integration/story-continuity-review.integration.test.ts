@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
+import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
@@ -131,6 +132,19 @@ integration("T17 durable continuity review", () => {
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
     return { job, application, campaignId: imported.campaignId };
+  }
+
+  function loadDefaultRuntimeStoryMemoryConfig() {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = databaseUrl!;
+    try {
+      const config = loadRuntimeConfig();
+      expect(config).toMatchObject({ storyMemoryCapability: "r3", storyMemoryEnforceEnabled: true });
+      return config;
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
   }
 
   it("binds enforcing Story Direction review to both main and choice-only producing requests", async () => {
@@ -398,6 +412,33 @@ integration("T17 durable continuity review", () => {
     expect(requests).toHaveLength(0);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
     await expect(application.retry({ ownerUserId, jobId: job.id })).rejects.toThrow();
+  });
+
+  it.each([{ verdict: "pass", expected: "completed" }, { verdict: "uncertain", expected: "recoverable" }] as const)("uses the imported campaign's default Max policy when runtime review is $verdict", async ({ verdict, expected }) => {
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Default Max review ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "default-max-review.story", story }));
+    const runtimeConfig = loadDefaultRuntimeStoryMemoryConfig();
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, {
+      installedCapability: runtimeConfig.storyMemoryCapability ?? null,
+      enforceEnabled: runtimeConfig.storyMemoryEnforceEnabled === true
+    });
+    reviewVerdict = verdict;
+    requests.length = 0;
+    try {
+      const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+      const queued = (await pool.query<{ context_options: { storyMemoryPolicy?: unknown } }>("SELECT context_options FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
+      expect(queued.context_options.storyMemoryPolicy).toMatchObject({ policy: { capability: "r3", continuityReview: "enforce" } });
+
+      await runGenerationJob(pool, `default-max-review-${randomUUID()}`, 30, credentialSecret);
+
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: expected });
+      const saved = (await pool.query<{ orchestration_private: { continuityReview?: unknown } }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
+      expect(saved.orchestration_private.continuityReview).toMatchObject({ mode: "enforce", status: "completed", verdict });
+    } finally {
+      reviewVerdict = "pass";
+      requests.length = 0;
+    }
   });
 
   it.each([{ mode: "observe", verdict: "conflict", expected: "completed" }, { mode: "observe", verdict: "uncertain", expected: "completed" }, { mode: "enforce", verdict: "pass", expected: "completed" }, { mode: "enforce", verdict: "uncertain", expected: "recoverable" }] as const)("$mode review $verdict ends $expected with bound private checkpoint", async ({ mode, verdict, expected }) => {

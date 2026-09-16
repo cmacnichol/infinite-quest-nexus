@@ -1,4 +1,5 @@
 import type { MemoryContextQuery } from "../../packages/contracts/src/memory.js";
+import { clearStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import type { ChronicleMetricsView, MemoryPublicResult } from "../../packages/application/src/memory/index.js";
 import { initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresWorldRepositoryAdapters } from "../../packages/database/src/world-repository.js";
@@ -283,6 +284,20 @@ export function importLegacyStory(
   legacyAssets?: Parameters<typeof importLegacyStoryApplication>[4],
 ) {
   return importLegacyStoryApplication(pool, request, memoryGeneration(pool), assetStore, legacyAssets);
+}
+
+/** Explicitly retain pre-Story-Memory behavior for legacy generation regressions. */
+export async function importLegacyStoryWithMemoryOff(...args: Parameters<typeof importLegacyStory>) {
+  const imported = await importLegacyStory(...args);
+  await clearStoryMemoryEnrollment(args[0], { ownerUserId: await initialOwnerId(args[0]), campaignId: imported.campaignId });
+  return imported;
+}
+
+/** Branch defaults are tested separately; this fixture exercises the legacy writer. */
+export async function branchCampaignWithMemoryOff(...args: Parameters<typeof branchCampaign>) {
+  const branched = await branchCampaign(...args);
+  await clearStoryMemoryEnrollment(args[0], { ownerUserId: await initialOwnerId(args[0]), campaignId: branched.id });
+  return branched;
 }
 
 export function importLegacyStoryWithClient(
