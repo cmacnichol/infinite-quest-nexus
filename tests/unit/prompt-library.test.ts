@@ -164,6 +164,9 @@ describe("Prompt Library catalog", () => {
     expect(text).toContain('Split sequences of three or more independent clauses joined by "and" into separate sentences.');
     expect(text).toContain("Allow ordinary conjunctions in lists and natural dialogue.");
     expect(text).toContain("Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning.");
+    expect(text).toContain("Use previous narration and retrieved story history for facts and continuity, not as prose patterns to imitate.");
+    expect(text).toContain("Do not carry forward their chained clauses, circular restatements, or repeated rhetorical endings into new narration.");
+    expect(text).toContain("Express each idea once; remove sentences that merely rename or restate it without adding a concrete development.");
     expect(text).toContain("Preserve established facts, requested events, viewpoint, and tone.");
     expect(preview.unresolvedVariables).toEqual([]);
   });

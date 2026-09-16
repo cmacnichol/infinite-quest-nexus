@@ -27,6 +27,7 @@ export const STORY_MEMORY_MANDATORY_CONTRACT = [
 
 export const STORY_PROSE_GUIDANCE = `Narration prose: Write clear, concrete prose with varied sentence lengths. Prefer one main action or observation per sentence. Split sequences of three or more independent clauses joined by "and" into separate sentences. Allow ordinary conjunctions in lists and natural dialogue.
 Each sentence should contribute a distinct action, perception, relevant thought, or consequence. Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning. Keep introspection connected to the character's immediate situation.
+Use previous narration and retrieved story history for facts and continuity, not as prose patterns to imitate. Do not carry forward their chained clauses, circular restatements, or repeated rhetorical endings into new narration. Express each idea once; remove sentences that merely rename or restate it without adding a concrete development.
 Before returning the JSON, silently revise repetitive clause chains and redundant restatements in the narration you write. Preserve established facts, requested events, viewpoint, and tone. Stop when the supported scene is complete; do not pad.`;
 
 export const STORY_SYSTEM_PROMPT = `You are the fiction writer for Infinite Quest.
