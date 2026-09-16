@@ -157,7 +157,7 @@ export function buildAcceptedTurnFictionMemory(
   const narration = stripMechanicsLeakage(bracketedNarration.text);
   const content = [
     `Turn ${ordinal}`,
-    action.text ? `Player action: ${action.text}` : "",
+    action.text ? `${turn.inputMode === "scene" ? "Story Direction (intent)" : "Player action"}: ${action.text}` : "",
     narration.text ? `Narration: ${narration.text}` : ""
   ].filter(Boolean).join("\n");
   return {
@@ -171,7 +171,7 @@ export function buildAcceptedTurnFictionMemory(
   };
 }
 
-export function buildCanonicalChronicleFacts(input: ChronicleCanonicalFactInput): ChronicleCanonicalFact[] {
+export function combineCanonicalChronicleFacts(input: Pick<ChronicleCanonicalFactInput, "canonicalFacts" | "canonicalFactUpdates">): { content: string; supersedesFactIds: string[] }[] {
   const structured = (input.canonicalFactUpdates ?? []).flatMap((update) => {
     const content = sanitizeChronicleFictionString(update.content, 4000);
     return content ? [{ content, supersedesFactIds: [...new Set(update.supersedesFactIds ?? [])].slice(0, 100) }] : [];
@@ -190,7 +190,11 @@ export function buildCanonicalChronicleFacts(input: ChronicleCanonicalFactInput)
     }
     existing.supersedesFactIds = [...new Set([...existing.supersedesFactIds, ...update.supersedesFactIds])];
   }
-  const ordered = [...updates.values()];
+  return [...updates.values()];
+}
+
+export function buildCanonicalChronicleFacts(input: ChronicleCanonicalFactInput): ChronicleCanonicalFact[] {
+  const ordered = combineCanonicalChronicleFacts(input);
   return buildCanonicalFactProjection(ordered.map((update, factIndex) => ({
     campaignId: input.campaignId,
     sourceTurnId: input.turnId,

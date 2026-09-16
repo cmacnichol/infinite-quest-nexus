@@ -89,6 +89,19 @@ describe("Story Player local UI model", () => {
     }));
   });
 
+  it("adopts a draft typed before late campaign hydration instead of clearing it", () => {
+    const model = createStoryUiModel({}, memoryStorage());
+    model.setComposerDraft("Keep this recovery draft.");
+
+    model.syncComposer("campaign-a", 7, "flexible_action");
+
+    expect(model.get()).toEqual(expect.objectContaining({
+      draft: "Keep this recovery draft.",
+      draftOwnerKey: "campaign-a:7",
+      draftOwnerTurnNumber: 7
+    }));
+  });
+
   it("keeps an explicit input mode when its composer owner policy is refreshed", () => {
     const model = createStoryUiModel({}, memoryStorage());
 

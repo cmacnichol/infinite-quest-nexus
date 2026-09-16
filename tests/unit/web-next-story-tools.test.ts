@@ -79,21 +79,34 @@ type StoryAboutTools = {
 };
 
 function storyComposition() {
+  const getCharacterProfile = vi.fn().mockResolvedValue({
+    campaignId,
+    revision: 4,
+    name: "Mira",
+    profile: { unclassifiedNotes: "Keeps the old lighthouse key." }
+  });
+  const updateCharacterProfile = vi.fn().mockResolvedValue({
+    campaignId,
+    revision: 5,
+    name: "Mira Vale",
+    profile: { unclassifiedNotes: "Keeps the repaired lighthouse key." }
+  });
   return {
     api: {
       campaigns: {
         list: vi.fn().mockResolvedValue({ campaigns: [{ id: campaignId, title: "Campaign", activeTurnNumber: 0, turnControlStyle: "action_only", textProviderProfileId: null }] }),
-        state: vi.fn(), inspectState: vi.fn(), updateState: vi.fn(), getTurnCorrection: vi.fn(), correctTurnNarration: vi.fn(), rewind: vi.fn(), branch: vi.fn()
+        state: vi.fn(), inspectState: vi.fn(), updateState: vi.fn(), getCharacterProfile, updateCharacterProfile, getTurnCorrection: vi.fn(), correctTurnNarration: vi.fn(), rewind: vi.fn(), branch: vi.fn()
       },
       generation: {
         syncStatus: vi.fn().mockResolvedValue({
-          campaignId, activeTurnNumber: 0, syncToken: "story-tools", turnWindowMode: "replace", pendingGeneration: null, generationRecovery: null,
+          id: campaignId, activeTurnNumber: 0, syncToken: "story-tools", turnWindowMode: "replace", pendingGeneration: null, generationRecovery: null,
           campaign: { id: campaignId, title: "Campaign", activeTurnNumber: 0, worldVersionId: "22222222-2222-4222-8222-222222222222", storyLengthProfile: "standard", updatedAt: "2026-08-18T00:00:00.000Z", selectedCharacterId: null, selectedCharacterName: "", characterSnapshot: null, characterProfile: null, characterProfileRevision: 0, status: "active" },
           world: { id: "33333333-3333-4333-8333-333333333333", title: "World", versionNumber: 1, genre: "", tone: "", premise: "", backgroundStory: "", character: "", firstAction: "Start", rules: "", playableCharacters: [] },
           playerConfig: { selectedCharacterId: null, selectedCharacterName: "", characterSnapshot: null, characterProfile: null, characterProfileRevision: 0, rpgStats: [], trackers: [], eventTriggers: [], useRpgStats: false, suppressEventTriggers: false },
           turns: { campaignId, turns: [], nextCursor: null }
         })
       },
+      providers: { list: vi.fn().mockResolvedValue({ providers: [] }) },
       session: { get: vi.fn().mockResolvedValue(null) }
     },
     campaignStore: createCampaignStore(), workflow: {}, illustrations: {}, idFactory: {}, clock: {}, delay: {}
@@ -104,9 +117,13 @@ async function settle(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
 describe("Story campaign tools", () => {
+  it("offers character profile recovery from Campaign Tools", () => {
+    expect(storyCampaignToolsMarkup()).toContain('data-tool-action="edit-character-profile"');
+  });
   it("renders Campaign Tools only through the optional Story header slot", () => {
     const { document } = parseHTML("<body><div id=app></div></body>").window;
     const root = document.querySelector<HTMLElement>("#app");
@@ -167,11 +184,115 @@ describe("Story campaign tools", () => {
 
     const tools = root.querySelector<HTMLElement>(".site-header [data-campaign-tools]");
     expect(tools?.textContent).toContain("Current World Setup");
+    expect(tools?.textContent).toContain("Edit Character Profile");
     expect(tools?.textContent).toContain("Edit Campaign State");
     expect(tools?.textContent).toContain("Turn History & State");
     expect(tools?.textContent).toContain("Activity Log");
     expect(tools?.textContent).toContain("PDF + images");
     expect(root.querySelector("[data-story-tools-rail]")).toBeNull();
+    mounted.dispose();
+  });
+
+  it("revision-checks a manual character profile edit from Story Campaign Tools", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>").window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Story fixture is missing.");
+    const composition = storyComposition();
+    const mounted = mountStoryPlayerPage(root, { campaignId, turnNumber: null }, composition);
+    await settle();
+    await settle();
+
+    const open = root.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']");
+    expect(open?.disabled).toBe(false);
+    open?.click();
+    await settle();
+    const dialog = root.querySelector<HTMLElement>("[data-story-tool-dialog]");
+    const name = dialog?.querySelector<HTMLInputElement>("[data-character-profile-name]");
+    const profile = dialog?.querySelector<HTMLTextAreaElement>("[data-character-profile-json]");
+    if (!name || !profile) throw new Error("Character profile editor is missing.");
+    name.value = "Mira Vale";
+    profile.value = '{"unclassifiedNotes":"Keeps the repaired lighthouse key."}';
+    dialog.querySelector<HTMLButtonElement>("[data-action='save-character-profile']")?.click();
+    await settle();
+
+    expect(composition.api.campaigns.getCharacterProfile).toHaveBeenCalledWith(campaignId);
+    expect(composition.api.campaigns.updateCharacterProfile).toHaveBeenCalledWith(campaignId, {
+      expectedRevision: 4,
+      name: "Mira Vale",
+      profile: { unclassifiedNotes: "Keeps the repaired lighthouse key." },
+      editSource: "manual"
+    });
+    mounted.dispose();
+  });
+
+  it("ignores an older profile response after the editor is reopened", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>").window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Story fixture is missing.");
+    const oldResponse = deferred<{ campaignId: string; revision: number; name: string; profile: Record<string, unknown> }>();
+    const currentResponse = deferred<{ campaignId: string; revision: number; name: string; profile: Record<string, unknown> }>();
+    const composition = storyComposition();
+    composition.api.campaigns.getCharacterProfile.mockReturnValueOnce(oldResponse.promise).mockReturnValueOnce(currentResponse.promise);
+    const mounted = mountStoryPlayerPage(root, { campaignId, turnNumber: null }, composition);
+    await settle(); await settle();
+
+    root.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']")?.click();
+    await settle();
+    root.querySelector<HTMLButtonElement>("[data-action='close-story-tool-dialog']")?.click();
+    root.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']")?.click();
+    oldResponse.resolve({ campaignId, revision: 4, name: "Stale Mira", profile: {} });
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-character-profile-name]")).toBeNull();
+
+    currentResponse.resolve({ campaignId, revision: 5, name: "Current Mira", profile: {} });
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-character-profile-name]")?.value).toBe("Current Mira");
+    mounted.dispose();
+  });
+
+  it("ignores a rejected profile fetch after the campaign projection switches", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>").window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Story fixture is missing.");
+    const stale = deferred<{ campaignId: string; revision: number; name: string; profile: Record<string, unknown> }>();
+    const composition = storyComposition();
+    composition.api.campaigns.getCharacterProfile.mockReturnValueOnce(stale.promise);
+    const mounted = mountStoryPlayerPage(root, { campaignId, turnNumber: null }, composition);
+    await settle(); await settle();
+    root.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']")?.click();
+    const loaded = await composition.api.generation.syncStatus(campaignId);
+    const otherCampaignId = "55555555-5555-4555-8555-555555555555";
+    composition.campaignStore.load({ ...loaded, id: otherCampaignId, campaign: { ...loaded.campaign, id: otherCampaignId }, turns: { ...loaded.turns, campaignId: otherCampaignId } });
+    stale.resolve(Promise.reject(new Error("old profile fetch failed")) as never);
+    await settle();
+
+    expect(root.querySelector("[data-story-tool-dialog]")?.textContent).not.toContain("Character profile could not be loaded");
+    mounted.dispose();
+  });
+
+  it("keeps a pending profile save disabled and ignores its completion after a campaign switch", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>").window;
+    const root = document.querySelector<HTMLElement>("#app");
+    if (!root) throw new Error("Story fixture is missing.");
+    const saving = deferred<{ campaignId: string; revision: number; name: string; profile: Record<string, unknown> }>();
+    const composition = storyComposition();
+    composition.api.campaigns.updateCharacterProfile.mockReturnValueOnce(saving.promise);
+    const mounted = mountStoryPlayerPage(root, { campaignId, turnNumber: null }, composition);
+    await settle(); await settle();
+    root.querySelector<HTMLButtonElement>("[data-tool-action='edit-character-profile']")?.click();
+    await settle();
+    root.querySelector<HTMLButtonElement>("[data-action='save-character-profile']")?.click();
+    await settle();
+    expect(root.querySelector<HTMLButtonElement>("[data-action='save-character-profile']")?.disabled).toBe(true);
+
+    const loaded = await composition.api.generation.syncStatus(campaignId);
+    const otherCampaignId = "55555555-5555-4555-8555-555555555555";
+    composition.campaignStore.load({ ...loaded, id: otherCampaignId, campaign: { ...loaded.campaign, id: otherCampaignId }, turns: { ...loaded.turns, campaignId: otherCampaignId } });
+    saving.resolve({ campaignId, revision: 5, name: "Old campaign", profile: {} });
+    await settle();
+
+    expect(composition.api.generation.syncStatus).toHaveBeenCalledTimes(2);
+    expect(root.textContent).not.toContain("Character profile saved. Your story draft is ready to submit.");
     mounted.dispose();
   });
 

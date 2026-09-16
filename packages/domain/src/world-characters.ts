@@ -7,6 +7,7 @@ import {
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { stripMechanicsLeakage, truncateAtBoundary } from "./text.js";
+export { characterFictionAuthority, completeCharacterFictionProfile, type CharacterFictionAuthority } from "./character-fiction-authority.js";
 
 export type CampaignCharacterSeed = {
   character: PlayableCharacter;

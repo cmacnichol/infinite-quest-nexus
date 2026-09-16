@@ -83,6 +83,10 @@ export function mapGenerationApplicationError(error: GenerationApplicationError)
       return generationHttpError("Only recoverable or failed generation jobs can be retried.", 409);
     case "retry_protocol_incompatible":
       return generationHttpError("This generation uses an incompatible prompt protocol. Discard it and enqueue a new generation.", 409);
+    case "story_memory_capability_unavailable":
+      return generationHttpError("Story Memory capability is unavailable. Update the campaign enrollment or operator capability before enqueuing.", 409);
+    case "story_memory_enforce_disabled":
+      return generationHttpError("Story Memory enforce mode is disabled. Update the campaign enrollment or operator configuration before enqueuing.", 409);
     case "cancel_source_state":
       return generationHttpError("Only active generation jobs can be cancelled.", 409);
     case "discard_source_state":

@@ -1,4 +1,5 @@
 import type { GenerationPolicySnapshot, StoryOnlyPromptSnapshot } from "../../contracts/src/campaign-generation-policy.js";
+import { STORY_MEMORY_MANDATORY_CONTRACT, composeStoryMemorySystemPrompt } from "../../contracts/src/story-prompt.js";
 import { sha256, stableStringify } from "../../domain/src/index.js";
 import type { StoryWithoutChoices } from "./story-only-output.js";
 
@@ -54,10 +55,22 @@ export function generationExecutionProtocolIdentity(
 
 export function composeStoryOnlySystemPrompt(
   baseSystemPrompt: string,
-  policy: Extract<GenerationPolicySnapshot, { playMode: "story_only" }>
+  policy: Extract<GenerationPolicySnapshot, { playMode: "story_only" }>,
+  hasFrozenStoryMemoryPolicy = false
 ): string {
   verifyPromptSnapshot(policy.prompts);
-  return `${baseSystemPrompt}\n\n${policy.prompts.systemSupplement}`;
+  return hasFrozenStoryMemoryPolicy
+    ? composeStoryMemorySystemPrompt(baseSystemPrompt, policy.prompts.systemSupplement)
+    : `${baseSystemPrompt}\n\n${policy.prompts.systemSupplement}`;
+}
+
+export function composeStoryOnlyChoiceRepairSystemPrompt(
+  choiceRepairSystem: string,
+  hasFrozenStoryMemoryPolicy: boolean
+): string {
+  return hasFrozenStoryMemoryPolicy
+    ? `${choiceRepairSystem}\n\n${STORY_MEMORY_MANDATORY_CONTRACT}`
+    : choiceRepairSystem;
 }
 
 export function buildStoryOnlyChoiceRepairInput(base: StoryWithoutChoices): string {

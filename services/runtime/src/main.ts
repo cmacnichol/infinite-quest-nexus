@@ -59,7 +59,7 @@ await runRuntimeLifecycle(config, abortController, {
       { credentialSecret, transport }
     ),
     createProviderApiAdapter: createProviderApplicationAdapter,
-    createApiGeneration: createApiGenerationApplication,
+    createApiGeneration: (pool, providers, operatorConfig) => createApiGenerationApplication(pool, providers, undefined, operatorConfig),
     createApiIllustration: createApiIllustrationApplication,
     createApiMemory: createApiMemoryApplication,
     createApiWorldCampaign: createApiWorldCampaignApplication,

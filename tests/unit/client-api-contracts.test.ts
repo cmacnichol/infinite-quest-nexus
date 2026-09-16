@@ -522,8 +522,8 @@ describe("client API response contracts", () => {
       replacementTurnId: null,
       diagnostic
     }).diagnostic).toEqual(diagnostic);
-    expect(generationJobSnapshotSchema.safeParse({ ...common, createdAt: TIMESTAMP, updatedAt: TIMESTAMP, diagnostic: { ...diagnostic, scratchpad: "PRIVATE_CANARY" } }).success)
-      .toBe(false);
+    expect(generationJobSnapshotSchema.parse({ ...common, createdAt: TIMESTAMP, updatedAt: TIMESTAMP, diagnostic: { ...diagnostic, scratchpad: "PRIVATE_CANARY" } }).diagnostic)
+      .toBeNull();
   });
 
   it("exports the full polling snapshot while excluding raw partial output", () => {

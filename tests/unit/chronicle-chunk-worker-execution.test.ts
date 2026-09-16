@@ -10,6 +10,7 @@ import {
 } from "../../services/runtime/src/chronicle-chunk-worker-execution.js";
 import { createChronicleWorkerExecutor } from "../../services/runtime/src/chronicle-platform-adapter.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
+import { normalizeStoryEvidenceSource, verifyStoryEvidenceSpan } from "../../packages/domain/src/story-evidence-spans.js";
 
 const claim: ClaimedChronicleChunkJob = {
   jobId: "chunk-job-1",
@@ -301,6 +302,12 @@ describe("Chronicle chunk worker execution", () => {
       })
     );
     expect(progress).toEqual(expect.objectContaining({ processedParents: 2, totalParents: 2 }));
+    for (const [, committed] of values.batches.commitParentBatch.mock.calls) {
+      for (const chunk of committed.chunks) {
+        expect(chunk.sourceEvidence).toBeDefined();
+        expect(verifyStoryEvidenceSpan(normalizeStoryEvidenceSource(committed.parent.content), chunk.sourceEvidence!, chunk.content)).toBe(true);
+      }
+    }
   });
 
   it("retries only after 250ms and 500ms, then exposes failure to the lane owner", async () => {

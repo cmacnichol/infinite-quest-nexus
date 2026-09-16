@@ -58,6 +58,23 @@ integration("Chronicle accepted-turn immutability", () => {
     throw new Error(`Chronicle job ${jobId} did not complete after six worker claims.`);
   }
 
+  it("rebuilds Story Direction labels from the saved input mode without modifying accepted turns", async () => {
+    const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: `direction-memory-${crypto.randomUUID()}.story`, story }));
+    await pool.query("UPDATE turns SET input_mode='scene' WHERE campaign_id=$1", [imported.campaignId]);
+    const before = await snapshotTurnRows(pool, ownerUserId, imported.campaignId);
+    await rebuildCampaignMemories(pool, imported.campaignId);
+    const memories = await pool.query<{ content: string; metadata: { inputMode: string } }>(
+      "SELECT content,metadata FROM chronicle_memories WHERE campaign_id=$1 AND memory_kind='turn_fiction'", [imported.campaignId]);
+    expect(memories.rows.length).toBeGreaterThan(0);
+    for (const memory of memories.rows) {
+      expect(memory.content).toContain("Story Direction (intent):");
+      expect(memory.content).not.toContain("Player action:");
+      expect(memory.metadata.inputMode).toBe("scene");
+    }
+    expect(await snapshotTurnRows(pool, ownerUserId, imported.campaignId)).toEqual(before);
+  });
+
   it("uses the saved latest narration in the next turn context without changing accepted rows", async () => {
     const story = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     story.turns.at(-1).narration = "The harbor bell is brass.";

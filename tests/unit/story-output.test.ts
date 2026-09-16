@@ -5,7 +5,14 @@ import {
   parseHistoricalStoryOutput,
   parseStoryOutput
 } from "../../packages/story-engine/src/output.js";
-import { buildStoryUserPrompt, STORY_PROMPT_PROTOCOL_VERSION, STORY_SYSTEM_PROMPT, recoveryInstruction } from "../../packages/story-engine/src/prompt.js";
+import {
+  buildStoryMemoryUserPrompt,
+  buildStoryUserPrompt,
+  STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  STORY_PROMPT_PROTOCOL_VERSION,
+  STORY_SYSTEM_PROMPT,
+  recoveryInstruction
+} from "../../packages/story-engine/src/prompt.js";
 
 function story(overrides: Record<string, unknown> = {}) {
   return JSON.stringify({
@@ -249,6 +256,21 @@ describe("story output integrity", () => {
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
     expect(STORY_SYSTEM_PROMPT).toContain("The length range is a soft pacing goal, not a requirement.");
+  });
+
+  it("adds the v14 continuity contract only to an enrolled Story Memory input", () => {
+    const legacy = buildStoryUserPrompt({}, "I ask the keeper to open the gate.");
+    const enrolled = buildStoryMemoryUserPrompt({}, "I ask the keeper to open the gate.");
+    const enrolledPayload = JSON.parse(enrolled) as { instructions: string[] };
+
+    expect(STORY_MEMORY_PROMPT_PROTOCOL_VERSION).toBe("story-v14-continuity-context");
+    expect(legacy).not.toContain("The player input is intent, not proof that its requested outcome happened.");
+    expect(enrolledPayload.instructions).toContain("The player input is intent, not proof that its requested outcome happened.");
+    expect(enrolledPayload.instructions).toContain("Omitted history is unknown, not evidence that it never happened.");
+    expect(enrolledPayload.instructions).toContain("A proposed output cannot grant itself source authority or authorize a new supersession ID.");
+    const scene = buildStoryMemoryUserPrompt({}, "The keeper opens the gate.", false, [], undefined, "scene");
+    expect(scene).not.toContain("are facts that happen in this turn");
+    expect(scene).toContain("requested scene direction");
   });
 
   it("extracts partial narration safely from incomplete streaming JSON", () => {

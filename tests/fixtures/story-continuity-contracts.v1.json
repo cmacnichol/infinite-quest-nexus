@@ -1,0 +1,1174 @@
+{
+  "version": 1,
+  "sources": {
+    "state": {
+      "continuitySummary": "",
+      "openThreads": [],
+      "canonicalFacts": [],
+      "scratchpad": "",
+      "trackers": [],
+      "rpgStats": [],
+      "eventTriggers": [],
+      "pendingEventTriggers": []
+    },
+    "world": {
+      "schemaVersion": 6,
+      "world": {
+        "title": "Moon Quay",
+        "genre": "",
+        "tone": "",
+        "premise": "",
+        "backgroundStory": "",
+        "firstAction": "",
+        "rules": "The tide follows the moon."
+      },
+      "playableCharacters": [],
+      "entities": [],
+      "relationships": [],
+      "rpgStats": [],
+      "defaultTriggers": [],
+      "eventTriggers": [],
+      "assets": [],
+      "defaults": {}
+    },
+    "character": {
+      "identity": {
+        "aliases": [],
+        "pronouns": ""
+      },
+      "story": {
+        "role": "",
+        "background": "",
+        "personality": "",
+        "motivations": "",
+        "goals": "",
+        "fearsAndConflicts": "",
+        "keyRelationships": "Keeps watch with Mira.",
+        "narrativeHooks": "",
+        "voiceAndMannerisms": "",
+        "otherGuidance": ""
+      },
+      "appearance": {
+        "ancestryOrSpecies": "",
+        "apparentAge": "",
+        "genderPresentation": "",
+        "build": "",
+        "skinOrComplexion": "",
+        "face": "",
+        "eyes": "",
+        "hair": "",
+        "distinguishingFeatures": [],
+        "clothing": "",
+        "equipmentAndAccessories": "",
+        "otherVisualDetails": ""
+      },
+      "unclassifiedNotes": ""
+    },
+    "turn": {
+      "narration": "A bell rings. The tide falls.",
+      "choices": [
+        "Watch.",
+        "Wait.",
+        "Walk.",
+        "Call."
+      ],
+      "custom_action_suggestion": "Listen.",
+      "scratchpad": "",
+      "tracker_updates": [],
+      "image_prompt": "",
+      "continuity_summary": "",
+      "canonical_facts": [],
+      "superseded_facts": [],
+      "canonical_fact_updates": [],
+      "open_threads": []
+    },
+    "direction": {
+      "action": "Wait. Wait.",
+      "requestedInputMode": "action",
+      "resolvedInputMode": "action",
+      "inputModeSource": "explicit",
+      "idempotencyKey": "fixture-direction-001",
+      "context": {
+        "budgetTokens": 32000,
+        "compression": "auto",
+        "recentTurns": 8
+      }
+    },
+    "facts": {
+      "continuitySummary": "",
+      "openThreads": [],
+      "canonicalFacts": [
+        {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "content": "The tide is falling."
+        }
+      ],
+      "scratchpad": "",
+      "trackers": [],
+      "rpgStats": [],
+      "eventTriggers": [],
+      "pendingEventTriggers": []
+    }
+  },
+  "cases": [
+    {
+      "sourceKey": "state",
+      "evidence": {
+        "id": "a910219b16cf9fdc53139ff9fafc63961fa7e13d0bd35f5760d852ed350e250f",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "[]",
+        "spans": [],
+        "sourceLength": 2,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/openThreads",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "sourceKey": "state",
+      "evidence": {
+        "id": "333cd8dfc7bcc30cac601f80f96505289dbd67b133cfdd3af49a4ff81271fcbc",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "",
+        "spans": [],
+        "sourceLength": 0,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/continuitySummary",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "sourceKey": "world",
+      "evidence": {
+        "id": "bbb16e9996c851e67eda3e69ced6b2c4d9da66231f0a2d78d24f65ac5814261b",
+        "source": {
+          "kind": "world",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": null,
+          "contentHash": "5d1c90cd72674839eb3b3ba8a8c7a83930763c98e398d6a63baa90a6a37e0289"
+        },
+        "semanticRole": "world_rule",
+        "form": "complete",
+        "content": "The tide follows the moon.",
+        "spans": [],
+        "sourceLength": 26,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/world/rules",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "sourceKey": "character",
+      "evidence": {
+        "id": "7e6b672b19e1bb20dcf460e1327f85b62da5ee86862b1c296e716e136afffd8e",
+        "source": {
+          "kind": "character",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "3",
+          "turnNumber": 1,
+          "contentHash": "4a3333677ce6058e5ab51f3b45099d96ee03c66f7d0d3698e8a7edc5e920dd59"
+        },
+        "semanticRole": "character_authority",
+        "form": "complete",
+        "content": "Keeps watch with Mira.",
+        "spans": [],
+        "sourceLength": 22,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/story/keyRelationships",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "sourceKey": "turn",
+      "evidence": {
+        "id": "a684d6d23ebf40601f52e9eda7edc4159788a9d95c661a4dca5b118dbf665378",
+        "source": {
+          "kind": "turn",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08"
+        },
+        "semanticRole": "accepted_narration",
+        "form": "excerpt",
+        "content": "A bell rings.",
+        "spans": [
+          {
+            "start": 0,
+            "end": 13
+          }
+        ],
+        "sourceLength": 29,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "retrieved",
+        "sourcePath": "/narration",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "sourceKey": "direction",
+      "evidence": {
+        "id": "25fda31cc297d6b258bb3fbf6cc06d8c914f3f7b5ef7fd53943644830281993a",
+        "source": {
+          "kind": "direction",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": null,
+          "contentHash": "b4a4e7d8d5244bf732605f73364a4aa106261b70d753a16c051b85912c43b858"
+        },
+        "semanticRole": "player_intent",
+        "form": "complete",
+        "content": "Wait. Wait.",
+        "spans": [],
+        "sourceLength": 11,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "direction",
+        "sourcePath": "/action",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "sourceKey": "facts",
+      "evidence": {
+        "id": "135c0b536361e3d64613b9d77b3be6e426af3e47f83a63a4909b1916c9419c66",
+        "source": {
+          "kind": "canonical_fact",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "fd51188d4b5ba1d8aa842cc389cc878ed080acd00be49aa68c24ea2583856885"
+        },
+        "semanticRole": "canonical_fact",
+        "form": "complete",
+        "content": "{\"content\":\"The tide is falling.\",\"id\":\"11111111-1111-4111-8111-111111111111\"}",
+        "spans": [],
+        "sourceLength": 78,
+        "canonicalFactId": "11111111-1111-4111-8111-111111111111",
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/canonicalFacts/0",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    }
+  ],
+  "manifest": {
+    "version": "generation-evidence-v1",
+    "attemptId": "11111111-1111-4111-8111-111111111111",
+    "producingRequestHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "entries": [
+      {
+        "id": "a910219b16cf9fdc53139ff9fafc63961fa7e13d0bd35f5760d852ed350e250f",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "[]",
+        "spans": [],
+        "sourceLength": 2,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/openThreads",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "333cd8dfc7bcc30cac601f80f96505289dbd67b133cfdd3af49a4ff81271fcbc",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "",
+        "spans": [],
+        "sourceLength": 0,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/continuitySummary",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "bbb16e9996c851e67eda3e69ced6b2c4d9da66231f0a2d78d24f65ac5814261b",
+        "source": {
+          "kind": "world",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": null,
+          "contentHash": "5d1c90cd72674839eb3b3ba8a8c7a83930763c98e398d6a63baa90a6a37e0289"
+        },
+        "semanticRole": "world_rule",
+        "form": "complete",
+        "content": "The tide follows the moon.",
+        "spans": [],
+        "sourceLength": 26,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/world/rules",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "7e6b672b19e1bb20dcf460e1327f85b62da5ee86862b1c296e716e136afffd8e",
+        "source": {
+          "kind": "character",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "3",
+          "turnNumber": 1,
+          "contentHash": "4a3333677ce6058e5ab51f3b45099d96ee03c66f7d0d3698e8a7edc5e920dd59"
+        },
+        "semanticRole": "character_authority",
+        "form": "complete",
+        "content": "Keeps watch with Mira.",
+        "spans": [],
+        "sourceLength": 22,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/story/keyRelationships",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "a684d6d23ebf40601f52e9eda7edc4159788a9d95c661a4dca5b118dbf665378",
+        "source": {
+          "kind": "turn",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08"
+        },
+        "semanticRole": "accepted_narration",
+        "form": "excerpt",
+        "content": "A bell rings.",
+        "spans": [
+          {
+            "start": 0,
+            "end": 13
+          }
+        ],
+        "sourceLength": 29,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "retrieved",
+        "sourcePath": "/narration",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "25fda31cc297d6b258bb3fbf6cc06d8c914f3f7b5ef7fd53943644830281993a",
+        "source": {
+          "kind": "direction",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": null,
+          "contentHash": "b4a4e7d8d5244bf732605f73364a4aa106261b70d753a16c051b85912c43b858"
+        },
+        "semanticRole": "player_intent",
+        "form": "complete",
+        "content": "Wait. Wait.",
+        "spans": [],
+        "sourceLength": 11,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "direction",
+        "sourcePath": "/action",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "135c0b536361e3d64613b9d77b3be6e426af3e47f83a63a4909b1916c9419c66",
+        "source": {
+          "kind": "canonical_fact",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "fd51188d4b5ba1d8aa842cc389cc878ed080acd00be49aa68c24ea2583856885"
+        },
+        "semanticRole": "canonical_fact",
+        "form": "complete",
+        "content": "{\"content\":\"The tide is falling.\",\"id\":\"11111111-1111-4111-8111-111111111111\"}",
+        "spans": [],
+        "sourceLength": 78,
+        "canonicalFactId": "11111111-1111-4111-8111-111111111111",
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/canonicalFacts/0",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    ],
+    "requiredReviewEvidenceIds": [
+      "a910219b16cf9fdc53139ff9fafc63961fa7e13d0bd35f5760d852ed350e250f",
+      "333cd8dfc7bcc30cac601f80f96505289dbd67b133cfdd3af49a4ff81271fcbc",
+      "bbb16e9996c851e67eda3e69ced6b2c4d9da66231f0a2d78d24f65ac5814261b",
+      "7e6b672b19e1bb20dcf460e1327f85b62da5ee86862b1c296e716e136afffd8e",
+      "135c0b536361e3d64613b9d77b3be6e426af3e47f83a63a4909b1916c9419c66"
+    ],
+    "manifestHash": "acef592de192ec3849d2eeb2cee0d0605ea825adea2812fc408eefaf643c3e43"
+  },
+  "snapshot": {
+    "version": "current-continuity-v3",
+    "ownerUserId": "11111111-1111-4111-8111-111111111111",
+    "campaignId": "11111111-1111-4111-8111-111111111111",
+    "worldVersionId": "11111111-1111-4111-8111-111111111111",
+    "baseIdentity": {
+      "operationKind": "append",
+      "expectedTurnNumber": 2,
+      "baseTurnNumber": 1,
+      "campaignActiveTurnNumber": 1,
+      "campaignStateRevision": 2,
+      "stateEditRevision": 2,
+      "narrationCorrectionRevision": null,
+      "baseTurnId": "11111111-1111-4111-8111-111111111111",
+      "stateFingerprint": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56",
+      "narrationFingerprint": "336a4316c1fc956cf9ad543003dd9f04793db1ada2e4a3d8a90048023cb8ac8a",
+      "version": "generation-base-v3",
+      "characterProfileRevision": 3,
+      "characterProfileFingerprint": "4a3333677ce6058e5ab51f3b45099d96ee03c66f7d0d3698e8a7edc5e920dd59"
+    },
+    "protectedAuthority": {
+      "rules": [
+        "The tide follows the moon."
+      ],
+      "worldCanon": {
+        "title": "Moon Quay",
+        "genre": "",
+        "tone": "",
+        "premise": "",
+        "backgroundStory": "",
+        "firstAction": "",
+        "rules": "The tide follows the moon."
+      },
+      "selectedCharacterId": "rowan",
+      "characterAuthority": {
+        "source": "campaign_profile",
+        "name": "Rowan",
+        "characterText": "",
+        "profile": {
+          "identity": {
+            "aliases": [],
+            "pronouns": ""
+          },
+          "story": {
+            "role": "",
+            "background": "",
+            "personality": "",
+            "motivations": "",
+            "goals": "",
+            "fearsAndConflicts": "",
+            "keyRelationships": "Keeps watch with Mira.",
+            "narrativeHooks": "",
+            "voiceAndMannerisms": "",
+            "otherGuidance": ""
+          },
+          "appearance": {
+            "ancestryOrSpecies": "",
+            "apparentAge": "",
+            "genderPresentation": "",
+            "build": "",
+            "skinOrComplexion": "",
+            "face": "",
+            "eyes": "",
+            "hair": "",
+            "distinguishingFeatures": [],
+            "clothing": "",
+            "equipmentAndAccessories": "",
+            "otherVisualDetails": ""
+          },
+          "unclassifiedNotes": ""
+        }
+      },
+      "currentContinuity": {
+        "continuitySummary": "",
+        "openThreads": [],
+        "canonicalFacts": [],
+        "scratchpad": "",
+        "trackers": [],
+        "rpgStats": [],
+        "eventTriggers": [],
+        "pendingEventTriggers": []
+      },
+      "scratchpad": "",
+      "openThreads": [],
+      "canonicalFacts": [],
+      "trackers": [],
+      "rpgStats": [],
+      "eventTriggers": [],
+      "pendingEventTriggers": [],
+      "latestTurn": {
+        "action": "Wait.",
+        "narration": "A bell rings. The tide falls."
+      }
+    },
+    "candidates": [
+      {
+        "id": "a910219b16cf9fdc53139ff9fafc63961fa7e13d0bd35f5760d852ed350e250f",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "[]",
+        "spans": [],
+        "sourceLength": 2,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/openThreads",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "333cd8dfc7bcc30cac601f80f96505289dbd67b133cfdd3af49a4ff81271fcbc",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "",
+        "spans": [],
+        "sourceLength": 0,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/continuitySummary",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "bbb16e9996c851e67eda3e69ced6b2c4d9da66231f0a2d78d24f65ac5814261b",
+        "source": {
+          "kind": "world",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": null,
+          "contentHash": "5d1c90cd72674839eb3b3ba8a8c7a83930763c98e398d6a63baa90a6a37e0289"
+        },
+        "semanticRole": "world_rule",
+        "form": "complete",
+        "content": "The tide follows the moon.",
+        "spans": [],
+        "sourceLength": 26,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/world/rules",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "7e6b672b19e1bb20dcf460e1327f85b62da5ee86862b1c296e716e136afffd8e",
+        "source": {
+          "kind": "character",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "3",
+          "turnNumber": 1,
+          "contentHash": "4a3333677ce6058e5ab51f3b45099d96ee03c66f7d0d3698e8a7edc5e920dd59"
+        },
+        "semanticRole": "character_authority",
+        "form": "complete",
+        "content": "Keeps watch with Mira.",
+        "spans": [],
+        "sourceLength": 22,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/story/keyRelationships",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "a684d6d23ebf40601f52e9eda7edc4159788a9d95c661a4dca5b118dbf665378",
+        "source": {
+          "kind": "turn",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08"
+        },
+        "semanticRole": "accepted_narration",
+        "form": "excerpt",
+        "content": "A bell rings.",
+        "spans": [
+          {
+            "start": 0,
+            "end": 13
+          }
+        ],
+        "sourceLength": 29,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "retrieved",
+        "sourcePath": "/narration",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "25fda31cc297d6b258bb3fbf6cc06d8c914f3f7b5ef7fd53943644830281993a",
+        "source": {
+          "kind": "direction",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": null,
+          "contentHash": "b4a4e7d8d5244bf732605f73364a4aa106261b70d753a16c051b85912c43b858"
+        },
+        "semanticRole": "player_intent",
+        "form": "complete",
+        "content": "Wait. Wait.",
+        "spans": [],
+        "sourceLength": 11,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "direction",
+        "sourcePath": "/action",
+        "normalizationVersion": "fiction-safe-json-v1"
+      },
+      {
+        "id": "135c0b536361e3d64613b9d77b3be6e426af3e47f83a63a4909b1916c9419c66",
+        "source": {
+          "kind": "canonical_fact",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "fd51188d4b5ba1d8aa842cc389cc878ed080acd00be49aa68c24ea2583856885"
+        },
+        "semanticRole": "canonical_fact",
+        "form": "complete",
+        "content": "{\"content\":\"The tide is falling.\",\"id\":\"11111111-1111-4111-8111-111111111111\"}",
+        "spans": [],
+        "sourceLength": 78,
+        "canonicalFactId": "11111111-1111-4111-8111-111111111111",
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/canonicalFacts/0",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    ],
+    "manifest": {
+      "version": "generation-evidence-v1",
+      "attemptId": "11111111-1111-4111-8111-111111111111",
+      "producingRequestHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "entries": [
+        {
+          "id": "a910219b16cf9fdc53139ff9fafc63961fa7e13d0bd35f5760d852ed350e250f",
+          "source": {
+            "kind": "state_edit",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "revision": "2",
+            "turnNumber": 1,
+            "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+          },
+          "semanticRole": "corrected_state",
+          "form": "complete",
+          "content": "[]",
+          "spans": [],
+          "sourceLength": 2,
+          "canonicalFactId": null,
+          "rank": 0,
+          "selectionGroup": "protected",
+          "sourcePath": "/openThreads",
+          "normalizationVersion": "fiction-safe-json-v1"
+        },
+        {
+          "id": "333cd8dfc7bcc30cac601f80f96505289dbd67b133cfdd3af49a4ff81271fcbc",
+          "source": {
+            "kind": "state_edit",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "revision": "2",
+            "turnNumber": 1,
+            "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+          },
+          "semanticRole": "corrected_state",
+          "form": "complete",
+          "content": "",
+          "spans": [],
+          "sourceLength": 0,
+          "canonicalFactId": null,
+          "rank": 0,
+          "selectionGroup": "protected",
+          "sourcePath": "/continuitySummary",
+          "normalizationVersion": "fiction-safe-json-v1"
+        },
+        {
+          "id": "bbb16e9996c851e67eda3e69ced6b2c4d9da66231f0a2d78d24f65ac5814261b",
+          "source": {
+            "kind": "world",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "revision": "1",
+            "turnNumber": null,
+            "contentHash": "5d1c90cd72674839eb3b3ba8a8c7a83930763c98e398d6a63baa90a6a37e0289"
+          },
+          "semanticRole": "world_rule",
+          "form": "complete",
+          "content": "The tide follows the moon.",
+          "spans": [],
+          "sourceLength": 26,
+          "canonicalFactId": null,
+          "rank": 0,
+          "selectionGroup": "protected",
+          "sourcePath": "/world/rules",
+          "normalizationVersion": "fiction-safe-json-v1"
+        },
+        {
+          "id": "7e6b672b19e1bb20dcf460e1327f85b62da5ee86862b1c296e716e136afffd8e",
+          "source": {
+            "kind": "character",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "revision": "3",
+            "turnNumber": 1,
+            "contentHash": "4a3333677ce6058e5ab51f3b45099d96ee03c66f7d0d3698e8a7edc5e920dd59"
+          },
+          "semanticRole": "character_authority",
+          "form": "complete",
+          "content": "Keeps watch with Mira.",
+          "spans": [],
+          "sourceLength": 22,
+          "canonicalFactId": null,
+          "rank": 0,
+          "selectionGroup": "protected",
+          "sourcePath": "/story/keyRelationships",
+          "normalizationVersion": "fiction-safe-json-v1"
+        },
+        {
+          "id": "a684d6d23ebf40601f52e9eda7edc4159788a9d95c661a4dca5b118dbf665378",
+          "source": {
+            "kind": "turn",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "revision": "1",
+            "turnNumber": 1,
+            "contentHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08"
+          },
+          "semanticRole": "accepted_narration",
+          "form": "excerpt",
+          "content": "A bell rings.",
+          "spans": [
+            {
+              "start": 0,
+              "end": 13
+            }
+          ],
+          "sourceLength": 29,
+          "canonicalFactId": null,
+          "rank": 0,
+          "selectionGroup": "retrieved",
+          "sourcePath": "/narration",
+          "normalizationVersion": "fiction-safe-json-v1"
+        },
+        {
+          "id": "25fda31cc297d6b258bb3fbf6cc06d8c914f3f7b5ef7fd53943644830281993a",
+          "source": {
+            "kind": "direction",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "revision": "1",
+            "turnNumber": null,
+            "contentHash": "b4a4e7d8d5244bf732605f73364a4aa106261b70d753a16c051b85912c43b858"
+          },
+          "semanticRole": "player_intent",
+          "form": "complete",
+          "content": "Wait. Wait.",
+          "spans": [],
+          "sourceLength": 11,
+          "canonicalFactId": null,
+          "rank": 0,
+          "selectionGroup": "direction",
+          "sourcePath": "/action",
+          "normalizationVersion": "fiction-safe-json-v1"
+        },
+        {
+          "id": "135c0b536361e3d64613b9d77b3be6e426af3e47f83a63a4909b1916c9419c66",
+          "source": {
+            "kind": "canonical_fact",
+            "id": "11111111-1111-4111-8111-111111111111",
+            "revision": "1",
+            "turnNumber": 1,
+            "contentHash": "fd51188d4b5ba1d8aa842cc389cc878ed080acd00be49aa68c24ea2583856885"
+          },
+          "semanticRole": "canonical_fact",
+          "form": "complete",
+          "content": "{\"content\":\"The tide is falling.\",\"id\":\"11111111-1111-4111-8111-111111111111\"}",
+          "spans": [],
+          "sourceLength": 78,
+          "canonicalFactId": "11111111-1111-4111-8111-111111111111",
+          "rank": 0,
+          "selectionGroup": "protected",
+          "sourcePath": "/canonicalFacts/0",
+          "normalizationVersion": "fiction-safe-json-v1"
+        }
+      ],
+      "requiredReviewEvidenceIds": [
+        "a910219b16cf9fdc53139ff9fafc63961fa7e13d0bd35f5760d852ed350e250f",
+        "333cd8dfc7bcc30cac601f80f96505289dbd67b133cfdd3af49a4ff81271fcbc",
+        "bbb16e9996c851e67eda3e69ced6b2c4d9da66231f0a2d78d24f65ac5814261b",
+        "7e6b672b19e1bb20dcf460e1327f85b62da5ee86862b1c296e716e136afffd8e",
+        "135c0b536361e3d64613b9d77b3be6e426af3e47f83a63a4909b1916c9419c66"
+      ],
+      "manifestHash": "acef592de192ec3849d2eeb2cee0d0605ea825adea2812fc408eefaf643c3e43"
+    }
+  },
+  "checkpoint": {
+    "version": 2,
+    "ownerUserId": "11111111-1111-4111-8111-111111111111",
+    "campaignId": "11111111-1111-4111-8111-111111111111",
+    "worldVersionId": "11111111-1111-4111-8111-111111111111",
+    "baseIdentity": {
+      "operationKind": "append",
+      "expectedTurnNumber": 2,
+      "baseTurnNumber": 1,
+      "campaignActiveTurnNumber": 1,
+      "campaignStateRevision": 2,
+      "stateEditRevision": 2,
+      "narrationCorrectionRevision": null,
+      "baseTurnId": "11111111-1111-4111-8111-111111111111",
+      "stateFingerprint": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56",
+      "narrationFingerprint": "336a4316c1fc956cf9ad543003dd9f04793db1ada2e4a3d8a90048023cb8ac8a"
+    },
+    "promptProtocolVersion": "story-v13",
+    "providerId": "11111111-1111-4111-8111-111111111111",
+    "providerModel": "synthetic-model",
+    "providerConfigurationHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "action": "Wait. Wait.",
+    "originalInputHash": "d2ece33b92d02e769c6fd75b0c38889c75dc21d3bf0a1e23924ce60dd33bd8eb",
+    "requestBody": "{}",
+    "requestPayloadHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "draftHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08",
+    "producingAttempt": 1,
+    "story": {
+      "narration": "A bell rings. The tide falls.",
+      "choices": [
+        "Watch.",
+        "Wait.",
+        "Walk.",
+        "Call."
+      ],
+      "custom_action_suggestion": "Listen.",
+      "scratchpad": "",
+      "tracker_updates": [],
+      "image_prompt": "",
+      "continuity_summary": "",
+      "canonical_facts": [],
+      "superseded_facts": [],
+      "canonical_fact_updates": [],
+      "open_threads": []
+    },
+    "response": {
+      "content": "{\"narration\":\"A bell rings. The tide falls.\",\"choices\":[\"Watch.\",\"Wait.\",\"Walk.\",\"Call.\"],\"custom_action_suggestion\":\"Listen.\",\"scratchpad\":\"\",\"tracker_updates\":[],\"image_prompt\":\"\",\"continuity_summary\":\"\",\"canonical_facts\":[],\"superseded_facts\":[],\"canonical_fact_updates\":[],\"open_threads\":[]}",
+      "responseId": "synthetic-response",
+      "finishReason": "stop",
+      "outputLimited": false,
+      "modelInstanceId": "synthetic-instance",
+      "usage": {
+        "inputTokens": 1,
+        "outputTokens": 1,
+        "totalTokens": 2
+      },
+      "reportedCost": null,
+      "rawMetadata": {}
+    },
+    "sentFactIds": []
+  },
+  "checkpointEnvelope": {
+    "version": 3,
+    "metadata": {
+      "contextProtocol": "current-continuity-v3",
+      "outputProtocol": "story-output-v2",
+      "memoryPolicyHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "evidenceManifestHash": "acef592de192ec3849d2eeb2cee0d0605ea825adea2812fc408eefaf643c3e43"
+    },
+    "checkpoint": {
+      "version": 2,
+      "ownerUserId": "11111111-1111-4111-8111-111111111111",
+      "campaignId": "11111111-1111-4111-8111-111111111111",
+      "worldVersionId": "11111111-1111-4111-8111-111111111111",
+      "baseIdentity": {
+        "operationKind": "append",
+        "expectedTurnNumber": 2,
+        "baseTurnNumber": 1,
+        "campaignActiveTurnNumber": 1,
+        "campaignStateRevision": 2,
+        "stateEditRevision": 2,
+        "narrationCorrectionRevision": null,
+        "baseTurnId": "11111111-1111-4111-8111-111111111111",
+        "stateFingerprint": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56",
+        "narrationFingerprint": "336a4316c1fc956cf9ad543003dd9f04793db1ada2e4a3d8a90048023cb8ac8a"
+      },
+      "promptProtocolVersion": "story-v13",
+      "providerId": "11111111-1111-4111-8111-111111111111",
+      "providerModel": "synthetic-model",
+      "providerConfigurationHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "action": "Wait. Wait.",
+      "originalInputHash": "d2ece33b92d02e769c6fd75b0c38889c75dc21d3bf0a1e23924ce60dd33bd8eb",
+      "requestBody": "{}",
+      "requestPayloadHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "draftHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08",
+      "producingAttempt": 1,
+      "story": {
+        "narration": "A bell rings. The tide falls.",
+        "choices": [
+          "Watch.",
+          "Wait.",
+          "Walk.",
+          "Call."
+        ],
+        "custom_action_suggestion": "Listen.",
+        "scratchpad": "",
+        "tracker_updates": [],
+        "image_prompt": "",
+        "continuity_summary": "",
+        "canonical_facts": [],
+        "superseded_facts": [],
+        "canonical_fact_updates": [],
+        "open_threads": []
+      },
+      "response": {
+        "content": "{\"narration\":\"A bell rings. The tide falls.\",\"choices\":[\"Watch.\",\"Wait.\",\"Walk.\",\"Call.\"],\"custom_action_suggestion\":\"Listen.\",\"scratchpad\":\"\",\"tracker_updates\":[],\"image_prompt\":\"\",\"continuity_summary\":\"\",\"canonical_facts\":[],\"superseded_facts\":[],\"canonical_fact_updates\":[],\"open_threads\":[]}",
+        "responseId": "synthetic-response",
+        "finishReason": "stop",
+        "outputLimited": false,
+        "modelInstanceId": "synthetic-instance",
+        "usage": {
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "totalTokens": 2
+        },
+        "reportedCost": null,
+        "rawMetadata": {}
+      },
+      "sentFactIds": []
+    }
+  },
+  "negativeEvidence": [
+    {
+      "reason": "forged_identity",
+      "value": {
+        "id": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "[]",
+        "spans": [],
+        "sourceLength": 2,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/openThreads",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "reason": "invalid_pointer",
+      "value": {
+        "id": "a910219b16cf9fdc53139ff9fafc63961fa7e13d0bd35f5760d852ed350e250f",
+        "source": {
+          "kind": "state_edit",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "2",
+          "turnNumber": 1,
+          "contentHash": "feb99c94155d0d82c616083e342a56161651a7fe2516faad6bbbd7b36e01aa56"
+        },
+        "semanticRole": "corrected_state",
+        "form": "complete",
+        "content": "[]",
+        "spans": [],
+        "sourceLength": 2,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/bad~2",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "reason": "excerpt_fact",
+      "value": {
+        "id": "135c0b536361e3d64613b9d77b3be6e426af3e47f83a63a4909b1916c9419c66",
+        "source": {
+          "kind": "canonical_fact",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "fd51188d4b5ba1d8aa842cc389cc878ed080acd00be49aa68c24ea2583856885"
+        },
+        "semanticRole": "canonical_fact",
+        "form": "excerpt",
+        "content": "{\"content\":\"The tide is falling.\",\"id\":\"11111111-1111-4111-8111-111111111111\"}",
+        "spans": [
+          {
+            "start": 0,
+            "end": 3
+          }
+        ],
+        "sourceLength": 78,
+        "canonicalFactId": "11111111-1111-4111-8111-111111111111",
+        "rank": 0,
+        "selectionGroup": "protected",
+        "sourcePath": "/canonicalFacts/0",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    },
+    {
+      "reason": "overlapping_spans",
+      "value": {
+        "id": "a684d6d23ebf40601f52e9eda7edc4159788a9d95c661a4dca5b118dbf665378",
+        "source": {
+          "kind": "turn",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "revision": "1",
+          "turnNumber": 1,
+          "contentHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08"
+        },
+        "semanticRole": "accepted_narration",
+        "form": "excerpt",
+        "content": "A bell rings.",
+        "spans": [
+          {
+            "start": 0,
+            "end": 13
+          },
+          {
+            "start": 10,
+            "end": 15
+          }
+        ],
+        "sourceLength": 29,
+        "canonicalFactId": null,
+        "rank": 0,
+        "selectionGroup": "retrieved",
+        "sourcePath": "/narration",
+        "normalizationVersion": "fiction-safe-json-v1"
+      }
+    }
+  ],
+  "reviews": [
+    {
+      "version": "story-continuity-review-v1",
+      "verdict": "uncertain",
+      "findings": [
+        {
+          "kind": "omission",
+          "category": "direction_coverage",
+          "severity": "warning",
+          "expectedEvidenceIds": [
+            "25fda31cc297d6b258bb3fbf6cc06d8c914f3f7b5ef7fd53943644830281993a"
+          ],
+          "outputPath": "/narration",
+          "explanation": "The repeated direction beat needs coverage; no absent passage is quoted."
+        }
+      ]
+    },
+    {
+      "version": "story-continuity-review-v1",
+      "verdict": "conflict",
+      "findings": [
+        {
+          "kind": "contradiction",
+          "category": "replacement_state",
+          "severity": "contradiction",
+          "basis": {
+            "kind": "candidate",
+            "draftHash": "bf505ef030746cc12d7773a1a61a2b751dccfecf234489063ed4e173d4c30f08",
+            "location": {
+              "path": "/narration",
+              "start": 14,
+              "end": 29,
+              "quote": "The tide falls."
+            }
+          },
+          "output": {
+            "path": "/continuity_summary",
+            "start": 0,
+            "end": 15,
+            "quote": "The tide rises."
+          },
+          "explanation": "Candidate replacement state contradicts candidate narration."
+        }
+      ]
+    },
+    {
+      "version": "story-continuity-review-v1",
+      "verdict": "pass",
+      "findings": [
+        {
+          "kind": "omission",
+          "category": "direction_coverage",
+          "severity": "warning",
+          "expectedEvidenceIds": [
+            "25fda31cc297d6b258bb3fbf6cc06d8c914f3f7b5ef7fd53943644830281993a"
+          ],
+          "outputPath": "/narration",
+          "explanation": "The repeated direction beat needs coverage; no absent passage is quoted."
+        }
+      ]
+    }
+  ],
+  "queryVariants": [
+    {
+      "kind": "action",
+      "query": "Wait.",
+      "entityIds": [],
+      "actionSegment": {
+        "index": 0,
+        "start": 0,
+        "end": 5
+      },
+      "temporalHint": null,
+      "version": "story-memory-query-v1",
+      "familyId": "action",
+      "variantId": "df95037cfa7db4a5695b2aa31d5e897d23ba55e45e24a05307485297e817ebaf"
+    },
+    {
+      "kind": "action",
+      "query": "Wait.",
+      "entityIds": [],
+      "actionSegment": {
+        "index": 1,
+        "start": 6,
+        "end": 11
+      },
+      "temporalHint": null,
+      "version": "story-memory-query-v1",
+      "familyId": "action",
+      "variantId": "f12082e0b9f2e89a948592c4757ca11c09dff20590a4fe07d7e8bde9a406a188"
+    }
+  ]
+}

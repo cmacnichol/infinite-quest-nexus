@@ -1,24 +1,22 @@
 import { sha256, stableStringify } from "../../domain/src/index.js";
+import { sanitizeChronicleFictionString } from "../../domain/src/chronicle-memory-helpers.js";
+import { campaignCharacterProfileSchema } from "../../contracts/src/world-library.js";
+import { effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
 import type { DatabaseClient } from "./pool.js";
 
-export type GenerationBaseIdentity = Readonly<{
-  operationKind: "append" | "replace_latest";
-  expectedTurnNumber: number;
-  baseTurnNumber: number;
-  campaignActiveTurnNumber: number;
-  campaignStateRevision: number;
-  stateEditRevision: number | null;
-  narrationCorrectionRevision: number | null;
-  baseTurnId: string | null;
-  stateFingerprint: string;
-  narrationFingerprint: string | null;
-}>;
+import type {
+  GenerationBaseIdentityV3,
+  LegacyGenerationBaseIdentity
+} from "../../application/src/memory/generation-context.js";
+import type { GenerationRecentTurn } from "../../application/src/memory/generation-context.js";
+export type GenerationBaseIdentity = LegacyGenerationBaseIdentity | GenerationBaseIdentityV3;
 
 export type ResolvedGenerationAuthority = Readonly<{
   ownerUserId: string;
   campaignId: string;
   worldVersionId: string;
   baseIdentity: GenerationBaseIdentity;
+  recentTurns?: readonly GenerationRecentTurn[];
 }>;
 
 type ResolveRequest = Readonly<{
@@ -26,7 +24,45 @@ type ResolveRequest = Readonly<{
   campaignId: string;
   operationKind: "append" | "replace_latest";
   expectedTurnNumber: number;
+  /** Policy attempts bind effective character authority; historical jobs retain their stored legacy shape. */
+  baseIdentityVersion?: "legacy" | "generation-base-v3";
+  captureRecentWindow?: boolean;
 }>;
+
+function characterAuthorityIdentity(
+  selectedCharacterId: string | null,
+  campaignProfile: unknown,
+  snapshot: unknown,
+  profileRevision: number
+): Pick<GenerationBaseIdentityV3, "characterProfileRevision" | "characterProfileFingerprint"> {
+  if (campaignProfile !== null && !campaignCharacterProfileSchema.safeParse(campaignProfile).success) {
+    throw Object.assign(new Error("The persisted campaign character profile is invalid."), {
+      code: "authoritative_context_invalid",
+      field: "character_profile"
+    });
+  }
+  const effective = effectiveCampaignCharacter(campaignProfile, snapshot);
+  const source = campaignProfile !== null
+    ? "campaign_profile"
+    : effective.profile !== null
+      ? "origin_snapshot"
+      : effective.name || effective.legacyGuidance
+        ? "legacy_guidance"
+        : "none";
+  // Profile-based rendering excludes the old character text; including it here
+  // would spuriously stale an attempt when unused legacy guidance changes.
+  const fictionAuthority = {
+    selectedCharacterId,
+    source,
+    name: effective.name,
+    profile: effective.profile,
+    characterText: effective.profile === null ? effective.legacyGuidance : ""
+  };
+  return {
+    characterProfileRevision: profileRevision,
+    characterProfileFingerprint: sha256(stableStringify(fictionAuthority))
+  };
+}
 
 /**
  * Reads the authoritative base inside the enqueue/commit transaction. The
@@ -41,8 +77,14 @@ export async function resolveGenerationAuthoritySnapshot(
     active_turn_number: number;
     world_version_id: string;
     revision: number;
+    selected_character_id: string | null;
+    character_profile: unknown;
+    character_profile_revision: number;
+    character_snapshot: unknown;
   }>(
-    `SELECT campaign.active_turn_number, campaign.world_version_id, state.revision
+    `SELECT campaign.active_turn_number, campaign.world_version_id, state.revision,
+            campaign.selected_character_id, campaign.character_profile,
+            campaign.character_profile_revision, campaign.character_snapshot
        FROM campaigns campaign
        JOIN campaign_state state ON state.campaign_id = campaign.id AND state.owner_user_id = campaign.owner_user_id
       WHERE campaign.id = $1 AND campaign.owner_user_id = $2
@@ -78,21 +120,53 @@ export async function resolveGenerationAuthoritySnapshot(
       [request.campaignId, request.ownerUserId, baseTurnNumber]
     );
   const baseTurn = baseTurnResult.rows[0] ?? null;
+  const recentRows = request.captureRecentWindow && request.baseIdentityVersion === "generation-base-v3"
+    ? (await client.query<{ turn_id: string; turn_number: number; action: string; input_mode: "action" | "scene";
+      effective_narration: string; correction_revision: number }>(
+      `SELECT t.id AS turn_id,t.turn_number,t.action,t.input_mode,e.effective_narration,e.correction_revision
+       FROM turns t JOIN effective_turn_narrations e ON e.turn_id=t.id AND e.campaign_id=t.campaign_id AND e.owner_user_id=t.owner_user_id
+       JOIN campaigns c ON c.id=t.campaign_id AND c.owner_user_id=t.owner_user_id
+       WHERE t.owner_user_id=$1 AND t.campaign_id=$2 AND c.world_version_id=$3
+         AND t.turn_number >= $4 AND t.turn_number < $5 ORDER BY t.turn_number`,
+      [request.ownerUserId, request.campaignId, campaign.world_version_id, Math.max(1, baseTurnNumber - 2), baseTurnNumber]
+    )).rows : undefined;
+  const recentTurns = recentRows?.map((row): GenerationRecentTurn => {
+    const source = { turnId: row.turn_id, turnNumber: row.turn_number, inputMode: row.input_mode,
+      action: sanitizeChronicleFictionString(row.action, Number.MAX_SAFE_INTEGER),
+      narration: sanitizeChronicleFictionString(row.effective_narration, Number.MAX_SAFE_INTEGER),
+      narrationCorrectionRevision: row.correction_revision };
+    return { ...source, sourceHash: sha256(stableStringify(source)) };
+  });
+  const legacyIdentity: LegacyGenerationBaseIdentity = {
+    operationKind: request.operationKind,
+    expectedTurnNumber: request.expectedTurnNumber,
+    baseTurnNumber,
+    campaignActiveTurnNumber: campaign.active_turn_number,
+    campaignStateRevision: campaign.revision,
+    stateEditRevision: stateEdit?.revision ?? null,
+    narrationCorrectionRevision: baseTurn?.correction_revision || null,
+    baseTurnId: baseTurn?.id ?? null,
+    stateFingerprint: sha256(stableStringify(stateEdit?.state_snapshot_private ?? {})),
+    narrationFingerprint: baseTurn ? sha256(baseTurn.effective_narration) : null
+  };
+  const baseIdentity: GenerationBaseIdentity = request.baseIdentityVersion === "generation-base-v3"
+    ? {
+      ...legacyIdentity,
+      version: "generation-base-v3",
+      ...(recentRows ? { recentWindowFingerprint: sha256(stableStringify(recentRows)) } : {}),
+      ...characterAuthorityIdentity(
+        campaign.selected_character_id,
+        campaign.character_profile,
+        campaign.character_snapshot,
+        campaign.character_profile_revision
+      )
+    }
+    : legacyIdentity;
   return {
     ownerUserId: request.ownerUserId,
     campaignId: request.campaignId,
     worldVersionId: campaign.world_version_id,
-    baseIdentity: {
-      operationKind: request.operationKind,
-      expectedTurnNumber: request.expectedTurnNumber,
-      baseTurnNumber,
-      campaignActiveTurnNumber: campaign.active_turn_number,
-      campaignStateRevision: campaign.revision,
-      stateEditRevision: stateEdit?.revision ?? null,
-      narrationCorrectionRevision: baseTurn?.correction_revision || null,
-      baseTurnId: baseTurn?.id ?? null,
-      stateFingerprint: sha256(stableStringify(stateEdit?.state_snapshot_private ?? {})),
-      narrationFingerprint: baseTurn ? sha256(baseTurn.effective_narration) : null
-    }
+    baseIdentity,
+    ...(recentTurns ? { recentTurns } : {})
   };
 }

@@ -1,3 +1,8 @@
+import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
+import { prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
+import { isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
+import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
+export { planGenerationPromptContext } from "./generation-context-planner.js";
 import type {
   GenerationExecutor,
   IllustrationGenerationTransactionPort,
@@ -19,18 +24,22 @@ import {
 } from "../../../packages/contracts/src/memory.js";
 import {
   promptSnapshotSchema,
+  assertStoryMemoryPromptCompatibility,
+  assertContinuityReviewPromptSnapshot,
+  readPromptSnapshot,
   type
   PromptSnapshot,
   PromptTemplateKey
 } from "../../../packages/contracts/src/prompt-library.js";
 import { generationPolicySnapshotSchema } from "../../../packages/contracts/src/campaign-generation-policy.js";
+import { effectiveProviderConfigurationFingerprint, storyMemoryPolicySnapshotSchema } from "../../../packages/contracts/src/story-memory-policy.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   storyLengthProfileFromUnknown,
   storyLengthWordRange,
   type StoryLengthWordRange
 } from "../../../packages/contracts/src/story-settings.js";
-import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
+import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import type {
   AcceptedGenerationCommitCollaborators,
   GenerationExecutionPayload,
@@ -47,6 +56,7 @@ import {
   buildEventTriggerPrompt,
   buildRpgAssessmentPrompt,
   buildSceneCoveragePrompt,
+  buildStoryMemoryUserPrompt,
   buildStoryUserPrompt,
   compactStoryLengthWordRange,
   containsMechanicsLanguage,
@@ -55,10 +65,11 @@ import {
   resolveEffectiveContextWindowTokens,
   estimatedInputSafetyAllowanceTokens,
   estimateStoryTokens,
+  composeStoryMemorySystemPrompt,
+  composeStoryOnlyChoiceRepairSystemPrompt,
   composeStoryOnlySystemPrompt,
   buildStoryOnlyChoiceRepairInput,
   generationExecutionProtocolIdentity,
-  planContext,
   serializeProviderRequest,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
@@ -98,13 +109,27 @@ import { providerPromptProtocolVersion } from "./provider-application-compositio
 
 type GenerationTextProvider = RuntimeTextExecution;
 
+/** Extension repair is safe only when every blocking citation points into the
+ * appended narration. Any state-field or main-text conflict replaces main. */
+export function semanticRepairScope(input: Readonly<{
+  hasExtension: boolean; mainNarration: string;
+  findings: readonly { kind: string; output?: { path: string; start: number } }[];
+}>): "main" | "extension_only" {
+  const prefixLength = formatNarrationParagraphs(input.mainNarration).length;
+  return input.hasExtension && input.findings.length > 0
+    && input.findings.every((finding) => finding.kind === "contradiction"
+      && finding.output?.path === "/narration" && finding.output.start >= prefixLength)
+    ? "extension_only" : "main";
+}
+
 function frozenPolicyIdentity(job: GenerationExecutionPayload): string | null {
   return job.generation_policy ? generationPolicyIdentity(job.generation_policy) : null;
 }
 
-export function generationContextFingerprint(input: Readonly<{ providerId: string; model: string; protocol: string; expectedTurnNumber: number; action: string; inputMode: string; storyLength: unknown; context: unknown; generationPolicyIdentity?: string | null }>): string {
+export function generationContextFingerprint(input: Readonly<{ providerId: string; model: string; protocol: string; expectedTurnNumber: number; action: string; inputMode: string; storyLength: unknown; context: unknown; generationPolicyIdentity?: string | null; storyMemoryPolicyIdentity?: string }>): string {
   return sha256(stableStringify({ provider: input.providerId, model: input.model, protocol: input.protocol,
     ...(input.generationPolicyIdentity ? { generationPolicyIdentity: input.generationPolicyIdentity } : {}),
+    ...(input.storyMemoryPolicyIdentity ? { storyMemoryPolicyIdentity: input.storyMemoryPolicyIdentity } : {}),
     expectedTurnNumber: input.expectedTurnNumber, action: input.action, inputMode: input.inputMode,
     storyLength: input.storyLength, context: input.context }));
 }
@@ -154,7 +179,7 @@ export type GenerationExecutorDependencies = Readonly<{
 
 type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_generation"
   | "story_recovery" | "story_choice_repair" | "event_trigger_after" | "event_extension"
-  | "scene_coverage_validation" | "scene_coverage_rewrite";
+  | "scene_coverage_validation" | "scene_coverage_rewrite" | "story_continuity_review" | "story_continuity_repair";
 
 type TurnGenerationPhase =
   | "provider_loading"
@@ -173,6 +198,8 @@ type TurnGenerationPhase =
   | "scene_coverage_rewrite"
   | "after_event_evaluation"
   | "event_extension"
+  | "story_continuity_review"
+  | "story_continuity_repair"
   | "turn_commit";
 
 type TurnGenerationDiagnosticContext = {
@@ -187,6 +214,9 @@ type TurnGenerationDiagnosticContext = {
 
 const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
   "active_generation_exists",
+  "authoritative_context_invalid",
+  "continuity_review_unavailable",
+  "continuity_review_conflict",
   "context_budget_exceeded",
   "context_budget_invalid",
   "continuity_output_budget_exceeded",
@@ -331,6 +361,9 @@ function errorCodeFrom(error: unknown): string | null {
 }
 
 const RECOVERABLE_INTEGRITY_ERROR_CODES = new Set([
+  "authoritative_context_invalid",
+  "continuity_review_unavailable",
+  "continuity_review_conflict",
   "context_budget_exceeded",
   "context_budget_invalid",
   "continuity_output_budget_exceeded",
@@ -361,6 +394,7 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
           ? "shorten_or_replace_turn"
           : "adjust_context",
       ...(scope ? { scope } : {}),
+      ...("protectedComponents" in error ? { protectedComponents: error.protectedComponents } : {}),
       requiredTokens: error.requiredTokens,
       availableTokens: error.availableTokens,
       ...(error.requiredCharacters === undefined ? {} : { requiredCharacters: error.requiredCharacters }),
@@ -368,7 +402,13 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
       countMode: "estimated",
       estimatorVersion: "story-token-estimate-v1"
     })
-    : null;
+    : errorCode === "authoritative_context_invalid"
+      ? projectSafeGenerationDiagnostic({ code: errorCode, operation: "story_generation", action: "repair_authority",
+        ...((error as { field?: unknown }).field === "canonical_facts" ? { field: "canonical_facts" } : {}) })
+      : errorCode === "continuity_review_unavailable" || errorCode === "continuity_review_conflict"
+        ? projectSafeGenerationDiagnostic({ code: errorCode, operation: "story_continuity_review", action: "discard_and_reenqueue" })
+        : errorCode === "generation_checkpoint_incompatible"
+          ? projectSafeGenerationDiagnostic({ code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue" }) : null;
   return {
     errorCode: RECOVERABLE_INTEGRITY_ERROR_CODES.has(errorCode || "")
       ? errorCode!
@@ -492,7 +532,7 @@ export function sentCanonicalFactIds(storyInput: string): string[] {
       .split("\n\nRECOVERY REQUIREMENT:\n", 1)[0]!;
     try {
       const parsed = JSON.parse(original) as Record<string, unknown>;
-      return parsed.authoritative_context ?? parsed.protected_fiction_safe_base_authority;
+      return parsed;
     } catch {
       return undefined;
     }
@@ -507,8 +547,22 @@ export function sentCanonicalFactIds(storyInput: string): string[] {
       return authority ? [authority] : [];
     })[0]
     : undefined;
-  const authority = directAuthority || lmStudioAuthority || messageAuthority;
-  if (!authority || typeof authority !== "object") return [];
+  const authority = directAuthority
+    || (lmStudioAuthority as { authoritative_context?: unknown; protected_fiction_safe_base_authority?: unknown } | undefined)?.authoritative_context
+    || (lmStudioAuthority as { protected_fiction_safe_base_authority?: unknown } | undefined)?.protected_fiction_safe_base_authority
+    || (messageAuthority as { authoritative_context?: unknown; protected_fiction_safe_base_authority?: unknown } | undefined)?.authoritative_context
+    || (messageAuthority as { protected_fiction_safe_base_authority?: unknown } | undefined)?.protected_fiction_safe_base_authority;
+  const repairFactIds = [rendered, lmStudioAuthority, messageAuthority].flatMap((candidate) => {
+    const protectedAuthority = candidate && typeof candidate === "object"
+      ? (candidate as { protected_authority?: unknown }).protected_authority : undefined;
+    return Array.isArray(protectedAuthority) ? protectedAuthority.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const record = entry as { canonicalFactId?: unknown; form?: unknown };
+      // Only complete canonical-fact evidence grants a supersession permission.
+      return record.form === "complete" && typeof record.canonicalFactId === "string" ? [record.canonicalFactId] : [];
+    }) : [];
+  });
+  if (!authority || typeof authority !== "object") return [...new Set(repairFactIds)];
   const continuity = (authority as { currentContinuity?: unknown }).currentContinuity;
   const continuityFacts = continuity && typeof continuity === "object"
     ? (continuity as { canonicalFacts?: unknown }).canonicalFacts
@@ -529,30 +583,7 @@ export function sentCanonicalFactIds(storyInput: string): string[] {
       ? [candidate.id]
       : [];
   }) : [];
-  return [...new Set([...continuityFactIds, ...selectedHistoricalFactIds])];
-}
-
-const PRIVATE_MECHANICS_AUTHORITY_KEYS = new Set([
-  "rpgStats", "eventTriggers", "pendingEventTriggers", "defaultTriggers", "mechanicsPrivate", "roll"
-]);
-
-/** Removes private mechanics/trigger state before any fiction-authority payload is rendered. */
-function fictionSafeAuthority<T>(value: T): T {
-  if (Array.isArray(value)) return value.map((entry) => fictionSafeAuthority(entry)) as T;
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-    .filter(([key]) => !PRIVATE_MECHANICS_AUTHORITY_KEYS.has(key))
-    .flatMap(([key, entry]) => {
-      if (key === "trackers" && Array.isArray(entry)) {
-        const fictionSafeTrackers = entry.filter((tracker) => {
-          if (!tracker || typeof tracker !== "object") return false;
-          const record = tracker as Record<string, unknown>;
-          return typeof record.value !== "number" && !containsMechanicsLanguage(stableStringify(record));
-        }).map((tracker) => fictionSafeAuthority(tracker));
-        return [[key, fictionSafeTrackers]];
-      }
-      return [[key, fictionSafeAuthority(entry)]];
-    })) as T;
+  return [...new Set([...continuityFactIds, ...selectedHistoricalFactIds, ...repairFactIds])];
 }
 
 function preparedRequestForResult(
@@ -600,15 +631,15 @@ function effectiveContextWindowTokens(provider: GenerationTextProvider, job: Gen
 }
 
 function effectiveProviderConfigurationHash(provider: GenerationTextProvider, job: GenerationExecutionPayload): string {
-  return sha256(stableStringify({
-    id: provider.id, providerType: provider.providerType, model: provider.model,
+  return effectiveProviderConfigurationFingerprint({
+    providerId: provider.id, providerType: provider.providerType, model: provider.model,
     endpointIdentity: provider.endpointIdentity ?? "",
     contextWindowTokens: provider.contextWindowTokens, maxOutputTokens: provider.maxOutputTokens,
     temperature: provider.temperature, requestTimeoutMs: provider.requestTimeoutMs,
     configuration: provider.configuration,
     effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job),
     inputSafetyPolicy: "estimated_20_percent_plus_1024"
-  }));
+  });
 }
 
 function sameFactIds(left: readonly string[], right: readonly string[]): boolean {
@@ -616,6 +647,16 @@ function sameFactIds(left: readonly string[], right: readonly string[]): boolean
     && right.length === new Set(right).size
     && left.every((id) => typeof id === "string" && id.length > 0)
     && stableStringify([...left].sort()) === stableStringify([...right].sort());
+}
+
+function incrementLogicalAllowance(
+  orchestration: GenerationOrchestrationState,
+  field: "automaticRepairsConsumed" | "choiceRepairsConsumed" | "eventCoverageRepairsConsumed"
+) {
+  const current = orchestration.logicalAttempt ?? { version: 1 as const, id: "legacy", semanticRepairsConsumed: 0, reviewsConsumed: 0,
+    automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0, choiceRepairsConsumed: orchestration.choiceRepair ? 1 : 0,
+    eventCoverageRepairsConsumed: orchestration.eventCoverageRepair ? 1 : 0 };
+  return { ...current, [field]: current[field] + 1 };
 }
 
 function isStringList(value: unknown): value is readonly string[] {
@@ -642,7 +683,8 @@ function compatibleValidatedMainDraft(
   value: GenerationOrchestrationState["validatedMainDraft"] | undefined,
   job: GenerationExecutionPayload,
   provider: GenerationTextProvider,
-  storyInput: string
+  storyInput: string,
+  semanticRepair?: GenerationOrchestrationState["semanticRepair"]
 ) {
   if (!value) return null;
   const validResponse = value.response && typeof value.response.content === "string"
@@ -661,6 +703,10 @@ function compatibleValidatedMainDraft(
       code: "generation_checkpoint_incompatible"
     });
   }
+  const repairedRequest = semanticRepair?.status === "validated"
+    && semanticRepair.repairedStoryHash === value.draftHash
+    && semanticRepair.repairRequestPayloadHash === value.requestPayloadHash
+    && stableStringify(semanticRepair.repairedStory) === stableStringify(parsedStory.data);
   if (value.ownerUserId !== job.owner_user_id
       || value.campaignId !== job.campaign_id
       || value.worldVersionId !== (job.world_version_id || null)
@@ -679,6 +725,9 @@ function compatibleValidatedMainDraft(
     throw Object.assign(new Error("The persisted validated draft does not match this generation input."), {
       code: "generation_checkpoint_incompatible"
     });
+  }
+  if (!repairedRequest && value.requestPayloadHash !== sha256(value.requestBody)) {
+    throw Object.assign(new Error("The persisted repaired draft request is incompatible."), { code: "generation_checkpoint_incompatible" });
   }
   if (!sameFactIds(value.sentFactIds, sentCanonicalFactIds(value.requestBody))) {
     throw Object.assign(new Error("The persisted validated draft fact visibility does not match its producing request."), {
@@ -722,90 +771,6 @@ const NO_RETRIEVAL_AUDIT: ChronicleRetrievalAudit = {
   queryCacheHits: 0,
   queryCacheMisses: 0
 };
-
-type PromptCandidate = Readonly<{ id: string; turnId: string | null; ordinal: number; kind: string; content: string; estimatedTokens: number; rank: number }>;
-
-function candidateRecord(candidate: Readonly<Record<string, unknown>>): PromptCandidate {
-  return {
-    id: String(candidate.id || ""),
-    turnId: typeof candidate.turnId === "string" ? candidate.turnId : null,
-    ordinal: Number(candidate.ordinal || 0),
-    kind: String(candidate.kind || "turn_fiction"),
-    content: String(candidate.content || ""),
-    estimatedTokens: Number(candidate.tokenEstimate || 0),
-    rank: Number(candidate.rank || 0)
-  };
-}
-
-/** Builds the one private context representation used for selection and the sent story body. */
-function planGenerationPromptContext(
-  context: MemoryGenerationAuthorityContext,
-  provider: GenerationTextProvider,
-  systemPrompt: string,
-  action: string,
-  guidance: string[],
-  storyLength: StoryLengthWordRange,
-  inputMode: "action" | "scene",
-  contextLimit: number,
-  inputLimit: number
-) {
-  const authority = context.authority;
-  const authorityContext = {
-    authoritativeRules: Array.isArray(authority.rules) ? authority.rules : [],
-    worldCanon: fictionSafeAuthority(authority.worldCanon ?? {}),
-    selectedCharacterId: authority.selectedCharacterId ?? null,
-    currentContinuity: fictionSafeAuthority(authority.currentContinuity ?? {}),
-    currentScene: fictionSafeAuthority(authority.latestTurn ?? null),
-    chronicle: [] as readonly PromptCandidate[]
-  };
-  const candidates = context.candidates.map(candidateRecord).filter((candidate) => candidate.id && candidate.content);
-  const serializationProfile: TextProviderProfile = {
-    ...provider,
-    // Serialization needs the provider wire shape only; the live execution
-    // binding retains its credential and destination outside this planner.
-    baseUrl: ""
-  };
-  const authorityRevision = sha256(stableStringify({ baseIdentity: context.baseIdentity, authority }));
-  const blocks = [
-    { id: "authority", revision: authorityRevision, content: stableStringify(authorityContext), protected: true, priority: 0, ordinal: 0, scope: "authority" },
-    ...candidates.map((candidate) => ({
-      id: candidate.id,
-      revision: sha256(stableStringify(candidate)),
-      content: candidate.content,
-      protected: false,
-      priority: Number.isFinite(Number(candidate.rank)) ? Number(candidate.rank) : Number.MAX_SAFE_INTEGER,
-      ordinal: Number(candidate.ordinal || 0),
-      scope: "chronicle"
-    }))
-  ];
-  const promptContext = (selected: readonly Readonly<{ id: string }>[]) => ({
-    ...authorityContext,
-    chronicle: selected.filter((block) => block.id !== "authority")
-      .map((block) => candidates.find((candidate) => candidate.id === block.id))
-      .filter((candidate): candidate is PromptCandidate => Boolean(candidate))
-  });
-  const plan = planContext({
-    blocks,
-    contextLimit,
-    inputLimit,
-    count: estimateStoryTokens,
-    safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
-    contextSafetyAllowanceTokens: 0,
-    serializeContext: (selected) => stableStringify(promptContext(selected)),
-    contextValue: promptContext,
-    serializeRequest: (selected) => serializeProviderRequest(serializationProfile, {
-      systemPrompt,
-      input: buildStoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
-    }).body,
-    protectedScope: "campaign_context"
-  });
-  const selectedContext = promptContext(plan.selected);
-  return {
-    promptContext: selectedContext,
-    storyInput: buildStoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode),
-    contextPlan: plan
-  };
-}
 
 function snapshottedStoryLength(context: GenerationExecutionPayload["context_options"]): StoryLengthWordRange {
   const profile = storyLengthProfileFromUnknown(context.storyLengthProfile);
@@ -983,8 +948,37 @@ async function executeLoadedGeneration(
   };
   const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) =>
     runTurnGenerationPhase(diagnosticContext, phaseName, generationStartedAt, operation);
-  const promptSnapshot = promptSnapshotSchema.safeParse(job.prompt_snapshot);
-  if (!promptSnapshot.success) {
+  const frozenStoryMemoryPolicy = job.context_options && typeof job.context_options === "object" && "storyMemoryPolicy" in job.context_options
+    ? storyMemoryPolicySnapshotSchema.safeParse((job.context_options as Record<string, unknown>).storyMemoryPolicy)
+    : null;
+  const frozenStoryMemoryPolicySnapshot = frozenStoryMemoryPolicy?.success
+    ? frozenStoryMemoryPolicy.data
+    : null;
+  if (frozenStoryMemoryPolicy && !frozenStoryMemoryPolicy.success) {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id, ownerUserId: job.owner_user_id, workerId, providerResponseId: null, providerFinishReason: null,
+      errorCode: frozenStoryMemoryPolicy.success ? "story_memory_policy_worker_incompatible" : "story_memory_policy_invalid",
+      errorMessage: "Saved Story Memory policy requires a compatible worker.",
+      recoveryMetadata: { reason: "story_memory_policy_worker_incompatible", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }), "saving incompatible Story Memory policy recovery state");
+    return false;
+  }
+  const frozenPromptEnvelope = job.prompt_snapshot;
+  const reviewMode = frozenStoryMemoryPolicySnapshot?.policy.continuityReview ?? "off";
+  let promptSnapshot: ReturnType<typeof readPromptSnapshot>;
+  try {
+    // Once R1 enables this route, the worker validates only the bytes and
+    // acknowledgement frozen on this job. It never re-reads mutable prompt
+    // overrides while executing or reclaiming a lease.
+    promptSnapshot = frozenStoryMemoryPolicySnapshot
+      ? assertStoryMemoryPromptCompatibility(job.prompt_snapshot)
+      : readPromptSnapshot(job.prompt_snapshot);
+    if (frozenStoryMemoryPolicySnapshot) assertContinuityReviewPromptSnapshot(promptSnapshot, reviewMode);
+    // Every downstream prompt use reads the one normalized frozen envelope.
+    job = { ...job, prompt_snapshot: promptSnapshot.templates as PromptSnapshot };
+  } catch {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id,
       ownerUserId: job.owner_user_id,
@@ -993,7 +987,9 @@ async function executeLoadedGeneration(
       providerFinishReason: null,
       errorCode: "generation_prompt_snapshot_invalid",
       errorMessage: "Saved generation instructions are invalid.",
-      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid" }
+      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
     }), "saving invalid prompt snapshot recovery state");
     return false;
   }
@@ -1014,14 +1010,19 @@ async function executeLoadedGeneration(
     return false;
   }
   const generationPolicy = parsedGenerationPolicy === null ? null : parsedGenerationPolicy.data;
+  const hasFrozenStoryMemoryPolicy = frozenStoryMemoryPolicySnapshot !== null;
+  const storyOnlyChoiceRepairSystemPrompt = generationPolicy?.playMode === "story_only"
+    ? composeStoryOnlyChoiceRepairSystemPrompt(generationPolicy.prompts.choiceRepairSystem, hasFrozenStoryMemoryPolicy)
+    : null;
   const stages = generationStagePolicy(generationPolicy?.playMode ?? "legacy");
   let frozenGenerationPolicyIdentity: string | null = null;
   try {
     frozenGenerationPolicyIdentity = generationPolicy ? generationPolicyIdentity(generationPolicy) : null;
-    if (generationPolicy && generationExecutionProtocolIdentity(
-      providerPromptProtocolVersion(promptSnapshot.data),
-      generationPolicy
-    ) !== job.prompt_protocol_version) {
+    const basePromptProtocol = providerPromptProtocolVersion(promptSnapshot.templates as PromptSnapshot);
+    const legacyExecutionProtocol = generationPolicy
+      ? generationExecutionProtocolIdentity(basePromptProtocol, generationPolicy) : basePromptProtocol;
+    const expectedExecutionProtocol = hasFrozenStoryMemoryPolicy ? `story-memory-v1|${legacyExecutionProtocol}` : legacyExecutionProtocol;
+    if ((generationPolicy || hasFrozenStoryMemoryPolicy) && expectedExecutionProtocol !== job.prompt_protocol_version) {
       throw new Error("Saved Story Direction protocol identity is incompatible.");
     }
   } catch {
@@ -1052,6 +1053,23 @@ async function executeLoadedGeneration(
       job.requested_model
     ));
 
+    if (frozenStoryMemoryPolicySnapshot && effectiveProviderConfigurationHash(provider, job) !== frozenStoryMemoryPolicySnapshot.providerConfigurationFingerprint) {
+      assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
+        errorCode: "generation_checkpoint_incompatible", errorMessage: "The provider configuration changed after this job was queued.",
+        recoveryMetadata: { reason: "provider_configuration_changed", diagnostic: {
+          code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+        } }
+      }), "saving changed provider configuration");
+      return false;
+    }
+
+    if (reviewMode !== "off" && job.streaming_segments_state?.provisionalSetId) {
+      assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
+        errorCode: "generation_checkpoint_incompatible", errorMessage: "Saved provisional artwork predates the required review gate.",
+        recoveryMetadata: { diagnostic: { code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue" } }
+      }), "rejecting incompatible provisional artwork");
+      return true;
+    }
     const preparedInput = await phase("input_preparation", async () => {
       const safeAction = safeTurnInput(job.action);
       const storyLength = snapshottedStoryLength(job.context_options);
@@ -1060,10 +1078,12 @@ async function executeLoadedGeneration(
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
       const storySystemPrompt = generationPolicy?.playMode === "story_only"
-        ? composeStoryOnlySystemPrompt(baseStorySystemPrompt, generationPolicy)
-        : baseStorySystemPrompt;
+        ? composeStoryOnlySystemPrompt(baseStorySystemPrompt, generationPolicy, hasFrozenStoryMemoryPolicy)
+        : hasFrozenStoryMemoryPolicy
+          ? composeStoryMemorySystemPrompt(baseStorySystemPrompt)
+          : baseStorySystemPrompt;
       const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
-        + estimateStoryTokens(buildStoryUserPrompt(
+        + estimateStoryTokens((hasFrozenStoryMemoryPolicy ? buildStoryMemoryUserPrompt : buildStoryUserPrompt)(
           emptyPromptContext,
           safeAction,
           false,
@@ -1114,7 +1134,8 @@ async function executeLoadedGeneration(
         expectedTurnNumber: job.expected_turn_number,
         query: safeAction,
         retrievalBudgetTokens: safeContextBudget,
-        expectedBaseIdentity: job.generation_base_identity
+        expectedBaseIdentity: job.generation_base_identity,
+        ...(hasFrozenStoryMemoryPolicy ? { storyMemoryPolicy: frozenStoryMemoryPolicySnapshot } : {})
       }
     ));
     const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(
@@ -1218,11 +1239,15 @@ async function executeLoadedGeneration(
       assertActiveGenerationUpdate(await repository.markGenerating(scope), "entering generation");
       const planned = planGenerationPromptContext(
         generationContext, provider, storySystemPrompt, safeAction, safeGuidance,
-        storyLength, job.resolved_input_mode, configuredCampaignContextBudget, inputTokenLimit
+        storyLength, job.resolved_input_mode, configuredCampaignContextBudget, inputTokenLimit,
+        isGenerationBaseIdentityV3(generationContext.baseIdentity) ? job.id : undefined,
+        hasFrozenStoryMemoryPolicy ? "story_memory" : "legacy",
+        frozenStoryMemoryPolicySnapshot?.policy
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
       const contextFingerprint = generationContextFingerprint({ providerId: provider.id, model: provider.model,
+        ...(frozenStoryMemoryPolicySnapshot ? { storyMemoryPolicyIdentity: `${frozenStoryMemoryPolicySnapshot.policyHash}|${frozenStoryMemoryPolicySnapshot.providerConfigurationFingerprint}` } : {}),
         protocol: job.prompt_protocol_version, ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}), expectedTurnNumber: job.expected_turn_number,
         action: safeAction, inputMode: job.resolved_input_mode, storyLength, context: promptContext });
       const contextDiagnostics = {
@@ -1248,15 +1273,27 @@ async function executeLoadedGeneration(
         ...storyMemoryDefaultsFromContext(promptContext),
         ...inputs.storyMemoryDefaults
       };
-      return { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults };
+      return { sourceManifest: planned.sourceManifest, storyInput, contextFingerprint, contextDiagnostics: { ...contextDiagnostics, ...(hasFrozenStoryMemoryPolicy ? { layers: planned.layerDiagnostics } : {}), ...(planned.worldReferenceOmissions ? { worldReferenceOmissions: planned.worldReferenceOmissions } : {}), sourceManifestHash: planned.sourceManifest?.manifestHash ?? null, sourceManifestEntries: planned.sourceManifest?.entries.map((entry) => ({ id: entry.id, source: entry.source, sourcePath: entry.sourcePath })) ?? [] }, storyMemoryDefaults };
     });
-    const { storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
+    const { sourceManifest, storyInput, contextFingerprint, contextDiagnostics, storyMemoryDefaults } = promptPreparation;
+    if (frozenStoryMemoryPolicySnapshot) {
+      const safeContext = projectSafeGenerationContextDiagnostic(contextDiagnostics);
+      orchestration.contextDiagnostic = projectSafeGenerationDiagnostic({
+        code: safeContext.reasonCodes?.length ? "context_evidence_omitted" : "context_ready",
+        operation: "story_generation", action: "adjust_context", ...safeContext,
+        protocolIdentity: frozenStoryMemoryPolicySnapshot.promptProtocol,
+        policyIdentity: frozenStoryMemoryPolicySnapshot.policyHash,
+        queryVariantCount: generationContext.chronicleRetrieval?.queryPlanning?.variantCount ?? 0
+      })!;
+      orchestration = await persistOrchestration(repository, scope, job, { contextDiagnostic: orchestration.contextDiagnostic, ...(sourceManifest ? { sourceEvidenceManifest: sourceManifest } : {}) });
+    }
     const plannedSentFactIds = sentCanonicalFactIds(storyInput);
     const validatedDraft = compatibleValidatedMainDraft(
       orchestration.validatedMainDraft,
       job,
       provider,
-      storyInput
+      storyInput,
+      orchestration.semanticRepair
     );
     if (stages.allowSceneCoverage && !compatibleEventCoverageRepair(
       orchestration.eventCoverageRepair,
@@ -1311,7 +1348,7 @@ async function executeLoadedGeneration(
           || savedChoiceRepair.originalRequestPayloadHash !== sha256(savedChoiceRepair.originalRequestBody)
           || savedChoiceRepair.repairRequestPayloadHash !== sha256(savedChoiceRepair.repairRequestBody)
           || stableStringify(choiceRepairPreparedRequest(provider,
-            (generationPolicy?.playMode === "story_only" ? generationPolicy.prompts.choiceRepairSystem : ""),
+            storyOnlyChoiceRepairSystemPrompt ?? "",
             savedChoiceRepair.base, savedChoiceRepair.repairResponseFormat))
             !== stableStringify({ body: savedChoiceRepair.repairRequestBody, payloadHash: savedChoiceRepair.repairRequestPayloadHash })
           || !sameFactIds(savedChoiceRepair.originalSentFactIds, sentCanonicalFactIds(savedChoiceRepair.originalRequestBody))) {
@@ -1337,7 +1374,7 @@ async function executeLoadedGeneration(
     const sentFactIds = validatedDraft?.sentFactIds || savedChoiceRepair?.originalSentFactIds || plannedSentFactIds;
 
     const streamingIllustration = await phase("streaming_illustration_setup", async () => {
-      const illustrationConfig = await collaborators.illustration.loadStreamingIllustrationConfig(
+      const illustrationConfig = reviewMode !== "off" ? null : await collaborators.illustration.loadStreamingIllustrationConfig(
         pool,
         { ownerUserId: job.owner_user_id, campaignId: job.campaign_id }
       ).catch(() => null);
@@ -1614,16 +1651,17 @@ async function executeLoadedGeneration(
           return true;
         } else {
           const repairRequest = {
-            systemPrompt: generationPolicy.prompts.choiceRepairSystem,
+            systemPrompt: storyOnlyChoiceRepairSystemPrompt!,
             input: buildStoryOnlyChoiceRepairInput(choiceOnly.base),
             budgetOutput: { kind: "story_choice_repair" as const }
           };
-          const initialRepairRequest = choiceRepairPreparedRequest(provider, generationPolicy.prompts.choiceRepairSystem, choiceOnly.base, "json_object");
+          const initialRepairRequest = choiceRepairPreparedRequest(provider, storyOnlyChoiceRepairSystemPrompt!, choiceOnly.base, "json_object");
           const pendingCheckpoint = existing?.status === "pending" ? existing : null;
           const originalPrepared = pendingCheckpoint
             ? { body: pendingCheckpoint.originalRequestBody, payloadHash: pendingCheckpoint.originalRequestPayloadHash }
             : preparedRequestForResult(result, provider, primaryRequest);
           orchestration = await persistOrchestration(repository, scope, job, {
+            ...(pendingCheckpoint && orchestration.logicalAttempt ? { logicalAttempt: orchestration.logicalAttempt } : pendingCheckpoint ? {} : { logicalAttempt: incrementLogicalAllowance(orchestration, "choiceRepairsConsumed") }),
             choiceRepair: {
               version: 1, ownerUserId: job.owner_user_id, campaignId: job.campaign_id, baseIdentity: job.generation_base_identity,
               providerId: provider.id, providerModel: provider.model, providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
@@ -1685,6 +1723,7 @@ async function executeLoadedGeneration(
         validationErrorCount: initialValidationErrors.length
       });
       orchestration = await persistOrchestration(repository, scope, job, {
+        logicalAttempt: incrementLogicalAllowance(orchestration, "automaticRepairsConsumed"),
         automaticRepair: {
           stage: recoveryKind,
           rejectedDraftHash: sha256(rejectedResponse),
@@ -1759,11 +1798,12 @@ async function executeLoadedGeneration(
           const preparedRecoveryRequest = preparedRequestForResult(result, provider, recoveryRequest);
           const preparedChoiceRepair = choiceRepairPreparedRequest(
             provider,
-            generationPolicy.prompts.choiceRepairSystem,
+            storyOnlyChoiceRepairSystemPrompt!,
             recoveredChoiceOnly.base,
             "json_object"
           );
           orchestration = await persistOrchestration(repository, scope, job, {
+            logicalAttempt: incrementLogicalAllowance(orchestration, "choiceRepairsConsumed"),
             choiceRepair: {
               version: 1, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
               baseIdentity: job.generation_base_identity, providerId: provider.id, providerModel: provider.model,
@@ -2035,7 +2075,10 @@ async function executeLoadedGeneration(
           consumedAttempt: job.attempts,
           mainRepairConsumed: true
         };
-        orchestration = await persistOrchestration(repository, scope, job, { eventCoverageRepair: repairFence });
+        orchestration = await persistOrchestration(repository, scope, job, {
+          eventCoverageRepair: repairFence,
+          logicalAttempt: incrementLogicalAllowance(orchestration, "eventCoverageRepairsConsumed")
+        });
         let repairResult: ProviderResult;
         let repairedMain: ReturnType<typeof parseStoryOutput>;
         try {
@@ -2235,9 +2278,10 @@ async function executeLoadedGeneration(
       if (!coveragePassed(eventCoverage)) {
         const rejectedFinalStoryHash = stableStringify(committedStory);
         const existingRepair = orchestration.eventCoverageRepair;
-        if (existingRepair
+        const eventCoverageConsumed = (orchestration.logicalAttempt?.eventCoverageRepairsConsumed ?? 0) >= 1;
+        if (eventCoverageConsumed || (existingRepair
           && (existingRepair.rejectedFinalStoryHash === rejectedFinalStoryHash
-            || existingRepair.repairedFinalStoryHash === rejectedFinalStoryHash)) {
+            || existingRepair.repairedFinalStoryHash === rejectedFinalStoryHash))) {
           assertActiveGenerationUpdate(await repository.markRecoverable({
             ...scope,
             providerResponseId: result.responseId || null,
@@ -2257,7 +2301,10 @@ async function executeLoadedGeneration(
           mainRepairConsumed: orchestration.eventCoverageRepair?.mainRepairConsumed === true
             || orchestration.eventCoverageRepair?.extensionFinalStoryHash === null
         };
-        orchestration = await persistOrchestration(repository, scope, job, { eventCoverageRepair: repair });
+        orchestration = await persistOrchestration(repository, scope, job, {
+          eventCoverageRepair: repair,
+          logicalAttempt: incrementLogicalAllowance(orchestration, "eventCoverageRepairsConsumed")
+        });
         let repairedStory: StoryTurnOutput | null = null;
         let repairResponse: ProviderResult | null = null;
         const validatedMainStory = orchestration.validatedMainDraft?.story ?? parsed.story;
@@ -2375,6 +2422,174 @@ async function executeLoadedGeneration(
           }), "saving event coverage recovery state");
           return true;
         }
+      }
+    }
+    if (reviewMode !== "off" && frozenStoryMemoryPolicySnapshot) {
+      const producingBody = orchestration.extension?.producingRequestBody ?? orchestration.validatedMainDraft?.requestBody;
+      let finalManifest: typeof orchestration.sourceEvidenceManifest;
+      try {
+        if (producingBody && orchestration.sourceEvidenceManifest) finalManifest = bindManifestToProducingRequest(orchestration.sourceEvidenceManifest, producingBody);
+      } catch { /* Observe records unavailable source scope; enforce cannot pass it. */ }
+      const auxiliaryRequestHashes = validatedChoiceRequestHashes(orchestration.choiceRepair, orchestration.validatedMainDraft?.story, effectiveProviderConfigurationHash(provider, job));
+      const binding = {
+        draftHash: sha256(stableStringify(committedStory)), producingRequestHash: producingBody ? sha256(producingBody) : null, manifestHash: finalManifest?.manifestHash ?? null, auxiliaryRequestHashes,
+        providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), promptHash: promptSnapshot.continuityReview!.review.hash,
+        promptProtocol: "story-continuity-review-v1" as const, policyHash: frozenStoryMemoryPolicySnapshot.policyHash
+      };
+      const bindingHash = reviewBindingHash(binding);
+      const existing = continuityReviewCheckpointSchema.safeParse(orchestration.continuityReview);
+      if (orchestration.continuityReview && (!existing.success || existing.data.bindingHash !== bindingHash || existing.data.mode !== reviewMode)) {
+        throw Object.assign(new Error("Saved continuity review belongs to a different final story."), { code: "generation_checkpoint_incompatible" });
+      }
+      let checkpoint: ContinuityReviewCheckpoint;
+      if (existing.success && existing.data.status === "completed") checkpoint = existing.data;
+      else if (existing.success) {
+        // A prior lease may have dispatched the call. Do not silently duplicate
+        // its cost or assume the missing response was a semantic pass.
+        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null };
+      } else {
+        checkpoint = { version: 1, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null };
+        try {
+          if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
+          const prepared = prepareContinuityReview({ provider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
+            promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory, effectiveContextWindowTokens: effectiveContextWindow });
+          const priorLedger = orchestration.logicalAttempt ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0,
+            reviewsConsumed: 0, automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0,
+            choiceRepairsConsumed: orchestration.choiceRepair ? 1 : 0, eventCoverageRepairsConsumed: orchestration.eventCoverageRepair ? 1 : 0 };
+          if (priorLedger.reviewsConsumed >= 2) throw Object.assign(new Error("Continuity review allowance consumed."), { code: "continuity_review_unavailable" });
+          checkpoint = { ...checkpoint, status: "dispatched", reviewRequestHash: prepared.requestHash };
+          orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint,
+            logicalAttempt: { ...priorLedger, reviewsConsumed: priorLedger.reviewsConsumed + 1 }, sourceEvidenceManifest: finalManifest });
+          const reviewed = await phase("story_continuity_review", () => callCampaignTextProvider(dependencies, provider, job, "story_continuity_review", prepared.request));
+          const validated = validatePreparedContinuityReviewResult(prepared, reviewed);
+          checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"] };
+        } catch (error) {
+          if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "")) throw error;
+          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null };
+        }
+      }
+      const reviewDiagnostic = projectSafeGenerationDiagnostic({
+        ...(orchestration.contextDiagnostic ?? {}), code: "context_ready", operation: "story_generation", action: "adjust_context",
+        review: { status: checkpoint.verdict === "pass" ? "passed" : checkpoint.verdict, automaticRepair: "not_consumed" }
+      })!;
+      orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint, ...(finalManifest ? { sourceEvidenceManifest: finalManifest } : {}), contextDiagnostic: reviewDiagnostic });
+      if (reviewMode === "enforce" && checkpoint.verdict !== "pass") {
+        if (checkpoint.verdict === "conflict" && checkpoint.result && finalManifest && producingBody) {
+          const rejectedFinalStoryHash = sha256(stableStringify(committedStory));
+          const existingRepair = orchestration.semanticRepair;
+          if (existingRepair?.rejectedFinalStoryHash === rejectedFinalStoryHash) {
+            // A lease reclaim after a dispatch cannot make a second semantic call.
+            if (existingRepair.status !== "validated") {
+              assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
+                errorCode: "continuity_review_conflict", errorMessage: "The reserved semantic repair has no validated response.",
+                recoveryMetadata: { retryable: true, stage: "semantic_repair", repairConsumed: true } }), "saving consumed semantic repair");
+              return true;
+            }
+          } else {
+            const repairScope = semanticRepairScope({ hasExtension: Boolean(orchestration.extension),
+              mainNarration: orchestration.validatedMainDraft?.story.narration ?? parsed.story.narration,
+              findings: checkpoint.result.findings });
+            const extensionOnly = repairScope === "extension_only";
+            let preparedRepair;
+            try {
+              preparedRepair = prepareContinuityRepair({ provider, manifest: finalManifest, promptSnapshot: frozenPromptEnvelope,
+                direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
+                effectiveContextWindowTokens: effectiveContextWindow });
+            } catch (error) {
+              assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
+                errorCode: "continuity_review_unavailable", errorMessage: "The required continuity repair request cannot fit the frozen provider budget.",
+                recoveryMetadata: { retryable: true, stage: "semantic_repair", reason: "repair_request_overflow" } }), "saving semantic repair overflow");
+              return true;
+            }
+            const oldLedger = orchestration.logicalAttempt;
+            const ledger = oldLedger ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0,
+              automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0, choiceRepairsConsumed: orchestration.choiceRepair ? 1 : 0,
+              eventCoverageRepairsConsumed: orchestration.eventCoverageRepair ? 1 : 0 };
+            if (ledger.semanticRepairsConsumed >= 1) {
+              assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
+                errorCode: "continuity_review_conflict", errorMessage: "The one permitted semantic repair was already consumed.",
+                recoveryMetadata: { retryable: true, stage: "semantic_repair", repairConsumed: true } }), "saving exhausted semantic repair");
+              return true;
+            }
+            // The reservation, exact wire body, conflict evidence, and allowance are all durable before dispatch.
+            orchestration = await persistOrchestration(repository, scope, job, {
+              sourceEvidenceManifest: preparedRepair.manifest,
+              logicalAttempt: { ...ledger, semanticRepairsConsumed: ledger.semanticRepairsConsumed + 1 },
+              semanticRepair: { version: 1, scope: repairScope, rejectedFinalStoryHash,
+                rejectedMainDraftHash: orchestration.validatedMainDraft?.draftHash ?? sha256(stableStringify(parsed.story)),
+                repairRequestBody: preparedRepair.body, repairRequestPayloadHash: preparedRepair.requestHash,
+                requiredEvidenceIds: preparedRepair.requiredEvidenceIds, status: "dispatched" }
+            });
+            let repairResponse: ProviderResult;
+            let repairedStory: StoryTurnOutput | null = null;
+            try {
+              repairResponse = await phase("story_continuity_repair", () => callCampaignTextProvider(dependencies, provider, job, "story_continuity_repair", preparedRepair.request));
+              if (!repairResponse.outputLimited) {
+                if (extensionOnly) repairedStory = parseEventExtension(
+                  repairResponse.content,
+                  orchestration.validatedMainDraft?.story.narration ?? parsed.story.narration
+                );
+                else {
+                  const parsedRepair = parseStoryOutput(repairResponse.content, storyMemoryDefaults);
+                  repairedStory = parsedRepair.ok ? parsedRepair.story : null;
+                  const originalMain = orchestration.validatedMainDraft?.story.narration ?? parsed.story.narration;
+                  const oldAppend = committedStory.narration.startsWith(originalMain) ? committedStory.narration.slice(originalMain.length).trim() : "";
+                  if (oldAppend && repairedStory?.narration.includes(oldAppend)) repairedStory = null;
+                }
+              }
+            } catch (error) {
+              if (isRecoverableIntegrityError(error)) throw error;
+              repairResponse = null as unknown as ProviderResult;
+            }
+            if (!repairedStory) {
+              assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
+                errorCode: "continuity_review_conflict", errorMessage: "The reserved semantic repair was invalid and cannot be repeated.",
+                recoveryMetadata: { retryable: true, stage: "semantic_repair", repairConsumed: true } }), "saving invalid semantic repair");
+              return true;
+            }
+            const repairedPrepared = preparedRequestForResult(repairResponse, provider, preparedRepair.request);
+            const repairedCheckpoint = { ...orchestration.semanticRepair!, status: "validated" as const, repairedStory,
+              repairedStoryHash: sha256(stableStringify(repairedStory)), response: repairResponse };
+            const repairRestart = extensionOnly ? {
+              semanticRepair: repairedCheckpoint,
+              extension: {
+                story: repairedStory, finalStoryHash: stableStringify(repairedStory), producingAttempt: job.attempts,
+                producingOperation: "event_extension" as const,
+                validatedMainDraftHash: orchestration.validatedMainDraft!.draftHash,
+                producingRequestPayloadHash: repairedPrepared.payloadHash, producingRequestBody: repairedPrepared.body,
+                providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), sentFactIds: sentCanonicalFactIds(repairedPrepared.body)
+              },
+              extensionError: undefined, eventCoverageRepair: undefined, continuityReview: undefined
+            } : {
+              semanticRepair: repairedCheckpoint,
+              validatedMainDraft: {
+                version: 2 as const, ownerUserId: job.owner_user_id, campaignId: job.campaign_id, worldVersionId: job.world_version_id || null,
+                baseIdentity: job.generation_base_identity, promptProtocolVersion: job.prompt_protocol_version, providerId: provider.id, providerModel: provider.model,
+                ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}),
+                providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), action: job.action, originalInputHash: sha256(storyInput),
+                requestBody: repairedPrepared.body, requestPayloadHash: repairedPrepared.payloadHash, draftHash: sha256(stableStringify(repairedStory)),
+                producingAttempt: job.attempts, story: repairedStory, response: repairResponse, sentFactIds: sentCanonicalFactIds(repairedPrepared.body)
+              },
+              afterEvents: undefined, afterTriggerError: "", extension: undefined, extensionError: undefined,
+              eventCoverageRepair: undefined, choiceRepair: undefined, continuityReview: undefined
+            };
+            orchestration = await persistOrchestration(repository, scope, job, repairRestart);
+            if (repository.restartAfterSemanticRepair
+              && !await repository.restartAfterSemanticRepair(scope)) {
+              throw Object.assign(new Error("Semantic repair restart lost its lease."), { code: "lease_lost" });
+            }
+            // `job.prompt_snapshot` is normalized to templates above for normal
+            // prompt lookup; a restart must retain the frozen continuity pair.
+            return executeLoadedGeneration(dependencies, workerId, leaseSeconds, { ...job,
+              prompt_snapshot: frozenPromptEnvelope as PromptSnapshot,
+              orchestration_private: orchestration });
+          }
+        }
+        const code = checkpoint.verdict === "conflict" ? "continuity_review_conflict" : "continuity_review_unavailable";
+        assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: result.responseId || null, providerFinishReason: result.finishReason || null,
+          errorCode: code, errorMessage: "The final story could not pass continuity review.", recoveryMetadata: { diagnostic: { ...reviewDiagnostic, code, action: "discard_and_reenqueue" } }
+        }), "saving enforcing review recovery");
+        return true;
       }
     }
     assertActiveGenerationUpdate(await repository.markCommitting(scope), "entering commit");

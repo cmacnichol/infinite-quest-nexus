@@ -20,7 +20,7 @@ import { apiTimestampSchema } from "./http.js";
 import { chronicleRetrievalAuditSchema } from "./memory.js";
 import { storyContextBudgetTokensSchema, storyLengthProfileSchema } from "./story-settings.js";
 import { userProfileSchema, userProfileUpdateSchema } from "./users.js";
-import { campaignCreateSchema, playableCharacterSchema, worldCreateSchema } from "./world-library.js";
+import { campaignCharacterProfileSchema, campaignCreateSchema, playableCharacterSchema, worldCreateSchema } from "./world-library.js";
 import { campaignTurnControlStyleSchema } from "./campaign-generation-policy.js";
 
 const operationKindSchema = generationJobStatusSchema.shape.operationKind;
@@ -102,6 +102,24 @@ export const providerListResponseSchema = z.object({ providers: z.array(provider
 
 export const campaignRuntimeStateResponseSchema = campaignRuntimeStateSchema;
 export const campaignRuntimeStateUpdateRequestSchema = campaignRuntimeStateUpdateSchema;
+
+const campaignCharacterProfileResponseBaseSchema = campaignCharacterProfileSchema.extend({
+  campaignId: z.uuid(),
+  revision: z.number().int().min(0)
+}).strict();
+
+/** The persisted projection returned after a successful character-profile update. */
+export const campaignCharacterProfileUpdateResponseSchema = campaignCharacterProfileResponseBaseSchema;
+
+/** The full editable character-profile projection returned by the campaign read route. */
+export const campaignCharacterProfileViewSchema = campaignCharacterProfileResponseBaseSchema.extend({
+  characterId: z.string().trim().min(1).max(200).nullable(),
+  storedProfile: campaignCharacterProfileSchema.nullable(),
+  inheritedFromSnapshot: z.boolean(),
+  legacyCharacterText: z.string().max(200_000),
+  rpgStats: z.array(playerRpgStatSchema).max(100),
+  defaultTriggers: z.array(z.union([playerEventTriggerSchema, campaignTrackerSchema])).max(400)
+}).strict();
 
 export const campaignRewindResponseSchema = z.object({
   campaignId: z.uuid(),
@@ -215,7 +233,7 @@ const generationRecoveryBaseSchema = z.object({
   attempts: z.number().int().min(0),
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
-  diagnostic: safeGenerationDiagnosticSchema.nullable().optional(),
+  diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null),
   resultTurnId: z.uuid().nullable()
 });
 
@@ -386,6 +404,8 @@ export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 export type UserProfileResponse = z.infer<typeof userProfileResponseSchema>;
 export type ProviderListResponse = z.infer<typeof providerListResponseSchema>;
 export type CampaignRuntimeStateResponse = z.infer<typeof campaignRuntimeStateResponseSchema>;
+export type CampaignCharacterProfileView = z.infer<typeof campaignCharacterProfileViewSchema>;
+export type CampaignCharacterProfileUpdateResponse = z.infer<typeof campaignCharacterProfileUpdateResponseSchema>;
 export type CampaignRewindResponse = z.infer<typeof campaignRewindResponseSchema>;
 export type CampaignBranchResponse = z.infer<typeof campaignBranchResponseSchema>;
 export type CampaignCreateResponse = z.infer<typeof campaignCreateResponseSchema>;

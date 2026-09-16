@@ -1,5 +1,5 @@
 import type {
-  PromptTemplateKey,
+  PromptCatalogKey,
   ProviderProfileInput,
   ProviderProfileUpdate,
   ProviderTextRequest
@@ -246,12 +246,12 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       return composition.application.listPromptLibrary(scope);
     },
 
-    previewPrompt(ownerUserId: string, input: Readonly<{ key: PromptTemplateKey; content: string }>) {
+    previewPrompt(ownerUserId: string, input: Readonly<{ key: PromptCatalogKey; content: string }>) {
       return composition.application.previewPrompt({ ownerUserId, ...input });
     },
 
     savePromptOverride(ownerUserId: string, input: Readonly<{
-      key: PromptTemplateKey;
+      key: PromptCatalogKey;
       content: string;
       scope: "application" | "campaign";
       campaignId?: string;
@@ -269,7 +269,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     resetPromptOverride(ownerUserId: string, input: Readonly<{
-      key: PromptTemplateKey;
+      key: PromptCatalogKey;
       scope: "application" | "campaign";
       campaignId?: string;
     }>) {

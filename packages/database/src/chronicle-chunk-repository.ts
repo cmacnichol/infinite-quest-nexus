@@ -1,3 +1,4 @@
+import { normalizeStoryEvidenceSource, verifyStoryEvidenceSpan, STORY_EVIDENCE_NORMALIZATION_VERSION } from "../../domain/src/story-evidence-spans.js";
 import { randomUUID } from "node:crypto";
 import type {
   CampaignWorldVersionMemoryScope,
@@ -237,7 +238,7 @@ export async function enqueuePostgresChronicleChunkIndex(
   const result = await database.query<{ id: string }>(
     `WITH desired AS (
        SELECT encode(digest(
-                c.world_version_id::text || E'\\x1f' ||
+                c.world_version_id::text || ':${STORY_EVIDENCE_NORMALIZATION_VERSION}' || E'\\x1f' ||
                 COALESCE(string_agg(
                   m.ordinal::text || ':' || m.id::text || ':' || m.content_hash,
                   E'\\x1e' ORDER BY m.ordinal,m.id
@@ -257,7 +258,7 @@ export async function enqueuePostgresChronicleChunkIndex(
           restart a long backfill from zero. */
        SELECT j.id,
               encode(digest(
-                COALESCE(string_agg(
+                '${STORY_EVIDENCE_NORMALIZATION_VERSION}' || COALESCE(string_agg(
                   m.ordinal::text || ':' || m.id::text || ':' || m.content_hash,
                   E'\\x1e' ORDER BY m.ordinal,m.id
                 ), ''),
@@ -447,6 +448,7 @@ export function createPostgresChronicleChunkParentPort(pool: DatabasePool): Chro
                  AND chunk.world_version_id=parent.world_version_id
                  AND chunk.parent_content_hash=parent.content_hash
                  AND chunk.chunking_protocol_version=$7
+                 AND chunk.metadata->'sourceEvidence'->>'normalizationVersion'='${STORY_EVIDENCE_NORMALIZATION_VERSION}'
                  AND (chunk.embedding_status='embedded' OR chunk.embedding_status='skipped')
             )
           ORDER BY ordinal,id
@@ -723,6 +725,9 @@ export function createPostgresChronicleChunkBatchPort(
             if (chunk.parentMemoryId !== parent.id || chunk.protocolVersion !== "chronicle-chunk-v1") {
               throw invalid("Chronicle chunk parent scope is invalid.");
             }
+            if (chunk.sourceEvidence && !verifyStoryEvidenceSpan(normalizeStoryEvidenceSource(parent.content), chunk.sourceEvidence, chunk.content)) {
+              throw invalid("Chronicle source evidence is invalid.");
+            }
             const embedding = chunk.embedding ? vectorLiteral(chunk.embedding) : null;
             const dimensions = chunk.embedding?.length ?? null;
             const skipReason = sanitizeChronicleChunkSkipReason(chunk.skipReason);
@@ -753,7 +758,7 @@ export function createPostgresChronicleChunkBatchPort(
             [scope.ownerUserId, scope.campaignId, scope.worldVersionId, parent.id, parent.content_hash,
               chunk.protocolVersion, chunk.chunkIndex, chunk.kind, chunk.content,
               chunk.sourceStartOffset, chunk.sourceEndOffset, chunk.estimatedTokens,
-              parent.entities, parent.entity_ids, JSON.stringify(parent.metadata), embedding,
+              parent.entities, parent.entity_ids, JSON.stringify({ ...parent.metadata, sourceEvidence: chunk.sourceEvidence ?? null }), embedding,
               chunk.embedding ? "embedded" : "skipped", skipReason,
               chunk.embedding ? input.provider?.id ?? null : null,
               chunk.embedding ? input.provider?.model ?? null : null,
@@ -785,7 +790,7 @@ export function createPostgresChronicleChunkBatchPort(
                      already-processed prefix is unchanged and resume instead of restarting. */
                   processed_signature=(
                     SELECT encode(digest(
-                             COALESCE(string_agg(
+                             '${STORY_EVIDENCE_NORMALIZATION_VERSION}' || COALESCE(string_agg(
                                m.ordinal::text || ':' || m.id::text || ':' || m.content_hash,
                                E'\x1e' ORDER BY m.ordinal,m.id
                              ), ''),

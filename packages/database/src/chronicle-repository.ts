@@ -495,7 +495,8 @@ async function writeAcceptedFiction(
   const memory = buildAcceptedTurnFictionMemory({
     accepted: true,
     action: scope.action,
-    narration: scope.narration
+    narration: scope.narration,
+    inputMode: scope.inputMode
   }, scope.ordinal);
   if (!memory) throw new Error("Accepted turn fiction memory was unexpectedly excluded.");
   const entityCatalog = buildChronicleEntityCatalog({
@@ -513,6 +514,8 @@ async function writeAcceptedFiction(
       memory.content, memory.tokenEstimate, options.importance ?? Math.min(1, 0.5 + scope.ordinal / 100),
       entities.entities, entities.entityIds,
       json({
+        inputMode: scope.inputMode ?? "action",
+        sourceNormalizationVersion: "story-fiction-source-v1",
         sanitized: memory.sanitized,
         removedMechanicsSegments: memory.removedMechanicsSegments,
         ...(options.reindexed ? { reindexed: true } : { generated: true })
@@ -526,6 +529,7 @@ type RebuildTurnRow = Readonly<{
   action: string;
   narration: string;
   state_snapshot_private: Record<string, unknown>;
+  input_mode: "action" | "scene";
 }>;
 
 type StateCorrection = Readonly<{
@@ -565,7 +569,8 @@ function derivedFromStateSnapshot(
   return {
     continuitySummary: typeof snapshot.continuitySummary === "string" ? snapshot.continuitySummary : "",
     canonicalFacts: Array.isArray(snapshot.canonicalFacts)
-      ? snapshot.canonicalFacts.filter((value): value is string => typeof value === "string")
+      ? snapshot.canonicalFacts.flatMap((value) => typeof value === "string" ? [value]
+        : value && typeof value === "object" && "content" in value && typeof value.content === "string" ? [value.content] : [])
       : [],
     supersededFacts: Array.isArray(snapshot.supersededFacts)
       ? snapshot.supersededFacts.filter((value): value is string => typeof value === "string")
@@ -656,7 +661,7 @@ async function rebuildMemories(
     characterProfile: campaign.character_profile
   });
   const turns = await client.query<RebuildTurnRow>(
-    `SELECT turn_row.id, turn_row.turn_number, turn_row.action,
+    `SELECT turn_row.id, turn_row.turn_number, turn_row.action, turn_row.input_mode,
             effective.effective_narration AS narration, turn_row.state_snapshot_private
        FROM turns turn_row
        JOIN effective_turn_narrations effective
@@ -714,7 +719,8 @@ async function rebuildMemories(
       turnId: turn.id,
       ordinal: turn.turn_number,
       action: turn.action,
-      narration: turn.narration
+      narration: turn.narration,
+      inputMode: turn.input_mode
     }, {
       importance: Math.min(1, 0.45 + turn.turn_number / Math.max(20, turns.rows.length * 2)),
       reindexed: true

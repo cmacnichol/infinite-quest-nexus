@@ -1,6 +1,16 @@
+import { createPostgresTurnCorrectionRepository } from "../../packages/database/src/turn-correction-repository.js";
+import { createTurnCorrectionApplication } from "../../packages/application/src/turn-corrections/index.js";
+import { memoryGeneration } from "../helpers/memory-applications.js";
+import { rebuildCampaignMemories } from "../helpers/memory-aware-services.js";
+import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
+import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
+import { normalizeStoryEvidenceSource } from "../../packages/domain/src/story-evidence-spans.js";
+import { sha256 } from "../../packages/domain/src/text.js";
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as rankFusion from "../../packages/domain/src/chronicle-rank-fusion.js";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
+import { storyMemoryPolicySchema, defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../packages/domain/src/generated/chronicle-retrieval-profile-v2.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -208,6 +218,149 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       }
     });
   }
+
+  it("passes actual historical fact UUIDs into enrolled rank fusion", async () => {
+    const { fixture, providerId } = await configuredFixture("historical UUID rank identity");
+    const turnId = await turn(fixture, 1, "Ask about the covenant.", "The courtyard is quiet.");
+    const memory = await parent(fixture, { turnId, kind: "turn_fiction", ordinal: 1, content: "The courtyard is quiet." });
+    await embeddedChunk(fixture, providerId, { parentId: memory.id, parentContentHash: memory.contentHash,
+      kind: "turn_narration", content: "The courtyard is quiet.", vector: [1, 0] });
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [fixture.campaignId]);
+    const factId = crypto.randomUUID();
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,1,0,'The obsidian covenant is binding.','the obsidian covenant is binding.',1)`,
+      [factId, fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, turnId]);
+    const policy = defaultStoryMemoryPolicy("r1");
+    const spy = vi.spyOn(rankFusion, "fuseChronicleRanks");
+    try {
+      await transaction(providerId, []).loadGenerationContext(pool, { ...fixture, operationKind: "append", expectedTurnNumber: 2,
+        query: "obsidian covenant", storyMemoryPolicy: { policy, policyHash: storyMemoryPolicyHash(policy),
+          contextProtocol: "current-continuity-v3", promptProtocol: "story-v14-continuity-context", providerConfigurationFingerprint: "a".repeat(64) } });
+      const facts = spy.mock.calls.flatMap(([inputs]) => inputs.flatMap((input) => input.candidates))
+        .filter((candidate) => candidate.memoryKind === "canonical_fact");
+      expect(facts.length).toBeGreaterThan(0);
+      expect(new Set(facts.map((fact) => fact.candidateId))).toEqual(new Set([factId]));
+    } finally { spy.mockRestore(); }
+  });
+
+  it.each(["chunked_hybrid", "legacy_hybrid", "chunked_unavailable"])("uses balanced queries only for enrolled generation and separates its query cache: %s", async (implementation) => {
+    const { fixture, providerId } = await configuredFixture("balanced private queries");
+    const memory = await parent(fixture, { turnId: null, kind: "open_thread", ordinal: 0,
+      content: "Zephyra seeks the missing sapphire behind the orchard gate." });
+    if (implementation !== "chunked_unavailable") await embeddedChunk(fixture, providerId, { parentId: memory.id, parentContentHash: memory.contentHash,
+      kind: "open_thread", content: "Zephyra seeks the missing sapphire.", vector: [1, 0] });
+    await pool.query("UPDATE campaign_memory_configs SET retrieval_implementation=$2 WHERE campaign_id=$1", [fixture.campaignId, implementation === "chunked_unavailable" ? "chunked_hybrid" : implementation]);
+    const queries: string[] = [];
+    const generation = transaction(providerId, queries);
+    const query = `${"Wait beside the empty courtyard. ".repeat(320)}Find Zephyra and the missing sapphire.`;
+    const scope = { ...fixture, operationKind: "append" as const, expectedTurnNumber: 1, query };
+    await generation.loadGenerationContext(pool, scope);
+    queries.length = 0;
+    const policy = defaultStoryMemoryPolicy("r1");
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy),
+      contextProtocol: "current-continuity-v3" as const, promptProtocol: "story-v14-continuity-context" as const,
+      providerConfigurationFingerprint: "a".repeat(64) };
+    const lexicalParameters: unknown[][] = [];
+    const observedPool = new Proxy(pool, { get(target, property) {
+      if (property === "connect") return async () => {
+        const client = await target.connect();
+        return new Proxy(client, { get(database, member) {
+          if (member === "query") return (statement: string, values?: unknown[]) => {
+            if (statement.includes("WITH base AS")) lexicalParameters.push(values ?? []);
+            return database.query(statement, values);
+          };
+          const value = Reflect.get(database, member);
+          return typeof value === "function" ? value.bind(database) : value;
+        } });
+      };
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const context = await generation.loadGenerationContext(observedPool, { ...scope, storyMemoryPolicy });
+    expect(lexicalParameters.length).toBeGreaterThan(0);
+    for (const parameters of lexicalParameters) {
+      expect(String(parameters[3]).length).toBeLessThanOrEqual(1_000);
+      expect(parameters[14]).toEqual(expect.any(Array));
+      expect((parameters[14] as string[]).every((value) => value.length <= 1_000)).toBe(true);
+      expect((parameters[14] as string[]).join(" ")).toContain("Find Zephyra");
+    }
+    expect(context.chronicleRetrieval).toMatchObject({ queryPlanning: {
+      planner: "balanced-v1", rankAggregation: "query_family_max_v1",
+      variantCount: expect.any(Number), uncoveredSegmentCount: expect.any(Number)
+    } });
+    expect(queries.some((value) => value.includes("Find Zephyra"))).toBe(true);
+    expect(queries.length).toBeLessThanOrEqual(8);
+    expect(queries.every((value) => value.length <= 1_650)).toBe(true);
+    queries.length = 0;
+    await generation.loadGenerationContext(pool, { ...scope, storyMemoryPolicy });
+    expect(queries).toEqual([]);
+  });
+
+  it("carries certified middle narration spans to the measured private request and rejects stale certificates", async () => {
+    const { fixture, providerId } = await configuredFixture("certified middle passage");
+    const passage = 'The copper gate was not unlocked. Vale said, "It is open." He was lying.';
+    const content = normalizeStoryEvidenceSource(`Turn 1\nPlayer action: Listen.\nNarration: ${"A distant lantern glowed. ".repeat(1500)}${passage} ${"Waves crossed the bay. ".repeat(1500)}`);
+    const oldTurn = await turn(fixture, 1, "Listen.", content);
+    const latestId = await turn(fixture, 2, "Wait.", "Present scene.");
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [fixture.campaignId]);
+    const memory = await parent(fixture, { turnId: oldTurn, kind: "turn_fiction", ordinal: 1, content });
+    const latest = await parent(fixture, { turnId: latestId, kind: "turn_fiction", ordinal: 2, content: "Present scene." });
+    await embeddedChunk(fixture, providerId, { parentId: latest.id, parentContentHash: latest.contentHash, kind: "turn_narration", content: "Present scene.", vector: [1, 0] });
+    const chunkId = crypto.randomUUID();
+    await embeddedChunk(fixture, providerId, { id: chunkId, parentId: memory.id, parentContentHash: memory.contentHash,
+      kind: "turn_narration", content: passage, vector: [1, 0] });
+    const certificate = { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), start: content.indexOf(passage), end: content.indexOf(passage) + passage.length };
+    await pool.query("UPDATE chronicle_memory_chunks SET metadata=jsonb_build_object('sourceEvidence',$2::jsonb) WHERE id=$1", [chunkId, JSON.stringify(certificate)]);
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v3" as const,
+      promptProtocol: "story-v14-continuity-context" as const, providerConfigurationFingerprint: "a".repeat(64) };
+    await pool.query("UPDATE world_versions SET content=jsonb_set(content,'{world,internal}',to_jsonb('WORLD_INTERNAL_CANARY'::text)) WHERE id=$1", [fixture.worldVersionId]);
+    let captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
+      ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId, operationKind: "append", expectedTurnNumber: 3, baseIdentityVersion: "generation-base-v3", captureRecentWindow: true
+    }));
+    const read = () => transaction(providerId, []).loadGenerationContext(pool, { ...fixture, operationKind: "append", expectedTurnNumber: 3, query: "copper gate Vale", storyMemoryPolicy, expectedBaseIdentity: captured.baseIdentity });
+    const context = await read();
+    expect(context.chronicleRetrieval?.effectiveImplementation).toBe("chunked_hybrid");
+    expect(context.candidates.map((candidate) => candidate.id)).toContain(memory.id);
+    expect(context.candidates.find((candidate) => candidate.id === memory.id)?.narrativeSource).toMatchObject({ sourceHash: sha256(content), spans: [{ start: certificate.start, end: certificate.end }] });
+    const provider: any = { id: "provider", providerType: "openai_compatible", model: "model", contextWindowTokens: 8000, maxOutputTokens: 100, temperature: 0, requestTimeoutMs: 1000, configuration: {} };
+    const plan = (source: typeof context) => planGenerationPromptContext(source, provider, "System", "copper gate Vale", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 8000, 7900, crypto.randomUUID(), "story_memory", policy);
+    const result = plan(context);
+    expect(result.storyInput).not.toContain("WORLD_INTERNAL_CANARY");
+    expect(JSON.parse(result.storyInput).authoritative_context.chronicle[0].content).toContain(passage);
+    expect(result.sourceManifest?.entries.some((entry) => entry.form === "excerpt" && entry.source.id === oldTurn)).toBe(true);
+    expect(result.contextPlan.requestTokens + result.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(7900);
+    await pool.query("UPDATE chronicle_memory_chunks SET metadata=jsonb_set(metadata,'{sourceEvidence,sourceHash}',to_jsonb($2::text)) WHERE id=$1", [chunkId, "a".repeat(64)]);
+    const stale = await read();
+    expect(stale.candidates.find((candidate) => candidate.id === memory.id)?.narrativeSource).toBeUndefined();
+    expect(plan(stale).sourceManifest?.entries.some((entry) => entry.form === "excerpt")).toBe(false);
+    expect(plan(stale).layerDiagnostics.sourceValidationFailures).toBeGreaterThan(0);
+    const correctedPassage = "The copper gate remained locked. Vale admitted his earlier lie.";
+    await createTurnCorrectionApplication({ corrections: createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) }) }).correctNarration(fixture, {
+      turnId: oldTurn, narration: content.replace(passage, correctedPassage), expectedCorrectionRevision: 0, expectedActiveTurnNumber: 2, source: "user_edit"
+    });
+    expect((await pool.query("SELECT id FROM chronicle_memory_chunks WHERE id=$1", [chunkId])).rows).toEqual([]);
+    await rebuildCampaignMemories(pool, fixture.campaignId);
+    const rebuilt = await pool.query<{ id: string; content: string; content_hash: string; ordinal: number; memory_kind: string }>("SELECT id,content,content_hash,ordinal,memory_kind FROM chronicle_memories WHERE campaign_id=$1 ORDER BY ordinal", [fixture.campaignId]);
+    for (const row of rebuilt.rows) {
+      const normalized = normalizeStoryEvidenceSource(row.content);
+      const selected = row.memory_kind === "turn_fiction" && row.ordinal === 1 ? correctedPassage : normalized;
+      const newChunkId = crypto.randomUUID();
+      await embeddedChunk(fixture, providerId, { id: newChunkId, parentId: row.id, parentContentHash: row.content_hash, kind: (row.memory_kind === "turn_fiction" ? "turn_narration" : row.memory_kind) as never, content: selected, vector: [1, 0] });
+      await pool.query("UPDATE chronicle_memory_chunks SET metadata=jsonb_build_object('sourceEvidence',$2::jsonb) WHERE id=$1", [newChunkId, JSON.stringify({ ...certificate, sourceHash: sha256(normalized), start: normalized.indexOf(selected), end: normalized.indexOf(selected) + selected.length })]);
+    }
+    await pool.query("UPDATE chronicle_chunk_jobs SET status='completed',completed_at=now() WHERE campaign_id=$1", [fixture.campaignId]);
+    captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
+      ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId, operationKind: "append", expectedTurnNumber: 3, baseIdentityVersion: "generation-base-v3", captureRecentWindow: true
+    }));
+    const correctedContext = await read();
+    expect(correctedContext.chronicleRetrieval, JSON.stringify(correctedContext.chronicleRetrieval)).toMatchObject({ effectiveImplementation: "chunked_hybrid" });
+    expect(correctedContext.candidates.some((candidate) => candidate.narrativeSource)).toBe(true);
+    const corrected = plan(correctedContext);
+    expect(JSON.parse(corrected.storyInput).authoritative_context.chronicle[0].content).toContain(correctedPassage);
+    expect(corrected.storyInput).not.toContain("He was lying.");
+    expect(corrected.sourceManifest?.entries.find((entry) => entry.form === "excerpt")?.source.contentHash).not.toBe(certificate.sourceHash);
+  });
 
   it("runs the private generation candidate read through the chunked hybrid stage", async () => {
     const { fixture, providerId } = await configuredFixture("private hybrid candidates");

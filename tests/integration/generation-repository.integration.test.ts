@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GenerationApplicationError } from "../../packages/application/src/index.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { sha256, stableStringify } from "../../packages/domain/src/index.js";
@@ -51,6 +52,24 @@ integration("PostgreSQL generation command repository", () => {
       promptProtocolVersion: providerPromptProtocolVersion,
       readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
         readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds])
+    });
+  }
+
+  function enrolledPolicyRepository() {
+    const policy = defaultStoryMemoryPolicy("r1");
+    return createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) =>
+        loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
+        readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
+      resolveStoryMemoryPolicySnapshot: async () => ({
+        policy,
+        policyHash: storyMemoryPolicyHash(policy),
+        contextProtocol: "current-continuity-v3",
+        promptProtocol: "story-v14-continuity-context",
+        providerConfigurationFingerprint: "a".repeat(64)
+      })
     });
   }
 
@@ -112,6 +131,30 @@ integration("PostgreSQL generation command repository", () => {
       context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
     });
   }
+
+  it("freezes a v3 effective character identity for an enrolled append and replacement", async () => {
+    const imported = await campaign();
+    const replacementCampaign = await campaign();
+    const commands = enrolledPolicyRepository();
+    const append = await commands.enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      appendRequest("Freeze the selected cartographer.")
+    );
+    const replacement = await commands.enqueueReplacement(
+      { ownerUserId, campaignId: replacementCampaign.campaignId },
+      replacementRequest("Replace the latest cartographer scene.")
+    );
+    const identities = await pool.query<{ id: string; generation_base_identity: Record<string, unknown> }>(
+      "SELECT id,generation_base_identity FROM generation_jobs WHERE id = ANY($1::uuid[]) ORDER BY id",
+      [[append.id, replacement.id]]
+    );
+    expect(identities.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ generation_base_identity: expect.objectContaining({
+        version: "generation-base-v3", characterProfileRevision: expect.any(Number),
+        characterProfileFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/)
+      }) })
+    ]));
+  });
 
   function replacementRequest(
     action: string,

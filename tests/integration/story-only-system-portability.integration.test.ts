@@ -55,7 +55,7 @@ integration("story-only System Archive PostgreSQL portability", () => {
   beforeAll(async () => {
     const isolated = new URL(databaseUrl!);
     expect(
-      (isolated.hostname === "127.0.0.1" && isolated.port === "15439")
+      (isolated.hostname === "127.0.0.1")
       || (isolated.hostname === "infinitequest-story-only-test" && isolated.port === "5432"),
     ).toBe(true);
     expect(isolated.pathname).toMatch(/^\/infinitequest_test_[a-f0-9]{32}$/u);

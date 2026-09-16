@@ -1,9 +1,12 @@
+import type { GenerationBaseIdentityV3, LegacyGenerationBaseIdentity } from "./generation-context.js";
+export type { MemoryGenerationAuthorityContext } from "./generation-context.js";
 import type {
   CampaignEmbeddingConfig,
   ChronicleHealth,
   ChronicleRetrievalAudit,
   MemoryContextQuery,
-  RetrievalImplementation
+  RetrievalImplementation,
+  StoryMemoryPolicySnapshot
 } from "@infinite-quest/contracts";
 
 /** Resolved at the API boundary or read from a claimed worker job; never caller supplied. */
@@ -125,6 +128,7 @@ export type DerivedTurnMemoryScope = CampaignWorldVersionMemoryScope & Readonly<
 }>;
 
 export type AcceptedTurnFictionScope = DerivedTurnMemoryScope & Readonly<{
+  inputMode?: "action" | "scene";
   action: string;
   narration: string;
 }>;
@@ -154,27 +158,11 @@ export type MemoryGenerationAuthorityScope = CampaignWorldVersionMemoryScope & R
    * retrieval. Public previews deliberately omit it and retain calibration.
    */
   retrievalBudgetTokens?: number;
-  expectedBaseIdentity?: Readonly<{
-    operationKind: "append" | "replace_latest";
-    expectedTurnNumber: number;
-    baseTurnNumber: number;
-    campaignActiveTurnNumber: number;
-    campaignStateRevision: number;
-    stateEditRevision: number | null;
-    narrationCorrectionRevision: number | null;
-    baseTurnId: string | null;
-    stateFingerprint: string;
-    narrationFingerprint: string | null;
-  }>;
+  expectedBaseIdentity?: LegacyGenerationBaseIdentity | GenerationBaseIdentityV3;
+  /** Frozen at enqueue; absence selects the named legacy reader, never implicit enrollment. */
+  storyMemoryPolicy?: StoryMemoryPolicySnapshot;
 }>;
 
-export type MemoryGenerationAuthorityContext = Readonly<{
-  authority: Readonly<Record<string, unknown>>;
-  candidates: readonly Readonly<Record<string, unknown>>[];
-  baseIdentity: Readonly<Record<string, unknown>>;
-  /** Retrieval provenance belongs to the private authority read, never a separate preview switch. */
-  chronicleRetrieval?: ChronicleRetrievalAudit;
-}>;
 
 export type MemoryWorkerClaimRequest = Readonly<{
   workerId: string;
@@ -287,6 +275,7 @@ export type ChronicleChunkDraftCommit = Readonly<{
   estimatedTokens: number;
   sourceStartOffset: number;
   sourceEndOffset: number;
+  sourceEvidence?: Readonly<{ normalizationVersion: "story-fiction-source-v1"; sourceHash: string; start: number; end: number }>;
   embedding: readonly number[] | null;
   skipReason: string | null;
 }>;

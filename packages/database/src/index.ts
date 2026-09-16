@@ -4,6 +4,7 @@ export * from "./campaign-continuity-repository.js";
 export * from "./chronicle-generation-context.js";
 export * from "./chronicle-repository.js";
 export * from "./generation-repository.js";
+export * from "./story-memory-policy-repository.js";
 export * from "./generation-execution-repository.js";
 export * from "./illustration-repository.js";
 export * from "./asset-repository.js";

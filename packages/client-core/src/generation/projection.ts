@@ -24,11 +24,15 @@ export type GenerationRecoveryGuidance = Readonly<{
   retryable: boolean;
 }>;
 
+export type GenerationDiagnosticPresentation = GenerationRecoveryGuidance & Readonly<{
+  details: readonly string[];
+}>;
+
 const recoveryGuidanceByAction: Readonly<Record<SafeGenerationDiagnostic["action"], GenerationRecoveryGuidance>> = {
   adjust_context: { message: "Review the campaign context settings, then retry the generation.", retryable: true },
   adjust_output_or_state: { message: "Review the current campaign state or output settings, then retry the generation.", retryable: true },
   check_provider_window: { message: "Review the selected provider context window, then retry the generation.", retryable: true },
-  repair_authority: { message: "Review the current campaign state before retrying the generation.", retryable: true },
+  repair_authority: { message: "Discard this attempt, correct the campaign state or character profile, then generate a new turn. Your draft can be reused.", retryable: false },
   update_prompt: { message: "Review the active prompt override, then retry the generation.", retryable: true },
   discard_and_reenqueue: { message: "Discard this generation and submit the turn again.", retryable: false },
   retry_event: { message: "Retry the generation to re-evaluate the event.", retryable: true },
@@ -39,6 +43,75 @@ const recoveryGuidanceByAction: Readonly<Record<SafeGenerationDiagnostic["action
 export function generationRecoveryGuidance(value: unknown): GenerationRecoveryGuidance | null {
   const diagnostic = projectSafeGenerationDiagnostic(value);
   return diagnostic ? recoveryGuidanceByAction[diagnostic.action] : null;
+}
+
+/**
+ * Presents only the allowlisted diagnostic projection. The detail strings are
+ * deliberately derived from fixed labels and numeric counts, never persisted
+ * prompt text, source IDs, excerpts, or provider errors.
+ */
+export function generationDiagnosticPresentation(value: unknown): GenerationDiagnosticPresentation {
+  const diagnostic = projectSafeGenerationDiagnostic(value);
+  if (!diagnostic) return {
+    message: "Generation needs attention. Reload its status before choosing a recovery action.",
+    retryable: false,
+    details: []
+  };
+  const guidance = recoveryGuidanceByAction[diagnostic.action];
+  const details: string[] = [];
+  if (diagnostic.code === "context_evidence_omitted") {
+    details.push("Some optional story evidence was omitted to fit the current context.");
+  }
+  if (diagnostic.protocolIdentity) details.push(`Prompt protocol: ${diagnostic.protocolIdentity}.`);
+  if (diagnostic.policyIdentity) details.push(`Story Memory policy: ${diagnostic.policyIdentity}.`);
+  if (diagnostic.queryVariantCount !== undefined) details.push(`Context queries: ${diagnostic.queryVariantCount}.`);
+  const counts = diagnostic.counts;
+  if (counts?.recentTurnsTarget !== undefined && counts.recentTurnsIncluded !== undefined) {
+    details.push(`Recent turns: ${counts.recentTurnsIncluded} of ${counts.recentTurnsTarget} included.`);
+  }
+  if (counts?.optionalEvidenceOmitted) details.push(`Optional evidence: ${counts.optionalEvidenceOmitted} omitted.`);
+  if (counts?.worldReferencesIncluded !== undefined || counts?.worldReferencesOmitted !== undefined) {
+    details.push(`World references: ${counts.worldReferencesIncluded ?? 0} included, ${counts.worldReferencesOmitted ?? 0} omitted.`);
+  }
+  if (counts?.excerptsComplete !== undefined || counts?.excerptsPartial !== undefined) {
+    details.push(`Historical excerpts: ${counts.excerptsComplete ?? 0} complete, ${counts.excerptsPartial ?? 0} limited.`);
+  }
+  if (counts?.sourceValidationFailures) details.push(`Source validation: ${counts.sourceValidationFailures} issue${counts.sourceValidationFailures === 1 ? "" : "s"}.`);
+  if (counts?.duplicateSources) details.push(`Duplicate sources omitted: ${counts.duplicateSources}.`);
+  if (diagnostic.reasonCodes?.length) details.push(`Context limits: ${diagnostic.reasonCodes.join(", ")}.`);
+  if (diagnostic.protectedComponents) {
+    const labels: Readonly<Record<keyof typeof diagnostic.protectedComponents, string>> = {
+      rules: "rules", world_canon: "world canon", character_profile: "character profile",
+      current_state: "current state", current_scene: "current scene", direction: "direction"
+    };
+    const estimates = (Object.entries(diagnostic.protectedComponents) as Array<[keyof typeof diagnostic.protectedComponents, number | undefined]>)
+      .filter((entry): entry is [keyof typeof diagnostic.protectedComponents, number] => entry[1] !== undefined)
+      .map(([key, value]) => `${labels[key]} ${value}`);
+    if (estimates.length) details.push(`Protected context estimates: ${estimates.join(", ")}.`);
+  }
+  if (diagnostic.review) {
+    const reviewDetail = diagnostic.review.status === "passed"
+      ? "Continuity review passed for the supplied scope only."
+      : diagnostic.review.status === "observed"
+        ? "Continuity review was observed; it did not block this generation."
+        : diagnostic.review.status === "off"
+          ? "Continuity review was off."
+          : diagnostic.review.status === "conflict"
+            ? "Continuity review found a conflict in the supplied scope."
+            : diagnostic.review.status === "uncertain"
+              ? "Continuity review is uncertain; it was not a full-history pass."
+              : "Continuity review was unavailable; no pass was recorded.";
+    details.push(reviewDetail);
+    if (diagnostic.review.automaticRepair === "consumed") details.push("The one automatic repair attempt was already used.");
+    if (diagnostic.review.automaticRepair === "unavailable") details.push("Automatic repair was unavailable for this generation.");
+  }
+  return {
+    message: diagnostic.code === "context_evidence_omitted"
+      ? "Some optional story evidence was omitted to fit the current context."
+      : guidance.message,
+    retryable: guidance.retryable,
+    details
+  };
 }
 
 export function copyOperation(value: GenerationOperation): GenerationOperation {

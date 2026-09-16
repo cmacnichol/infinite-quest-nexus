@@ -1,3 +1,4 @@
+import { canonicalFactDeduplicationKey } from "../../domain/src/canonical-facts.js";
 import { buildCanonicalChronicleFacts } from "../../domain/src/chronicle-memory-helpers.js";
 
 type Snapshot = Readonly<Record<string, unknown>>;
@@ -20,14 +21,15 @@ function canonicalFactUpdates(snapshot: Snapshot) {
     : [];
 }
 
-function projectedFactIds(snapshot: Snapshot, campaignId: string, turnId: string): string[] {
+function projectedFacts(snapshot: Snapshot, campaignId: string, turnId: string) {
   return buildCanonicalChronicleFacts({
     campaignId,
     turnId,
-    canonicalFacts: stringValues(snapshot.canonicalFacts),
+    canonicalFacts: Array.isArray(snapshot.canonicalFacts) ? snapshot.canonicalFacts.flatMap((value) => typeof value === "string" ? [value]
+      : value && typeof value === "object" && "content" in value && typeof value.content === "string" ? [value.content] : []) : [],
     canonicalFactUpdates: canonicalFactUpdates(snapshot),
     entityCatalog: []
-  }).map((fact) => fact.id);
+  });
 }
 
 /**
@@ -67,11 +69,17 @@ export function preseedAcceptedTurnSnapshotFactIds(
     factIds: Map<string, string>;
   }>,
 ): void {
-  const sourceFactIds = projectedFactIds(snapshot, input.sourceCampaignId, input.sourceTurnId);
-  const destinationFactIds = projectedFactIds(snapshot, input.destinationCampaignId, input.destinationTurnId);
-  sourceFactIds.forEach((sourceId, index) => {
-    const destinationId = destinationFactIds[index];
-    if (destinationId) input.factIds.set(sourceId, destinationId);
+  const sourceFacts = projectedFacts(snapshot, input.sourceCampaignId, input.sourceTurnId);
+  const destinationFacts = projectedFacts(snapshot, input.destinationCampaignId, input.destinationTurnId);
+  sourceFacts.forEach((sourceFact, index) => {
+    const destinationId = destinationFacts[index]?.id;
+    if (!destinationId) return;
+    input.factIds.set(sourceFact.id, destinationId);
+    for (const value of Array.isArray(snapshot.canonicalFacts) ? snapshot.canonicalFacts : []) {
+      if (value && typeof value === "object" && typeof value.id === "string" && typeof value.content === "string"
+        && canonicalFactDeduplicationKey(value.content) === canonicalFactDeduplicationKey(sourceFact.content)
+        && !input.factIds.has(value.id)) input.factIds.set(value.id, destinationId);
+    }
   });
 }
 
@@ -90,18 +98,26 @@ export function remapAcceptedTurnSnapshotFactReferences(
   }>,
 ): Record<string, unknown> {
   preseedAcceptedTurnSnapshotFactIds(snapshot, input);
-  if (!Array.isArray(snapshot.canonicalFactUpdates)) return { ...snapshot };
-  return {
+  const remappedSnapshot = {
     ...snapshot,
+    ...(Array.isArray(snapshot.canonicalFacts) ? { canonicalFacts: snapshot.canonicalFacts.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      return { ...value, id: typeof value.id === "string" ? input.factIds.get(value.id) ?? null : null };
+    }) } : {})
+  };
+  if (!Array.isArray(snapshot.canonicalFactUpdates)) return remappedSnapshot;
+  return {
+    ...remappedSnapshot,
     canonicalFactUpdates: snapshot.canonicalFactUpdates.map((candidate) => {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return candidate;
       const update = candidate as Record<string, unknown>;
       if (!Array.isArray(update.supersedesFactIds)) return { ...update };
       return {
         ...update,
-        supersedesFactIds: update.supersedesFactIds.map((id) => (
-          typeof id === "string" ? input.factIds.get(id) ?? id : id
-        ))
+        supersedesFactIds: update.supersedesFactIds.flatMap((id) => {
+          const destinationId = typeof id === "string" ? input.factIds.get(id) : undefined;
+          return destinationId ? [destinationId] : [];
+        })
       };
     })
   };

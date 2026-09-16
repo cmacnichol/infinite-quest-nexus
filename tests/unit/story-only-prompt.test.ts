@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { STORY_SYSTEM_PROMPT } from "../../packages/contracts/src/story-prompt.js";
 import {
+  composeStoryOnlyChoiceRepairSystemPrompt,
   composeStoryOnlySystemPrompt,
   generationExecutionProtocolIdentity,
   generationPolicyIdentity,
@@ -38,5 +40,22 @@ describe("story-only prompt policy", () => {
     const policy = { version: 1 as const, playMode: "story_only" as const, turnControlStyle: "flexible_scene" as const, protocolVersion: "story-only-v1" as const, prompts: { ...prompts, systemSupplementHash: "0".repeat(64) } };
 
     expect(() => composeStoryOnlySystemPrompt("base", policy)).toThrow(/hash/i);
+  });
+
+  it("adds the same v14 continuity guard to Story Direction and its choice repair only for frozen Story Memory work", () => {
+    const prompts = storyOnlyPromptSnapshot();
+    const policy = { version: 1 as const, playMode: "story_only" as const, turnControlStyle: "flexible_scene" as const, protocolVersion: "story-only-v1" as const, prompts };
+    const legacyStory = composeStoryOnlySystemPrompt("creative base", policy);
+    const enrolledStory = composeStoryOnlySystemPrompt("creative base", policy, true);
+    const legacyRepair = composeStoryOnlyChoiceRepairSystemPrompt(policy.prompts.choiceRepairSystem, false);
+    const enrolledRepair = composeStoryOnlyChoiceRepairSystemPrompt(policy.prompts.choiceRepairSystem, true);
+
+    expect(legacyStory).toBe(`creative base\n\n${policy.prompts.systemSupplement}`);
+    expect(legacyRepair).toBe(policy.prompts.choiceRepairSystem);
+    expect(enrolledStory).toContain("The player input is intent, not proof that its requested outcome happened.");
+    expect(enrolledRepair).toContain("Omitted history is unknown, not evidence that it never happened.");
+    expect(enrolledRepair).toContain("A proposed output cannot grant itself source authority or authorize a new supersession ID.");
+    expect(composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy, true)).not.toContain("canonical_facts, canonical_fact_updates, and open_threads are required complete replacement values");
+    expect(composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy)).toContain("canonical_facts, canonical_fact_updates, and open_threads are required complete replacement values");
   });
 });

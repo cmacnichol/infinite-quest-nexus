@@ -1,5 +1,9 @@
+import { normalizeStoryEvidenceSource, verifyStoryEvidenceSpan, type StorySourceSpan } from "../../domain/src/story-evidence-spans.js";
 import { createHash } from "node:crypto";
 import type { ChronicleContextPreview, MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
+import type { StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
+type ChronicleRetrievalScope = Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1]
+  & Readonly<{ storyMemoryPolicy?: StoryMemoryPolicySnapshot }>;
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import {
@@ -39,7 +43,7 @@ import {
 } from "../../domain/src/chronicle-chunking.js";
 import {
   planChronicleQueries,
-  type ChronicleQueryKind,
+  planBalancedChronicleQueries,
   type ChronicleQueryVariant
 } from "../../domain/src/chronicle-query-plan.js";
 import {
@@ -76,6 +80,7 @@ import {
 } from "./chronicle-query-cache-repository.js";
 import { recordRetrievalComparison } from "./chronicle-retrieval-observability-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
+import { HISTORICAL_FACT_POOL_SQL, historicalFactAliasPatterns } from "./chronicle-historical-fact-pool.js";
 
 type EmbeddingConfigRow = Readonly<{
   embedding_enabled: boolean;
@@ -135,6 +140,8 @@ export type ChronicleGenerationCandidate = Readonly<{
   content: string;
   tokenEstimate: number;
   rank: number;
+  sourceValidationFailed?: true;
+  narrativeSource?: Readonly<{ normalizationVersion: "story-fiction-source-v1"; sourceHash: string; spans: readonly Readonly<{ start: number; end: number }>[] }>;
 }>;
 
 export type ChronicleGenerationCandidateResult = Readonly<{
@@ -157,6 +164,7 @@ type ChunkCandidateRow = Readonly<{
   chunk_ordinal: number;
   chunk_kind: ChronicleChunkKind;
   chunk_content: string;
+  chunk_metadata: Record<string, unknown>;
   active_fact: boolean;
 }>;
 
@@ -168,6 +176,7 @@ type BatchedChunkCandidateRow = ChunkCandidateRow & Readonly<{
 type ChunkedRankFusionResult = Readonly<{
   retrieval: Record<string, unknown>;
   selectedParentContent: ReadonlyMap<string, string>;
+  selectedNarrativeSpans?: ReadonlyMap<string, readonly StorySourceSpan[]> | undefined;
   providerFingerprint: string | null;
   costIds: readonly string[];
   telemetryCandidates: readonly ChronicleRetrievalCandidate[];
@@ -198,6 +207,7 @@ type RetrievalExecution = Readonly<{
   memories: ContextMemoryRow[];
   retrieval: Record<string, unknown>;
   selectedParentContent: ReadonlyMap<string, string> | null;
+  selectedNarrativeSpans?: ReadonlyMap<string, readonly StorySourceSpan[]> | undefined;
   latencyMs: number;
   providerFingerprint: string | null;
   costIds: readonly string[];
@@ -211,6 +221,7 @@ type ChronicleRetrievalStage = Readonly<{
   expandedQuery: string;
   memories: ContextMemoryRow[];
   selectedParentContent: ReadonlyMap<string, string> | null;
+  selectedNarrativeSpans?: ReadonlyMap<string, readonly StorySourceSpan[]> | undefined;
   retrieval: Record<string, unknown>;
   chronicleRetrieval: ChronicleRetrievalAudit;
   config: EmbeddingConfigRow | undefined;
@@ -356,7 +367,7 @@ function campaignFictionCanon(campaign: ContextCampaignRow, maximumTokens: numbe
 
 async function loadContextCampaign(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
 ): Promise<ContextCampaignRow> {
   const result = await client.query<ContextCampaignRow>(
     `SELECT c.id, c.title, c.active_turn_number, c.world_version_id, c.selected_character_id,
@@ -428,17 +439,23 @@ function generationRankFusionProfile(
 
 async function loadContextMemories(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   query: string,
   queryEntityIds: string[],
+  entityCatalog: readonly EntityReference[] = [],
 ): Promise<ContextMemoryRow[]> {
   const limits = generationChronicleRetrievalLimits(scope.request.retrievalBudgetTokens);
+  const boundedQueries = scope.storyMemoryPolicy ? planBalancedChronicleQueries({ action: scope.request.query }).variants.map((variant) => variant.query) : null;
+  const lookupQuery = boundedQueries ? boundedQueries[0] ?? "" : query.trim();
+  const rankExpression = (document: string, parameter: number) => boundedQueries
+    ? `COALESCE((SELECT max(ts_rank_cd(${document}, websearch_to_tsquery('english', fragment))) FROM unnest($${parameter}::text[]) fragment), 0::real)`
+    : `ts_rank_cd(${document}, websearch_to_tsquery('english', $4))`;
   const result = await client.query<ContextMemoryRow>(
     `WITH base AS (
        SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, metadata,
               created_at,
               CASE WHEN $4 = '' THEN 0::real
-                   ELSE ts_rank_cd(search_document, websearch_to_tsquery('english', $4)) END AS relevance
+                   ELSE ${rankExpression("search_document", 15)} END AS relevance
          FROM chronicle_memories
         WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
           AND ($6::integer IS NULL OR ordinal <= $6::integer)
@@ -480,12 +497,24 @@ async function loadContextMemories(
         CASE WHEN $4 <> '' THEN lexical_rank ELSE 2147483647 END,
         ordinal DESC, memory_kind, id
       LIMIT $14::integer`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, query.trim(), scope.request.recentTurns,
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, lookupQuery, scope.request.recentTurns,
       scope.request.throughTurnNumber ?? null, queryEntityIds, limits.canonicalCandidates,
       limits.canonicalCandidates / 2, limits.turnSequenceCoverage, limits.canonicalCandidates / 2,
-      limits.turnLexicalCandidates, limits.entityCandidates, limits.candidatePool]
+      limits.turnLexicalCandidates, limits.entityCandidates, limits.candidatePool, ...(boundedQueries ? [boundedQueries] : [])]
   );
   if (scope.request.throughTurnNumber === undefined) return [...result.rows];
+  if (scope.storyMemoryPolicy && boundedQueries) {
+    const mention = /\baccepted turn\s+(\d+)\b/iu.exec(scope.request.query);
+    const temporal = mention ? Number(mention[1]) : null;
+    const historical = await client.query<ContextMemoryRow>(HISTORICAL_FACT_POOL_SQL, [
+      scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber,
+      limits.historicalCanonicalFacts, boundedQueries, queryEntityIds,
+      historicalFactAliasPatterns(entityCatalog, queryEntityIds),
+      temporal !== null && Number.isSafeInteger(temporal) && temporal <= scope.request.throughTurnNumber ? temporal : null
+    ]);
+    return [...result.rows, ...historical.rows].sort((left, right) => left.ordinal - right.ordinal
+      || left.memory_kind.localeCompare(right.memory_kind) || compareDeterministically(left.id, right.id));
+  }
   const historical = await client.query<ContextMemoryRow>(
     `SELECT id, source_turn_id AS turn_id, 'canonical_fact'::text AS memory_kind,
             source_turn_number AS ordinal, '- [fact_id: ' || id || '] ' || content AS content,
@@ -493,14 +522,14 @@ async function loadContextMemories(
             0.85::real AS importance, entities, entity_ids,
             jsonb_build_object('structuredFactIds', jsonb_build_array(id::text)) AS metadata,
             CASE WHEN $4 = '' THEN 0::real
-                 ELSE ts_rank_cd(to_tsvector('english', content), websearch_to_tsquery('english', $4)) END AS relevance
+                 ELSE ${rankExpression("to_tsvector('english', content)", 7)} END AS relevance
        FROM campaign_canonical_facts
       WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
         AND valid_from_turn <= $5 AND (valid_until_turn IS NULL OR valid_until_turn > $5)
       ORDER BY source_turn_number DESC, source_fact_index
       LIMIT $6::integer`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, query.trim(), scope.request.throughTurnNumber,
-      limits.historicalCanonicalFacts]
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, lookupQuery, scope.request.throughTurnNumber,
+      limits.historicalCanonicalFacts, ...(boundedQueries ? [boundedQueries] : [])]
   );
   return [...result.rows, ...historical.rows]
     .sort((left, right) => left.ordinal - right.ordinal
@@ -521,6 +550,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     query: string;
     throughTurnNumber: number;
     retrievalBudgetTokens?: number;
+    storyMemoryPolicy?: StoryMemoryPolicySnapshot;
   }>,
   dependencies: ChronicleGenerationTransactionDependencies,
   options: Readonly<{ useSavepoints?: boolean }> = {},
@@ -529,6 +559,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
     worldVersionId: scope.worldVersionId,
+    ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
     request: {
       // This request initializes retrieval only. It is never rendered or used
       // as a generation budget; selected parents retain their full content.
@@ -562,7 +593,13 @@ export async function loadPostgresChronicleGenerationCandidates(
     kind: memory.memory_kind,
     content: memory.content,
     tokenEstimate: Math.max(0, memory.token_estimate),
-    rank: index + 1
+    rank: index + 1,
+    ...(stage.selectedNarrativeSpans?.has(memory.id) && !stage.selectedNarrativeSpans.get(memory.id)!.length ? { sourceValidationFailed: true as const } : {}),
+    ...(stage.selectedNarrativeSpans?.get(memory.id)?.length ? { narrativeSource: {
+      normalizationVersion: "story-fiction-source-v1" as const,
+      sourceHash: stage.selectedNarrativeSpans.get(memory.id)![0]!.sourceHash,
+      spans: stage.selectedNarrativeSpans.get(memory.id)!.map(({ start, end }) => ({ start, end }))
+    } } : {})
   }));
   return { candidates, chronicleRetrieval: stage.chronicleRetrieval };
 }
@@ -589,7 +626,7 @@ function contextMetrics(row: ContextMetricRow): ContextMetrics {
 
 export async function loadPostgresChronicleContextMetrics(
   client: DatabasePool | DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
 ): Promise<ContextMetrics> {
   const result = await client.query<ContextMetricRow>(
     `SELECT
@@ -710,7 +747,7 @@ function exactHash(value: string): string {
 
 function queryCache(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   dependencies: ChronicleGenerationTransactionDependencies,
   useSavepoints = true,
 ) {
@@ -732,9 +769,12 @@ function queryCacheKey(
   model: string,
   providerFingerprint: string,
   queryPrefix: string,
+  variant?: ChronicleQueryVariant,
 ): ChronicleQueryEmbeddingCacheKey {
   return {
-    normalizedQueryHash: queryHash(query),
+    normalizedQueryHash: variant && "version" in variant
+      ? exactHash(stableStringify({ planner: "balanced-v1", kind: variant.kind, query: queryHash(query) }))
+      : queryHash(query),
     providerProfileId,
     model,
     providerFingerprint,
@@ -745,7 +785,7 @@ function queryCacheKey(
 
 async function loadContextConfig(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
 ): Promise<EmbeddingConfigRow | undefined> {
   const result = await client.query<EmbeddingConfigRow>(
     `SELECT embedding_enabled, embedding_provider_profile_id, embedding_model, embedding_batch_size,
@@ -759,7 +799,7 @@ async function loadContextConfig(
 
 async function applyContextSemanticRelevance(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   query: string,
   memories: ContextMemoryRow[],
   queryEntityIds: string[],
@@ -769,9 +809,10 @@ async function applyContextSemanticRelevance(
   diagnosticImplementation: RetrievalExecution["implementation"] = "legacy_hybrid",
   expectedDimensionsOverride: number | null = null,
   useSavepoints = true,
+  balancedVariants?: readonly ChronicleQueryVariant[],
 ): Promise<LegacyRetrievalResult> {
   const limits = generationChronicleRetrievalLimits(scope.request.retrievalBudgetTokens);
-  const normalizedQuery = query.toLowerCase();
+  const normalizedQuery = (balancedVariants ? balancedVariants.map((variant) => variant.query).join("\n") : query).toLowerCase();
   const queryEntityIdSet = new Set(queryEntityIds);
   const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
   for (const memory of memories) {
@@ -850,16 +891,20 @@ async function applyContextSemanticRelevance(
       ?? inferredDimensions?.rows[0]?.expected_dimensions
       ?? null;
     const cache = queryCache(client, scope, dependencies, useSavepoints);
-    const cacheKey = queryCacheKey(query.trim(), providerProfileId, config.embedding_model, fingerprint, prefixes.queryPrefix);
-    const cachedQueryVector = await cache.getQueryEmbedding(scope, cacheKey);
-    let queryVector = usableCachedQueryVector(cachedQueryVector, expectedDimensions);
+    const queries = balancedVariants ?? [{ kind: "action" as const, query: query.trim(), entityIds: [] }];
+    const cacheKeys = queries.map((variant) => queryCacheKey(variant.query, providerProfileId, config.embedding_model, fingerprint, prefixes.queryPrefix, variant));
+    const queryVectors: Array<readonly number[] | null> = [];
+    const missed: number[] = [];
+    for (let index = 0; index < queries.length; index += 1) {
+      const vector = usableCachedQueryVector(await cache.getQueryEmbedding(scope, cacheKeys[index]!), expectedDimensions);
+      queryVectors.push(vector);
+      if (vector) queryCacheHits += 1;
+      else { queryCacheMisses += 1; missed.push(index); }
+    }
     let costId: string | null = null;
-    if (queryVector) {
-      queryCacheHits = 1;
-    } else {
-      queryCacheMisses = 1;
+    if (missed.length) {
       embeddingRequests = 1;
-      const result = await dependencies.embeddings.embed(provider, [`${prefixes.queryPrefix}${query.trim()}`]);
+      const result = await dependencies.embeddings.embed(provider, missed.map((index) => `${prefixes.queryPrefix}${queries[index]!.query}`));
       costId = await dependencies.embeddings.recordCost(client, provider, {
         ownerUserId: scope.ownerUserId,
         campaignId: scope.campaignId,
@@ -868,11 +913,20 @@ async function applyContextSemanticRelevance(
           : {}),
         operation: scope.costAttribution?.operation ?? "context_preview_embedding"
       }, result);
-      queryVector = requireUsableQueryVector(result.embeddings[0], expectedDimensions);
+      if (result.embeddings.length !== missed.length) throw new Error("Incomplete Chronicle query embedding batch.");
+      const validVectors = result.embeddings.map((value) => requireUsableQueryVector(value, expectedDimensions));
       auditTrace = { ...auditTrace, providerCallOutcome: "succeeded", queryEmbeddingRequests: embeddingRequests };
-      await cache.putQueryEmbedding(scope, cacheKey, queryVector);
+      for (let index = 0; index < missed.length; index += 1) {
+        const position = missed[index]!;
+        const vector = validVectors[index]!;
+        queryVectors[position] = vector;
+        await cache.putQueryEmbedding(scope, cacheKeys[position]!, vector);
+      }
     }
-    const scored = await client.query<ContextMemoryRow>(
+    const scoredLists: ContextMemoryRow[][] = [];
+    for (const queryVector of queryVectors) {
+      if (!queryVector) throw new Error("Missing Chronicle query vector.");
+      const scored = await client.query<ContextMemoryRow>(
       `SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids,
               0::real AS relevance, embedding_content_hash,
               (1 - (embedding <=> $6::vector))::real AS semantic_relevance
@@ -889,8 +943,10 @@ async function applyContextSemanticRelevance(
         vectorLiteral(queryVector), queryVector.length, fingerprint, scope.request.throughTurnNumber ?? null,
         limits.turnLexicalCandidates]
     );
-    const freshScores = scored.rows.filter((row) => row.embedding_content_hash
-      && row.embedding_content_hash === chronicleContentHash(row.content));
+      scoredLists.push(scored.rows.filter((row) => row.embedding_content_hash
+        && row.embedding_content_hash === chronicleContentHash(row.content)));
+    }
+    const freshScores = [...new Map(scoredLists.flat().map((row) => [row.id, row])).values()];
     if (freshScores.length === 0) {
       if (diagnosticMode === "production") {
         await dependencies.embeddings.recordHealth(client, providerScope, true);
@@ -925,7 +981,16 @@ async function applyContextSemanticRelevance(
         existingIds.add(row.id);
       }
     }
-    const semantic = new Map(freshScores.map((row) => [row.id, Number(row.semantic_relevance)]));
+    const semantic = balancedVariants ? new Map(fuseChronicleRanks(scoredLists.map((rows, index) => ({
+      signal: "semantic" as const, variant: queries[index]!.kind,
+      ...("variantId" in queries[index]! ? { variantId: (queries[index] as Extract<ChronicleQueryVariant, { variantId: string }>).variantId } : {}),
+      candidates: rows.filter((row) => Number(row.semantic_relevance) >= 0.2).map((row) => ({
+        candidateId: row.id, parentMemoryId: row.id, parentTurnId: row.turn_id, parentOrdinal: row.ordinal,
+        memoryKind: row.memory_kind, activeFact: true
+      }))
+    })), { rrfK: 60, weights: {}, rankAggregation: "query_family_max_v1" })
+      .map((candidate) => [candidate.candidateId, candidate.score * 61]))
+      : new Map(freshScores.map((row) => [row.id, Number(row.semantic_relevance)]));
     for (const memory of memories) {
       const lexical = Math.min(1, Math.max(0, Number(memory.lexicalRelevance || 0) * 8));
       const semanticScore = Math.max(0, semantic.get(memory.id) ?? 0);
@@ -1055,7 +1120,7 @@ const TERMINAL_CHUNK_PREDICATE = `(chunk.embedding_status='embedded'
 
 async function resolveChunkEmbeddingIdentity(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   config: EmbeddingConfigRow | undefined,
   dependencies: ChronicleGenerationTransactionDependencies,
   resolution: ChronicleTransactionEmbeddingResolution,
@@ -1111,7 +1176,7 @@ async function resolveChunkEmbeddingIdentity(
 
 async function chunkIndexReady(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   identity: ChunkEmbeddingIdentity,
 ): Promise<boolean> {
   const result = await client.query<{ chunk_index_ready: boolean }>(
@@ -1183,7 +1248,7 @@ function authorizedChunkCte(): string {
               parent.token_estimate AS parent_token_estimate,parent.importance AS parent_importance,
               parent.entities AS parent_entities,parent.entity_ids AS parent_entity_ids,
               parent.metadata AS parent_metadata,chunk.chunk_ordinal,chunk.chunk_kind,
-              chunk.content AS chunk_content,
+              chunk.content AS chunk_content,chunk.metadata AS chunk_metadata,
               chunk.entities,chunk.entity_ids,chunk.search_document,chunk.embedding,
               chunk.embedding_status,chunk.embedding_provider_profile_id,chunk.embedding_model,
               chunk.embedding_dimensions,chunk.embedding_protocol_version,
@@ -1245,7 +1310,7 @@ type ChunkRankResult = Readonly<{
 
 const CHUNK_RANK_RESULT_COLUMNS = `candidate_id,parent_memory_id,parent_turn_id,parent_memory_kind,parent_ordinal,
             parent_content,parent_token_estimate,parent_importance,parent_entities,parent_entity_ids,parent_metadata,
-            chunk_ordinal,chunk_kind,chunk_content,active_fact`;
+            chunk_ordinal,chunk_kind,chunk_content,chunk_metadata,active_fact`;
 
 function storeChunkRankRows(
   requests: readonly ChunkRankRequest[],
@@ -1276,7 +1341,7 @@ function semanticRankCompatibilitySql(
 
 async function loadSemanticRankFamily(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   requests: readonly ChunkRankRequest[],
   candidateLimit: number,
   results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
@@ -1330,7 +1395,7 @@ async function loadSemanticRankFamily(
 
 async function loadFullTextRankFamily(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   requests: readonly ChunkRankRequest[],
   candidateLimit: number,
   results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
@@ -1369,7 +1434,7 @@ async function loadFullTextRankFamily(
 
 async function loadEntityRankFamily(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   requests: readonly ChunkRankRequest[],
   candidateLimit: number,
   results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
@@ -1409,7 +1474,7 @@ async function loadEntityRankFamily(
 
 async function loadStaticRankFamily(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   requests: readonly ChunkRankRequest[],
   candidateLimit: number,
   results: Map<ChunkRankRequest, readonly ChunkCandidateRow[]>,
@@ -1474,7 +1539,7 @@ async function loadStaticRankFamily(
 
 async function loadAuthorizedChunkRanks(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   requests: readonly ChunkRankRequest[],
   candidateLimit: number,
 ): Promise<readonly ChunkRankResult[]> {
@@ -1528,11 +1593,11 @@ function cutoffSafeEntityCatalog(
   });
 }
 
-function plannedChunkQueries(
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+function chunkQueryPlanInput(
+  scope: ChronicleRetrievalScope,
   memories: readonly ContextMemoryRow[],
   entityCatalog: readonly EntityReference[],
-): readonly ChronicleQueryVariant[] {
+) {
   const entityHints = matchEntityReferences(scope.request.query, entityCatalog).flatMap(({ entity, matchedAlias }) => {
     const authorizedMemories = memories.filter((memory) => memory.entity_ids.includes(entity.id));
     if (!authorizedMemories.length) return [];
@@ -1551,7 +1616,7 @@ function plannedChunkQueries(
       terms
     }];
   });
-  return planChronicleQueries({
+  const input = {
     action: scope.request.query,
     ...(scope.request.throughTurnNumber === undefined ? {} : { throughTurnNumber: scope.request.throughTurnNumber }),
     entityHints,
@@ -1559,7 +1624,19 @@ function plannedChunkQueries(
       .map((memory) => ({ ordinal: memory.ordinal, content: memory.content })),
     openThreadHints: memories.filter((memory) => memory.memory_kind === "open_thread")
       .map((memory) => ({ ordinal: memory.ordinal, content: memory.content }))
-  });
+  };
+  // Only an explicit ledger reference supplies a turn anchor. Fictional dates
+  // and phrases such as "last winter" never become database ordinals.
+  const turnMention = /\baccepted turn\s+(\d+)\b/iu.exec(scope.request.query);
+  const turnNumber = turnMention ? Number(turnMention[1]) : null;
+  return { ...input, ...(turnNumber !== null && Number.isSafeInteger(turnNumber)
+    && scope.request.throughTurnNumber !== undefined && turnNumber <= scope.request.throughTurnNumber
+    ? { temporalHint: { throughTurnNumber: turnNumber, label: turnMention![0] } } : {}) };
+}
+
+function plannedChunkQueries(scope: ChronicleRetrievalScope, memories: readonly ContextMemoryRow[], entityCatalog: readonly EntityReference[]): readonly ChronicleQueryVariant[] {
+  const input = chunkQueryPlanInput(scope, memories, entityCatalog);
+  return scope.storyMemoryPolicy ? planBalancedChronicleQueries(input).variants : planChronicleQueries(input);
 }
 
 function contextMemoryFromChunk(row: ChunkCandidateRow): ContextMemoryRow {
@@ -1582,7 +1659,7 @@ function contextMemoryFromChunk(row: ChunkCandidateRow): ContextMemoryRow {
 async function applyChunkedRankFusion(
   client: DatabaseClient,
   campaign: ContextCampaignRow,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   memories: ContextMemoryRow[],
   entityCatalog: readonly EntityReference[],
   config: EmbeddingConfigRow,
@@ -1608,7 +1685,8 @@ async function applyChunkedRankFusion(
     rows: readonly ChunkCandidateRow[],
   ): void => {
     rows.forEach((row) => candidateRows.set(row.candidate_id, row));
-    inputs.push({ signal, variant: variant.kind, candidates: rows.map(rankCandidate) });
+    inputs.push({ signal, variant: variant.kind, candidates: rows.map(rankCandidate),
+      ...("variantId" in variant ? { variantId: variant.variantId } : {}) });
   };
 
   let semanticAvailable = false;
@@ -1658,7 +1736,8 @@ async function applyChunkedRankFusion(
           providerProfileId,
           config.embedding_model,
           fingerprint,
-          prefixes.queryPrefix
+          prefixes.queryPrefix,
+          variant
         ));
         const queryVectors: Array<readonly number[] | null> = [];
         const missedIndexes: number[] = [];
@@ -1798,6 +1877,9 @@ async function applyChunkedRankFusion(
     };
   }
 
+  const temporalVariant = variants.find((variant) => variant.kind === "temporal_hint");
+  const temporalAnchor = temporalVariant && "temporalHint" in temporalVariant
+    ? temporalVariant.temporalHint?.throughTurnNumber : undefined;
   const nonsemanticRequests: ChunkRankRequest[] = [
     ...variants.map((variant) => ({ signal: "full_text" as const, variant, query: variant.query })),
     ...variants.filter((variant) => variant.entityIds.length > 0)
@@ -1808,8 +1890,8 @@ async function applyChunkedRankFusion(
     { signal: "kind", variant: actionVariant },
     {
       signal: "temporal",
-      variant: actionVariant,
-      temporalAnchor: scope.request.throughTurnNumber ?? campaign.active_turn_number
+      variant: temporalVariant ?? actionVariant,
+      temporalAnchor: temporalAnchor ?? scope.request.throughTurnNumber ?? campaign.active_turn_number
     }
   ];
   const nonsemanticRanks = await loadAuthorizedChunkRanks(client, scope, nonsemanticRequests, candidateLimit);
@@ -1819,7 +1901,7 @@ async function applyChunkedRankFusion(
     (scope.request.throughTurnNumber === undefined
       ? []
       : memories.filter((memory) => memory.memory_kind === "canonical_fact")
-    ).map((memory) => [`historical-canonical:${memory.id}`, memory] as const)
+    ).map((memory) => [scope.storyMemoryPolicy ? memory.id : `historical-canonical:${memory.id}`, memory] as const)
   );
   const historicalCanonicalCandidates = [...historicalCanonicalByCandidateId.entries()].map(([candidateId, memory]) => ({
     candidateId,
@@ -1833,7 +1915,9 @@ async function applyChunkedRankFusion(
     signal: ChronicleRankSignal,
     candidates: readonly (typeof historicalCanonicalCandidates)[number][],
   ): void => {
-    if (candidates.length) inputs.push({ signal, variant: actionVariant.kind, candidates });
+    const variant = scope.storyMemoryPolicy && signal === "temporal" && temporalVariant ? temporalVariant : actionVariant;
+    if (candidates.length) inputs.push({ signal, variant: variant.kind, candidates,
+      ...("variantId" in variant ? { variantId: variant.variantId } : {}) });
   };
   const newestHistoricalOrdinal = historicalCanonicalCandidates.reduce(
     (maximum, candidate) => Math.max(maximum, candidate.parentOrdinal),
@@ -1846,8 +1930,12 @@ async function applyChunkedRankFusion(
       || right.parentOrdinal - left.parentOrdinal
       || compareDeterministically(left.candidateId, right.candidateId)));
   historicalRank("entity", historicalCanonicalCandidates
-    .filter((candidate) => candidate.parentMemoryId !== "" && historicalCanonicalByCandidateId.get(candidate.candidateId)!
-      .entity_ids.some((entityId) => actionVariant.entityIds.includes(entityId)))
+    .filter((candidate) => {
+      const memory = historicalCanonicalByCandidateId.get(candidate.candidateId)!;
+      return candidate.parentMemoryId !== "" && (scope.storyMemoryPolicy
+        ? memory.metadata.historicalEntityMatch === true
+        : memory.entity_ids.some((entityId) => actionVariant.entityIds.includes(entityId)));
+    })
     .sort((left, right) => right.parentOrdinal - left.parentOrdinal
       || compareDeterministically(left.candidateId, right.candidateId)));
   historicalRank("recency", [...historicalCanonicalCandidates]
@@ -1862,12 +1950,13 @@ async function applyChunkedRankFusion(
     .sort((left, right) => right.parentOrdinal - left.parentOrdinal
       || compareDeterministically(left.candidateId, right.candidateId)));
   historicalRank("temporal", [...historicalCanonicalCandidates]
-    .sort((left, right) => Math.abs(left.parentOrdinal - newestHistoricalOrdinal)
-      - Math.abs(right.parentOrdinal - newestHistoricalOrdinal)
+    .sort((left, right) => Math.abs(left.parentOrdinal - (temporalAnchor ?? newestHistoricalOrdinal))
+      - Math.abs(right.parentOrdinal - (temporalAnchor ?? newestHistoricalOrdinal))
       || right.parentOrdinal - left.parentOrdinal
       || compareDeterministically(left.candidateId, right.candidateId)));
 
-  const fused = fuseChronicleRanks(inputs, rankFusionProfile);
+  const fused = fuseChronicleRanks(inputs, { ...rankFusionProfile,
+    ...(scope.storyMemoryPolicy ? { rankAggregation: scope.storyMemoryPolicy.policy.rankAggregation } : {}) });
   const fusedRankByCandidateId = new Map<string, number>();
   let previousFusedScore: number | null = null;
   let currentFusedRank = 0;
@@ -1947,6 +2036,21 @@ async function applyChunkedRankFusion(
     [parent.parentMemoryId, parent.content] as const
   )));
   const selectedParentIds = new Set(selectedParentContent.keys());
+  const selectedNarrativeSpans = new Map<string, StorySourceSpan[]>();
+  if (scope.storyMemoryPolicy?.policy.excerptPolicy === "verified_spans_v1") {
+    for (const candidate of fused) {
+      const row = candidateRows.get(candidate.candidateId);
+      if (!row || !selectedParentIds.has(row.parent_memory_id) || row.chunk_kind !== "turn_narration") continue;
+      const certificate = row.chunk_metadata?.sourceEvidence as StorySourceSpan | undefined;
+      const normalized = normalizeStoryEvidenceSource(row.parent_content);
+      if (!certificate || !verifyStoryEvidenceSpan(normalized, certificate, row.chunk_content)) {
+        if (!selectedNarrativeSpans.has(row.parent_memory_id)) selectedNarrativeSpans.set(row.parent_memory_id, []);
+        continue;
+      }
+      const spans = selectedNarrativeSpans.get(row.parent_memory_id) ?? [];
+      spans.push(certificate); selectedNarrativeSpans.set(row.parent_memory_id, spans);
+    }
+  }
   const maximumScore = fused[0]?.score ?? 0;
   const memoriesById = new Map(memories.map((memory) => [memory.id, memory]));
   for (const candidate of fused) {
@@ -1958,7 +2062,7 @@ async function applyChunkedRankFusion(
     const normalizedScore = maximumScore > 0 ? candidate.score / maximumScore : 0;
     const normalizedSignalScore = (signal: ChronicleRankSignal): number => maximumScore > 0
       ? candidate.contributions
-        .filter((contribution) => contribution.signal === signal)
+        .filter((contribution) => contribution.signal === signal && contribution.counted !== false)
         .reduce((total, contribution) => total + contribution.score, 0) / maximumScore
       : 0;
     memory.relevance = Math.max(memory.relevance, normalizedScore);
@@ -1993,6 +2097,7 @@ async function applyChunkedRankFusion(
       diversity: parentSelection.diagnostics satisfies ChronicleParentSelectionDiagnostics
     },
     selectedParentContent,
+    selectedNarrativeSpans,
     providerFingerprint,
     costIds,
     auditTrace: {
@@ -2067,7 +2172,7 @@ function rankedMemoryTelemetryCandidates(
  */
 export async function loadChronicleRetrievalStage(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   dependencies: ChronicleGenerationTransactionDependencies,
   options: Readonly<{ useSavepoints?: boolean }> = {},
 ): Promise<ChronicleRetrievalStage> {
@@ -2091,7 +2196,7 @@ export async function loadChronicleRetrievalStage(
     const preliminaryQuery = expandEntityQuery(scope.request.query, immutableWorldCatalog);
     const preliminaryEntityIds = matchEntityReferences(scope.request.query, immutableWorldCatalog)
       .map((match) => match.entity.id);
-    const cutoffMemories = await loadContextMemories(client, scope, preliminaryQuery, preliminaryEntityIds);
+    const cutoffMemories = await loadContextMemories(client, scope, preliminaryQuery, preliminaryEntityIds, immutableWorldCatalog);
     entityCatalog = cutoffSafeEntityCatalog(
       completeEntityCatalog,
       cutoffMemories,
@@ -2099,18 +2204,20 @@ export async function loadChronicleRetrievalStage(
     );
     entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
     queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
-    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds);
+    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds, entityCatalog);
   } else {
     entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
     queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
-    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds);
+    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds, entityCatalog);
   }
   // Count only the already owner/campaign/world-version/cutoff-filtered rows.
   // This safe aggregate lets callers verify scope eligibility without exposing
   // candidate IDs, content, entity names, or provider diagnostics.
   const scopeEligibleCandidates = memories.length;
+  const queryPlan = scope.storyMemoryPolicy ? planBalancedChronicleQueries(chunkQueryPlanInput(scope, memories, entityCatalog)) : null;
   const latestHint = memories.filter((memory) => memory.memory_kind === "turn_fiction").at(-1)?.content ?? "";
-  const expandedQuery = [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
+  const expandedQuery = queryPlan ? queryPlan.variants.map((variant) => variant.query).join("\n")
+    : [entityExpandedQuery, truncateAtBoundary(latestHint, 1200)].filter(Boolean).join("\n");
   const config = await loadContextConfig(client, scope);
   const productionImplementation = config?.retrieval_implementation ?? "legacy_hybrid";
   const executeLegacy = async (
@@ -2132,7 +2239,8 @@ export async function loadChronicleRetrievalStage(
       diagnosticMode,
       implementation,
       expectedDimensionsOverride,
-      useSavepoints
+      useSavepoints,
+      queryPlan?.variants
     );
     return {
       implementation,
@@ -2305,6 +2413,7 @@ export async function loadChronicleRetrievalStage(
       memories: attempt.executionMemories,
       retrieval: attempt.result.retrieval,
       selectedParentContent: attempt.result.selectedParentContent,
+      selectedNarrativeSpans: attempt.result.selectedNarrativeSpans,
       latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
       providerFingerprint: attempt.result.providerFingerprint,
       costIds: attempt.result.costIds,
@@ -2453,13 +2562,18 @@ export async function loadChronicleRetrievalStage(
     ...retrievalResult,
     scopeEligibleCandidates
   };
-  const chronicleRetrieval = buildChronicleRetrievalAudit({
+  const chronicleRetrieval: ChronicleRetrievalAudit = { ...buildChronicleRetrievalAudit({
     configuredImplementation: productionImplementation,
     effectiveImplementation: productionExecution.effectiveImplementation,
     semanticUsed: retrievalResult.semanticAvailable === true,
     fallbackCode: auditRetrievalFallbackCode(retrievalResult),
     trace: productionExecution.auditTrace
-  });
+  }), ...(queryPlan ? { queryPlanning: {
+    planner: queryPlan.version, rankAggregation: "query_family_max_v1" as const,
+    variantCount: queryPlan.variants.length, segmentCount: queryPlan.segmentCount,
+    uncoveredSegmentCount: queryPlan.uncoveredSegmentCount, totalCharacters: queryPlan.totalCharacters,
+    fingerprint: exactHash(stableStringify({ planner: queryPlan.version, rankAggregation: "query_family_max_v1", variants: queryPlan.variants }))
+  } } : {}) };
   return {
     campaign,
     currentContinuity,
@@ -2471,13 +2585,14 @@ export async function loadChronicleRetrievalStage(
     config,
     productionImplementation,
     productionExecution,
+    selectedNarrativeSpans: productionExecution.selectedNarrativeSpans,
     retrievalExecutions
   };
 }
 
 export async function buildPostgresChronicleContextPreview(
   client: DatabaseClient,
-  scope: Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1],
+  scope: ChronicleRetrievalScope,
   dependencies: ChronicleGenerationTransactionDependencies,
 ): Promise<ChronicleContextPreview> {
   const {

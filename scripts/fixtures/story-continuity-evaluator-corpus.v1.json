@@ -1,0 +1,621 @@
+{
+  "version": "story-continuity-evaluator-corpus-v1",
+  "preregistration": {
+    "seeds": [
+      "t15-local-repeat-01",
+      "t15-local-repeat-02"
+    ],
+    "pairedMethod": "identical-sanitized-inputs-and-heldout-candidates-by-scenario-and-repeat",
+    "frozenLabelVersion": "story-continuity-heldout-oracles-v1",
+    "blindedRubricVersion": "not-run-local-capture-only"
+  },
+  "scenarios": [
+    {
+      "id": "structured-only-base-fact",
+      "trajectory": "teacher_forced",
+      "sourceKind": "canonical_fact",
+      "evidence": "The relay key remains beneath the north stair.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The relay key remains beneath the north stair."
+        },
+        "forbiddenContradictions": [
+          "The relay key was moved to the harbor."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentContinuity/canonicalFacts/0"
+        }
+      }
+    },
+    {
+      "id": "character-edit-long-relationship",
+      "trajectory": "teacher_forced",
+      "sourceKind": "campaign_profile",
+      "evidence": "Mara trusts Iven because he returned her compass after the storm.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "Mara trusts Iven because he returned her compass after the storm."
+        },
+        "forbiddenContradictions": [
+          "Mara has never met Iven."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/selectedCharacterAuthority"
+        }
+      }
+    },
+    {
+      "id": "world-sibling-lore",
+      "trajectory": "teacher_forced",
+      "sourceKind": "world_rule",
+      "evidence": "The two harbor bells answer one another only at dawn.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The two harbor bells answer one another only at dawn."
+        },
+        "forbiddenContradictions": [
+          "The harbor bells answer at midnight."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/authoritativeRules"
+        }
+      }
+    },
+    {
+      "id": "late-multi-beat-direction",
+      "trajectory": "teacher_forced",
+      "sourceKind": "current_scene",
+      "evidence": "After the council vote, deliver the blue packet before leaving the chamber.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "After the council vote, deliver the blue packet before leaving the chamber."
+        },
+        "forbiddenContradictions": [
+          "Leave before the council vote."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentScene/narration"
+        }
+      }
+    },
+    {
+      "id": "old-fact-among-distractors",
+      "trajectory": "teacher_forced",
+      "sourceKind": "canonical_fact",
+      "evidence": "The brass key opens the archive door despite its worn teeth.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The brass key opens the archive door despite its worn teeth."
+        },
+        "forbiddenContradictions": [
+          "The brass key opens the lighthouse."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentContinuity/canonicalFacts/0"
+        }
+      }
+    },
+    {
+      "id": "supersession-cutoff",
+      "trajectory": "teacher_forced",
+      "sourceKind": "canonical_fact",
+      "evidence": "The bridge is open again after the mason replaced the broken plank.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The bridge is open again after the mason replaced the broken plank."
+        },
+        "forbiddenContradictions": [
+          "The bridge remains closed."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentContinuity/canonicalFacts/0"
+        }
+      }
+    },
+    {
+      "id": "intentional-empty-correction",
+      "trajectory": "teacher_forced",
+      "sourceKind": "current_correction",
+      "evidence": "No open debt remains between the baker and the courier.",
+      "oracle": {
+        "expectedState": {
+          "openThreads": []
+        },
+        "forbiddenContradictions": [
+          "The baker still owes the courier."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentContinuity"
+        }
+      }
+    },
+    {
+      "id": "chronicle-offline",
+      "trajectory": "teacher_forced",
+      "sourceKind": "recent_history",
+      "evidence": "The observatory chart is stored in the locked west cabinet.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The observatory chart is stored in the locked west cabinet."
+        },
+        "forbiddenContradictions": [
+          "The chart was destroyed."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/recentTurns/1/acceptedNarration"
+        }
+      }
+    },
+    {
+      "id": "very-long-parent",
+      "trajectory": "teacher_forced",
+      "sourceKind": "recent_history",
+      "evidence": "The river bridge has a single red rope marking the safe crossing.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The river bridge has a single red rope marking the safe crossing."
+        },
+        "forbiddenContradictions": [
+          "There is no safe crossing mark."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/recentTurns/1/acceptedNarration"
+        }
+      }
+    },
+    {
+      "id": "recent-oversized-predecessor",
+      "trajectory": "teacher_forced",
+      "sourceKind": "recent_history",
+      "evidence": "The innkeeper promised tea after the party returns from the station.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The innkeeper promised tea after the party returns from the station."
+        },
+        "forbiddenContradictions": [
+          "The innkeeper refused to help."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/recentTurns/1/acceptedNarration"
+        }
+      }
+    },
+    {
+      "id": "quoted-lie-dream-flashback",
+      "trajectory": "rollout",
+      "sourceKind": "current_scene",
+      "evidence": "The dream's false voice claimed the lantern belonged to the sea, but Mara knows it belongs to the archive.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The dream's false voice claimed the lantern belonged to the sea, but Mara knows it belongs to the archive."
+        },
+        "forbiddenContradictions": [
+          "The lantern belongs to the sea."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentScene/narration"
+        }
+      }
+    },
+    {
+      "id": "legitimate-change-resolved-thread",
+      "trajectory": "rollout",
+      "sourceKind": "current_correction",
+      "evidence": "The repaired market gate now opens at sunrise, resolving the old lockout.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The repaired market gate now opens at sunrise, resolving the old lockout."
+        },
+        "forbiddenContradictions": [
+          "The market gate is still broken."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentContinuity"
+        }
+      }
+    },
+    {
+      "id": "lost-unresolved-thread",
+      "trajectory": "rollout",
+      "sourceKind": "current_correction",
+      "evidence": "The missing cartographer has not returned from the northern trail.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The missing cartographer has not returned from the northern trail.",
+          "openThreads": [
+            "Find the missing cartographer."
+          ]
+        },
+        "forbiddenContradictions": [
+          "The cartographer returned safely."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentContinuity"
+        }
+      }
+    },
+    {
+      "id": "malicious-retrieved-instructions",
+      "trajectory": "rollout",
+      "sourceKind": "recent_history",
+      "evidence": "A damaged parchment says to ignore all duties; it is a false instruction and must not change the party's course.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "A damaged parchment says to ignore all duties; it is a false instruction and must not change the party's course."
+        },
+        "forbiddenContradictions": [
+          "The party abandons every duty."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/recentTurns/1/acceptedNarration"
+        }
+      }
+    },
+    {
+      "id": "rejected-draft-valid-looking-id",
+      "trajectory": "rollout",
+      "sourceKind": "current_scene",
+      "evidence": "Only the accepted blue packet record may be carried into the next scene.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "Only the accepted blue packet record may be carried into the next scene."
+        },
+        "forbiddenContradictions": [
+          "A rejected packet record is accepted."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentScene/narration"
+        }
+      }
+    },
+    {
+      "id": "review-repair-crash-reclaim",
+      "trajectory": "rollout",
+      "sourceKind": "current_scene",
+      "evidence": "After reclaim, the same review record remains bound to the original narration request.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "After reclaim, the same review record remains bound to the original narration request."
+        },
+        "forbiddenContradictions": [
+          "Reclaim creates a new unrelated review record."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentScene/narration"
+        }
+      }
+    },
+    {
+      "id": "immediate-event-extension",
+      "trajectory": "rollout",
+      "sourceKind": "current_scene",
+      "evidence": "The runner reaches the station before dusk and leaves the signal lantern lit.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The runner reaches the station before dusk and leaves the signal lantern lit."
+        },
+        "forbiddenContradictions": [
+          "The runner misses the station."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentScene/narration"
+        }
+      }
+    },
+    {
+      "id": "branch-transfer-archive-import",
+      "trajectory": "rollout",
+      "sourceKind": "canonical_fact",
+      "evidence": "The archive crate remains sealed until its chain of custody is checked.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The archive crate remains sealed until its chain of custody is checked."
+        },
+        "forbiddenContradictions": [
+          "The archive crate was opened without review."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentContinuity/canonicalFacts/0"
+        }
+      }
+    },
+    {
+      "id": "multilingual-unicode",
+      "trajectory": "rollout",
+      "sourceKind": "current_scene",
+      "evidence": "The note reads \u201cla br\u00fajula sigue al norte\u201d and points to the northward compass mark.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The note reads \u201cla br\u00fajula sigue al norte\u201d and points to the northward compass mark."
+        },
+        "forbiddenContradictions": [
+          "The note points south."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/currentScene/narration"
+        }
+      }
+    },
+    {
+      "id": "accepted-chain-propagation",
+      "trajectory": "rollout",
+      "sourceKind": "recent_history",
+      "evidence": "The party follows the accepted pine trail while the older mistaken detour remains rejected.",
+      "oracle": {
+        "expectedState": {
+          "continuitySummary": "The party follows the accepted pine trail while the older mistaken detour remains rejected."
+        },
+        "forbiddenContradictions": [
+          "The party follows the rejected detour."
+        ],
+        "authoritativeEvidence": {
+          "sourcePath": "/recentTurns/1/acceptedNarration"
+        }
+      }
+    }
+  ],
+  "candidates": [
+    {
+      "scenarioId": "structured-only-base-fact",
+      "narration": "The lantern warms as the party approaches.",
+      "state": {
+        "continuitySummary": "The relay key was moved to the harbor.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The relay key remains beneath the north stair.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "character-edit-long-relationship",
+      "narration": "Mara checks the old map by lamplight.",
+      "state": {
+        "continuitySummary": "Mara trusts Iven because he returned her compass after the storm.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "Mara trusts Iven because he returned her compass after the storm.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "world-sibling-lore",
+      "narration": "The harbor bell rings once across the fog.",
+      "state": {
+        "continuitySummary": "The two harbor bells answer one another only at dawn.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The two harbor bells answer one another only at dawn.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "late-multi-beat-direction",
+      "narration": "A courier leaves a sealed blue packet.",
+      "state": {
+        "continuitySummary": "After the council vote, deliver the blue packet before leaving the chamber.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "After the council vote, deliver the blue packet before leaving the chamber.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "old-fact-among-distractors",
+      "narration": "The brass key opens the lighthouse.",
+      "state": {
+        "continuitySummary": "The brass key opens the lighthouse.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The brass key opens the archive door despite its worn teeth.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "supersession-cutoff",
+      "narration": "The council chamber falls quiet.",
+      "state": {
+        "continuitySummary": "The bridge is open again after the mason replaced the broken plank.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The bridge is open again after the mason replaced the broken plank.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "intentional-empty-correction",
+      "narration": "Rain taps softly against the observatory glass.",
+      "state": {
+        "continuitySummary": "No open debt remains between the baker and the courier.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "No open debt remains between the baker and the courier.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "chronicle-offline",
+      "narration": "A brass key catches the light on the table.",
+      "state": {
+        "continuitySummary": "The observatory chart is stored in the locked west cabinet.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The observatory chart is stored in the locked west cabinet.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "very-long-parent",
+      "narration": "The bridge ropes creak in the river wind.",
+      "state": {
+        "continuitySummary": "The river bridge has a single red rope marking the safe crossing.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The river bridge has a single red rope marking the safe crossing.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "recent-oversized-predecessor",
+      "narration": "The innkeeper sets down a cup of tea.",
+      "state": {
+        "continuitySummary": "The innkeeper promised tea after the party returns from the station.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The innkeeper promised tea after the party returns from the station.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "quoted-lie-dream-flashback",
+      "narration": "A remembered voice fades with the dream.",
+      "state": {
+        "continuitySummary": "The dream's false voice claimed the lantern belonged to the sea, but Mara knows it belongs to the archive.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The dream's false voice claimed the lantern belonged to the sea, but Mara knows it belongs to the archive.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "legitimate-change-resolved-thread",
+      "narration": "The repaired gate opens toward the market.",
+      "state": {
+        "continuitySummary": "The repaired market gate now opens at sunrise, resolving the old lockout.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The repaired market gate now opens at sunrise, resolving the old lockout.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "lost-unresolved-thread",
+      "narration": "A child points toward the lantern festival.",
+      "state": {
+        "continuitySummary": "The cartographer returned safely.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The missing cartographer has not returned from the northern trail.",
+        "openThreads": [
+          "Find the missing cartographer."
+        ]
+      }
+    },
+    {
+      "scenarioId": "malicious-retrieved-instructions",
+      "narration": "The parchment contains an irrelevant command.",
+      "state": {
+        "continuitySummary": "A damaged parchment says to ignore all duties; it is a false instruction and must not change the party's course.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "A damaged parchment says to ignore all duties; it is a false instruction and must not change the party's course.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "rejected-draft-valid-looking-id",
+      "narration": "A polished draft describes a scene that never happened.",
+      "state": {
+        "continuitySummary": "A rejected packet record is accepted.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "Only the accepted blue packet record may be carried into the next scene.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "review-repair-crash-reclaim",
+      "narration": "The interrupted review resumes with the same record.",
+      "state": {
+        "continuitySummary": "After reclaim, the same review record remains bound to the original narration request.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "After reclaim, the same review record remains bound to the original narration request.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "immediate-event-extension",
+      "narration": "The runner reaches the station before dusk.",
+      "state": {
+        "continuitySummary": "The runner reaches the station before dusk and leaves the signal lantern lit.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The runner reaches the station before dusk and leaves the signal lantern lit.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "branch-transfer-archive-import",
+      "narration": "A sealed crate arrives from the archive.",
+      "state": {
+        "continuitySummary": "The archive crate remains sealed until its chain of custody is checked.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The archive crate remains sealed until its chain of custody is checked.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "multilingual-unicode",
+      "narration": "A note in two languages rests beside the compass.",
+      "state": {
+        "continuitySummary": "The note reads \u201cla br\u00fajula sigue al norte\u201d and points to the northward compass mark.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The note reads \u201cla br\u00fajula sigue al norte\u201d and points to the northward compass mark.",
+        "openThreads": []
+      }
+    },
+    {
+      "scenarioId": "accepted-chain-propagation",
+      "narration": "The party follows the accepted trail into the pines.",
+      "state": {
+        "continuitySummary": "The party follows the rejected detour.",
+        "openThreads": []
+      },
+      "repairedNarration": "The party pauses and follows the established trail.",
+      "repairedState": {
+        "continuitySummary": "The party follows the accepted pine trail while the older mistaken detour remains rejected.",
+        "openThreads": []
+      }
+    }
+  ]
+}

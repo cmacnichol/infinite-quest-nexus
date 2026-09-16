@@ -1,5 +1,6 @@
 import type {
   PromptTemplateKey,
+  PromptCatalogKey,
   ProviderType
 } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
@@ -296,7 +297,7 @@ export type PromptSnapshotVersion = Readonly<{
 }>;
 
 export type PromptTemplateView = Readonly<{
-  key: PromptTemplateKey;
+  key: PromptCatalogKey;
   title: string;
   category: "Story Engine" | "World authoring" | "Imports" | "Illustrations";
   description: string;
@@ -323,7 +324,7 @@ export type PromptLibraryView = Readonly<{
 }>;
 
 export type PromptPreviewRequest = OwnerScope & Readonly<{
-  key: PromptTemplateKey;
+  key: PromptCatalogKey;
   content: string;
 }>;
 
@@ -338,7 +339,7 @@ export type PromptPreviewView = Readonly<{
 }>;
 
 export type SavePromptOverrideCommand = PromptScope & Readonly<{
-  key: PromptTemplateKey;
+  key: PromptCatalogKey;
   content: string;
   compatibilityAcknowledgement?: Readonly<{
     requiredShapeVersion: string;
@@ -348,7 +349,7 @@ export type SavePromptOverrideCommand = PromptScope & Readonly<{
 }>;
 
 export type ResetPromptOverrideCommand = PromptScope & Readonly<{
-  key: PromptTemplateKey;
+  key: PromptCatalogKey;
 }>;
 
 export type CostCategory = "story" | "image" | "memory";

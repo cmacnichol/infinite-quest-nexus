@@ -2560,6 +2560,20 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const btnDoneWorldSetup = $("btnDoneWorldSetup");');
   });
 
+  it("edits the campaign character profile through the revision-checked typed client path", () => {
+    expect(storyHtml).toContain('id="btnOpenEditCharacterProfile" type="button"');
+    expect(storyHtml).toContain('id="editCharacterProfileDialog"');
+    expect(storyHtml).toContain('id="editCharacterProfileName"');
+    expect(storyHtml).toContain('id="editCharacterProfileJson"');
+    expect(storyHtml).toContain('id="btnSaveEditCharacterProfile"');
+    expect(storyScript).toContain('async function openEditCharacterProfile()');
+    expect(storyScript).toContain('apiClient.campaigns.getCharacterProfile(campaignId)');
+    expect(storyScript).toContain('apiClient.campaigns.updateCharacterProfile(session.campaignId');
+    expect(storyScript).toContain('expectedRevision: session.revision');
+    expect(storyScript).toContain('editSource: "manual"');
+    expect(storyScript).toContain('const editCharacterProfileLocked = generationLocked || recoveryVisible');
+  });
+
   it("uses the shared slim navigation with dashboard and story first, grouped utilities, and the themed brand mark", () => {
     const dashboardIndex = storyHtml.indexOf('id="btnNexusDashboard"');
     const storyIndex = storyHtml.indexOf('id="navStoryLink"');

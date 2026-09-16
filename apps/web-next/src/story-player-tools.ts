@@ -122,6 +122,7 @@ export function storyCampaignToolsMarkup(): string {
     <summary><span class="story-campaign-tools-desktop">Campaign Tools</span><span class="story-campaign-tools-mobile">Tools</span></summary>
     <div class="story-campaign-tools-menu" role="group" aria-label="Campaign Tools">
       <button type="button" data-tool-action="open-world-setup">Current World Setup</button>
+      <button type="button" data-tool-action="edit-character-profile">Edit Character Profile</button>
       <button type="button" data-tool-action="edit-campaign-state">Edit Campaign State</button>
       <button type="button" data-tool-action="open-campaign-history">Turn History &amp; State</button>
       <button type="button" data-tool-action="open-activity">Activity Log</button>

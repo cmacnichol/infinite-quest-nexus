@@ -140,9 +140,9 @@ function importReport(input: Readonly<{
     versions: {
       archiveFormat: 1,
       sourceApplication: "0.1.0",
-      sourceMigration: "0094_story_generation_policy",
+      sourceMigration: "0095_story_memory_capability_enrollment",
       destinationApplication: "0.1.0",
-      destinationMigration: "0094_story_generation_policy",
+      destinationMigration: "0095_story_memory_capability_enrollment",
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -756,6 +756,40 @@ integration("deterministic owner-wide System Archive export", () => {
     ]));
   });
 
+  it("uses the canonical migration sequence when migration timestamps are nonmonotonic", async () => {
+    const canonical = await pool.query<{ name: string }>(
+      "SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1",
+    );
+    const skewed = await pool.query<{ name: string; run_on: Date }>(
+      "SELECT name,run_on FROM schema_migrations WHERE name < $1 ORDER BY name DESC LIMIT 1",
+      [canonical.rows[0]!.name],
+    );
+    const originalRunOn = skewed.rows[0]!.run_on;
+    await pool.query(
+      "UPDATE schema_migrations SET run_on='2099-01-01T00:00:00.000Z' WHERE name=$1",
+      [skewed.rows[0]!.name],
+    );
+    try {
+      const exports = createPostgresSystemArchiveExportRepository(pool, {
+        pageSize: 2,
+        sourceApplicationVersion: "0.1.0",
+      });
+      const sourceMigration = await exports.withOwnerSnapshot({ ownerUserId }, (snapshot) => (
+        snapshot.readCompatibility().then((compatibility) => compatibility.sourceMigration)
+      ));
+      const destination = await createPostgresSystemArchiveImportRepository(pool)
+        .destinationFingerprint({ ownerUserId }, {});
+
+      expect(sourceMigration).toBe(canonical.rows[0]!.name);
+      expect(destination.latestMigration).toBe(canonical.rows[0]!.name);
+    } finally {
+      await pool.query("UPDATE schema_migrations SET run_on=$2 WHERE name=$1", [
+        skewed.rows[0]!.name,
+        originalRunOn,
+      ]);
+    }
+  });
+
   it("exports exhaustive logical authority, all retained originals, and no excluded state", async () => {
     const first = await exportArchive();
     const second = await exportArchive();
@@ -771,7 +805,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0094_story_generation_policy",
+      sourceMigration: "0095_story_memory_capability_enrollment",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -1186,7 +1220,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(preview).toMatchObject({
       formatVersion: 2,
       sourceApplication: "0.1.0",
-      sourceMigration: "0094_story_generation_policy",
+      sourceMigration: "0095_story_memory_capability_enrollment",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -1214,7 +1248,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0094_story_generation_policy",
+        latestMigration: "0095_story_memory_capability_enrollment",
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1248,9 +1282,9 @@ integration("deterministic owner-wide System Archive export", () => {
         versions: {
           archiveFormat: 2,
           sourceApplication: "0.1.0",
-          sourceMigration: "0094_story_generation_policy",
+          sourceMigration: "0095_story_memory_capability_enrollment",
           destinationApplication: "0.1.0",
-          destinationMigration: "0094_story_generation_policy",
+          destinationMigration: "0095_story_memory_capability_enrollment",
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1273,7 +1307,7 @@ integration("deterministic owner-wide System Archive export", () => {
     const exported = await exportArchive();
     const zip = await JSZip.loadAsync(exported.bytes);
     const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as Record<string, unknown>;
-    manifest.sourceMigration = "0094_future_system_archive_shape";
+    manifest.sourceMigration = "0096_future_system_archive_shape";
     zip.file("manifest.json", JSON.stringify(manifest));
     const newer = await zip.generateAsync({ type: "nodebuffer" });
 
@@ -1283,7 +1317,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0094_story_generation_policy",
+            latestMigration: "0095_story_memory_capability_enrollment",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1305,7 +1339,7 @@ integration("deterministic owner-wide System Archive export", () => {
       await expect(service.preview({ ownerUserId }, randomUUID())).resolves.toMatchObject({
         valid: false,
         previewHandle: null,
-        versions: { sourceMigration: "0094_future_system_archive_shape" },
+        versions: { sourceMigration: "0096_future_system_archive_shape" },
         errors: ["archive-version-unsupported"],
       });
       expect(createPreview).not.toHaveBeenCalled();
@@ -1324,7 +1358,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0094_story_generation_policy",
+            latestMigration: "0095_story_memory_capability_enrollment",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1361,7 +1395,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0094_story_generation_policy",
+            latestMigration: "0095_story_memory_capability_enrollment",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1413,7 +1447,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0094_story_generation_policy",
+            latestMigration: "0095_story_memory_capability_enrollment",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1817,7 +1851,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0094_story_generation_policy",
+        sourceMigration: "0095_story_memory_capability_enrollment",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1869,7 +1903,7 @@ integration("deterministic owner-wide System Archive export", () => {
     await expect(writer.publish({
       manifest: {
         sourceApplication: "0.1.0",
-        sourceMigration: "0094_story_generation_policy",
+        sourceMigration: "0095_story_memory_capability_enrollment",
         sourceInstallationId: ownerUserId,
         sourceOwnerCount: 1,
         sourceOwner: {
@@ -1934,7 +1968,7 @@ integration("deterministic owner-wide System Archive export", () => {
         await expect(writer.publish({
           manifest: {
             sourceApplication: "0.1.0",
-            sourceMigration: "0094_story_generation_policy",
+            sourceMigration: "0095_story_memory_capability_enrollment",
             sourceInstallationId: ownerUserId,
             sourceOwnerCount: 1,
             sourceOwner: {
@@ -4050,7 +4084,7 @@ integration("deterministic owner-wide System Archive export", () => {
         archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0094_story_generation_policy",
+          latestMigration: "0095_story_memory_capability_enrollment",
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4536,7 +4570,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0094_story_generation_policy",
+            latestMigration: "0095_story_memory_capability_enrollment",
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4592,7 +4626,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0094_story_generation_policy",
+      latestMigration: "0095_story_memory_capability_enrollment",
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",

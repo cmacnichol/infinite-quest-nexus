@@ -7,12 +7,16 @@ import type { GenerationExecutionRepository } from "../../packages/database/src/
 import type { GenerationExecutionPayload } from "../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
-import { sha256, stableStringify } from "../../packages/domain/src/index.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
+import { characterFictionAuthority, sha256, stableStringify } from "../../packages/domain/src/index.js";
+import { canonicalEvidenceJson, readStoryEvidenceFromSource } from "../../packages/application/src/memory/generation-context.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
 import { generationExecutionProtocolIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
   generationContextFingerprint,
+  planGenerationPromptContext,
+  semanticRepairScope,
   sentCanonicalFactIds,
   type GenerationExecutionCollaborators
 } from "../../services/runtime/src/generation-executor-adapter.js";
@@ -138,6 +142,183 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
 }
 
 describe("generation executor adapter", () => {
+  it("limits extension-only semantic repair to appended narration contradictions", () => {
+    expect(semanticRepairScope({ hasExtension: true, mainNarration: "Main scene.", findings: [{ kind: "contradiction", output: { path: "/narration", start: "Main scene.".length } }] })).toBe("extension_only");
+    expect(semanticRepairScope({ hasExtension: true, mainNarration: "Main scene.", findings: [{ kind: "contradiction", output: { path: "/continuity_summary", start: 0 } }] })).toBe("main");
+    expect(semanticRepairScope({ hasExtension: false, mainNarration: "Main scene.", findings: [{ kind: "contradiction", output: { path: "/narration", start: 99 } }] })).toBe("main");
+  });
+  function plannerContext(characterAuthority: unknown, version: "legacy" | "v3" = "v3") {
+    const baseIdentity = version === "v3"
+      ? { version: "generation-base-v3", operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null, characterProfileRevision: 1, characterProfileFingerprint: "b".repeat(64) }
+      : { operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null };
+    return {
+      authority: {
+        rules: ["World rule."], worldCanon: { title: "World" }, selectedCharacterId: "mira",
+        ...(version === "v3" ? { characterAuthority } : {}),
+        currentContinuity: { continuitySummary: "", scratchpad: "", canonicalFacts: [], openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] },
+        scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [], latestTurn: null
+      }, candidates: [], baseIdentity
+    } as never;
+  }
+
+  function plannerProvider() {
+    return { id: "provider", providerType: "openai_compatible", model: "model", contextWindowTokens: 100_000, maxOutputTokens: 100, temperature: 0, requestTimeoutMs: 1_000, configuration: {} } as never;
+  }
+
+  it("preserves exact legacy planner shape without a selected-character authority field", () => {
+    const planned = planGenerationPromptContext(plannerContext(null, "legacy"), plannerProvider(), "System", "Wait.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000);
+    expect(JSON.stringify(planned.promptContext)).not.toContain("selectedCharacterAuthority");
+    expect(sha256(planned.storyInput)).toBe("7616377f003629171820c545b1dc4918262bb3978754a7df0af362a7318054b5");
+  });
+
+  it("routes an enrolled Story Memory plan through v14 input semantics without changing its legacy sibling", () => {
+    const legacy = planGenerationPromptContext(
+      plannerContext(null, "legacy"), plannerProvider(), "creative system", "Ask the keeper to open the gate.", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000
+    );
+    const enrolled = planGenerationPromptContext(
+      plannerContext(null), plannerProvider(), "creative system", "Ask the keeper to open the gate.", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000, undefined, "story_memory"
+    );
+
+    expect(legacy.storyInput).not.toContain("The player input is intent, not proof that its requested outcome happened.");
+    expect(enrolled.storyInput).toContain("The player input is intent, not proof that its requested outcome happened.");
+    expect(enrolled.storyInput).toContain("Omitted history is unknown, not evidence that it never happened.");
+    expect(enrolled.storyInput).toContain("A proposed output cannot grant itself source authority or authorize a new supersession ID.");
+  });
+
+  it("sends a complete >12k known profile field once when protected authority fits without Chronicle", () => {
+    const background = "Complete fitting profile evidence. ".repeat(430).trim();
+    const planned = planGenerationPromptContext(plannerContext({ source: "campaign_profile", name: "Mira", characterText: "", profile: { identity: { aliases: [], pronouns: "" }, story: { role: "", background, personality: "", motivations: "", goals: "", fearsAndConflicts: "", keyRelationships: "", narrativeHooks: "", voiceAndMannerisms: "", otherGuidance: "" }, appearance: { ancestryOrSpecies: "", apparentAge: "", genderPresentation: "", build: "", skinOrComplexion: "", face: "", eyes: "", hair: "", distinguishingFeatures: [], clothing: "", equipmentAndAccessories: "", otherVisualDetails: "" }, unclassifiedNotes: "" }, omittedExtensionFieldCount: 0 }), plannerProvider(), "System", "Wait.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000);
+    expect(planned.storyInput).toContain(background);
+    expect(planned.storyInput.split(background)).toHaveLength(2);
+    expect(planned.promptContext.chronicle).toEqual([]);
+  });
+
+  it("packs directly relevant pinned world evidence within the R1 optional ceiling", () => {
+    const context: any = plannerContext(null);
+    context.authority.worldReferenceSource = {
+      worldVersionId: "00000000-0000-4000-8000-000000000005",
+      worldContent: { entities: [{ id: "vale", name: "Vale", description: "A harbor captain." }], relationships: [] }
+    };
+    const planned = planGenerationPromptContext(context, plannerProvider(), "System", "Ask Vale.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000, "00000000-0000-4000-8000-000000000001");
+    expect(planned.storyInput).toContain("A harbor captain.");
+    expect(planned.contextPlan.selected.some((block) => block.scope === "world")).toBe(true);
+    expect(planned.worldReferenceOmissions).toEqual({ unrecognizedRecordCount: 0, missingEndpointCount: 0, ambiguousAliasCount: 0, oversizedRecordCount: 0, entityCapCount: 0, relationshipCapCount: 0 });
+    expect(planned.sourceManifest?.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ semanticRole: "world_reference", sourcePath: "/entities/0", form: "complete", selectionGroup: "world" })
+    ]));
+  });
+
+  it("omits an oversized whole world record under a tight quota while optional history borrows the unused share", () => {
+    const context: any = plannerContext({ source: "campaign_profile", name: "Mira", characterText: "", profile: { identity: { aliases: ["Vale"] } } });
+    context.authority.worldReferenceSource = {
+      worldVersionId: "00000000-0000-4000-8000-000000000005",
+      worldContent: { entities: [
+        { id: "vale", name: "Vale", description: "This complete world record is deliberately larger than the optional world allocation. ".repeat(14) }
+      ], relationships: [] }
+    };
+    context.candidates = [{ id: "history", turnId: null, ordinal: 1, kind: "turn_fiction", content: "Borrowed history remains available when no world entry fits.", tokenEstimate: 10, rank: 0 }];
+
+    const planned = planGenerationPromptContext(context, plannerProvider(), "System", "Ask Vale.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 3_000, 3_000);
+
+    expect(planned.contextPlan.selected.some((block) => block.scope === "world")).toBe(false);
+    expect(planned.promptContext.chronicle.map((candidate) => candidate.id)).toEqual(["history"]);
+  });
+
+  it("records every sent protected source and rebinds selected world evidence to its original pinned path", () => {
+    const context: any = plannerContext({ source: "campaign_profile", name: "Mira", characterText: "", profile: { identity: { aliases: ["Vale"] } } });
+    context.authority.currentContinuity = { continuitySummary: "Mira promised to return.", scratchpad: "", canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The tide gate is locked." }], openThreads: ["Find Vale."], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] };
+    context.authority.latestTurn = { action: "Ask Vale.", narration: "The quay bell answers." };
+    context.authority.worldReferenceSource = {
+      worldVersionId: "00000000-0000-4000-8000-000000000005",
+      worldContent: { entities: [{ id: "vale", name: "Vale", description: "A harbor captain.", internal: { secret: "must not reach the provider" } }], relationships: [] }
+    };
+    const planned = planGenerationPromptContext(context, plannerProvider(), "System", "Ask Vale.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000, "00000000-0000-4000-8000-000000000001");
+    const manifest = planned.sourceManifest!;
+    const roles = manifest.entries.map((entry) => entry.semanticRole);
+
+    expect(roles).toEqual(expect.arrayContaining(["world_rule", "character_authority", "current_continuity", "canonical_fact", "accepted_narration", "player_intent", "world_reference"]));
+    const world = manifest.entries.find((entry) => entry.semanticRole === "world_reference")!;
+    expect(world.sourcePath).toBe("/entities/0");
+    expect(world.source.revision).toBe(context.authority.worldReferenceSource.worldVersionId);
+    expect(world.source.contentHash).toBe(sha256(canonicalEvidenceJson(context.authority.worldReferenceSource.worldContent)));
+    expect(world.content).not.toContain("must not reach the provider");
+    expect(planned.storyInput).not.toContain("must not reach the provider");
+    expect(readStoryEvidenceFromSource(world, { entities: [world.content], relationships: [] }, {
+      contentHash: sha256(canonicalEvidenceJson(context.authority.worldReferenceSource.worldContent))
+    })).toEqual(world);
+    const direction = manifest.entries.find((entry) => entry.selectionGroup === "direction")!;
+    expect(readStoryEvidenceFromSource(direction, { text: "Ask Vale." })).toEqual(direction);
+  });
+
+  it("uses a stable character source identifier when no character is selected", () => {
+    const context: any = plannerContext({ source: "none", name: "", characterText: "", profile: null });
+    context.authority.selectedCharacterId = null;
+
+    const planned = planGenerationPromptContext(context, plannerProvider(), "System", "Wait.", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000,
+      "00000000-0000-4000-8000-000000000001");
+
+    expect(planned.sourceManifest?.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ semanticRole: "character_authority", source: expect.objectContaining({ id: "selected-character" }) })
+    ]));
+  });
+
+  it("exposes bounded count-only world selection omissions without world contents", () => {
+    const context: any = plannerContext(null);
+    const witnesses = Array.from({ length: 25 }, (_, index) => ({ id: `witness-${index}`, name: `Witness ${index}`, description: `Witness detail ${index}.` }));
+    context.authority.worldReferenceSource = {
+      worldVersionId: "00000000-0000-4000-8000-000000000005",
+      worldContent: {
+        entities: [
+          { id: "warden-one", name: "Warden", description: "First warden." },
+          { id: "warden-two", name: "Warden", description: "Second warden." },
+          { id: "large", name: "Large", description: "x".repeat(30_000) },
+          { hidden: "UNRECOGNIZED_WORLD_CONTENT" },
+          ...witnesses
+        ],
+        relationships: [
+          { from: "warden-one", to: "missing", description: "Broken relationship." },
+          { source: { hidden: "UNRECOGNIZED_WORLD_CONTENT" } }
+        ]
+      }
+    };
+    const planned = planGenerationPromptContext(context, plannerProvider(), "System", `Warden ${witnesses.map((entry) => entry.name).join(" ")}`,
+      [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000);
+
+    expect(planned.worldReferenceOmissions).toEqual({ unrecognizedRecordCount: 2, missingEndpointCount: 1, ambiguousAliasCount: 1, oversizedRecordCount: 1, entityCapCount: 1, relationshipCapCount: 0 });
+    expect(JSON.stringify(planned.worldReferenceOmissions)).not.toContain("UNRECOGNIZED_WORLD_CONTENT");
+  });
+
+  it("fails protected character overflow before any provider call or partial profile serialization", () => {
+    const background = "Protected profile overflow. ".repeat(500).trim();
+    expect(() => planGenerationPromptContext(plannerContext({ source: "campaign_profile", name: "Mira", characterText: "", profile: { identity: { aliases: [], pronouns: "" }, story: { role: "", background, personality: "", motivations: "", goals: "", fearsAndConflicts: "", keyRelationships: "", narrativeHooks: "", voiceAndMannerisms: "", otherGuidance: "" }, appearance: { ancestryOrSpecies: "", apparentAge: "", genderPresentation: "", build: "", skinOrComplexion: "", face: "", eyes: "", hair: "", distinguishingFeatures: [], clothing: "", equipmentAndAccessories: "", otherVisualDetails: "" }, unclassifiedNotes: "" }, omittedExtensionFieldCount: 0 }), plannerProvider(), "System", "Wait.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100, 100)).toThrow(expect.objectContaining({ code: "context_budget_exceeded", protectedBlockIds: ["authority"] }));
+  });
+
+  it("uses a profile-only edit even when Chronicle candidates are unavailable", () => {
+    const before = planGenerationPromptContext(plannerContext({ source: "campaign_profile", name: "Mira", characterText: "", profile: { story: { motivations: "Guard the east gate." } }, omittedExtensionFieldCount: 0 }), plannerProvider(), "System", "Wait.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000);
+    const after = planGenerationPromptContext(plannerContext({ source: "campaign_profile", name: "Mira", characterText: "", profile: { story: { motivations: "Guard the west gate." } }, omittedExtensionFieldCount: 0 }), plannerProvider(), "System", "Wait.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000);
+    expect(before.promptContext.chronicle).toEqual([]);
+    expect(after.storyInput).toContain("Guard the west gate.");
+    expect(after.storyInput).not.toContain("Guard the east gate.");
+  });
+
+  it("does not serialize recognized profile credentials into the private provider input", () => {
+    const secret = "fixture-serialized-provider-token-T04";
+    const authority = characterFictionAuthority({
+      name: "Mira",
+      profile: {
+        story: { background: `Provider token: ${secret}\nMira keeps the bridge watch.` },
+        unclassifiedNotes: `api_key=${secret}\nThe bridge bell rings at dusk.`
+      }
+    }, null);
+    const planned = planGenerationPromptContext(plannerContext(authority), plannerProvider(), "System", "Wait.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000, 100_000);
+    expect(planned.storyInput).not.toContain(secret);
+    expect(planned.storyInput).toContain("Mira keeps the bridge watch.");
+    expect(planned.storyInput).toContain("The bridge bell rings at dusk.");
+  });
+
   it("preserves the historical context fingerprint field set and separates frozen policy", () => {
     const input = { providerId: "provider", model: "model", protocol: "legacy", expectedTurnNumber: 2, action: "Act", inputMode: "action", storyLength: { label: "short" }, context: { world: "canon" } };
     expect(generationContextFingerprint(input)).toBe("6f4bd446bda2f101a509ba415a10f79036caf7d252b4f08fe37378e351254de3");
@@ -159,6 +340,30 @@ describe("generation executor adapter", () => {
     await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "invalid-window", leaseSeconds: 30, claim })).resolves.toBe(true);
     expect(provider.execute).not.toHaveBeenCalled();
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "context_budget_invalid" }));
+  });
+
+  it("makes malformed canonical authority recoverable with a safe repair diagnostic before provider execution", async () => {
+    const job = completeGenerationExecutionPayload();
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      markRecoverable: vi.fn(async () => true), markFailed: vi.fn(async () => true), commitAcceptedTurn: vi.fn()
+    } as unknown as GenerationExecutionRepository;
+    const provider = { id: claim.providerProfileId, providerType: "openai_compatible", model: "test",
+      contextWindowTokens: 100_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000,
+      configuration: {}, execute: vi.fn() };
+    const collaborators = { ...rejectedCollaborators(), loadTextExecution: vi.fn(async () => provider),
+      promptFromSnapshot: vi.fn(() => "Write fiction."), memory: { loadGenerationContext: vi.fn(async () => {
+        throw Object.assign(new Error("PRIVATE malformed persisted source"), { code: "authoritative_context_invalid", field: "canonical_facts" });
+      }) } } as unknown as GenerationExecutionCollaborators;
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "invalid-authority", leaseSeconds: 30, claim })).resolves.toBe(true);
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "authoritative_context_invalid",
+      recoveryMetadata: expect.objectContaining({ diagnostic: { code: "authoritative_context_invalid", operation: "story_generation",
+        action: "repair_authority", field: "canonical_facts" } }) }));
+    expect(JSON.stringify(vi.mocked(repository.markRecoverable).mock.calls)).not.toContain("PRIVATE");
   });
 
   it("accounts for the frozen Story Direction supplement before context retrieval or dispatch", async () => {
@@ -447,6 +652,18 @@ describe("generation executor adapter", () => {
     });
 
     expect(sentCanonicalFactIds(request)).toEqual([continuityFact, selectedHistoricalFact]);
+  });
+
+  it("authorizes only complete canonical facts carried by a semantic-repair envelope", () => {
+    const allowed = "11111111-1111-4111-8111-111111111111";
+    const omitted = "22222222-2222-4222-8222-222222222222";
+    const request = JSON.stringify({ messages: [{ role: "user", content: JSON.stringify({
+      protocol: "story-continuity-repair-v1", protected_authority: [
+        { canonicalFactId: allowed, form: "complete" },
+        { canonicalFactId: omitted, form: "excerpt" }
+      ]
+    }) }] });
+    expect(sentCanonicalFactIds(request)).toEqual([allowed]);
   });
 
   it("treats a malformed checkpoint provenance record as recoverable before provider work", async () => {
@@ -1004,9 +1221,10 @@ describe("generation executor adapter", () => {
     }));
   });
 
-  it("classifies a provider-window overflow independently from a larger campaign context budget", async () => {
+  it.each(["legacy", "v3"])("classifies a provider-window overflow with safe protected categories: %s", async (version) => {
     const job = completeGenerationExecutionPayload();
     job.context_options = { ...job.context_options, budgetTokens: 1_000_000 };
+    if (version === "v3") job.generation_base_identity = { ...job.generation_base_identity!, version: "generation-base-v3", characterProfileRevision: 1, characterProfileFingerprint: "b".repeat(64) };
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
@@ -1021,7 +1239,7 @@ describe("generation executor adapter", () => {
     const collaborators = {
       memory: {
         loadGenerationContext: vi.fn(async () => ({
-          authority: { worldCanon: { gazetteer: "word ".repeat(12_000) } }, candidates: [],
+          authority: { worldCanon: { premise: "word ".repeat(12_000) } }, candidates: [],
           baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT
         }))
       },
@@ -1036,6 +1254,9 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "context_budget_exceeded",
       recoveryMetadata: expect.objectContaining({ diagnostic: expect.objectContaining({ scope: "provider_request" }) })
+    }));
+    if (version === "v3") expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      recoveryMetadata: expect.objectContaining({ diagnostic: expect.objectContaining({ protectedComponents: expect.objectContaining({ world_canon: expect.any(Number) }) }) })
     }));
     expect(provider.execute).not.toHaveBeenCalled();
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
@@ -1127,9 +1348,37 @@ describe("generation executor adapter", () => {
     expect(providerCalls).toEqual([]);
     expect(executed).toBe(false);
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
-      errorCode: "generation_prompt_snapshot_invalid"
+      errorCode: "generation_prompt_snapshot_invalid",
+      recoveryMetadata: expect.objectContaining({ diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } })
     }));
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unsupported future Story Memory policy before loading its provider and publishes discard recovery", async () => {
+    const policy = defaultStoryMemoryPolicy("r2");
+    const job = completeGenerationExecutionPayload();
+    job.context_options = {
+      ...job.context_options,
+      storyMemoryPolicy: {
+        policy: { ...policy, capability: "r4" }, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v3",
+        promptProtocol: "story-v14-continuity-context", providerConfigurationFingerprint: "a".repeat(64)
+      }
+    } as never;
+    const repository = { ...guardedRepository(), loadExecutionPayload: vi.fn(async () => job), markRecoverable: vi.fn(async () => true) };
+    const collaborators = rejectedCollaborators();
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
+
+    expect(collaborators.loadTextExecution).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "story_memory_policy_invalid",
+      recoveryMetadata: expect.objectContaining({ diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } })
+    }));
   });
 
   it("raises generation_cancelled when malformed snapshot recovery loses its lease", async () => {

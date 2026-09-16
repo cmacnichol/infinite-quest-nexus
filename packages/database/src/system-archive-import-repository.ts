@@ -345,7 +345,7 @@ async function fingerprint(
   // stream, and concurrent client.query calls are deprecated by node-postgres.
   const clock = await database.query<{ checked_at: Date }>("SELECT clock_timestamp() AS checked_at");
   const migration = await database.query<{ name: string }>(
-    "SELECT name FROM schema_migrations ORDER BY run_on DESC,name DESC LIMIT 1"
+    "SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1"
   );
   const initialOwner = await database.query<{ id: string }>(
     "SELECT id FROM users WHERE system_key='initial-owner' AND status='active'"

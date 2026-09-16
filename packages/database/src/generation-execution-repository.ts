@@ -1,3 +1,9 @@
+import { assertContinuityReviewCommit, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
+import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
+import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
+import { sha256Hex } from "../../contracts/src/hash.js";
+import type { GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
+import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
 import type {
   CampaignWorldVersionMemoryScope,
   ClaimedGeneration,
@@ -40,6 +46,10 @@ import {
   resolveEntityMetadata,
   stableStringify
 } from "../../domain/src/index.js";
+import {
+  isGenerationBaseIdentityV3,
+  readGenerationBaseIdentity
+} from "../../application/src/memory/generation-context.js";
 import {
   resolveGenerationAuthoritySnapshot,
   type GenerationBaseIdentity
@@ -100,6 +110,33 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** Versioned counters belong to the logical user attempt, never the worker lease. */
+  logicalAttempt?: {
+    version: 1;
+    id: string;
+    semanticRepairsConsumed: number;
+    reviewsConsumed: number;
+    automaticRepairsConsumed: number;
+    choiceRepairsConsumed: number;
+    eventCoverageRepairsConsumed: number;
+  };
+  /** One self-contained continuity repair.  Its reservation is written before transport. */
+  semanticRepair?: {
+    version: 1;
+    scope: "main" | "extension_only";
+    rejectedFinalStoryHash: string;
+    rejectedMainDraftHash: string;
+    repairRequestBody: string;
+    repairRequestPayloadHash: string;
+    requiredEvidenceIds: readonly string[];
+    status: "reserved" | "dispatched" | "validated";
+    repairedStory?: StoryTurnOutput;
+    repairedStoryHash?: string;
+    response?: ProviderResult;
+  };
+  continuityReview?: ContinuityReviewCheckpoint | undefined;
+  contextDiagnostic?: SafeGenerationDiagnostic;
+  sourceEvidenceManifest?: GenerationEvidenceManifest;
   roll?: PrivateRollResolution | null;
   rpgAssessmentError?: string;
   beforeEvents?: ActivatedEvent[];
@@ -176,6 +213,29 @@ function hasValidAutomaticRepair(value: unknown): boolean {
     && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
     && repair.consumedAttempt > 0;
+}
+
+function hasValidLogicalAttempt(value: unknown): boolean {
+  if (value === undefined) return true; // Historical checkpoints are conservatively upgraded by the executor.
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const ledger = value as Record<string, unknown>;
+  return ledger.version === 1 && typeof ledger.id === "string" && ledger.id.length > 0
+    && ["semanticRepairsConsumed", "reviewsConsumed", "automaticRepairsConsumed", "choiceRepairsConsumed", "eventCoverageRepairsConsumed"]
+      .every((key) => typeof ledger[key] === "number" && Number.isSafeInteger(ledger[key]) && (ledger[key] as number) >= 0);
+}
+
+function hasValidSemanticRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return repair.version === 1 && (repair.scope === "main" || repair.scope === "extension_only")
+    && typeof repair.rejectedFinalStoryHash === "string" && repair.rejectedFinalStoryHash.length > 0
+    && typeof repair.rejectedMainDraftHash === "string" && repair.rejectedMainDraftHash.length > 0
+    && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
+    && typeof repair.repairRequestPayloadHash === "string" && repair.repairRequestPayloadHash === sha256Hex(repair.repairRequestBody)
+    && Array.isArray(repair.requiredEvidenceIds) && repair.requiredEvidenceIds.every((id) => typeof id === "string")
+    && (repair.status === "reserved" || repair.status === "dispatched" || repair.status === "validated")
+    && (repair.status !== "validated" || (typeof repair.repairedStoryHash === "string" && Boolean(repair.repairedStory) && typeof repair.repairedStory === "object"));
 }
 
 function hasValidChoiceRepair(value: unknown): boolean {
@@ -345,6 +405,8 @@ export type GenerationExecutionRepository = Readonly<{
   loadExecutionPayload(request: GenerationExecutionRequest): Promise<GenerationExecutionPayload | null>;
   renewLease(scope: GenerationLeaseScope, leaseSeconds: number): Promise<boolean>;
   markGenerating(scope: GenerationLeaseScope): Promise<boolean>;
+  /** Returns a repaired validating job to the normal assessment entrypoint. */
+  restartAfterSemanticRepair?(scope: GenerationLeaseScope): Promise<boolean>;
   saveOrchestration(scope: GenerationLeaseScope, value: GenerationOrchestrationState): Promise<boolean>;
   savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;
   saveStreamingSegments(scope: GenerationLeaseScope, value: GenerationStreamingState): Promise<boolean>;
@@ -490,8 +552,8 @@ async function commitAcceptedTurn(
   // The commit boundary accepts only the current protocol. Historical/import
   // replay goes through the explicitly named Chronicle compatibility path.
   const story = storyTurnOutputSchema.parse(input.story);
-  const lease = await client.query<{ id: string }>(
-    `SELECT id FROM generation_jobs
+  const lease = await client.query<{ id: string; context_options: Record<string, unknown>; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
+    `SELECT id, context_options, prompt_snapshot, orchestration_private, streaming_segments_state FROM generation_jobs
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
         AND lease_expires_at > now()
       FOR UPDATE`,
@@ -501,6 +563,24 @@ async function commitAcceptedTurn(
     throw Object.assign(new Error("Generation lease was lost or cancelled before commit."), {
       code: "lease_lost"
     });
+  }
+  const storedJob = lease.rows[0]!;
+  if (storedJob.context_options?.storyMemoryPolicy) {
+    const policy = storyMemoryPolicySnapshotSchema.parse(storedJob.context_options.storyMemoryPolicy);
+    if (policy.policy.continuityReview !== "off") {
+      const saved = storedJob.orchestration_private;
+      const requestBody = saved.extension?.producingRequestBody ?? saved.validatedMainDraft?.requestBody;
+      if (storedJob.streaming_segments_state?.provisionalSetId) throw Object.assign(new Error("Reviewed commit source or illustration gate is invalid."), { code: "continuity_review_unavailable" });
+      let manifest: GenerationEvidenceManifest | undefined;
+      try { if (requestBody && saved.sourceEvidenceManifest) manifest = bindManifestToProducingRequest(saved.sourceEvidenceManifest, requestBody); } catch { /* Only an observed unavailable result can commit without verified review inputs. */ }
+      const auxiliaryRequestHashes = validatedChoiceRequestHashes(saved.choiceRepair, saved.validatedMainDraft?.story, policy.providerConfigurationFingerprint);
+      const prompts = assertContinuityReviewPromptSnapshot(storedJob.prompt_snapshot, policy.policy.continuityReview);
+      assertContinuityReviewCommit(policy.policy.continuityReview, saved.continuityReview, {
+        draftHash: sha256Hex(stableStringify(story)), producingRequestHash: requestBody ? sha256Hex(requestBody) : null, manifestHash: manifest?.manifestHash ?? null, auxiliaryRequestHashes,
+        providerConfigurationHash: policy.providerConfigurationFingerprint, promptHash: prompts.continuityReview!.review.hash,
+        promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash
+      });
+    }
   }
   const requestedSupersessionIds = [...new Set(story.canonical_fact_updates.flatMap((update) => update.supersedes_fact_ids))];
   if (requestedSupersessionIds.length) {
@@ -524,13 +604,15 @@ async function commitAcceptedTurn(
       });
     }
   }
+  const storedBaseIdentity = readGenerationBaseIdentity(job.generation_base_identity);
   const authority = await resolveGenerationAuthoritySnapshot(client, {
     ownerUserId: job.owner_user_id,
     campaignId: job.campaign_id,
     operationKind: job.operation_kind,
-    expectedTurnNumber: job.expected_turn_number
+    expectedTurnNumber: job.expected_turn_number,
+    ...(isGenerationBaseIdentityV3(storedBaseIdentity) ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
   });
-  if (!matchesGenerationBaseIdentity(job.generation_base_identity, authority.baseIdentity)) {
+  if (!matchesGenerationBaseIdentity(storedBaseIdentity, authority.baseIdentity)) {
     throw Object.assign(new Error("Campaign authority changed before this generation could commit."), {
       code: "stale_campaign"
     });
@@ -772,6 +854,7 @@ async function commitAcceptedTurn(
       turnId,
       ordinal: job.expected_turn_number,
       action: input.fictionAction,
+      inputMode: job.resolved_input_mode,
       narration: story.narration
     });
   }
@@ -915,7 +998,10 @@ export function createPostgresGenerationExecutionRepository(
       );
       const row = result.rows[0];
       if (!row) return null;
-      if (!hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
+      if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
+          || !hasValidLogicalAttempt(row.orchestration_private?.logicalAttempt)
+          || !hasValidSemanticRepair(row.orchestration_private?.semanticRepair)
+          || !hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
           || !hasValidChoiceRepair(row.orchestration_private?.choiceRepair)
           || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {
         await client.query(
@@ -943,13 +1029,50 @@ export function createPostgresGenerationExecutionRepository(
         );
         return null;
       }
-      const authority = await resolveGenerationAuthoritySnapshot(client, {
-        ownerUserId: row.owner_user_id,
-        campaignId: row.campaign_id,
-        operationKind: row.operation_kind,
-        expectedTurnNumber: row.expected_turn_number
-      });
-      if (!matchesGenerationBaseIdentity(row.generation_base_identity, authority.baseIdentity)) {
+      let storedBaseIdentity: GenerationBaseIdentity;
+      try {
+        storedBaseIdentity = readGenerationBaseIdentity(row.generation_base_identity) as GenerationBaseIdentity;
+      } catch {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
+                  error_message = 'Saved generation authority is invalid.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_base_identity_invalid" })]
+        );
+        return null;
+      }
+      let authority: Awaited<ReturnType<typeof resolveGenerationAuthoritySnapshot>>;
+      try {
+        authority = await resolveGenerationAuthoritySnapshot(client, {
+          ownerUserId: row.owner_user_id,
+          campaignId: row.campaign_id,
+          operationKind: row.operation_kind,
+          expectedTurnNumber: row.expected_turn_number,
+          ...(isGenerationBaseIdentityV3(storedBaseIdentity) ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
+        });
+      } catch (error) {
+        const detail = error as { code?: unknown; field?: unknown };
+        if (detail.code !== "authoritative_context_invalid") throw error;
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
+                  error_message = 'Persisted campaign authority is invalid.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({
+            reason: "authoritative_context_invalid",
+            ...(typeof detail.field === "string" ? { field: detail.field } : {})
+          })]
+        );
+        return null;
+      }
+      if (!matchesGenerationBaseIdentity(storedBaseIdentity, authority.baseIdentity)) {
         await client.query(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_authority_stale',
@@ -972,7 +1095,7 @@ export function createPostgresGenerationExecutionRepository(
         character_snapshot: _characterSnapshot,
         ...payload
       } = row;
-      return { ...payload, orchestration_inputs: orchestrationInputs(row) };
+      return { ...payload, generation_base_identity: storedBaseIdentity, orchestration_inputs: orchestrationInputs(row) };
       });
     },
 
@@ -998,14 +1121,27 @@ export function createPostgresGenerationExecutionRepository(
       ));
     },
 
-    async saveOrchestration(scope, value) {
+    async restartAfterSemanticRepair(scope) {
       return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET orchestration_private = $4, updated_at = now()
+        `UPDATE generation_jobs SET status = 'assessing', updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'validating'
+            AND lease_expires_at > now()
+          RETURNING id`,
+        [scope.jobId, scope.ownerUserId, scope.workerId]
+      ));
+    },
+
+    async saveOrchestration(scope, value) {
+      const safeContextDiagnostic = projectSafeGenerationDiagnostic(value.contextDiagnostic);
+      return changed(await pool.query<{ id: string }>(
+        `UPDATE generation_jobs SET orchestration_private = $4,
+            recovery_metadata = CASE WHEN $5::jsonb IS NULL THEN recovery_metadata ELSE recovery_metadata || jsonb_build_object('diagnostic',$5::jsonb) END,
+            updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
             AND status IN ('assessing','generating','validating','committing')
             AND lease_expires_at > now()
           RETURNING id`,
-        [scope.jobId, scope.ownerUserId, scope.workerId, json(value)]
+        [scope.jobId, scope.ownerUserId, scope.workerId, json(value), safeContextDiagnostic ? json(safeContextDiagnostic) : null]
       ));
     },
 

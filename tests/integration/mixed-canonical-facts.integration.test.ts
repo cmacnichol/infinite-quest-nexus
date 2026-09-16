@@ -9,6 +9,11 @@ import {
   withTransaction
 } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { loadAcceptedGenerationContinuity } from "../../packages/database/src/campaign-continuity-repository.js";
+import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
+import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
+import { planGenerationPromptContext, sentCanonicalFactIds } from "../../services/runtime/src/generation-executor-adapter.js";
+import { serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -137,5 +142,51 @@ integration("mixed canonical fact persistence", () => {
     expect(canonicalMemory.rows).toHaveLength(1);
     expect(canonicalMemory.rows[0]?.content).toContain("The harbor gate is open.");
     expect(canonicalMemory.rows[0]?.content).toContain("The brass key rests beneath the bridge.");
+    const persisted = await pool.query<{ state_snapshot_private: unknown }>("SELECT state_snapshot_private FROM turns WHERE id=$1", [second.rows[0]!.id]);
+    const expected = buildCanonicalChronicleFacts({ campaignId: fixture.campaignId, turnId: second.rows[0]!.id,
+      canonicalFacts: ["The brass key rests beneath the bridge."],
+      canonicalFactUpdates: [{ content: "The harbor gate is open.", supersedesFactIds: [lockedFactId] }], entityCatalog: [] });
+    const read = () => withTransaction(pool, (client) => loadAcceptedGenerationContinuity(client, scope, {
+      turnId: second.rows[0]!.id, turnNumber: 2, snapshot: persisted.rows[0]!.state_snapshot_private
+    }));
+    expect((await read()).canonicalFacts).toEqual(expected.map((fact) => ({ id: fact.id, content: fact.content })));
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [fixture.campaignId]);
+    const request = async () => {
+      const context = await withTransaction(pool, async (client) => {
+        const input = { ...scope, operationKind: "append" as const, expectedTurnNumber: 3, query: "Inspect the open gate." };
+        const frozen = await resolveGenerationAuthoritySnapshot(client, { ...input, baseIdentityVersion: "generation-base-v3" });
+        return loadPostgresChronicleGenerationAuthorityContext(client, { ...input, expectedBaseIdentity: frozen.baseIdentity });
+      });
+      const provider = { id: crypto.randomUUID(), providerType: "openai_compatible", model: "test",
+        contextWindowTokens: 32_000, maxOutputTokens: 1_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {} } as never;
+      const planned = planGenerationPromptContext(context, provider, "Write a scene.", "Inspect the open gate.", [],
+        { profile: "brief", minWords: 100, maxWords: 120 }, "action", 30_000, 30_000, crypto.randomUUID());
+      return serializeProviderRequest(provider, { systemPrompt: "Write a scene.", input: planned.storyInput }).body;
+    };
+    const body = await request();
+    expect(body).toContain("The harbor gate is open.");
+    expect(sentCanonicalFactIds(body).sort()).toEqual(expected.map((fact) => fact.id).sort());
+    expect(sentCanonicalFactIds(body)).not.toContain(lockedFactId);
+    await pool.query("UPDATE campaign_canonical_facts SET source_fact_index=9 WHERE id=$1", [expected[0]!.id]);
+    expect(sentCanonicalFactIds(await request())).toEqual([expected[1]!.id]);
+    await pool.query("UPDATE campaign_canonical_facts SET source_fact_index=0 WHERE id=$1", [expected[0]!.id]);
+    await pool.query("UPDATE campaign_canonical_facts SET valid_until_turn=3 WHERE id=$1", [expected[0]!.id]);
+    const expired = await withTransaction(pool, (client) => loadAcceptedGenerationContinuity(client, scope,
+      { turnId: second.rows[0]!.id, turnNumber: 3, snapshot: persisted.rows[0]!.state_snapshot_private }));
+    expect(expired.canonicalFacts.map((fact) => fact.id)).toEqual([null, expected[1]!.id]);
+    await pool.query("UPDATE campaign_canonical_facts SET valid_until_turn=NULL WHERE id=$1", [expected[0]!.id]);
+    const wrongScope = await withTransaction(pool, (client) => loadAcceptedGenerationContinuity(client,
+      { ...scope, worldVersionId: crypto.randomUUID() }, { turnId: second.rows[0]!.id, turnNumber: 2, snapshot: persisted.rows[0]!.state_snapshot_private }));
+    expect(wrongScope.canonicalFacts.every((fact) => fact.id === null)).toBe(true);
+    const before = await pool.query("SELECT id,content,valid_until_turn,source_turn_id FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [fixture.campaignId]);
+    await read();
+    expect((await pool.query("SELECT id,content,valid_until_turn,source_turn_id FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [fixture.campaignId])).rows).toEqual(before.rows);
+    await pool.query("DELETE FROM campaign_canonical_facts WHERE id=$1", [expected[0]!.id]);
+    expect((await read()).canonicalFacts).toEqual([
+      { id: null, content: expected[0]!.content }, { id: expected[1]!.id, content: expected[1]!.content }
+    ]);
+    const withoutProjection = await request();
+    expect(withoutProjection).toContain("The harbor gate is open.");
+    expect(sentCanonicalFactIds(withoutProjection)).toEqual([expected[1]!.id]);
   });
 });

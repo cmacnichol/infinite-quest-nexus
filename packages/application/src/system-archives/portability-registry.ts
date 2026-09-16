@@ -38,6 +38,7 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   campaign_character_profile_edits: "portable_authority",
   campaign_illustration_configs: "portable_authority",
   campaign_memory_configs: "portable_authority",
+  campaign_story_memory_enrollments: "operational",
   campaign_state: "portable_authority",
   campaign_state_edits: "portable_authority",
   campaign_world_migrations: "portable_authority",
@@ -46,6 +47,7 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   chronicle_chunk_jobs: "operational",
   chronicle_jobs: "operational",
   chronicle_memories: "portable_authority",
+  // Includes sourceEvidence metadata; certification is rebuilt and never portable authority.
   chronicle_memory_chunks: "rebuildable",
   chronicle_query_embedding_cache: "rebuildable",
   chronicle_retrieval_candidates: "rebuildable",

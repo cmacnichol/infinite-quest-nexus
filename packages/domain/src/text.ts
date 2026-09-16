@@ -152,3 +152,14 @@ export function removeProviderSecrets(settings: Record<string, unknown> | undefi
   const secretKeys = new Set(["apiKey", "customApiKey", "lmStudioApiKey", "imageApiKey", "token", "password"]);
   return Object.fromEntries(Object.entries(settings).map(([key, value]) => [key, secretKeys.has(key) ? "" : value]));
 }
+
+/** Removes explicit credential/config assignments from otherwise fictional text. */
+export function stripCredentialLeakage(value: string): string {
+  return value
+    .replace(/https?:\/\/[^\s?]+\?[^\s]*(?:api[_-]?key|token|secret|password|credential|authorization)=[^\s&#]+[^\s]*/giu, "")
+    .replace(/\b(?:api[\s_-]*key|provider[\s_-]*token|access[\s_-]*token|refresh[\s_-]*token|token|secret|password|credential|authorization)\b\s*(?:[:=]\s*|\s+)(?:bearer\s+)?[A-Za-z0-9_./+=:-]{8,}/giu, "")
+    .replace(/\b(?:bearer\s+|sk-|AKIA)[A-Za-z0-9_./+=:-]{8,}/gu, "")
+    .replace(/[ \t]+\n/gu, "\n")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+}

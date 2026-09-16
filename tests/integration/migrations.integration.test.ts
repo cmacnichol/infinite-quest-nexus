@@ -79,7 +79,8 @@ integration("standard database migration runner", () => {
           "0091_story_source_authoring",
           "0092_source_synthesis_review_fence",
           "0093_portable_source_material_authority_paths",
-          "0094_story_generation_policy"
+          "0094_story_generation_policy",
+          "0095_story_memory_capability_enrollment"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -1769,7 +1770,8 @@ END;
         "0091_story_source_authoring",
         "0092_source_synthesis_review_fence",
         "0093_portable_source_material_authority_paths",
-        "0094_story_generation_policy"
+        "0094_story_generation_policy",
+          "0095_story_memory_capability_enrollment"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2770,7 +2772,8 @@ END;
         "0091_story_source_authoring",
         "0092_source_synthesis_review_fence",
         "0093_portable_source_material_authority_paths",
-        "0094_story_generation_policy"
+        "0094_story_generation_policy",
+          "0095_story_memory_capability_enrollment"
       ]);
 
       // The additive nullable generation-policy column is present after the upgrade;
@@ -2797,9 +2800,9 @@ END;
         "SELECT processed_signature FROM chronicle_chunk_jobs"
       )).toMatchObject({ rows: [{ processed_signature: null }] });
 
-      // The upgraded worker must recognise the pre-upgrade index as current. Enqueueing after
-      // the upgrade creates a job that finds no parent needing work, so an existing campaign is
-      // not re-embedded just because the code changed.
+      // Accepted rows/chunks/vectors remain unchanged by migration. The explicit
+      // fiction-source normalization upgrade requires a later derived-index job
+      // to revisit parents instead of claiming old offsets are current.
       const upgradedJob = await enqueuePostgresChronicleChunkIndex(isolatedPool, {
         ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id
       });
@@ -2809,7 +2812,7 @@ END;
       if (!claim) throw new Error("upgraded chunk job was not claimed");
       const page = await createPostgresChronicleChunkParentPort(isolatedPool)
         .loadForClaim(claim, { batchLimit: 10, cursor: null });
-      expect(page.parents).toEqual([]);
+      expect(page.parents).toHaveLength(2);
       expect(page.totalParents).toBe(2);
 
       // A job that was mid-flight at upgrade time carries an older capability fingerprint. That

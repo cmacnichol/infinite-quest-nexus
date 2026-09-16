@@ -433,7 +433,7 @@ integration("source world portable provenance", () => {
       await client.query("BEGIN");
       const context = await loadPostgresChronicleGenerationAuthorityContext(client, {
         ownerUserId, campaignId, worldVersionId: published.value.worldVersionId,
-        operationKind: "append", expectedTurnNumber: 0, query: "approved canon"
+        operationKind: "append", expectedTurnNumber: 1, query: "approved canon"
       });
       const serialized = JSON.stringify(context.authority);
       expect(serialized).toContain("approved canon");

@@ -1,5 +1,5 @@
-import type { CampaignProjection } from "@infinite-quest/client-core";
-import type { AcceptedTurnCorrectionView, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile } from "@infinite-quest/contracts";
+import { generationDiagnosticPresentation, type CampaignProjection } from "@infinite-quest/client-core";
+import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
 import { alignLatestSpine, latestCampaignSpine } from "./story-player-history";
@@ -24,6 +24,11 @@ export interface StoryPlayerViewState {
   readonly currentStateError: string | null;
   readonly correction: AcceptedTurnCorrectionView | null;
   readonly about: MetaResponse | null;
+  readonly characterProfile: Readonly<{ revision: number; name: string; profile: CampaignCharacterProfileUpdate["profile"] }> | null;
+  readonly characterProfileDraft: Readonly<{ name: string; profileJson: string }> | null;
+  readonly characterProfileError: string | null;
+  readonly characterProfileLocked: boolean;
+  readonly characterProfileSaveInFlight: boolean;
   readonly activityRecords: readonly StoryActivityRecord[];
   readonly illustrations: Readonly<StoryIllustrationState>;
 }
@@ -116,12 +121,14 @@ function recovery(document: Document, projection: Readonly<CampaignProjection>):
   section.append(element(document, "p", undefined, failed ? "Try again when the text provider is ready." : "The accepted story remains unchanged until completion."));
   const diagnostic = generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic;
   if (diagnostic) {
-    const action = diagnostic.action === "adjust_context" ? "Adjust the campaign context and try again."
-      : diagnostic.action === "adjust_output_or_state" ? "Shorten the current state or output target and try again."
-      : diagnostic.action === "check_provider_window" ? "Check the selected provider context window and try again."
-      : diagnostic.action === "update_prompt" ? "Update the compatible prompt override and try again."
-      : "Follow the recovery action and try again.";
-    section.append(element(document, "p", "story-recovery-diagnostic", action));
+    const presentation = generationDiagnosticPresentation(diagnostic);
+    section.append(element(document, "p", "story-recovery-diagnostic", presentation.message));
+    if (presentation.details.length) {
+      const details = element(document, "ul", "story-recovery-details");
+      details.setAttribute("aria-label", "Safe generation context details");
+      for (const detail of presentation.details) details.append(element(document, "li", undefined, detail));
+      section.append(details);
+    }
   }
   const actions = element(document, "div", "story-generation-actions");
   if (generation.monitoring === "detached") {
@@ -130,7 +137,8 @@ function recovery(document: Document, projection: Readonly<CampaignProjection>):
     resume.dataset.action = "resume-generation";
     actions.append(resume);
   }
-  if (generation.result.state === "unavailable" || failed) {
+  const retryable = diagnostic ? generationDiagnosticPresentation(diagnostic).retryable : true;
+  if (generation.result.state === "unavailable" || (failed && retryable)) {
     const retry = element(document, "button", undefined, generation.result.state === "unavailable" ? "Load accepted result" : "Retry generation");
     retry.type = "button";
     retry.dataset.action = "retry-generation";
@@ -153,7 +161,9 @@ function recovery(document: Document, projection: Readonly<CampaignProjection>):
 }
 
 function generationLabel(projection: Readonly<CampaignProjection>): string {
-  return projection.generation === null ? "Story Engine ready" : "Story Engine generating";
+  if (projection.generation === null) return "Story Engine ready";
+  return projection.generation.origin === "hydrated_recovery" || projection.generation.result.state === "failed"
+    ? "Story generation needs attention" : "Story Engine generating";
 }
 
 function viewingLabel(turnNumber: number | null, activeTurnNumber: number): string {
@@ -275,6 +285,7 @@ function storyComposer(
   const submit = element(document, "button", "story-continue", "Continue Story");
   submit.type = "button";
   submit.dataset.action = "continue-story";
+  submit.disabled = state.projection.generation !== null;
   primary.append(submit);
   composer.append(secondary, primary);
   if (ui.message !== null) {
@@ -462,7 +473,7 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
       reader.append(preview);
     }
     const isViewingLatest = selectedTurn.turnNumber === campaign.activeTurnNumber;
-    if (isViewingLatest && projection.generation === null) {
+    if (isViewingLatest && (projection.generation === null || projection.generation.origin === "hydrated_recovery" || projection.generation.result.state === "failed")) {
       reader.append(storyComposer(document, state, selectedTurn.choices, state.selectedCampaign?.turnControlStyle ?? "action_only"));
     }
   } else {
@@ -782,11 +793,12 @@ function editorField(document: Document, labelText: string, action: string, valu
 
 function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialogElement | null {
   const active = state.ui.activeDialog;
-  if (active !== "world" && active !== "current-state" && active !== "correction" && active !== "activity" && active !== "about" && !active?.startsWith("restart:")) return null;
+  if (active !== "world" && active !== "current-state" && active !== "character-profile" && active !== "correction" && active !== "activity" && active !== "about" && !active?.startsWith("restart:")) return null;
   const dialog = element(document, "dialog", "story-tool-dialog") as HTMLDialogElement;
   dialog.dataset.storyToolDialog = "";
   const title = element(document, "h2", undefined, active === "world" ? "Current World Setup"
     : active === "current-state" ? "Edit Campaign State"
+      : active === "character-profile" ? "Edit Character Profile"
       : active === "correction" ? "Edit Response" : "Restart from this turn");
   title.textContent = active === "activity" ? "Activity Log" : active === "about" ? "About Infinite Quest Nexus" : title.textContent;
   title.id = "story-tool-dialog-title";
@@ -859,6 +871,26 @@ function toolDialog(document: Document, state: StoryPlayerViewState): HTMLDialog
       save.disabled = state.currentStateLocked;
       dialog.append(reload, save);
     }
+  } else if (active === "character-profile") {
+    const profile = state.characterProfile;
+    if (profile === null) dialog.append(element(document, "p", "story-status", state.characterProfileError ?? "Loading character profile…"));
+    else {
+      const draft = state.characterProfileDraft ?? { name: profile.name, profileJson: JSON.stringify(profile.profile, null, 2) };
+      dialog.append(element(document, "p", undefined, `Revision ${profile.revision}. Profile edits apply to future turns only.`));
+      if (state.characterProfileLocked) dialog.append(element(document, "p", "story-status", state.characterProfileSaveInFlight
+        ? "Saving character profile. Your story draft is preserved."
+        : "Story generation is active or recovering. Profile edits are temporarily unavailable; your story draft is preserved."));
+      const name = element(document, "input") as HTMLInputElement;
+      name.value = draft.name; name.dataset.characterProfileName = ""; name.disabled = state.characterProfileLocked;
+      const nameLabel = element(document, "label", "story-tool-field story-character-profile-field", "Character name"); nameLabel.append(name);
+      const json = element(document, "textarea") as HTMLTextAreaElement;
+      json.rows = 12;
+      json.value = draft.profileJson; json.dataset.characterProfileJson = ""; json.disabled = state.characterProfileLocked;
+      const jsonLabel = element(document, "label", "story-tool-field story-character-profile-field", "Character profile JSON"); jsonLabel.append(json);
+      const save = element(document, "button", undefined, "Save Character Profile"); save.type = "button"; save.dataset.action = "save-character-profile"; save.disabled = state.characterProfileLocked;
+      const status = element(document, "p", "story-status", state.characterProfileError ?? ""); status.dataset.storyStatus = ""; status.setAttribute("aria-live", "polite");
+      dialog.append(nameLabel, jsonLabel, status, save);
+    }
   } else if (active === "correction") {
     const correction = state.correction;
     if (correction === null) dialog.append(element(document, "p", undefined, "Loading the current response…"));
@@ -898,6 +930,8 @@ export function applyReadingWidth(foldout: HTMLElement, width: ReadingWidth): vo
   foldout.dataset.readingWidth = width;
 }
 
+const nativeComposerBindings = new WeakMap<HTMLTextAreaElement, { ownerKey: string | null; modeledDraft: string }>();
+
 export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewState): void {
   const document = root.ownerDocument;
   const main = root.querySelector<HTMLElement>('main[data-page="story-player"]');
@@ -931,7 +965,42 @@ export function renderStoryPlayerView(root: HTMLElement, state: StoryPlayerViewS
     return;
   }
 
-  reader.replaceChildren(campaignReader(document, state));
+  const previousDraft = reader.querySelector<HTMLTextAreaElement>("[data-story-draft]");
+  const previousBinding = previousDraft ? nativeComposerBindings.get(previousDraft) : undefined;
+  const wasFocused = previousDraft !== null && document.activeElement === previousDraft;
+  const selectionStart = previousDraft?.selectionStart;
+  const selectionEnd = previousDraft?.selectionEnd;
+  const content = campaignReader(document, state);
+  let nextDraft = content.querySelector<HTMLTextAreaElement>("[data-story-draft]");
+  if (previousDraft && nextDraft && state.ui.draftOwnerKey !== null
+    && previousBinding?.ownerKey === state.ui.draftOwnerKey) {
+    // Retain the native event target while background updates arrive. A value
+    // changed by the user before its input event must not be overwritten by
+    // the previously rendered model value. Explicit model edits still win.
+    for (const attribute of Array.from(previousDraft.attributes)) {
+      if (!nextDraft.hasAttribute(attribute.name)) previousDraft.removeAttribute(attribute.name);
+    }
+    for (const attribute of Array.from(nextDraft.attributes)) previousDraft.setAttribute(attribute.name, attribute.value);
+    previousDraft.disabled = nextDraft.disabled;
+    if (previousBinding.modeledDraft !== state.ui.draft) previousDraft.value = state.ui.draft;
+    nextDraft.replaceWith(previousDraft);
+    nextDraft = previousDraft;
+  }
+  if (nextDraft) {
+    if (!nativeComposerBindings.has(nextDraft)) {
+      const input = nextDraft;
+      input.addEventListener("input", () => {
+        const binding = nativeComposerBindings.get(input);
+        if (binding) binding.modeledDraft = input.value;
+      });
+    }
+    nativeComposerBindings.set(nextDraft, { ownerKey: state.ui.draftOwnerKey, modeledDraft: state.ui.draft });
+  }
+  reader.replaceChildren(content);
+  if (wasFocused && nextDraft === previousDraft && !nextDraft.disabled) {
+    nextDraft.focus({ preventScroll: true });
+    if (typeof selectionStart === "number" && typeof selectionEnd === "number") nextDraft.setSelectionRange(selectionStart, selectionEnd);
+  }
   const navigation = renderStoryNavigation(document, state);
   if (navigation) spine.append(navigation);
   main.append(...renderStoryDialogs(document, state));

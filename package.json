@@ -22,6 +22,7 @@
     "start": "node dist/services/runtime/src/main.js",
     "migrate": "tsx packages/database/src/migrate-cli.ts",
     "evaluate:chronicle": "tsx scripts/evaluate-chronicle-retrieval.ts",
+    "evaluate:story-continuity": "tsx scripts/evaluate-story-continuity.ts",
     "system-archive": "tsx scripts/system-archive.ts",
     "test": "pnpm test:unit && pnpm test:integration",
     "test:unit": "vitest run tests/unit",

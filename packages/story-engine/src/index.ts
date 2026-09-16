@@ -10,6 +10,7 @@ export * from "./prompt.js";
 export * from "./story-only-prompt.js";
 export * from "./story-only-output.js";
 export * from "./scene-coverage.js";
+export * from "./continuity-review.js";
 export * from "./token-estimate.js";
 export * from "./providers.js";
 export * from "./readable-campaign-export.js";
