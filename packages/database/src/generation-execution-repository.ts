@@ -119,7 +119,10 @@ export type GenerationOrchestrationState = {
     requestPayloadHash: string;
     providerConfigurationHash: string;
     attempt: number;
-  };
+    status: "reserved" | "dispatched";
+    authorizedReviewId?: string;
+    authorizedRevision?: number;
+  } | undefined;
   /** Complete primary response captured before parsing or any destructive validator/repair stage. */
   primaryResult?: {
     version: 1;
@@ -131,7 +134,7 @@ export type GenerationOrchestrationState = {
     contextFingerprint: string;
     contextDiagnostics: Record<string, unknown>;
     chronicleRetrieval: ChronicleRetrievalAudit;
-  };
+  } | undefined;
   /** Versioned counters belong to the logical user attempt, never the worker lease. */
   logicalAttempt?: {
     version: 1;
@@ -266,7 +269,10 @@ function hasValidPrimaryReservation(value: unknown): boolean {
     && typeof reservation.requestBody === "string" && reservation.requestBody.length > 0
     && typeof reservation.requestPayloadHash === "string" && reservation.requestPayloadHash === sha256Hex(reservation.requestBody)
     && typeof reservation.providerConfigurationHash === "string" && reservation.providerConfigurationHash.length > 0
-    && typeof reservation.attempt === "number" && Number.isSafeInteger(reservation.attempt) && reservation.attempt > 0;
+    && typeof reservation.attempt === "number" && Number.isSafeInteger(reservation.attempt) && reservation.attempt > 0
+    && (reservation.status === "reserved" || reservation.status === "dispatched")
+    && (reservation.authorizedReviewId === undefined || typeof reservation.authorizedReviewId === "string")
+    && (reservation.authorizedRevision === undefined || (typeof reservation.authorizedRevision === "number" && Number.isSafeInteger(reservation.authorizedRevision) && reservation.authorizedRevision > 0));
 }
 
 function hasValidLogicalAttempt(value: unknown): boolean {

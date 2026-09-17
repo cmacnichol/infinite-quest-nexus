@@ -598,7 +598,7 @@ describe("generation executor adapter", () => {
     job.attempts = 2;
     job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "e".repeat(64) };
     job.orchestration_private = {
-      primaryReservation: { version: 1, requestBody: "{\"request\":true}", requestPayloadHash: sha256("{\"request\":true}"), providerConfigurationHash: "a".repeat(64), attempt: 1 }
+      primaryReservation: { version: 1, requestBody: "{\"request\":true}", requestPayloadHash: sha256("{\"request\":true}"), providerConfigurationHash: "a".repeat(64), attempt: 1, status: "reserved" }
     } as never;
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
@@ -615,17 +615,19 @@ describe("generation executor adapter", () => {
       .execute({ workerId: "reserved-primary", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
 
     expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.markFailed).not.toHaveBeenCalled();
     expect(repository.pauseForReview).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       stage: "structure", candidateScope: "main", reasons: ["output_incomplete"], gateCandidate: expect.objectContaining({ story: null })
     }));
   });
 
   it.each([
-    { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation", "story_recovery"], errorCode: "invalid_json" },
+    { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation"], errorCode: "invalid_json" },
     { label: "output-limited partial JSON", content: "{\"narration\":\"The observatory", outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit" },
     { label: "output-limited duplicate choices", content: JSON.stringify({ narration: "The observatory door opens.", choices: ["Wait.", " WAIT. ", "Look.", "Listen."], custom_action_suggestion: "Study.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "The door opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit" }
   ])("keeps Story Direction $label recoverable without mechanical follow-up dispatch", async ({ content, outputLimited, expectedOperations, errorCode }) => {
     const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
     const policy = {
       version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
       prompts: storyOnlyPromptSnapshot()
@@ -645,7 +647,7 @@ describe("generation executor adapter", () => {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
       savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
-      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), pauseForReview: vi.fn(async () => true), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
       markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
     } as unknown as GenerationExecutionRepository;
     const provider = {
@@ -668,8 +670,12 @@ describe("generation executor adapter", () => {
 
     expect(operations).toEqual(expectedOperations);
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
-    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode }));
+    expect(repository.markRecoverable).not.toHaveBeenCalled();
     expect(repository.markFailed).not.toHaveBeenCalled();
+    expect(repository.pauseForReview).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      state: "pending", stage: "structure", candidateScope: "main",
+      reasons: outputLimited ? ["output_incomplete"] : ["invalid_structure"]
+    }));
   });
 
   it("rejects a reclaimed Story Direction mechanical checkpoint before it can consume dormant events", async () => {
