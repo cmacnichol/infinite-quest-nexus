@@ -22,7 +22,7 @@ export interface GenerationReviewProjection {
 export type GenerationTransportHealth =
   | { readonly state: "unobserved" }
   | { readonly state: "healthy" }
-  | { readonly state: "degraded"; readonly reason: "stream_lost" | "poll_failed"; readonly consecutiveFailures: number };
+  | { readonly state: "degraded"; readonly reason: "stream_lost" | "poll_failed" | "invalid_snapshot"; readonly consecutiveFailures: number };
 
 export type GenerationResultState =
   | { readonly state: "pending" }

@@ -9,7 +9,7 @@ import type { AbortSignalLike, Clock, PendingGenerationSubmission, PendingSubmis
 
 export type GenerationSourceEvent =
   | { kind: "snapshot"; snapshot: GenerationStreamSnapshot }
-  | { kind: "degraded"; reason: "stream_lost" | "poll_failed"; consecutiveFailures: number };
+  | { kind: "degraded"; reason: "stream_lost" | "poll_failed" | "invalid_snapshot"; consecutiveFailures: number };
 
 export interface GenerationSnapshotSource {
   watch(jobId: string, signal: AbortSignalLike): AsyncIterable<GenerationSourceEvent>;
@@ -18,7 +18,7 @@ export interface GenerationSnapshotSource {
 export type GenerationEvent =
   | { type: "status"; snapshot: GenerationStreamSnapshot }
   | { type: "narration"; text: string }
-  | { type: "degraded"; reason: "stream_lost" | "poll_failed"; consecutiveFailures: number }
+  | { type: "degraded"; reason: "stream_lost" | "poll_failed" | "invalid_snapshot"; consecutiveFailures: number }
   | { type: "detached"; jobId: string }
   | { type: "result_unavailable"; jobId: string; error: Error }
   | { type: "settled"; outcome: "completed"; result: GenerationResult }

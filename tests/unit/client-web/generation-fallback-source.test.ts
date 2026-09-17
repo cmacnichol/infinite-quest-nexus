@@ -315,22 +315,65 @@ describe("browser generation fallback source", () => {
     expect(api.calls).toBe(0);
   });
 
-  it("does not hide invalid SSE frames behind polling", async () => {
+  it.each(["invalid JSON", "invalid schema"])("reconciles %s SSE frames through validated polling", async (frame) => {
     const events = eventSources();
     const api = apiQueue(events.sources, snapshot({ status: "completed" }));
     const source = createBrowserGenerationSource(options({ api, eventSourceFactory: events.factory }));
     const iterator = source.watch(jobId, signal())[Symbol.asyncIterator]();
     const next = iterator.next();
     await Promise.resolve();
-    events.sources[0]?.message({ invalid: true });
+    events.sources[0]?.onmessage?.(new MessageEvent("message", {
+      data: frame === "invalid JSON" ? "{" : JSON.stringify({ invalid: true })
+    }));
 
-    const error = await next.catch((cause: unknown) => cause);
-    expect(error).toBeInstanceOf(GenerationWorkflowProtocolError);
-    expect(error).toMatchObject({ kind: "invalid_snapshot" });
+    await expect(next).resolves.toMatchObject({
+      value: { kind: "degraded", reason: "invalid_snapshot", consecutiveFailures: 1 }
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ value: { snapshot: { id: jobId, status: "completed" } } });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    expect(api.calls).toBe(1);
+    expect(api.openedDuringRead).toEqual([false]);
+    expect(events.sources[0]?.closeCalls).toBe(1);
+  });
+
+  it("still rejects an invalid polling snapshot after stream rejection", async () => {
+    const events = eventSources();
+    const api = apiQueue(events.sources, { invalid: true } as unknown as GenerationJobSnapshot);
+    const source = createBrowserGenerationSource(options({ api, eventSourceFactory: events.factory }));
+    const iterator = source.watch(jobId, signal())[Symbol.asyncIterator]();
+    const next = iterator.next();
+    await Promise.resolve();
+    events.sources[0]?.message({ invalid: true });
+    await expect(next).resolves.toMatchObject({ value: { kind: "degraded" } });
+    await expect(iterator.next()).rejects.toMatchObject({ kind: "invalid_snapshot" });
+    expect(api.calls).toBe(1);
+  });
+
+  it("does not poll if the watcher aborts after a rejected stream frame", async () => {
+    const events = eventSources();
+    const api = apiQueue(events.sources);
+    const abortSignal = signal();
+    const source = createBrowserGenerationSource(options({ api, eventSourceFactory: events.factory }));
+    const iterator = source.watch(jobId, abortSignal)[Symbol.asyncIterator]();
+    const next = iterator.next();
+    await Promise.resolve();
+    events.sources[0]?.message({ invalid: true });
+    await expect(next).resolves.toMatchObject({ value: { kind: "degraded" } });
+    abortSignal.abort();
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    expect(api.calls).toBe(0);
+    expect(abortSignal.listenerCount()).toBe(0);
+  });
+
+  it("does not hide unrelated protocol errors behind polling", async () => {
+    const error = new GenerationWorkflowProtocolError("action_response_mismatch");
+    const api = apiQueue([]);
+    const source = createBrowserGenerationSource(options({ api, eventSourceFactory: () => { throw error; } }));
+    await expect(collect(source.watch(jobId, signal()))).rejects.toBe(error);
     expect(api.calls).toBe(0);
   });
 
-  it("keeps one watch alive through fallback so Task 5 does not report early source end", async () => {
+  it.each(["stream_lost", "invalid_snapshot"])("settles the original workflow after %s without another generation", async (reason) => {
     const events = eventSources();
     const completed = snapshot({ status: "completed" });
     const browserApi = apiQueue(events.sources, completed);
@@ -342,8 +385,10 @@ describe("browser generation fallback source", () => {
       clear() { this.value = null; }
     };
     const result = { id: jobId, status: "completed" } as GenerationResult;
+    const retry = vi.fn(async () => { throw new Error("Monitoring recovery must not retry generation."); });
+    const enqueue = vi.fn(async () => ({ id: jobId, status: "queued" as const, duplicate: false, operationKind: "append" as const, replacementTurnId: null }));
     const workflowApi: GenerationApiPort = {
-      enqueue: async () => ({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }),
+      enqueue,
       enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }),
       syncStatus: async () => ({ pendingGeneration: null } as CampaignSyncStatus),
       result: async () => result,
@@ -373,11 +418,15 @@ describe("browser generation fallback source", () => {
     });
     const watched = collect(run.watch(signal()));
     await Promise.resolve();
-    events.sources[0]?.error();
+    if (reason === "stream_lost") events.sources[0]?.error();
+    else events.sources[0]?.message({ invalid: true });
 
     const workflowEvents = await watched;
-    expect(workflowEvents).toContainEqual({ type: "degraded", reason: "stream_lost", consecutiveFailures: 1 });
+    expect(workflowEvents).toContainEqual({ type: "degraded", reason, consecutiveFailures: 1 });
     expect(workflowEvents.at(-1)).toEqual({ type: "settled", outcome: "completed", result });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    expect(pendingStore.value).toBeNull();
   });
 
   it("opens a bounded second browser session on the same signal after Task 5 retries recoverable work", async () => {
