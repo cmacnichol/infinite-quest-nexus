@@ -50,10 +50,15 @@ export const generationReviewDecisionJournalEntrySchema = z.strictObject({
 export const generationReviewCheckpointSchema = z.strictObject({
   version: z.literal(1), reviewId: z.uuid(), revision: z.number().int().safe().positive(), state: z.enum(["pending", "decided"]),
   stage: generationReviewStageSchema, candidateScope: z.enum(["main", "final"]), reasons: z.array(generationReviewReasonCodeSchema).min(1).max(20),
+  operationKind: z.enum(["append", "replace_latest"]), replacementTurnId: z.uuid().nullable(),
+  eligibility: z.strictObject({ complete: z.boolean(), structurallyValid: z.boolean(), mechanicsClean: z.boolean(), authorityValid: z.boolean(), stageComplete: z.boolean(), retryAvailable: z.boolean() }),
   originalCandidate: generationReviewCandidateSchema, gateCandidate: generationReviewCandidateSchema, workingCandidate: generationReviewCandidateSchema,
   originalFindings: z.array(generationReviewReasonCodeSchema).min(1).max(20), originalFindingsHash: hashSchema,
   retryFailure: z.string().trim().min(1).max(500).nullable(), decisionJournal: z.array(generationReviewDecisionJournalEntrySchema).max(100)
 }).superRefine((checkpoint, context) => {
+  if ((checkpoint.operationKind === "append") !== (checkpoint.replacementTurnId === null)) {
+    context.addIssue({ code: "custom", message: "Review operation binding must match its replacement target." });
+  }
   if (checkpoint.originalFindingsHash !== generationReviewFindingsHash(checkpoint.originalFindings)) {
     context.addIssue({ code: "custom", path: ["originalFindingsHash"], message: "Original findings must match their stable audit hash." });
   }

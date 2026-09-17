@@ -80,7 +80,9 @@ integration("PostgreSQL generation review persistence", () => {
     };
     const checkpoint = {
       version: 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: "structure" as const,
-      candidateScope: "main" as const, reasons, originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
+      candidateScope: "main" as const, reasons, operationKind: "append" as const, replacementTurnId: null,
+      eligibility: { complete: true, structurallyValid: false, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+      originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
       originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: []
     } satisfies GenerationReviewCheckpoint;
     const scope = { jobId: queued.id, ownerUserId, workerId };
@@ -100,8 +102,9 @@ integration("PostgreSQL generation review persistence", () => {
     await expect(commandsAfterPause.retry({ ownerUserId, jobId: fixture.queued.id })).rejects.toMatchObject({ kind: "conflict" });
     await expect(commandsAfterPause.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
       reviewId: fixture.checkpoint.reviewId, revision: 1, state: "pending", narration: fixture.checkpoint.gateCandidate.story?.narration,
-      choices: fixture.checkpoint.gateCandidate.story?.choices, findings: [{ code: "invalid_structure", message: expect.any(String) }]
+      canKeep: false, canRetry: true, choices: fixture.checkpoint.gateCandidate.story?.choices, findings: [{ code: "invalid_structure", message: expect.any(String) }]
     });
+    await expect(commandsAfterPause.decideReview({ ownerUserId, jobId: fixture.queued.id }, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });
     await expect(pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [fixture.imported.campaignId]))
       .resolves.toMatchObject({ rows: [{ count: 2 }] });
   });
@@ -110,16 +113,12 @@ integration("PostgreSQL generation review persistence", () => {
     const fixture = await pendingReview();
     const repository = commands();
     const scope = { ownerUserId, jobId: fixture.queued.id };
-    const results = await Promise.allSettled([
-      repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" }),
-      repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" })
-    ]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const results = await Promise.allSettled([repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" }), repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" })]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
     const winner = results.find((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof repository.decideReview>>> => result.status === "fulfilled")!.value;
-    const decision = results[0]?.status === "fulfilled" ? "keep" : "retry";
+    const decision = "retry" as const;
     await expect(repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision })).resolves.toEqual(winner);
-    const losingDecision = decision === "keep" ? "retry" : "keep";
-    await expect(repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: losingDecision })).rejects.toMatchObject({ kind: "conflict" });
+    await expect(repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });
     const foreignOwner = (await pool.query<{ id: string }>("INSERT INTO users(display_name) VALUES ('Review foreign owner') RETURNING id")).rows[0]!.id;
     await expect(repository.getReview({ ownerUserId: foreignOwner, jobId: fixture.queued.id })).rejects.toMatchObject({ kind: "not_found" });
     await expect(repository.decideReview({ ownerUserId: foreignOwner, jobId: fixture.queued.id }, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision })).rejects.toMatchObject({ kind: "not_found" });

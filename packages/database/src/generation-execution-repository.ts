@@ -1156,7 +1156,33 @@ export function createPostgresGenerationExecutionRepository(
 
     async pauseForReview(scope, checkpoint) {
       const parsed = generationReviewCheckpointSchema.parse(checkpoint);
-      return changed(await pool.query<{ id: string }>(
+      return withTransaction(pool, async (client) => {
+      const actual = await client.query<{ campaignId: string; worldId: string; worldVersionId: string | null; baseIdentity: GenerationBaseIdentity; providerProfileId: string; expectedTurnNumber: number; operationKind: "append" | "replace_latest"; replacementTurnId: string | null; prior: Record<string, unknown> }>(
+        `SELECT j.campaign_id AS "campaignId", w.id AS "worldId", c.world_version_id AS "worldVersionId",
+                j.generation_base_identity AS "baseIdentity", j.provider_profile_id AS "providerProfileId", j.expected_turn_number AS "expectedTurnNumber",
+                j.operation_kind AS "operationKind", j.replacement_turn_id AS "replacementTurnId", j.orchestration_private AS prior
+           FROM generation_jobs j JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
+           JOIN world_versions v ON v.id=c.world_version_id JOIN worlds w ON w.id=v.world_id
+          WHERE j.id=$1 AND j.owner_user_id=$2 AND j.lease_owner=$3
+            AND j.status IN ('assessing','generating','validating','committing') AND j.lease_expires_at > now() FOR UPDATE`,
+        [scope.jobId, scope.ownerUserId, scope.workerId]
+      );
+      const job = actual.rows[0];
+      if (!job) return false;
+      const candidate = parsed.gateCandidate;
+      if (candidate.ownerUserId !== scope.ownerUserId || candidate.campaignId !== job.campaignId || candidate.worldId !== job.worldId
+          || candidate.worldVersionId !== job.worldVersionId || candidate.expectedTurnNumber !== job.expectedTurnNumber
+          || stableStringify(candidate.baseIdentity) !== stableStringify(readGenerationBaseIdentity(job.baseIdentity))
+          || candidate.provider.profileId !== job.providerProfileId || parsed.operationKind !== job.operationKind
+          || parsed.replacementTurnId !== job.replacementTurnId) return false;
+      const prior = generationReviewCheckpointSchema.safeParse(job.prior?.generationReview);
+      if (prior.success) {
+        if (parsed.revision <= prior.data.revision || parsed.decisionJournal.length < prior.data.decisionJournal.length
+            || stableStringify(parsed.originalCandidate) !== stableStringify(prior.data.originalCandidate)
+            || stableStringify(parsed.originalFindings) !== stableStringify(prior.data.originalFindings)
+            || stableStringify(parsed.decisionJournal.slice(0, prior.data.decisionJournal.length)) !== stableStringify(prior.data.decisionJournal)) return false;
+      }
+      return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs
             SET status = 'recoverable', orchestration_private = orchestration_private || jsonb_build_object('generationReview', $4::jsonb),
                 error_code = 'generation_review_required', error_message = 'Generation requires review before it can continue.',
@@ -1166,6 +1192,7 @@ export function createPostgresGenerationExecutionRepository(
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, json(parsed)]
       ));
+      });
     },
 
     async savePartialNarration(scope, narration) {

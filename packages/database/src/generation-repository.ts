@@ -12,6 +12,7 @@ import {
   type GenerationMutationResult
 } from "../../application/src/index.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../application/src/generation/review-checkpoint.js";
+import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
 import { generationReviewDecisionRequestSchema, projectGenerationReviewDetail } from "../../contracts/src/generation-review.js";
 import {
   assertStoryMemoryPromptCompatibility,
@@ -179,6 +180,10 @@ function mutationResult(row: MutationRow): GenerationMutationResult {
     return { id: row.id, status: row.status, operationKind: "append", replacementTurnId: null };
   }
   return { id: row.id, status: row.status, operationKind: "replace_latest", replacementTurnId: row.replacementTurnId! };
+}
+
+function checkpointCanKeep(checkpoint: ReturnType<typeof generationReviewCheckpointSchema.parse>): boolean {
+  return checkpoint.gateCandidate.story !== null && canKeepGenerationCandidate({ ...checkpoint.eligibility, candidateScope: checkpoint.candidateScope, reasons: checkpoint.reasons });
 }
 
 function jobResult(row: JobRow): GenerationJob {
@@ -666,8 +671,8 @@ export function createPostgresGenerationCommandRepository(
       return projectGenerationReviewDetail({
         review: {
           ...checkpoint.data,
-          canKeep: checkpoint.data.state === "pending",
-          canRetry: checkpoint.data.state === "pending"
+          canKeep: checkpoint.data.state === "pending" && checkpointCanKeep(checkpoint.data),
+          canRetry: checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable
         },
         candidate: checkpoint.data.gateCandidate.story
           ? { narration: checkpoint.data.gateCandidate.story.narration, choices: checkpoint.data.gateCandidate.story.choices }
@@ -700,6 +705,8 @@ export function createPostgresGenerationCommandRepository(
             || checkpoint.reviewId !== parsedRequest.reviewId || checkpoint.revision !== parsedRequest.revision) {
           throw new GenerationApplicationError("conflict");
         }
+        if (parsedRequest.decision === "keep" && !checkpointCanKeep(checkpoint)) throw new GenerationApplicationError("conflict");
+        if (parsedRequest.decision === "retry" && !checkpoint.eligibility.retryAvailable) throw new GenerationApplicationError("conflict");
         const status = job.operationKind === "replace_latest" ? "replacement_queued" as const : "queued" as const;
         const receipt = {
           jobId: job.id, status, operationKind: job.operationKind,
