@@ -138,6 +138,14 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     return repository;
   }
 
+  async function authorizeReviewRetry(jobId: string, stage: "structure" | "choices") {
+    const review = await commands().getReview({ ownerUserId, jobId });
+    expect(review).toMatchObject({ stage, canRetry: true });
+    await commands().decideReview({ ownerUserId, jobId }, {
+      reviewId: review.reviewId, revision: review.revision, decision: "retry"
+    });
+  }
+
   async function campaignCounts(campaignId: string) {
     const result = await pool.query<{ turns: string; memories: string; jobs: string; state: unknown }>(
       `SELECT (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
@@ -181,9 +189,16 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     } };
     const initialOperations: string[] = [];
     const executor = createGenerationExecutor({ pool, repository: interruptingRepository, collaborators: collaborators(
-      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }, { content: validRepair() }], initialOperations, []
+      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }], initialOperations, []
     ) });
     await expect(executor.execute({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBe(true);
+    expect(initialOperations).toEqual(["story_generation"]);
+    await authorizeReviewRetry(queued.id, "choices");
+    const retried = await repository.claimNext({ workerId: `${workerId}-retry`, leaseSeconds: 30 });
+    expect(retried?.jobId).toBe(queued.id);
+    await expect(createGenerationExecutor({ pool, repository: interruptingRepository, collaborators: collaborators(
+      [{ content: validRepair() }], initialOperations, []
+    ) }).execute({ workerId: `${workerId}-retry`, leaseSeconds: 30, claim: retried! })).resolves.toBe(true);
     expect(initialOperations).toEqual(["story_generation", "story_choice_repair"]);
     const stored = await pool.query<{ orchestration: { choiceRepair: Record<string, unknown> } }>(
       "SELECT orchestration_private AS orchestration FROM generation_jobs WHERE id=$1", [queued.id]
@@ -191,23 +206,6 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     return { imported, queued, repository, choiceRepair: stored.rows[0]!.orchestration.choiceRepair };
   }
 
-  async function persistedPendingRepair(workerId: string) {
-    const imported = await campaign();
-    const before = await campaignCounts(imported.campaignId);
-    const queued = await enqueue(imported.campaignId);
-    const repository = createPostgresGenerationExecutionRepository(pool);
-    const operations: string[] = [];
-    await execute(queued.id, workerId, [
-      { content: "{not valid JSON", responseId: "pending-recovery-rejected" },
-      { content: output(["Enter the observatory.", " enter the observatory. ", "Wait beneath the eaves.", "Speak to the keeper."], "\uff33\uff50\uff45\uff41\uff4b\uff0e"), responseId: "pending-recovery-duplicate" }
-    ], operations, []);
-    expect(operations).toEqual(["story_generation", "story_recovery"]);
-    const stored = await pool.query<{ orchestration: { choiceRepair: Record<string, unknown> } }>(
-      "SELECT orchestration_private AS orchestration FROM generation_jobs WHERE id=$1", [queued.id]
-    );
-    expect(stored.rows[0]!.orchestration.choiceRepair.status).toBe("pending");
-    return { imported, before, queued, repository, choiceRepair: stored.rows[0]!.orchestration.choiceRepair };
-  }
 
   it("repairs duplicate choices once while preserving every non-choice field and original authority", async () => {
     const imported = await campaign();
@@ -221,7 +219,10 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     main.canonical_fact_updates = [{ content: "The keeper's lantern is dark above the west door.", supersedes_fact_ids: [sourceFactId] }];
     main.open_threads = ["Find the missing keeper.", "Learn why the lantern went dark."];
     await execute(queued.id, "choice-repair-main", [
-      { content: JSON.stringify(main), responseId: "main-choice-repair-response" },
+      { content: JSON.stringify(main), responseId: "main-choice-repair-response" }
+    ], operations, requests);
+    await authorizeReviewRetry(queued.id, "choices");
+    await execute(queued.id, "choice-repair-main-retry", [
       { content: validRepair({
         choices: ["Enter beneath the dark lantern.", "Call for the keeper in the rain.", "Study the extinguished lantern.", "Circle the tower for another door."],
         custom_action_suggestion: "Trace why the keeper's lantern went dark."
@@ -282,11 +283,17 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     ], "\uff33\uff50\uff45\uff41\uff4b\uff0e");
 
     await execute(queued.id, `choice-repair-generic-${crypto.randomUUID()}`, [
-      { content: rejected, responseId: "generic-recovery-rejected" },
+      { content: rejected, responseId: "generic-recovery-rejected" }
+    ], operations, requests);
+    expect(operations).toEqual(["story_generation"]);
+    expect(requests).toHaveLength(1);
+    expect(await campaignCounts(imported.campaignId)).toEqual(before);
+    await authorizeReviewRetry(queued.id, "structure");
+    await execute(queued.id, `choice-repair-generic-structure-${crypto.randomUUID()}`, [
       { content: duplicateRecovered, responseId: "generic-recovery-duplicate", outputLimited: recoveredOutputLimited }
     ], operations, requests);
 
-    expect(operations).toEqual(["story_generation", "story_recovery"]);
+    expect(operations).toEqual(["story_generation", "story_generation"]);
     expect(requests).toHaveLength(2);
     expect(await campaignCounts(imported.campaignId)).toEqual(before);
     const saved = await pool.query<{
@@ -294,24 +301,30 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       errorCode: string | null;
       resultTurnId: string | null;
       policy: { playMode?: string; turnControlStyle?: string };
-      orchestration: { choiceRepair?: Record<string, unknown> };
+      orchestration: { generationReview?: Record<string, unknown> };
     }>(`SELECT status,error_code AS "errorCode",result_turn_id AS "resultTurnId",
                  generation_policy AS policy,orchestration_private AS orchestration
           FROM generation_jobs WHERE id=$1`, [queued.id]);
+    if (recoveredOutputLimited) {
+      expect(saved.rows).toMatchObject([{
+        status: "recoverable", errorCode: "generation_review_required", resultTurnId: null,
+        orchestration: { generationReview: {
+          state: "pending", stage: "structure", candidateScope: "main",
+          eligibility: { retryAvailable: false }, retryFailure: expect.any(String)
+        } }
+      }]);
+      expect(await campaignCounts(imported.campaignId)).toEqual(before);
+      return;
+    }
     expect(saved.rows).toMatchObject([{
-      status: "recoverable", errorCode: "invalid_schema", resultTurnId: null,
+      status: "recoverable", errorCode: "generation_review_required", resultTurnId: null,
       policy: { playMode: "story_only", turnControlStyle: "flexible_scene" },
-      orchestration: { choiceRepair: {
-        status: "pending", originalResponse: { responseId: "generic-recovery-duplicate" },
-        base: { narration: "Rain turns the observatory glass silver as Mara opens the west door." }
+      orchestration: { generationReview: {
+        state: "pending", stage: "choices", candidateScope: "main",
+        gateCandidate: { resumeDependencies: { producingProviderResult: { responseId: "generic-recovery-duplicate" } } }
       } }
     }]);
-    const pendingCheckpoint = saved.rows[0]!.orchestration.choiceRepair!;
-    expect(pendingCheckpoint.originalRequestBody).not.toBe("");
-    expect(pendingCheckpoint.originalRequestPayloadHash).toEqual(expect.any(String));
-    expect(pendingCheckpoint.originalSentFactIds).toEqual([sourceFactId]);
-
-    await commands().retry({ ownerUserId, jobId: queued.id });
+    await authorizeReviewRetry(queued.id, "choices");
     const retryOperations: string[] = [];
     const retryRequests: string[] = [];
     await execute(queued.id, `choice-repair-generic-retry-${crypto.randomUUID()}`, [
@@ -335,15 +348,12 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       "SELECT orchestration_private AS orchestration FROM generation_jobs WHERE id=$1", [queued.id]
     )).rows[0]!.orchestration.choiceRepair;
     expect(acceptedCheckpoint).toMatchObject({
-      originalRequestBody: pendingCheckpoint.originalRequestBody,
-      originalRequestPayloadHash: pendingCheckpoint.originalRequestPayloadHash,
-      originalSentFactIds: pendingCheckpoint.originalSentFactIds,
-      originalResponse: pendingCheckpoint.originalResponse
+      originalResponse: { responseId: "generic-recovery-duplicate" }
     });
   }, 60_000);
 
-  it("does not let a pending recovered choice repair dispatch on lease reclaim before an explicit retry", async () => {
-    const fixture = await persistedPendingRepair("choice-repair-pending-reclaim-a");
+  it("reclaims a persisted authorized choice repair without redispatching main or repair", async () => {
+    const fixture = await persistedValidatedRepair("choice-repair-pending-reclaim-a");
     await pool.query(
       "UPDATE generation_jobs SET status='queued',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1",
       [fixture.queued.id]
@@ -356,17 +366,16 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       .execute({ workerId: "choice-repair-pending-reclaim-b", leaseSeconds: 30, claim: reclaimed! })).resolves.toBe(true);
     expect(operations).toEqual([]);
     expect(requests).toEqual([]);
-    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(fixture.before);
     await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
-      .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "automatic_repair_consumed", result_turn_id: null }] });
+      .resolves.toMatchObject({ rows: [{ status: "completed", error_code: null, result_turn_id: expect.any(String) }] });
   }, 60_000);
 
   it("fails closed when a pending recovered choice-repair checkpoint is tampered", async () => {
-    const fixture = await persistedPendingRepair("choice-repair-pending-tamper-a");
+    const fixture = await persistedValidatedRepair("choice-repair-pending-tamper-a");
     const tampered = structuredClone(fixture.choiceRepair);
     (tampered.base as Record<string, unknown>).narration = "Tampered recovered narration.";
-    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ choiceRepair: tampered })]);
-    await commands().retry({ ownerUserId, jobId: fixture.queued.id });
+    const before = await campaignCounts(fixture.imported.campaignId);
+    await pool.query("UPDATE generation_jobs SET status='queued', orchestration_private=orchestration_private || $2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ choiceRepair: tampered })]);
     const claimed = await fixture.repository.claimNext({ workerId: "choice-repair-pending-tamper-b", leaseSeconds: 30 });
     expect(claimed?.jobId).toBe(fixture.queued.id);
     const operations: string[] = [];
@@ -375,17 +384,17 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       .execute({ workerId: "choice-repair-pending-tamper-b", leaseSeconds: 30, claim: claimed! })).resolves.toBe(true);
     expect(operations).toEqual([]);
     expect(requests).toEqual([]);
-    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(fixture.before);
+    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(before);
     await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
       .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_checkpoint_incompatible", result_turn_id: null }] });
   }, 60_000);
 
   it("fails closed when a pending recovered choice-repair checkpoint is malformed", async () => {
-    const fixture = await persistedPendingRepair("choice-repair-pending-malformed-a");
+    const fixture = await persistedValidatedRepair("choice-repair-pending-malformed-a");
     const malformed = structuredClone(fixture.choiceRepair);
     malformed.repairRequestPayloadHash = "";
-    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ choiceRepair: malformed })]);
-    await commands().retry({ ownerUserId, jobId: fixture.queued.id });
+    const before = await campaignCounts(fixture.imported.campaignId);
+    await pool.query("UPDATE generation_jobs SET status='queued', orchestration_private=orchestration_private || $2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ choiceRepair: malformed })]);
     const claimed = await fixture.repository.claimNext({ workerId: "choice-repair-pending-malformed-b", leaseSeconds: 30 });
     expect(claimed?.jobId).toBe(fixture.queued.id);
     const operations: string[] = [];
@@ -394,7 +403,7 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       .execute({ workerId: "choice-repair-pending-malformed-b", leaseSeconds: 30, claim: claimed! })).resolves.toBe(false);
     expect(operations).toEqual([]);
     expect(requests).toEqual([]);
-    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(fixture.before);
+    expect(await campaignCounts(fixture.imported.campaignId)).toEqual(before);
     await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
       .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_checkpoint_incompatible", result_turn_id: null }] });
   }, 60_000);
@@ -416,6 +425,12 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       { contextWindowTokens: 9_000, maxOutputTokens: 4_096 }, repairTransport
     ) });
     await expect(executor.execute({ workerId: "choice-repair-oversized", leaseSeconds: 30, claim: claim! })).resolves.toBe(true);
+    await authorizeReviewRetry(queued.id, "choices");
+    const repairClaim = await repository.claimNext({ workerId: "choice-repair-oversized-retry", leaseSeconds: 30 });
+    expect(repairClaim?.jobId).toBe(queued.id);
+    await expect(createGenerationExecutor({ pool, repository, collaborators: collaborators(
+      [], operations, requests, { contextWindowTokens: 9_000, maxOutputTokens: 4_096 }, repairTransport
+    ) }).execute({ workerId: "choice-repair-oversized-retry", leaseSeconds: 30, claim: repairClaim! })).resolves.toBe(true);
     expect(operations).toEqual(["story_generation"]);
     expect(requests).toHaveLength(2);
     expect(repairTransport.calls).toBe(0);
@@ -429,28 +444,34 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     const before = await campaignCounts(imported.campaignId);
     const queued = await enqueue(imported.campaignId);
     const operations: string[] = [];
-    await execute(queued.id, "choice-repair-extra", [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }, { content: validRepair({ narration: "malicious replacement" }) }], operations, []);
+    await execute(queued.id, "choice-repair-extra", [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }], operations, []);
+    await authorizeReviewRetry(queued.id, "choices");
+    await execute(queued.id, "choice-repair-extra-retry", [{ content: validRepair({ narration: "malicious replacement" }) }], operations, []);
     const after = await campaignCounts(imported.campaignId);
     expect(operations).toEqual(["story_generation", "story_choice_repair"]);
     expect(after).toEqual(before);
-    await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [queued.id]))
-      .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "invalid_schema", result_turn_id: null }] });
+    await expect(pool.query<{ status: string; errorCode: string; resultTurnId: string | null; review: { stage: string; retryFailure: string; eligibility: { retryAvailable: boolean } } }>(
+      "SELECT status,error_code AS \"errorCode\",result_turn_id AS \"resultTurnId\",orchestration_private->'generationReview' AS review FROM generation_jobs WHERE id=$1", [queued.id]
+    )).resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_review_required", resultTurnId: null,
+      review: { stage: "choices", retryFailure: expect.any(String), eligibility: { retryAvailable: false } } }] });
   }, 60_000);
 
-  it("uses commands.retry after output-limited Story Direction output and never accepts a limited duplicate-choice draft", async () => {
+  it("requires review decisions after output-limited Story Direction output and never accepts a limited duplicate-choice draft", async () => {
     const imported = await campaign();
     const first = await enqueue(imported.campaignId);
     await execute(first.id, "choice-repair-limited-main", [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]), outputLimited: true }], [], []);
     await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [first.id]))
-      .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "output_limit", result_turn_id: null }] });
-    await commands().retry({ ownerUserId, jobId: first.id });
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_review_required", result_turn_id: null }] });
+    await authorizeReviewRetry(first.id, "structure");
     await execute(first.id, "choice-repair-limited-main-retry", [{ content: output(["Enter.", "Listen.", "Wait.", "Speak."]) }], [], []);
     const second = await enqueue(imported.campaignId);
-    await execute(second.id, "choice-repair-limited-repair", [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }, { content: validRepair(), outputLimited: true }], [], []);
+    await execute(second.id, "choice-repair-limited-repair", [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }], [], []);
+    await authorizeReviewRetry(second.id, "choices");
+    await execute(second.id, "choice-repair-limited-repair-retry", [{ content: validRepair(), outputLimited: true }], [], []);
     await expect(pool.query("SELECT id,status,error_code,result_turn_id FROM generation_jobs WHERE id = ANY($1::uuid[]) ORDER BY id", [[first.id, second.id]]))
       .resolves.toMatchObject({ rows: expect.arrayContaining([
         expect.objectContaining({ id: first.id, status: "completed", error_code: null, result_turn_id: expect.any(String) }),
-        expect.objectContaining({ id: second.id, status: "recoverable", error_code: "invalid_schema", result_turn_id: null })
+        expect.objectContaining({ id: second.id, status: "recoverable", error_code: "generation_review_required", result_turn_id: null })
       ]) });
   }, 60_000);
 
@@ -471,9 +492,16 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     } };
     const firstOperations: string[] = [];
     const firstExecutor = createGenerationExecutor({ pool, repository: expiringRepository, collaborators: collaborators(
-      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }, { content: validRepair() }], firstOperations, []
+      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }], firstOperations, []
     ) });
     await expect(firstExecutor.execute({ workerId: "choice-repair-crash-a", leaseSeconds: 30, claim: firstClaim! })).resolves.toBe(true);
+    expect(firstOperations).toEqual(["story_generation"]);
+    await authorizeReviewRetry(queued.id, "choices");
+    const repairClaim = await repository.claimNext({ workerId: "choice-repair-crash-a-retry", leaseSeconds: 30 });
+    expect(repairClaim?.jobId).toBe(queued.id);
+    await expect(createGenerationExecutor({ pool, repository: expiringRepository, collaborators: collaborators(
+      [{ content: validRepair() }], firstOperations, []
+    ) }).execute({ workerId: "choice-repair-crash-a-retry", leaseSeconds: 30, claim: repairClaim! })).resolves.toBe(true);
     expect(firstOperations).toEqual(["story_generation", "story_choice_repair"]);
     const reclaimed = await repository.claimNext({ workerId: "choice-repair-crash-b", leaseSeconds: 30 });
     expect(reclaimed?.jobId).toBe(queued.id);
@@ -507,10 +535,17 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       return saved;
     } };
     const wire = { calls: 0, responseFormatBodies: [] as string[] };
+    const wireRequests: string[] = [];
     const initial = createGenerationExecutor({ pool, repository: interruptingRepository, collaborators: collaborators(
-      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]), responseId: "fallback-main-response" }], [], [], undefined, wire
+      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]), responseId: "fallback-main-response" }], [], wireRequests, undefined, wire
     ) });
     await expect(initial.execute({ workerId: "choice-repair-fallback-a", leaseSeconds: 30, claim: firstClaim! })).resolves.toBe(true);
+    await authorizeReviewRetry(queued.id, "choices");
+    const repairClaim = await repository.claimNext({ workerId: "choice-repair-fallback-a-retry", leaseSeconds: 30 });
+    expect(repairClaim?.jobId).toBe(queued.id);
+    await expect(createGenerationExecutor({ pool, repository: interruptingRepository, collaborators: collaborators(
+      [], [], wireRequests, undefined, wire
+    ) }).execute({ workerId: "choice-repair-fallback-a-retry", leaseSeconds: 30, claim: repairClaim! })).resolves.toBe(true);
     expect(wire.calls).toBe(2);
     expect(wire.responseFormatBodies[0]).toContain("response_format");
     expect(wire.responseFormatBodies[1]).not.toContain("response_format");
@@ -569,9 +604,16 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     } };
     const initialOperations: string[] = [];
     const initialExecutor = createGenerationExecutor({ pool, repository: interruptingRepository, collaborators: collaborators(
-      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }, { content: validRepair() }], initialOperations, []
+      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }], initialOperations, []
     ) });
     await expect(initialExecutor.execute({ workerId: "choice-repair-retry-a", leaseSeconds: 30, claim: firstClaim! })).resolves.toBe(true);
+    expect(initialOperations).toEqual(["story_generation"]);
+    await authorizeReviewRetry(queued.id, "choices");
+    const repairClaim = await repository.claimNext({ workerId: "choice-repair-retry-a-repair", leaseSeconds: 30 });
+    expect(repairClaim?.jobId).toBe(queued.id);
+    await expect(createGenerationExecutor({ pool, repository: interruptingRepository, collaborators: collaborators(
+      [{ content: validRepair() }], initialOperations, []
+    ) }).execute({ workerId: "choice-repair-retry-a-repair", leaseSeconds: 30, claim: repairClaim! })).resolves.toBe(true);
     expect(initialOperations).toEqual(["story_generation", "story_choice_repair"]);
     await commands().retry({ ownerUserId, jobId: queued.id });
     const resumedOperations: string[] = [];
@@ -640,9 +682,16 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     } };
     const firstOperations: string[] = [];
     const firstExecutor = createGenerationExecutor({ pool, repository: crashingRepository, collaborators: collaborators(
-      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }, { content: validRepair() }], firstOperations, []
+      [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }], firstOperations, []
     ) });
     await expect(firstExecutor.execute({ workerId: "choice-repair-dispatched-a", leaseSeconds: 30, claim: firstClaim! })).resolves.toBe(true);
+    expect(firstOperations).toEqual(["story_generation"]);
+    await authorizeReviewRetry(queued.id, "choices");
+    const repairClaim = await repository.claimNext({ workerId: "choice-repair-dispatched-a-retry", leaseSeconds: 30 });
+    expect(repairClaim?.jobId).toBe(queued.id);
+    await expect(createGenerationExecutor({ pool, repository: crashingRepository, collaborators: collaborators(
+      [{ content: validRepair() }], firstOperations, []
+    ) }).execute({ workerId: "choice-repair-dispatched-a-retry", leaseSeconds: 30, claim: repairClaim! })).resolves.toBe(true);
     expect(firstOperations).toEqual(["story_generation", "story_choice_repair"]);
     const before = await campaignCounts(imported.campaignId);
     const reclaimed = await repository.claimNext({ workerId: "choice-repair-dispatched-b", leaseSeconds: 30 });

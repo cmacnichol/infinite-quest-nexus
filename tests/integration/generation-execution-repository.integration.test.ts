@@ -208,7 +208,7 @@ integration("PostgreSQL generation execution repository", () => {
     };
     const reasons: GenerationReviewCheckpoint["reasons"] = ["narrative_conflict"];
     const checkpoint: GenerationReviewCheckpoint = {
-      version: 1, reviewId: crypto.randomUUID(), revision: 1, state: "decided", stage: "continuity", candidateScope: "final", reasons,
+      version: 1, reviewId: crypto.randomUUID(), revision: 2, state: "decided", stage: "continuity", candidateScope: "final", reasons,
       operationKind: "append", replacementTurnId: null,
       eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,

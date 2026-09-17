@@ -1850,7 +1850,13 @@ async function executeLoadedGeneration(
         reasons: [reason],
         operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
         eligibility: { complete: !result.outputLimited, structurallyValid: false, mechanicsClean: false,
-          authorityValid: true, stageComplete: false, retryAvailable: true } });
+          authorityValid: true, stageComplete: false, retryAvailable: true },
+        ...(savedReview.success ? {
+          originalCandidate: savedReview.data.originalCandidate,
+          originalFindings: savedReview.data.originalFindings,
+          decisionJournal: savedReview.data.decisionJournal,
+          revision: savedReview.data.revision + 1
+        } : {}) });
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected primary candidate for review");
       return true;
     };
@@ -2167,10 +2173,10 @@ async function executeLoadedGeneration(
         stage: "scene_coverage", reasons: priorRetry ? savedReview.data.originalFindings : ["scene_beats_missing"],
         operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
         eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
-        ...(priorRetry ? {
+        ...(savedReview.success ? {
           originalCandidate: savedReview.data.originalCandidate, originalFindings: savedReview.data.originalFindings,
           decisionJournal: savedReview.data.decisionJournal, revision: savedReview.data.revision + 1,
-          retryFailure: "The authorized scene rewrite did not produce a usable complete turn."
+          ...(priorRetry ? { retryFailure: "The authorized scene rewrite did not produce a usable complete turn." } : {})
         } : {})
       });
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing incomplete scene candidate for review");
@@ -2406,7 +2412,14 @@ async function executeLoadedGeneration(
           const gate = prepareGenerationReview({
             candidate, stage: "event_coverage", reasons: ["event_coverage_failed"],
             operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
-            eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true }
+            eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true,
+              retryAvailable: (orchestration.logicalAttempt?.eventCoverageRepairsConsumed ?? 0) < 1 },
+            ...(savedReview.success ? {
+              originalCandidate: savedReview.data.originalCandidate,
+              originalFindings: savedReview.data.originalFindings,
+              decisionJournal: savedReview.data.decisionJournal,
+              revision: savedReview.data.revision + 1
+            } : {})
           });
           assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected before-event candidate for review");
           return true;
@@ -2449,7 +2462,7 @@ async function executeLoadedGeneration(
           eventCoverageRepair: repairFence,
           logicalAttempt: incrementLogicalAllowance(orchestration, "eventCoverageRepairsConsumed")
         });
-        let repairResult: ProviderResult;
+        let repairResult: ProviderResult | null = null;
         let repairedMain: ReturnType<typeof parseStoryOutput>;
         try {
           repairResult = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
@@ -2474,8 +2487,43 @@ async function executeLoadedGeneration(
           }), "saving invalid main event rewrite recovery state");
           return true;
         }
+        if (!repairResult) {
+          assertActiveGenerationUpdate(await repository.markRecoverable({
+            ...scope, providerResponseId: null, providerFinishReason: null,
+            errorCode: "event_coverage_failed",
+            errorMessage: "The before or pending event fiction rewrite did not return a usable result.",
+            recoveryMetadata: { retryable: true, stage: "event_coverage", repairAttempted: true }
+          }), "saving missing main event rewrite result");
+          return true;
+        }
         const repairedStory = repairedMain.story;
-        result = repairResult!;
+        let repairedCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
+        try {
+          const coverageResponse = await phase("scene_coverage_validation", () =>
+            callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+              systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+              input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), repairedStory.narration)
+            })
+          );
+          repairedCoverage = coverageResponse.outputLimited
+            ? null
+            : parseRequiredEventCoverage(coverageResponse.content, dueBeforeOrPendingEvents);
+        } catch (error) {
+          if (isRecoverableIntegrityError(error)) throw error;
+        }
+        if (!coveragePassed(repairedCoverage)) {
+          if (await reofferFailedAuthorizedRetry("event_coverage", "The authorized before-event rewrite did not satisfy event coverage.")) return true;
+          assertActiveGenerationUpdate(await repository.markRecoverable({
+            ...scope,
+            providerResponseId: repairResult.responseId || null,
+            providerFinishReason: repairResult.finishReason || null,
+            errorCode: "event_coverage_failed",
+            errorMessage: "The before or pending event fiction rewrite failed event coverage verification.",
+            recoveryMetadata: { retryable: true, stage: "event_coverage", repairAttempted: true }
+          }), "saving failed main event rewrite coverage");
+          return true;
+        }
+        result = repairResult;
         parsed = repairedMain;
         orchestration = await persistOrchestration(repository, scope, job, {
           validatedMainDraft: {
@@ -2683,7 +2731,14 @@ async function executeLoadedGeneration(
           };
           const gate = prepareGenerationReview({ candidate, stage: "event_coverage", reasons: ["event_coverage_failed"],
             operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
-            eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true } });
+            eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true,
+              retryAvailable: (orchestration.logicalAttempt?.eventCoverageRepairsConsumed ?? 0) < 1 },
+            ...(savedReview.success ? {
+              originalCandidate: savedReview.data.originalCandidate,
+              originalFindings: savedReview.data.originalFindings,
+              decisionJournal: savedReview.data.decisionJournal,
+              revision: savedReview.data.revision + 1
+            } : {}) });
           assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected event candidate for review");
           return true;
         }

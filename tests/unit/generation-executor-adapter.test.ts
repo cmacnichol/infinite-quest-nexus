@@ -23,6 +23,7 @@ import {
 } from "../../services/runtime/src/generation-executor-adapter.js";
 import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
 import { prepareGenerationReview } from "../../services/runtime/src/generation-review-adapter.js";
+import type { GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const claim: ClaimedGeneration = {
@@ -141,6 +142,36 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
       useRpgStats: false, rpgStats: [], eventTriggers: [], pendingEventTriggers: [],
       storyMemoryDefaults: { canonicalFacts: [], supersededFacts: [] }, suppressEventTriggers: true,
       characterProfile: null, characterSnapshot: null
+    }
+  };
+}
+
+function authorizeReviewRetry(job: GenerationExecutionPayload, checkpoint: GenerationReviewCheckpoint): void {
+  job.orchestration_private = {
+    ...job.orchestration_private,
+    generationReview: {
+      ...checkpoint,
+      state: "decided",
+      revision: checkpoint.revision + 1,
+      decisionJournal: [...checkpoint.decisionJournal, {
+        reviewId: checkpoint.reviewId,
+        revision: checkpoint.revision,
+        actorUserId: job.owner_user_id,
+        decision: "retry",
+        decidedAt: "2026-09-17T00:00:00.000Z",
+        candidateScope: checkpoint.candidateScope,
+        candidateHash: checkpoint.gateCandidate.storyHash,
+        findingsHash: checkpoint.originalFindingsHash,
+        nextStage: checkpoint.stage,
+        offeredCandidate: checkpoint.gateCandidate,
+        offeredReasons: checkpoint.reasons,
+        actionReceipt: {
+          jobId: job.id,
+          status: job.operation_kind === "append" ? "queued" : "replacement_queued",
+          operationKind: job.operation_kind,
+          replacementTurnId: job.replacement_turn_id
+        }
+      }]
     }
   };
 }
@@ -546,7 +577,7 @@ describe("generation executor adapter", () => {
 
     expect(operations).toEqual(["story_generation"]);
     expect(provider.execute).toHaveBeenCalledOnce();
-    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(repository.commitAcceptedTurn, JSON.stringify(job.orchestration_private)).toHaveBeenCalledWith(expect.objectContaining({
       story: expect.objectContaining({ choices: story.choices }),
       orchestration: expect.not.objectContaining({ beforeEvents: expect.any(Array) })
     }));
@@ -806,6 +837,10 @@ describe("generation executor adapter", () => {
         job.orchestration_private = value;
         return true;
       }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => {
+        job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint };
+        return true;
+      }),
       savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
       recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
       markValidating: vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true),
@@ -953,6 +988,7 @@ describe("generation executor adapter", () => {
 
   it("persists one event-coverage repair and commits only its revalidated full story", async () => {
     const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
     job.orchestration_inputs.suppressEventTriggers = false;
     const immediateEvent = {
       id: "immediate-bell",
@@ -963,11 +999,16 @@ describe("generation executor adapter", () => {
       instructions: "A silver bell rings in the observatory.",
       summary: "The bell must ring."
     };
+    job.orchestration_private.afterEvents = [immediateEvent] as never;
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true),
       markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async (_scope, value) => {
         job.orchestration_private = value;
+        return true;
+      }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => {
+        job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint };
         return true;
       }),
       savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
@@ -989,9 +1030,11 @@ describe("generation executor adapter", () => {
         .mockResolvedValueOnce({ content: story("The observatory door opens."), responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: story("The observatory door opens.\n\nThe chamber stays silent."), responseId: "extension", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "immediate-bell", covered: false, missing_required_beats: ["bell"], contradictions: [] }] }), responseId: "coverage-1", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
-        .mockResolvedValueOnce({ content: story("The observatory door opens.\n\nA silver bell rings."), responseId: "repair", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "immediate-bell", covered: true, missing_required_beats: [], contradictions: [] }] }), responseId: "coverage-2", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "immediate-bell", covered: true, missing_required_beats: [], contradictions: [] }] }), responseId: "appended-coverage", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: story("The observatory door opens.\n\nA silver bell rings."), responseId: "repair", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "immediate-bell", covered: true, missing_required_beats: [], contradictions: [] }] }), responseId: "repair-coverage", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "immediate-bell", covered: true, missing_required_beats: [], contradictions: [] }] }), responseId: "repair-appended-coverage", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} })
     };
     const collaborators = {
       memory: { loadGenerationContext: vi.fn(async () => ({
@@ -1019,31 +1062,29 @@ describe("generation executor adapter", () => {
     await expect(executor.execute({ workerId: "event-repair-initial", leaseSeconds: 30, claim })).resolves.toBe(true);
     const validatedMainDraftHash = job.orchestration_private.validatedMainDraft?.draftHash;
     expect(validatedMainDraftHash).toEqual(expect.any(String));
-    job.orchestration_private.eventCoverageRepair = {
-      rejectedFinalStoryHash: "legacy-main-rejection",
-      validatedMainDraftHash: validatedMainDraftHash!,
-      extensionFinalStoryHash: null,
-      extensionProducingAttempt: null,
-      consumedAttempt: 1
-    };
-    job.orchestration_private.afterEvents = [immediateEvent] as never;
+    expect(provider.execute).toHaveBeenCalledTimes(3);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    const pendingEventGate = job.orchestration_private.generationReview as GenerationReviewCheckpoint;
+    expect(pendingEventGate).toMatchObject({ state: "pending", stage: "event_coverage", candidateScope: "final" });
+    authorizeReviewRetry(job, pendingEventGate);
     await expect(executor.execute({ workerId: "event-repair-worker", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
 
     expect(job.orchestration_private.eventCoverageRepair).toEqual(expect.objectContaining({
       consumedAttempt: 1,
-      mainRepairConsumed: true
+      authorizedReviewId: pendingEventGate.reviewId,
+      authorizedRevision: pendingEventGate.revision
     }));
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
       story: expect.objectContaining({ narration: "The observatory door opens.\n\nA silver bell rings." })
     }));
     const serializedFictionRequests = provider.execute.mock.calls.map(([request]) => String(request.input));
-    expect(serializedFictionRequests).toHaveLength(6);
+    expect(serializedFictionRequests).toHaveLength(8);
     for (const request of serializedFictionRequests) {
       expect(request).not.toContain("PRIVATE_STAT_CANARY");
       expect(request).not.toContain("PRIVATE_TRACKER_CANARY");
     }
     expect(serializedFictionRequests[0]).toContain("Silver doorway");
-    expect(provider.execute.mock.calls[3]?.[0].budgetOutput).toEqual({
+    expect(provider.execute.mock.calls[5]?.[0].budgetOutput).toEqual({
       kind: "event_extension",
       protectedStory: {
         narration: "The observatory door opens.",
@@ -1053,7 +1094,7 @@ describe("generation executor adapter", () => {
       },
       narrationCharacterLimit: 200_000
     });
-    expect(JSON.parse(provider.execute.mock.calls[3]?.[0].input || "{}")).toMatchObject({
+    expect(JSON.parse(provider.execute.mock.calls[5]?.[0].input || "{}")).toMatchObject({
       protected_fiction_safe_base_authority: expect.objectContaining({
         worldCanon: expect.objectContaining({ trackers: [{ id: "doorway", name: "Silver doorway", value: "hidden" }] })
       }),
@@ -1081,11 +1122,13 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "generation_checkpoint_incompatible"
     }));
-    expect(repository.commitAcceptedTurn).toHaveBeenCalledTimes(2);
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledTimes(1);
   });
 
   it("repairs before-event coverage once, revalidates it, and commits the repaired main draft", async () => {
     const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    job.orchestration_inputs.suppressEventTriggers = false;
     job.orchestration_private.beforeEvents = [{
       id: "before-event", sourceTriggerId: "before-trigger", name: "Bell", timing: "before",
       condition: "", effect: "", instructions: "A bell rings in the hall.", reason: "", sourceTurn: 3,
@@ -1094,6 +1137,7 @@ describe("generation executor adapter", () => {
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => { job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint }; return true; }),
       savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
       markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
       commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true)
@@ -1104,19 +1148,29 @@ describe("generation executor adapter", () => {
       execute: vi.fn()
         .mockResolvedValueOnce({ content: output("The hall is quiet."), responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: false, missing_required_beats: ["before-event"], contradictions: [] }] }), responseId: "miss", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: true, missing_required_beats: [], contradictions: [] }] }), responseId: "retry-check", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: output("The hall is quiet.\n\nA bell rings in the hall."), responseId: "repair", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: true, missing_required_beats: [], contradictions: [] }] }), responseId: "verified", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }) };
     const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
 
-    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "before-repair", leaseSeconds: 30, claim })).resolves.toBe(true);
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+    await expect(executor.execute({ workerId: "before-repair", leaseSeconds: 30, claim })).resolves.toBe(true);
+    expect(provider.execute).toHaveBeenCalledTimes(2);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    const pendingEventGate = job.orchestration_private.generationReview as GenerationReviewCheckpoint;
+    expect(pendingEventGate).toMatchObject({ state: "pending", stage: "event_coverage", candidateScope: "main" });
+    authorizeReviewRetry(job, pendingEventGate);
+    await expect(executor.execute({ workerId: "before-repair-retry", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
     expect(repository.markRecoverable).not.toHaveBeenCalled();
-    expect(provider.execute).toHaveBeenCalledTimes(4);
+    expect(provider.execute).toHaveBeenCalledTimes(5);
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ story: expect.objectContaining({ narration: expect.stringContaining("bell rings") }) }));
 
   });
 
   it("stops after a rewritten before-event draft still fails coverage", async () => {
     const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    job.orchestration_inputs.suppressEventTriggers = false;
     job.orchestration_private.beforeEvents = [{
       id: "before-event", sourceTriggerId: "before-trigger", name: "Bell", timing: "before",
       condition: "", effect: "", instructions: "A bell rings in the hall.", reason: "", sourceTurn: 3,
@@ -1125,6 +1179,7 @@ describe("generation executor adapter", () => {
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => { job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint }; return true; }),
       savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
       markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
       commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true)
@@ -1135,22 +1190,28 @@ describe("generation executor adapter", () => {
       execute: vi.fn()
         .mockResolvedValueOnce({ content: output("The hall is quiet."), responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: false, missing_required_beats: ["before-event"], contradictions: [] }] }), responseId: "miss", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
+        .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: true, missing_required_beats: [], contradictions: [] }] }), responseId: "retry-check", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: output("The hall remains quiet."), responseId: "repair", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} })
         .mockResolvedValueOnce({ content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: false, missing_required_beats: ["before-event"], contradictions: [] }] }), responseId: "still-missing", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }) };
     const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
 
-    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "before-repair-exhausted", leaseSeconds: 30, claim })).resolves.toBe(true);
-
-    expect(provider.execute).toHaveBeenCalledTimes(4);
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+    await expect(executor.execute({ workerId: "before-repair-exhausted", leaseSeconds: 30, claim })).resolves.toBe(true);
+    expect(provider.execute).toHaveBeenCalledTimes(2);
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
-    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
-      errorCode: "event_coverage_failed",
-      recoveryMetadata: expect.objectContaining({ stage: "event_coverage", repairAttempted: true })
-    }));
+    authorizeReviewRetry(job, job.orchestration_private.generationReview as GenerationReviewCheckpoint);
+    await expect(executor.execute({ workerId: "before-repair-exhausted-retry", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
+
+    expect(provider.execute).toHaveBeenCalledTimes(5);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).not.toHaveBeenCalled();
+    expect(job.orchestration_private.generationReview).toMatchObject({ state: "pending", stage: "event_coverage", eligibility: { retryAvailable: false } });
   });
 
   it("uses replacement output budgeting for a feasible near-limit before-event rewrite", async () => {
     const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    job.orchestration_inputs.suppressEventTriggers = false;
     job.orchestration_private.beforeEvents = [{
       id: "before-event", sourceTriggerId: "before-trigger", name: "Bell", timing: "before",
       condition: "", effect: "", instructions: "A bell rings in the hall.", reason: "", sourceTurn: 3,
@@ -1159,6 +1220,7 @@ describe("generation executor adapter", () => {
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => { job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint }; return true; }),
       savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
       markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
       commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true)
@@ -1174,9 +1236,13 @@ describe("generation executor adapter", () => {
       }) };
     const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
 
-    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators }).execute({ workerId: "near-limit-before-repair", leaseSeconds: 30, claim })).resolves.toBe(true);
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+    await expect(executor.execute({ workerId: "near-limit-before-repair", leaseSeconds: 30, claim })).resolves.toBe(true);
+    expect(provider.execute).toHaveBeenCalledTimes(2);
+    authorizeReviewRetry(job, job.orchestration_private.generationReview as GenerationReviewCheckpoint);
+    await expect(executor.execute({ workerId: "near-limit-before-repair-retry", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
 
-    expect(provider.execute.mock.calls[2]?.[0].budgetOutput).toEqual({ kind: "story_replace" });
+    expect(provider.execute.mock.calls[3]?.[0].budgetOutput).toEqual({ kind: "story_replace" });
     expect(repository.markRecoverable).not.toHaveBeenCalled();
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ story: expect.objectContaining({ narration: "A bell rings in the hall." }) }));
   });

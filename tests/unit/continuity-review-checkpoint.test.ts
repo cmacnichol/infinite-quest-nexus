@@ -29,7 +29,7 @@ describe("durable continuity review checkpoint", () => {
       resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     };
     const reasons = ["narrative_conflict"] as const;
-    const checkpoint = { version: 1 as const, reviewId: "66666666-6666-4666-8666-666666666666", revision: 1, state: "decided" as const, stage: "continuity" as const, candidateScope: "final" as const, reasons,
+    const checkpoint = { version: 1 as const, reviewId: "66666666-6666-4666-8666-666666666666", revision: 2, state: "decided" as const, stage: "continuity" as const, candidateScope: "final" as const, reasons,
       operationKind: "append" as const, replacementTurnId: null, eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate, originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null,
       decisionJournal: [{ reviewId: "66666666-6666-4666-8666-666666666666", revision: 1, actorUserId: candidate.ownerUserId, decision: "keep" as const, decidedAt: "2026-09-16T00:00:00.000Z", candidateScope: "final" as const, candidateHash: candidate.storyHash, findingsHash: generationReviewFindingsHash(reasons), nextStage: null, offeredCandidate: candidate, offeredReasons: reasons, actionReceipt: { jobId: "77777777-7777-4777-8777-777777777777", status: "queued" as const, operationKind: "append" as const, replacementTurnId: null } }]
