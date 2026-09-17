@@ -54,7 +54,7 @@ integration("PostgreSQL generation review persistence", () => {
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation-review.story", story: fixture }));
   }
 
-  async function pendingReview({ pause = true }: { pause?: boolean } = {}) {
+  async function pendingReview({ pause = true, eligible = false }: { pause?: boolean; eligible?: boolean } = {}) {
     const imported = await campaign();
     const queued = await commands().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
       action: "Inspect the review observatory.", providerProfileId, idempotencyKey: crypto.randomUUID(),
@@ -75,7 +75,7 @@ integration("PostgreSQL generation review persistence", () => {
       custom_action_suggestion: "Examine the moonlit archive.", scratchpad: "", tracker_updates: [], image_prompt: "A moonlit observatory archive.",
       continuity_summary: "The observatory archive has opened.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
     });
-    const reasons: ["invalid_structure"] = ["invalid_structure"];
+    const reasons: GenerationReviewCheckpoint["reasons"] = eligible ? ["review_uncertain"] : ["invalid_structure"];
     const candidate = {
       scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
       producingRequestHash: "a".repeat(64), producingResponseId: null, sentFactIds: [], ownerUserId, campaignId: imported.campaignId,
@@ -86,9 +86,9 @@ integration("PostgreSQL generation review persistence", () => {
       resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     };
     const checkpoint = {
-      version: 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: "structure" as const,
+      version: 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: eligible ? "continuity" as const : "structure" as const,
       candidateScope: "main" as const, reasons, operationKind: "append" as const, replacementTurnId: null,
-      eligibility: { complete: true, structurallyValid: false, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+      eligibility: { complete: true, structurallyValid: eligible, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
       originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: []
     } satisfies GenerationReviewCheckpoint;
@@ -137,6 +137,29 @@ integration("PostgreSQL generation review persistence", () => {
     )).resolves.toMatchObject({ rows: [{ journalSize: 1 }] });
   });
 
+  it("serializes competing eligible Keep and Retry decisions with one durable winner", async () => {
+    const fixture = await pendingReview({ eligible: true });
+    const repository = commands(); const scope = { ownerUserId, jobId: fixture.queued.id };
+    const keep = { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" as const };
+    const retry = { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" as const };
+    const results = await Promise.allSettled([repository.decideReview(scope, keep), repository.decideReview(scope, retry)]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
+    const winnerRequest = winnerIndex === 0 ? keep : retry;
+    const losingRequest = winnerIndex === 0 ? retry : keep;
+    const winner = results[winnerIndex] as PromiseFulfilledResult<Awaited<ReturnType<typeof repository.decideReview>>>;
+    const loser = results[1 - winnerIndex] as PromiseRejectedResult;
+    expect(loser.reason).toMatchObject({ kind: "conflict" });
+    await expect(repository.decideReview(scope, winnerRequest)).resolves.toEqual(winner.value);
+    await expect(repository.decideReview(scope, losingRequest)).rejects.toMatchObject({ kind: "conflict" });
+    await expect(pool.query<{ status: string; journalSize: number; acceptedTurns: number }>(
+      `SELECT j.status, jsonb_array_length(j.orchestration_private->'generationReview'->'decisionJournal')::int AS "journalSize",
+              (SELECT count(*)::int FROM turns WHERE campaign_id=j.campaign_id AND accepted_at IS NOT NULL) AS "acceptedTurns"
+         FROM generation_jobs j WHERE j.id=$1`, [fixture.queued.id]
+    )).resolves.toMatchObject({ rows: [{ status: "queued", journalSize: 1, acceptedTurns: 2 }] });
+  });
+
   it("rejects owner, campaign, base, and protocol checkpoint mismatches without changing the leased job", async () => {
     const fixture = await pendingReview();
     await pool.query("UPDATE generation_jobs SET status='assessing',lease_owner=$2,lease_expires_at=now()+interval '30 seconds' WHERE id=$1", [fixture.queued.id, fixture.scope.workerId]);
@@ -182,11 +205,46 @@ integration("PostgreSQL generation review persistence", () => {
     await expect(pool.query<{ status: string; lease_owner: string | null }>("SELECT status,lease_owner FROM generation_jobs WHERE id=$1", [heartbeat.queued.id]))
       .resolves.toMatchObject({ rows: [{ status: "recoverable", lease_owner: null }] });
     const cancellation = await pendingReview(); const repository = commands(); const scope = { ownerUserId, jobId: cancellation.queued.id };
-    await expect(Promise.allSettled([cancellation.execution.renewLease(cancellation.scope, 30), repository.cancel(scope), repository.decideReview(scope, { reviewId: cancellation.checkpoint.reviewId, revision: 1, decision: "retry" })])).resolves.toHaveLength(3);
+    const cancelRetry = { reviewId: cancellation.checkpoint.reviewId, revision: 1, decision: "retry" as const };
+    const cancellationResults = await Promise.allSettled([cancellation.execution.renewLease(cancellation.scope, 30), repository.cancel(scope), repository.decideReview(scope, cancelRetry)]);
+    expect(cancellationResults).toHaveLength(3);
     await expect(repository.getReview(scope)).resolves.toMatchObject({ canKeep: false, canRetry: false });
+    const cancellationRow = await pool.query<{ status: string; lease_owner: string | null; journalSize: number; acceptedTurns: number }>(
+      `SELECT j.status, j.lease_owner, jsonb_array_length(j.orchestration_private->'generationReview'->'decisionJournal')::int AS "journalSize",
+              (SELECT count(*)::int FROM turns WHERE campaign_id=j.campaign_id AND accepted_at IS NOT NULL) AS "acceptedTurns"
+         FROM generation_jobs j WHERE j.id=$1`, [cancellation.queued.id]
+    );
+    expect(cancellationRow.rows).toMatchObject([{ status: "cancelled", lease_owner: null, acceptedTurns: 2 }]);
+    const cancelledDecision = cancellationResults[2]!;
+    if (cancelledDecision.status === "fulfilled") {
+      expect(cancellationRow.rows[0]!.journalSize).toBe(1);
+      await expect(repository.decideReview(scope, cancelRetry)).resolves.toEqual(cancelledDecision.value);
+    } else {
+      expect(cancelledDecision.reason).toMatchObject({ kind: "conflict" });
+      expect(cancellationRow.rows[0]!.journalSize).toBe(0);
+      await expect(repository.decideReview(scope, cancelRetry)).rejects.toMatchObject({ kind: "conflict" });
+    }
+    await expect(repository.decideReview(scope, { ...cancelRetry, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });
     const discard = await pendingReview(); const discardScope = { ownerUserId, jobId: discard.queued.id };
-    await expect(Promise.allSettled([repository.discard(discardScope), repository.decideReview(discardScope, { reviewId: discard.checkpoint.reviewId, revision: 1, decision: "retry" })])).resolves.toHaveLength(2);
-    await expect(pool.query<{ status: string; lease_owner: string | null }>("SELECT status,lease_owner FROM generation_jobs WHERE id=$1", [discard.queued.id]))
-      .resolves.toMatchObject({ rows: [expect.objectContaining({ lease_owner: null })] });
+    const discardRetry = { reviewId: discard.checkpoint.reviewId, revision: 1, decision: "retry" as const };
+    const discardResults = await Promise.allSettled([repository.discard(discardScope), repository.decideReview(discardScope, discardRetry)]);
+    const discardRow = await pool.query<{ status: string; lease_owner: string | null; journalSize: number; acceptedTurns: number }>(
+      `SELECT j.status, j.lease_owner, jsonb_array_length(j.orchestration_private->'generationReview'->'decisionJournal')::int AS "journalSize",
+              (SELECT count(*)::int FROM turns WHERE campaign_id=j.campaign_id AND accepted_at IS NOT NULL) AS "acceptedTurns"
+         FROM generation_jobs j WHERE j.id=$1`, [discard.queued.id]
+    );
+    expect(discardRow.rows[0]).toMatchObject({ lease_owner: null, acceptedTurns: 2 });
+    const discardDecision = discardResults[1]!;
+    if (discardDecision.status === "fulfilled") {
+      expect(discardResults[0]).toMatchObject({ status: "rejected" });
+      expect(discardRow.rows[0]).toMatchObject({ status: "queued", journalSize: 1 });
+      await expect(repository.decideReview(discardScope, discardRetry)).resolves.toEqual(discardDecision.value);
+    } else {
+      expect(discardDecision.reason).toMatchObject({ kind: "conflict" });
+      expect(discardResults[0]).toMatchObject({ status: "fulfilled" });
+      expect(discardRow.rows[0]).toMatchObject({ status: "discarded", journalSize: 0 });
+      await expect(repository.decideReview(discardScope, discardRetry)).rejects.toMatchObject({ kind: "conflict" });
+    }
+    await expect(repository.decideReview(discardScope, { ...discardRetry, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });
   });
 });
