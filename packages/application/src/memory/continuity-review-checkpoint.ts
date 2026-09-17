@@ -55,7 +55,9 @@ export function assertGenerationReviewAcceptance(value: unknown, expected: Gener
     || candidate.protocol.promptHash !== expected.protocol.promptHash
     || canonicalEvidenceJson(candidate.baseIdentity) !== canonicalEvidenceJson(expected.baseIdentity)) unavailable();
   const receipt = current.decisionJournal.find((entry) => entry.reviewId === current.reviewId
-    && entry.revision === current.revision && entry.decision === "keep");
+    // `decideReview` advances the checkpoint revision after recording the
+    // decision at the revision the user was shown.
+    && entry.revision === current.revision - 1 && entry.decision === "keep");
   if (!receipt || receipt.actorUserId !== expected.actorUserId || receipt.candidateScope !== expected.candidateScope
     || receipt.candidateHash !== expected.candidateHash || receipt.findingsHash !== expected.findingsHash
     || receipt.findingsHash !== sha256Hex(canonicalEvidenceJson(current.reasons))

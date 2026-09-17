@@ -699,7 +699,7 @@ async function commitAcceptedTurn(
         && review.data.candidateScope === "final" && review.data.stage === "continuity";
       const hasFinalContinuityReview = isFinalContinuityCheckpoint
         && review.data.decisionJournal.some((entry) => entry.reviewId === review.data.reviewId
-          && entry.revision === review.data.revision && entry.decision === "keep");
+          && entry.revision === review.data.revision - 1 && entry.decision === "keep");
       if (hasFinalContinuityReview) {
         if (mechanicsLeakFields(story).length) {
           throw Object.assign(new Error("A kept generation candidate contains mechanics language."), { code: "mechanics_leak" });

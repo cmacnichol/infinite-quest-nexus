@@ -54,6 +54,7 @@ integration("T17 durable continuity review", () => {
   let ownerUserId = "";
   let providerId = "";
   let reviewVerdict: "pass" | "uncertain" | "conflict" = "pass";
+  let reviewUnavailable = false;
   let reviewSequence: Array<"pass" | "uncertain" | "conflict"> = [];
   const requests: string[] = [];
   let needsChoiceRepair = false;
@@ -85,6 +86,7 @@ integration("T17 durable continuity review", () => {
       if (needsChoiceRepair) story.choices = ["Wait.", "Wait.", "Listen.", "Leave."];
       return JSON.stringify(story);
     }
+    if (reviewUnavailable) return "not a continuity review result";
     const input = userInput as { draft: { narration: string }; evidence: Array<{ id: string; content: string }> };
     const start = extensionConflict ? input.draft.narration.indexOf("The bell rings") : 0;
     const quote = input.draft.narration.slice(start, start + 4);
@@ -185,6 +187,61 @@ integration("T17 durable continuity review", () => {
     expect(requests).toHaveLength(2);
     expect(requests[0]).toContain(worldLore);
     expect(requests[0]).toContain(relationshipLore);
+  });
+
+  it.each([
+    { label: "conflict", unavailable: false, verdict: "conflict" as const },
+    { label: "unavailable", unavailable: true, verdict: "pass" as const }
+  ])("commits the exact final Keep offline after a $label review", async ({ unavailable, verdict }) => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    reviewVerdict = verdict; reviewUnavailable = unavailable; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `offline-final-keep-initial-${randomUUID()}`, 30, credentialSecret);
+      const pending = await application.getJob({ ownerUserId, jobId: job.id });
+      expect(pending).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      const beforeAccepted = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      );
+      const savedBefore = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { story: { narration: string }; storyHash: string }; state: string } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedBefore.generationReview).toMatchObject({ state: "pending" });
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(0);
+
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: review.reviewId, revision: review.revision, decision: "keep"
+      });
+      const requestsBeforeOfflineKeep = requests.length;
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const loadTextExecution = vi.fn(async () => { throw new Error("text provider must remain offline for final Keep"); });
+      const collaborators = {
+        ...createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation),
+        loadTextExecution
+      };
+      const workerId = `offline-final-keep-resume-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+
+      expect(loadTextExecution).not.toHaveBeenCalled();
+      expect(requests).toHaveLength(requestsBeforeOfflineKeep);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      const acceptedAfter = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      );
+      expect(acceptedAfter.rows).toEqual([{ count: beforeAccepted.rows[0]!.count + 1 }]);
+      const keptTurn = await pool.query<{ narration: string }>(
+        `SELECT narration FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL
+          ORDER BY turn_number DESC LIMIT 1`, [campaignId]
+      );
+      expect(keptTurn.rows).toEqual([{ narration: savedBefore.generationReview.gateCandidate.story.narration }]);
+      const savedAfter = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedAfter.generationReview.gateCandidate.storyHash).toBe(savedBefore.generationReview.gateCandidate.storyHash);
+    } finally { reviewUnavailable = false; reviewVerdict = "pass"; }
   });
 
   it("reserves one semantic repair, replaces the main, and reviews the repaired request before commit", async () => {

@@ -1053,7 +1053,7 @@ async function executeLoadedGeneration(
     const keepReceipt = savedReview.success && savedReview.data.state === "decided"
       && savedReview.data.stage === "continuity" && savedReview.data.candidateScope === "final"
       ? savedReview.data.decisionJournal.find((entry) => entry.reviewId === savedReview.data.reviewId
-          && entry.revision === savedReview.data.revision && entry.decision === "keep")
+          && entry.revision === savedReview.data.revision - 1 && entry.decision === "keep")
       : undefined;
     if (keepReceipt && savedReview.success) {
       const candidate = savedReview.data.gateCandidate;
@@ -1083,6 +1083,7 @@ async function executeLoadedGeneration(
         throw Object.assign(new Error("The final Keep receipt has incompatible frozen execution inputs."), { code: "generation_checkpoint_incompatible" });
       }
       const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(generation.chronicleRetrieval);
+      assertActiveGenerationUpdate(await repository.markGenerating(scope), "resuming final Keep generation state");
       assertActiveGenerationUpdate(await repository.markValidating(scope), "resuming final Keep validation");
       assertActiveGenerationUpdate(await repository.markCommitting(scope), "resuming final Keep commit");
       const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
@@ -2656,7 +2657,7 @@ async function executeLoadedGeneration(
       const continuityRetryReceipt = savedReview.success && savedReview.data.state === "decided"
         && savedReview.data.stage === "continuity" && savedReview.data.candidateScope === "final"
         ? savedReview.data.decisionJournal.find((entry) => entry.decision === "retry"
-            && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision
+            && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
             && entry.candidateHash === sha256(canonicalEvidenceJson(committedStory)))
         : undefined;
       // An unavailable or uncertain review retry authorizes one new reviewer
