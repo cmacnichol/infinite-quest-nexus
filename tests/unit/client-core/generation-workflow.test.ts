@@ -210,7 +210,7 @@ describe("generation workflow", () => {
             errorCode: "generation_failed",
             errorMessage: "Generation could not be completed."
           }
-        } as CampaignSyncStatus)
+        } as unknown as CampaignSyncStatus)
       }),
       source,
       clock: { now: () => 1_000 },

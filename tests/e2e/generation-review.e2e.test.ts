@@ -12,6 +12,12 @@ const webNextOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?
 const reviewId = "66666666-6666-4666-8666-666666666666";
 const reofferedReviewId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const jobId = "55555555-5555-4555-8555-555555555555";
+const unexpectedFixtureRoutes: string[] = [];
+
+test.afterEach(() => {
+  expect(unexpectedFixtureRoutes).toEqual([]);
+  unexpectedFixtureRoutes.splice(0);
+});
 
 interface ReviewFixtureOptions {
   readonly liveStream?: boolean;
@@ -170,10 +176,24 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
       return respond(acceptedResult);
     }
     if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}`) return respond(sharedState.accepted ? completedSnapshot : snapshot);
-    console.log(`Unexpected review fixture request: ${request.method()} ${path}`);
+    unexpectedFixtureRoutes.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Missing review fixture route." }) });
   });
   return { fixture, decisions, writePaths, consoleErrors, get reviewDetailRequests() { return reviewDetailRequests; }, get settledReviewDetailRequests() { return settledReviewDetailRequests; }, get resultRequests() { return resultRequests; }, generatingSnapshot, snapshot, queuedSnapshot, completedSnapshot, reofferedSnapshot, reofferedQueuedSnapshot, reofferedCompletedSnapshot };
+}
+
+async function streamedNarration(page: Page, surface: "legacy" | "web-next"): Promise<string> {
+  const locator = page.locator(surface === "legacy"
+    ? "#streamingPreviewCard .streaming-narration"
+    : "[data-story-generation-preview] .story-narration");
+  return (await locator.textContent())?.trim() ?? "";
+}
+
+async function acceptedNarration(page: Page, surface: "legacy" | "web-next", turnNumber: number): Promise<string> {
+  const locator = page.locator(surface === "legacy"
+    ? `#scene-${turnNumber} .scene-narration .narration`
+    : "[data-story-reader] .story-narration").last();
+  return (await locator.textContent())?.trim() ?? "";
 }
 
 async function installStagedReviewStream(page: Page, snapshots: { readonly generatingSnapshot: unknown; readonly snapshot: unknown; readonly queuedSnapshot: unknown; readonly completedSnapshot: unknown; readonly reofferedSnapshot: unknown; readonly reofferedQueuedSnapshot: unknown; readonly reofferedCompletedSnapshot: unknown }) {
@@ -237,8 +257,14 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeVisible();
     await expect(recovery.getByRole("button", { name: "Continue with retry", exact: true })).toBeVisible();
     await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
-    const continuation = page.locator(surface === "legacy" ? "#btnTakeAction" : "[data-action='continue-story']");
-    const acceptedChoice = page.locator(surface === "legacy" ? "#choiceArea .choice" : "[data-story-choice]").first();
+    const webAwesome = surface === "web-next"
+      && await page.locator(".app-shell").getAttribute("data-ui-implementation") === "web-awesome";
+    const continuation = surface === "legacy"
+      ? page.locator("#btnTakeAction")
+      : webAwesome ? page.getByRole("button", { name: "Continue Story", exact: true }) : page.locator("[data-action='continue-story']");
+    const acceptedChoice = surface === "legacy"
+      ? page.locator("#choiceArea .choice").first()
+      : webAwesome ? page.getByRole("button", { name: "Cross the threshold", exact: true }).first() : page.locator("[data-story-choice]").first();
     await expect(continuation).toBeDisabled();
     await expect(acceptedChoice).toBeDisabled();
     const keep = recovery.getByRole("button", { name: "Keep this turn", exact: true });
@@ -325,6 +351,8 @@ for (const surface of ["legacy", "web-next"] as const) {
     await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`);
     const preview = page.locator(surface === "legacy" ? "#streamingPreviewCard" : "[data-story-generation-preview]");
     await expect(preview).toContainText("The lighthouse bell answered across the harbor.");
+    const previewNarration = await streamedNarration(page, surface);
+    expect(previewNarration).toBe("The lighthouse bell answered across the harbor.");
     await page.evaluate(() => (window as Window & { __generationReviewFixtureAdvance?: () => void }).__generationReviewFixtureAdvance?.());
     await expect.poll(() => page.evaluate(() => (window as Window & { __generationReviewFixtureLastSnapshot?: { review?: { reviewId?: string } } }).__generationReviewFixtureLastSnapshot?.review?.reviewId)).toBe(reviewId);
     await expect.poll(() => api.reviewDetailRequests).toBeGreaterThan(0);
@@ -341,6 +369,7 @@ for (const surface of ["legacy", "web-next"] as const) {
     expect(api.resultRequests).toBe(1);
     await reloadResult.click();
     await expect(page.locator("body")).toContainText("The lighthouse bell answered across the harbor.");
+    expect(await acceptedNarration(page, surface, 2)).toBe(previewNarration);
     await expect(recovery).toBeHidden();
     expect(api.resultRequests).toBe(2);
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
@@ -520,3 +549,19 @@ for (const surface of ["legacy", "web-next"] as const) {
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
   });
 }
+
+test("web-next web-awesome renders fenced pending-review Keep and Retry controls", async ({ page }) => {
+  test.skip(process.env.TASK7_EXPECT_WEB_AWESOME !== "true", "This bounded assertion runs against the explicit web-awesome Vite server.");
+  const api = await installReviewApi(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${webNextOrigin}/app/story/${api.fixture.campaignId}`);
+  await expect(page.locator(".app-shell")).toHaveAttribute("data-ui-implementation", "web-awesome");
+  const recovery = page.locator("[data-story-recovery]");
+  await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeVisible();
+  const retry = recovery.getByRole("button", { name: "Continue with retry", exact: true });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue Story", exact: true })).toBeDisabled();
+  await retry.click();
+  await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
+  expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+});

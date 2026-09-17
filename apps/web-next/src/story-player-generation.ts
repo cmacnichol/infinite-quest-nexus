@@ -8,7 +8,7 @@ import {
   type IdFactory,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
-import type { GenerationResult, StoryLengthProfile, TurnInputModeSource } from "@infinite-quest/contracts";
+import { generationReviewSummarySchema, type GenerationResult, type StoryLengthProfile, type TurnInputModeSource } from "@infinite-quest/contracts";
 
 const GENERATION_CONTEXT = { budgetTokens: 32_000, compression: "auto" as const, recentTurns: 8 };
 
@@ -101,8 +101,9 @@ export function createStoryGenerationController(
         for await (const event of events) {
           if (!isCurrent(entry)) return;
           entry.session.apply(event);
-          if (event.type === "status" && event.snapshot.review?.state === "pending") {
-            const review = event.snapshot.review;
+          const reviewResult = event.type === "status" ? generationReviewSummarySchema.safeParse(event.snapshot.review) : null;
+          if (reviewResult?.success && reviewResult.data.state === "pending") {
+            const review = reviewResult.data;
             const identity = `${review.version}:${review.reviewId}:${review.revision}`;
             if (identity !== loadedReviewIdentity) {
               loadedReviewIdentity = identity;
