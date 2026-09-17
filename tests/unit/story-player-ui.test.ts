@@ -984,12 +984,13 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).not.toContain('.turn-streaming-preview {\n  display: flex;');
   });
 
-  it("hides prior turn controls during generation and restores them only after resolution", () => {
+  it("hides ordinary turn input during generation while retaining a saved review's controls", () => {
     expect(storyScript).toContain("function beginGenerationDisplay(action)");
     expect(storyScript).toContain("function restoreGenerationDisplay()");
     expect(storyScript).toContain("function commitGenerationDisplay(removeStreamingPreview = true)");
     expect(storyScript).toContain("function renderTurnInput()");
-    expect(storyScript).toContain('const shouldShowInput = !state.generationDisplayActive && isLatest;');
+    expect(storyScript).toContain('const recoveryVisible = Boolean($("generationRecoveryPanel") && !$("generationRecoveryPanel").classList.contains("hidden"));');
+    expect(storyScript).toContain('const shouldShowInput = (!state.generationDisplayActive || recoveryVisible) && isLatest;');
     expect(storyScript).toContain('inputPanel.classList.toggle("hidden", !shouldShowInput);');
     expect(storyScript).toContain("container.replaceChildren();");
     expect(storyScript).toContain("beginGenerationDisplay(action);");
@@ -2624,7 +2625,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="btnOpenEditState" type="button"');
     expect(storyHtml).not.toContain('nav-menu-item-flush');
     expect(navigationCss).toContain('.nav-profile-button {');
-    expect(storyScript).toContain('const generationLocked = state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration);');
+    expect(storyScript).toContain('const generationLocked = state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration) || Boolean(state.generationReview?.summary);');
     expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
     expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
     expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');

@@ -22,6 +22,18 @@ The pending turn retains its frozen Action or Story Direction policy, including
 the saved prompt identity. Recovery, retry, reclaim, and replacement do not
 reclassify or convert it.
 
+## Review a saved candidate
+
+Some complete candidates pause because continuity evidence conflicts or is unavailable, or because a requested scene is not fully covered. The player shows the saved fiction and the available actions. For a final continuity decision, **Keep this turn** accepts only that exact eligible candidate and makes no text-provider request. For a main scene-coverage decision, Keep preserves that exact main fiction as the prefix, then normal final assembly and any later required gate continue. **Continue with retry** authorizes one bounded repair. If that repair fails, the original eligible candidate is shown again with Keep still available. A refresh, reconnect, or worker restart preserves the pending decision.
+
+Keep is unavailable for incomplete output, invalid structure or choices, mechanics leakage, invalid authority or fact references, required event coverage, and replacement-target failures. Those cases require their specific recovery action and never turn an incomplete preview into an accepted turn.
+
+## Operator rollout and rollback
+
+For a rollout, stop intake and old workers, let active jobs finish or resolve their pending reviews with compatible code, then deploy the compatible API, worker, and both player surfaces before resuming intake. Older recoverable jobs with no review checkpoint retain their existing recovery behavior; operators must not fabricate a keepable candidate from a partial preview.
+
+For rollback, stop intake and workers first, resolve pending or queued review jobs with compatible code, and only then return old workers to service. Keep accepted turns and private audit records in place. This change has no destructive down migration; deployment remains an operator action.
+
 ## Terminal failure
 
 If the job reaches a failed state:

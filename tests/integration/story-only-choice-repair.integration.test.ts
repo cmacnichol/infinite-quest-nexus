@@ -309,8 +309,8 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
       expect(saved.rows).toMatchObject([{
         status: "recoverable", errorCode: "generation_review_required", resultTurnId: null,
         orchestration: { generationReview: {
-          state: "pending", stage: "structure", candidateScope: "main",
-          eligibility: { retryAvailable: false }, retryFailure: expect.any(String)
+          state: "pending", stage: "choices", candidateScope: "main",
+          eligibility: { retryAvailable: true }, retryFailure: null
         } }
       }]);
       expect(await campaignCounts(imported.campaignId)).toEqual(before);
@@ -462,7 +462,7 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     await execute(first.id, "choice-repair-limited-main", [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]), outputLimited: true }], [], []);
     await expect(pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [first.id]))
       .resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_review_required", result_turn_id: null }] });
-    await authorizeReviewRetry(first.id, "structure");
+    await authorizeReviewRetry(first.id, "choices");
     await execute(first.id, "choice-repair-limited-main-retry", [{ content: output(["Enter.", "Listen.", "Wait.", "Speak."]) }], [], []);
     const second = await enqueue(imported.campaignId);
     await execute(second.id, "choice-repair-limited-repair", [{ content: output(["Enter.", "Enter.", "Wait.", "Speak."]) }], [], []);

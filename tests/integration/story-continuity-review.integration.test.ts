@@ -10,8 +10,8 @@ import { createServer, type Server } from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
@@ -19,6 +19,8 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
 import type { GenerationEvidenceManifest } from "../../packages/application/src/memory/generation-context.js";
+import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
+import { sha256Hex } from "../../packages/contracts/src/hash.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
@@ -45,7 +47,7 @@ type CorpusScenario = Readonly<{
 type CapturedDispatch = Readonly<{ body: string; jobId: string; manifest: GenerationEvidenceManifest }>;
 
 function reply(narration: string): string {
-  return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Continue.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+  return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
 integration("T17 durable continuity review", () => {
@@ -109,7 +111,7 @@ integration("T17 durable continuity review", () => {
     const basis = input.evidence.find((entry) => entry.content.length > 0);
     if (!basis) throw new Error("Review fixture requires selected evidence.");
     const verdict = reviewSequence.shift() ?? reviewVerdict;
-    return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "Fixture reviewer reports a grounded conflict." }] : [] });
+    return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "PRIVATE_REVIEW_CANARY: fixture reviewer reports a grounded conflict." }] : [] });
   }
 
   beforeAll(async () => {
@@ -129,8 +131,20 @@ integration("T17 durable continuity review", () => {
           response.end(JSON.stringify({ error: { message: "response_format is not supported" } }));
           return;
         }
+        const content = reviewResponse(body);
+        const providerRequest = JSON.parse(body) as { stream?: boolean };
+        if (providerRequest.stream === true) {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          const midpoint = Math.max(1, Math.floor(content.length / 2));
+          for (const chunk of [content.slice(0, midpoint), content.slice(midpoint)]) {
+            response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`);
+          }
+          response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } })}\n\n`);
+          response.end("data: [DONE]\n\n");
+          return;
+        }
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ message: { content: reviewResponse(body) }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110, cost: 0.001 } }));
+        response.end(JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110, cost: 0.001 } }));
       });
     });
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -141,6 +155,23 @@ integration("T17 durable continuity review", () => {
   });
 
   afterAll(async () => { await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done())); await (server as Server & { transport?: { close(): Promise<void> } }).transport?.close(); await pool.end(); });
+
+  afterEach(() => {
+    reviewVerdict = "pass";
+    reviewUnavailable = false;
+    reviewSequence = [];
+    requests.length = 0;
+    needsChoiceRepair = false;
+    invalidChoiceRepair = false;
+    invalidPrimary = false;
+    semanticRepairNeedsChoiceRepair = false;
+    extensionConflict = false;
+    invalidSemanticRepair = false;
+    eventCoverageSequence = [];
+    sceneCoverageSequence = [];
+    rejectSceneRewriteResponseFormat = false;
+    repairSupersedesFactId = null;
+  });
 
   async function enqueue(
     mode: "off" | "observe" | "enforce",
@@ -157,6 +188,21 @@ integration("T17 durable continuity review", () => {
     await prepareCampaign?.(imported.campaignId);
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+    return { job, application, campaignId: imported.campaignId };
+  }
+
+  async function enqueueReplacement(mode: "off" | "observe" | "enforce", scene: boolean) {
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Review replacement ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "review-replacement.story", story }));
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
+    const current = (await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id=$1", [imported.campaignId])).rows[0]!;
+    const job = await application.enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, generationRetryLatestRequestSchema.parse({
+      action: "Replace the observatory turn.", expectedCurrentTurnNumber: current.active_turn_number,
+      requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit",
+      providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 }
+    }));
     return { job, application, campaignId: imported.campaignId };
   }
 
@@ -302,6 +348,7 @@ integration("T17 durable continuity review", () => {
     { label: "conflict", unavailable: false, verdict: "conflict" as const },
     { label: "unavailable", unavailable: true, verdict: "pass" as const }
   ])("commits the exact final Keep offline after a $label review", async ({ unavailable, verdict }) => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
     const { job, application, campaignId } = await enqueue("enforce");
     reviewVerdict = verdict; reviewUnavailable = unavailable; requests.length = 0;
     try {
@@ -350,8 +397,163 @@ integration("T17 durable continuity review", () => {
         "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
       )).rows[0]!.orchestration_private;
       expect(savedAfter.generationReview.gateCandidate.storyHash).toBe(savedBefore.generationReview.gateCandidate.storyHash);
-    } finally { reviewUnavailable = false; reviewVerdict = "pass"; }
+      expect(requests.filter((request) => JSON.parse(request).stream === true)).toHaveLength(1);
+    } finally {
+      reviewUnavailable = false;
+      reviewVerdict = "pass";
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
   });
+
+  it.each([
+    { label: "append Action", operation: "append", scene: false, storyOnly: false },
+    { label: "append scene", operation: "append", scene: true, storyOnly: false },
+    { label: "replacement Action", operation: "replace_latest", scene: false, storyOnly: false },
+    { label: "replacement scene", operation: "replace_latest", scene: true, storyOnly: false },
+    { label: "Story-only scene", operation: "append", scene: true, storyOnly: true }
+  ] as const)("streams a complete primary candidate and commits the exact final Keep for $label", async ({ operation, scene, storyOnly }) => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      const fixture = operation === "append"
+        ? await enqueue("enforce", scene, undefined, "Wait at the observatory.", storyOnly)
+        : await enqueueReplacement("enforce", scene);
+      const { job, application, campaignId } = fixture;
+      reviewVerdict = "conflict";
+      requests.length = 0;
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+      await runGenerationJob(pool, `streamed-final-keep-${randomUUID()}`, 30, credentialSecret);
+
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", partialNarration: "Mira waits at the observatory."
+      });
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+      expect(review.narration).toBe("Mira waits at the observatory.");
+      expect(JSON.parse(requests[0]!).stream).toBe(true);
+      const savedBefore = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string; story: { narration: string; choices: string[]; custom_action_suggestion: string } } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedBefore.generationReview.gateCandidate.story.narration).toBe(review.narration);
+      expect(savedBefore.generationReview.gateCandidate.storyHash)
+        .toBe(sha256Hex(canonicalEvidenceJson(savedBefore.generationReview.gateCandidate.story)));
+      const primaryRequests = requests.filter((request) => {
+        const body = JSON.parse(request) as { stream?: boolean; messages?: Array<{ content?: string }> };
+        return body.stream === true && !body.messages?.some((message) => message.content?.includes("story-continuity-review-v1") || message.content?.includes("story-continuity-repair-v1"));
+      });
+      expect(primaryRequests).toHaveLength(1);
+      expect(requests.filter((request) => request.includes("story-continuity-repair-v1"))).toHaveLength(0);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+      const requestsBeforeKeep = requests.length;
+      await runGenerationJob(pool, `streamed-final-keep-commit-${randomUUID()}`, 30, credentialSecret);
+
+      expect(requests).toHaveLength(requestsBeforeKeep);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", operationKind: operation });
+      const savedAfter = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedAfter.generationReview.gateCandidate.storyHash).toBe(savedBefore.generationReview.gateCandidate.storyHash);
+      expect(primaryRequests).toHaveLength(1);
+      expect(requests.filter((request) => request.includes("story-continuity-repair-v1"))).toHaveLength(0);
+      await expect(pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).resolves.toMatchObject({ rows: [{ count: acceptedBefore + (operation === "append" ? 1 : 0) }] });
+      await expect(pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]
+      )).resolves.toMatchObject({ rows: [{ count: 1 }] });
+      const accepted = await application.getResult({ ownerUserId, jobId: job.id });
+      expect(accepted).toMatchObject({
+        narration: savedBefore.generationReview.gateCandidate.story.narration,
+        choices: savedBefore.generationReview.gateCandidate.story.choices,
+        customActionSuggestion: savedBefore.generationReview.gateCandidate.story.custom_action_suggestion
+      });
+    } finally {
+      reviewVerdict = "pass";
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  }, 60_000);
+
+  it("reclaims a streamed captured candidate and a persisted Keep decision without another text call", async () => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "conflict";
+    requests.length = 0;
+    try {
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+      let interrupted = false;
+      const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+        const updated = await repository.saveOrchestration(scope, value);
+        if (!interrupted && value.primaryResult) {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+          throw Object.assign(new Error("Injected restart after streamed primary capture."), { code: "generation_cancelled" });
+        }
+        return updated;
+      } };
+      const workerId = `streamed-capture-${randomUUID()}`;
+      const firstClaim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: firstClaim!, workerId, leaseSeconds: 30 });
+      expect(interrupted).toBe(true);
+      const primaryRequests = requests.filter((request) => JSON.parse(request).stream === true);
+      expect(primaryRequests).toHaveLength(1);
+      const callsAfterCapture = requests.length;
+
+      await runGenerationJob(pool, `streamed-capture-reclaim-${randomUUID()}`, 30, credentialSecret);
+      expect(requests).toHaveLength(callsAfterCapture + 1);
+      expect(requests.filter((request) => request.includes("story-continuity-review-v1"))).toHaveLength(1);
+      expect(requests.filter((request) => JSON.parse(request).stream === true)).toHaveLength(1);
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+      const imageFailure = vi.fn(async () => { throw new Error("Injected accepted-illustration enqueue failure."); });
+      collaborators.illustration.enqueueAcceptedTurnIllustrationSegments = imageFailure;
+      const decisionWorkerId = `streamed-decision-restart-${randomUUID()}`;
+      const decisionClaim = await repository.claimNext({ workerId: decisionWorkerId, leaseSeconds: 30 });
+      await createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: decisionClaim!, workerId: decisionWorkerId, leaseSeconds: 30 });
+
+      expect(requests).toHaveLength(callsAfterCapture + 1);
+      expect(imageFailure).toHaveBeenCalledTimes(1);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      expect(await application.getResult({ ownerUserId, jobId: job.id })).toMatchObject({ narration: review.narration });
+
+      const foreignStory = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+      foreignStory.world.title = `Foreign retrieval ${randomUUID()}`;
+      const foreign = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "foreign-retrieval.story", story: foreignStory }));
+      const foreignTurn = (await pool.query<{ id: string }>(
+        "INSERT INTO turns (owner_user_id,campaign_id,turn_number,narration,accepted_at) VALUES ($1,$2,3,$3,now()) RETURNING id",
+        [ownerUserId, foreign.campaignId, "FOREIGN_ACCEPTED_FICTION_CANARY"]
+      )).rows[0]!;
+      const foreignVersion = (await pool.query<{ world_version_id: string }>("SELECT world_version_id FROM campaigns WHERE id=$1", [foreign.campaignId])).rows[0]!;
+      await pool.query("UPDATE campaigns SET active_turn_number=3 WHERE id=$1", [foreign.campaignId]);
+      await pool.query(
+        "INSERT INTO chronicle_memories (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate) VALUES ($1,$2,$3,$4,'campaign_summary',3,$5,4)",
+        [ownerUserId, foreign.campaignId, foreignVersion.world_version_id, foreignTurn.id, "FOREIGN_ACCEPTED_FICTION_CANARY"]
+      );
+      reviewVerdict = "pass";
+      const next = await application.enqueueAppend({ ownerUserId, campaignId: (await pool.query<{ campaign_id: string }>("SELECT campaign_id FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.campaign_id }, generationRequestSchema.parse({
+        action: "Continue from the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+        providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+      }));
+      const beforeNextTurn = requests.length;
+      await runGenerationJob(pool, `streamed-next-turn-${randomUUID()}`, 30, credentialSecret);
+      const nextPrimary = requests.slice(beforeNextTurn).map((request) => JSON.parse(request) as { stream?: boolean; messages?: Array<{ content?: string }> })
+        .find((request) => request.stream === true && !request.messages?.some((message) => message.content?.includes("story-continuity-review-v1")));
+      expect(JSON.stringify(nextPrimary)).toContain(review.narration);
+      await expect(pool.query("SELECT content FROM chronicle_memories WHERE campaign_id=(SELECT campaign_id FROM generation_jobs WHERE id=$1) AND content LIKE '%PRIVATE_REVIEW_CANARY%'", [job.id]))
+        .resolves.toMatchObject({ rows: [] });
+      for (const canary of ["PRIVATE_REVIEW_CANARY", "FOREIGN_ACCEPTED_FICTION_CANARY"]) {
+        expect(JSON.stringify(nextPrimary)).not.toContain(canary);
+      }
+      expect(await application.getJob({ ownerUserId, jobId: next.id })).toMatchObject({ status: "completed" });
+    } finally {
+      reviewVerdict = "pass";
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  }, 60_000);
 
   it("re-runs an uncertain continuity reviewer before requiring a new conflict decision", async () => {
     const { job, application } = await enqueue("enforce");
@@ -373,6 +575,7 @@ integration("T17 durable continuity review", () => {
   });
 
   it("re-offers the original final candidate after a failed authorized continuity retry and keeps it offline", async () => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
     const { job, application, campaignId } = await enqueue("enforce");
     reviewVerdict = "pass"; reviewSequence = ["conflict"]; requests.length = 0;
     try {
@@ -421,7 +624,12 @@ integration("T17 durable continuity review", () => {
       expect((await pool.query<{ count: number }>(
         "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
       )).rows[0]!.count).toBe(acceptedBefore + 1);
-    } finally { invalidSemanticRepair = false; reviewSequence = []; }
+      expect(requests.filter((request) => JSON.parse(request).stream === true)).toHaveLength(1);
+    } finally {
+      invalidSemanticRepair = false;
+      reviewSequence = [];
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
   });
 
   it("keeps an uncovered scene main exactly, then pauses again for a later final continuity conflict", async () => {

@@ -148,7 +148,13 @@ integration("story context payload baseline shape", () => {
     return { campaignId: imported.campaignId, worldVersionId: campaign.rows[0]!.world_version_id };
   }
 
-  async function dispatch(campaignId: string, action: string, enrolled = false, inputMode: "action" | "scene" = "action"): Promise<CapturedRequest> {
+  async function dispatch(
+    campaignId: string,
+    action: string,
+    enrolled = false,
+    inputMode: "action" | "scene" = "action",
+    retryPendingReview = false
+  ): Promise<CapturedRequest> {
     const before = requests.length;
     const application = enrolled
       ? composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r1", enforceEnabled: false })
@@ -160,6 +166,16 @@ integration("story context payload baseline shape", () => {
       context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
     }));
     expect(await runGenerationJob(pool, `payload-baseline-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+    if (retryPendingReview) {
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ canRetry: true });
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: review.reviewId,
+        revision: review.revision,
+        decision: "retry"
+      });
+      expect(await runGenerationJob(pool, `payload-baseline-retry-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+    }
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
     const captured = requests.at(before);
     if (!captured) throw new Error("The real executor did not reach the fake provider boundary.");
@@ -423,7 +439,7 @@ integration("story context payload baseline shape", () => {
       const before = requests.length;
       replies.push(candidateReply({ choices: [] }), JSON.stringify({ choices: storyContinuityCandidateOutput.choices,
         custom_action_suggestion: storyContinuityCandidateOutput.customActionSuggestion }));
-      await dispatch(fixture.campaignId, "Set the relay scene.", true, "scene");
+      await dispatch(fixture.campaignId, "Set the relay scene.", true, "scene", true);
       const actual = requests.slice(before);
       expect(actual).toHaveLength(2);
       for (const request of actual) {

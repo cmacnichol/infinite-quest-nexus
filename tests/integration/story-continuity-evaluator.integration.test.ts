@@ -86,12 +86,22 @@ integration("T15 executor-backed continuity evidence", () => {
     return { campaignId: imported.campaignId, worldVersionId: result.rows[0]!.world_version_id };
   }
 
-  async function dispatch(campaignId: string, action: string): Promise<CapturedDispatch> {
+  async function dispatch(campaignId: string, action: string, retryPendingReview = false): Promise<CapturedDispatch> {
     const before = requests.length;
     const started = performance.now();
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const job = await application.enqueueAppend({ ownerUserId, campaignId }, generationRequestSchema.parse({ action, requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 } }));
     expect(await runGenerationJob(pool, `t15-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+    if (retryPendingReview) {
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ stage: "continuity", canRetry: true });
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: review.reviewId,
+        revision: review.revision,
+        decision: "retry"
+      });
+      expect(await runGenerationJob(pool, `t15-retry-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+    }
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
     const originalBody = requests.at(before);
     if (!originalBody) throw new Error("The executor did not call the T15 capturing fake provider.");
@@ -231,7 +241,7 @@ integration("T15 executor-backed continuity evidence", () => {
     replies.push(JSON.stringify(candidate));
     conflictNextReview = outputMode === "repaired";
     repairedReply = JSON.stringify({ ...JSON.parse(reply(repair.narration)), continuity_summary: repair.state.continuitySummary, open_threads: repair.state.openThreads });
-    const captured = await dispatch(fixture.campaignId, "Continue fixture history.");
+    const captured = await dispatch(fixture.campaignId, "Continue fixture history.", outputMode === "repaired");
     const accepted = await acceptedTurn(fixture.campaignId);
     const manifestEntry = captured.manifest.entries.find((entry) => entry.source.id === sourceRecord.sourceId && entry.sourcePath === sourceRecord.sourcePath);
     if (!manifestEntry || manifestEntry.content !== sourceRecord.content) throw new Error(`The captured manifest does not identify ${scenario.sourceKind} (${sourceRecord.sourceId} ${sourceRecord.sourcePath}) by its independently persisted content.`);

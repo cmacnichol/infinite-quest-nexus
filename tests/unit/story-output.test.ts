@@ -98,6 +98,16 @@ describe("story output integrity", () => {
     });
   });
 
+  it("does not treat a typed canonical-fact UUID as fiction mechanics", () => {
+    const structured = parseStoryOutput(story({
+      canonical_fact_updates: [{
+        content: "Marker One is now dark.",
+        supersedes_fact_ids: ["11111111-ac12-4111-8111-111111111111"]
+      }]
+    }));
+    expect(structured).toMatchObject({ ok: true });
+  });
+
   it("validates structured canonical fact updates and their fiction boundary", () => {
     expect(parseStoryOutput(story({
       canonical_fact_updates: [{ content: "Marker One is dark.", supersedes_fact_ids: ["invented-id"] }]

@@ -119,7 +119,10 @@ function storyTextFields(story: StoryTurnOutput): Array<[string, string]> {
     ["continuity_summary", story.continuity_summary],
     ["canonical_facts", JSON.stringify(story.canonical_facts)],
     ["superseded_facts", JSON.stringify(story.superseded_facts)],
-    ["canonical_fact_updates", JSON.stringify(story.canonical_fact_updates)],
+    // Fact IDs are typed authority references, not model-authored fiction.
+    // Scanning their serialized UUIDs can mistake an `ac12` segment for armor
+    // class language and reject an otherwise valid turn.
+    ["canonical_fact_updates", story.canonical_fact_updates.map((update) => update.content).join("\n")],
     ["open_threads", JSON.stringify(story.open_threads)]
   ];
 }

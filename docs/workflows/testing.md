@@ -32,6 +32,10 @@ For focused database tests, pass `--config vitest.integration.config.ts`; it pro
 
 Report passed, failed, and skipped checks separately, including reasons for skips. Unit tests do not establish real PostgreSQL, browser, or live-provider behavior. A skipped integration or browser check is not a pass.
 
+## Generation rejection review verification
+
+Changes to the durable generation-review workflow require a composed real-PostgreSQL test with a deterministic streaming provider. It must capture a complete primary response, pause on a reviewable finding, make an explicit decision, commit through the normal transaction, and prove that final Keep makes no additional primary or continuity-repair request. Cover append and replacement plus Action and scene input paths. Pair it with the Story Direction choice/replacement integrations, private-memory and foreign-campaign retrieval isolation, and independent illustration-enqueue failure coverage. Browser fixtures establish player behavior; they do not replace the PostgreSQL workflow test. Deterministic providers establish workflow correctness, not live narrative quality.
+
 For visible UI changes, verify affected interactions in a rendered browser and provide screenshots. For documentation-only changes, validate local links, review the complete scoped diff, and run `git diff --check`; application tests are needed only if executable behavior changes.
 
 ## Story context integrity verification
@@ -297,3 +301,5 @@ changing the frozen public payload contracts.
 ## Story continuity evaluation
 
 The [continuity evaluator runbook](../runbooks/story-continuity-evaluation.md) covers the deterministic PostgreSQL authority-to-provider matrix and explicitly authorized live copied-campaign runs. Record release applicability and absent evidence in the [release-readiness report](../review/story-memory-release-readiness-2026-09-16.md); synthetic-provider tests do not establish live model quality.
+
+Generation-review changes also require `tests/integration/story-continuity-review.integration.test.ts` with the PostgreSQL integration configuration. Its deterministic SSE fixture must cover a complete streamed candidate, the review decision, and the subsequent commit or restart. Record provider-call counts separately for primary generation, review, and repair. When a Keep decision is involved, verify the saved candidate hash and exact accepted payload, then verify the next turn receives accepted fiction but no private review finding or foreign-campaign canary. Illustration enqueue failures must leave the accepted turn intact.

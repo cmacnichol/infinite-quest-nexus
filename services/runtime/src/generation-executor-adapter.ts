@@ -1765,7 +1765,10 @@ async function executeLoadedGeneration(
         }
       });
       const finalPartialNarration = extractPartialNarration(result.content);
-      if (finalPartialNarration) {
+      // The public preview belongs to the initial primary response. A
+      // structure retry is an authorized private replacement attempt; it can
+      // become visible only by passing validation and being accepted.
+      if (finalPartialNarration && !structureRetryReceipt) {
         assertActiveGenerationUpdate(
           await repository.savePartialNarration(scope, finalPartialNarration),
           "flushing complete primary narration"
