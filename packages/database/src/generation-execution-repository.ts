@@ -596,9 +596,9 @@ async function commitAcceptedTurn(
   // The commit boundary accepts only the current protocol. Historical/import
   // replay goes through the explicitly named Chronicle compatibility path.
   const story = storyTurnOutputSchema.parse(input.story);
-  const lease = await client.query<{ id: string; owner_user_id: string; campaign_id: string; world_id: string; world_version_id: string | null; expected_turn_number: number; operation_kind: "append" | "replace_latest"; replacement_turn_id: string | null; generation_base_identity: unknown; context_options: Record<string, unknown>; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
+  const lease = await client.query<{ id: string; owner_user_id: string; campaign_id: string; world_id: string; world_version_id: string | null; expected_turn_number: number; operation_kind: "append" | "replace_latest"; replacement_turn_id: string | null; generation_base_identity: unknown; context_options: Record<string, unknown>; prompt_protocol_version: string; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
     `SELECT j.id, j.owner_user_id, j.campaign_id, wv.world_id, c.world_version_id, j.expected_turn_number,
-            j.operation_kind, j.replacement_turn_id, j.generation_base_identity, j.context_options, j.prompt_snapshot,
+            j.operation_kind, j.replacement_turn_id, j.generation_base_identity, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
             j.orchestration_private, j.streaming_segments_state
        FROM generation_jobs j JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
        JOIN world_versions wv ON wv.id=c.world_version_id AND wv.owner_user_id=j.owner_user_id
@@ -615,6 +615,11 @@ async function commitAcceptedTurn(
   const storedJob = lease.rows[0]!;
   let reviewAcceptanceAudit: Record<string, unknown> | undefined;
   const storedReview = generationReviewCheckpointSchema.safeParse(storedJob.orchestration_private.generationReview);
+  if (Object.hasOwn(storedJob.orchestration_private, "generationReview") && !storedReview.success) {
+    throw Object.assign(new Error("The persisted generation review checkpoint cannot authorize this commit."), {
+      code: "generation_review_acceptance_unavailable"
+    });
+  }
   if (storedReview.success) assertActiveMainKeepPreservation(storedReview.data, storedJob.orchestration_private, story);
   if (storedJob.context_options?.storyMemoryPolicy) {
     const policy = storyMemoryPolicySnapshotSchema.parse(storedJob.context_options.storyMemoryPolicy);
@@ -647,7 +652,7 @@ async function commitAcceptedTurn(
           findingsHash: generationReviewFindingsHash(review.data.reasons), ownerUserId: storedJob.owner_user_id,
           campaignId: storedJob.campaign_id, worldId: storedJob.world_id, worldVersionId: storedJob.world_version_id,
           baseIdentity: readGenerationBaseIdentity(storedJob.generation_base_identity),
-          protocol: { version: job.prompt_protocol_version, promptHash: review.data.gateCandidate.protocol.promptHash },
+          protocol: { version: storedJob.prompt_protocol_version, promptHash: prompts.continuityReview!.review.hash },
           policyHash: policy.policyHash, operationKind: storedJob.operation_kind, replacementTurnId: storedJob.replacement_turn_id
         });
         if (review.data.gateCandidate.producingResponseId !== response.responseId) {

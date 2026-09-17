@@ -433,6 +433,32 @@ integration("PostgreSQL generation execution repository", () => {
       .resolves.toMatchObject({ rows: [{ result_turn_id: null }] });
   });
 
+  it("binds final Keep protocol identity to the locked job snapshot rather than executor memory", async () => {
+    const changedVersionCampaign = await campaign();
+    const changedVersion = await readyFinalKeepCommit(changedVersionCampaign.campaignId, "final-keep-protocol-version-worker");
+    await pool.query("UPDATE generation_jobs SET prompt_protocol_version='substituted-protocol' WHERE id=$1", [changedVersion.scope.jobId]);
+    await expect(changedVersion.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: changedVersion.scope, job: changedVersion.job, story: changedVersion.story, responseId: changedVersion.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+
+    const changedSnapshotCampaign = await campaign();
+    const changedSnapshot = await readyFinalKeepCommit(changedSnapshotCampaign.campaignId, "final-keep-protocol-snapshot-worker");
+    const stored = await pool.query<{ prompt_snapshot: Record<string, unknown> }>(
+      "SELECT prompt_snapshot FROM generation_jobs WHERE id=$1", [changedSnapshot.scope.jobId]
+    );
+    const promptSnapshot = structuredClone(stored.rows[0]!.prompt_snapshot) as {
+      continuityReview: { review: { content: string; hash: string } };
+    };
+    promptSnapshot.continuityReview.review.content = "A frozen replacement continuity review prompt.";
+    promptSnapshot.continuityReview.review.hash = sha256(promptSnapshot.continuityReview.review.content);
+    await pool.query("UPDATE generation_jobs SET prompt_snapshot=$2::jsonb WHERE id=$1", [
+      changedSnapshot.scope.jobId, JSON.stringify(promptSnapshot)
+    ]);
+    await expect(changedSnapshot.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: changedSnapshot.scope, job: changedSnapshot.job, story: changedSnapshot.story, responseId: changedSnapshot.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+  });
+
   async function installActiveMainKeep(
     keep: Awaited<ReturnType<typeof readyFinalKeepCommit>>,
     preservesPrefix: boolean,
@@ -543,6 +569,18 @@ integration("PostgreSQL generation execution repository", () => {
     await expect(superseded.repository.commitAcceptedTurn(acceptedCommitInput({
       scope: superseded.scope, job: superseded.job, story: supersededStory, responseId: superseded.responseId
     }))).resolves.toMatchObject({ turnId: expect.any(String) });
+  });
+
+  it("fails closed when a persisted main Keep checkpoint cannot be parsed", async () => {
+    const imported = await campaign();
+    const mainKeep = await readyFinalKeepCommit(imported.campaignId, "malformed-main-keep-worker");
+    const rewrittenStory = await installActiveMainKeep(mainKeep, false, true);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{generationReview}',$2::jsonb) WHERE id=$1", [
+      mainKeep.scope.jobId, JSON.stringify({ malformed: true })
+    ]);
+    await expect(mainKeep.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: mainKeep.scope, job: mainKeep.job, story: rewrittenStory, responseId: mainKeep.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
   });
 
   async function acceptedAndChronicleSnapshot(
