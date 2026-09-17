@@ -110,6 +110,7 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
     id: claim.jobId,
     owner_user_id: claim.ownerUserId,
     campaign_id: claim.campaignId,
+    world_id: "00000000-0000-4000-8000-000000000006",
     world_version_id: "00000000-0000-4000-8000-000000000005",
     provider_profile_id: claim.providerProfileId,
     expected_turn_number: claim.expectedTurnNumber,
@@ -590,6 +591,33 @@ describe("generation executor adapter", () => {
     expect(repository.recordAttempt).not.toHaveBeenCalled();
     expect(repository.markValidating).not.toHaveBeenCalled();
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
+  it("pauses a reclaimed reserved primary request before another narration call", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.attempts = 2;
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "e".repeat(64) };
+    job.orchestration_private = {
+      primaryReservation: { version: 1, requestBody: "{\"request\":true}", requestPayloadHash: sha256("{\"request\":true}"), providerConfigurationHash: "a".repeat(64), attempt: 1 }
+    } as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), pauseForReview: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = { id: claim.providerProfileId, name: "Reservation provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "reserved-primary", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
+
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.pauseForReview).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      stage: "structure", candidateScope: "main", reasons: ["output_incomplete"], gateCandidate: expect.objectContaining({ story: null })
+    }));
   });
 
   it.each([

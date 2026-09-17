@@ -1611,11 +1611,49 @@ async function executeLoadedGeneration(
       }), "saving automatic repair recovery state");
       return true;
     }
+    if (!validatedDraft && !savedChoiceRepair?.originalResponse && !orchestration.primaryResult && !orchestration.primaryReservation) {
+      const preparedReservation = serializeProviderRequest({ ...provider, baseUrl: "" }, {
+        systemPrompt: primaryRequest.systemPrompt,
+        input: primaryRequest.input
+      });
+      orchestration = await persistOrchestration(repository, scope, job, {
+        primaryReservation: {
+          version: 1, requestBody: preparedReservation.body, requestPayloadHash: preparedReservation.payloadHash,
+          providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), attempt: job.attempts
+        }
+      });
+    }
     const capturedPrimary = orchestration.primaryResult;
     if (capturedPrimary && capturedPrimary.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)) {
       throw Object.assign(new Error("The captured primary response belongs to another provider configuration."), {
         code: "generation_checkpoint_incompatible"
       });
+    }
+    if (!capturedPrimary && orchestration.primaryReservation && job.attempts > orchestration.primaryReservation.attempt) {
+      if (!job.world_id) throw Object.assign(new Error("The interrupted primary request cannot be bound to its world."), { code: "generation_checkpoint_incompatible" });
+      const reservation = orchestration.primaryReservation;
+      const candidate: GenerationReviewCandidate = {
+        scope: "main", story: null, storyHash: sha256(canonicalEvidenceJson(null)),
+        rawOutputReference: `generation-primary:${job.id}:${reservation.attempt}`,
+        producingRequestHash: null, producingResponseId: null, sentFactIds: sentCanonicalFactIds(reservation.requestBody),
+        ownerUserId: job.owner_user_id, campaignId: job.campaign_id, worldId: job.world_id, worldVersionId: job.world_version_id || null,
+        baseTurnNumber: job.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.expected_turn_number,
+        policy: frozenStoryMemoryPolicySnapshot?.policy ?? generationPolicy ?? {},
+        policyHash: frozenStoryMemoryPolicySnapshot?.policyHash ?? sha256(stableStringify(generationPolicy ?? {})),
+        baseIdentity: job.generation_base_identity,
+        protocol: { version: job.prompt_protocol_version, promptHash: promptSnapshot.continuityReview?.review.hash ?? sha256("") },
+        provider: { type: provider.providerType, profileId: job.provider_profile_id, configurationHash: reservation.providerConfigurationHash },
+        resumeDependencies: {
+          generationContext: { contextFingerprint, contextDiagnostics, chronicleRetrieval }, producingProviderResult: null,
+          stageState: { primaryReservation: reservation }, frozenCommitInputs: { inputs, fictionAction: safeAction },
+          replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
+        }
+      };
+      const gate = prepareGenerationReview({ candidate, stage: "structure", reasons: ["output_incomplete"],
+        operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
+        eligibility: { complete: false, structurallyValid: false, mechanicsClean: false, authorityValid: true, stageComplete: false, retryAvailable: true } });
+      assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing interrupted primary request for review");
+      return true;
     }
     const dispatchedPrimary = !validatedDraft && !savedChoiceRepair?.originalResponse && !capturedPrimary;
     let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", () =>

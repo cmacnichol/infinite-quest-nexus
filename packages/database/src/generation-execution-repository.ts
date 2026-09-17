@@ -112,6 +112,14 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** A primary request was durably reserved; a lease reclaim cannot treat it as an unseen request. */
+  primaryReservation?: {
+    version: 1;
+    requestBody: string;
+    requestPayloadHash: string;
+    providerConfigurationHash: string;
+    attempt: number;
+  };
   /** Complete primary response captured before parsing or any destructive validator/repair stage. */
   primaryResult?: {
     version: 1;
@@ -248,6 +256,17 @@ function hasValidPrimaryResult(value: unknown): boolean {
     && typeof result.contextFingerprint === "string" && result.contextFingerprint.length > 0
     && typeof result.contextDiagnostics === "object" && result.contextDiagnostics !== null
     && typeof result.chronicleRetrieval === "object" && result.chronicleRetrieval !== null;
+}
+
+function hasValidPrimaryReservation(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const reservation = value as Record<string, unknown>;
+  return reservation.version === 1
+    && typeof reservation.requestBody === "string" && reservation.requestBody.length > 0
+    && typeof reservation.requestPayloadHash === "string" && reservation.requestPayloadHash === sha256Hex(reservation.requestBody)
+    && typeof reservation.providerConfigurationHash === "string" && reservation.providerConfigurationHash.length > 0
+    && typeof reservation.attempt === "number" && Number.isSafeInteger(reservation.attempt) && reservation.attempt > 0;
 }
 
 function hasValidLogicalAttempt(value: unknown): boolean {
@@ -1138,6 +1157,7 @@ export function createPostgresGenerationExecutionRepository(
       if (!row) return null;
       if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
           || !hasValidLogicalAttempt(row.orchestration_private?.logicalAttempt)
+          || !hasValidPrimaryReservation(row.orchestration_private?.primaryReservation)
           || !hasValidPrimaryResult(row.orchestration_private?.primaryResult)
           || !hasValidSemanticRepair(row.orchestration_private?.semanticRepair)
           || !hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
