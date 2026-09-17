@@ -721,7 +721,7 @@ describe("generation executor adapter", () => {
     ["Scene", "scene", "scene", "explicit"],
     ["resolved Auto", "auto", "action", "auto"],
     ["new Action policy", "action", "action", "explicit"]
-  ] as const)("reclaims a compatible %s draft without another narration call", async (label, requestedInputMode, resolvedInputMode, inputModeSource) => {
+  ] as const)("reclaims a captured complete %s result without another narration call", async (label, requestedInputMode, resolvedInputMode, inputModeSource) => {
     const job = completeGenerationExecutionPayload();
     job.requested_input_mode = requestedInputMode;
     job.resolved_input_mode = resolvedInputMode;
@@ -784,7 +784,16 @@ describe("generation executor adapter", () => {
 
     const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
     await expect(executor.execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+    expect(job.orchestration_private.primaryResult).toMatchObject({
+      requestPayloadHash: expect.any(String), response: { responseId: "first-response" },
+      sentFactIds: expect.any(Array)
+    });
+    expect(repository.savePartialNarration).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: job.id }), firstNarration
+    );
     expect(job.orchestration_private.validatedMainDraft).toBeDefined();
+    const capturedPrimary = job.orchestration_private.primaryResult;
+    job.orchestration_private = { primaryResult: capturedPrimary! };
     job.attempts = 2;
     await expect(executor.execute({ workerId: "worker-b", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
 

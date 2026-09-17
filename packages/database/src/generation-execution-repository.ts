@@ -112,6 +112,18 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** Complete primary response captured before parsing or any destructive validator/repair stage. */
+  primaryResult?: {
+    version: 1;
+    requestBody: string;
+    requestPayloadHash: string;
+    response: ProviderResult;
+    sentFactIds: readonly string[];
+    providerConfigurationHash: string;
+    contextFingerprint: string;
+    contextDiagnostics: Record<string, unknown>;
+    chronicleRetrieval: ChronicleRetrievalAudit;
+  };
   /** Versioned counters belong to the logical user attempt, never the worker lease. */
   logicalAttempt?: {
     version: 1;
@@ -219,6 +231,23 @@ function hasValidAutomaticRepair(value: unknown): boolean {
     && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
     && repair.consumedAttempt > 0;
+}
+
+function hasValidPrimaryResult(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return result.version === 1
+    && typeof result.requestBody === "string" && result.requestBody.length > 0
+    && typeof result.requestPayloadHash === "string" && result.requestPayloadHash === sha256Hex(result.requestBody)
+    && typeof result.response === "object" && result.response !== null
+    && typeof (result.response as Record<string, unknown>).content === "string"
+    && typeof (result.response as Record<string, unknown>).outputLimited === "boolean"
+    && Array.isArray(result.sentFactIds) && result.sentFactIds.every((id) => typeof id === "string")
+    && typeof result.providerConfigurationHash === "string" && result.providerConfigurationHash.length > 0
+    && typeof result.contextFingerprint === "string" && result.contextFingerprint.length > 0
+    && typeof result.contextDiagnostics === "object" && result.contextDiagnostics !== null
+    && typeof result.chronicleRetrieval === "object" && result.chronicleRetrieval !== null;
 }
 
 function hasValidLogicalAttempt(value: unknown): boolean {
@@ -1109,6 +1138,7 @@ export function createPostgresGenerationExecutionRepository(
       if (!row) return null;
       if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
           || !hasValidLogicalAttempt(row.orchestration_private?.logicalAttempt)
+          || !hasValidPrimaryResult(row.orchestration_private?.primaryResult)
           || !hasValidSemanticRepair(row.orchestration_private?.semanticRepair)
           || !hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
           || !hasValidChoiceRepair(row.orchestration_private?.choiceRepair)

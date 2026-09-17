@@ -155,6 +155,10 @@ integration("T17 durable continuity review", () => {
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
       expect(requests).toHaveLength(3);
+      expect(saved.primaryResult).toMatchObject({
+        requestPayloadHash: createHash("sha256").update(requests[0]!).digest("hex"),
+        response: { responseId: expect.any(String) }
+      });
       expect(saved.continuityReview.binding.auxiliaryRequestHashes).toEqual([createHash("sha256").update(requests[1]!).digest("hex")]);
       expect(saved.continuityReview.binding.producingRequestHash).toBe(createHash("sha256").update(requests[0]!).digest("hex"));
       expect(JSON.parse(JSON.parse(requests[2]!).messages[1].content).draft.choices).toEqual(["Continue.", "Wait.", "Listen.", "Leave."]);

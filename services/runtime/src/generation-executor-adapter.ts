@@ -1611,8 +1611,33 @@ async function executeLoadedGeneration(
       }), "saving automatic repair recovery state");
       return true;
     }
-    let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || await phase("story_generation", () =>
+    const capturedPrimary = orchestration.primaryResult;
+    if (capturedPrimary && capturedPrimary.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)) {
+      throw Object.assign(new Error("The captured primary response belongs to another provider configuration."), {
+        code: "generation_checkpoint_incompatible"
+      });
+    }
+    const dispatchedPrimary = !validatedDraft && !savedChoiceRepair?.originalResponse && !capturedPrimary;
+    let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", () =>
       callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
+    if (dispatchedPrimary) {
+      const preparedPrimary = preparedRequestForResult(result, provider, primaryRequest);
+      orchestration = await persistOrchestration(repository, scope, job, {
+        primaryResult: {
+          version: 1, requestBody: preparedPrimary.body, requestPayloadHash: preparedPrimary.payloadHash,
+          response: result, sentFactIds: sentCanonicalFactIds(preparedPrimary.body),
+          providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+          contextFingerprint, contextDiagnostics, chronicleRetrieval
+        }
+      });
+      const finalPartialNarration = extractPartialNarration(result.content);
+      if (finalPartialNarration) {
+        assertActiveGenerationUpdate(
+          await repository.savePartialNarration(scope, finalPartialNarration),
+          "flushing complete primary narration"
+        );
+      }
+    }
     let validation = validatedDraft || resumedChoiceStory
       ? {
           parsed: { ok: true as const, story: validatedDraft?.story || resumedChoiceStory! },
