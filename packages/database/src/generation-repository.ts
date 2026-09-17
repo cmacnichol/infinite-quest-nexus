@@ -659,8 +659,8 @@ export function createPostgresGenerationCommandRepository(
     },
 
     async getReview(scope): Promise<GenerationReviewDetail> {
-      const result = await pool.query<{ orchestrationPrivate: Record<string, unknown> }>(
-        `SELECT orchestration_private AS "orchestrationPrivate"
+      const result = await pool.query<{ orchestrationPrivate: Record<string, unknown>; status: JobStatus }>(
+        `SELECT orchestration_private AS "orchestrationPrivate", status
            FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
         [scope.jobId, scope.ownerUserId]
       );
@@ -671,8 +671,8 @@ export function createPostgresGenerationCommandRepository(
       return projectGenerationReviewDetail({
         review: {
           ...checkpoint.data,
-          canKeep: checkpoint.data.state === "pending" && checkpointCanKeep(checkpoint.data),
-          canRetry: checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable
+          canKeep: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpointCanKeep(checkpoint.data),
+          canRetry: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable
         },
         candidate: checkpoint.data.gateCandidate.story
           ? { narration: checkpoint.data.gateCandidate.story.narration, choices: checkpoint.data.gateCandidate.story.choices }

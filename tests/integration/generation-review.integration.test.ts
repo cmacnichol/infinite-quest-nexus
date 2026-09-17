@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
@@ -33,6 +33,13 @@ integration("PostgreSQL generation review persistence", () => {
 
   afterAll(async () => { await pool.end(); });
 
+  afterEach(async () => {
+    await pool.query(
+      "UPDATE generation_jobs SET status='discarded', lease_owner=NULL, lease_expires_at=NULL WHERE owner_user_id=$1 AND status IN ('queued','assessing','generating','validating','committing','recoverable')",
+      [ownerUserId]
+    );
+  });
+
   function commands() {
     return createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, scopedOwner, campaignId) => loadPromptSnapshotForTest(client, scopedOwner, campaignId),
@@ -47,7 +54,7 @@ integration("PostgreSQL generation review persistence", () => {
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation-review.story", story: fixture }));
   }
 
-  async function pendingReview() {
+  async function pendingReview({ pause = true }: { pause?: boolean } = {}) {
     const imported = await campaign();
     const queued = await commands().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
       action: "Inspect the review observatory.", providerProfileId, idempotencyKey: crypto.randomUUID(),
@@ -86,7 +93,7 @@ integration("PostgreSQL generation review persistence", () => {
       originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: []
     } satisfies GenerationReviewCheckpoint;
     const scope = { jobId: queued.id, ownerUserId, workerId };
-    expect(await execution.pauseForReview(scope, checkpoint)).toBe(true);
+    if (pause) expect(await execution.pauseForReview(scope, checkpoint)).toBe(true);
     return { imported, queued, execution, scope, checkpoint };
   }
 
@@ -128,5 +135,58 @@ integration("PostgreSQL generation review persistence", () => {
       "SELECT jsonb_array_length(orchestration_private->'generationReview'->'decisionJournal')::int AS \"journalSize\" FROM generation_jobs WHERE id=$1",
       [fixture.queued.id]
     )).resolves.toMatchObject({ rows: [{ journalSize: 1 }] });
+  });
+
+  it("rejects owner, campaign, base, and protocol checkpoint mismatches without changing the leased job", async () => {
+    const fixture = await pendingReview();
+    await pool.query("UPDATE generation_jobs SET status='assessing',lease_owner=$2,lease_expires_at=now()+interval '30 seconds' WHERE id=$1", [fixture.queued.id, fixture.scope.workerId]);
+    const mutateCandidates = (mutate: (candidate: GenerationReviewCheckpoint["gateCandidate"]) => GenerationReviewCheckpoint["gateCandidate"]) => ({
+      ...fixture.checkpoint, reviewId: crypto.randomUUID(), revision: 2,
+      gateCandidate: mutate(fixture.checkpoint.gateCandidate), workingCandidate: mutate(fixture.checkpoint.workingCandidate), originalCandidate: mutate(fixture.checkpoint.originalCandidate)
+    } as GenerationReviewCheckpoint);
+    const foreignOwnerId = crypto.randomUUID();
+    const foreignCampaignId = crypto.randomUUID();
+    const mismatches = [
+      mutateCandidates((candidate) => ({ ...candidate, ownerUserId: foreignOwnerId })),
+      mutateCandidates((candidate) => ({ ...candidate, campaignId: foreignCampaignId })),
+      mutateCandidates((candidate) => ({ ...candidate,
+        baseTurnNumber: candidate.baseTurnNumber + 1, expectedTurnNumber: candidate.expectedTurnNumber + 1,
+        baseIdentity: { ...candidate.baseIdentity, baseTurnNumber: candidate.baseIdentity.baseTurnNumber + 1, expectedTurnNumber: candidate.baseIdentity.expectedTurnNumber + 1 }
+      })),
+      mutateCandidates((candidate) => ({ ...candidate, protocol: { ...candidate.protocol, version: "wrong-protocol" } }))
+    ];
+    for (const mismatched of mismatches) await expect(fixture.execution.pauseForReview(fixture.scope, mismatched)).resolves.toBe(false);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview', jsonb_build_object('revision', 'corrupt')) WHERE id=$1", [fixture.queued.id]);
+    await expect(fixture.execution.pauseForReview(fixture.scope, fixture.checkpoint)).resolves.toBe(false);
+    await expect(pool.query<{ status: string; lease_owner: string }>("SELECT status,lease_owner FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "assessing", lease_owner: fixture.scope.workerId }] });
+  });
+
+  it("retains the first decision receipt through a later review gate", async () => {
+    const fixture = await pendingReview();
+    const repository = commands(); const scope = { ownerUserId, jobId: fixture.queued.id };
+    const first = await repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" });
+    await pool.query("UPDATE generation_jobs SET status='assessing',lease_owner=$2,lease_expires_at=now()+interval '30 seconds' WHERE id=$1", [fixture.queued.id, fixture.scope.workerId]);
+    const journal = (await pool.query<{ orchestration_private: { generationReview: GenerationReviewCheckpoint } }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [fixture.queued.id])).rows[0]!.orchestration_private.generationReview.decisionJournal;
+    const second = { ...fixture.checkpoint, reviewId: crypto.randomUUID(), revision: 3, state: "pending" as const, decisionJournal: journal } as GenerationReviewCheckpoint;
+    await expect(fixture.execution.pauseForReview(fixture.scope, second)).resolves.toBe(true);
+    await expect(repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" })).resolves.toEqual(first);
+  });
+
+  it("serializes heartbeat, cancellation, discard, and decision races", async () => {
+    const heartbeat = await pendingReview({ pause: false });
+    await expect(Promise.allSettled([
+      heartbeat.execution.renewLease(heartbeat.scope, 30),
+      heartbeat.execution.pauseForReview(heartbeat.scope, heartbeat.checkpoint)
+    ])).resolves.toHaveLength(2);
+    await expect(pool.query<{ status: string; lease_owner: string | null }>("SELECT status,lease_owner FROM generation_jobs WHERE id=$1", [heartbeat.queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", lease_owner: null }] });
+    const cancellation = await pendingReview(); const repository = commands(); const scope = { ownerUserId, jobId: cancellation.queued.id };
+    await expect(Promise.allSettled([cancellation.execution.renewLease(cancellation.scope, 30), repository.cancel(scope), repository.decideReview(scope, { reviewId: cancellation.checkpoint.reviewId, revision: 1, decision: "retry" })])).resolves.toHaveLength(3);
+    await expect(repository.getReview(scope)).resolves.toMatchObject({ canKeep: false, canRetry: false });
+    const discard = await pendingReview(); const discardScope = { ownerUserId, jobId: discard.queued.id };
+    await expect(Promise.allSettled([repository.discard(discardScope), repository.decideReview(discardScope, { reviewId: discard.checkpoint.reviewId, revision: 1, decision: "retry" })])).resolves.toHaveLength(2);
+    await expect(pool.query<{ status: string; lease_owner: string | null }>("SELECT status,lease_owner FROM generation_jobs WHERE id=$1", [discard.queued.id]))
+      .resolves.toMatchObject({ rows: [expect.objectContaining({ lease_owner: null })] });
   });
 });

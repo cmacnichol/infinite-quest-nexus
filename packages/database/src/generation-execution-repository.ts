@@ -1157,14 +1157,14 @@ export function createPostgresGenerationExecutionRepository(
     async pauseForReview(scope, checkpoint) {
       const parsed = generationReviewCheckpointSchema.parse(checkpoint);
       return withTransaction(pool, async (client) => {
-      const actual = await client.query<{ campaignId: string; worldId: string; worldVersionId: string | null; baseIdentity: GenerationBaseIdentity; providerProfileId: string; expectedTurnNumber: number; operationKind: "append" | "replace_latest"; replacementTurnId: string | null; prior: Record<string, unknown> }>(
+      const actual = await client.query<{ campaignId: string; worldId: string; worldVersionId: string | null; baseIdentity: GenerationBaseIdentity; providerProfileId: string; promptProtocolVersion: string; expectedTurnNumber: number; operationKind: "append" | "replace_latest"; replacementTurnId: string | null; prior: Record<string, unknown> }>(
         `SELECT j.campaign_id AS "campaignId", w.id AS "worldId", c.world_version_id AS "worldVersionId",
-                j.generation_base_identity AS "baseIdentity", j.provider_profile_id AS "providerProfileId", j.expected_turn_number AS "expectedTurnNumber",
+                j.generation_base_identity AS "baseIdentity", j.provider_profile_id AS "providerProfileId", j.prompt_protocol_version AS "promptProtocolVersion", j.expected_turn_number AS "expectedTurnNumber",
                 j.operation_kind AS "operationKind", j.replacement_turn_id AS "replacementTurnId", j.orchestration_private AS prior
            FROM generation_jobs j JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
            JOIN world_versions v ON v.id=c.world_version_id JOIN worlds w ON w.id=v.world_id
           WHERE j.id=$1 AND j.owner_user_id=$2 AND j.lease_owner=$3
-            AND j.status IN ('assessing','generating','validating','committing') AND j.lease_expires_at > now() FOR UPDATE`,
+            AND j.status IN ('assessing','generating','validating','committing') AND j.lease_expires_at > now() FOR UPDATE OF j`,
         [scope.jobId, scope.ownerUserId, scope.workerId]
       );
       const job = actual.rows[0];
@@ -1174,9 +1174,11 @@ export function createPostgresGenerationExecutionRepository(
           || candidate.worldVersionId !== job.worldVersionId || candidate.expectedTurnNumber !== job.expectedTurnNumber
           || stableStringify(candidate.baseIdentity) !== stableStringify(readGenerationBaseIdentity(job.baseIdentity))
           || candidate.provider.profileId !== job.providerProfileId || parsed.operationKind !== job.operationKind
-          || parsed.replacementTurnId !== job.replacementTurnId) return false;
-      const prior = generationReviewCheckpointSchema.safeParse(job.prior?.generationReview);
-      if (prior.success) {
+          || candidate.protocol.version !== job.promptProtocolVersion || parsed.replacementTurnId !== job.replacementTurnId) return false;
+      const rawPrior = job.prior?.generationReview;
+      const prior = rawPrior === undefined ? undefined : generationReviewCheckpointSchema.safeParse(rawPrior);
+      if (prior && !prior.success) return false;
+      if (prior?.success) {
         if (parsed.revision <= prior.data.revision || parsed.decisionJournal.length < prior.data.decisionJournal.length
             || stableStringify(parsed.originalCandidate) !== stableStringify(prior.data.originalCandidate)
             || stableStringify(parsed.originalFindings) !== stableStringify(prior.data.originalFindings)

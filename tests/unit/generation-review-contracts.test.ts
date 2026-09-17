@@ -121,6 +121,9 @@ describe("generation review contracts", () => {
       stage: "continuity",
       candidateScope: "final",
       reasons: ["review_unavailable"],
+      operationKind: "append",
+      replacementTurnId: null,
+      eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: false, retryAvailable: true },
       originalCandidate: { ...candidate, scope: "main" },
       gateCandidate: { ...candidate, campaignId: "77777777-7777-4777-8777-777777777777" },
       workingCandidate: candidate,
@@ -160,7 +163,9 @@ describe("generation review contracts", () => {
     const offeredReasons = ["scene_beats_missing"] as const;
     const checkpoint = {
       version: 1, reviewId: review.reviewId, revision: 2, state: "pending", stage: "continuity", candidateScope: "final",
-      reasons: ["review_uncertain"], originalCandidate: main, gateCandidate: final, workingCandidate: final,
+      reasons: ["review_uncertain"], operationKind: "append", replacementTurnId: null,
+      eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: false, retryAvailable: true },
+      originalCandidate: main, gateCandidate: final, workingCandidate: final,
       originalFindings, originalFindingsHash: generationReviewFindingsHash(originalFindings), retryFailure: null,
       decisionJournal: [{
         reviewId: "88888888-8888-4888-8888-888888888888", revision: 1, actorUserId: main.ownerUserId, decision: "keep",
@@ -189,6 +194,8 @@ describe("generation review contracts", () => {
     };
     expect(generationReviewCheckpointSchema.safeParse({
       version: 1, reviewId: review.reviewId, revision: 1, state: "pending", stage: "continuity", candidateScope: "final", reasons: ["review_unavailable"],
+      operationKind: "append", replacementTurnId: null,
+      eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: false, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate,
       workingCandidate: { ...candidate, baseIdentity: { ...candidate.baseIdentity, campaignStateRevision: 1 } },
       originalFindings: ["review_unavailable"], originalFindingsHash: "d".repeat(64), retryFailure: null, decisionJournal: []
