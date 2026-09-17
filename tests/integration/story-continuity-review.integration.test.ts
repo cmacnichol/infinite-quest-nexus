@@ -58,6 +58,8 @@ integration("T17 durable continuity review", () => {
   let reviewSequence: Array<"pass" | "uncertain" | "conflict"> = [];
   const requests: string[] = [];
   let needsChoiceRepair = false;
+  let invalidChoiceRepair = false;
+  let invalidPrimary = false;
   let semanticRepairNeedsChoiceRepair = false;
   let extensionConflict = false;
   let invalidSemanticRepair = false;
@@ -68,7 +70,7 @@ integration("T17 durable continuity review", () => {
   function reviewResponse(body: string): string {
     const userInput = (() => { try { return JSON.parse(JSON.parse(body).messages[1].content) as Record<string, unknown>; } catch { return null; } })();
     const system = (() => { try { return String(JSON.parse(body).messages[0].content || ""); } catch { return ""; } })();
-    if (userInput?.phase === "after" && Array.isArray(userInput.triggers)) return JSON.stringify({ activated_trigger_ids: userInput.triggers.map((trigger: { id: string }) => trigger.id), reasons: {} });
+    if ((userInput?.phase === "before" || userInput?.phase === "after") && Array.isArray(userInput.triggers)) return JSON.stringify({ activated_trigger_ids: userInput.triggers.map((trigger: { id: string }) => trigger.id), reasons: {} });
     if (system.includes("complete an already validated adventure turn")) return reply("Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.");
     if (body.includes("The immediate event fiction could not be verified.")) return reply("Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.");
     if (body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat")) return reply("Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.");
@@ -91,7 +93,10 @@ integration("T17 durable continuity review", () => {
         missing_required_beats: covered ? [] : ["The bell must ring."], contradictions: [] })) });
     }
     if (userInput?.protocol !== "story-continuity-review-v1") {
-      if (needsChoiceRepair && body.includes("final_narration")) return JSON.stringify({ choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." });
+      if (needsChoiceRepair && body.includes("final_narration")) return JSON.stringify(invalidChoiceRepair
+        ? { choices: ["Wait.", "Wait."] }
+        : { choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." });
+      if (invalidPrimary) return JSON.stringify({ narration: "Mira waits at the observatory." });
       const story = JSON.parse(reply("Mira waits at the observatory."));
       if (needsChoiceRepair) story.choices = ["Wait.", "Wait.", "Listen.", "Leave."];
       return JSON.stringify(story);
@@ -206,6 +211,42 @@ integration("T17 durable continuity review", () => {
     } finally { needsChoiceRepair = false; }
   });
 
+  it("re-offers the original choice candidate when its authorized repair fails", async () => {
+    const { job, application } = await enqueue("enforce", true);
+    reviewVerdict = "pass"; requests.length = 0; needsChoiceRepair = true; invalidChoiceRepair = true;
+    try {
+      await runGenerationJob(pool, `choice-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const first = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(first).toMatchObject({ stage: "choices", state: "pending", canRetry: true, narration: null });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: first.reviewId, revision: first.revision, decision: "retry" });
+      await runGenerationJob(pool, `choice-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(reoffered).toMatchObject({ stage: "choices", state: "pending", canRetry: false, narration: null });
+      expect(reoffered.revision).toBeGreaterThan(first.revision);
+    } finally { needsChoiceRepair = false; invalidChoiceRepair = false; }
+  });
+
+  it("re-offers the original structure candidate when its authorized retry fails", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; requests.length = 0; invalidPrimary = true;
+    try {
+      await runGenerationJob(pool, `structure-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const first = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(first).toMatchObject({ stage: "structure", state: "pending", canRetry: true, narration: null });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: first.reviewId, revision: first.revision, decision: "retry" });
+      await runGenerationJob(pool, `structure-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(reoffered).toMatchObject({ stage: "structure", state: "pending", canRetry: false, narration: null });
+      expect(reoffered.revision).toBeGreaterThan(first.revision);
+    } finally { invalidPrimary = false; }
+  });
+
   it.each(["observe", "enforce"] as const)("%s completes a review when selected pinned world references are sent", async (mode) => {
     const worldLore = "The Sable Relay remembers every oath sworn beneath its lens.";
     const relationshipLore = "The keeper answers the Sable Relay after dusk.";
@@ -281,6 +322,25 @@ integration("T17 durable continuity review", () => {
       )).rows[0]!.orchestration_private;
       expect(savedAfter.generationReview.gateCandidate.storyHash).toBe(savedBefore.generationReview.gateCandidate.storyHash);
     } finally { reviewUnavailable = false; reviewVerdict = "pass"; }
+  });
+
+  it("re-runs an uncertain continuity reviewer before requiring a new conflict decision", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["uncertain", "conflict"]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `continuity-uncertain-initial-${randomUUID()}`, 30, credentialSecret);
+      const uncertain = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(uncertain).toMatchObject({ stage: "continuity", state: "pending", reasons: ["review_uncertain"] });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: uncertain.reviewId, revision: uncertain.revision, decision: "retry" });
+      await runGenerationJob(pool, `continuity-uncertain-rerun-${randomUUID()}`, 30, credentialSecret);
+
+      const conflict = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(conflict).toMatchObject({ stage: "continuity", state: "pending", reasons: ["narrative_conflict"], canKeep: true, canRetry: true });
+      expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(2);
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(0);
+    } finally { reviewSequence = []; }
   });
 
   it("re-offers the original final candidate after a failed authorized continuity retry and keeps it offline", async () => {
@@ -359,6 +419,25 @@ integration("T17 durable continuity review", () => {
       await expect(pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]))
         .resolves.toMatchObject({ rows: [{ count: before.rows[0]!.count }] });
     } finally { sceneCoverageSequence = []; reviewVerdict = "pass"; }
+  });
+
+  it("re-offers the original scene candidate when its authorized rewrite fails", async () => {
+    const { job, application } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
+    reviewVerdict = "pass"; sceneCoverageSequence = [false, false, false]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `scene-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const first = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(first).toMatchObject({ stage: "scene_coverage", state: "pending", canKeep: true, canRetry: true });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: first.reviewId, revision: first.revision, decision: "retry" });
+      await runGenerationJob(pool, `scene-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(reoffered).toMatchObject({ stage: "scene_coverage", state: "pending", canKeep: true, canRetry: false, narration: first.narration });
+      expect(reoffered.revision).toBeGreaterThan(first.revision);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { sceneCoverageSequence = []; }
   });
 
   it("reserves one semantic repair, replaces the main, and reviews the repaired request before commit", async () => {
@@ -448,6 +527,31 @@ integration("T17 durable continuity review", () => {
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
       expect(saved.eventCoverageRepair).toMatchObject({ authorizedReviewId: gate.reviewId, authorizedRevision: gate.revision });
       expect(saved.extension.story.narration.startsWith(saved.validatedMainDraft.story.narration)).toBe(true);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { eventCoverageSequence = []; }
+  });
+
+  it("pauses before-event coverage before one authorized rewrite", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    const triggerId = randomUUID();
+    await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [campaignId, JSON.stringify([{ id: triggerId, label: "Keeper arrival", timing: "before", condition: "Mira waits.", effect: "The bell rings as the keeper arrives.", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }])]);
+    reviewVerdict = "pass"; eventCoverageSequence = [false, true, true]; requests.length = 0;
+    try {
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+      await runGenerationJob(pool, `before-event-gate-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(gate).toMatchObject({ stage: "event_coverage", candidateScope: "main", canKeep: false, canRetry: true });
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(0);
+      expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId])).rows[0]!.count).toBe(acceptedBefore);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `before-event-retry-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
+      expect(saved.eventCoverageRepair).toMatchObject({ authorizedReviewId: gate.reviewId, authorizedRevision: gate.revision, mainRepairConsumed: true });
       expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
     } finally { eventCoverageSequence = []; }
   });
