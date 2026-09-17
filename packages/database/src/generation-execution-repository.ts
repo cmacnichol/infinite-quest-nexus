@@ -160,6 +160,8 @@ export type GenerationOrchestrationState = {
     /** Private exact serialized extension request that produced the final story. */
     producingRequestBody?: string;
     providerConfigurationHash?: string;
+    /** Complete final candidates retain the response that produced the extension. */
+    response?: ProviderResult;
     /** Exact fact records rendered into that extension request. */
     sentFactIds: readonly string[];
   } | undefined;
@@ -312,6 +314,8 @@ export type GenerationExecutionPayload = {
   id: string;
   owner_user_id: string;
   campaign_id: string;
+  /** Immutable world authority used to bind a paused review candidate. */
+  world_id?: string;
   world_version_id?: string;
   provider_profile_id: string;
   expected_turn_number: number;
@@ -370,7 +374,7 @@ export type GenerationFailedUpdate = GenerationLeaseScope & Readonly<{
 
 type GenerationTextProvider = Readonly<{
   id: string;
-  name: string;
+  name?: string;
   providerType: string;
   model: string;
 }>;
@@ -1084,11 +1088,12 @@ export function createPostgresGenerationExecutionRepository(
                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
                 j.generation_base_identity, j.generation_policy,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
-                c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
+                wv.world_id, c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
                 latest.state_snapshot_private
            FROM generation_jobs j
            JOIN campaigns c ON c.id = j.campaign_id AND c.owner_user_id = j.owner_user_id
+           JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
            JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
            LEFT JOIN LATERAL (
              SELECT state_snapshot_private FROM turns

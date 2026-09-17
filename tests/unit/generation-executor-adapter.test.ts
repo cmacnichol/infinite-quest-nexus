@@ -7,6 +7,7 @@ import type { GenerationExecutionRepository } from "../../packages/database/src/
 import type { GenerationExecutionPayload } from "../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
+import { storyTurnOutputSchema } from "../../packages/contracts/src/generation.js";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { characterFictionAuthority, sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson, readStoryEvidenceFromSource } from "../../packages/application/src/memory/generation-context.js";
@@ -21,6 +22,7 @@ import {
   type GenerationExecutionCollaborators
 } from "../../services/runtime/src/generation-executor-adapter.js";
 import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
+import { prepareGenerationReview } from "../../services/runtime/src/generation-review-adapter.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 
 const claim: ClaimedGeneration = {
@@ -143,6 +145,33 @@ function completeGenerationExecutionPayload(): GenerationExecutionPayload {
 }
 
 describe("generation executor adapter", () => {
+  it("prepares a final continuity offer that preserves the reviewed candidate and its retry stage", () => {
+    const job = completeGenerationExecutionPayload();
+    const story = storyTurnOutputSchema.parse({
+      narration: "The observatory door opens onto a silent moonlit archive.",
+      choices: ["Enter.", "Wait.", "Study.", "Call."], custom_action_suggestion: "Study the door.",
+      scratchpad: "", tracker_updates: [], image_prompt: "A moonlit observatory archive.",
+      continuity_summary: "The archive is open.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
+    });
+    const baseIdentity = { ...job.generation_base_identity!, stateFingerprint: "e".repeat(64) };
+    const candidate = {
+      scope: "final" as const, story, storyHash: sha256(canonicalEvidenceJson(story)), rawOutputReference: null,
+      producingRequestHash: "a".repeat(64), producingResponseId: "provider-response", sentFactIds: [],
+      ownerUserId: job.owner_user_id, campaignId: job.campaign_id, worldId: "00000000-0000-4000-8000-000000000006",
+      worldVersionId: job.world_version_id ?? null, baseTurnNumber: baseIdentity.baseTurnNumber,
+      expectedTurnNumber: job.expected_turn_number, policy: {}, policyHash: "b".repeat(64), baseIdentity,
+      protocol: { version: job.prompt_protocol_version, promptHash: "c".repeat(64) },
+      provider: { type: "openai_compatible", profileId: job.provider_profile_id, configurationHash: "d".repeat(64) },
+      resumeDependencies: { generationContext: {}, producingProviderResult: { responseId: "provider-response" }, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
+    };
+
+    const review = prepareGenerationReview({ candidate, stage: "continuity", reasons: ["narrative_conflict"], operationKind: "append", replacementTurnId: null,
+      eligibility: { structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true } });
+
+    expect(review).toMatchObject({ state: "pending", stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true } });
+    expect(review.gateCandidate).toEqual(candidate);
+    expect(review.originalFindingsHash).toBe(sha256(canonicalEvidenceJson(["narrative_conflict"])));
+  });
   it("limits extension-only semantic repair to appended narration contradictions", () => {
     expect(semanticRepairScope({ hasExtension: true, mainNarration: "Main scene.", findings: [{ kind: "contradiction", output: { path: "/narration", start: "Main scene.".length } }] })).toBe("extension_only");
     expect(semanticRepairScope({ hasExtension: true, mainNarration: "Main scene.", findings: [{ kind: "contradiction", output: { path: "/continuity_summary", start: 0 } }] })).toBe("main");

@@ -1,6 +1,8 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
-import { isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
+import { prepareGenerationReview } from "./generation-review-adapter.js";
+import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
+import { canonicalEvidenceJson, isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
 export { planGenerationPromptContext } from "./generation-context-planner.js";
 import type {
@@ -1047,6 +1049,63 @@ async function executeLoadedGeneration(
   }, Math.max(5000, Math.floor(leaseSeconds * 1000 / 3)));
 
   try {
+    const savedReview = generationReviewCheckpointSchema.safeParse(job.orchestration_private.generationReview);
+    const keepReceipt = savedReview.success && savedReview.data.state === "decided"
+      && savedReview.data.stage === "continuity" && savedReview.data.candidateScope === "final"
+      ? savedReview.data.decisionJournal.find((entry) => entry.reviewId === savedReview.data.reviewId
+          && entry.revision === savedReview.data.revision && entry.decision === "keep")
+      : undefined;
+    if (keepReceipt && savedReview.success) {
+      const candidate = savedReview.data.gateCandidate;
+      const frozen = candidate.resumeDependencies.frozenCommitInputs;
+      const generation = candidate.resumeDependencies.generationContext;
+      const providerDescriptor = frozen.provider;
+      const response = candidate.resumeDependencies.producingProviderResult;
+      const frozenOrchestration = frozen.orchestration;
+      const frozenInputs = frozen.inputs;
+      const frozenSentFactIds = frozen.finalSentFactIds;
+      const story = storyTurnOutputSchema.parse(candidate.story);
+      if (candidate.ownerUserId !== job.owner_user_id || candidate.campaignId !== job.campaign_id
+          || candidate.worldId !== job.world_id || candidate.worldVersionId !== (job.world_version_id || null)
+          || canonicalEvidenceJson(candidate.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
+          || candidate.protocol.version !== job.prompt_protocol_version
+          || candidate.protocol.promptHash !== promptSnapshot.continuityReview?.review.hash
+          || candidate.policyHash !== frozenStoryMemoryPolicySnapshot?.policyHash
+          || candidate.storyHash !== sha256(canonicalEvidenceJson(story))
+          || mechanicsLeakFields(story).length
+          || !providerDescriptor || typeof providerDescriptor !== "object" || typeof (providerDescriptor as { id?: unknown }).id !== "string"
+          || typeof (providerDescriptor as { providerType?: unknown }).providerType !== "string" || typeof (providerDescriptor as { model?: unknown }).model !== "string"
+          || !response || typeof response !== "object" || typeof (response as { content?: unknown }).content !== "string"
+          || typeof (response as { outputLimited?: unknown }).outputLimited !== "boolean"
+          || !frozenOrchestration || typeof frozenOrchestration !== "object" || !frozenInputs || typeof frozenInputs !== "object"
+          || !Array.isArray(frozenSentFactIds) || typeof frozen.fictionAction !== "string"
+          || typeof generation.contextFingerprint !== "string" || !generation.contextDiagnostics || typeof generation.contextDiagnostics !== "object") {
+        throw Object.assign(new Error("The final Keep receipt has incompatible frozen execution inputs."), { code: "generation_checkpoint_incompatible" });
+      }
+      const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(generation.chronicleRetrieval);
+      assertActiveGenerationUpdate(await repository.markValidating(scope), "resuming final Keep validation");
+      assertActiveGenerationUpdate(await repository.markCommitting(scope), "resuming final Keep commit");
+      const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
+        scope, job, story,
+        provider: providerDescriptor as { id: string; providerType: string; model: string },
+        response: response as ProviderResult,
+        contextFingerprint: generation.contextFingerprint as string,
+        contextDiagnostics: generation.contextDiagnostics as Record<string, unknown>,
+        sentFactIds: frozenSentFactIds as string[], chronicleRetrieval,
+        inputs: frozenInputs as GenerationExecutionPayload["orchestration_inputs"],
+        orchestration: frozenOrchestration as GenerationOrchestrationState,
+        fictionAction: frozen.fictionAction as string,
+        collaborators: { memory: collaborators.memory, illustration: collaborators.illustration,
+          attributeGenerationCostsToTurn: collaborators.attributeGenerationCostsToTurn },
+        onIllustrationEnqueueError(error, acceptedTurnId) {
+          logger.warn({ event: "accepted_turn_illustration_enqueue_failed", generationJobId: job.id, campaignId: job.campaign_id,
+            turnId: acceptedTurnId, errorMessage: error instanceof Error ? error.message : String(error) });
+        }
+      }));
+      logger.info({ event: "turn_generation_completed", ...generationLogContext(job, workerId), resultTurnId: turnId,
+        providerResponseId: (response as ProviderResult).responseId || null, finishReason: (response as ProviderResult).finishReason || null });
+      return true;
+    }
     const provider = await phase("provider_loading", () => collaborators.loadTextExecution(
       job.owner_user_id,
       job.provider_profile_id,
@@ -2213,6 +2272,7 @@ async function executeLoadedGeneration(
                 systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
               }).body,
               providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+              response: extensionResponse,
               sentFactIds: sentCanonicalFactIds(preparedRequestForResult(extensionResponse, provider, {
                 systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
               }).body)
@@ -2371,6 +2431,7 @@ async function executeLoadedGeneration(
               producingRequestPayloadHash: preparedRepair.payloadHash,
               producingRequestBody: preparedRepair.body,
               providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+              ...(repairResponse ? { response: repairResponse } : {}),
               sentFactIds: repairSentFactIds
             },
             eventCoverageRepair: {
@@ -2474,6 +2535,43 @@ async function executeLoadedGeneration(
       })!;
       orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint, ...(finalManifest ? { sourceEvidenceManifest: finalManifest } : {}), contextDiagnostic: reviewDiagnostic });
       if (reviewMode === "enforce" && checkpoint.verdict !== "pass") {
+        if (!job.world_id || !producingBody || !orchestration.validatedMainDraft) {
+          throw Object.assign(new Error("The rejected final candidate is missing its frozen review binding."), {
+            code: "generation_checkpoint_incompatible"
+          });
+        }
+        const producingResponse = orchestration.extension?.response ?? result;
+        const reviewReason = checkpoint.verdict === "conflict"
+          ? "narrative_conflict" as const
+          : checkpoint.verdict === "uncertain"
+            ? "review_uncertain" as const
+            : "review_unavailable" as const;
+        const candidate: GenerationReviewCandidate = {
+          scope: "final", story: committedStory, storyHash: sha256(canonicalEvidenceJson(committedStory)), rawOutputReference: null,
+          producingRequestHash: sha256(producingBody), producingResponseId: producingResponse.responseId || null,
+          sentFactIds: [...finalSentFactIds], ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+          worldId: job.world_id, worldVersionId: job.world_version_id || null,
+          baseTurnNumber: job.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.expected_turn_number,
+          policy: frozenStoryMemoryPolicySnapshot.policy, policyHash: frozenStoryMemoryPolicySnapshot.policyHash,
+          baseIdentity: job.generation_base_identity,
+          protocol: { version: job.prompt_protocol_version, promptHash: promptSnapshot.continuityReview!.review.hash },
+          provider: { type: provider.providerType, profileId: job.provider_profile_id, configurationHash: effectiveProviderConfigurationHash(provider, job) },
+          resumeDependencies: {
+            generationContext: { contextFingerprint, contextDiagnostics, chronicleRetrieval },
+            producingProviderResult: structuredClone(producingResponse) as Record<string, unknown>,
+            stageState: { continuityReview: checkpoint, validatedMainDraft: orchestration.validatedMainDraft, extension: orchestration.extension ?? null },
+            frozenCommitInputs: {
+              inputs, fictionAction: safeAction, provider: { id: provider.id, providerType: provider.providerType, model: provider.model },
+              orchestration, finalSentFactIds: [...finalSentFactIds]
+            },
+            replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
+          }
+        };
+        const gate = prepareGenerationReview({ candidate, stage: "continuity", reasons: [reviewReason],
+          operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
+          eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true } });
+        assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected final candidate for review");
+        if (checkpoint.verdict === "conflict" || checkpoint.verdict === "uncertain" || checkpoint.verdict === "unavailable") return true;
         if (checkpoint.verdict === "conflict" && checkpoint.result && finalManifest && producingBody) {
           const rejectedFinalStoryHash = sha256(stableStringify(committedStory));
           const existingRepair = orchestration.semanticRepair;
@@ -2557,7 +2655,8 @@ async function executeLoadedGeneration(
                 producingOperation: "event_extension" as const,
                 validatedMainDraftHash: orchestration.validatedMainDraft!.draftHash,
                 producingRequestPayloadHash: repairedPrepared.payloadHash, producingRequestBody: repairedPrepared.body,
-                providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), sentFactIds: sentCanonicalFactIds(repairedPrepared.body)
+                providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), response: repairResponse,
+                sentFactIds: sentCanonicalFactIds(repairedPrepared.body)
               },
               extensionError: undefined, eventCoverageRepair: undefined, continuityReview: undefined
             } : {
