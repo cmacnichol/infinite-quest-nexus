@@ -3,6 +3,7 @@ import {
   generationJobSnapshotSchema,
   generationReviewDecisionRequestSchema,
   generationReviewReasonCodeSchema,
+  projectGenerationReviewDetail,
   projectGenerationReviewSummary
 } from "../../packages/contracts/src/index.js";
 import { generationReviewCheckpointSchema } from "../../packages/application/src/generation/review-checkpoint.js";
@@ -94,6 +95,18 @@ describe("generation review contracts", () => {
       worldVersionId: "66666666-6666-4666-8666-666666666666",
       baseTurnNumber: 0,
       expectedTurnNumber: 1,
+      baseIdentity: {
+        operationKind: "append",
+        expectedTurnNumber: 1,
+        baseTurnNumber: 0,
+        campaignActiveTurnNumber: 0,
+        campaignStateRevision: 0,
+        stateEditRevision: null,
+        narrationCorrectionRevision: null,
+        baseTurnId: null,
+        stateFingerprint: "f".repeat(64),
+        narrationFingerprint: null
+      },
       policy: {},
       policyHash: "e".repeat(64),
       protocol: { version: "story-v1", promptHash: "b".repeat(64) },
@@ -116,5 +129,76 @@ describe("generation review contracts", () => {
       retryFailure: null,
       decisionJournal: []
     }).success).toBe(false);
+  });
+
+  it("retains a historical main offer receipt after a final candidate opens a later gate", () => {
+    const baseIdentity = {
+      operationKind: "append",
+      expectedTurnNumber: 1,
+      baseTurnNumber: 0,
+      campaignActiveTurnNumber: 0,
+      campaignStateRevision: 0,
+      stateEditRevision: null,
+      narrationCorrectionRevision: null,
+      baseTurnId: null,
+      stateFingerprint: "f".repeat(64),
+      narrationFingerprint: null
+    };
+    const candidate = (scope: "main" | "final", storyHash: string) => ({
+      scope, story: null, storyHash, rawOutputReference: `provider-${scope}`, producingRequestHash: null,
+      producingResponseId: null, sentFactIds: [], ownerUserId: "33333333-3333-4333-8333-333333333333",
+      campaignId: snapshot.campaignId, worldId: "44444444-4444-4444-8444-444444444444",
+      worldVersionId: "66666666-6666-4666-8666-666666666666", baseTurnNumber: 0, expectedTurnNumber: 1,
+      baseIdentity, policy: {}, policyHash: "e".repeat(64), protocol: { version: "story-v1", promptHash: "b".repeat(64) },
+      provider: { type: "lmstudio", profileId: null, configurationHash: "c".repeat(64) },
+      resumeDependencies: { generationContext: {}, producingProviderResult: {}, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
+    });
+    const main = candidate("main", "a".repeat(64));
+    const final = candidate("final", "d".repeat(64));
+    expect(generationReviewCheckpointSchema.safeParse({
+      version: 1, reviewId: review.reviewId, revision: 2, state: "pending", stage: "continuity", candidateScope: "final",
+      reasons: ["review_uncertain"], originalCandidate: main, gateCandidate: final, workingCandidate: final,
+      originalFindings: ["scene_beats_missing"], originalFindingsHash: "1".repeat(64), retryFailure: null,
+      decisionJournal: [{
+        reviewId: "88888888-8888-4888-8888-888888888888", revision: 1, actorUserId: main.ownerUserId, decision: "keep",
+        decidedAt: "2026-09-16T00:00:00.000Z", candidateScope: "main", candidateHash: main.storyHash,
+        findingsHash: "2".repeat(64), nextStage: "choices", offeredCandidate: main, offeredReasons: ["scene_beats_missing"],
+        actionReceipt: { jobId: snapshot.id, status: "queued", operationKind: "append", replacementTurnId: null }
+      }]
+    }).success).toBe(true);
+  });
+
+  it("rejects a checkpoint when candidate base identity changes despite matching turn numbers", () => {
+    const candidate = {
+      scope: "final", story: null, storyHash: "a".repeat(64), rawOutputReference: "provider-output-1", producingRequestHash: null,
+      producingResponseId: null, sentFactIds: [], ownerUserId: "33333333-3333-4333-8333-333333333333", campaignId: snapshot.campaignId,
+      worldId: "44444444-4444-4444-8444-444444444444", worldVersionId: "66666666-6666-4666-8666-666666666666",
+      baseTurnNumber: 0, expectedTurnNumber: 1, policy: {}, policyHash: "e".repeat(64), protocol: { version: "story-v1", promptHash: "b".repeat(64) },
+      provider: { type: "lmstudio", profileId: null, configurationHash: "c".repeat(64) },
+      baseIdentity: { operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 0, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "f".repeat(64), narrationFingerprint: null },
+      resumeDependencies: { generationContext: {}, producingProviderResult: {}, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
+    };
+    expect(generationReviewCheckpointSchema.safeParse({
+      version: 1, reviewId: review.reviewId, revision: 1, state: "pending", stage: "continuity", candidateScope: "final", reasons: ["review_unavailable"],
+      originalCandidate: candidate, gateCandidate: candidate,
+      workingCandidate: { ...candidate, baseIdentity: { ...candidate.baseIdentity, campaignStateRevision: 1 } },
+      originalFindings: ["review_unavailable"], originalFindingsHash: "d".repeat(64), retryFailure: null, decisionJournal: []
+    }).success).toBe(false);
+  });
+
+  it("projects static safe findings and fiction preview without private canaries", () => {
+    const detail = projectGenerationReviewDetail({
+      review: { ...review, reasons: ["review_uncertain", "review_unavailable"] },
+      candidate: { narration: "Mira crosses the quay.", choices: ["Follow Mira"] },
+      privateFailure: "PRIVATE-CANARY",
+      privateFindings: [{ message: "PRIVATE-CANARY" }],
+      omittedFindingCount: 2
+    });
+    expect(detail.findings).toEqual([
+      { code: "review_uncertain", message: "The automated review could not reach a conclusive result." },
+      { code: "review_unavailable", message: "The automated review was unavailable for this candidate." }
+    ]);
+    expect(detail).toMatchObject({ narration: "Mira crosses the quay.", choices: ["Follow Mira"], retryFailure: null, omittedFindingCount: 2 });
+    expect(JSON.stringify(detail)).not.toContain("PRIVATE-CANARY");
   });
 });
