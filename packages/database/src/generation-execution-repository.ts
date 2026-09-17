@@ -218,6 +218,9 @@ export type GenerationOrchestrationState = {
     resultHash?: string;
     /** Prepared after an exhausted generic recovery; only an explicit retry may dispatch it. */
     status: "pending" | "dispatched" | "validated";
+    /** The sole review decision that may consume this choice-only repair. */
+    authorizedReviewId?: string;
+    authorizedRevision?: number;
   } | undefined;
   /** One durable, provenance-fenced rewrite allowance for rejected event fiction. */
   eventCoverageRepair?: {
@@ -320,6 +323,8 @@ function hasValidChoiceRepair(value: unknown): boolean {
     && (repair.repairResponseFormat === "json_object" || repair.repairResponseFormat === "none")
     && typeof repair.repairRequestPayloadHash === "string" && repair.repairRequestPayloadHash.length > 0
     && (repair.status === "pending" || repair.status === "dispatched" || repair.status === "validated")
+    && (repair.authorizedReviewId === undefined || typeof repair.authorizedReviewId === "string")
+    && (repair.authorizedRevision === undefined || (typeof repair.authorizedRevision === "number" && Number.isSafeInteger(repair.authorizedRevision) && repair.authorizedRevision > 0))
     && (repair.status !== "validated" || (typeof repair.repairRequestPayloadHash === "string" && typeof repair.resultHash === "string" && typeof repair.fields === "object" && repair.fields !== null));
 }
 

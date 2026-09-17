@@ -1218,7 +1218,25 @@ async function executeLoadedGeneration(
     const structureRetryReceipt = savedReview.success && savedReview.data.state === "decided"
       && savedReview.data.stage === "structure" && savedReview.data.candidateScope === "main"
       ? savedReview.data.decisionJournal.find((entry) => entry.decision === "retry"
-          && entry.nextStage === "structure" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
+            && entry.nextStage === "structure" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
+      : undefined;
+    const choiceRetryReceipt = savedReview.success && savedReview.data.state === "decided"
+      && savedReview.data.stage === "choices" && savedReview.data.candidateScope === "main"
+      ? savedReview.data.decisionJournal.find((entry) => entry.decision === "retry"
+          && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
+          && entry.nextStage === "choices" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
+      : undefined;
+    const sceneKeepReceipt = savedReview.success && savedReview.data.state === "decided"
+      && savedReview.data.stage === "scene_coverage" && savedReview.data.candidateScope === "main"
+      ? savedReview.data.decisionJournal.find((entry) => entry.decision === "keep"
+          && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
+          && entry.nextStage === null && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
+      : undefined;
+    const sceneRetryReceipt = savedReview.success && savedReview.data.state === "decided"
+      && savedReview.data.stage === "scene_coverage" && savedReview.data.candidateScope === "main"
+      ? savedReview.data.decisionJournal.find((entry) => entry.decision === "retry"
+          && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
+          && entry.nextStage === "scene_coverage" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
       : undefined;
     if (structureRetryReceipt) {
       orchestration = await persistOrchestration(repository, scope, job, {
@@ -1794,7 +1812,7 @@ async function executeLoadedGeneration(
       const priorRetry = savedReview.success && savedReview.data.state === "decided"
         && savedReview.data.stage === "structure" && savedReview.data.candidateScope === "main"
         ? savedReview.data.decisionJournal.find((entry) => entry.decision === "retry"
-            && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision)
+            && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1)
         : undefined;
       const gate = prepareGenerationReview({
         candidate: priorRetry && savedReview.success ? savedReview.data.gateCandidate : candidate,
@@ -1829,7 +1847,7 @@ async function executeLoadedGeneration(
         && (!result.outputLimited || resumingPendingChoiceRepair)) {
       const choiceOnly = parseStoryOnlyOutput(result.content);
       if (!choiceOnly.ok && choiceOnly.kind === "choices") {
-        return pauseRejectedMain("choices", "invalid_choices");
+        if (!choiceRetryReceipt) return pauseRejectedMain("choices", "invalid_choices");
       }
     }
     if (generationPolicy?.playMode === "story_only" && !validatedDraft
@@ -1874,10 +1892,15 @@ async function executeLoadedGeneration(
               originalSentFactIds: pendingCheckpoint?.originalSentFactIds || sentCanonicalFactIds(originalPrepared.body),
               originalResponse: pendingCheckpoint?.originalResponse || result, consumedAttempt: job.attempts,
               repairRequestBody: initialRepairRequest.body, repairRequestPayloadHash: initialRepairRequest.payloadHash,
-              repairResponseFormat: "json_object", status: "dispatched"
+              repairResponseFormat: "json_object", status: "pending",
+              authorizedReviewId: pendingCheckpoint?.authorizedReviewId ?? choiceRetryReceipt!.reviewId,
+              authorizedRevision: pendingCheckpoint?.authorizedRevision ?? choiceRetryReceipt!.revision
             }
           });
           try {
+            orchestration = await persistOrchestration(repository, scope, job, {
+              choiceRepair: { ...orchestration.choiceRepair!, status: "dispatched" }
+            });
             const repairResponse = await phase("story_choice_repair", () => callCampaignTextProvider(
               dependencies, provider, job, "story_choice_repair", repairRequest
             ));
@@ -2067,9 +2090,72 @@ async function executeLoadedGeneration(
     if (mechanicsLeakFields(parsed.story).length) {
       throw new Error("Mechanics validation invariant failed.");
     }
+    const sceneStory = parsed.story;
     const parsedNarration = parsed.story.narration;
 
-    if (stages.allowSceneCoverage && job.resolved_input_mode === "scene") {
+    const pauseSceneCoverage = async (): Promise<true> => {
+      if (!job.world_id) {
+        throw Object.assign(new Error("The rejected scene candidate cannot be bound to its world."), {
+          code: "generation_checkpoint_incompatible"
+        });
+      }
+      const prepared = preparedRequestForResult(result, provider, baseRequest);
+      if (!validatedDraft) {
+        orchestration = await persistOrchestration(repository, scope, job, {
+          validatedMainDraft: {
+            version: 2, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+            worldVersionId: job.world_version_id || null, baseIdentity: job.generation_base_identity,
+            promptProtocolVersion: job.prompt_protocol_version,
+            ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}),
+            providerId: provider.id, providerModel: provider.model,
+            providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), action: job.action,
+            originalInputHash: sha256(storyInput), requestBody: prepared.body, requestPayloadHash: prepared.payloadHash,
+            draftHash: sha256(stableStringify(sceneStory)), producingAttempt: job.attempts,
+            story: sceneStory, response: result, sentFactIds: sentCanonicalFactIds(prepared.body)
+          },
+          automaticRepair: undefined
+        });
+      }
+      const candidate: GenerationReviewCandidate = {
+        scope: "main", story: sceneStory, storyHash: sha256(canonicalEvidenceJson(sceneStory)),
+        rawOutputReference: `generation-primary:${job.id}:${job.attempts}`,
+        producingRequestHash: prepared.payloadHash, producingResponseId: result.responseId || null,
+        sentFactIds: sentCanonicalFactIds(prepared.body), ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+        worldId: job.world_id, worldVersionId: job.world_version_id || null,
+        baseTurnNumber: job.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.expected_turn_number,
+        policy: frozenStoryMemoryPolicySnapshot?.policy ?? generationPolicy ?? {},
+        policyHash: frozenStoryMemoryPolicySnapshot?.policyHash ?? sha256(stableStringify(generationPolicy ?? {})),
+        baseIdentity: job.generation_base_identity,
+        protocol: { version: job.prompt_protocol_version, promptHash: promptSnapshot.continuityReview?.review.hash ?? sha256("") },
+        provider: { type: provider.providerType, profileId: job.provider_profile_id,
+          configurationHash: effectiveProviderConfigurationHash(provider, job) },
+        resumeDependencies: {
+          generationContext: { contextFingerprint, contextDiagnostics, chronicleRetrieval },
+          producingProviderResult: structuredClone(result) as Record<string, unknown>,
+          stageState: { primaryResult: orchestration.primaryResult ?? null },
+          frozenCommitInputs: { inputs, fictionAction: safeAction },
+          replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
+        }
+      };
+      const priorRetry = sceneRetryReceipt && savedReview.success;
+      const gate = prepareGenerationReview({
+        candidate: priorRetry ? savedReview.data.gateCandidate : candidate,
+        stage: "scene_coverage", reasons: priorRetry ? savedReview.data.originalFindings : ["scene_beats_missing"],
+        operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
+        eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+        ...(priorRetry ? {
+          originalCandidate: savedReview.data.originalCandidate, originalFindings: savedReview.data.originalFindings,
+          decisionJournal: savedReview.data.decisionJournal, revision: savedReview.data.revision + 1,
+          retryFailure: "The authorized scene rewrite did not produce a usable complete turn."
+        } : {})
+      });
+      assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing incomplete scene candidate for review");
+      return true;
+    };
+
+    const activeSceneKeep = Boolean(sceneKeepReceipt && savedReview.success
+      && savedReview.data.gateCandidate.storyHash === sha256(canonicalEvidenceJson(sceneStory)));
+    if (stages.allowSceneCoverage && job.resolved_input_mode === "scene" && !activeSceneKeep) {
       let coverage;
       let coverageOutputLimited = true;
       try {
@@ -2096,6 +2182,9 @@ async function executeLoadedGeneration(
         contradictionCount: coverage?.contradictions.length || 0
       });
       if (!coverage?.covered) {
+        const authorizedSceneRetry = Boolean(sceneRetryReceipt && savedReview.success
+          && savedReview.data.gateCandidate.storyHash === sha256(canonicalEvidenceJson(sceneStory)));
+        if (!authorizedSceneRetry) return pauseSceneCoverage();
         const rejectedResponse = result.content;
         logger.warn({
           event: "turn_generation_recovery_started",
