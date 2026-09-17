@@ -159,6 +159,16 @@ export type GenerationOrchestrationState = {
     repairedStoryHash?: string;
     response?: ProviderResult;
   };
+  /** One scene rewrite reservation, persisted before provider transport. */
+  sceneCoverageRepair?: {
+    version: 1;
+    rejectedMainStoryHash: string;
+    repairRequestBody: string;
+    repairRequestPayloadHash: string;
+    status: "reserved" | "dispatched" | "validated";
+    authorizedReviewId: string;
+    authorizedRevision: number;
+  } | undefined;
   continuityReview?: ContinuityReviewCheckpoint | undefined;
   /** Private, immutable candidate and decision evidence for a user review gate. */
   generationReview?: GenerationReviewCheckpoint | undefined;
@@ -302,6 +312,21 @@ function hasValidSemanticRepair(value: unknown): boolean {
     && Array.isArray(repair.requiredEvidenceIds) && repair.requiredEvidenceIds.every((id) => typeof id === "string")
     && (repair.status === "reserved" || repair.status === "dispatched" || repair.status === "validated")
     && (repair.status !== "validated" || (typeof repair.repairedStoryHash === "string" && Boolean(repair.repairedStory) && typeof repair.repairedStory === "object"));
+}
+
+function hasValidSceneCoverageRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return repair.version === 1
+    && typeof repair.rejectedMainStoryHash === "string" && repair.rejectedMainStoryHash.length > 0
+    && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
+    && typeof repair.repairRequestPayloadHash === "string"
+    && repair.repairRequestPayloadHash === sha256Hex(repair.repairRequestBody)
+    && (repair.status === "reserved" || repair.status === "dispatched" || repair.status === "validated")
+    && typeof repair.authorizedReviewId === "string" && repair.authorizedReviewId.length > 0
+    && typeof repair.authorizedRevision === "number" && Number.isSafeInteger(repair.authorizedRevision)
+    && repair.authorizedRevision > 0;
 }
 
 function hasValidChoiceRepair(value: unknown): boolean {
@@ -1177,6 +1202,7 @@ export function createPostgresGenerationExecutionRepository(
           || !hasValidPrimaryReservation(row.orchestration_private?.primaryReservation)
           || !hasValidPrimaryResult(row.orchestration_private?.primaryResult)
           || !hasValidSemanticRepair(row.orchestration_private?.semanticRepair)
+          || !hasValidSceneCoverageRepair(row.orchestration_private?.sceneCoverageRepair)
           || !hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
           || !hasValidChoiceRepair(row.orchestration_private?.choiceRepair)
           || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {

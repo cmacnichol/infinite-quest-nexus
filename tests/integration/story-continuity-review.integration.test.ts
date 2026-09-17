@@ -247,6 +247,27 @@ integration("T17 durable continuity review", () => {
     } finally { invalidPrimary = false; }
   });
 
+  it("does not dispatch a primary replacement from a historical structure retry receipt", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; requests.length = 0; invalidPrimary = true;
+    try {
+      await runGenerationJob(pool, `structure-stale-initial-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      const saved = (await pool.query<{ orchestration_private: Record<string, unknown> }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+      const review = saved.generationReview as { decisionJournal: Array<Record<string, unknown>> };
+      const receipt = review.decisionJournal.at(-1)!;
+      receipt.reviewId = randomUUID();
+      delete saved.primaryResult;
+      (saved.primaryReservation as { status: string }).status = "reserved";
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(saved)]);
+
+      await runGenerationJob(pool, `structure-stale-reclaim-${randomUUID()}`, 30, credentialSecret);
+      expect(requests).toHaveLength(1);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
+    } finally { invalidPrimary = false; }
+  });
+
   it.each(["observe", "enforce"] as const)("%s completes a review when selected pinned world references are sent", async (mode) => {
     const worldLore = "The Sable Relay remembers every oath sworn beneath its lens.";
     const relationshipLore = "The keeper answers the Sable Relay after dusk.";
@@ -440,6 +461,40 @@ integration("T17 durable continuity review", () => {
     } finally { sceneCoverageSequence = []; }
   });
 
+  it("reclaims a dispatched scene rewrite without another transport call and re-offers the original", async () => {
+    const { job, application } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
+    reviewVerdict = "pass"; sceneCoverageSequence = [false, false]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `scene-dispatch-gate-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+      let interrupted = false;
+      const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+        const sceneRepair = (value as { sceneCoverageRepair?: { status?: string } }).sceneCoverageRepair;
+        if (!interrupted && sceneRepair?.status === "validated") {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+          throw Object.assign(new Error("Injected worker termination after scene rewrite transport."), { code: "generation_cancelled" });
+        }
+        return repository.saveOrchestration(scope, value);
+      } };
+      const workerId = `scene-dispatch-crash-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+
+      expect(interrupted).toBe(true);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+      await runGenerationJob(pool, `scene-dispatch-reclaim-${randomUUID()}`, 30, credentialSecret);
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(reoffered).toMatchObject({ state: "pending", stage: "scene_coverage", canKeep: true, canRetry: false, narration: gate.narration });
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { sceneCoverageSequence = []; }
+  });
+
   it("reserves one semantic repair, replaces the main, and reviews the repaired request before commit", async () => {
     const { job, application } = await enqueue("enforce");
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; requests.length = 0;
@@ -459,6 +514,24 @@ integration("T17 durable continuity review", () => {
     expect(saved.continuityReview.binding.producingRequestHash).toBe(createHash("sha256").update(requests[2]!).digest("hex"));
     expect(requests[2]).toContain("story-continuity-repair-v1");
     expect(requests[2]).not.toContain("private fixture");
+  });
+
+  it("does not dispatch continuity repair from a receipt for a different stage", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["conflict"]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `continuity-stage-initial-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      const saved = (await pool.query<{ orchestration_private: Record<string, unknown> }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+      const review = saved.generationReview as { decisionJournal: Array<Record<string, unknown>> };
+      review.decisionJournal.at(-1)!.nextStage = "scene_coverage";
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(saved)]);
+
+      await runGenerationJob(pool, `continuity-stage-reclaim-${randomUUID()}`, 30, credentialSecret);
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(0);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+    } finally { reviewSequence = []; }
   });
 
   it("does not spend a second semantic repair when the post-repair review still conflicts", async () => {
