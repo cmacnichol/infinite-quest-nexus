@@ -16,6 +16,7 @@ import {
   turnInputModeSourceSchema
 } from "./generation.js";
 import { generationReviewSummarySchema } from "./generation-review.js";
+export { generationReviewDecisionRequestSchema, generationReviewDetailSchema } from "./generation-review.js";
 import { safeGenerationDiagnosticSchema } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { chronicleRetrievalAuditSchema } from "./memory.js";

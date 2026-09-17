@@ -14,6 +14,7 @@ import {
 import { generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../application/src/generation/review-checkpoint.js";
 import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
 import { generationReviewDecisionRequestSchema, projectGenerationReviewDetail } from "../../contracts/src/generation-review.js";
+import { continuityReviewCheckpointSchema } from "../../application/src/memory/continuity-review-checkpoint.js";
 import {
   assertStoryMemoryPromptCompatibility,
   assertContinuityReviewPromptSnapshot,
@@ -30,6 +31,7 @@ import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
+import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
 
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
@@ -67,6 +69,7 @@ type JobRow = {
   errorCode: string | null;
   errorMessage: string | null;
   recoveryMetadata: Record<string, unknown>;
+  reviewSummary: unknown;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -183,10 +186,16 @@ function mutationResult(row: MutationRow): GenerationMutationResult {
 }
 
 function checkpointCanKeep(checkpoint: ReturnType<typeof generationReviewCheckpointSchema.parse>): boolean {
-  return checkpoint.gateCandidate.story !== null && canKeepGenerationCandidate({ ...checkpoint.eligibility, stage: checkpoint.stage, candidateScope: checkpoint.candidateScope, reasons: checkpoint.reasons });
+  return checkpoint.gateCandidate.story !== null && canKeepGenerationCandidate({
+    ...checkpoint.eligibility,
+    stage: checkpoint.stage,
+    candidateScope: checkpoint.candidateScope,
+    reasons: checkpoint.reasons
+  });
 }
 
 function jobResult(row: JobRow): GenerationJob {
+  const review = projectBoundedGenerationReviewSummary(row.reviewSummary, row.status);
   const base = {
     id: row.id,
     campaignId: row.campaignId,
@@ -211,7 +220,8 @@ function jobResult(row: JobRow): GenerationJob {
     completedAt: row.completedAt,
     partialOutput: row.partialOutput,
     partialNarration: row.partialOutput ? extractPartialNarration(row.partialOutput) : null
-    , generationPolicy: row.generationPolicy
+    , generationPolicy: row.generationPolicy,
+    ...(review ? { review } : {})
   };
   return row.operationKind === "append"
     ? { ...base, operationKind: "append", replacementTurnId: null }
@@ -596,6 +606,7 @@ export function createPostgresGenerationCommandRepository(
                 requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
+                ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
                 partial_output AS "partialOutput", generation_policy AS "generationPolicy"
            FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
@@ -676,7 +687,14 @@ export function createPostgresGenerationCommandRepository(
         },
         candidate: checkpoint.data.gateCandidate.story
           ? { narration: checkpoint.data.gateCandidate.story.narration, choices: checkpoint.data.gateCandidate.story.choices }
-          : null
+          : null,
+        continuityReview: (() => {
+          const state = checkpoint.data.gateCandidate.resumeDependencies.stageState as Record<string, unknown>;
+          const continuity = continuityReviewCheckpointSchema.safeParse(
+            state.continuityReview ?? row.orchestrationPrivate?.continuityReview
+          );
+          return continuity.success ? continuity.data.result : null;
+        })()
       });
     },
 

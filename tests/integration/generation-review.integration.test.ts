@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
+import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
 import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { generationRequestSchema, sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
@@ -111,9 +112,33 @@ integration("PostgreSQL generation review persistence", () => {
       reviewId: fixture.checkpoint.reviewId, revision: 1, state: "pending", narration: fixture.checkpoint.gateCandidate.story?.narration,
       canKeep: false, canRetry: true, choices: fixture.checkpoint.gateCandidate.story?.choices, findings: [{ code: "invalid_structure", message: expect.any(String) }]
     });
+    await expect(commandsAfterPause.getJob({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
+      id: fixture.queued.id,
+      review: { reviewId: fixture.checkpoint.reviewId, revision: 1, state: "pending", canKeep: false, canRetry: true }
+    });
     await expect(commandsAfterPause.decideReview({ ownerUserId, jobId: fixture.queued.id }, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });
     await expect(pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [fixture.imported.campaignId]))
       .resolves.toMatchObject({ rows: [{ count: 2 }] });
+  });
+
+  it("hydrates the pending review into recovery sync and changes its fingerprint when only the review revision changes", async () => {
+    const fixture = await pendingReview({ eligible: true });
+    const adapters = createPostgresCampaignAuthorityAdapters(pool, { memory: {} as never, turnPages: {} as never });
+    const read = () => adapters.transaction.read((transaction) => adapters.sync.readCampaignSyncSnapshot(transaction, {
+      ownerUserId,
+      campaignId: fixture.imported.campaignId
+    }));
+    const first = await read();
+    await pool.query(
+      "UPDATE generation_jobs SET orchestration_private = jsonb_set(orchestration_private, '{generationReview,revision}', '2'::jsonb) WHERE id=$1",
+      [fixture.queued.id]
+    );
+    const second = await read();
+
+    expect(first.projection.generationRecovery).toMatchObject({ id: fixture.queued.id, status: "recoverable" });
+    expect(first.projection.generationRecovery?.review).toMatchObject({ reviewId: fixture.checkpoint.reviewId, revision: 1, state: "pending" });
+    expect(second.projection.generationRecovery?.review).toMatchObject({ reviewId: fixture.checkpoint.reviewId, revision: 2, state: "pending" });
+    expect(second.syncToken).not.toBe(first.syncToken);
   });
 
   it("serializes a review race, replays the winning receipt, and keeps foreign owners out", async () => {

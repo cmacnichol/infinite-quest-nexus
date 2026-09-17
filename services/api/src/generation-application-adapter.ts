@@ -3,6 +3,7 @@ import type {
   GenerationRetryLatestRequest
 } from "../../../packages/contracts/src/generation.js";
 import type { GenerationResult } from "../../../packages/contracts/src/client-api.js";
+import type { GenerationReviewDecisionRequest, GenerationReviewDetail } from "../../../packages/contracts/src/generation-review.js";
 import {
   GenerationApplicationError,
   type EnqueueGenerationResult,
@@ -22,6 +23,8 @@ export type GenerationApplicationAdapter = Readonly<{
   enqueueLatestReplacement(ownerScope: OwnerScope, campaignId: string, request: GenerationRetryLatestRequest): Promise<EnqueueGenerationResult>;
   getGenerationJob(ownerScope: OwnerScope, jobId: string): Promise<GenerationJob>;
   getGenerationResult(ownerScope: OwnerScope, jobId: string): Promise<GenerationResult>;
+  getGenerationReview(ownerScope: OwnerScope, jobId: string): Promise<GenerationReviewDetail>;
+  decideGenerationReview(ownerScope: OwnerScope, jobId: string, request: GenerationReviewDecisionRequest): Promise<GenerationMutationResult>;
   retryGeneration(ownerScope: OwnerScope, jobId: string): Promise<GenerationMutationResult>;
   cancelGeneration(ownerScope: OwnerScope, jobId: string): Promise<GenerationMutationResult>;
   discardGeneration(ownerScope: OwnerScope, jobId: string): Promise<GenerationMutationResult>;
@@ -121,6 +124,12 @@ export function createGenerationApplicationAdapter(application: GenerationApplic
     ),
     getGenerationResult: (ownerScope, jobId) => mapApplicationErrors(() =>
       application.getResult({ ownerUserId: ownerScope.ownerUserId, jobId })
+    ),
+    getGenerationReview: (ownerScope, jobId) => mapApplicationErrors(() =>
+      application.getReview({ ownerUserId: ownerScope.ownerUserId, jobId })
+    ),
+    decideGenerationReview: (ownerScope, jobId, request) => mapApplicationErrors(() =>
+      application.decideReview({ ownerUserId: ownerScope.ownerUserId, jobId }, request)
     ),
     retryGeneration: (ownerScope, jobId) => mapApplicationErrors(() =>
       application.retry({ ownerUserId: ownerScope.ownerUserId, jobId })

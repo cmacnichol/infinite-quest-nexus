@@ -18,6 +18,7 @@ import {
 } from "../../packages/application/src/index.js";
 import type {
   GenerationRequest,
+  GenerationReviewDecisionRequest,
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../packages/contracts/src/index.js";
@@ -34,6 +35,11 @@ const replacementRequest = {
   ...request,
   expectedCurrentTurnNumber: 3
 } as GenerationRetryLatestRequest;
+const reviewDecision = {
+  reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  revision: 1,
+  decision: "retry"
+} as GenerationReviewDecisionRequest;
 const pendingGeneration = {
   id: jobId,
   status: "queued",
@@ -143,6 +149,8 @@ async function invoke(adapter: GenerationApplicationAdapter, method: AdapterMeth
     case "enqueueLatestReplacement": return adapter.enqueueLatestReplacement(ownerScope, campaignId, replacementRequest);
     case "getGenerationJob": return adapter.getGenerationJob(ownerScope, jobId);
     case "getGenerationResult": return adapter.getGenerationResult(ownerScope, jobId);
+    case "getGenerationReview": return adapter.getGenerationReview(ownerScope, jobId);
+    case "decideGenerationReview": return adapter.decideGenerationReview(ownerScope, jobId, reviewDecision);
     case "retryGeneration": return adapter.retryGeneration(ownerScope, jobId);
     case "cancelGeneration": return adapter.cancelGeneration(ownerScope, jobId);
     case "discardGeneration": return adapter.discardGeneration(ownerScope, jobId);
@@ -154,6 +162,8 @@ const adapterCases = [
   ["enqueueLatestReplacement", "enqueueReplacement", { ownerUserId: ownerScope.ownerUserId, campaignId }, replacementRequest],
   ["getGenerationJob", "getJob", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
   ["getGenerationResult", "getResult", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
+  ["getGenerationReview", "getReview", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
+  ["decideGenerationReview", "decideReview", { ownerUserId: ownerScope.ownerUserId, jobId }, reviewDecision],
   ["retryGeneration", "retry", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
   ["cancelGeneration", "cancel", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
   ["discardGeneration", "discard", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined]

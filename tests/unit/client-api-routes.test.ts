@@ -26,6 +26,8 @@ import {
   generationEnqueueResponseSchema,
   generationJobSnapshotSchema,
   generationResultSchema,
+  generationReviewDecisionRequestSchema,
+  generationReviewDetailSchema,
   generationStreamSnapshotSchema,
   metaResponseSchema,
   playableCharacterListResponseSchema,
@@ -112,6 +114,7 @@ type MockPoolOptions = {
   onQuery?: (sql: string) => void;
   rawGenerationError?: boolean;
   generationDiagnostic?: Record<string, unknown>;
+  generationReview?: Record<string, unknown>;
   onGenerationJobRead?: () => void;
   streamReadFailure?: boolean;
   streamReadFailureAfterReads?: number;
@@ -199,6 +202,7 @@ function jobRow(options: MockPoolOptions) {
     errorCode: null,
     errorMessage: null,
     recoveryMetadata: options.generationDiagnostic ? { diagnostic: options.generationDiagnostic } : {},
+    ...(options.generationReview ? { review: options.generationReview } : {}),
     createdAt: NOW,
     updatedAt: NOW,
     completedAt: NOW,
@@ -1366,6 +1370,101 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(calls[1]?.request).not.toHaveProperty("userId");
     } finally {
       await app.close();
+    }
+  });
+
+  it("serves safe owner-scoped review details and submits only a strict decision command", async () => {
+    const calls: Array<{ method: string; scope: Record<string, string>; request?: Record<string, unknown> }> = [];
+    const privateCanary = "PRIVATE_REVIEW_CONTEXT_CANARY";
+    const generation = injectedGenerationApplication({
+      getReview: async (scope) => {
+        calls.push({ method: "getReview", scope });
+        return {
+          version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 2, state: "pending",
+          stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true,
+          narration: "Mara enters the sealed archive.", choices: ["Wait."],
+          findings: [{ code: "narrative_conflict", message: privateCanary }], retryDescription: "Retry this generation stage.",
+          retryFailure: privateCanary, omittedFindingCount: 0
+        } as never;
+      },
+      decideReview: async (scope, request) => {
+        calls.push({ method: "decideReview", scope, request });
+        return { id: JOB_ID, status: "queued", operationKind: "append", replacementTurnId: null };
+      }
+    });
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation }));
+    const decision = { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 2, decision: "keep" };
+    try {
+      const detail = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/review` });
+      const accepted = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${JOB_ID}/review-decision`, payload: decision });
+      const malformed = await app.inject({ method: "POST", url: `/api/v1/generation-jobs/${JOB_ID}/review-decision`, payload: { ...decision, narration: "fabricated" } });
+
+      expect(detail.statusCode).toBe(200);
+      expect(generationReviewDetailSchema.parse(detail.json())).toMatchObject({
+        reviewId: decision.reviewId,
+        findings: [{ code: "narrative_conflict", message: "The candidate may conflict with established story continuity." }],
+        retryFailure: "The authorized retry did not produce an acceptable replacement."
+      });
+      expect(detail.body).not.toContain(privateCanary);
+      expect(accepted.statusCode).toBe(202);
+      expect(generationActionResponseSchema.parse(accepted.json())).toMatchObject({ id: JOB_ID, status: "queued" });
+      expect(malformed.statusCode).toBe(400);
+      expect(calls).toEqual([
+        { method: "getReview", scope: { ownerUserId: OWNER_ID, jobId: JOB_ID } },
+        { method: "decideReview", scope: { ownerUserId: OWNER_ID, jobId: JOB_ID }, request: generationReviewDecisionRequestSchema.parse(decision) }
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps the same review identity in polling and SSE without invoking a review decision", async () => {
+    const review = {
+      version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 3, state: "pending",
+      stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true
+    };
+    const calls: string[] = [];
+    const generation = injectedGenerationApplication({
+      getJob: async () => ({ ...jobRow({ generationReview: review }), status: "recoverable", resultTurnId: null }) as never,
+      getReview: async () => { calls.push("getReview"); throw new Error("detail should not be loaded"); },
+      decideReview: async () => { calls.push("decideReview"); throw new Error("decision should not be made"); }
+    });
+    const events = controlledGenerationEvents();
+    const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation, generationEvents: events.source }));
+    try {
+      const polling = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}` });
+      const streamPromise = app.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/stream` });
+      await expect.poll(() => events.subscribe.mock.calls.length).toBe(1);
+      events.close.mock.calls.length || events.emit();
+      const stream = await streamPromise;
+      const frame = JSON.parse(stream.body.trim().replace(/^data: /, ""));
+      expect(polling.json().review).toEqual(review);
+      expect(frame.review).toEqual(review);
+      expect(calls).toEqual([]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps owner-hidden review reads and stale decisions to their route status", async () => {
+    const reviewId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const missing = injectedGenerationApplication({
+      getReview: async () => { throw new GenerationApplicationError("not_found", { jobId: JOB_ID }); }
+    });
+    const stale = injectedGenerationApplication({
+      decideReview: async () => { throw new GenerationApplicationError("conflict"); }
+    });
+    const [missingApp, staleApp] = await Promise.all([
+      buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation: missing })),
+      buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation: stale }))
+    ]);
+    try {
+      const missingResponse = await missingApp.inject({ method: "GET", url: `/api/v1/generation-jobs/${JOB_ID}/review` });
+      const staleResponse = await staleApp.inject({ method: "POST", url: `/api/v1/generation-jobs/${JOB_ID}/review-decision`, payload: { reviewId, revision: 1, decision: "retry" } });
+      expect(missingResponse.statusCode).toBe(404);
+      expect(staleResponse.statusCode).toBe(409);
+    } finally {
+      await Promise.all([missingApp.close(), staleApp.close()]);
     }
   });
 

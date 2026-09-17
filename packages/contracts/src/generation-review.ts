@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { continuityReviewSchema } from "./story-continuity-review.js";
 
 export const generationReviewStageSchema = z.enum(["structure", "choices", "scene_coverage", "event_coverage", "continuity"]);
 export const generationReviewReasonCodeSchema = z.enum(["scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable", "invalid_choices", "invalid_structure", "output_incomplete", "mechanics_contamination", "event_coverage_failed", "candidate_stale", "candidate_invalid"]);
@@ -49,8 +50,29 @@ const fictionPreviewSchema = z.strictObject({
 const generationReviewDetailProjectionInputSchema = z.object({
   review: generationReviewSummarySchema.passthrough(),
   candidate: fictionPreviewSchema.nullable().optional(),
+  continuityReview: continuityReviewSchema.nullable().optional(),
   omittedFindingCount: z.number().int().min(0).optional()
 }).passthrough();
+
+const continuityCategoryLabels = {
+  world_rule: "world-rule", character_attribute: "character-detail", relationship: "relationship", chronology: "chronology",
+  location: "location", object_state: "object-state", thread_loss: "open-thread", direction_coverage: "story-direction",
+  replacement_state: "replacement-state"
+} as const;
+
+function specificContinuityFinding(
+  narration: string | undefined,
+  review: z.infer<typeof continuityReviewSchema> | null | undefined
+): GenerationReviewFinding | null {
+  if (!narration || !review || review.verdict !== "conflict") return null;
+  const finding = review.findings.find((candidate) => candidate.kind === "contradiction");
+  if (!finding || finding.kind !== "contradiction" || finding.output.path !== "/narration"
+    || narration.slice(finding.output.start, finding.output.end) !== finding.output.quote) return null;
+  return {
+    code: "narrative_conflict",
+    message: `Possible ${continuityCategoryLabels[finding.category]} contradiction in “${finding.output.quote}”.`
+  };
+}
 
 /**
  * Converts server-validated fiction preview fields into a public detail. Review
@@ -59,11 +81,14 @@ const generationReviewDetailProjectionInputSchema = z.object({
  */
 export function projectGenerationReviewDetail(value: unknown): GenerationReviewDetail {
   const input = generationReviewDetailProjectionInputSchema.parse(value);
+  const specific = input.review.reasons.includes("narrative_conflict")
+    ? specificContinuityFinding(input.candidate?.narration, input.continuityReview)
+    : null;
   return generationReviewDetailSchema.parse({
     ...projectGenerationReviewSummary(input.review),
     narration: input.candidate?.narration ?? null,
     choices: input.candidate?.choices ?? [],
-    findings: input.review.reasons.map((code) => ({ code, message: reviewReasonMessages[code] })),
+    findings: input.review.reasons.map((code) => specific?.code === code ? specific : ({ code, message: reviewReasonMessages[code] })),
     retryDescription: "Retry this generation stage.",
     // Retry execution errors are private orchestration diagnostics.  The public
     // surface records only that the one authorized replacement was unavailable.
