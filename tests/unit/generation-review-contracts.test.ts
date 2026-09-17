@@ -148,7 +148,8 @@ describe("generation review contracts", () => {
       scope, story: null, storyHash, rawOutputReference: `provider-${scope}`, producingRequestHash: null,
       producingResponseId: null, sentFactIds: [], ownerUserId: "33333333-3333-4333-8333-333333333333",
       campaignId: snapshot.campaignId, worldId: "44444444-4444-4444-8444-444444444444",
-      worldVersionId: "66666666-6666-4666-8666-666666666666", baseTurnNumber: 0, expectedTurnNumber: 1,
+      // Legacy validated-main checkpoints retain a nullable world-version identity.
+      worldVersionId: null, baseTurnNumber: 0, expectedTurnNumber: 1,
       baseIdentity, policy: {}, policyHash: "e".repeat(64), protocol: { version: "story-v1", promptHash: "b".repeat(64) },
       provider: { type: "lmstudio", profileId: null, configurationHash: "c".repeat(64) },
       resumeDependencies: { generationContext: {}, producingProviderResult: {}, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }

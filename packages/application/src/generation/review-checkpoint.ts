@@ -9,7 +9,7 @@ export const generationReviewCandidateSchema = z.strictObject({
   scope: z.enum(["main", "final"]), story: storyTurnOutputSchema.nullable(), storyHash: hashSchema,
   rawOutputReference: z.string().trim().min(1).max(500).nullable(), producingRequestHash: hashSchema.nullable(),
   producingResponseId: z.string().trim().min(1).max(500).nullable(), sentFactIds: z.array(z.uuid()).max(1_000),
-  ownerUserId: z.uuid(), campaignId: z.uuid(), worldId: z.uuid(), worldVersionId: z.uuid(),
+  ownerUserId: z.uuid(), campaignId: z.uuid(), worldId: z.uuid(), worldVersionId: z.uuid().nullable(),
   baseTurnNumber: z.number().int().min(0), expectedTurnNumber: z.number().int().positive(), policy: immutableJsonSchema, policyHash: hashSchema,
   baseIdentity: generationBaseIdentitySchema,
   protocol: z.strictObject({ version: z.string().trim().min(1).max(200), promptHash: hashSchema }),
