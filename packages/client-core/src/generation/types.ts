@@ -1,6 +1,8 @@
 import type {
   GenerationActionResponse,
   GenerationResult,
+  GenerationReviewDecisionRequest,
+  GenerationReviewDetail,
   GenerationStreamSnapshot
 } from "@infinite-quest/contracts";
 import type { AbortSignalLike, Clock, PendingGenerationSubmission, PendingSubmissionStore } from "../ports.js";
@@ -47,6 +49,8 @@ export interface GenerationApiPort {
   enqueueReplacement(campaignId: string, request: import("@infinite-quest/contracts").GenerationRetryLatestRequest): Promise<import("@infinite-quest/contracts").GenerationEnqueueResponse>;
   syncStatus(campaignId: string): Promise<import("@infinite-quest/contracts").CampaignSyncStatus>;
   result(jobId: string): Promise<GenerationResult>;
+  getReview(jobId: string): Promise<GenerationReviewDetail>;
+  decideReview(jobId: string, request: GenerationReviewDecisionRequest): Promise<GenerationActionResponse>;
   retry(jobId: string): Promise<GenerationActionResponse>;
   cancel(jobId: string): Promise<GenerationActionResponse>;
   discard(jobId: string): Promise<GenerationActionResponse>;
@@ -84,6 +88,8 @@ interface GenerationRunBase {
   readonly jobId: string;
   watch(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
   retryGeneration(signal: AbortSignalLike): AsyncIterable<GenerationEvent>;
+  getReview(): Promise<GenerationReviewDetail>;
+  decideReview(request: GenerationReviewDecisionRequest): Promise<GenerationActionResponse>;
   cancelGeneration(): Promise<GenerationActionResponse>;
   discardGeneration(): Promise<GenerationActionResponse>;
   fetchResult(): Promise<

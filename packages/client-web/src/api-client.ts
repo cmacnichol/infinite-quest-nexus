@@ -14,6 +14,8 @@ import {
   campaignCharacterProfileUpdateResponseSchema,
   campaignSyncStatusSchema,
   generationActionResponseSchema,
+  generationReviewDecisionRequestSchema,
+  generationReviewDetailSchema,
   generationEnqueueResponseSchema,
   generationJobSnapshotSchema,
   generationRequestSchema,
@@ -56,6 +58,8 @@ import type {
   GenerationRequest,
   GenerationResult,
   GenerationRetryLatestRequest,
+  GenerationReviewDecisionRequest,
+  GenerationReviewDetail,
   MetaResponse,
   PlayableCharacterListResponse,
   ProviderListResponse,
@@ -117,6 +121,8 @@ export interface GenerationApi {
   enqueueReplacement(campaignId: string, request: GenerationRetryLatestRequest, signal?: AbortSignal): Promise<GenerationEnqueueResponse>;
   get(jobId: string, signal?: AbortSignal): Promise<GenerationJobSnapshot>;
   result(jobId: string, signal?: AbortSignal): Promise<GenerationResult>;
+  getReview(jobId: string, signal?: AbortSignal): Promise<GenerationReviewDetail>;
+  decideReview(jobId: string, request: GenerationReviewDecisionRequest, signal?: AbortSignal): Promise<GenerationActionResponse>;
   retry(jobId: string, signal?: AbortSignal): Promise<GenerationActionResponse>;
   cancel(jobId: string, signal?: AbortSignal): Promise<GenerationActionResponse>;
   discard(jobId: string, signal?: AbortSignal): Promise<GenerationActionResponse>;
@@ -293,6 +299,17 @@ export function createNexusApiClient(options: NexusHttpClientOptions): NexusApiC
       path: `/generation-jobs/${encodedPathSegment(jobId)}/result`,
       responseSchema: generationResultSchema
     }, signal)),
+    getReview: (jobId, signal) => http.request(withSignal({
+      method: "GET",
+      path: `/generation-jobs/${encodedPathSegment(jobId)}/review`,
+      responseSchema: generationReviewDetailSchema
+    }, signal)),
+    async decideReview(jobId, request, signal) {
+      const method: HttpMethod = "POST";
+      const path = `/generation-jobs/${encodedPathSegment(jobId)}/review-decision`;
+      const body = validatedRequest(generationReviewDecisionRequestSchema, request, method, path);
+      return http.request(withSignal({ method, path, body: { kind: "json", value: body }, responseSchema: generationActionResponseSchema }, signal));
+    },
     retry: (jobId, signal) => http.request(withSignal({
       method: "POST",
       path: `/generation-jobs/${encodedPathSegment(jobId)}/retry`,

@@ -78,11 +78,15 @@ function createRun(
   dependencies: GenerationWorkflowDependencies
 ): GenerationRun {
   const machine = createGenerationMachine();
+  // A resumed review remains an explicit user decision even if a reconnecting
+  // stream frame has not yet repeated its public review summary.
+  let reviewRequiresDecision = "review" in operation && operation.review !== undefined;
   let watcherActive = false;
   let inFlightTerminalAction: {
     action: "cancel" | "discard";
     response: Promise<GenerationActionResponse>;
   } | null = null;
+  let inFlightReviewDecision: Promise<GenerationActionResponse> | null = null;
 
   async function fetchResult(): Promise<
     | Extract<GenerationEvent, { type: "settled"; outcome: "completed" }>
@@ -131,6 +135,26 @@ function createRun(
       if (cause instanceof GenerationWorkflowProtocolError) throw cause;
       return toError(cause);
     }
+  }
+
+  function decideReview(request: import("@infinite-quest/contracts").GenerationReviewDecisionRequest): Promise<GenerationActionResponse> {
+    if (inFlightReviewDecision) return inFlightReviewDecision;
+    const response = dependencies.api.decideReview(jobId, request).then((actionResponse) => {
+      if (actionResponse.id !== jobId
+        || !["queued", "replacement_queued"].includes(actionResponse.status)
+        || actionResponse.operationKind !== operation.operationKind
+        || actionResponse.replacementTurnId !== operation.replacementTurnId) {
+        throw new GenerationWorkflowProtocolError("action_response_mismatch");
+      }
+      machine.acknowledgeReviewDecision(request.reviewId, request.revision);
+      return actionResponse;
+    });
+    inFlightReviewDecision = response;
+    void response.then(
+      () => { if (inFlightReviewDecision === response) inFlightReviewDecision = null; },
+      () => { if (inFlightReviewDecision === response) inFlightReviewDecision = null; }
+    );
+    return response;
   }
 
   async function observeSnapshot(snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot) {
@@ -210,6 +234,7 @@ function createRun(
             }
             const parsed = generationStreamSnapshotSchema.safeParse(sourceEvent.snapshot);
             if (!parsed.success) throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause: parsed.error });
+            if (parsed.data.status === "recoverable" && parsed.data.review !== undefined) reviewRequiresDecision = true;
             let observation = await observeSnapshot(parsed.data);
             // A new watcher must settle even if this run already observed the terminal snapshot.
             if (observation.kind === "duplicate"
@@ -234,6 +259,10 @@ function createRun(
               return;
             }
             if (observation.snapshot.status === "recoverable") {
+              if (reviewRequiresDecision) {
+                yield { type: "settled", outcome: "unrecoverable", error: terminalError(observation.snapshot.errorMessage) };
+                return;
+              }
               if (observation.snapshot.attempts === 1) {
                 try {
                   const retryError = await retryOrUnrecoverable();
@@ -307,6 +336,10 @@ function createRun(
     retryGeneration(signal: import("../ports.js").AbortSignalLike) {
       return observe(signal, true);
     },
+    getReview() {
+      return dependencies.api.getReview(jobId);
+    },
+    decideReview,
     cancelGeneration() {
       return performAction("cancel");
     },

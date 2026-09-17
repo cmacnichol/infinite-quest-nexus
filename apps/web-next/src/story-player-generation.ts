@@ -8,7 +8,7 @@ import {
   type IdFactory,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
-import type { GenerationResult, StoryLengthProfile, TurnInputModeSource } from "@infinite-quest/contracts";
+import { generationReviewSummarySchema, type GenerationResult, type StoryLengthProfile, type TurnInputModeSource } from "@infinite-quest/contracts";
 
 const GENERATION_CONTEXT = { budgetTokens: 32_000, compression: "auto" as const, recentTurns: 8 };
 
@@ -30,6 +30,7 @@ export interface StoryGenerationController {
   submitAppend(submission: StoryGenerationSubmission): Promise<boolean>;
   submitReplacement(replacementTurnId: string, submission: StoryGenerationSubmission): Promise<boolean>;
   cancel(): Promise<boolean>;
+  decideReview(request: import("@infinite-quest/contracts").GenerationReviewDecisionRequest): Promise<boolean>;
   retry(): Promise<boolean>;
   discard(): Promise<boolean>;
   dispose(): void;
@@ -94,11 +95,23 @@ export function createStoryGenerationController(
 
   const monitor = (entry: AttachedRun, retryFirst = false) => {
     void (async () => {
+      let loadedReviewIdentity: string | null = null;
       try {
         const events = retryFirst ? entry.run.retryGeneration(entry.abort.signal) : entry.run.watch(entry.abort.signal);
         for await (const event of events) {
           if (!isCurrent(entry)) return;
           entry.session.apply(event);
+          const reviewResult = event.type === "status" ? generationReviewSummarySchema.safeParse(event.snapshot.review) : null;
+          if (reviewResult?.success && reviewResult.data.state === "pending") {
+            const review = reviewResult.data;
+            const identity = `${review.version}:${review.reviewId}:${review.revision}`;
+            if (identity !== loadedReviewIdentity) {
+              loadedReviewIdentity = identity;
+              // A live review can arrive after attach's initial loadReview call.
+              // Campaign-store fences this request against later review revisions.
+              void entry.session.loadReview();
+            }
+          }
           if (event.type === "settled" && event.outcome === "completed" && isCurrent(entry)) {
             await finalizeCompleted(entry, event.result);
           } else if (event.type === "settled" && (event.outcome === "cancelled" || event.outcome === "discarded") && isCurrent(entry)) {
@@ -122,6 +135,9 @@ export function createStoryGenerationController(
       epoch
     };
     active = entry;
+    // The saved review is read only after its public summary identifies one;
+    // attaching a run must never decide or retry a candidate automatically.
+    if (typeof entry.session.loadReview === "function") void entry.session.loadReview();
     monitor(entry, retryFirst);
     return true;
   };
@@ -191,6 +207,17 @@ export function createStoryGenerationController(
       if (!entry || !isCurrent(entry)) return false;
       try {
         await entry.run.cancelGeneration();
+        return true;
+      } catch (error) {
+        if (isCurrent(entry)) dependencies.onError?.(error);
+        return false;
+      }
+    },
+    async decideReview(request) {
+      const entry = active;
+      if (!entry || !isCurrent(entry)) return false;
+      try {
+        await entry.session.decideReview(request);
         return true;
       } catch (error) {
         if (isCurrent(entry)) dependencies.onError?.(error);

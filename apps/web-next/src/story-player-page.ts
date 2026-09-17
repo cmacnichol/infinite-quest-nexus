@@ -188,6 +188,8 @@ export function mountStoryPlayerPage(
   let storyMemoryError: string | null = null;
   let storyMemoryRequestToken = 0;
   let storyMemorySaveInFlight = false;
+  let reviewDecisionInFlight = false;
+  let reviewDecisionError: string | null = null;
   let replacementTurnId: string | null = null;
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
@@ -631,7 +633,9 @@ export function mountStoryPlayerPage(
       storyMemoryLocked: storyMemorySaveInFlight,
       storyMemorySaveInFlight,
       activityRecords: tools.activity(),
-      illustrations: illustrations.get()
+      illustrations: illustrations.get(),
+      reviewDecisionInFlight,
+      reviewDecisionError
     };
     const activeCampaign = projection.campaign;
     const canWriteCampaign = canWriteCurrentCampaign();
@@ -661,7 +665,7 @@ export function mountStoryPlayerPage(
     } else {
       renderStoryPlayerView(root, state);
     }
-    if (recoveryFocusAction && ["retry-generation", "discard-generation", "resume-generation"].includes(recoveryFocusAction)) {
+    if (recoveryFocusAction && ["retry-generation", "discard-generation", "resume-generation", "keep-generation-review", "retry-generation-review"].includes(recoveryFocusAction)) {
       root.querySelector<HTMLElement>(`[data-story-recovery] [data-action="${recoveryFocusAction}"]`)?.focus({ preventScroll: true });
     }
     const editState = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
@@ -1124,6 +1128,35 @@ export function mountStoryPlayerPage(
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='discard-generation']")) {
       control.addEventListener("click", () => { void generation.discard(); });
+    }
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='keep-generation-review'], [data-action='retry-generation-review']")) {
+      control.addEventListener("click", () => {
+        const review = projection.generation?.review?.summary;
+        const decision = control.dataset.action === "keep-generation-review" ? "keep" : "retry";
+        if (!review || reviewDecisionInFlight) return;
+        reviewDecisionInFlight = true;
+        reviewDecisionError = null;
+        render();
+        void generation.decideReview({ reviewId: review.reviewId, revision: review.revision, decision }).then(async (saved) => {
+          if (!saved && !disposed) {
+            reviewDecisionError = "Your decision could not be saved. The turn remains unchanged.";
+            const campaignId = projection.campaign?.id;
+            if (campaignId) {
+              // A stale decision can mean another tab has already accepted or
+              // replaced the turn. Campaign sync is authoritative for that
+              // race and preserves the local failure when it is still pending.
+              try {
+                const sync = await composition.api.generation.syncStatus(campaignId);
+                if (!disposed && projection.campaign?.id === campaignId) composition.campaignStore.load(sync);
+              } catch {
+                // Keep the explicit save error when the refresh itself fails.
+              }
+            }
+          }
+        }).finally(() => {
+          if (!disposed) { reviewDecisionInFlight = false; render(); }
+        });
+      });
     }
     for (const textarea of root.querySelectorAll<HTMLTextAreaElement>("[data-story-illustration-prompt]")) {
       textarea.addEventListener("input", () => { void illustrations.editPrompt(textarea.value); });

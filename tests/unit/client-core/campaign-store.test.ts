@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CampaignRuntimeStateResponse, CampaignSyncStatus, GenerationResult, GenerationStreamSnapshot, TurnListResponse, TurnSummary } from "../../../packages/contracts/src/index.js";
+import type { CampaignRuntimeStateResponse, CampaignSyncStatus, GenerationResult, GenerationReviewDetail, GenerationStreamSnapshot, TurnListResponse, TurnSummary } from "../../../packages/contracts/src/index.js";
 import {
   CampaignProjectionProtocolError,
   createGenerationWorkflow,
@@ -137,9 +137,30 @@ function run(id = campaignId): GenerationRun {
     replacementTurnId: null,
     watch: async function* () {},
     retryGeneration: async function* () {},
+    getReview: async () => reviewDetail(),
+    decideReview: async () => ({ id: jobId, status: "queued", operationKind: "append", replacementTurnId: null }),
     cancelGeneration: async () => ({ id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null }),
     discardGeneration: async () => ({ id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null }),
     fetchResult: async () => ({ type: "result_unavailable", jobId, error: new Error("not available") })
+  };
+}
+
+function reviewDetail(overrides: Partial<GenerationReviewDetail> = {}): GenerationReviewDetail {
+  return {
+    version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+    stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true,
+    narration: "The preserved gate text.", choices: ["Enter"], findings: [{ code: "narrative_conflict", message: "Possible chronology conflict." }],
+    retryDescription: "Retry the continuity stage.", retryFailure: null, omittedFindingCount: 0,
+    ...overrides
+  };
+}
+
+function reviewSummary(overrides: Partial<GenerationReviewDetail> = {}) {
+  const detail = reviewDetail(overrides);
+  return {
+    version: detail.version, reviewId: detail.reviewId, revision: detail.revision, state: detail.state,
+    stage: detail.stage, candidateScope: detail.candidateScope, reasons: detail.reasons,
+    canKeep: detail.canKeep, canRetry: detail.canRetry
   };
 }
 
@@ -207,6 +228,78 @@ function expectProtocol(action: () => void, kind: string): void {
 }
 
 describe("campaign store hydration", () => {
+  it("hydrates review identity and drops a delayed detail once a newer decision revision arrives", async () => {
+    let resolveDetail: ((value: GenerationReviewDetail) => void) | undefined;
+    const controller = createCampaignStore();
+    controller.load(sync({ generationRecovery: {
+      id: jobId, status: "recoverable", operationKind: "append", replacementTurnId: null,
+      expectedTurnNumber: 3, attempts: 1, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", resultTurnId: null,
+      review: reviewSummary()
+    } } as never));
+    const session = controller.attachGeneration({
+      ...run(),
+      getReview: () => new Promise<GenerationReviewDetail>((resolve) => { resolveDetail = resolve; })
+    });
+    session.apply({ type: "status", snapshot: snapshot({ status: "recoverable", review: reviewSummary(), partialNarration: "The preserved gate text." }) });
+    session.apply({ type: "narration", text: "The preserved gate text." });
+
+    const loading = session.loadReview();
+    expect(controller.store.get().generation).toMatchObject({ narration: "The preserved gate text.", review: { summary: { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1 }, detail: { state: "loading" } } });
+    session.apply({ type: "status", snapshot: snapshot({ status: "queued", review: reviewSummary({ state: "decided", revision: 2 }), partialNarration: "The preserved gate text." }) });
+    resolveDetail?.(reviewDetail());
+    await loading;
+
+    expect(controller.store.get().generation).toMatchObject({ narration: "The preserved gate text.", review: { summary: { revision: 2, state: "decided" }, detail: { state: "idle" } } });
+  });
+
+  it("drops a review detail response after switching campaigns", async () => {
+    let resolveDetail: ((value: GenerationReviewDetail) => void) | undefined;
+    const controller = createCampaignStore();
+    controller.load(sync());
+    const session = controller.attachGeneration({ ...run(), getReview: () => new Promise((resolve) => { resolveDetail = resolve; }) });
+    session.apply({ type: "status", snapshot: snapshot({ status: "recoverable", review: reviewSummary() }) });
+
+    const loading = session.loadReview();
+    controller.load(syncForCampaign(otherCampaignId));
+    resolveDetail?.(reviewDetail());
+    await loading;
+
+    expect(controller.store.get()).toMatchObject({ campaign: { id: otherCampaignId }, generation: null });
+  });
+
+  it("retains an unsupported review version without exposing review actions", () => {
+    const controller = createCampaignStore();
+    controller.load(sync());
+    const session = controller.attachGeneration(run());
+    session.apply({ type: "status", snapshot: snapshot({ status: "recoverable", partialNarration: "Saved text.", review: { version: 2 } as never }) });
+    session.apply({ type: "narration", text: "Saved text." });
+
+    expect(controller.store.get().generation).toMatchObject({ narration: "Saved text.", review: null, unsupportedReviewVersion: 2 });
+  });
+
+  it("refreshes an authoritative higher review on a 409 without submitting the opposite decision", async () => {
+    const submitted: string[] = [];
+    const controller = createCampaignStore();
+    controller.load(sync());
+    const session = controller.attachGeneration({
+      ...run(),
+      decideReview: async (request) => {
+        submitted.push(request.decision);
+        throw new NexusApiError("stale review", { statusCode: 409 });
+      },
+      getReview: async () => reviewDetail({ reviewId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", revision: 2, state: "pending" })
+    });
+    session.apply({ type: "status", snapshot: snapshot({ status: "recoverable", review: reviewSummary() }) });
+
+    await expect(session.decideReview({ reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, decision: "keep" })).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(submitted).toEqual(["keep"]);
+    expect(controller.store.get().generation?.review).toMatchObject({
+      summary: { reviewId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", revision: 2 },
+      detail: { state: "loaded" }
+    });
+  });
+
   it("preserves the recorded retrieval audit on the immediate accepted turn", async () => {
     const completed = result({ chronicleRetrieval: DEDICATED_CHUNKED_AUDIT });
     const controller = createCampaignStore();
@@ -785,6 +878,8 @@ describe("campaign store generation projection", () => {
       enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: turnTwoId }),
       syncStatus: async () => sync(),
       result: async () => result({ expectedTurnNumber: 2, turnNumber: 2 }),
+      getReview: async () => ({} as never),
+      decideReview: async () => ({ id: jobId, status: "replacement_queued", operationKind: "replace_latest", replacementTurnId: turnTwoId }),
       retry: async () => ({ id: jobId, status: "replacement_queued", operationKind: "replace_latest", replacementTurnId: turnTwoId }),
       cancel: async () => ({ id: jobId, status: "cancelled", operationKind: "replace_latest", replacementTurnId: turnTwoId }),
       discard: async () => ({ id: jobId, status: "discarded", operationKind: "replace_latest", replacementTurnId: turnTwoId })

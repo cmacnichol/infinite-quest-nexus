@@ -4,6 +4,8 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 
 const PRIVATE_CANARY = "PRIVATE_PROMPT_AND_PROVIDER_ERROR_CANARY";
 const generationId = "55555555-5555-4555-8555-555555555555";
+const legacyOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const webNextOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}`;
 
 function recoveryFixture() {
   const payloads = quietLeafApiPayloads();
@@ -129,7 +131,7 @@ async function installRecoveryApi(page: Page, options: { operation?: "append" | 
 test("web-next Story renders only safe recovery guidance and recovery actions", async ({ page }) => {
   const payloads = await installRecoveryApi(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(`http://127.0.0.1:43174/app/story/${payloads.campaignId}`);
+  await page.goto(`${webNextOrigin}/app/story/${payloads.campaignId}`);
 
   const recovery = page.locator("[data-story-recovery]");
   await expect(recovery).toBeVisible();
@@ -154,7 +156,7 @@ test("legacy Story renders safe recovery guidance without private diagnostic dat
   await page.setViewportSize({ width: 1440, height: 1000 });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
   await page.route(`**/story/${payloads.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
-  await page.goto(`http://127.0.0.1:43173/story/${payloads.campaignId}`);
+  await page.goto(`${legacyOrigin}/story/${payloads.campaignId}`);
 
   const recovery = page.locator("#generationRecoveryPanel");
   await expect(recovery).toBeVisible();
@@ -163,6 +165,7 @@ test("legacy Story renders safe recovery guidance without private diagnostic dat
   await expect(recovery).toContainText("World references: 4 included, 1 omitted.");
   await expect(recovery).toContainText("Protected context estimates: world canon 12, current state 4, direction 3.");
   await expect(recovery).toContainText("Continuity review is uncertain; it was not a full-history pass.");
+  await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
   await expect(recovery.getByRole("button", { name: "Resume monitoring", exact: true })).toBeVisible();
   await expect(recovery.getByRole("button", { name: "Retry generation job", exact: true })).toBeVisible();
   await expect(recovery.getByRole("button", { name: "Discard generation job", exact: true })).toBeVisible();
@@ -208,7 +211,7 @@ for (const scope of ["application", "campaign"] as const) test(`Prompt Library r
     return respond({});
   });
 
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#prompt-library");
+  await page.goto(`${legacyOrigin}/nexus/index.html#prompt-library`);
   await expect(page.getByRole("heading", { name: "Story system", exact: true })).toBeVisible();
   await expect(page.getByText("Required output shape version story-output-v2.")).toBeVisible();
   await expect(page.locator("#promptLibraryRequiredShape")).toHaveText("{ narration, choices, currentContinuity }");
@@ -245,7 +248,7 @@ for (const surface of ["legacy", "web-next"] as const) {
         const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
         await page.route(`**/story/${payloads.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
       }
-      await page.goto(surface === "legacy" ? `http://127.0.0.1:43173/story/${payloads.campaignId}` : `http://127.0.0.1:43174/app/story/${payloads.campaignId}`);
+      await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${payloads.campaignId}` : `${webNextOrigin}/app/story/${payloads.campaignId}`);
       const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
       await expect(recovery).toBeVisible();
       const draft = page.locator(surface === "legacy" ? "#freeAction" : "[data-story-draft]");
@@ -271,7 +274,7 @@ for (const surface of ["legacy", "web-next"] as const) {
       const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
       await page.route(`**/story/${payloads.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
     }
-    await page.goto(surface === "legacy" ? `http://127.0.0.1:43173/story/${payloads.campaignId}` : `http://127.0.0.1:43174/app/story/${payloads.campaignId}`);
+    await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${payloads.campaignId}` : `${webNextOrigin}/app/story/${payloads.campaignId}`);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
     await expect(recovery).toContainText("Discard this generation and submit the turn again.");
     await expect(recovery.getByRole("button", { name: /^Retry generation/ })).toBeHidden();
@@ -294,7 +297,7 @@ for (const surface of ["legacy", "web-next"] as const) {
         const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
         await page.route(`**/story/${payloads.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
       }
-      await page.goto(surface === "legacy" ? `http://127.0.0.1:43173/story/${payloads.campaignId}` : `http://127.0.0.1:43174/app/story/${payloads.campaignId}`);
+      await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${payloads.campaignId}` : `${webNextOrigin}/app/story/${payloads.campaignId}`);
       const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
       await expect(recovery).toBeVisible();
       if (status in messages) await expect(recovery).toContainText(messages[status as keyof typeof messages]);
@@ -320,9 +323,9 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
     const api = await installRecoveryApi(page, { operation, diagnostic: { code: "authoritative_context_invalid", operation: "story_generation", action: "repair_authority" } });
     if (surface === "legacy") {
       const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
-      await page.route(`http://127.0.0.1:43173/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+      await page.route(`${legacyOrigin}/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
     }
-    await page.goto(surface === "legacy" ? `http://127.0.0.1:43173/story/${api.campaignId}` : `http://127.0.0.1:43174/app/story/${api.campaignId}`);
+    await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.campaignId}` : `${webNextOrigin}/app/story/${api.campaignId}`);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
     await expect(recovery).toBeVisible();
     if (surface === "web-next") await expect(page.locator("[data-page=story-player]")).toHaveAttribute("aria-busy", "false");
@@ -360,9 +363,9 @@ for (const surface of ["legacy", "web-next"] as const) for (const operation of [
     const api = await installRecoveryApi(page, { operation, diagnostic: { code: "authoritative_context_invalid", operation: "story_generation", action: "repair_authority" } });
     if (surface === "legacy") {
       const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
-      await page.route(`http://127.0.0.1:43173/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+      await page.route(`${legacyOrigin}/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
     }
-    await page.goto(surface === "legacy" ? `http://127.0.0.1:43173/story/${api.campaignId}` : `http://127.0.0.1:43174/app/story/${api.campaignId}`);
+    await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.campaignId}` : `${webNextOrigin}/app/story/${api.campaignId}`);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
     await expect(recovery).toBeVisible();
     const draft = page.locator(surface === "legacy" ? "#freeAction" : "[data-story-draft]");
@@ -415,9 +418,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     });
     if (surface === "legacy") {
       const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
-      await page.route(`http://127.0.0.1:43173/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+      await page.route(`${legacyOrigin}/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
     }
-    await page.goto(surface === "legacy" ? `http://127.0.0.1:43173/story/${api.campaignId}` : `http://127.0.0.1:43174/app/story/${api.campaignId}`);
+    await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.campaignId}` : `${webNextOrigin}/app/story/${api.campaignId}`);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
     await expect(recovery).toBeVisible();
     const draft = page.locator(surface === "legacy" ? "#freeAction" : "[data-story-draft]");
@@ -452,19 +455,19 @@ for (const surface of ["legacy", "web-next"] as const) {
 test("stream loss falls back to polling and the same recovery survives an interface handoff", async ({ page }) => {
   const api = await installRecoveryApi(page, { streamLoss: true });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
-  await page.route(`http://127.0.0.1:43173/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
-  await page.goto(`http://127.0.0.1:43174/app/story/${api.campaignId}`);
+  await page.route(`${legacyOrigin}/story/${api.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto(`${webNextOrigin}/app/story/${api.campaignId}`);
   await expect(page.locator("[data-page=story-player]")).toHaveAttribute("aria-busy", "false");
   await expect.poll(() => api.requests.some(request => request.endsWith(`/${generationId}/stream`))).toBe(true);
   await expect.poll(() => api.requests.some(request => request === `GET /api/v1/generation-jobs/${generationId}`)).toBe(true);
   await expect(page.locator("[data-story-recovery]")).toContainText("Continuity review is uncertain");
-  await page.goto(`http://127.0.0.1:43173/story/${api.campaignId}`);
+  await page.goto(`${legacyOrigin}/story/${api.campaignId}`);
   await expect(page.locator("#generationRecoveryPanel")).toContainText("Continuity review is uncertain");
   await expect(page.locator("#freeAction")).toBeEnabled();
   await page.locator("#freeAction").fill("Keep the handoff draft.");
   await page.locator("#generationRecoveryPanel").getByRole("button", { name: "Discard generation job", exact: true }).click();
   await expect.poll(() => api.requests.some((request) => request.endsWith(`/${generationId}/discard`))).toBe(true);
   await expect(page.locator("#freeAction")).toHaveValue("Keep the handoff draft.");
-  await page.goto(`http://127.0.0.1:43174/app/story/${api.campaignId}`);
+  await page.goto(`${webNextOrigin}/app/story/${api.campaignId}`);
   await expect(page.locator("[data-story-recovery]")).toBeHidden();
 });

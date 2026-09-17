@@ -45,6 +45,8 @@ import {
   providerProfileUpdateSchema,
   providerTextRequestSchema
 } from "../../../packages/contracts/src/generation.js";
+import { generationReviewDecisionRequestSchema } from "../../../packages/contracts/src/generation-review.js";
+import { projectGenerationReviewDetailResponse, projectGenerationReviewSnapshot } from "./generation-review-projection.js";
 import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import { storyMemorySettingsUpdateSchema } from "../../../packages/contracts/src/story-memory-policy.js";
 import {
@@ -348,10 +350,12 @@ function generationPublicDiagnostic(value: unknown) {
 }
 
 function generationSnapshot(value: unknown) {
+  const { recoveryMetadata: _recoveryMetadata, ...job } = value as Record<string, unknown>;
   return parseResponseProjection(generationJobSnapshotSchema, {
-    ...value as object,
+    ...job,
     ...generationPublicError(value),
-    diagnostic: generationPublicDiagnostic(value)
+    diagnostic: generationPublicDiagnostic(value),
+    ...projectGenerationReviewSnapshot(value)
   });
 }
 
@@ -359,7 +363,8 @@ function generationStreamSnapshot(value: unknown) {
   return parseResponseProjection(generationStreamSnapshotSchema, {
     ...value as object,
     ...generationPublicError(value),
-    diagnostic: generationPublicDiagnostic(value)
+    diagnostic: generationPublicDiagnostic(value),
+    ...projectGenerationReviewSnapshot(value)
   });
 }
 
@@ -1395,6 +1400,22 @@ export async function buildServer({
     const jobId = uuidSchema.parse(request.params.jobId);
     const ownerScope = { ownerUserId: await initialOwnerId(pool) };
     return parseResponseProjection(generationResultSchema, await generationAdapter.getGenerationResult(ownerScope, jobId));
+  });
+
+  app.get<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/review", async (request) => {
+    const jobId = uuidSchema.parse(request.params.jobId);
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    return projectGenerationReviewDetailResponse(await generationAdapter.getGenerationReview(ownerScope, jobId));
+  });
+
+  app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/review-decision", async (request, reply) => {
+    const jobId = uuidSchema.parse(request.params.jobId);
+    const decision = generationReviewDecisionRequestSchema.parse(request.body);
+    const ownerScope = { ownerUserId: await initialOwnerId(pool) };
+    const { newlyQueued: _newlyQueued, ...result } = await generationLifecycle.decideReview(ownerScope.ownerUserId, jobId, () =>
+      generationAdapter.decideGenerationReview(ownerScope, jobId, decision)
+    );
+    return reply.code(202).send(parseResponseProjection(generationActionResponseSchema, result));
   });
 
   app.post<{ Params: { jobId: string } }>("/api/v1/generation-jobs/:jobId/retry", async (request, reply) => {

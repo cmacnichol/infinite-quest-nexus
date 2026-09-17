@@ -1,8 +1,9 @@
-import { assertContinuityReviewCommit, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
+import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
+import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
 import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
-import type { GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
 import type {
   CampaignWorldVersionMemoryScope,
@@ -40,6 +41,7 @@ import {
   type PrivateRollResolution,
   type ProviderResult
 } from "../../story-engine/src/index.js";
+import { mechanicsLeakFields } from "../../story-engine/src/output.js";
 import {
   buildScopedEntityCatalog,
   normalizeCampaignTrackers,
@@ -110,6 +112,29 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** A primary request was durably reserved; a lease reclaim cannot treat it as an unseen request. */
+  primaryReservation?: {
+    version: 1;
+    requestBody: string;
+    requestPayloadHash: string;
+    providerConfigurationHash: string;
+    attempt: number;
+    status: "reserved" | "dispatched";
+    authorizedReviewId?: string;
+    authorizedRevision?: number;
+  } | undefined;
+  /** Complete primary response captured before parsing or any destructive validator/repair stage. */
+  primaryResult?: {
+    version: 1;
+    requestBody: string;
+    requestPayloadHash: string;
+    response: ProviderResult;
+    sentFactIds: readonly string[];
+    providerConfigurationHash: string;
+    contextFingerprint: string;
+    contextDiagnostics: Record<string, unknown>;
+    chronicleRetrieval: ChronicleRetrievalAudit;
+  } | undefined;
   /** Versioned counters belong to the logical user attempt, never the worker lease. */
   logicalAttempt?: {
     version: 1;
@@ -134,7 +159,19 @@ export type GenerationOrchestrationState = {
     repairedStoryHash?: string;
     response?: ProviderResult;
   };
+  /** One scene rewrite reservation, persisted before provider transport. */
+  sceneCoverageRepair?: {
+    version: 1;
+    rejectedMainStoryHash: string;
+    repairRequestBody: string;
+    repairRequestPayloadHash: string;
+    status: "reserved" | "dispatched" | "validated";
+    authorizedReviewId: string;
+    authorizedRevision: number;
+  } | undefined;
   continuityReview?: ContinuityReviewCheckpoint | undefined;
+  /** Private, immutable candidate and decision evidence for a user review gate. */
+  generationReview?: GenerationReviewCheckpoint | undefined;
   contextDiagnostic?: SafeGenerationDiagnostic;
   sourceEvidenceManifest?: GenerationEvidenceManifest;
   roll?: PrivateRollResolution | null;
@@ -156,6 +193,8 @@ export type GenerationOrchestrationState = {
     /** Private exact serialized extension request that produced the final story. */
     producingRequestBody?: string;
     providerConfigurationHash?: string;
+    /** Complete final candidates retain the response that produced the extension. */
+    response?: ProviderResult;
     /** Exact fact records rendered into that extension request. */
     sentFactIds: readonly string[];
   } | undefined;
@@ -189,6 +228,9 @@ export type GenerationOrchestrationState = {
     resultHash?: string;
     /** Prepared after an exhausted generic recovery; only an explicit retry may dispatch it. */
     status: "pending" | "dispatched" | "validated";
+    /** The sole review decision that may consume this choice-only repair. */
+    authorizedReviewId?: string;
+    authorizedRevision?: number;
   } | undefined;
   /** One durable, provenance-fenced rewrite allowance for rejected event fiction. */
   eventCoverageRepair?: {
@@ -201,6 +243,9 @@ export type GenerationOrchestrationState = {
     mainRepairConsumed?: boolean;
     repairedFinalStoryHash?: string;
     repairedMainRequestPayloadHash?: string;
+    /** The sole review decision that may consume this event-fiction rewrite. */
+    authorizedReviewId?: string;
+    authorizedRevision?: number;
   } | undefined;
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
@@ -213,6 +258,37 @@ function hasValidAutomaticRepair(value: unknown): boolean {
     && typeof repair.rejectedDraftHash === "string" && repair.rejectedDraftHash.length > 0
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt)
     && repair.consumedAttempt > 0;
+}
+
+function hasValidPrimaryResult(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  return result.version === 1
+    && typeof result.requestBody === "string" && result.requestBody.length > 0
+    && typeof result.requestPayloadHash === "string" && result.requestPayloadHash === sha256Hex(result.requestBody)
+    && typeof result.response === "object" && result.response !== null
+    && typeof (result.response as Record<string, unknown>).content === "string"
+    && typeof (result.response as Record<string, unknown>).outputLimited === "boolean"
+    && Array.isArray(result.sentFactIds) && result.sentFactIds.every((id) => typeof id === "string")
+    && typeof result.providerConfigurationHash === "string" && result.providerConfigurationHash.length > 0
+    && typeof result.contextFingerprint === "string" && result.contextFingerprint.length > 0
+    && typeof result.contextDiagnostics === "object" && result.contextDiagnostics !== null
+    && typeof result.chronicleRetrieval === "object" && result.chronicleRetrieval !== null;
+}
+
+function hasValidPrimaryReservation(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const reservation = value as Record<string, unknown>;
+  return reservation.version === 1
+    && typeof reservation.requestBody === "string" && reservation.requestBody.length > 0
+    && typeof reservation.requestPayloadHash === "string" && reservation.requestPayloadHash === sha256Hex(reservation.requestBody)
+    && typeof reservation.providerConfigurationHash === "string" && reservation.providerConfigurationHash.length > 0
+    && typeof reservation.attempt === "number" && Number.isSafeInteger(reservation.attempt) && reservation.attempt > 0
+    && (reservation.status === "reserved" || reservation.status === "dispatched")
+    && (reservation.authorizedReviewId === undefined || typeof reservation.authorizedReviewId === "string")
+    && (reservation.authorizedRevision === undefined || (typeof reservation.authorizedRevision === "number" && Number.isSafeInteger(reservation.authorizedRevision) && reservation.authorizedRevision > 0));
 }
 
 function hasValidLogicalAttempt(value: unknown): boolean {
@@ -238,6 +314,21 @@ function hasValidSemanticRepair(value: unknown): boolean {
     && (repair.status !== "validated" || (typeof repair.repairedStoryHash === "string" && Boolean(repair.repairedStory) && typeof repair.repairedStory === "object"));
 }
 
+function hasValidSceneCoverageRepair(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const repair = value as Record<string, unknown>;
+  return repair.version === 1
+    && typeof repair.rejectedMainStoryHash === "string" && repair.rejectedMainStoryHash.length > 0
+    && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
+    && typeof repair.repairRequestPayloadHash === "string"
+    && repair.repairRequestPayloadHash === sha256Hex(repair.repairRequestBody)
+    && (repair.status === "reserved" || repair.status === "dispatched" || repair.status === "validated")
+    && typeof repair.authorizedReviewId === "string" && repair.authorizedReviewId.length > 0
+    && typeof repair.authorizedRevision === "number" && Number.isSafeInteger(repair.authorizedRevision)
+    && repair.authorizedRevision > 0;
+}
+
 function hasValidChoiceRepair(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -260,6 +351,8 @@ function hasValidChoiceRepair(value: unknown): boolean {
     && (repair.repairResponseFormat === "json_object" || repair.repairResponseFormat === "none")
     && typeof repair.repairRequestPayloadHash === "string" && repair.repairRequestPayloadHash.length > 0
     && (repair.status === "pending" || repair.status === "dispatched" || repair.status === "validated")
+    && (repair.authorizedReviewId === undefined || typeof repair.authorizedReviewId === "string")
+    && (repair.authorizedRevision === undefined || (typeof repair.authorizedRevision === "number" && Number.isSafeInteger(repair.authorizedRevision) && repair.authorizedRevision > 0))
     && (repair.status !== "validated" || (typeof repair.repairRequestPayloadHash === "string" && typeof repair.resultHash === "string" && typeof repair.fields === "object" && repair.fields !== null));
 }
 
@@ -281,7 +374,10 @@ function hasValidEventCoverageRepair(value: unknown): boolean {
     && (repair.repairedFinalStoryHash === undefined
       || (typeof repair.repairedFinalStoryHash === "string" && repair.repairedFinalStoryHash.length > 0))
     && (repair.repairedMainRequestPayloadHash === undefined
-      || (typeof repair.repairedMainRequestPayloadHash === "string" && repair.repairedMainRequestPayloadHash.length > 0));
+      || (typeof repair.repairedMainRequestPayloadHash === "string" && repair.repairedMainRequestPayloadHash.length > 0))
+    && (repair.authorizedReviewId === undefined || typeof repair.authorizedReviewId === "string")
+    && (repair.authorizedRevision === undefined || (typeof repair.authorizedRevision === "number"
+      && Number.isSafeInteger(repair.authorizedRevision) && repair.authorizedRevision > 0));
 }
 
 export type GenerationStreamingState = Record<string, unknown> & {
@@ -308,6 +404,8 @@ export type GenerationExecutionPayload = {
   id: string;
   owner_user_id: string;
   campaign_id: string;
+  /** Immutable world authority used to bind a paused review candidate. */
+  world_id?: string;
   world_version_id?: string;
   provider_profile_id: string;
   expected_turn_number: number;
@@ -366,7 +464,7 @@ export type GenerationFailedUpdate = GenerationLeaseScope & Readonly<{
 
 type GenerationTextProvider = Readonly<{
   id: string;
-  name: string;
+  name?: string;
   providerType: string;
   model: string;
 }>;
@@ -408,6 +506,8 @@ export type GenerationExecutionRepository = Readonly<{
   /** Returns a repaired validating job to the normal assessment entrypoint. */
   restartAfterSemanticRepair?(scope: GenerationLeaseScope): Promise<boolean>;
   saveOrchestration(scope: GenerationLeaseScope, value: GenerationOrchestrationState): Promise<boolean>;
+  /** Atomically publishes a pending review and releases the worker lease. */
+  pauseForReview(scope: GenerationLeaseScope, checkpoint: GenerationReviewCheckpoint): Promise<boolean>;
   savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;
   saveStreamingSegments(scope: GenerationLeaseScope, value: GenerationStreamingState): Promise<boolean>;
   recordAttempt(input: GenerationAttemptRecord): Promise<void>;
@@ -543,6 +643,44 @@ function mergedTrackers(current: unknown, updates: Array<Record<string, unknown>
   return normalizeCampaignTrackers([...map.values()]);
 }
 
+/** A main Keep remains active only until a later retry authorizes a rewrite. */
+function assertActiveMainKeepPreservation(
+  checkpoint: GenerationReviewCheckpoint,
+  orchestration: GenerationOrchestrationState,
+  finalStory: StoryTurnOutput
+): void {
+  const mainKeepIndex = checkpoint.decisionJournal.map((entry) => entry.candidateScope === "main" && entry.decision === "keep")
+    .lastIndexOf(true);
+  if (mainKeepIndex < 0) return;
+  const laterRewriteAuthorized = checkpoint.decisionJournal.slice(mainKeepIndex + 1).some((entry) => entry.decision === "retry"
+    && (entry.candidateScope === "final" || entry.nextStage === "scene_coverage"));
+  if (laterRewriteAuthorized) return;
+  const activeMainDecision = checkpoint.decisionJournal[mainKeepIndex]!;
+  const unavailable = (): never => {
+    throw Object.assign(new Error("The kept main candidate cannot authorize this final commit."), {
+      code: "generation_review_acceptance_unavailable"
+    });
+  };
+  const main = activeMainDecision.offeredCandidate;
+  const draft = orchestration.validatedMainDraft;
+  if (!main.story || !draft) unavailable();
+  const mainStory = main.story as StoryTurnOutput;
+  const validatedMainDraft = draft as GenerationValidatedMainDraftCheckpoint;
+  if (main.storyHash !== sha256Hex(canonicalEvidenceJson(mainStory))
+    || canonicalEvidenceJson(mainStory) !== canonicalEvidenceJson(validatedMainDraft.story)
+    || main.producingRequestHash !== validatedMainDraft.requestPayloadHash
+    || main.producingResponseId !== validatedMainDraft.response.responseId) unavailable();
+  if (!orchestration.extension) {
+    if (canonicalEvidenceJson(finalStory) !== canonicalEvidenceJson(mainStory)) unavailable();
+    return;
+  }
+  const extension = orchestration.extension;
+  if (extension.validatedMainDraftHash !== validatedMainDraft.draftHash
+    || extension.finalStoryHash !== stableStringify(finalStory)
+    || extension.producingRequestPayloadHash.length !== 64
+    || !finalStory.narration.startsWith(mainStory.narration)) unavailable();
+}
+
 async function commitAcceptedTurn(
   client: DatabaseClient,
   input: AcceptedGenerationCommit
@@ -552,11 +690,15 @@ async function commitAcceptedTurn(
   // The commit boundary accepts only the current protocol. Historical/import
   // replay goes through the explicitly named Chronicle compatibility path.
   const story = storyTurnOutputSchema.parse(input.story);
-  const lease = await client.query<{ id: string; context_options: Record<string, unknown>; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
-    `SELECT id, context_options, prompt_snapshot, orchestration_private, streaming_segments_state FROM generation_jobs
-      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
-        AND lease_expires_at > now()
-      FOR UPDATE`,
+  const lease = await client.query<{ id: string; owner_user_id: string; campaign_id: string; world_id: string; world_version_id: string | null; expected_turn_number: number; operation_kind: "append" | "replace_latest"; replacement_turn_id: string | null; generation_base_identity: unknown; context_options: Record<string, unknown>; prompt_protocol_version: string; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
+    `SELECT j.id, j.owner_user_id, j.campaign_id, wv.world_id, c.world_version_id, j.expected_turn_number,
+            j.operation_kind, j.replacement_turn_id, j.generation_base_identity, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
+            j.orchestration_private, j.streaming_segments_state
+       FROM generation_jobs j JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
+       JOIN world_versions wv ON wv.id=c.world_version_id AND wv.owner_user_id=j.owner_user_id
+      WHERE j.id = $1 AND j.owner_user_id = $2 AND j.lease_owner = $3 AND j.status = 'committing'
+        AND j.lease_expires_at > now()
+      FOR UPDATE OF j`,
     [scope.jobId, scope.ownerUserId, scope.workerId]
   );
   if (!lease.rows[0]) {
@@ -565,6 +707,14 @@ async function commitAcceptedTurn(
     });
   }
   const storedJob = lease.rows[0]!;
+  let reviewAcceptanceAudit: Record<string, unknown> | undefined;
+  const storedReview = generationReviewCheckpointSchema.safeParse(storedJob.orchestration_private.generationReview);
+  if (Object.hasOwn(storedJob.orchestration_private, "generationReview") && !storedReview.success) {
+    throw Object.assign(new Error("The persisted generation review checkpoint cannot authorize this commit."), {
+      code: "generation_review_acceptance_unavailable"
+    });
+  }
+  if (storedReview.success) assertActiveMainKeepPreservation(storedReview.data, storedJob.orchestration_private, story);
   if (storedJob.context_options?.storyMemoryPolicy) {
     const policy = storyMemoryPolicySnapshotSchema.parse(storedJob.context_options.storyMemoryPolicy);
     if (policy.policy.continuityReview !== "off") {
@@ -575,11 +725,58 @@ async function commitAcceptedTurn(
       try { if (requestBody && saved.sourceEvidenceManifest) manifest = bindManifestToProducingRequest(saved.sourceEvidenceManifest, requestBody); } catch { /* Only an observed unavailable result can commit without verified review inputs. */ }
       const auxiliaryRequestHashes = validatedChoiceRequestHashes(saved.choiceRepair, saved.validatedMainDraft?.story, policy.providerConfigurationFingerprint);
       const prompts = assertContinuityReviewPromptSnapshot(storedJob.prompt_snapshot, policy.policy.continuityReview);
-      assertContinuityReviewCommit(policy.policy.continuityReview, saved.continuityReview, {
+      const normalBinding = {
         draftHash: sha256Hex(stableStringify(story)), producingRequestHash: requestBody ? sha256Hex(requestBody) : null, manifestHash: manifest?.manifestHash ?? null, auxiliaryRequestHashes,
         providerConfigurationHash: policy.providerConfigurationFingerprint, promptHash: prompts.continuityReview!.review.hash,
         promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash
-      });
+      } as const;
+      const review = generationReviewCheckpointSchema.safeParse(saved.generationReview);
+      const isFinalContinuityCheckpoint = review.success && review.data.state === "decided"
+        && review.data.candidateScope === "final" && review.data.stage === "continuity";
+      const hasFinalContinuityReview = isFinalContinuityCheckpoint
+        && review.data.decisionJournal.some((entry) => entry.reviewId === review.data.reviewId
+          && entry.revision === review.data.revision - 1 && entry.decision === "keep");
+      if (hasFinalContinuityReview) {
+        if (mechanicsLeakFields(story).length) {
+          throw Object.assign(new Error("A kept generation candidate contains mechanics language."), { code: "mechanics_leak" });
+        }
+        assertGenerationReviewAcceptance(review.data, {
+          jobId: storedJob.id, actorUserId: storedJob.owner_user_id, candidateScope: "final",
+          candidateHash: sha256Hex(canonicalEvidenceJson(story)), stage: "continuity",
+          findingsHash: generationReviewFindingsHash(review.data.reasons), ownerUserId: storedJob.owner_user_id,
+          campaignId: storedJob.campaign_id, worldId: storedJob.world_id, worldVersionId: storedJob.world_version_id,
+          baseIdentity: readGenerationBaseIdentity(storedJob.generation_base_identity),
+          protocol: { version: storedJob.prompt_protocol_version, promptHash: prompts.continuityReview!.review.hash },
+          policyHash: policy.policyHash, operationKind: storedJob.operation_kind, replacementTurnId: storedJob.replacement_turn_id
+        });
+        if (review.data.gateCandidate.producingResponseId !== response.responseId) {
+          throw Object.assign(new Error("The saved generation review candidate was not produced by this response."), {
+            code: "generation_review_acceptance_unavailable"
+          });
+        }
+        const producingRequestHash = saved.extension?.producingRequestPayloadHash
+          ?? saved.validatedMainDraft?.requestPayloadHash;
+        if (!producingRequestHash || review.data.gateCandidate.producingRequestHash !== producingRequestHash) {
+          throw Object.assign(new Error("The saved generation review candidate was not produced by the persisted request."), {
+            code: "generation_review_acceptance_unavailable"
+          });
+        }
+        const originalReview = continuityReviewCheckpointSchema.safeParse(saved.continuityReview);
+        reviewAcceptanceAudit = {
+          disposition: "accepted_by_user", reviewId: review.data.reviewId, revision: review.data.revision,
+          candidateHash: review.data.gateCandidate.storyHash,
+          originalVerdict: originalReview.success ? originalReview.data.verdict : "unavailable",
+          originalReasonCodes: review.data.originalFindings,
+          currentReasonCodes: review.data.reasons
+        };
+      } else {
+        if (isFinalContinuityCheckpoint && !continuityReviewCheckpointSchema.safeParse(saved.continuityReview).success) {
+          throw Object.assign(new Error("The final generation review has no valid Keep receipt."), {
+            code: "generation_review_acceptance_unavailable"
+          });
+        }
+        assertContinuityReviewCommit(policy.policy.continuityReview, saved.continuityReview, normalBinding);
+      }
     }
   }
   const requestedSupersessionIds = [...new Set(story.canonical_fact_updates.flatMap((update) => update.supersedes_fact_ids))];
@@ -779,7 +976,8 @@ async function commitAcceptedTurn(
         generationPolicy: job.generation_policy,
         contextFingerprint: input.contextFingerprint,
         contextDiagnostics: input.contextDiagnostics,
-        chronicleRetrieval
+        chronicleRetrieval,
+        ...(reviewAcceptanceAudit ? { reviewAcceptance: reviewAcceptanceAudit } : {})
       }), job.generation_policy === null ? null : json(job.generation_policy)]
   );
   const turnId = turnResult.rows[0]?.id;
@@ -980,11 +1178,12 @@ export function createPostgresGenerationExecutionRepository(
                 j.requested_model, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
                 j.generation_base_identity, j.generation_policy,
                 j.attempts, j.orchestration_private, j.streaming_segments_state,
-                c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
+                wv.world_id, c.world_version_id, c.legacy_settings, c.character_profile, c.character_snapshot,
                 cs.rpg_stats, cs.event_triggers, cs.pending_event_triggers,
                 latest.state_snapshot_private
            FROM generation_jobs j
            JOIN campaigns c ON c.id = j.campaign_id AND c.owner_user_id = j.owner_user_id
+           JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
            JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
            LEFT JOIN LATERAL (
              SELECT state_snapshot_private FROM turns
@@ -1000,7 +1199,10 @@ export function createPostgresGenerationExecutionRepository(
       if (!row) return null;
       if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
           || !hasValidLogicalAttempt(row.orchestration_private?.logicalAttempt)
+          || !hasValidPrimaryReservation(row.orchestration_private?.primaryReservation)
+          || !hasValidPrimaryResult(row.orchestration_private?.primaryResult)
           || !hasValidSemanticRepair(row.orchestration_private?.semanticRepair)
+          || !hasValidSceneCoverageRepair(row.orchestration_private?.sceneCoverageRepair)
           || !hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
           || !hasValidChoiceRepair(row.orchestration_private?.choiceRepair)
           || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {
@@ -1134,7 +1336,11 @@ export function createPostgresGenerationExecutionRepository(
     async saveOrchestration(scope, value) {
       const safeContextDiagnostic = projectSafeGenerationDiagnostic(value.contextDiagnostic);
       return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET orchestration_private = $4,
+        `UPDATE generation_jobs SET orchestration_private =
+              CASE WHEN $4::jsonb ? 'generationReview' THEN $4::jsonb
+                   WHEN orchestration_private ? 'generationReview' THEN ($4::jsonb || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
+                   ELSE $4::jsonb
+               END,
             recovery_metadata = CASE WHEN $5::jsonb IS NULL THEN recovery_metadata ELSE recovery_metadata || jsonb_build_object('diagnostic',$5::jsonb) END,
             updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
@@ -1143,6 +1349,49 @@ export function createPostgresGenerationExecutionRepository(
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, json(value), safeContextDiagnostic ? json(safeContextDiagnostic) : null]
       ));
+    },
+
+    async pauseForReview(scope, checkpoint) {
+      const parsed = generationReviewCheckpointSchema.parse(checkpoint);
+      return withTransaction(pool, async (client) => {
+      const actual = await client.query<{ campaignId: string; worldId: string; worldVersionId: string | null; baseIdentity: GenerationBaseIdentity; providerProfileId: string; promptProtocolVersion: string; expectedTurnNumber: number; operationKind: "append" | "replace_latest"; replacementTurnId: string | null; prior: Record<string, unknown> }>(
+        `SELECT j.campaign_id AS "campaignId", w.id AS "worldId", c.world_version_id AS "worldVersionId",
+                j.generation_base_identity AS "baseIdentity", j.provider_profile_id AS "providerProfileId", j.prompt_protocol_version AS "promptProtocolVersion", j.expected_turn_number AS "expectedTurnNumber",
+                j.operation_kind AS "operationKind", j.replacement_turn_id AS "replacementTurnId", j.orchestration_private AS prior
+           FROM generation_jobs j JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
+           JOIN world_versions v ON v.id=c.world_version_id JOIN worlds w ON w.id=v.world_id
+          WHERE j.id=$1 AND j.owner_user_id=$2 AND j.lease_owner=$3
+            AND j.status IN ('assessing','generating','validating','committing') AND j.lease_expires_at > now() FOR UPDATE OF j`,
+        [scope.jobId, scope.ownerUserId, scope.workerId]
+      );
+      const job = actual.rows[0];
+      if (!job) return false;
+      const candidate = parsed.gateCandidate;
+      if (candidate.ownerUserId !== scope.ownerUserId || candidate.campaignId !== job.campaignId || candidate.worldId !== job.worldId
+          || candidate.worldVersionId !== job.worldVersionId || candidate.expectedTurnNumber !== job.expectedTurnNumber
+          || stableStringify(candidate.baseIdentity) !== stableStringify(readGenerationBaseIdentity(job.baseIdentity))
+          || candidate.provider.profileId !== job.providerProfileId || parsed.operationKind !== job.operationKind
+          || candidate.protocol.version !== job.promptProtocolVersion || parsed.replacementTurnId !== job.replacementTurnId) return false;
+      const rawPrior = job.prior?.generationReview;
+      const prior = rawPrior === undefined ? undefined : generationReviewCheckpointSchema.safeParse(rawPrior);
+      if (prior && !prior.success) return false;
+      if (prior?.success) {
+        if (parsed.revision <= prior.data.revision || parsed.decisionJournal.length < prior.data.decisionJournal.length
+            || stableStringify(parsed.originalCandidate) !== stableStringify(prior.data.originalCandidate)
+            || stableStringify(parsed.originalFindings) !== stableStringify(prior.data.originalFindings)
+            || stableStringify(parsed.decisionJournal.slice(0, prior.data.decisionJournal.length)) !== stableStringify(prior.data.decisionJournal)) return false;
+      }
+      return changed(await client.query<{ id: string }>(
+        `UPDATE generation_jobs
+            SET status = 'recoverable', orchestration_private = orchestration_private || jsonb_build_object('generationReview', $4::jsonb),
+                error_code = 'generation_review_required', error_message = 'Generation requires review before it can continue.',
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+            AND status IN ('assessing','generating','validating','committing') AND lease_expires_at > now()
+          RETURNING id`,
+        [scope.jobId, scope.ownerUserId, scope.workerId, json(parsed)]
+      ));
+      });
     },
 
     async savePartialNarration(scope, narration) {

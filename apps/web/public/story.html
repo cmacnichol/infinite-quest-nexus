@@ -129,9 +129,20 @@
             <p>Generating...</p>
           </div>
 
-          <div id="generationRecoveryPanel" class="generation-recovery hidden" role="status" aria-live="polite">
-            <p id="generationRecoveryMessage">Story generation stopped before completing the next turn.</p>
+          <div id="generationRecoveryPanel" class="generation-recovery hidden">
+            <p id="generationRecoveryMessage" role="status" aria-live="polite">Story generation stopped before completing the next turn.</p>
             <ul id="generationRecoveryDetails" class="generation-recovery-details hidden" aria-label="Safe generation context details"></ul>
+            <section id="generationReviewPanel" class="hidden" aria-live="polite">
+              <h2 id="generationReviewHeading">This turn needs your review</h2>
+              <p id="generationReviewReason"></p>
+              <article id="generationReviewPreview" aria-label="Saved turn preview"></article>
+              <div id="generationReviewChoices" aria-label="Saved choices"></div>
+              <div class="row wrap">
+                <button id="btnKeepGenerationReview" class="primary" type="button">Keep this turn</button>
+                <button id="btnRetryGenerationReview" class="accent" type="button">Continue with retry</button>
+              </div>
+              <p id="generationReviewStatus" role="status" aria-live="polite"></p>
+            </section>
             <div class="row wrap">
               <button id="btnContinueGeneration" class="primary" type="button">Resume monitoring</button>
               <button id="btnRetryGeneration" class="accent" type="button">Retry generation job</button>

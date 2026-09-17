@@ -1,13 +1,15 @@
-import type {
+import { generationReviewSummarySchema, type
   CampaignRuntimeStateResponse,
   CampaignSyncStatus,
   GenerationResult,
+  GenerationReviewSummary,
   TurnInputModeSource,
   TurnInputSelection,
   TurnListResponse,
   TurnSummary
 } from "@infinite-quest/contracts";
 import type { GenerationEvent, GenerationRun } from "./generation/types.js";
+import { NexusApiError } from "./errors.js";
 import {
   copyOperation,
   copySnapshot,
@@ -53,6 +55,8 @@ export interface GenerationProjectionSession {
   readonly campaignId: string;
   readonly jobId: string;
   apply(event: GenerationEvent): void;
+  loadReview(): Promise<void>;
+  decideReview(request: import("@infinite-quest/contracts").GenerationReviewDecisionRequest): Promise<import("@infinite-quest/contracts").GenerationActionResponse>;
   retryResult(): Promise<void>;
 }
 
@@ -88,6 +92,7 @@ interface LiveGeneration {
 export function createCampaignStore(): CampaignStoreController {
   const writable = createWritableStore<CampaignProjection>(EMPTY_PROJECTION);
   let liveGeneration: LiveGeneration | null = null;
+  let reviewEpoch = 0;
 
   function current(): Immutable<CampaignProjection> {
     return writable.get();
@@ -104,7 +109,9 @@ export function createCampaignStore(): CampaignStoreController {
 
     if (switchingCampaign || (liveGeneration && liveGeneration.run.jobId !== generation?.jobId)) {
       liveGeneration = null;
+      reviewEpoch += 1;
     }
+    if (!sameReviewIdentity(previous.generation?.review?.summary, generation?.review?.summary)) reviewEpoch += 1;
     writable.set({
       campaign: clone(sync.campaign),
       world: clone(sync.world),
@@ -153,6 +160,40 @@ export function createCampaignStore(): CampaignStoreController {
         const generation = current().generation;
         if (generation?.result.state !== "unavailable") throw protocol("result_retry_not_available");
         applyGenerationEvent(run, await run.fetchResult());
+      },
+      async () => {
+        const before = current();
+        const generation = before.generation;
+        if (!generation || generation.jobId !== run.jobId || generation.review === null) return;
+        const identity = generation.review.summary;
+        const token = reviewEpoch;
+        writable.set({ ...before, generation: { ...generation, review: { ...generation.review, detail: { state: "loading" } } } });
+        try {
+          const detail = await run.getReview();
+          const latest = current().generation;
+          if (token !== reviewEpoch || latest?.jobId !== run.jobId
+            || !sameReviewIdentity(identity, latest.review?.summary)
+            || !sameReviewIdentity(identity, detail)) return;
+          writable.set({ ...current(), generation: { ...latest, review: { summary: clone(identity), detail: { state: "loaded", value: clone(detail) } } } });
+        } catch {
+          const latest = current().generation;
+          if (token !== reviewEpoch || latest?.jobId !== run.jobId || !sameReviewIdentity(identity, latest.review?.summary)) return;
+          writable.set({ ...current(), generation: { ...latest, review: { ...latest.review!, detail: { state: "failed" } } } });
+        }
+      },
+      async (request) => {
+        try {
+          const response = await run.decideReview(request);
+          const latest = current().generation;
+          if (latest?.jobId === run.jobId && latest.review !== null) {
+            reviewEpoch += 1;
+            writable.set({ ...current(), generation: { ...latest, review: { ...latest.review, detail: { state: "idle" } } } });
+          }
+          return response;
+        } catch (cause) {
+          if (cause instanceof NexusApiError && cause.statusCode === 409) await refreshReviewAfterConflict(run);
+          throw cause;
+        }
       }
     );
     liveGeneration = { run, session };
@@ -168,11 +209,34 @@ export function createCampaignStore(): CampaignStoreController {
           hydratedGeneration: null,
           snapshot: null,
           narration: "",
+          review: null,
+          unsupportedReviewVersion: null,
           transport: { state: "unobserved" },
           result: { state: "pending" }
         };
     writable.set({ ...previous, generation });
     return session;
+  }
+
+  async function refreshReviewAfterConflict(run: GenerationRun): Promise<void> {
+    const before = current().generation;
+    if (!before || before.jobId !== run.jobId || before.review === null) return;
+    const token = reviewEpoch;
+    try {
+      const detail = await run.getReview();
+      const latest = current().generation;
+      if (token !== reviewEpoch || latest?.jobId !== run.jobId || latest.review === null) return;
+      const currentSummary = latest.review.summary;
+      if (detail.revision < currentSummary.revision
+        || (detail.revision === currentSummary.revision && detail.reviewId !== currentSummary.reviewId)) return;
+      reviewEpoch += 1;
+      writable.set({ ...current(), generation: {
+        ...latest,
+        review: { summary: clone(reviewSummary(detail)), detail: { state: "loaded", value: clone(detail) } }
+      } });
+    } catch {
+      // The original review remains visible. A conflict never invents an alternate decision.
+    }
   }
 
   function resolveWindow(
@@ -204,6 +268,8 @@ export function createCampaignStore(): CampaignStoreController {
       attempts: recovery.attempts,
       resultTurnId: recovery.resultTurnId,
       diagnostic: recovery.diagnostic ?? null,
+      review: reviewProjection(recovery.review),
+      unsupportedReviewVersion: unsupportedReviewVersion(recovery.review),
       operation: operationOf(recovery)
     };
     const result = recovery.status === "failed"
@@ -229,6 +295,8 @@ export function createCampaignStore(): CampaignStoreController {
       monitoring: "attached",
       snapshot: previous.snapshot,
       narration: previous.narration,
+      review: mergeReview(previous.review, hydrated.review),
+      unsupportedReviewVersion: hydrated.unsupportedReviewVersion,
       transport: previous.transport
     };
   }
@@ -243,6 +311,8 @@ export function createCampaignStore(): CampaignStoreController {
       attempts: null,
       resultTurnId: null,
       diagnostic: null,
+      review: reviewProjection(pending.review),
+      unsupportedReviewVersion: unsupportedReviewVersion(pending.review),
       operation: operationOf(pending)
     };
   }
@@ -262,6 +332,8 @@ export function createCampaignStore(): CampaignStoreController {
       hydratedGeneration: clone(hydratedGeneration),
       snapshot: null,
       narration: "",
+      review: hydratedGeneration.review,
+      unsupportedReviewVersion: hydratedGeneration.unsupportedReviewVersion,
       transport: { state: "unobserved" },
       result
     };
@@ -277,6 +349,8 @@ export function createCampaignStore(): CampaignStoreController {
       if (event.snapshot.campaignId !== run.campaignId) throw protocol("campaign_mismatch");
       if (event.snapshot.operationKind !== run.operationKind
         || event.snapshot.replacementTurnId !== run.replacementTurnId) throw protocol("job_mismatch");
+      const nextReview = reviewProjection(event.snapshot.review);
+      if (!sameReviewIdentity(generation.review?.summary, nextReview?.summary)) reviewEpoch += 1;
       writable.set({
         ...previous,
         generation: {
@@ -284,6 +358,8 @@ export function createCampaignStore(): CampaignStoreController {
           operation: operationOf(event.snapshot),
           hydratedGeneration: null,
           snapshot: copySnapshot(event.snapshot),
+          review: mergeReview(generation.review, nextReview),
+          unsupportedReviewVersion: unsupportedReviewVersion(event.snapshot.review),
           transport: { state: "healthy" },
           result: { state: "pending" }
         }
@@ -407,7 +483,9 @@ function createSession(
   run: GenerationRun,
   isActive: () => boolean,
   applyEvent: (event: GenerationEvent) => void,
-  retryResult: () => Promise<void>
+  retryResult: () => Promise<void>,
+  loadReview: () => Promise<void>,
+  decideReview: (request: import("@infinite-quest/contracts").GenerationReviewDecisionRequest) => Promise<import("@infinite-quest/contracts").GenerationActionResponse>
 ): GenerationProjectionSession {
   return {
     campaignId: run.campaignId,
@@ -419,7 +497,62 @@ function createSession(
     async retryResult() {
       if (!isActive()) return;
       await retryResult();
+    },
+    async loadReview() {
+      if (!isActive()) return;
+      await loadReview();
+    },
+    decideReview(request) {
+      if (!isActive()) return Promise.reject(protocol("campaign_not_loaded"));
+      return decideReview(request);
     }
+  };
+}
+
+function reviewProjection(summary: import("@infinite-quest/contracts").GenerationStreamSnapshot["review"]): import("./campaign-projection.js").GenerationReviewProjection | null {
+  const parsed = generationReviewSummarySchema.safeParse(summary);
+  return parsed.success ? { summary: clone(parsed.data), detail: { state: "idle" } } : null;
+}
+
+function unsupportedReviewVersion(value: import("@infinite-quest/contracts").GenerationStreamSnapshot["review"]): number | null {
+  const parsed = generationReviewSummarySchema.safeParse(value);
+  return !parsed.success && value !== undefined && "version" in value ? value.version : null;
+}
+
+type GenerationReviewIdentity = Readonly<Pick<GenerationReviewSummary, "version" | "reviewId" | "revision" | "state">>;
+
+function sameReviewIdentity(
+  left: GenerationReviewIdentity | undefined,
+  right: GenerationReviewIdentity | undefined
+): boolean {
+  return left?.version === right?.version
+    && left?.reviewId === right?.reviewId
+    && left?.revision === right?.revision
+    && left?.state === right?.state;
+}
+
+function mergeReview(
+  previous: import("./campaign-projection.js").GenerationReviewProjection | null,
+  next: import("./campaign-projection.js").GenerationReviewProjection | null
+): import("./campaign-projection.js").GenerationReviewProjection | null {
+  if (next === null) return null;
+  if (previous !== null && sameReviewIdentity(previous.summary, next.summary)) {
+    return { summary: clone(next.summary), detail: previous.detail };
+  }
+  return next;
+}
+
+function reviewSummary(detail: import("@infinite-quest/contracts").GenerationReviewDetail): import("@infinite-quest/contracts").GenerationReviewSummary {
+  return {
+    version: detail.version,
+    reviewId: detail.reviewId,
+    revision: detail.revision,
+    state: detail.state,
+    stage: detail.stage,
+    candidateScope: detail.candidateScope,
+    reasons: [...detail.reasons],
+    canKeep: detail.canKeep,
+    canRetry: detail.canRetry
   };
 }
 

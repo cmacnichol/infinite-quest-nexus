@@ -10,8 +10,8 @@ import { createServer, type Server } from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
@@ -19,6 +19,8 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
 import type { GenerationEvidenceManifest } from "../../packages/application/src/memory/generation-context.js";
+import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
+import { sha256Hex } from "../../packages/contracts/src/hash.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
@@ -45,7 +47,7 @@ type CorpusScenario = Readonly<{
 type CapturedDispatch = Readonly<{ body: string; jobId: string; manifest: GenerationEvidenceManifest }>;
 
 function reply(narration: string): string {
-  return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Continue.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+  return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
 integration("T17 durable continuity review", () => {
@@ -54,18 +56,24 @@ integration("T17 durable continuity review", () => {
   let ownerUserId = "";
   let providerId = "";
   let reviewVerdict: "pass" | "uncertain" | "conflict" = "pass";
+  let reviewUnavailable = false;
   let reviewSequence: Array<"pass" | "uncertain" | "conflict"> = [];
   const requests: string[] = [];
   let needsChoiceRepair = false;
+  let invalidChoiceRepair = false;
+  let invalidPrimary = false;
   let semanticRepairNeedsChoiceRepair = false;
   let extensionConflict = false;
+  let invalidSemanticRepair = false;
   let eventCoverageSequence: boolean[] = [];
+  let sceneCoverageSequence: boolean[] = [];
+  let rejectSceneRewriteResponseFormat = false;
   let repairSupersedesFactId: string | null = null;
 
   function reviewResponse(body: string): string {
     const userInput = (() => { try { return JSON.parse(JSON.parse(body).messages[1].content) as Record<string, unknown>; } catch { return null; } })();
     const system = (() => { try { return String(JSON.parse(body).messages[0].content || ""); } catch { return ""; } })();
-    if (userInput?.phase === "after" && Array.isArray(userInput.triggers)) return JSON.stringify({ activated_trigger_ids: userInput.triggers.map((trigger: { id: string }) => trigger.id), reasons: {} });
+    if ((userInput?.phase === "before" || userInput?.phase === "after") && Array.isArray(userInput.triggers)) return JSON.stringify({ activated_trigger_ids: userInput.triggers.map((trigger: { id: string }) => trigger.id), reasons: {} });
     if (system.includes("complete an already validated adventure turn")) return reply("Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.");
     if (body.includes("The immediate event fiction could not be verified.")) return reply("Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.");
     if (body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat")) return reply("Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.");
@@ -74,24 +82,36 @@ integration("T17 durable continuity review", () => {
     if (semanticRepairNeedsChoiceRepair && userInput?.protocol === "story-continuity-repair-v1") {
       return JSON.stringify({ ...JSON.parse(reply("Mira waits at the observatory.")), choices: ["Wait.", "Wait.", "Listen.", "Leave."] });
     }
+    if (invalidSemanticRepair && userInput?.protocol === "story-continuity-repair-v1") {
+      return JSON.stringify({ narration: "This invalid repair omits the required turn fields." });
+    }
+    if (userInput?.task === "Determine whether the narration includes all concrete required beats without contradiction."
+        && !Array.isArray(userInput?.required_events)) {
+      const covered = sceneCoverageSequence.shift() ?? true;
+      return JSON.stringify({ covered, missing_required_beats: covered ? [] : ["The requested scene beat is absent."], contradictions: [] });
+    }
     if (system.includes("validate whether generated fiction") && Array.isArray(userInput?.required_events)) {
       const covered = eventCoverageSequence.shift() ?? true;
       return JSON.stringify({ event_results: (userInput.required_events as Array<{ event_id: string }>).map((event) => ({ event_id: event.event_id, covered,
         missing_required_beats: covered ? [] : ["The bell must ring."], contradictions: [] })) });
     }
     if (userInput?.protocol !== "story-continuity-review-v1") {
-      if (needsChoiceRepair && body.includes("final_narration")) return JSON.stringify({ choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." });
+      if (needsChoiceRepair && body.includes("final_narration")) return JSON.stringify(invalidChoiceRepair
+        ? { choices: ["Wait.", "Wait."] }
+        : { choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." });
+      if (invalidPrimary) return JSON.stringify({ narration: "Mira waits at the observatory." });
       const story = JSON.parse(reply("Mira waits at the observatory."));
       if (needsChoiceRepair) story.choices = ["Wait.", "Wait.", "Listen.", "Leave."];
       return JSON.stringify(story);
     }
+    if (reviewUnavailable) return "not a continuity review result";
     const input = userInput as { draft: { narration: string }; evidence: Array<{ id: string; content: string }> };
     const start = extensionConflict ? input.draft.narration.indexOf("The bell rings") : 0;
     const quote = input.draft.narration.slice(start, start + 4);
     const basis = input.evidence.find((entry) => entry.content.length > 0);
     if (!basis) throw new Error("Review fixture requires selected evidence.");
     const verdict = reviewSequence.shift() ?? reviewVerdict;
-    return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "Fixture reviewer reports a grounded conflict." }] : [] });
+    return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "PRIVATE_REVIEW_CANARY: fixture reviewer reports a grounded conflict." }] : [] });
   }
 
   beforeAll(async () => {
@@ -104,8 +124,27 @@ integration("T17 durable continuity review", () => {
       request.setEncoding("utf8"); request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         if (request.url?.endsWith("/chat/completions")) requests.push(body);
+        if (rejectSceneRewriteResponseFormat
+            && body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat")
+            && body.includes("\"response_format\"")) {
+          response.writeHead(400, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "response_format is not supported" } }));
+          return;
+        }
+        const content = reviewResponse(body);
+        const providerRequest = JSON.parse(body) as { stream?: boolean };
+        if (providerRequest.stream === true) {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          const midpoint = Math.max(1, Math.floor(content.length / 2));
+          for (const chunk of [content.slice(0, midpoint), content.slice(midpoint)]) {
+            response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`);
+          }
+          response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } })}\n\n`);
+          response.end("data: [DONE]\n\n");
+          return;
+        }
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ message: { content: reviewResponse(body) }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110, cost: 0.001 } }));
+        response.end(JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110, cost: 0.001 } }));
       });
     });
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -117,20 +156,53 @@ integration("T17 durable continuity review", () => {
 
   afterAll(async () => { await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done())); await (server as Server & { transport?: { close(): Promise<void> } }).transport?.close(); await pool.end(); });
 
+  afterEach(() => {
+    reviewVerdict = "pass";
+    reviewUnavailable = false;
+    reviewSequence = [];
+    requests.length = 0;
+    needsChoiceRepair = false;
+    invalidChoiceRepair = false;
+    invalidPrimary = false;
+    semanticRepairNeedsChoiceRepair = false;
+    extensionConflict = false;
+    invalidSemanticRepair = false;
+    eventCoverageSequence = [];
+    sceneCoverageSequence = [];
+    rejectSceneRewriteResponseFormat = false;
+    repairSupersedesFactId = null;
+  });
+
   async function enqueue(
     mode: "off" | "observe" | "enforce",
     scene = false,
     prepareCampaign?: (campaignId: string) => Promise<void>,
-    action = "Wait at the observatory."
+    action = "Wait at the observatory.",
+    storyOnly = scene
   ) {
     const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Review ${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "review.story", story }));
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
-    if (scene) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
+    if (storyOnly) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     await prepareCampaign?.(imported.campaignId);
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+    return { job, application, campaignId: imported.campaignId };
+  }
+
+  async function enqueueReplacement(mode: "off" | "observe" | "enforce", scene: boolean) {
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Review replacement ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "review-replacement.story", story }));
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
+    const current = (await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id=$1", [imported.campaignId])).rows[0]!;
+    const job = await application.enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, generationRetryLatestRequestSchema.parse({
+      action: "Replace the observatory turn.", expectedCurrentTurnNumber: current.active_turn_number,
+      requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit",
+      providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 }
+    }));
     return { job, application, campaignId: imported.campaignId };
   }
 
@@ -147,18 +219,107 @@ integration("T17 durable continuity review", () => {
     }
   }
 
-  it("binds enforcing Story Direction review to both main and choice-only producing requests", async () => {
-    const { job, application } = await enqueue("enforce", true);
+  it("pauses invalid Story Direction choices until one retry repairs the retained narration", async () => {
+    const { job, application, campaignId } = await enqueue("enforce", true);
     reviewVerdict = "pass"; requests.length = 0; needsChoiceRepair = true;
     try {
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
       await runGenerationJob(pool, `choices-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required"
+      });
+      const savedBeforeDecision = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
+      const originalStory = JSON.parse(savedBeforeDecision.primaryResult.response.content);
+      expect(savedBeforeDecision.generationReview).toMatchObject({ state: "pending", stage: "choices", candidateScope: "main" });
+      expect(savedBeforeDecision.generationReview.gateCandidate.story).toBeNull();
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).not.toContain("story-only-choice-repair-v1");
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count).toBe(acceptedBefore);
+
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ stage: "choices", canKeep: false });
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: review.reviewId, revision: review.revision, decision: "retry"
+      });
+
+      await runGenerationJob(pool, `choices-retry-${randomUUID()}`, 30, credentialSecret);
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
       expect(requests).toHaveLength(3);
+      expect(saved.primaryResult).toMatchObject({
+        requestPayloadHash: createHash("sha256").update(requests[0]!).digest("hex"),
+        response: { responseId: expect.any(String) }
+      });
+      expect(saved.choiceRepair).toMatchObject({ status: "validated", authorizedReviewId: review.reviewId, authorizedRevision: review.revision });
+      expect(saved.logicalAttempt).toMatchObject({ choiceRepairsConsumed: 1 });
       expect(saved.continuityReview.binding.auxiliaryRequestHashes).toEqual([createHash("sha256").update(requests[1]!).digest("hex")]);
       expect(saved.continuityReview.binding.producingRequestHash).toBe(createHash("sha256").update(requests[0]!).digest("hex"));
       expect(JSON.parse(JSON.parse(requests[2]!).messages[1].content).draft.choices).toEqual(["Continue.", "Wait.", "Listen.", "Leave."]);
+      expect((await pool.query<{ narration: string }>(
+        "SELECT narration FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL ORDER BY turn_number DESC LIMIT 1", [campaignId]
+      )).rows[0]!.narration).toBe(originalStory.narration);
     } finally { needsChoiceRepair = false; }
+  });
+
+  it("re-offers the original choice candidate when its authorized repair fails", async () => {
+    const { job, application } = await enqueue("enforce", true);
+    reviewVerdict = "pass"; requests.length = 0; needsChoiceRepair = true; invalidChoiceRepair = true;
+    try {
+      await runGenerationJob(pool, `choice-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const first = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(first).toMatchObject({ stage: "choices", state: "pending", canRetry: true, narration: null });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: first.reviewId, revision: first.revision, decision: "retry" });
+      await runGenerationJob(pool, `choice-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(reoffered).toMatchObject({ stage: "choices", state: "pending", canRetry: false, narration: null });
+      expect(reoffered.revision).toBeGreaterThan(first.revision);
+    } finally { needsChoiceRepair = false; invalidChoiceRepair = false; }
+  });
+
+  it("re-offers the original structure candidate when its authorized retry fails", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; requests.length = 0; invalidPrimary = true;
+    try {
+      await runGenerationJob(pool, `structure-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const first = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(first).toMatchObject({ stage: "structure", state: "pending", canRetry: true, narration: null });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: first.reviewId, revision: first.revision, decision: "retry" });
+      await runGenerationJob(pool, `structure-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(reoffered).toMatchObject({ stage: "structure", state: "pending", canRetry: false, narration: null });
+      expect(reoffered.revision).toBeGreaterThan(first.revision);
+    } finally { invalidPrimary = false; }
+  });
+
+  it("does not dispatch a primary replacement from a historical structure retry receipt", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; requests.length = 0; invalidPrimary = true;
+    try {
+      await runGenerationJob(pool, `structure-stale-initial-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      const saved = (await pool.query<{ orchestration_private: Record<string, unknown> }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+      const review = saved.generationReview as { decisionJournal: Array<Record<string, unknown>> };
+      const receipt = review.decisionJournal.at(-1)!;
+      receipt.reviewId = randomUUID();
+      delete saved.primaryResult;
+      (saved.primaryReservation as { status: string }).status = "reserved";
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(saved)]);
+
+      await runGenerationJob(pool, `structure-stale-reclaim-${randomUUID()}`, 30, credentialSecret);
+      expect(requests).toHaveLength(1);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
+    } finally { invalidPrimary = false; }
   });
 
   it.each(["observe", "enforce"] as const)("%s completes a review when selected pinned world references are sent", async (mode) => {
@@ -183,10 +344,410 @@ integration("T17 durable continuity review", () => {
     expect(requests[0]).toContain(relationshipLore);
   });
 
+  it.each([
+    { label: "conflict", unavailable: false, verdict: "conflict" as const },
+    { label: "unavailable", unavailable: true, verdict: "pass" as const }
+  ])("commits the exact final Keep offline after a $label review", async ({ unavailable, verdict }) => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    const { job, application, campaignId } = await enqueue("enforce");
+    reviewVerdict = verdict; reviewUnavailable = unavailable; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `offline-final-keep-initial-${randomUUID()}`, 30, credentialSecret);
+      const pending = await application.getJob({ ownerUserId, jobId: job.id });
+      expect(pending).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      const beforeAccepted = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      );
+      const savedBefore = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { story: { narration: string }; storyHash: string }; state: string } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedBefore.generationReview).toMatchObject({ state: "pending" });
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(0);
+
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: review.reviewId, revision: review.revision, decision: "keep"
+      });
+      const requestsBeforeOfflineKeep = requests.length;
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const loadTextExecution = vi.fn(async () => { throw new Error("text provider must remain offline for final Keep"); });
+      const collaborators = {
+        ...createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation),
+        loadTextExecution
+      };
+      const workerId = `offline-final-keep-resume-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+
+      expect(loadTextExecution).not.toHaveBeenCalled();
+      expect(requests).toHaveLength(requestsBeforeOfflineKeep);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      const acceptedAfter = await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      );
+      expect(acceptedAfter.rows).toEqual([{ count: beforeAccepted.rows[0]!.count + 1 }]);
+      const keptTurn = await pool.query<{ narration: string }>(
+        `SELECT narration FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL
+          ORDER BY turn_number DESC LIMIT 1`, [campaignId]
+      );
+      expect(keptTurn.rows).toEqual([{ narration: savedBefore.generationReview.gateCandidate.story.narration }]);
+      const savedAfter = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedAfter.generationReview.gateCandidate.storyHash).toBe(savedBefore.generationReview.gateCandidate.storyHash);
+      expect(requests.filter((request) => JSON.parse(request).stream === true)).toHaveLength(1);
+    } finally {
+      reviewUnavailable = false;
+      reviewVerdict = "pass";
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  });
+
+  it.each([
+    { label: "append Action", operation: "append", scene: false, storyOnly: false },
+    { label: "append scene", operation: "append", scene: true, storyOnly: false },
+    { label: "replacement Action", operation: "replace_latest", scene: false, storyOnly: false },
+    { label: "replacement scene", operation: "replace_latest", scene: true, storyOnly: false },
+    { label: "Story-only scene", operation: "append", scene: true, storyOnly: true }
+  ] as const)("streams a complete primary candidate and commits the exact final Keep for $label", async ({ operation, scene, storyOnly }) => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    try {
+      const fixture = operation === "append"
+        ? await enqueue("enforce", scene, undefined, "Wait at the observatory.", storyOnly)
+        : await enqueueReplacement("enforce", scene);
+      const { job, application, campaignId } = fixture;
+      reviewVerdict = "conflict";
+      requests.length = 0;
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+      await runGenerationJob(pool, `streamed-final-keep-${randomUUID()}`, 30, credentialSecret);
+
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", partialNarration: "Mira waits at the observatory."
+      });
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+      expect(review.narration).toBe("Mira waits at the observatory.");
+      expect(JSON.parse(requests[0]!).stream).toBe(true);
+      const savedBefore = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string; story: { narration: string; choices: string[]; custom_action_suggestion: string } } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedBefore.generationReview.gateCandidate.story.narration).toBe(review.narration);
+      expect(savedBefore.generationReview.gateCandidate.storyHash)
+        .toBe(sha256Hex(canonicalEvidenceJson(savedBefore.generationReview.gateCandidate.story)));
+      const primaryRequests = requests.filter((request) => {
+        const body = JSON.parse(request) as { stream?: boolean; messages?: Array<{ content?: string }> };
+        return body.stream === true && !body.messages?.some((message) => message.content?.includes("story-continuity-review-v1") || message.content?.includes("story-continuity-repair-v1"));
+      });
+      expect(primaryRequests).toHaveLength(1);
+      expect(requests.filter((request) => request.includes("story-continuity-repair-v1"))).toHaveLength(0);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+      const requestsBeforeKeep = requests.length;
+      await runGenerationJob(pool, `streamed-final-keep-commit-${randomUUID()}`, 30, credentialSecret);
+
+      expect(requests).toHaveLength(requestsBeforeKeep);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", operationKind: operation });
+      const savedAfter = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedAfter.generationReview.gateCandidate.storyHash).toBe(savedBefore.generationReview.gateCandidate.storyHash);
+      expect(primaryRequests).toHaveLength(1);
+      expect(requests.filter((request) => request.includes("story-continuity-repair-v1"))).toHaveLength(0);
+      await expect(pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).resolves.toMatchObject({ rows: [{ count: acceptedBefore + (operation === "append" ? 1 : 0) }] });
+      await expect(pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]
+      )).resolves.toMatchObject({ rows: [{ count: 1 }] });
+      const accepted = await application.getResult({ ownerUserId, jobId: job.id });
+      expect(accepted).toMatchObject({
+        narration: savedBefore.generationReview.gateCandidate.story.narration,
+        choices: savedBefore.generationReview.gateCandidate.story.choices,
+        customActionSuggestion: savedBefore.generationReview.gateCandidate.story.custom_action_suggestion
+      });
+    } finally {
+      reviewVerdict = "pass";
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  }, 60_000);
+
+  it("reclaims a streamed captured candidate and a persisted Keep decision without another text call", async () => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "conflict";
+    requests.length = 0;
+    try {
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+      let interrupted = false;
+      const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+        const updated = await repository.saveOrchestration(scope, value);
+        if (!interrupted && value.primaryResult) {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+          throw Object.assign(new Error("Injected restart after streamed primary capture."), { code: "generation_cancelled" });
+        }
+        return updated;
+      } };
+      const workerId = `streamed-capture-${randomUUID()}`;
+      const firstClaim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: firstClaim!, workerId, leaseSeconds: 30 });
+      expect(interrupted).toBe(true);
+      const primaryRequests = requests.filter((request) => JSON.parse(request).stream === true);
+      expect(primaryRequests).toHaveLength(1);
+      const callsAfterCapture = requests.length;
+
+      await runGenerationJob(pool, `streamed-capture-reclaim-${randomUUID()}`, 30, credentialSecret);
+      expect(requests).toHaveLength(callsAfterCapture + 1);
+      expect(requests.filter((request) => request.includes("story-continuity-review-v1"))).toHaveLength(1);
+      expect(requests.filter((request) => JSON.parse(request).stream === true)).toHaveLength(1);
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+      const imageFailure = vi.fn(async () => { throw new Error("Injected accepted-illustration enqueue failure."); });
+      collaborators.illustration.enqueueAcceptedTurnIllustrationSegments = imageFailure;
+      const decisionWorkerId = `streamed-decision-restart-${randomUUID()}`;
+      const decisionClaim = await repository.claimNext({ workerId: decisionWorkerId, leaseSeconds: 30 });
+      await createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: decisionClaim!, workerId: decisionWorkerId, leaseSeconds: 30 });
+
+      expect(requests).toHaveLength(callsAfterCapture + 1);
+      expect(imageFailure).toHaveBeenCalledTimes(1);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      expect(await application.getResult({ ownerUserId, jobId: job.id })).toMatchObject({ narration: review.narration });
+
+      const foreignStory = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+      foreignStory.world.title = `Foreign retrieval ${randomUUID()}`;
+      const foreign = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "foreign-retrieval.story", story: foreignStory }));
+      const foreignTurn = (await pool.query<{ id: string }>(
+        "INSERT INTO turns (owner_user_id,campaign_id,turn_number,narration,accepted_at) VALUES ($1,$2,3,$3,now()) RETURNING id",
+        [ownerUserId, foreign.campaignId, "FOREIGN_ACCEPTED_FICTION_CANARY"]
+      )).rows[0]!;
+      const foreignVersion = (await pool.query<{ world_version_id: string }>("SELECT world_version_id FROM campaigns WHERE id=$1", [foreign.campaignId])).rows[0]!;
+      await pool.query("UPDATE campaigns SET active_turn_number=3 WHERE id=$1", [foreign.campaignId]);
+      await pool.query(
+        "INSERT INTO chronicle_memories (owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate) VALUES ($1,$2,$3,$4,'campaign_summary',3,$5,4)",
+        [ownerUserId, foreign.campaignId, foreignVersion.world_version_id, foreignTurn.id, "FOREIGN_ACCEPTED_FICTION_CANARY"]
+      );
+      reviewVerdict = "pass";
+      const next = await application.enqueueAppend({ ownerUserId, campaignId: (await pool.query<{ campaign_id: string }>("SELECT campaign_id FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.campaign_id }, generationRequestSchema.parse({
+        action: "Continue from the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+        providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+      }));
+      const beforeNextTurn = requests.length;
+      await runGenerationJob(pool, `streamed-next-turn-${randomUUID()}`, 30, credentialSecret);
+      const nextPrimary = requests.slice(beforeNextTurn).map((request) => JSON.parse(request) as { stream?: boolean; messages?: Array<{ content?: string }> })
+        .find((request) => request.stream === true && !request.messages?.some((message) => message.content?.includes("story-continuity-review-v1")));
+      expect(JSON.stringify(nextPrimary)).toContain(review.narration);
+      await expect(pool.query("SELECT content FROM chronicle_memories WHERE campaign_id=(SELECT campaign_id FROM generation_jobs WHERE id=$1) AND content LIKE '%PRIVATE_REVIEW_CANARY%'", [job.id]))
+        .resolves.toMatchObject({ rows: [] });
+      for (const canary of ["PRIVATE_REVIEW_CANARY", "FOREIGN_ACCEPTED_FICTION_CANARY"]) {
+        expect(JSON.stringify(nextPrimary)).not.toContain(canary);
+      }
+      expect(await application.getJob({ ownerUserId, jobId: next.id })).toMatchObject({ status: "completed" });
+    } finally {
+      reviewVerdict = "pass";
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  }, 60_000);
+
+  it("re-runs an uncertain continuity reviewer before requiring a new conflict decision", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["uncertain", "conflict"]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `continuity-uncertain-initial-${randomUUID()}`, 30, credentialSecret);
+      const uncertain = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(uncertain).toMatchObject({ stage: "continuity", state: "pending", reasons: ["review_uncertain"] });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: uncertain.reviewId, revision: uncertain.revision, decision: "retry" });
+      await runGenerationJob(pool, `continuity-uncertain-rerun-${randomUUID()}`, 30, credentialSecret);
+
+      const conflict = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(conflict).toMatchObject({ stage: "continuity", state: "pending", reasons: ["narrative_conflict"], canKeep: true, canRetry: true });
+      expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(2);
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(0);
+    } finally { reviewSequence = []; }
+  });
+
+  it("re-offers the original final candidate after a failed authorized continuity retry and keeps it offline", async () => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    const { job, application, campaignId } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["conflict"]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `continuity-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const initialReview = await application.getReview({ ownerUserId, jobId: job.id });
+      const savedBeforeRetry = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: initialReview.reviewId, revision: initialReview.revision, decision: "retry"
+      });
+      invalidSemanticRepair = true;
+      await runGenerationJob(pool, `continuity-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(reoffered).toMatchObject({ state: "pending", stage: "continuity", canKeep: true, canRetry: false, retryFailure: expect.any(String) });
+      const savedAfterFailure = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string }; decisionJournal: unknown[] } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedAfterFailure.generationReview.gateCandidate.storyHash).toBe(savedBeforeRetry.generationReview.gateCandidate.storyHash);
+      expect(savedAfterFailure.generationReview.decisionJournal).toHaveLength(1);
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count).toBe(acceptedBefore);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: reoffered.reviewId, revision: reoffered.revision, decision: "keep"
+      });
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const loadTextExecution = vi.fn(async () => { throw new Error("text provider must remain offline for re-offered final Keep"); });
+      const collaborators = {
+        ...createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation),
+        loadTextExecution
+      };
+      const workerId = `continuity-reoffer-keep-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+      expect(loadTextExecution).not.toHaveBeenCalled();
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count).toBe(acceptedBefore + 1);
+      expect(requests.filter((request) => JSON.parse(request).stream === true)).toHaveLength(1);
+    } finally {
+      invalidSemanticRepair = false;
+      reviewSequence = [];
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  });
+
+  it("keeps an uncovered scene main exactly, then pauses again for a later final continuity conflict", async () => {
+    const { job, application, campaignId } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
+    reviewVerdict = "conflict"; sceneCoverageSequence = [false]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `scene-review-initial-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(requests).toHaveLength(2);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(0);
+      const firstReview = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(firstReview).toMatchObject({ stage: "scene_coverage", state: "pending", canKeep: true });
+      const before = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]);
+      const mainNarration = firstReview.narration;
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: firstReview.reviewId, revision: firstReview.revision, decision: "keep" });
+      await runGenerationJob(pool, `scene-review-keep-${randomUUID()}`, 30, credentialSecret);
+
+      expect(requests).toHaveLength(3);
+      expect(requests[2]).toContain("story-continuity-review-v1");
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(0);
+      const laterReview = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(laterReview).toMatchObject({ stage: "continuity", state: "pending", narration: mainNarration });
+      await expect(pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]))
+        .resolves.toMatchObject({ rows: [{ count: before.rows[0]!.count }] });
+    } finally { sceneCoverageSequence = []; reviewVerdict = "pass"; }
+  });
+
+  it("re-offers the original scene candidate when its authorized rewrite fails", async () => {
+    const { job, application } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
+    reviewVerdict = "pass"; sceneCoverageSequence = [false, false, false]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `scene-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const first = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(first).toMatchObject({ stage: "scene_coverage", state: "pending", canKeep: true, canRetry: true });
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: first.reviewId, revision: first.revision, decision: "retry" });
+      await runGenerationJob(pool, `scene-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(reoffered).toMatchObject({ stage: "scene_coverage", state: "pending", canKeep: true, canRetry: false, narration: first.narration });
+      expect(reoffered.revision).toBeGreaterThan(first.revision);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { sceneCoverageSequence = []; }
+  });
+
+  it("reclaims a dispatched scene rewrite without another transport call and re-offers the original", async () => {
+    const { job, application } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
+    reviewVerdict = "pass"; sceneCoverageSequence = [false, false]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `scene-dispatch-gate-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+      let interrupted = false;
+      const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+        const sceneRepair = (value as { sceneCoverageRepair?: { status?: string } }).sceneCoverageRepair;
+        if (!interrupted && sceneRepair?.status === "validated") {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+          throw Object.assign(new Error("Injected worker termination after scene rewrite transport."), { code: "generation_cancelled" });
+        }
+        return repository.saveOrchestration(scope, value);
+      } };
+      const workerId = `scene-dispatch-crash-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+
+      expect(interrupted).toBe(true);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+      await runGenerationJob(pool, `scene-dispatch-reclaim-${randomUUID()}`, 30, credentialSecret);
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(reoffered).toMatchObject({ state: "pending", stage: "scene_coverage", canKeep: true, canRetry: false, narration: gate.narration });
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { sceneCoverageSequence = []; }
+  });
+
+  it("records the actual response-format fallback body for a validated scene rewrite", async () => {
+    const { job, application } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
+    reviewVerdict = "pass"; sceneCoverageSequence = [false, false, true]; requests.length = 0;
+    rejectSceneRewriteResponseFormat = true;
+    try {
+      await runGenerationJob(pool, `scene-fallback-gate-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `scene-fallback-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const rewriteBodies = requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"));
+      expect(rewriteBodies).toHaveLength(2);
+      expect(rewriteBodies[0]).toContain("\"response_format\"");
+      expect(rewriteBodies[1]).not.toContain("\"response_format\"");
+      const saved = (await pool.query<{ orchestration_private: { sceneCoverageRepair: { status: string; repairRequestBody: string; repairRequestPayloadHash: string } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(saved.sceneCoverageRepair).toMatchObject({
+        status: "validated",
+        repairRequestBody: rewriteBodies[1],
+        repairRequestPayloadHash: createHash("sha256").update(rewriteBodies[1]!).digest("hex")
+      });
+    } finally {
+      sceneCoverageSequence = [];
+      rejectSceneRewriteResponseFormat = false;
+    }
+  });
+
   it("reserves one semantic repair, replaces the main, and reviews the repaired request before commit", async () => {
     const { job, application } = await enqueue("enforce");
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; requests.length = 0;
     await runGenerationJob(pool, `semantic-main-${randomUUID()}`, 30, credentialSecret);
+    const gate = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(gate).toMatchObject({ state: "pending", stage: "continuity" });
+    expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(0);
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+    await runGenerationJob(pool, `semantic-main-retry-${randomUUID()}`, 30, credentialSecret);
     const completed = await application.getJob({ ownerUserId, jobId: job.id });
     expect(completed).toMatchObject({ status: "completed" });
     expect(requests).toHaveLength(4);
@@ -199,10 +760,31 @@ integration("T17 durable continuity review", () => {
     expect(requests[2]).not.toContain("private fixture");
   });
 
+  it("does not dispatch continuity repair from a receipt for a different stage", async () => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["conflict"]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `continuity-stage-initial-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      const saved = (await pool.query<{ orchestration_private: Record<string, unknown> }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+      const review = saved.generationReview as { decisionJournal: Array<Record<string, unknown>> };
+      review.decisionJournal.at(-1)!.nextStage = "scene_coverage";
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(saved)]);
+
+      await runGenerationJob(pool, `continuity-stage-reclaim-${randomUUID()}`, 30, credentialSecret);
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(0);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+    } finally { reviewSequence = []; }
+  });
+
   it("does not spend a second semantic repair when the post-repair review still conflicts", async () => {
     const { job, application } = await enqueue("enforce");
     reviewVerdict = "pass"; reviewSequence = ["conflict", "conflict"]; requests.length = 0;
     await runGenerationJob(pool, `semantic-exhausted-${randomUUID()}`, 30, credentialSecret);
+    const gate = await application.getReview({ ownerUserId, jobId: job.id });
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+    await runGenerationJob(pool, `semantic-exhausted-retry-${randomUUID()}`, 30, credentialSecret);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "continuity_review_conflict" });
     expect(requests).toHaveLength(4);
     const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
@@ -216,6 +798,10 @@ integration("T17 durable continuity review", () => {
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; extensionConflict = true; requests.length = 0;
     try {
       await runGenerationJob(pool, `semantic-extension-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(gate).toMatchObject({ state: "pending", stage: "continuity" });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `semantic-extension-retry-${randomUUID()}`, 30, credentialSecret);
       const completed = await application.getJob({ ownerUserId, jobId: job.id });
       expect(completed, JSON.stringify(completed)).toMatchObject({ status: "completed" });
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
@@ -232,6 +818,10 @@ integration("T17 durable continuity review", () => {
     await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [campaignId, JSON.stringify([{ id: triggerId, label: "Keeper arrival", timing: "after", condition: "Mira waits.", effect: "The bell rings as the keeper arrives.", addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }])]);
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; extensionConflict = false; requests.length = 0;
     await runGenerationJob(pool, `semantic-main-event-${randomUUID()}`, 30, credentialSecret);
+    const gate = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(gate).toMatchObject({ state: "pending", stage: "continuity" });
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+    await runGenerationJob(pool, `semantic-main-event-retry-${randomUUID()}`, 30, credentialSecret);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
     const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
     expect(saved.semanticRepair).toMatchObject({ status: "validated", scope: "main" });
@@ -245,14 +835,78 @@ integration("T17 durable continuity review", () => {
     expect(repair.rejected_final.narration).toContain("The bell rings");
   });
 
+  it("pauses final event coverage before one authorized rewrite while preserving the main prefix", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    const triggerId = randomUUID();
+    await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [campaignId, JSON.stringify([{ id: triggerId, label: "Keeper arrival", timing: "after", condition: "Mira waits.", effect: "The bell rings as the keeper arrives.", addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }])]);
+    reviewVerdict = "pass"; eventCoverageSequence = [false, true, true]; requests.length = 0;
+    try {
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+      await runGenerationJob(pool, `event-coverage-gate-${randomUUID()}`, 30, credentialSecret);
+
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(gate).toMatchObject({ stage: "event_coverage", candidateScope: "final", canKeep: false, canRetry: true });
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(0);
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count).toBe(acceptedBefore);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `event-coverage-retry-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
+      expect(saved.eventCoverageRepair).toMatchObject({ authorizedReviewId: gate.reviewId, authorizedRevision: gate.revision });
+      expect(saved.extension.story.narration.startsWith(saved.validatedMainDraft.story.narration)).toBe(true);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { eventCoverageSequence = []; }
+  });
+
+  it("pauses before-event coverage before one authorized rewrite", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    const triggerId = randomUUID();
+    await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [campaignId, JSON.stringify([{ id: triggerId, label: "Keeper arrival", timing: "before", condition: "Mira waits.", effect: "The bell rings as the keeper arrives.", addTextAfter: false, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }])]);
+    reviewVerdict = "pass"; eventCoverageSequence = [false, true, true]; requests.length = 0;
+    try {
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+      await runGenerationJob(pool, `before-event-gate-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(gate).toMatchObject({ stage: "event_coverage", candidateScope: "main", canKeep: false, canRetry: true });
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(0);
+      expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId])).rows[0]!.count).toBe(acceptedBefore);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `before-event-retry-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
+      expect(saved.eventCoverageRepair).toMatchObject({ authorizedReviewId: gate.reviewId, authorizedRevision: gate.revision, mainRepairConsumed: true });
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { eventCoverageSequence = []; }
+  });
+
   it("does not repeat an event-coverage rewrite after a semantic main restart", async () => {
     const { job, application, campaignId } = await enqueue("enforce");
     const triggerId = randomUUID();
     await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [campaignId, JSON.stringify([{ id: triggerId, label: "Keeper arrival", timing: "after", condition: "Mira waits.", effect: "The bell rings as the keeper arrives.", addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }])]);
-    reviewVerdict = "pass"; reviewSequence = ["conflict"]; eventCoverageSequence = [false, true, true, false]; requests.length = 0;
+    reviewVerdict = "pass"; reviewSequence = ["conflict"]; eventCoverageSequence = [false, true, true, true, true, true, true, false]; requests.length = 0;
     try {
       await runGenerationJob(pool, `coverage-then-semantic-${randomUUID()}`, 30, credentialSecret);
-      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "event_coverage_failed" });
+      const eventGate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(eventGate).toMatchObject({ state: "pending", stage: "event_coverage" });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: eventGate.reviewId, revision: eventGate.revision, decision: "retry" });
+      await runGenerationJob(pool, `coverage-then-semantic-event-retry-${randomUUID()}`, 30, credentialSecret);
+      const continuityGate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(continuityGate).toMatchObject({ state: "pending", stage: "continuity" });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: continuityGate.reviewId, revision: continuityGate.revision, decision: "retry" });
+      await runGenerationJob(pool, `coverage-then-semantic-continuity-retry-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      const laterEventGate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(laterEventGate).toMatchObject({ state: "pending", stage: "event_coverage", canRetry: false });
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
       expect(saved.logicalAttempt).toMatchObject({ semanticRepairsConsumed: 1, eventCoverageRepairsConsumed: 1 });
       expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
@@ -265,6 +919,14 @@ integration("T17 durable continuity review", () => {
     reviewVerdict = "pass"; reviewSequence = ["conflict"]; needsChoiceRepair = true; semanticRepairNeedsChoiceRepair = true; requests.length = 0;
     try {
       await runGenerationJob(pool, `choice-then-semantic-${randomUUID()}`, 30, credentialSecret);
+      const choiceGate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(choiceGate).toMatchObject({ state: "pending", stage: "choices" });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: choiceGate.reviewId, revision: choiceGate.revision, decision: "retry" });
+      await runGenerationJob(pool, `choice-then-semantic-choice-retry-${randomUUID()}`, 30, credentialSecret);
+      const continuityGate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(continuityGate).toMatchObject({ state: "pending", stage: "continuity" });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: continuityGate.reviewId, revision: continuityGate.revision, decision: "retry" });
+      await runGenerationJob(pool, `choice-then-semantic-continuity-retry-${randomUUID()}`, 30, credentialSecret);
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
       expect(saved.logicalAttempt).toMatchObject({ semanticRepairsConsumed: 1, choiceRepairsConsumed: 1 });
@@ -290,6 +952,9 @@ integration("T17 durable continuity review", () => {
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; repairSupersedesFactId = factId; requests.length = 0;
     try {
       await runGenerationJob(pool, `semantic-fact-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `semantic-fact-retry-${randomUUID()}`, 30, credentialSecret);
       const completed = await application.getJob({ ownerUserId, jobId: job.id });
       expect(completed, JSON.stringify({ completed, repair: requests.find((body) => body.includes("story-continuity-repair-v1")) })).toMatchObject({ status: "completed" });
       expect(requests.find((body) => body.includes("story-continuity-repair-v1"))).toContain(factId);
@@ -304,6 +969,9 @@ integration("T17 durable continuity review", () => {
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; repairSupersedesFactId = factId; requests.length = 0;
     try {
       await runGenerationJob(pool, `semantic-omitted-fact-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `semantic-omitted-fact-retry-${randomUUID()}`, 30, credentialSecret);
       const repair = requests.find((body) => body.includes("story-continuity-repair-v1"));
       expect(repair).not.toContain(factId);
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "failed", errorCode: "generation_failed" });
@@ -313,6 +981,10 @@ integration("T17 durable continuity review", () => {
   it.each(["dispatched", "validated"] as const)("reclaims a %s semantic-repair checkpoint without a second repair dispatch", async (crashAt) => {
     const { job, application } = await enqueue("enforce");
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; requests.length = 0;
+    await runGenerationJob(pool, `semantic-gate-${crashAt}-${randomUUID()}`, 30, credentialSecret);
+    const gate = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(gate).toMatchObject({ state: "pending", stage: "continuity" });
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
     const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);

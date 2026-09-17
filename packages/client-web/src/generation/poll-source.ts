@@ -23,6 +23,11 @@ const TERMINAL_STATUSES = new Set([
   "recoverable"
 ]);
 
+function isTerminalSnapshot(snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot): boolean {
+  return TERMINAL_STATUSES.has(snapshot.status)
+    && !(snapshot.status === "recoverable" && snapshot.review !== undefined);
+}
+
 export function createPollSession(
   options: PollSessionOptions,
   jobId: string,
@@ -112,7 +117,7 @@ async function* runPollSession(
     }
     consecutiveFailures = 0;
     yield { kind: "snapshot", snapshot: parsed.data };
-    if (TERMINAL_STATUSES.has(parsed.data.status)) return;
+    if (isTerminalSnapshot(parsed.data)) return;
     await waitForNextPoll(options, POLL_INTERVAL_MS, signal);
   }
 }

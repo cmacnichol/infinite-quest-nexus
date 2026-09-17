@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -101,6 +101,9 @@ async function generationCommands(pool: DatabasePool) {
       application.enqueueReplacement({ ownerUserId, campaignId }, request),
     getGenerationJob: (jobId: string) => application.getJob({ ownerUserId, jobId }),
     getGenerationResult: (jobId: string) => application.getResult({ ownerUserId, jobId }),
+    getGenerationReview: (jobId: string) => application.getReview({ ownerUserId, jobId }),
+    decideGenerationReview: (jobId: string, reviewId: string, revision: number, decision: "keep" | "retry") =>
+      application.decideReview({ ownerUserId, jobId }, { reviewId, revision, decision }),
     retryGeneration: (jobId: string) => application.retry({ ownerUserId, jobId }),
     cancelGeneration: (jobId: string) => application.cancel({ ownerUserId, jobId })
   };
@@ -124,6 +127,17 @@ async function getGenerationResult(pool: DatabasePool, jobId: string) {
 
 async function retryGeneration(pool: DatabasePool, jobId: string) {
   return (await generationCommands(pool)).retryGeneration(jobId);
+}
+
+async function decideGenerationReview(pool: DatabasePool, jobId: string, decision: "keep" | "retry") {
+  const commands = await generationCommands(pool);
+  const review = await commands.getGenerationReview(jobId);
+  await commands.decideGenerationReview(jobId, review.reviewId, review.revision, decision);
+  return review;
+}
+
+async function getGenerationReview(pool: DatabasePool, jobId: string) {
+  return (await generationCommands(pool)).getGenerationReview(jobId);
 }
 
 async function cancelGeneration(pool: DatabasePool, jobId: string) {
@@ -251,6 +265,12 @@ integration("durable Story Engine integration", () => {
     if (server) await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
     await providerTransport?.close();
     await pool.end();
+  });
+
+  // A failed assertion must not let an unused synthetic provider response
+  // change the next independent scenario.
+  afterEach(() => {
+    replies.length = 0;
   });
 
   async function campaign(
@@ -828,54 +848,25 @@ integration("durable Story Engine integration", () => {
     }
   });
 
-  it("does not repeat a consumed automatic repair after a lease reclaim", async () => {
+  it("requires an explicit retry for an invalid candidate", async () => {
     const imported = await campaign();
     const requestOffset = requests.length;
     const job = await queue(imported.campaignId, "Repair this draft once.");
-    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
-    const querySpy = vi.spyOn(pool, "query");
-    let repairConsumed = false;
-    querySpy.mockImplementation((async (...args: any[]) => {
-      const statement = String(args[0]);
-      const parameters = Array.isArray(args[1]) ? args[1] : [];
-      const result = await originalQuery(...args);
-      if (!repairConsumed && statement.includes("SET orchestration_private")
-          && String(parameters[3]).includes("automaticRepair")) {
-        repairConsumed = true;
-        await originalQuery(
-          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
-          [job.id]
-        );
-      }
-      return result;
-    }) as any);
-    try {
-      replies.push({ content: "not valid story JSON" }, { content: validStory("The single repair response is never repeated.") });
-      await runGenerationJob(pool, "repair-worker-a", 30, credentialSecret);
-      expect(repairConsumed).toBe(true);
-      expect(await runGenerationJob(pool, "repair-worker-b", 30, credentialSecret)).toBe(true);
-      expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(2);
-      expect(await getGenerationJob(pool, job.id)).toMatchObject({
-        status: "recoverable",
-        errorCode: "automatic_repair_consumed",
-        attempts: 2
-      });
-      const accepted = await pool.query<{ n: number }>(
-        "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND turn_number=$2",
-        [imported.campaignId, 3]
-      );
-      expect(accepted.rows).toEqual([{ n: 0 }]);
-      await retryGeneration(pool, job.id);
-      const retryReset = await pool.query<{ orchestration_private: { automaticRepair?: unknown } }>(
-        "SELECT orchestration_private FROM generation_jobs WHERE id = $1",
-        [job.id]
-      );
-      expect(retryReset.rows[0]?.orchestration_private.automaticRepair).toBeUndefined();
-      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "queued" });
-      expect(await cancelGeneration(pool, job.id)).toMatchObject({ status: "cancelled" });
-    } finally {
-      querySpy.mockRestore();
-    }
+    replies.push({ content: "not valid story JSON" }, { content: validStory("The single repair response is never repeated.") });
+    await runGenerationJob(pool, "repair-worker-a", 30, credentialSecret);
+    const pending = await decideGenerationReview(pool, job.id, "retry");
+    expect(pending).toMatchObject({ stage: "structure", canKeep: false, canRetry: true });
+    expect(await runGenerationJob(pool, "repair-worker-b", 30, credentialSecret)).toBe(true);
+    expect(requests.slice(requestOffset).filter((request) => Array.isArray(request.messages))).toHaveLength(2);
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({
+      status: "completed",
+      attempts: 2
+    });
+    const accepted = await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+      [imported.campaignId, 3]
+    );
+    expect(accepted.rows).toEqual([{ n: 1 }]);
   });
 
   it("makes a failed event extension recoverable, then retries only that extension", async () => {
@@ -2094,6 +2085,8 @@ integration("durable Story Engine integration", () => {
     );
     const branchJob = await queue(imported.campaignId, "Reply.");
     await runGenerationJob(pool, "story-worker-branch-reply", 30, credentialSecret);
+    await decideGenerationReview(pool, branchJob.id, "retry");
+    await runGenerationJob(pool, "story-worker-branch-repair", 30, credentialSecret);
 
     expect(await getGenerationJob(pool, branchJob.id)).toMatchObject({ status: "completed", expectedTurnNumber: 3 });
     expect(await getGenerationResult(pool, branchJob.id)).toMatchObject({
@@ -2264,12 +2257,12 @@ integration("durable Story Engine integration", () => {
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-c", 30, credentialSecret);
+    await decideGenerationReview(pool, job.id, "retry");
+    await runGenerationJob(pool, "story-worker-c-repair", 30, credentialSecret);
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
     const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
     expect(turn.rows[0]?.narration).not.toMatch(/roll|dice|check/i);
-    const recoveryMessages = requests.at(-1)?.messages || [];
-    expect(recoveryMessages.at(-2)?.content).toContain("She rolls a 17");
-    expect(recoveryMessages.at(-1)?.content).toContain('"rolls a 17"');
+    expect(requests.slice(-2).filter((request) => Array.isArray(request.messages))).toHaveLength(2);
   });
 
   it("streams only the initial story request when validation starts an internal recovery", async () => {
@@ -2290,6 +2283,8 @@ integration("durable Story Engine integration", () => {
       );
       const job = await queue(imported.campaignId);
       await runGenerationJob(pool, "story-worker-streamed-recovery", 30, credentialSecret);
+      await decideGenerationReview(pool, job.id, "retry");
+      await runGenerationJob(pool, "story-worker-streamed-recovery-retry", 30, credentialSecret);
 
       const turnRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
       expect(turnRequests).toHaveLength(2);
@@ -2319,6 +2314,8 @@ integration("durable Story Engine integration", () => {
       );
       const job = await queue(imported.campaignId);
       await runGenerationJob(pool, "story-worker-lifecycle-logs", 30, credentialSecret);
+      await decideGenerationReview(pool, job.id, "retry");
+      await runGenerationJob(pool, "story-worker-lifecycle-logs-retry", 30, credentialSecret);
 
       const events = [
         ...infoSpy.mock.calls.map(([event], index) => ({ event, order: infoSpy.mock.invocationCallOrder[index] ?? 0 })),
@@ -2338,43 +2335,21 @@ integration("durable Story Engine integration", () => {
         "turn_generation_stream_progress",
         "turn_generation_provider_completed",
         "turn_generation_validation_completed",
-        "turn_generation_recovery_started",
+        "turn_generation_claimed",
+        "turn_generation_started",
         "turn_generation_provider_started",
         "turn_generation_provider_completed",
         "turn_generation_validation_completed",
         "turn_generation_completed"
       ]);
 
-      expect(phaseEvents.map((event) => ({ event: event.event, phase: event.phase }))).toEqual([
-        { event: "turn_generation_phase_started", phase: "provider_loading" },
-        { event: "turn_generation_phase_completed", phase: "provider_loading" },
-        { event: "turn_generation_phase_started", phase: "input_preparation" },
-        { event: "turn_generation_phase_completed", phase: "input_preparation" },
-        { event: "turn_generation_phase_started", phase: "context_retrieval" },
-        { event: "turn_generation_phase_completed", phase: "context_retrieval" },
-        { event: "turn_generation_phase_started", phase: "orchestration_loading" },
-        { event: "turn_generation_phase_completed", phase: "orchestration_loading" },
-        { event: "turn_generation_phase_started", phase: "rpg_assessment" },
-        { event: "turn_generation_phase_completed", phase: "rpg_assessment" },
-        { event: "turn_generation_phase_started", phase: "before_event_evaluation" },
-        { event: "turn_generation_phase_completed", phase: "before_event_evaluation" },
-        { event: "turn_generation_phase_started", phase: "prompt_preparation" },
-        { event: "turn_generation_phase_completed", phase: "prompt_preparation" },
-        { event: "turn_generation_phase_started", phase: "streaming_illustration_setup" },
-        { event: "turn_generation_phase_completed", phase: "streaming_illustration_setup" },
-        { event: "turn_generation_phase_started", phase: "story_generation" },
-        { event: "turn_generation_phase_completed", phase: "story_generation" },
-        { event: "turn_generation_phase_started", phase: "story_validation" },
-        { event: "turn_generation_phase_completed", phase: "story_validation" },
-        { event: "turn_generation_phase_started", phase: "story_recovery" },
-        { event: "turn_generation_phase_completed", phase: "story_recovery" },
-        { event: "turn_generation_phase_started", phase: "story_validation" },
-        { event: "turn_generation_phase_completed", phase: "story_validation" },
-        { event: "turn_generation_phase_started", phase: "after_event_evaluation" },
-        { event: "turn_generation_phase_completed", phase: "after_event_evaluation" },
-        { event: "turn_generation_phase_started", phase: "turn_commit" },
-        { event: "turn_generation_phase_completed", phase: "turn_commit" }
-      ]);
+      expect(phaseEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: "turn_generation_phase_started", phase: "provider_loading", jobAttempt: 1 }),
+        expect.objectContaining({ event: "turn_generation_phase_completed", phase: "story_validation", jobAttempt: 1 }),
+        expect.objectContaining({ event: "turn_generation_phase_started", phase: "story_generation", jobAttempt: 2 }),
+        expect.objectContaining({ event: "turn_generation_phase_completed", phase: "turn_commit", jobAttempt: 2 })
+      ]));
+      expect(phaseEvents.some((event) => event.phase === "story_recovery")).toBe(false);
       for (const event of phaseEvents) {
         expect(event).toMatchObject({
           generationJobId: job.id,
@@ -2382,8 +2357,6 @@ integration("durable Story Engine integration", () => {
           providerProfileId: providerId,
           expectedTurnNumber: 3,
           operationKind: "append",
-          jobAttempt: 1,
-          workerId: "story-worker-lifecycle-logs",
           phase: expect.any(String),
           totalDurationMs: expect.any(Number)
         });
@@ -2399,13 +2372,12 @@ integration("durable Story Engine integration", () => {
           providerProfileId: providerId,
           expectedTurnNumber: 3,
           operationKind: "append",
-          jobAttempt: 1
+          jobAttempt: expect.any(Number)
         });
       }
       expect(events).toEqual(expect.arrayContaining([
         expect.objectContaining({ event: "turn_generation_provider_started", storyOperation: "story_generation", streaming: true }),
-        expect.objectContaining({ event: "turn_generation_recovery_started", recoveryKind: "mechanics_cleanup" }),
-        expect.objectContaining({ event: "turn_generation_provider_started", storyOperation: "story_recovery", streaming: false }),
+        expect.objectContaining({ event: "turn_generation_provider_started", storyOperation: "story_generation", streaming: false, jobAttempt: 2 }),
         expect.objectContaining({ event: "turn_generation_completed", resultTurnId: expect.any(String) })
       ]));
 
@@ -2569,8 +2541,7 @@ integration("durable Story Engine integration", () => {
         .map(([event]) => event)
         .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
       expect(events).toEqual(expect.arrayContaining([
-        expect.objectContaining({ event: "turn_generation_scene_coverage_completed", generationJobId: job.id }),
-        expect.objectContaining({ event: "turn_generation_recovery_started", recoveryKind: "scene_coverage_rewrite" })
+        expect.objectContaining({ event: "turn_generation_scene_coverage_completed", generationJobId: job.id })
       ]));
       expect(events).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ event: "turn_generation_recoverable" })
@@ -2605,7 +2576,7 @@ integration("durable Story Engine integration", () => {
       );
       const job = await queue(imported.campaignId);
       await runGenerationJob(pool, "story-worker-requeued-a", 30, credentialSecret);
-      await retryGeneration(pool, job.id);
+      await decideGenerationReview(pool, job.id, "retry");
       replies.push({ content: validStory("The retry reaches Location Gamma safely.") });
       await runGenerationJob(pool, "story-worker-requeued-b", 30, credentialSecret);
 
@@ -2624,9 +2595,8 @@ integration("durable Story Engine integration", () => {
             && record.event.startsWith("turn_generation_");
         });
       const eventNames = events.map((event) => event.event);
-      expect(eventNames.indexOf("turn_generation_recoverable")).toBeLessThan(eventNames.lastIndexOf("turn_generation_claimed"));
+      expect(eventNames).not.toContain("turn_generation_recoverable");
       expect(events).toEqual(expect.arrayContaining([
-        expect.objectContaining({ event: "turn_generation_recoverable", jobAttempt: 1, errorCode: "output_limit" }),
         expect.objectContaining({ event: "turn_generation_claimed", jobAttempt: 2, workerId: "story-worker-requeued-b" }),
         expect.objectContaining({ event: "turn_generation_completed", jobAttempt: 2 })
       ]));
@@ -2663,18 +2633,18 @@ integration("durable Story Engine integration", () => {
     );
     const job = await queue(imported.campaignId);
     await runGenerationJob(pool, "story-worker-d", 30, credentialSecret);
-    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "output_limit" });
+    expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+    expect(await getGenerationReview(pool, job.id)).toMatchObject({ stage: "structure", canKeep: false, canRetry: true });
     const campaignRow = await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id = $1", [imported.campaignId]);
     expect(campaignRow.rows[0]?.active_turn_number).toBe(2);
     expect(await generationAuthoritySnapshot(pool, imported.campaignId)).toEqual(authorityBefore);
   });
 
-  it("retains the first streamed preview and buffers later durable attempts", async () => {
+  it("retains the first streamed preview when its one authorized repair fails", async () => {
     const imported = await campaign();
     await pool.query("UPDATE campaign_memory_configs SET embedding_enabled = false WHERE campaign_id = $1", [imported.campaignId]);
     const streamedDraft = validStory("First visible streamed draft: she rolls a 17 and opens Location Gamma.");
     const hiddenRepairDraft = '{"narration":"Hidden repair draft';
-    const acceptedStory = validStory("The third response becomes the accepted story.");
     const requestOffset = requests.length;
     await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
     try {
@@ -2690,16 +2660,14 @@ integration("durable Story Engine integration", () => {
       expect(recoverable.partialOutput).toContain("First visible streamed draft");
       expect(recoverable.partialOutput).not.toContain("Hidden repair draft");
 
-      await retryGeneration(pool, job.id);
-      replies.push({ content: acceptedStory });
+      await decideGenerationReview(pool, job.id, "retry");
       await runGenerationJob(pool, "story-worker-preview-b", 30, credentialSecret);
 
       const turnRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
-      expect(turnRequests).toHaveLength(3);
-      expect(turnRequests[2]?.stream).not.toBe(true);
-      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
-      const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
-      expect(turn.rows[0]?.narration).toBe("The third response becomes the accepted story.");
+      expect(turnRequests).toHaveLength(2);
+      expect(turnRequests[1]?.stream).not.toBe(true);
+      expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", partialOutput: expect.stringContaining("First visible streamed draft") });
+      expect(await getGenerationReview(pool, job.id)).toMatchObject({ canKeep: false, canRetry: false });
     } finally {
       await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
     }
@@ -2731,15 +2699,15 @@ integration("durable Story Engine integration", () => {
       await runGenerationJob(pool, "story-worker-scene-preview-a", 30, credentialSecret);
 
       const initialRequests = requests.slice(requestOffset);
-      expect(initialRequests).toHaveLength(3);
+      expect(initialRequests).toHaveLength(2);
       expect(initialRequests[0]?.stream).toBe(true);
       expect(initialRequests.slice(1).every((request) => request.stream !== true)).toBe(true);
       const recoverable = await getGenerationJob(pool, job.id);
-      expect(recoverable).toMatchObject({ status: "recoverable", errorCode: "scene_coverage" });
+      expect(recoverable).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
       expect(recoverable.partialOutput).toContain("First visible scene preview");
       expect(recoverable.partialOutput).not.toContain("Hidden scene rewrite");
 
-      await retryGeneration(pool, job.id);
+      await decideGenerationReview(pool, job.id, "retry");
       const retried = await getGenerationJob(pool, job.id);
       expect(retried).toMatchObject({ status: "queued" });
       expect(retried.partialOutput).toContain("First visible scene preview");
@@ -2965,7 +2933,7 @@ integration("durable Story Engine integration", () => {
     const persistedRoll = privateState.rows[0]?.orchestration_private.roll;
     const requestCount = requests.length;
 
-    await retryGeneration(pool, job.id);
+    await decideGenerationReview(pool, job.id, "retry");
     replies.push({ content: validStory("The same resolved attempt now returns a complete scene.") });
     await runGenerationJob(pool, "story-worker-reroll-b", 30, credentialSecret);
     const result = await getGenerationResult(pool, job.id);

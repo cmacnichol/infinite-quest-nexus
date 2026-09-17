@@ -1,4 +1,4 @@
-import { generationDiagnosticPresentation, type CampaignProjection } from "@infinite-quest/client-core";
+import { generationDiagnosticPresentation, generationReviewPresentation, type CampaignProjection } from "@infinite-quest/client-core";
 import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile, StoryMemorySettings } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
@@ -42,6 +42,8 @@ export interface StoryPlayerViewState {
   readonly storyMemorySaveInFlight: boolean;
   readonly activityRecords: readonly StoryActivityRecord[];
   readonly illustrations: Readonly<StoryIllustrationState>;
+  readonly reviewDecisionInFlight: boolean;
+  readonly reviewDecisionError: string | null;
 }
 
 type ReaderTurn = Readonly<{
@@ -122,16 +124,62 @@ function chooser(document: Document, campaigns: readonly CampaignSummary[]): HTM
   return section;
 }
 
-function recovery(document: Document, projection: Readonly<CampaignProjection>): HTMLElement | null {
+function recovery(document: Document, state: StoryPlayerViewState): HTMLElement | null {
+  const projection = state.projection;
   const generation = projection.generation;
   if (generation === null) return null;
   const section = element(document, "section", "story-recovery");
   section.dataset.storyRecovery = "";
+  const review = generation.review;
+  const detail = review?.detail.state === "loaded" ? review.detail.value : null;
+  const reviewView = review === null ? null : generationReviewPresentation(
+    review.summary, generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic, detail
+  );
+  if (reviewView !== null) {
+    section.setAttribute("role", "status");
+    section.setAttribute("aria-live", "polite");
+    section.append(element(document, "h2", undefined, reviewView.state === "review" ? "This turn needs your review" : "Generation review unavailable"));
+    section.append(element(document, "p", "story-recovery-diagnostic", reviewView.message));
+    if (detail) {
+      const findings = element(document, "ul", "story-recovery-details");
+      findings.setAttribute("aria-label", "Review findings");
+      for (const finding of detail.findings) findings.append(element(document, "li", undefined, finding.message));
+      section.append(findings);
+      if (detail.narration !== null) {
+        const preview = element(document, "article", "story-generation-preview");
+        preview.dataset.storyReviewPreview = "";
+        preview.append(element(document, "h3", undefined, "Saved turn preview"), ...narrationParagraphs(document, detail.narration));
+        for (const choice of detail.choices) {
+          const disabledChoice = element(document, "button", undefined, choice) as HTMLButtonElement;
+          disabledChoice.type = "button"; disabledChoice.disabled = true; preview.append(disabledChoice);
+        }
+        section.append(preview);
+      }
+    } else if (review?.detail.state === "loading") section.append(element(document, "p", undefined, "Loading the saved preview…"));
+    else if (review?.detail.state === "failed") section.append(element(document, "p", "story-recovery-diagnostic", "The saved preview could not be loaded. Reload the generation status to try again."));
+    const decisions = element(document, "div", "story-generation-actions");
+    if (reviewView.canKeep) {
+      const keep = element(document, "button", undefined, "Keep this turn");
+      keep.type = "button"; keep.dataset.action = "keep-generation-review"; keep.disabled = state.reviewDecisionInFlight;
+      decisions.append(keep, element(document, "p", undefined, reviewView.keepDescription));
+    }
+    if (reviewView.canRetry) {
+      const retry = element(document, "button", undefined, "Continue with retry");
+      retry.type = "button"; retry.dataset.action = "retry-generation-review"; retry.disabled = state.reviewDecisionInFlight;
+      decisions.append(retry, element(document, "p", undefined, reviewView.retryDescription));
+    }
+    if (state.reviewDecisionInFlight) decisions.append(element(document, "p", undefined, "Saving your decision…"));
+    if (state.reviewDecisionError) decisions.append(element(document, "p", "story-recovery-diagnostic", state.reviewDecisionError));
+    if (reviewView.retryFailure) decisions.append(element(document, "p", "story-recovery-diagnostic", reviewView.retryFailure));
+    if (decisions.childElementCount) section.append(decisions);
+  }
   const failed = generation.result.state === "failed" || generation.origin === "hydrated_recovery";
-  section.append(element(document, "h2", undefined, failed ? "Story generation needs attention" : "Story generation in progress"));
-  section.append(element(document, "p", undefined, failed ? "Try again when the text provider is ready." : "The accepted story remains unchanged until completion."));
+  if (reviewView === null) {
+    section.append(element(document, "h2", undefined, failed ? "Story generation needs attention" : "Story generation in progress"));
+    section.append(element(document, "p", undefined, failed ? "Try again when the text provider is ready." : "The accepted story remains unchanged until completion."));
+  }
   const diagnostic = generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic;
-  if (diagnostic) {
+  if (diagnostic && reviewView === null) {
     const presentation = generationDiagnosticPresentation(diagnostic);
     section.append(element(document, "p", "story-recovery-diagnostic", presentation.message));
     if (presentation.details.length) {
@@ -142,14 +190,14 @@ function recovery(document: Document, projection: Readonly<CampaignProjection>):
     }
   }
   const actions = element(document, "div", "story-generation-actions");
-  if (generation.monitoring === "detached") {
+  if (generation.monitoring === "detached" && reviewView === null) {
     const resume = element(document, "button", undefined, "Resume monitoring");
     resume.type = "button";
     resume.dataset.action = "resume-generation";
     actions.append(resume);
   }
   const retryable = diagnostic ? generationDiagnosticPresentation(diagnostic).retryable : true;
-  if (generation.result.state === "unavailable" || (failed && retryable)) {
+  if (reviewView === null && (generation.result.state === "unavailable" || (failed && retryable))) {
     const retry = element(document, "button", undefined, generation.result.state === "unavailable" ? "Load accepted result" : "Retry generation");
     retry.type = "button";
     retry.dataset.action = "retry-generation";
@@ -256,6 +304,7 @@ function storyComposer(
     button.dataset.storyChoice = "";
     button.dataset.choiceIndex = String(index);
     button.setAttribute("aria-pressed", String(ui.choiceSelection.includes(index)));
+    button.disabled = state.projection.generation !== null;
     choiceList.append(button);
   }
   if (choices.length) composer.append(choiceList);
@@ -504,7 +553,7 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
       reader.append(setup);
     }
   }
-  const recoveryView = recovery(document, projection);
+  const recoveryView = recovery(document, state);
   if (recoveryView) reader.append(recoveryView);
   return reader;
 }
@@ -568,7 +617,7 @@ export function renderStoryContent(document: Document, state: StoryPlayerViewSta
       content.push(setup);
     }
   }
-  const recoveryView = recovery(document, state.projection);
+  const recoveryView = recovery(document, state);
   if (recoveryView) content.push(recoveryView);
   return content;
 }

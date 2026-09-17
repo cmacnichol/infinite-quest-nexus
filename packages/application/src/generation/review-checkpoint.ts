@@ -1,0 +1,98 @@
+import { generationReviewReasonCodeSchema, generationReviewStageSchema, sha256Hex, storyTurnOutputSchema, z, type GenerationReviewReasonCode } from "@infinite-quest/contracts";
+import { canonicalEvidenceJson, generationBaseIdentitySchema } from "../memory/generation-context.js";
+
+const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const immutableJsonSchema = z.record(z.string(), z.unknown());
+const generationReviewReasonsSchema = z.array(generationReviewReasonCodeSchema).min(1).max(20);
+
+/** Stable audit identity for the ordered review findings offered to a user. */
+export function generationReviewFindingsHash(reasons: readonly GenerationReviewReasonCode[]): string {
+  return sha256Hex(canonicalEvidenceJson(generationReviewReasonsSchema.parse(reasons)));
+}
+
+/** Immutable server-created candidate provenance for later worker decision handling. */
+export const generationReviewCandidateSchema = z.strictObject({
+  scope: z.enum(["main", "final"]), story: storyTurnOutputSchema.nullable(), storyHash: hashSchema,
+  rawOutputReference: z.string().trim().min(1).max(500).nullable(), producingRequestHash: hashSchema.nullable(),
+  producingResponseId: z.string().trim().min(1).max(500).nullable(), sentFactIds: z.array(z.uuid()).max(1_000),
+  ownerUserId: z.uuid(), campaignId: z.uuid(), worldId: z.uuid(), worldVersionId: z.uuid().nullable(),
+  baseTurnNumber: z.number().int().min(0), expectedTurnNumber: z.number().int().positive(), policy: immutableJsonSchema, policyHash: hashSchema,
+  baseIdentity: generationBaseIdentitySchema,
+  protocol: z.strictObject({ version: z.string().trim().min(1).max(200), promptHash: hashSchema }),
+  provider: z.strictObject({ type: z.string().trim().min(1).max(100), profileId: z.uuid().nullable(), configurationHash: hashSchema }),
+  resumeDependencies: z.strictObject({
+    generationContext: immutableJsonSchema,
+    producingProviderResult: immutableJsonSchema.nullable(),
+    stageState: immutableJsonSchema,
+    frozenCommitInputs: immutableJsonSchema,
+    replacementTarget: immutableJsonSchema.nullable()
+  })
+}).superRefine((candidate, context) => {
+  if (!candidate.story && !candidate.rawOutputReference) context.addIssue({ code: "custom", message: "A candidate requires typed story content or an immutable raw-output reference." });
+  if (candidate.story && !candidate.producingRequestHash) context.addIssue({ code: "custom", message: "Typed candidate content requires its producing request identity." });
+  if (candidate.story && candidate.storyHash !== sha256Hex(canonicalEvidenceJson(candidate.story))) {
+    context.addIssue({ code: "custom", message: "Typed candidate content must match its stable story hash." });
+  }
+  if (candidate.baseTurnNumber !== candidate.baseIdentity.baseTurnNumber || candidate.expectedTurnNumber !== candidate.baseIdentity.expectedTurnNumber) {
+    context.addIssue({ code: "custom", message: "Candidate turn numbers must match its frozen generation base identity." });
+  }
+});
+
+export const generationReviewDecisionJournalEntrySchema = z.strictObject({
+  reviewId: z.uuid(), revision: z.number().int().safe().positive(), actorUserId: z.uuid(), decision: z.enum(["keep", "retry"]),
+  decidedAt: z.string().datetime({ offset: true }), candidateScope: z.enum(["main", "final"]), candidateHash: hashSchema,
+  findingsHash: hashSchema, nextStage: generationReviewStageSchema.nullable(),
+  offeredCandidate: generationReviewCandidateSchema,
+  offeredReasons: z.array(generationReviewReasonCodeSchema).min(1).max(20),
+  actionReceipt: z.strictObject({ jobId: z.uuid(), status: z.enum(["queued", "replacement_queued"]), operationKind: z.enum(["append", "replace_latest"]), replacementTurnId: z.uuid().nullable() })
+});
+
+export const generationReviewCheckpointSchema = z.strictObject({
+  version: z.literal(1), reviewId: z.uuid(), revision: z.number().int().safe().positive(), state: z.enum(["pending", "decided"]),
+  stage: generationReviewStageSchema, candidateScope: z.enum(["main", "final"]), reasons: z.array(generationReviewReasonCodeSchema).min(1).max(20),
+  operationKind: z.enum(["append", "replace_latest"]), replacementTurnId: z.uuid().nullable(),
+  eligibility: z.strictObject({ complete: z.boolean(), structurallyValid: z.boolean(), mechanicsClean: z.boolean(), authorityValid: z.boolean(), stageComplete: z.boolean(), retryAvailable: z.boolean() }),
+  originalCandidate: generationReviewCandidateSchema, gateCandidate: generationReviewCandidateSchema, workingCandidate: generationReviewCandidateSchema,
+  originalFindings: z.array(generationReviewReasonCodeSchema).min(1).max(20), originalFindingsHash: hashSchema,
+  retryFailure: z.string().trim().min(1).max(500).nullable(), decisionJournal: z.array(generationReviewDecisionJournalEntrySchema).max(100)
+}).superRefine((checkpoint, context) => {
+  if ((checkpoint.operationKind === "append") !== (checkpoint.replacementTurnId === null)) {
+    context.addIssue({ code: "custom", message: "Review operation binding must match its replacement target." });
+  }
+  if (checkpoint.originalFindingsHash !== generationReviewFindingsHash(checkpoint.originalFindings)) {
+    context.addIssue({ code: "custom", path: ["originalFindingsHash"], message: "Original findings must match their stable audit hash." });
+  }
+  const binding = checkpoint.gateCandidate;
+  for (const candidate of [checkpoint.originalCandidate, checkpoint.gateCandidate, checkpoint.workingCandidate]) {
+    if (candidate.ownerUserId !== binding.ownerUserId || candidate.campaignId !== binding.campaignId || candidate.worldId !== binding.worldId
+      || candidate.worldVersionId !== binding.worldVersionId || candidate.baseTurnNumber !== binding.baseTurnNumber
+      || candidate.expectedTurnNumber !== binding.expectedTurnNumber || canonicalEvidenceJson(candidate.baseIdentity) !== canonicalEvidenceJson(binding.baseIdentity)
+      || candidate.policyHash !== binding.policyHash || candidate.protocol.version !== binding.protocol.version
+      || candidate.protocol.promptHash !== binding.protocol.promptHash || candidate.provider.profileId !== binding.provider.profileId
+      || candidate.provider.type !== binding.provider.type || candidate.provider.configurationHash !== binding.provider.configurationHash) {
+      context.addIssue({ code: "custom", message: "Review candidates must share one immutable campaign and provider binding." });
+      break;
+    }
+  }
+  if (checkpoint.gateCandidate.scope !== checkpoint.candidateScope) context.addIssue({ code: "custom", path: ["gateCandidate", "scope"], message: "The offered candidate scope must match the checkpoint." });
+  for (const entry of checkpoint.decisionJournal) {
+    if (entry.candidateScope !== entry.offeredCandidate.scope || entry.candidateHash !== entry.offeredCandidate.storyHash
+      || entry.findingsHash !== generationReviewFindingsHash(entry.offeredReasons)) {
+      context.addIssue({ code: "custom", path: ["decisionJournal"], message: "Decision evidence must bind its historical offered candidate." });
+      break;
+    }
+    const candidate = entry.offeredCandidate;
+    if (candidate.ownerUserId !== binding.ownerUserId || candidate.campaignId !== binding.campaignId || candidate.worldId !== binding.worldId
+      || candidate.worldVersionId !== binding.worldVersionId || canonicalEvidenceJson(candidate.baseIdentity) !== canonicalEvidenceJson(binding.baseIdentity)
+      || candidate.policyHash !== binding.policyHash || candidate.protocol.version !== binding.protocol.version
+      || candidate.protocol.promptHash !== binding.protocol.promptHash || candidate.provider.profileId !== binding.provider.profileId
+      || candidate.provider.type !== binding.provider.type || candidate.provider.configurationHash !== binding.provider.configurationHash) {
+      context.addIssue({ code: "custom", path: ["decisionJournal"], message: "Historical decision evidence must share the checkpoint authority binding." });
+      break;
+    }
+  }
+});
+
+export type GenerationReviewCandidate = Readonly<z.infer<typeof generationReviewCandidateSchema>>;
+export type GenerationReviewDecisionJournalEntry = Readonly<z.infer<typeof generationReviewDecisionJournalEntrySchema>>;
+export type GenerationReviewCheckpoint = Readonly<z.infer<typeof generationReviewCheckpointSchema>>;

@@ -50,7 +50,7 @@ integration("Story Direction composed PostgreSQL generation", () => {
     ["clean", ["story_generation"], true],
     ["events_configured", ["story_generation"], true],
     ["choice_repair", ["story_generation", "story_choice_repair"], true],
-    ["invalid_narration", ["story_generation", "story_recovery"], false],
+    ["invalid_narration", ["story_generation", "story_generation"], false],
     ["output_limited", ["story_generation"], false],
     ["lease_reclaim", ["story_generation"], true]
   ] as const)("runs the %s benchmark fixture against an owned dedicated child database", async (scenario, operations, committed) => {

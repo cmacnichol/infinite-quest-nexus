@@ -7,6 +7,8 @@ import {
   storyTurnOutputSchema
 } from "../../packages/contracts/src/generation.js";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
+import { assertContinuityReviewPromptSnapshot } from "../../packages/contracts/src/prompt-library.js";
+import { reviewBindingHash } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   campaignCharacterProfileUpdateSchema,
@@ -22,6 +24,8 @@ import { createPostgresGenerationCommandRepository } from "../../packages/databa
 import { createPostgresCharacterProfileRepository } from "../../packages/database/src/campaign-transfer-character-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresWorldCampaignTransactionPort } from "../../packages/database/src/world-campaign-transaction.js";
+import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
+import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import {
   createDatabasePool,
   initialOwnerId,
@@ -31,10 +35,13 @@ import {
 import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
-import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { apiProviderGraph, createProvider } from "../helpers/provider-application-fixtures.js";
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
 import { sha256, stableStringify } from "../../packages/domain/src/index.js";
+import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
+import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
+import { sha256Hex } from "../../packages/contracts/src/hash.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -159,6 +166,71 @@ integration("PostgreSQL generation execution repository", () => {
     return { repository, scope, job };
   }
 
+  async function readyFinalKeepCommit(campaignId: string, workerId: string, story = supersedingStory([])) {
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
+    const queued = await application.enqueueAppend(
+      { ownerUserId, campaignId },
+      generationRequestSchema.parse({
+        action: "Keep the reviewed observatory outcome.", providerProfileId, idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
+      })
+    );
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId };
+    const job = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    if (!job) throw new Error("Expected an enforce-review generation payload.");
+    expect(await repository.markGenerating(scope)).toBe(true);
+    expect(await repository.markValidating(scope)).toBe(true);
+    expect(await repository.markCommitting(scope)).toBe(true);
+    const row = await pool.query<{ world_id: string }>(
+      "SELECT wv.world_id FROM campaigns c JOIN world_versions wv ON wv.id=c.world_version_id WHERE c.id=$1",
+      [campaignId]
+    );
+    const policy = (job.context_options as unknown as { storyMemoryPolicy: {
+      policy: Record<string, unknown>;
+      policyHash: string;
+      providerConfigurationFingerprint: string;
+    } }).storyMemoryPolicy;
+    const prompts = assertContinuityReviewPromptSnapshot(job.prompt_snapshot, "enforce");
+    const responseId = crypto.randomUUID();
+    const candidate = {
+      scope: "final" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
+      producingRequestHash: "a".repeat(64), producingResponseId: responseId, sentFactIds: [],
+      ownerUserId, campaignId, worldId: row.rows[0]!.world_id, worldVersionId: job.world_version_id!,
+      baseTurnNumber: job.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.generation_base_identity.expectedTurnNumber,
+      policy: policy.policy, policyHash: policy.policyHash, baseIdentity: job.generation_base_identity,
+      protocol: { version: job.prompt_protocol_version, promptHash: prompts.continuityReview!.review.hash },
+      provider: { type: "openai_compatible", profileId: providerProfileId, configurationHash: policy.providerConfigurationFingerprint },
+      resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
+    };
+    const reasons: GenerationReviewCheckpoint["reasons"] = ["narrative_conflict"];
+    const checkpoint: GenerationReviewCheckpoint = {
+      version: 1, reviewId: crypto.randomUUID(), revision: 2, state: "decided", stage: "continuity", candidateScope: "final", reasons,
+      operationKind: "append", replacementTurnId: null,
+      eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+      originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
+      originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null,
+      decisionJournal: [{
+        reviewId: crypto.randomUUID(), revision: 1, actorUserId: ownerUserId, decision: "keep", decidedAt: "2026-09-17T04:00:00.000Z",
+        candidateScope: "final", candidateHash: candidate.storyHash, findingsHash: generationReviewFindingsHash(reasons), nextStage: null,
+        offeredCandidate: candidate, offeredReasons: reasons,
+        actionReceipt: { jobId: queued.id, status: "queued", operationKind: "append", replacementTurnId: null }
+      }]
+    };
+    checkpoint.decisionJournal[0]!.reviewId = checkpoint.reviewId;
+    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [queued.id, JSON.stringify({
+      generationReview: checkpoint,
+      validatedMainDraft: {
+        draftHash: "d".repeat(64), story, requestPayloadHash: candidate.producingRequestHash,
+        response: { responseId }
+      }
+    })]);
+    return { repository, scope, job, story, checkpoint, campaignId, responseId };
+  }
+
   async function insertCanonicalFact(input: Readonly<{
     ownerUserId?: string;
     campaignId: string;
@@ -260,6 +332,7 @@ integration("PostgreSQL generation execution repository", () => {
     scope: GenerationLeaseScope;
     job: AcceptedGenerationCommit["job"];
     story: ReturnType<typeof supersedingStory>;
+    responseId?: string;
     sentFactIds?: readonly string[];
   }>): AcceptedGenerationCommit {
     return {
@@ -274,7 +347,7 @@ integration("PostgreSQL generation execution repository", () => {
       },
       response: {
         content: JSON.stringify(input.story),
-        responseId: crypto.randomUUID(),
+        responseId: input.responseId ?? crypto.randomUUID(),
         finishReason: "stop",
         outputLimited: false,
         modelInstanceId: "execution-repository-instance",
@@ -299,6 +372,216 @@ integration("PostgreSQL generation execution repository", () => {
       onIllustrationEnqueueError: () => undefined
     };
   }
+
+  it("commits an enforced final Keep only for its exact stored candidate and preserves failed targets", async () => {
+    const imported = await campaign();
+    const accepted = await readyFinalKeepCommit(imported.campaignId, "final-keep-accepted-worker");
+    await expect(accepted.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: accepted.scope, job: accepted.job, story: accepted.story, responseId: accepted.responseId
+    }))).resolves.toMatchObject({ turnId: expect.any(String) });
+    await expect(pool.query<{ accepted_turns: number }>(
+      "SELECT count(*)::int AS accepted_turns FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL",
+      [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ accepted_turns: 3 }] });
+    await expect(pool.query<{ model_metadata: Record<string, unknown> }>(
+      "SELECT model_metadata FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [expect.objectContaining({ model_metadata: expect.objectContaining({
+      reviewAcceptance: expect.objectContaining({ disposition: "accepted_by_user", originalVerdict: "unavailable", originalReasonCodes: ["narrative_conflict"] })
+    }) })] });
+
+    const changedCampaign = await campaign();
+    const changedCandidate = await readyFinalKeepCommit(changedCampaign.campaignId, "final-keep-changed-worker");
+    const differentStory = storyTurnOutputSchema.parse({ ...changedCandidate.story, narration: "A different candidate reaches the observatory at dawn." });
+    await expect(changedCandidate.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: changedCandidate.scope, job: changedCandidate.job, story: differentStory
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+
+    const missingCampaign = await campaign();
+    const missingReceipt = await readyFinalKeepCommit(missingCampaign.campaignId, "final-keep-missing-worker");
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
+      missingReceipt.scope.jobId, JSON.stringify({ ...missingReceipt.checkpoint, decisionJournal: [] })
+    ]);
+    await expect(missingReceipt.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: missingReceipt.scope, job: missingReceipt.job, story: missingReceipt.story
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+
+    const mechanicsCampaign = await campaign();
+    const mechanicsLeak = await readyFinalKeepCommit(mechanicsCampaign.campaignId, "final-keep-mechanics-worker");
+    const contaminated = storyTurnOutputSchema.parse({ ...mechanicsLeak.story, narration: "The keeper rolls a die beneath the observatory moon." });
+    const contaminatedCandidate = { ...mechanicsLeak.checkpoint.gateCandidate, story: contaminated, storyHash: sha256Hex(canonicalEvidenceJson(contaminated)) };
+    const contaminatedCheckpoint = {
+      ...mechanicsLeak.checkpoint,
+      originalCandidate: contaminatedCandidate,
+      gateCandidate: contaminatedCandidate,
+      workingCandidate: contaminatedCandidate,
+      decisionJournal: mechanicsLeak.checkpoint.decisionJournal.map((entry) => ({ ...entry, candidateHash: contaminatedCandidate.storyHash, offeredCandidate: contaminatedCandidate }))
+    };
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
+      mechanicsLeak.scope.jobId, JSON.stringify(contaminatedCheckpoint)
+    ]);
+    await expect(mechanicsLeak.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: mechanicsLeak.scope, job: mechanicsLeak.job, story: contaminated
+    }))).rejects.toMatchObject({ code: "mechanics_leak" });
+
+    const staleCampaign = await campaign();
+    const stale = await readyFinalKeepCommit(staleCampaign.campaignId, "final-keep-stale-worker");
+    await pool.query("UPDATE campaigns SET character_profile_revision=character_profile_revision+1 WHERE id=$1", [staleCampaign.campaignId]);
+    await expect(stale.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: stale.scope, job: stale.job, story: stale.story, responseId: stale.responseId
+    }))).rejects.toMatchObject({ code: "stale_campaign" });
+    await expect(pool.query<{ result_turn_id: string | null }>("SELECT result_turn_id FROM generation_jobs WHERE id=$1", [stale.scope.jobId]))
+      .resolves.toMatchObject({ rows: [{ result_turn_id: null }] });
+  });
+
+  it("binds final Keep protocol identity to the locked job snapshot rather than executor memory", async () => {
+    const changedVersionCampaign = await campaign();
+    const changedVersion = await readyFinalKeepCommit(changedVersionCampaign.campaignId, "final-keep-protocol-version-worker");
+    await pool.query("UPDATE generation_jobs SET prompt_protocol_version='substituted-protocol' WHERE id=$1", [changedVersion.scope.jobId]);
+    await expect(changedVersion.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: changedVersion.scope, job: changedVersion.job, story: changedVersion.story, responseId: changedVersion.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+
+    const changedSnapshotCampaign = await campaign();
+    const changedSnapshot = await readyFinalKeepCommit(changedSnapshotCampaign.campaignId, "final-keep-protocol-snapshot-worker");
+    const stored = await pool.query<{ prompt_snapshot: Record<string, unknown> }>(
+      "SELECT prompt_snapshot FROM generation_jobs WHERE id=$1", [changedSnapshot.scope.jobId]
+    );
+    const promptSnapshot = structuredClone(stored.rows[0]!.prompt_snapshot) as {
+      continuityReview: { review: { content: string; hash: string } };
+    };
+    promptSnapshot.continuityReview.review.content = "A frozen replacement continuity review prompt.";
+    promptSnapshot.continuityReview.review.hash = sha256(promptSnapshot.continuityReview.review.content);
+    await pool.query("UPDATE generation_jobs SET prompt_snapshot=$2::jsonb WHERE id=$1", [
+      changedSnapshot.scope.jobId, JSON.stringify(promptSnapshot)
+    ]);
+    await expect(changedSnapshot.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: changedSnapshot.scope, job: changedSnapshot.job, story: changedSnapshot.story, responseId: changedSnapshot.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+  });
+
+  async function installActiveMainKeep(
+    keep: Awaited<ReturnType<typeof readyFinalKeepCommit>>,
+    preservesPrefix: boolean,
+    supersedeWithFinalRetry = false
+  ) {
+    const mainStory = storyTurnOutputSchema.parse({
+      ...keep.story,
+      narration: "The keeper reaches the observatory before the morning bell."
+    });
+    const finalStory = storyTurnOutputSchema.parse({
+      ...keep.story,
+      narration: preservesPrefix
+        ? `${mainStory.narration} The bell answers with a single clear note.`
+        : "A replacement narrator skips the kept observatory arrival."
+    });
+    const mainRequestHash = "b".repeat(64);
+    const requestBody = JSON.stringify({ input: "{}" });
+    const finalRequestHash = sha256Hex(requestBody);
+    const draftHash = "d".repeat(64);
+    const mainCandidate = {
+      ...keep.checkpoint.gateCandidate,
+      scope: "main" as const,
+      story: mainStory,
+      storyHash: sha256Hex(canonicalEvidenceJson(mainStory)),
+      producingRequestHash: mainRequestHash,
+      producingResponseId: "kept-main-provider-response"
+    };
+    const finalCandidate = {
+      ...keep.checkpoint.gateCandidate,
+      story: finalStory,
+      storyHash: sha256Hex(canonicalEvidenceJson(finalStory)),
+      producingRequestHash: finalRequestHash,
+      producingResponseId: keep.responseId
+    };
+    const mainReceipt = {
+      ...keep.checkpoint.decisionJournal[0]!, reviewId: crypto.randomUUID(), candidateScope: "main" as const,
+      candidateHash: mainCandidate.storyHash, offeredCandidate: mainCandidate
+    };
+    const finalReceipt = {
+      ...keep.checkpoint.decisionJournal[0]!, candidateHash: finalCandidate.storyHash, offeredCandidate: finalCandidate
+    };
+    const retryReceipt = {
+      ...finalReceipt, reviewId: crypto.randomUUID(), decision: "retry" as const, nextStage: "continuity" as const
+    };
+    const checkpoint = {
+      ...keep.checkpoint,
+      originalCandidate: finalCandidate,
+      gateCandidate: finalCandidate,
+      workingCandidate: finalCandidate,
+      decisionJournal: supersedeWithFinalRetry ? [mainReceipt, retryReceipt] : [mainReceipt, finalReceipt]
+    } as GenerationReviewCheckpoint;
+    const manifest = {
+      version: "generation-evidence-v1" as const, attemptId: crypto.randomUUID(), producingRequestHash: finalRequestHash,
+      entries: [], requiredReviewEvidenceIds: [] as string[]
+    };
+    const manifestHash = sha256Hex(canonicalEvidenceJson(manifest));
+    const normalBinding = {
+      draftHash: sha256Hex(stableStringify(finalStory)), producingRequestHash: finalRequestHash, manifestHash,
+      auxiliaryRequestHashes: [] as string[],
+      providerConfigurationHash: finalCandidate.provider.configurationHash,
+      promptHash: finalCandidate.protocol.promptHash, promptProtocol: "story-continuity-review-v1" as const,
+      policyHash: finalCandidate.policyHash
+    };
+    await pool.query(
+      "UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1",
+      [keep.scope.jobId, JSON.stringify({
+        generationReview: checkpoint,
+        validatedMainDraft: {
+          draftHash, story: mainStory, requestPayloadHash: mainRequestHash,
+          response: { responseId: "kept-main-provider-response" }
+        },
+        extension: {
+          story: finalStory, finalStoryHash: stableStringify(finalStory), producingAttempt: 1,
+          producingOperation: "event_extension", validatedMainDraftHash: draftHash,
+          producingRequestPayloadHash: finalRequestHash, producingRequestBody: requestBody, sentFactIds: []
+        },
+        sourceEvidenceManifest: { ...manifest, manifestHash },
+        ...(supersedeWithFinalRetry ? {
+          continuityReview: {
+            version: 1, mode: "enforce", binding: normalBinding, bindingHash: reviewBindingHash(normalBinding),
+            status: "completed", verdict: "pass", reviewRequestHash: "e".repeat(64),
+            result: { version: "story-continuity-review-v1", verdict: "pass", findings: [] }
+          }
+        } : {})
+      })]
+    );
+    return finalStory;
+  }
+
+  it("preserves an active main Keep prefix through a provenance-bound extension", async () => {
+    const preservedCampaign = await campaign();
+    const preserved = await readyFinalKeepCommit(preservedCampaign.campaignId, "main-keep-prefix-worker");
+    const preservedStory = await installActiveMainKeep(preserved, true);
+    await expect(preserved.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: preserved.scope, job: preserved.job, story: preservedStory, responseId: preserved.responseId
+    }))).resolves.toMatchObject({ turnId: expect.any(String) });
+
+    const rewrittenCampaign = await campaign();
+    const rewritten = await readyFinalKeepCommit(rewrittenCampaign.campaignId, "main-keep-rewrite-worker");
+    const rewrittenStory = await installActiveMainKeep(rewritten, false);
+    await expect(rewritten.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: rewritten.scope, job: rewritten.job, story: rewrittenStory, responseId: rewritten.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+
+    const supersededCampaign = await campaign();
+    const superseded = await readyFinalKeepCommit(supersededCampaign.campaignId, "main-keep-superseded-worker");
+    const supersededStory = await installActiveMainKeep(superseded, false, true);
+    await expect(superseded.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: superseded.scope, job: superseded.job, story: supersededStory, responseId: superseded.responseId
+    }))).resolves.toMatchObject({ turnId: expect.any(String) });
+  });
+
+  it("fails closed when a persisted main Keep checkpoint cannot be parsed", async () => {
+    const imported = await campaign();
+    const mainKeep = await readyFinalKeepCommit(imported.campaignId, "malformed-main-keep-worker");
+    const rewrittenStory = await installActiveMainKeep(mainKeep, false, true);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{generationReview}',$2::jsonb) WHERE id=$1", [
+      mainKeep.scope.jobId, JSON.stringify({ malformed: true })
+    ]);
+    await expect(mainKeep.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: mainKeep.scope, job: mainKeep.job, story: rewrittenStory, responseId: mainKeep.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+  });
 
   async function acceptedAndChronicleSnapshot(
     campaignId: string,

@@ -14,6 +14,7 @@ import { projectSafeGenerationDiagnostic } from "../../contracts/src/story-promp
 import { portableAcceptedTurnModelMetadata } from "../../contracts/src/campaign-generation-policy.js";
 import { storyContextBudgetTokensSchema } from "../../contracts/src/story-settings.js";
 import { z } from "zod";
+import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import {
   campaignSyncSourceProjectionSchema,
@@ -1552,6 +1553,7 @@ type CampaignSyncRow = {
   recoveryResultTurnId: string | null;
   recoveryReplacementTurnId: string | null;
   recoveryMetadata: Record<string, unknown> | null;
+  recoveryReviewSummary: unknown;
   recoveryResultIsRecent: boolean | null;
   latestTurnId: string | null;
   latestTurnNumber: number | null;
@@ -1561,6 +1563,10 @@ function publicGenerationError(status: unknown) {
   return ["failed", "recoverable", "cancelled", "discarded"].includes(String(status))
     ? { errorCode: PUBLIC_GENERATION_FAILURE_CODE, errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE }
     : { errorCode: null, errorMessage: null };
+}
+
+function publicGenerationReview(value: unknown, status: unknown) {
+  return projectBoundedGenerationReviewSummary(value, status);
 }
 
 function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
@@ -1590,6 +1596,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
                 recovery.result_turn_id AS "recoveryResultTurnId",
                 recovery.replacement_turn_id AS "recoveryReplacementTurnId",
                 recovery.recovery_metadata AS "recoveryMetadata",
+                recovery."recoveryReviewSummary" AS "recoveryReviewSummary",
                 latest_turn.id AS "latestTurnId", latest_turn.turn_number AS "latestTurnNumber",
                 (recovery.result_turn_id IS NOT NULL AND EXISTS (
                   SELECT 1 FROM (
@@ -1613,8 +1620,9 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
            ) pending ON true
            LEFT JOIN LATERAL (
              SELECT id, status, operation_kind, expected_turn_number, attempts,
-                    result_turn_id, replacement_turn_id, recovery_metadata
-               FROM generation_jobs
+                    result_turn_id, replacement_turn_id, recovery_metadata,
+                    ${generationReviewSummaryProjection("orchestration_private")} AS "recoveryReviewSummary"
+              FROM generation_jobs
               WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
                 AND status IN ('recoverable','failed','completed')
               ORDER BY updated_at DESC, id DESC LIMIT 1
@@ -1714,6 +1722,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
           attempts: row.recoveryAttempts,
           ...publicGenerationError(row.recoveryStatus),
           diagnostic: projectSafeGenerationDiagnostic(objectValue(row.recoveryMetadata).diagnostic),
+          review: publicGenerationReview(row.recoveryReviewSummary, row.recoveryStatus),
           resultTurnId: row.recoveryResultTurnId
         }
         : null;
@@ -1759,7 +1768,10 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         recoveryId: generationRecovery?.id ?? null,
         recoveryStatus: generationRecovery?.status ?? null,
         recoveryAttempts: generationRecovery?.attempts ?? null,
-        recoveryReplacementTurnId: generationRecovery?.replacementTurnId ?? null
+        recoveryReplacementTurnId: generationRecovery?.replacementTurnId ?? null,
+        recoveryReviewId: generationRecovery?.review?.reviewId ?? null,
+        recoveryReviewRevision: generationRecovery?.review?.revision ?? null,
+        recoveryReviewState: generationRecovery?.review?.state ?? null
       }));
       return {
         syncToken,

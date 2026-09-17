@@ -20,6 +20,11 @@ const TERMINAL_STATUSES = new Set([
   "recoverable"
 ]);
 
+function isTerminalSnapshot(snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot): boolean {
+  return TERMINAL_STATUSES.has(snapshot.status)
+    && !(snapshot.status === "recoverable" && snapshot.review !== undefined);
+}
+
 export function generationStreamUrl(basePath: string, jobId: string): string {
   return apiPath(
     normalizeBasePath(basePath),
@@ -102,7 +107,7 @@ export function createEventSourceSession(
               return;
             }
             enqueue({ kind: "snapshot", snapshot: parsed.data });
-            if (TERMINAL_STATUSES.has(parsed.data.status)) settle("terminal");
+            if (isTerminalSnapshot(parsed.data)) settle("terminal");
           } catch (cause) {
             fail(new GenerationWorkflowProtocolError("invalid_snapshot", { cause }));
           }

@@ -34,6 +34,26 @@ describe("generation route lifecycle logging", () => {
     expect(logs).toEqual([{ event: "turn_generation_requeued", ...context }]);
   });
 
+  it("emits one requeue notification when a review receipt is replayed after a worker claim", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const lifecycle = createGenerationRouteLifecycle({
+      readContext: async () => context,
+      logger: { info: (fields) => { logs.push(fields); } }
+    });
+
+    const first = await lifecycle.decideReview(ownerUserId, generationJobId, async () => ({
+      id: generationJobId, status: "queued", operationKind: "append", replacementTurnId: null, newlyQueued: true
+    }));
+    const replayAfterClaim = await lifecycle.decideReview(ownerUserId, generationJobId, async () => ({
+      // The receipt remains queued even though a worker may now hold or have completed it.
+      id: generationJobId, status: "queued", operationKind: "append", replacementTurnId: null, newlyQueued: false
+    }));
+
+    expect(first.newlyQueued).toBe(true);
+    expect(replayAfterClaim.newlyQueued).toBe(false);
+    expect(logs).toEqual([{ event: "turn_generation_requeued", ...context }]);
+  });
+
   it("does not mutate or log when the pre-mutation context read fails", async () => {
     const failure = new Error("context read failed");
     const logs: Record<string, unknown>[] = [];

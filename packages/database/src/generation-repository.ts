@@ -1,5 +1,7 @@
 import type {
   GenerationRequest,
+  GenerationReviewDecisionRequest,
+  GenerationReviewDetail,
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../contracts/src/index.js";
@@ -7,8 +9,13 @@ import {
   GenerationApplicationError,
   type GenerationCommandRepository,
   type GenerationJob,
-  type GenerationMutationResult
+  type GenerationMutationResult,
+  type GenerationReviewDecisionResult
 } from "../../application/src/index.js";
+import { generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../application/src/generation/review-checkpoint.js";
+import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
+import { generationReviewDecisionRequestSchema, projectGenerationReviewDetail } from "../../contracts/src/generation-review.js";
+import { continuityReviewCheckpointSchema } from "../../application/src/memory/continuity-review-checkpoint.js";
 import {
   assertStoryMemoryPromptCompatibility,
   assertContinuityReviewPromptSnapshot,
@@ -25,6 +32,7 @@ import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
+import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
 
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
@@ -62,6 +70,7 @@ type JobRow = {
   errorCode: string | null;
   errorMessage: string | null;
   recoveryMetadata: Record<string, unknown>;
+  reviewSummary: unknown;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -177,7 +186,27 @@ function mutationResult(row: MutationRow): GenerationMutationResult {
   return { id: row.id, status: row.status, operationKind: "replace_latest", replacementTurnId: row.replacementTurnId! };
 }
 
+function reviewDecisionResult(
+  receipt: GenerationMutationResult,
+  newlyQueued: boolean
+): GenerationReviewDecisionResult {
+  return Object.defineProperty(receipt, "newlyQueued", {
+    value: newlyQueued,
+    enumerable: false
+  }) as GenerationReviewDecisionResult;
+}
+
+function checkpointCanKeep(checkpoint: ReturnType<typeof generationReviewCheckpointSchema.parse>): boolean {
+  return checkpoint.gateCandidate.story !== null && canKeepGenerationCandidate({
+    ...checkpoint.eligibility,
+    stage: checkpoint.stage,
+    candidateScope: checkpoint.candidateScope,
+    reasons: checkpoint.reasons
+  });
+}
+
 function jobResult(row: JobRow): GenerationJob {
+  const review = projectBoundedGenerationReviewSummary(row.reviewSummary, row.status);
   const base = {
     id: row.id,
     campaignId: row.campaignId,
@@ -202,7 +231,8 @@ function jobResult(row: JobRow): GenerationJob {
     completedAt: row.completedAt,
     partialOutput: row.partialOutput,
     partialNarration: row.partialOutput ? extractPartialNarration(row.partialOutput) : null
-    , generationPolicy: row.generationPolicy
+    , generationPolicy: row.generationPolicy,
+    ...(review ? { review } : {})
   };
   return row.operationKind === "append"
     ? { ...base, operationKind: "append", replacementTurnId: null }
@@ -587,6 +617,7 @@ export function createPostgresGenerationCommandRepository(
                 requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
+                ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
                 partial_output AS "partialOutput", generation_policy AS "generationPolicy"
            FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
@@ -649,6 +680,92 @@ export function createPostgresGenerationCommandRepository(
       } as GenerationResult;
     },
 
+    async getReview(scope): Promise<GenerationReviewDetail> {
+      const result = await pool.query<{ orchestrationPrivate: Record<string, unknown>; status: JobStatus }>(
+        `SELECT orchestration_private AS "orchestrationPrivate", status
+           FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
+        [scope.jobId, scope.ownerUserId]
+      );
+      const row = result.rows[0];
+      if (!row) throw notFound({ jobId: scope.jobId });
+      const checkpoint = generationReviewCheckpointSchema.safeParse(row.orchestrationPrivate?.generationReview);
+      if (!checkpoint.success) throw new GenerationApplicationError("invalid_state");
+      return projectGenerationReviewDetail({
+        review: {
+          ...checkpoint.data,
+          canKeep: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpointCanKeep(checkpoint.data),
+          canRetry: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable
+        },
+        candidate: checkpoint.data.gateCandidate.story
+          ? { narration: checkpoint.data.gateCandidate.story.narration, choices: checkpoint.data.gateCandidate.story.choices }
+          : null,
+        continuityReview: (() => {
+          const state = checkpoint.data.gateCandidate.resumeDependencies.stageState as Record<string, unknown>;
+          const continuity = continuityReviewCheckpointSchema.safeParse(
+            state.continuityReview ?? row.orchestrationPrivate?.continuityReview
+          );
+          return continuity.success ? continuity.data.result : null;
+        })()
+      });
+    },
+
+    async decideReview(scope, request) {
+      return withTransaction(pool, async (client) => {
+        const parsedRequest = generationReviewDecisionRequestSchema.parse(request);
+        const source = await client.query<MutationRow & { generationStatus: JobStatus; orchestrationPrivate: Record<string, unknown> }>(
+          `SELECT id, status AS "generationStatus", campaign_id AS "campaignId", operation_kind AS "operationKind",
+                  replacement_turn_id AS "replacementTurnId", orchestration_private AS "orchestrationPrivate"
+             FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
+          [scope.jobId, scope.ownerUserId]
+        );
+        const job = source.rows[0];
+        if (!job) throw notFound({ jobId: scope.jobId });
+        const parsed = generationReviewCheckpointSchema.safeParse(job.orchestrationPrivate?.generationReview);
+        if (!parsed.success) throw new GenerationApplicationError("conflict");
+        const checkpoint = parsed.data;
+        const recorded = checkpoint.decisionJournal.find((entry) => entry.reviewId === parsedRequest.reviewId && entry.revision === parsedRequest.revision);
+        if (recorded) {
+          if (recorded.decision !== parsedRequest.decision) throw new GenerationApplicationError("conflict");
+          return recorded.actionReceipt.operationKind === "append"
+            ? reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "append", replacementTurnId: null }, false)
+            : reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "replace_latest", replacementTurnId: recorded.actionReceipt.replacementTurnId! }, false);
+        }
+        if (job.generationStatus !== "recoverable" || checkpoint.state !== "pending"
+            || checkpoint.reviewId !== parsedRequest.reviewId || checkpoint.revision !== parsedRequest.revision) {
+          throw new GenerationApplicationError("conflict");
+        }
+        if (parsedRequest.decision === "keep" && !checkpointCanKeep(checkpoint)) throw new GenerationApplicationError("conflict");
+        if (parsedRequest.decision === "retry" && !checkpoint.eligibility.retryAvailable) throw new GenerationApplicationError("conflict");
+        const status = job.operationKind === "replace_latest" ? "replacement_queued" as const : "queued" as const;
+        const receipt = {
+          jobId: job.id, status, operationKind: job.operationKind,
+          replacementTurnId: job.operationKind === "replace_latest" ? job.replacementTurnId! : null
+        };
+        const next = generationReviewCheckpointSchema.parse({
+          ...checkpoint,
+          state: "decided",
+          revision: checkpoint.revision + 1,
+          decisionJournal: [...checkpoint.decisionJournal, {
+            reviewId: parsedRequest.reviewId, revision: parsedRequest.revision, actorUserId: scope.ownerUserId, decision: parsedRequest.decision,
+            decidedAt: new Date().toISOString(), candidateScope: checkpoint.candidateScope,
+            candidateHash: checkpoint.gateCandidate.storyHash,
+            findingsHash: generationReviewFindingsHash(checkpoint.reasons),
+            nextStage: parsedRequest.decision === "retry" ? checkpoint.stage : null,
+            offeredCandidate: checkpoint.gateCandidate, offeredReasons: checkpoint.reasons, actionReceipt: receipt
+          }]
+        });
+        const updated = await client.query<MutationRow>(
+          `UPDATE generation_jobs SET status = $3, lease_owner = NULL, lease_expires_at = NULL,
+              error_code = NULL, error_message = NULL,
+              orchestration_private = orchestration_private || jsonb_build_object('generationReview', $4::jsonb), updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2
+            RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
+          [scope.jobId, scope.ownerUserId, status, json(next)]
+        );
+        return reviewDecisionResult(mutationResult(updated.rows[0]!), true);
+      });
+    },
+
     async retry(scope) {
       return withTransaction(pool, async (client) => {
         const source = await client.query<MutationRow & {
@@ -657,18 +774,22 @@ export function createPostgresGenerationCommandRepository(
            promptProtocolVersion: string;
            generationPolicy: GenerationPolicySnapshot | null;
            contextOptions: Record<string, unknown>;
-           errorCode: string | null;
+           errorCode: string | null; orchestrationPrivate: Record<string, unknown>;
         }>(
           `SELECT id, status AS "generationStatus", campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
                   expected_turn_number AS "expectedTurnNumber", attempts, operation_kind AS "operationKind",
                   replacement_turn_id AS "replacementTurnId", prompt_snapshot AS "promptSnapshot",
                    prompt_protocol_version AS "promptProtocolVersion", generation_policy AS "generationPolicy",
-                   context_options AS "contextOptions", error_code AS "errorCode"
+                   context_options AS "contextOptions", error_code AS "errorCode", orchestration_private AS "orchestrationPrivate"
              FROM generation_jobs WHERE id = $1 AND owner_user_id = $2 FOR UPDATE`,
           [scope.jobId, scope.ownerUserId]
         );
         const job = source.rows[0];
         if (!job) throw notFound({ jobId: scope.jobId });
+        const review = generationReviewCheckpointSchema.safeParse(job.orchestrationPrivate?.generationReview);
+        if (job.generationStatus === "recoverable" && review.success && review.data.state === "pending") {
+          throw new GenerationApplicationError("conflict");
+        }
         if (job.generationStatus !== "recoverable" && job.generationStatus !== "failed") {
           throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: job.generationStatus });
         }
@@ -732,7 +853,7 @@ export function createPostgresGenerationCommandRepository(
               SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL, partial_output = NULL,
                   error_code = 'cancelled_by_player', error_message = 'Cancelled by player.', updated_at = now()
             WHERE id = $1 AND owner_user_id = $2
-              AND status IN ('queued', 'replacement_queued', 'assessing', 'generating', 'validating', 'committing')
+              AND status IN ('queued', 'replacement_queued', 'assessing', 'generating', 'validating', 'committing', 'recoverable')
             RETURNING id, status, campaign_id AS "campaignId", operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
           [scope.jobId, scope.ownerUserId]
         );

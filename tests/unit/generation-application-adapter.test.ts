@@ -14,10 +14,12 @@ import {
   type GenerationApplicationErrorReason,
   type GenerationJob,
   type GenerationMutationResult,
+  type GenerationReviewDecisionResult,
   type OwnerScope
 } from "../../packages/application/src/index.js";
 import type {
   GenerationRequest,
+  GenerationReviewDecisionRequest,
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../packages/contracts/src/index.js";
@@ -34,6 +36,11 @@ const replacementRequest = {
   ...request,
   expectedCurrentTurnNumber: 3
 } as GenerationRetryLatestRequest;
+const reviewDecision = {
+  reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  revision: 1,
+  decision: "retry"
+} as GenerationReviewDecisionRequest;
 const pendingGeneration = {
   id: jobId,
   status: "queued",
@@ -114,6 +121,8 @@ function applicationFake(
     enqueueReplacement: { id: jobId, status: "queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "44444444-4444-4444-8444-444444444444" } as EnqueueGenerationResult,
     getJob: { id: jobId } as GenerationJob,
     getResult: { id: jobId } as GenerationResult,
+    getReview: { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1 } as never,
+    decideReview: { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null, newlyQueued: true } as GenerationReviewDecisionResult,
     retry: { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
     cancel: { id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
     discard: { id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null } as GenerationMutationResult
@@ -126,6 +135,8 @@ function applicationFake(
     async enqueueReplacement(scope, input) { calls.push({ method: "enqueueReplacement", scope, request: input }); rejected("enqueueReplacement"); return successes.enqueueReplacement; },
     async getJob(scope) { calls.push({ method: "getJob", scope }); rejected("getJob"); return successes.getJob; },
     async getResult(scope) { calls.push({ method: "getResult", scope }); rejected("getResult"); return successes.getResult; },
+    async getReview(scope) { calls.push({ method: "getReview", scope }); rejected("getReview"); return successes.getReview; },
+    async decideReview(scope, input) { calls.push({ method: "decideReview", scope, request: input }); rejected("decideReview"); return successes.decideReview; },
     async retry(scope) { calls.push({ method: "retry", scope }); rejected("retry"); return successes.retry; },
     async cancel(scope) { calls.push({ method: "cancel", scope }); rejected("cancel"); return successes.cancel; },
     async discard(scope) { calls.push({ method: "discard", scope }); rejected("discard"); return successes.discard; }
@@ -139,6 +150,8 @@ async function invoke(adapter: GenerationApplicationAdapter, method: AdapterMeth
     case "enqueueLatestReplacement": return adapter.enqueueLatestReplacement(ownerScope, campaignId, replacementRequest);
     case "getGenerationJob": return adapter.getGenerationJob(ownerScope, jobId);
     case "getGenerationResult": return adapter.getGenerationResult(ownerScope, jobId);
+    case "getGenerationReview": return adapter.getGenerationReview(ownerScope, jobId);
+    case "decideGenerationReview": return adapter.decideGenerationReview(ownerScope, jobId, reviewDecision);
     case "retryGeneration": return adapter.retryGeneration(ownerScope, jobId);
     case "cancelGeneration": return adapter.cancelGeneration(ownerScope, jobId);
     case "discardGeneration": return adapter.discardGeneration(ownerScope, jobId);
@@ -150,6 +163,8 @@ const adapterCases = [
   ["enqueueLatestReplacement", "enqueueReplacement", { ownerUserId: ownerScope.ownerUserId, campaignId }, replacementRequest],
   ["getGenerationJob", "getJob", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
   ["getGenerationResult", "getResult", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
+  ["getGenerationReview", "getReview", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
+  ["decideGenerationReview", "decideReview", { ownerUserId: ownerScope.ownerUserId, jobId }, reviewDecision],
   ["retryGeneration", "retry", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
   ["cancelGeneration", "cancel", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined],
   ["discardGeneration", "discard", { ownerUserId: ownerScope.ownerUserId, jobId }, undefined]

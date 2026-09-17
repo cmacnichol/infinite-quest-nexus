@@ -18,7 +18,9 @@ import type {
   GenerationRequest,
   GenerationResult,
   GenerationRetryLatestRequest,
-  GenerationJobSnapshot
+  GenerationJobSnapshot,
+  GenerationReviewDecisionRequest,
+  GenerationReviewDetail
 } from "../../../packages/contracts/src/index.js";
 import { generationRequestSchema } from "../../../packages/contracts/src/index.js";
 
@@ -69,6 +71,8 @@ interface GenerationApiPort {
   retry(jobId: string): Promise<GenerationActionResponse>;
   cancel(jobId: string): Promise<GenerationActionResponse>;
   discard(jobId: string): Promise<GenerationActionResponse>;
+  getReview(jobId: string): Promise<GenerationReviewDetail>;
+  decideReview(jobId: string, request: GenerationReviewDecisionRequest): Promise<GenerationActionResponse>;
 }
 
 describe("createNexusApiClient", () => {
@@ -85,10 +89,12 @@ describe("createNexusApiClient", () => {
     ]);
     expect(Object.keys(client.generation).sort()).toEqual([
       "cancel",
+      "decideReview",
       "discard",
       "enqueue",
       "enqueueReplacement",
       "get",
+      "getReview",
       "result",
       "retry",
       "syncStatus"
@@ -273,6 +279,8 @@ describe("createNexusApiClient", () => {
       () => client.generation.retry("job / id", signal),
       () => client.generation.cancel("job / id", signal),
       () => client.generation.discard("job / id", signal),
+      () => client.generation.getReview("job / id", signal),
+      () => client.generation.decideReview(jobId, { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, decision: "keep" }, signal),
       () => client.meta.get(signal),
       () => client.session.get(signal),
       () => client.session.updateProfile({ displayName: "Initial Owner" }, signal),
@@ -316,6 +324,8 @@ describe("createNexusApiClient", () => {
       "/api/v1/generation-jobs/job%20%2F%20id/retry",
       "/api/v1/generation-jobs/job%20%2F%20id/cancel",
       "/api/v1/generation-jobs/job%20%2F%20id/discard",
+      "/api/v1/generation-jobs/job%20%2F%20id/review",
+      `/api/v1/generation-jobs/${jobId}/review-decision`,
       "/api/v1/meta",
       "/api/v1/session",
       "/api/v1/users/me/profile",
@@ -331,8 +341,7 @@ describe("createNexusApiClient", () => {
     ]);
     expect(queue.options.map((option) => option.method)).toEqual([
       "GET", "POST", "GET", "GET", "POST", "GET", "GET", "GET", "GET", "GET", "PATCH", "GET", "PUT", "GET", "PATCH", "POST", "POST",
-      "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "GET", "PATCH", "GET",
-      "GET", "GET", "GET", "POST", "POST", "POST", "GET", "POST"
+      "GET", "GET", "POST", "POST", "GET", "GET", "POST", "POST", "POST", "GET", "POST", "GET", "GET", "PATCH", "GET", "GET", "GET", "GET", "POST", "POST", "POST", "GET", "POST"
     ]);
     expect(JSON.parse(String(queue.options[12]?.body))).toMatchObject({
       expectedRevision: 4,
@@ -342,9 +351,9 @@ describe("createNexusApiClient", () => {
     });
     expect(queue.options[19]?.body).toBe(JSON.stringify(generationRequest));
     expect(queue.options[20]?.body).toBe(JSON.stringify(replacementRequest));
-    expect(queue.options.slice(23, 26).map((option) => option.body)).toEqual([undefined, undefined, undefined]);
-    expect(queue.options[34]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
-    expect(queue.options[35]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
+    expect(queue.options.slice(23, 28).map((option) => option.body)).toEqual([undefined, undefined, undefined, undefined, JSON.stringify({ reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, decision: "keep" })]);
+    expect(queue.options[36]?.body).toBe(JSON.stringify({ prompt: "A quiet road", variantIndex: 0 }));
+    expect(queue.options[37]?.body).toBe(JSON.stringify({ mode: "missing", idempotencyKey: jobId }));
     expect(queue.options.every((option) => option.signal === signal)).toBe(true);
   });
 
