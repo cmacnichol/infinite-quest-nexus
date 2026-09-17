@@ -15,6 +15,7 @@ import {
   turnInputModeSchema,
   turnInputModeSourceSchema
 } from "./generation.js";
+import { generationReviewSummarySchema } from "./generation-review.js";
 import { safeGenerationDiagnosticSchema } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
 import { chronicleRetrievalAuditSchema } from "./memory.js";
@@ -234,7 +235,8 @@ const generationRecoveryBaseSchema = z.object({
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
   diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null),
-  resultTurnId: z.uuid().nullable()
+  resultTurnId: z.uuid().nullable(),
+  review: generationReviewSummarySchema.optional()
 });
 
 export const generationRecoverySchema = z.discriminatedUnion("operationKind", [
