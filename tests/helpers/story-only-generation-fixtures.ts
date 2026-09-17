@@ -251,6 +251,17 @@ export async function runStoryOnlyFixture(fixture: StoryOnlyFixture): Promise<St
     }
   } : repository;
   await createGenerationExecutor({ pool, repository: firstRepository, collaborators }).execute({ workerId: "story-only-fixture-worker-a", leaseSeconds: 30, claim: firstClaim });
+  if (scenario === "choice_repair" || scenario === "invalid_narration") {
+    const review = await commandRepository(pool).getReview({ ownerUserId, jobId: queued.id });
+    await commandRepository(pool).decideReview({ ownerUserId, jobId: queued.id }, {
+      reviewId: review.reviewId,
+      revision: review.revision,
+      decision: "retry"
+    });
+    const retried = await repository.claimNext({ workerId: "story-only-fixture-worker-retry", leaseSeconds: 30 });
+    if (retried?.jobId !== queued.id) throw new Error("Story-only fixture could not claim its explicitly authorized retry.");
+    await createGenerationExecutor({ pool, repository, collaborators }).execute({ workerId: "story-only-fixture-worker-retry", leaseSeconds: 30, claim: retried });
+  }
   if (scenario === "lease_reclaim") {
     if (!leaseExpired) throw new Error("Lease-reclaim fixture did not expire worker A after its saved main draft.");
     const reclaimed = await repository.claimNext({ workerId: "story-only-fixture-worker-b", leaseSeconds: 30 });

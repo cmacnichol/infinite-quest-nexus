@@ -519,8 +519,12 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "generation_policy_invalid" }));
   });
 
-  it("runs Story Direction through one fiction-only provider operation without dormant mechanics guidance", async () => {
+  it.each([
+    { label: "a normal completion", finishReason: "stop", outputLimited: false },
+    { label: "a complete length-finish response", finishReason: "length", outputLimited: true }
+  ])("runs Story Direction through one fiction-only provider operation without dormant mechanics guidance after $label", async ({ finishReason, outputLimited }) => {
     const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
     const policy = {
       version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1",
       prompts: storyOnlyPromptSnapshot()
@@ -558,7 +562,7 @@ describe("generation executor adapter", () => {
       id: claim.providerProfileId, name: "Story-only provider", providerRole: "text" as const,
       providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 16_000,
       maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
-      execute: vi.fn(async () => ({ content: JSON.stringify(story), responseId: "story-only", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} }))
+      execute: vi.fn(async () => ({ content: JSON.stringify(story), responseId: "story-only", finishReason, outputLimited, modelInstanceId: "test-instance", usage: {}, reportedCost: null, rawMetadata: {} }))
     };
     const operations: string[] = [];
     const collaborators = {
@@ -653,10 +657,10 @@ describe("generation executor adapter", () => {
   });
 
   it.each([
-    { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation"], errorCode: "invalid_json" },
-    { label: "output-limited partial JSON", content: "{\"narration\":\"The observatory", outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit" },
-    { label: "output-limited duplicate choices", content: JSON.stringify({ narration: "The observatory door opens.", choices: ["Wait.", " WAIT. ", "Look.", "Listen."], custom_action_suggestion: "Study.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "The door opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit" }
-  ])("keeps Story Direction $label recoverable without mechanical follow-up dispatch", async ({ content, outputLimited, expectedOperations, errorCode }) => {
+    { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation"], errorCode: "invalid_json", expectedStage: "structure", expectedReason: "invalid_structure" },
+    { label: "output-limited partial JSON", content: "{\"narration\":\"The observatory", outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit", expectedStage: "structure", expectedReason: "output_incomplete" },
+    { label: "output-limited duplicate choices", content: JSON.stringify({ narration: "The observatory door opens.", choices: ["Wait.", " WAIT. ", "Look.", "Listen."], custom_action_suggestion: "Study.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "The door opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit", expectedStage: "choices", expectedReason: "invalid_choices" }
+  ])("keeps Story Direction $label recoverable without mechanical follow-up dispatch", async ({ content, outputLimited, expectedOperations, errorCode, expectedStage, expectedReason }) => {
     const job = completeGenerationExecutionPayload();
     job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
     const policy = {
@@ -704,8 +708,8 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).not.toHaveBeenCalled();
     expect(repository.markFailed).not.toHaveBeenCalled();
     expect(repository.pauseForReview).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
-      state: "pending", stage: "structure", candidateScope: "main",
-      reasons: outputLimited ? ["output_incomplete"] : ["invalid_structure"]
+      state: "pending", stage: expectedStage, candidateScope: "main",
+      reasons: [expectedReason]
     }));
   });
 

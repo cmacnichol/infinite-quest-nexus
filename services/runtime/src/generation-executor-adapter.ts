@@ -1872,8 +1872,7 @@ async function executeLoadedGeneration(
         return true;
       }
     }
-    if (generationPolicy?.playMode === "story_only" && !validatedDraft
-        && (!result.outputLimited || resumingPendingChoiceRepair)) {
+    if (generationPolicy?.playMode === "story_only" && !validatedDraft) {
       const choiceOnly = parseStoryOnlyOutput(result.content);
       if (!choiceOnly.ok && choiceOnly.kind === "choices") {
         if (!choiceRetryReceipt) return pauseRejectedMain("choices", "invalid_choices");
@@ -1961,9 +1960,9 @@ async function executeLoadedGeneration(
       }
     }
     // A complete provider response is preserved and offered before any
-    // destructive structural recovery.  A length finish is only an
-    // incomplete candidate when the parsed structured output is incomplete.
-    if (firstReason || result.outputLimited) {
+    // destructive structural recovery.  `outputLimited` alone does not make
+    // a parsed structured response incomplete; the parser is authoritative.
+    if (firstReason) {
       const reason = result.outputLimited
         ? "output_incomplete" as const
         : firstReason === "mechanics_leak"
