@@ -6,6 +6,7 @@ const base = {
   structurallyValid: true,
   mechanicsClean: true,
   authorityValid: true,
+  stage: "continuity" as const,
   candidateScope: "final" as const,
   stageComplete: true,
   reasons: ["review_unavailable"] as const
@@ -22,7 +23,10 @@ describe("generation review keep policy", () => {
     ["no review reason", { ...base, reasons: [] }, false],
     ["hard structure finding", { ...base, reasons: ["invalid_structure"] }, false],
     ["mixed soft and hard findings", { ...base, reasons: ["review_uncertain", "candidate_stale"] }, false],
-    ["eligible main candidate", { ...base, candidateScope: "main" as const, reasons: ["scene_beats_missing"] }, true]
+    ["eligible scene coverage main candidate", { ...base, stage: "scene_coverage" as const, candidateScope: "main" as const, reasons: ["scene_beats_missing"] }, true],
+    ["continuity cannot keep a main candidate", { ...base, candidateScope: "main" as const }, false],
+    ["scene coverage cannot keep a final candidate", { ...base, stage: "scene_coverage" as const }, false],
+    ["hard structure stage cannot keep spoofed soft findings", { ...base, stage: "structure" as const }, false]
   ])("%s", (_name, input, expected) => {
     expect(canKeepGenerationCandidate(input as GenerationReviewEligibility)).toBe(expected);
   });

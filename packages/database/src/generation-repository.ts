@@ -183,7 +183,7 @@ function mutationResult(row: MutationRow): GenerationMutationResult {
 }
 
 function checkpointCanKeep(checkpoint: ReturnType<typeof generationReviewCheckpointSchema.parse>): boolean {
-  return checkpoint.gateCandidate.story !== null && canKeepGenerationCandidate({ ...checkpoint.eligibility, candidateScope: checkpoint.candidateScope, reasons: checkpoint.reasons });
+  return checkpoint.gateCandidate.story !== null && canKeepGenerationCandidate({ ...checkpoint.eligibility, stage: checkpoint.stage, candidateScope: checkpoint.candidateScope, reasons: checkpoint.reasons });
 }
 
 function jobResult(row: JobRow): GenerationJob {

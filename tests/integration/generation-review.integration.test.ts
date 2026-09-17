@@ -75,7 +75,7 @@ integration("PostgreSQL generation review persistence", () => {
       custom_action_suggestion: "Examine the moonlit archive.", scratchpad: "", tracker_updates: [], image_prompt: "A moonlit observatory archive.",
       continuity_summary: "The observatory archive has opened.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
     });
-    const reasons: GenerationReviewCheckpoint["reasons"] = eligible ? ["review_uncertain"] : ["invalid_structure"];
+    const reasons: GenerationReviewCheckpoint["reasons"] = eligible ? ["scene_beats_missing"] : ["invalid_structure"];
     const candidate = {
       scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
       producingRequestHash: "a".repeat(64), producingResponseId: null, sentFactIds: [], ownerUserId, campaignId: imported.campaignId,
@@ -86,7 +86,7 @@ integration("PostgreSQL generation review persistence", () => {
       resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     };
     const checkpoint = {
-      version: 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: eligible ? "continuity" as const : "structure" as const,
+      version: 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: eligible ? "scene_coverage" as const : "structure" as const,
       candidateScope: "main" as const, reasons, operationKind: "append" as const, replacementTurnId: null,
       eligibility: { complete: true, structurallyValid: eligible, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
