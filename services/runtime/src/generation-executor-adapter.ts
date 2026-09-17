@@ -2296,8 +2296,18 @@ async function executeLoadedGeneration(
           "scene_coverage_rewrite",
           sceneRewriteRequest
         ));
+        // The provider can canonicalize the prepared request after the
+        // reservation (for example, by retrying without response_format).
+        // Retain its returned wire identity before claiming this rewrite has
+        // a validated result.
+        const actualSceneRewrite = preparedRequestForResult(sceneRewriteResponse, provider, sceneRewriteRequest);
         orchestration = await persistOrchestration(repository, scope, job, {
-          sceneCoverageRepair: { ...orchestration.sceneCoverageRepair!, status: "validated" }
+          sceneCoverageRepair: {
+            ...orchestration.sceneCoverageRepair!,
+            repairRequestBody: actualSceneRewrite.body,
+            repairRequestPayloadHash: actualSceneRewrite.payloadHash,
+            status: "validated"
+          }
         });
         result = sceneRewriteResponse;
         parsed = parseStoryOutput(result.content, storyMemoryDefaults);

@@ -65,6 +65,7 @@ integration("T17 durable continuity review", () => {
   let invalidSemanticRepair = false;
   let eventCoverageSequence: boolean[] = [];
   let sceneCoverageSequence: boolean[] = [];
+  let rejectSceneRewriteResponseFormat = false;
   let repairSupersedesFactId: string | null = null;
 
   function reviewResponse(body: string): string {
@@ -121,6 +122,13 @@ integration("T17 durable continuity review", () => {
       request.setEncoding("utf8"); request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         if (request.url?.endsWith("/chat/completions")) requests.push(body);
+        if (rejectSceneRewriteResponseFormat
+            && body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat")
+            && body.includes("\"response_format\"")) {
+          response.writeHead(400, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "response_format is not supported" } }));
+          return;
+        }
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ message: { content: reviewResponse(body) }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110, cost: 0.001 } }));
       });
@@ -493,6 +501,34 @@ integration("T17 durable continuity review", () => {
       expect(reoffered).toMatchObject({ state: "pending", stage: "scene_coverage", canKeep: true, canRetry: false, narration: gate.narration });
       expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
     } finally { sceneCoverageSequence = []; }
+  });
+
+  it("records the actual response-format fallback body for a validated scene rewrite", async () => {
+    const { job, application } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
+    reviewVerdict = "pass"; sceneCoverageSequence = [false, false, true]; requests.length = 0;
+    rejectSceneRewriteResponseFormat = true;
+    try {
+      await runGenerationJob(pool, `scene-fallback-gate-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `scene-fallback-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const rewriteBodies = requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"));
+      expect(rewriteBodies).toHaveLength(2);
+      expect(rewriteBodies[0]).toContain("\"response_format\"");
+      expect(rewriteBodies[1]).not.toContain("\"response_format\"");
+      const saved = (await pool.query<{ orchestration_private: { sceneCoverageRepair: { status: string; repairRequestBody: string; repairRequestPayloadHash: string } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(saved.sceneCoverageRepair).toMatchObject({
+        status: "validated",
+        repairRequestBody: rewriteBodies[1],
+        repairRequestPayloadHash: createHash("sha256").update(rewriteBodies[1]!).digest("hex")
+      });
+    } finally {
+      sceneCoverageSequence = [];
+      rejectSceneRewriteResponseFormat = false;
+    }
   });
 
   it("reserves one semantic repair, replaces the main, and reviews the repaired request before commit", async () => {
