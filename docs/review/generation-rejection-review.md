@@ -59,10 +59,10 @@ No player production code changed in this task.
 | Parser regression for typed fact identifiers | RED then GREEN: 28 tests |
 | Existing payload, continuity-evaluator, and Story-only choice-review regressions | Passed after explicit-decision expectation updates: 40 tests, 6 existing skips |
 | `corepack pnpm exec vitest run tests/unit/story-player-ui.test.ts --silent` | Passed: 87 tests |
-| `corepack pnpm test:unit` | Passed: 302 files, 3,697 tests; 44 skipped |
+| `corepack pnpm test:unit` | Passed: 302 files, 3,698 tests; 44 skipped |
 | `corepack pnpm check` | Passed |
 | `corepack pnpm build` | Passed; existing runtime-font resolution and chunk-size warnings remain |
-| Isolated integration coverage | Passed across all 103 files: 100 Windows files and three Linux-only portable-archive files. The Windows `corepack pnpm test:integration` run reached 56/103, then stopped at a Linux-only filesystem guard; its remaining 47 files were run with the same isolated config. The three Linux-only files passed in a fresh disposable Linux Node/PostgreSQL environment (4 tests). The original Windows coverage produced 967 passing tests and 120 skips; replacing the three stale review-expectation failures and the three Linux-only results gives 976 passing tests and 120 skips. This is segmented cross-platform coverage, not a claim that one Windows command passed end-to-end. |
+| Isolated integration coverage | Clear coverage was executed across all 103 files: 976 passing tests and 120 skips, segmented across Windows and Linux. This was not a full Windows command pass. The Windows `corepack pnpm test:integration` run reached 56/103, then stopped at a Linux-only filesystem guard; its remaining 47 files were run with the same isolated config. The three Linux-only files passed in a fresh disposable Linux Node/PostgreSQL environment (4 tests). The original Windows coverage produced 967 passing tests and 120 skips; replacing the three stale review-expectation failures and the three Linux-only results gives 976 passing tests and 120 skips. |
 
 The 44 unit skips are existing platform-gated secure archive and asset-staging
 cases, POSIX credential-permission cases, and optional secure-filesystem runtime
@@ -84,6 +84,12 @@ states at both required viewport sizes: [web-next retry 390](assets/generation-r
 [web-next accepted 390](assets/generation-rejection-review/web-next-accepted-390.png), and
 [legacy accepted 1440](assets/generation-rejection-review/legacy-accepted-1440.png).
 This task did not rerun browser tests or live providers.
+
+## Final whole-branch review
+
+A final review of the whole branch found no functional findings. This
+documentation-only correction fixes the unit count and clarifies the segmented
+integration coverage; it did not rerun application suites.
 
 ## Release decisions carried into verification
 
