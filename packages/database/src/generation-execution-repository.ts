@@ -1,9 +1,9 @@
-import { assertContinuityReviewCommit, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
-import { generationReviewCheckpointSchema, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
+import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
+import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
 import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
-import type { GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
 import type {
   CampaignWorldVersionMemoryScope,
@@ -41,6 +41,7 @@ import {
   type PrivateRollResolution,
   type ProviderResult
 } from "../../story-engine/src/index.js";
+import { mechanicsLeakFields } from "../../story-engine/src/output.js";
 import {
   buildScopedEntityCatalog,
   normalizeCampaignTrackers,
@@ -557,11 +558,14 @@ async function commitAcceptedTurn(
   // The commit boundary accepts only the current protocol. Historical/import
   // replay goes through the explicitly named Chronicle compatibility path.
   const story = storyTurnOutputSchema.parse(input.story);
-  const lease = await client.query<{ id: string; context_options: Record<string, unknown>; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
-    `SELECT id, context_options, prompt_snapshot, orchestration_private, streaming_segments_state FROM generation_jobs
-      WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'committing'
-        AND lease_expires_at > now()
-      FOR UPDATE`,
+  const lease = await client.query<{ id: string; owner_user_id: string; campaign_id: string; world_id: string; world_version_id: string | null; expected_turn_number: number; operation_kind: "append" | "replace_latest"; replacement_turn_id: string | null; generation_base_identity: unknown; context_options: Record<string, unknown>; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
+    `SELECT j.id, j.owner_user_id, j.campaign_id, wv.world_id, j.world_version_id, j.expected_turn_number,
+            j.operation_kind, j.replacement_turn_id, j.generation_base_identity, j.context_options, j.prompt_snapshot,
+            j.orchestration_private, j.streaming_segments_state
+       FROM generation_jobs j JOIN world_versions wv ON wv.id=j.world_version_id AND wv.owner_user_id=j.owner_user_id
+      WHERE j.id = $1 AND j.owner_user_id = $2 AND j.lease_owner = $3 AND j.status = 'committing'
+        AND j.lease_expires_at > now()
+      FOR UPDATE OF j`,
     [scope.jobId, scope.ownerUserId, scope.workerId]
   );
   if (!lease.rows[0]) {
@@ -580,11 +584,30 @@ async function commitAcceptedTurn(
       try { if (requestBody && saved.sourceEvidenceManifest) manifest = bindManifestToProducingRequest(saved.sourceEvidenceManifest, requestBody); } catch { /* Only an observed unavailable result can commit without verified review inputs. */ }
       const auxiliaryRequestHashes = validatedChoiceRequestHashes(saved.choiceRepair, saved.validatedMainDraft?.story, policy.providerConfigurationFingerprint);
       const prompts = assertContinuityReviewPromptSnapshot(storedJob.prompt_snapshot, policy.policy.continuityReview);
-      assertContinuityReviewCommit(policy.policy.continuityReview, saved.continuityReview, {
+      const normalBinding = {
         draftHash: sha256Hex(stableStringify(story)), producingRequestHash: requestBody ? sha256Hex(requestBody) : null, manifestHash: manifest?.manifestHash ?? null, auxiliaryRequestHashes,
         providerConfigurationHash: policy.providerConfigurationFingerprint, promptHash: prompts.continuityReview!.review.hash,
         promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash
-      });
+      } as const;
+      const review = generationReviewCheckpointSchema.safeParse(saved.generationReview);
+      const hasFinalContinuityReview = review.success && review.data.state === "decided"
+        && review.data.candidateScope === "final" && review.data.stage === "continuity";
+      if (hasFinalContinuityReview) {
+        if (mechanicsLeakFields(story).length) {
+          throw Object.assign(new Error("A kept generation candidate contains mechanics language."), { code: "mechanics_leak" });
+        }
+        assertGenerationReviewAcceptance(review.data, {
+          jobId: storedJob.id, actorUserId: storedJob.owner_user_id, candidateScope: "final",
+          candidateHash: sha256Hex(canonicalEvidenceJson(story)), stage: "continuity",
+          findingsHash: generationReviewFindingsHash(review.data.reasons), ownerUserId: storedJob.owner_user_id,
+          campaignId: storedJob.campaign_id, worldId: storedJob.world_id, worldVersionId: storedJob.world_version_id,
+          baseIdentity: readGenerationBaseIdentity(storedJob.generation_base_identity),
+          protocol: { version: job.prompt_protocol_version, promptHash: review.data.gateCandidate.protocol.promptHash },
+          policyHash: policy.policyHash, operationKind: storedJob.operation_kind, replacementTurnId: storedJob.replacement_turn_id
+        });
+      } else {
+        assertContinuityReviewCommit(policy.policy.continuityReview, saved.continuityReview, normalBinding);
+      }
     }
   }
   const requestedSupersessionIds = [...new Set(story.canonical_fact_updates.flatMap((update) => update.supersedes_fact_ids))];

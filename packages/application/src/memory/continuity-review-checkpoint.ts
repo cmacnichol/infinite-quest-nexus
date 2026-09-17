@@ -1,5 +1,6 @@
 import { z, continuityReviewSchema, sha256Hex } from "@infinite-quest/contracts";
 import { generationEvidenceManifestSchema, generationEvidenceManifestHash, type GenerationEvidenceManifest, canonicalEvidenceJson } from "./generation-context.js";
+import { generationReviewCheckpointSchema } from "../generation/review-checkpoint.js";
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
 export const reviewBindingSchema = z.object({
   draftHash: hash, producingRequestHash: hash.nullable(), manifestHash: hash.nullable(), auxiliaryRequestHashes: z.array(hash).max(4).optional(), providerConfigurationHash: hash,
@@ -20,6 +21,50 @@ export const continuityReviewCheckpointSchema = z.object({
   if (value.verdict === "unavailable" && value.result !== null) context.addIssue({ code: "custom", message: "Unavailable review cannot claim a result." });
 });
 export type ContinuityReviewCheckpoint = z.infer<typeof continuityReviewCheckpointSchema>;
+
+/** Server-known identity required to honor a single final-candidate Keep receipt.
+ * The receipt is audit evidence; the locked job and this immutable binding remain authority. */
+export type GenerationReviewAcceptanceBinding = Readonly<{
+  jobId: string; actorUserId: string; candidateScope: "main" | "final"; candidateHash: string;
+  stage: string; findingsHash: string; ownerUserId: string; campaignId: string; worldId: string;
+  worldVersionId: string | null; baseIdentity: unknown; protocol: Readonly<{ version: string; promptHash: string }>;
+  policyHash: string; operationKind: "append" | "replace_latest"; replacementTurnId: string | null;
+}>;
+
+/**
+ * Proves that the currently locked job is committing the precise candidate that
+ * its owner elected to keep. This deliberately has no general review override:
+ * callers may use it only for the final continuity waiver.
+ */
+export function assertGenerationReviewAcceptance(value: unknown, expected: GenerationReviewAcceptanceBinding): void {
+  const checkpoint = generationReviewCheckpointSchema.safeParse(value);
+  const unavailable = (): never => {
+    throw Object.assign(new Error("The saved generation review acceptance does not bind this commit."), {
+      code: "generation_review_acceptance_unavailable"
+    });
+  };
+  if (!checkpoint.success || !checkpoint.data) unavailable();
+  const current = checkpoint.data!;
+  if (current.state !== "decided" || current.candidateScope !== expected.candidateScope || current.stage !== expected.stage
+    || current.operationKind !== expected.operationKind || current.replacementTurnId !== expected.replacementTurnId) unavailable();
+  const candidate = current.gateCandidate;
+  if (candidate.scope !== expected.candidateScope || candidate.storyHash !== expected.candidateHash
+    || candidate.ownerUserId !== expected.ownerUserId || candidate.campaignId !== expected.campaignId
+    || candidate.worldId !== expected.worldId || candidate.worldVersionId !== expected.worldVersionId
+    || candidate.policyHash !== expected.policyHash || candidate.protocol.version !== expected.protocol.version
+    || candidate.protocol.promptHash !== expected.protocol.promptHash
+    || canonicalEvidenceJson(candidate.baseIdentity) !== canonicalEvidenceJson(expected.baseIdentity)) unavailable();
+  const receipt = current.decisionJournal.find((entry) => entry.reviewId === current.reviewId
+    && entry.revision === current.revision && entry.decision === "keep");
+  if (!receipt || receipt.actorUserId !== expected.actorUserId || receipt.candidateScope !== expected.candidateScope
+    || receipt.candidateHash !== expected.candidateHash || receipt.findingsHash !== expected.findingsHash
+    || receipt.findingsHash !== sha256Hex(canonicalEvidenceJson(current.reasons))
+    || receipt.actionReceipt.jobId !== expected.jobId || receipt.actionReceipt.operationKind !== expected.operationKind
+    || receipt.actionReceipt.replacementTurnId !== expected.replacementTurnId
+    || receipt.offeredCandidate.storyHash !== expected.candidateHash
+    || canonicalEvidenceJson(receipt.offeredCandidate.baseIdentity) !== canonicalEvidenceJson(expected.baseIdentity)) unavailable();
+}
+
 export function assertContinuityReviewCommit(mode: "off" | "observe" | "enforce", value: unknown, binding: ReviewBinding): void {
   if (mode === "off") return;
   const checkpoint = continuityReviewCheckpointSchema.safeParse(value);
