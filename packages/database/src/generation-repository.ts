@@ -9,7 +9,8 @@ import {
   GenerationApplicationError,
   type GenerationCommandRepository,
   type GenerationJob,
-  type GenerationMutationResult
+  type GenerationMutationResult,
+  type GenerationReviewDecisionResult
 } from "../../application/src/index.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../application/src/generation/review-checkpoint.js";
 import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
@@ -183,6 +184,16 @@ function mutationResult(row: MutationRow): GenerationMutationResult {
     return { id: row.id, status: row.status, operationKind: "append", replacementTurnId: null };
   }
   return { id: row.id, status: row.status, operationKind: "replace_latest", replacementTurnId: row.replacementTurnId! };
+}
+
+function reviewDecisionResult(
+  receipt: GenerationMutationResult,
+  newlyQueued: boolean
+): GenerationReviewDecisionResult {
+  return Object.defineProperty(receipt, "newlyQueued", {
+    value: newlyQueued,
+    enumerable: false
+  }) as GenerationReviewDecisionResult;
 }
 
 function checkpointCanKeep(checkpoint: ReturnType<typeof generationReviewCheckpointSchema.parse>): boolean {
@@ -716,8 +727,8 @@ export function createPostgresGenerationCommandRepository(
         if (recorded) {
           if (recorded.decision !== parsedRequest.decision) throw new GenerationApplicationError("conflict");
           return recorded.actionReceipt.operationKind === "append"
-            ? { id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "append", replacementTurnId: null }
-            : { id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "replace_latest", replacementTurnId: recorded.actionReceipt.replacementTurnId! };
+            ? reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "append", replacementTurnId: null }, false)
+            : reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "replace_latest", replacementTurnId: recorded.actionReceipt.replacementTurnId! }, false);
         }
         if (job.generationStatus !== "recoverable" || checkpoint.state !== "pending"
             || checkpoint.reviewId !== parsedRequest.reviewId || checkpoint.revision !== parsedRequest.revision) {
@@ -751,7 +762,7 @@ export function createPostgresGenerationCommandRepository(
             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
           [scope.jobId, scope.ownerUserId, status, json(next)]
         );
-        return mutationResult(updated.rows[0]!);
+        return reviewDecisionResult(mutationResult(updated.rows[0]!), true);
       });
     },
 

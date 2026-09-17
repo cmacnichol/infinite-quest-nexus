@@ -13,7 +13,8 @@ import type {
   GenerationExecutionRequest,
   GenerationJob,
   GenerationJobScope,
-  GenerationMutationResult
+  GenerationMutationResult,
+  GenerationReviewDecisionResult
 } from "./types.js";
 
 export interface GenerationCommandRepository {
@@ -28,7 +29,7 @@ export interface GenerationCommandRepository {
   getJob(scope: GenerationJobScope): Promise<GenerationJob>;
   getResult(scope: GenerationJobScope): Promise<GenerationResult>;
   getReview(scope: GenerationJobScope): Promise<GenerationReviewDetail>;
-  decideReview(scope: GenerationJobScope, request: GenerationReviewDecisionRequest): Promise<GenerationMutationResult>;
+  decideReview(scope: GenerationJobScope, request: GenerationReviewDecisionRequest): Promise<GenerationReviewDecisionResult>;
   retry(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   cancel(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   discard(scope: GenerationJobScope): Promise<GenerationMutationResult>;
@@ -54,7 +55,7 @@ export interface GenerationApplication {
   getJob(scope: GenerationJobScope): Promise<GenerationJob>;
   getResult(scope: GenerationJobScope): Promise<GenerationResult>;
   getReview(scope: GenerationJobScope): Promise<GenerationReviewDetail>;
-  decideReview(scope: GenerationJobScope, request: GenerationReviewDecisionRequest): Promise<GenerationMutationResult>;
+  decideReview(scope: GenerationJobScope, request: GenerationReviewDecisionRequest): Promise<GenerationReviewDecisionResult>;
   retry(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   cancel(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   discard(scope: GenerationJobScope): Promise<GenerationMutationResult>;

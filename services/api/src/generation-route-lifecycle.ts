@@ -1,4 +1,4 @@
-import type { GenerationMutationResult } from "../../../packages/application/src/index.js";
+import type { GenerationMutationResult, GenerationReviewDecisionResult } from "../../../packages/application/src/index.js";
 
 export type GenerationLifecycleLogContext = Readonly<{
   generationJobId: string;
@@ -16,6 +16,7 @@ export type GenerationRouteLifecycleDependencies = Readonly<{
 
 export type GenerationRouteLifecycle = Readonly<{
   retry(ownerUserId: string, generationJobId: string, mutate: () => Promise<GenerationMutationResult>): Promise<GenerationMutationResult>;
+  decideReview(ownerUserId: string, generationJobId: string, mutate: () => Promise<GenerationReviewDecisionResult>): Promise<GenerationReviewDecisionResult>;
   cancel(ownerUserId: string, generationJobId: string, mutate: () => Promise<GenerationMutationResult>): Promise<GenerationMutationResult>;
 }>;
 
@@ -25,6 +26,12 @@ export function createGenerationRouteLifecycle({ readContext, logger }: Generati
       const context = await readContext(ownerUserId, generationJobId);
       const result = await mutate();
       if (context) logger.info({ event: "turn_generation_requeued", ...context });
+      return result;
+    },
+    decideReview: async (ownerUserId, generationJobId, mutate) => {
+      const context = await readContext(ownerUserId, generationJobId);
+      const result = await mutate();
+      if (result.newlyQueued && context) logger.info({ event: "turn_generation_requeued", ...context });
       return result;
     },
     cancel: async (ownerUserId, generationJobId, mutate) => {

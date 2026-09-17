@@ -10,6 +10,7 @@ import {
   type GenerationApplication,
   type GenerationJob,
   type GenerationMutationResult,
+  type GenerationReviewDecisionResult,
   type OwnerScope
 } from "../../../packages/application/src/index.js";
 
@@ -24,7 +25,7 @@ export type GenerationApplicationAdapter = Readonly<{
   getGenerationJob(ownerScope: OwnerScope, jobId: string): Promise<GenerationJob>;
   getGenerationResult(ownerScope: OwnerScope, jobId: string): Promise<GenerationResult>;
   getGenerationReview(ownerScope: OwnerScope, jobId: string): Promise<GenerationReviewDetail>;
-  decideGenerationReview(ownerScope: OwnerScope, jobId: string, request: GenerationReviewDecisionRequest): Promise<GenerationMutationResult>;
+  decideGenerationReview(ownerScope: OwnerScope, jobId: string, request: GenerationReviewDecisionRequest): Promise<GenerationReviewDecisionResult>;
   retryGeneration(ownerScope: OwnerScope, jobId: string): Promise<GenerationMutationResult>;
   cancelGeneration(ownerScope: OwnerScope, jobId: string): Promise<GenerationMutationResult>;
   discardGeneration(ownerScope: OwnerScope, jobId: string): Promise<GenerationMutationResult>;

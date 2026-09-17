@@ -1412,7 +1412,7 @@ export async function buildServer({
     const jobId = uuidSchema.parse(request.params.jobId);
     const decision = generationReviewDecisionRequestSchema.parse(request.body);
     const ownerScope = { ownerUserId: await initialOwnerId(pool) };
-    const result = await generationLifecycle.retry(ownerScope.ownerUserId, jobId, () =>
+    const { newlyQueued: _newlyQueued, ...result } = await generationLifecycle.decideReview(ownerScope.ownerUserId, jobId, () =>
       generationAdapter.decideGenerationReview(ownerScope, jobId, decision)
     );
     return reply.code(202).send(parseResponseProjection(generationActionResponseSchema, result));

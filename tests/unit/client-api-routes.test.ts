@@ -1313,7 +1313,7 @@ describe("client API route contracts without PostgreSQL", () => {
       },
       retry: async (scope) => {
         calls.push({ method: "retry", scope });
-        return { id: JOB_ID, status: "queued", operationKind: "append", replacementTurnId: null };
+        return { id: JOB_ID, status: "queued", operationKind: "append", replacementTurnId: null, newlyQueued: true };
       },
       cancel: async (scope) => {
         calls.push({ method: "cancel", scope });
@@ -1389,7 +1389,7 @@ describe("client API route contracts without PostgreSQL", () => {
       },
       decideReview: async (scope, request) => {
         calls.push({ method: "decideReview", scope, request });
-        return { id: JOB_ID, status: "queued", operationKind: "append", replacementTurnId: null };
+        return { id: JOB_ID, status: "queued", operationKind: "append", replacementTurnId: null, newlyQueued: true };
       }
     });
     const app = await buildServer(serverOptions({ config: config(storageRoot), pool: mockPool(), generation }));
@@ -1408,6 +1408,7 @@ describe("client API route contracts without PostgreSQL", () => {
       expect(detail.body).not.toContain(privateCanary);
       expect(accepted.statusCode).toBe(202);
       expect(generationActionResponseSchema.parse(accepted.json())).toMatchObject({ id: JOB_ID, status: "queued" });
+      expect(accepted.json()).not.toHaveProperty("newlyQueued");
       expect(malformed.statusCode).toBe(400);
       expect(calls).toEqual([
         { method: "getReview", scope: { ownerUserId: OWNER_ID, jobId: JOB_ID } },

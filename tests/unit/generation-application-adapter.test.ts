@@ -14,6 +14,7 @@ import {
   type GenerationApplicationErrorReason,
   type GenerationJob,
   type GenerationMutationResult,
+  type GenerationReviewDecisionResult,
   type OwnerScope
 } from "../../packages/application/src/index.js";
 import type {
@@ -121,7 +122,7 @@ function applicationFake(
     getJob: { id: jobId } as GenerationJob,
     getResult: { id: jobId } as GenerationResult,
     getReview: { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1 } as never,
-    decideReview: { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
+    decideReview: { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null, newlyQueued: true } as GenerationReviewDecisionResult,
     retry: { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
     cancel: { id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
     discard: { id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null } as GenerationMutationResult

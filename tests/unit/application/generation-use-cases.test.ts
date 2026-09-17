@@ -86,6 +86,7 @@ describe("generation application use cases", () => {
     const review = { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1 } as GenerationReviewDetail;
     const decision = { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, decision: "keep" } as GenerationReviewDecisionRequest;
     const mutation = { id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationActionResponse;
+    const reviewDecision = { ...mutation, newlyQueued: true };
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const repository: GenerationCommandRepository = {
       enqueueAppend: async (...args) => { calls.push({ method: "enqueueAppend", args }); return enqueueResult; },
@@ -93,7 +94,7 @@ describe("generation application use cases", () => {
       getJob: async (...args) => { calls.push({ method: "getJob", args }); return job; },
       getResult: async (...args) => { calls.push({ method: "getResult", args }); return result; },
       getReview: async (...args) => { calls.push({ method: "getReview", args }); return review; },
-      decideReview: async (...args) => { calls.push({ method: "decideReview", args }); return mutation; },
+      decideReview: async (...args) => { calls.push({ method: "decideReview", args }); return reviewDecision; },
       retry: async (...args) => { calls.push({ method: "retry", args }); return mutation; },
       cancel: async (...args) => { calls.push({ method: "cancel", args }); return mutation; },
       discard: async (...args) => { calls.push({ method: "discard", args }); return mutation; }
@@ -109,7 +110,7 @@ describe("generation application use cases", () => {
     await expect(application.getJob(jobScope)).resolves.toBe(job);
     await expect(application.getResult(jobScope)).resolves.toBe(result);
     await expect(application.getReview(jobScope)).resolves.toBe(review);
-    await expect(application.decideReview(jobScope, decision)).resolves.toBe(mutation);
+    await expect(application.decideReview(jobScope, decision)).resolves.toBe(reviewDecision);
     await expect(application.retry(jobScope)).resolves.toBe(mutation);
     await expect(application.cancel(jobScope)).resolves.toBe(mutation);
     await expect(application.discard(jobScope)).resolves.toBe(mutation);

@@ -7,6 +7,10 @@ import type {
 export type EnqueueGenerationResult = GenerationEnqueueResponse;
 export type GenerationJob = GenerationJobStatus;
 export type GenerationMutationResult = GenerationActionResponse;
+/** Internal command outcome. The HTTP response remains the action receipt. */
+export type GenerationReviewDecisionResult = GenerationMutationResult & Readonly<{
+  newlyQueued: boolean;
+}>;
 
 export type OwnerScope = Readonly<{
   ownerUserId: string;
