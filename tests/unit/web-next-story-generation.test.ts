@@ -1,4 +1,5 @@
 import type { GenerationEvent, GenerationRun, GenerationSubmissionInput, GenerationWorkflow } from "../../packages/client-core/src/index.js";
+import type { GenerationReviewDecisionRequest } from "../../packages/contracts/src/index.js";
 import { describe, expect, it, vi } from "vitest";
 import { createStoryGenerationController } from "../../apps/web-next/src/story-player-generation.js";
 
@@ -208,5 +209,27 @@ describe("StoryGenerationController", () => {
     await expect(controller.discard()).resolves.toBe(true);
     expect(apply).toHaveBeenCalledWith(expect.objectContaining({ type: "settled", outcome: "discarded" }));
     await expect(controller.submitAppend({ action: "Continue.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit" })).resolves.toBe(true);
+  });
+
+  it("sends an explicit saved review decision through the attached session", async () => {
+    const decision: GenerationReviewDecisionRequest = {
+      reviewId: "44444444-4444-4444-8444-444444444444",
+      revision: 1,
+      decision: "keep"
+    };
+    const decideReview = vi.fn(async () => ({
+      id: jobId, status: "queued" as const, operationKind: "append" as const, replacementTurnId: null
+    }));
+    const controller = createStoryGenerationController({
+      workflow: { submit: vi.fn(async () => run()), resume: vi.fn() },
+      campaignStore: { attachGeneration: vi.fn(() => ({ campaignId, jobId, apply: vi.fn(), loadReview: vi.fn(), decideReview, retryResult: vi.fn() })) } as never,
+      idFactory: { create: () => "review-idempotency-key" },
+      currentCampaign: () => ({ id: campaignId, activeTurnNumber: 0 })
+    });
+
+    await controller.submitAppend({ action: "Open it.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit" });
+
+    await expect(controller.decideReview(decision)).resolves.toBe(true);
+    expect(decideReview).toHaveBeenCalledWith(decision);
   });
 });

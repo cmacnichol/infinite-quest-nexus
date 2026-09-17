@@ -184,9 +184,65 @@ describe("generation workflow", () => {
     const aborted = signal();
     const iterator = run.watch(aborted)[Symbol.asyncIterator]();
     await iterator.next();
+    const terminal = iterator.next();
+    await Promise.resolve();
+    await Promise.resolve();
     aborted.abort();
-    await iterator.next();
+    await terminal;
 
+    expect(client.retries).toBe(0);
+  });
+
+  it("does not dispatch generic retry while a supported review awaits an explicit decision", async () => {
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const source = sourceFromSessions([[
+      // A reconnect can lose the review field on the stream frame. The
+      // persisted recovery summary is still authoritative for this run.
+      { kind: "snapshot", snapshot: snapshot({ status: "recoverable" }) }
+    ]]);
+    const workflow = createGenerationWorkflow({
+      api: api({
+        retry: async () => { client.retries += 1; return actionResponse("queued"); },
+        syncStatus: async () => ({
+          pendingGeneration: null,
+          generationRecovery: {
+            ...snapshot({ status: "recoverable", review: reviewSummary() }),
+            errorCode: "generation_failed",
+            errorMessage: "Generation could not be completed."
+          }
+        } as CampaignSyncStatus)
+      }),
+      source,
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.resume(campaignId);
+    expect(run).not.toBeNull();
+    const aborted = signal();
+    const iterator = run!.watch(aborted)[Symbol.asyncIterator]();
+    await iterator.next();
+    const terminal = iterator.next();
+    await Promise.resolve();
+    await Promise.resolve();
+    aborted.abort();
+    await terminal;
+
+    expect(client.retries).toBe(0);
+  });
+
+  it("retains a live pending review across a reconnect frame that omits its summary", async () => {
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const source = sourceFromSessions([[
+      { kind: "snapshot", snapshot: snapshot({ status: "recoverable", review: reviewSummary() }) },
+      { kind: "degraded", reason: "stream_lost", consecutiveFailures: 1 },
+      { kind: "snapshot", snapshot: snapshot({ status: "recoverable" }) }
+    ]]);
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+
+    const events = await collect(run.watch(signal()));
+
+    expect(events).toContainEqual(expect.objectContaining({ type: "degraded", reason: "stream_lost" }));
     expect(client.retries).toBe(0);
   });
 

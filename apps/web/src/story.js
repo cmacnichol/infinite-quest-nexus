@@ -42,7 +42,8 @@ import {
   createCampaignContinuityDraft,
   formatChronicleRetrievalAudit,
   generationDiagnosticPresentation,
-  generationRecoveryGuidance
+  generationRecoveryGuidance,
+  generationReviewPresentation
 } from "@infinite-quest/client-core";
 
 "use strict";
@@ -121,6 +122,9 @@ const state = {
   generationDisplayAction: "",
   generationJobId: null,
   generationRecoveryKind: null,
+  generationReview: null,
+  generationReviewError: null,
+  generationReviewSubmitting: false,
   cancellationConfirmed: false,
   illustrationConfig: null,
   illustrationSegments: [],
@@ -160,6 +164,8 @@ let nextEditStateSessionId = 0;
 let nextCharacterProfileEditSessionId = 0;
 let characterProfileEditRequestToken = 0;
 let nextResponseEditSessionId = 0;
+let generationReviewLoadEpoch = 0;
+let generationReviewLoadedKey = null;
 const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
 
 function completeHistorySupersededError() {
@@ -322,7 +328,10 @@ function hideBusy() {
 function syncInputState() {
   const btnAction = $("btnTakeAction");
   const freeAction = $("freeAction");
-  const generationLocked = state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration);
+  // A generic recoverable job may retain a draft while its explicit retry or
+  // discard action is pending. A typed saved review is different: its choices
+  // must block every competing generation path until it is resolved.
+  const generationLocked = state.busy || !state.campaignLoaded || Boolean(state.pendingGeneration) || Boolean(state.generationReview?.summary);
   const recoveryPanel = $("generationRecoveryPanel");
   const recoveryVisible = Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
   const editStateLocked = generationLocked || recoveryVisible || Boolean(state.editStateSession?.saving);
@@ -492,6 +501,14 @@ async function loadCampaign(campaignId, options = {}) {
       showGenerationRecovery(
         state.generationRecovery.id,
         guidance?.message || "This durable generation needs your direction.",
+        "generation",
+        guidance,
+        presentation
+      );
+      await loadGenerationReview();
+      showGenerationRecovery(
+        state.generationRecovery.id,
+        state.generationReview?.summary ? "This turn needs your review" : (guidance?.message || "This durable generation needs your direction."),
         "generation",
         guidance,
         presentation
@@ -1226,7 +1243,11 @@ function renderTurnInput() {
   const inputPanel = document.querySelector(".input-action");
   if (!inputPanel) return;
   const isLatest = isViewingLatestTurn();
-  const shouldShowInput = !state.generationDisplayActive && isLatest;
+  // A live saved review is rendered with the input controls. Keep the region
+  // visible for its explicit decisions while syncInputState keeps all ordinary
+  // generation paths disabled.
+  const recoveryVisible = Boolean($("generationRecoveryPanel") && !$("generationRecoveryPanel").classList.contains("hidden"));
+  const shouldShowInput = (!state.generationDisplayActive || recoveryVisible) && isLatest;
   inputPanel.classList.toggle("hidden", !shouldShowInput);
   syncStoryLengthOverrideControls();
   if (!shouldShowInput) {
@@ -1483,12 +1504,18 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
   const retryButton = $("btnRetryGeneration");
   const discardButton = $("btnDiscardGenerationRecovery");
   const details = $("generationRecoveryDetails");
+  const reviewPanel = $("generationReviewPanel");
+  const review = state.generationReview;
+  const reviewView = review?.summary ? generationReviewPresentation(review.summary, null, review.detail) : null;
   state.generationRecoveryKind = kind;
   if (panel) {
     panel.dataset.jobId = jobId;
     panel.classList.remove("hidden");
   }
-  if (messageEl) messageEl.textContent = message || "The durable generation needs attention.";
+  if (messageEl) {
+    messageEl.textContent = message || "The durable generation needs attention.";
+    messageEl.classList.toggle("hidden", reviewView !== null);
+  }
   if (details) {
     details.replaceChildren();
     for (const detail of presentation?.details || []) {
@@ -1496,14 +1523,31 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
       item.textContent = detail;
       details.append(item);
     }
-    details.classList.toggle("hidden", !details.childElementCount);
+    details.classList.toggle("hidden", reviewView !== null || !details.childElementCount);
   }
-  if (continueButton) continueButton.classList.toggle("hidden", kind === "result");
+  if (continueButton) continueButton.classList.toggle("hidden", reviewView !== null || kind === "result");
   if (retryButton) {
-    retryButton.classList.toggle("hidden", kind !== "result" && guidance?.retryable === false);
+    retryButton.classList.toggle("hidden", reviewView !== null || (kind !== "result" && guidance?.retryable === false));
     retryButton.textContent = kind === "result" ? "Retry loading result" : "Retry generation job";
   }
   if (discardButton) discardButton.classList.toggle("hidden", kind === "result");
+  if (reviewPanel) {
+    reviewPanel.classList.toggle("hidden", !reviewView);
+    if (reviewView) {
+      $("generationReviewHeading").textContent = reviewView.state === "review" ? "This turn needs your review" : "Generation review unavailable";
+      $("generationReviewReason").textContent = review?.detail?.findings?.map(finding => finding.message).join(" ") || reviewView.message;
+      const preview = $("generationReviewPreview");
+      preview.replaceChildren();
+      if (review?.detail?.narration) preview.append(...review.detail.narration.split(/\r?\n/).filter(Boolean).map(text => { const p = document.createElement("p"); p.textContent = text; return p; }));
+      const choices = $("generationReviewChoices");
+      choices.replaceChildren();
+      for (const choice of review?.detail?.choices || []) { const button = document.createElement("button"); button.type = "button"; button.disabled = true; button.textContent = choice; choices.append(button); }
+      const keep = $("btnKeepGenerationReview"); const retry = $("btnRetryGenerationReview");
+      if (keep) { keep.classList.toggle("hidden", !reviewView.canKeep); keep.disabled = state.generationReviewSubmitting; }
+      if (retry) { retry.classList.toggle("hidden", !reviewView.canRetry); retry.disabled = state.generationReviewSubmitting; }
+      $("generationReviewStatus").textContent = state.generationReviewSubmitting ? "Saving your decision…" : state.generationReviewError || reviewView.retryFailure || "";
+    }
+  }
 }
 
 function hideGenerationRecovery() {
@@ -1518,6 +1562,69 @@ function hideGenerationRecovery() {
     details.classList.add("hidden");
   }
   state.generationRecoveryKind = null;
+  state.generationReview = null;
+  state.generationReviewError = null;
+  state.generationReviewSubmitting = false;
+  generationReviewLoadEpoch += 1;
+  generationReviewLoadedKey = null;
+}
+
+async function loadGenerationReview() {
+  const recovery = state.generationRecovery;
+  const summary = recovery?.review;
+  if (!summary || !state.campaignId) return;
+  const campaignId = state.campaignId;
+  const jobId = recovery.id;
+  const reviewKey = `${jobId}:${summary.version}:${summary.reviewId}:${summary.revision}:${summary.state}`;
+  if (generationReviewLoadedKey === reviewKey) return;
+  const loadEpoch = ++generationReviewLoadEpoch;
+  const stillCurrent = () => state.campaignId === campaignId
+    && state.generationRecovery?.id === jobId
+    && state.generationRecovery.review?.version === summary.version
+    && state.generationRecovery.review?.reviewId === summary.reviewId
+    && state.generationRecovery.review?.revision === summary.revision
+    && state.generationRecovery.review?.state === summary.state
+    && generationReviewLoadEpoch === loadEpoch;
+  try {
+    const run = state.generationRun || await composition.workflow.resume(campaignId);
+    if (!run || !stillCurrent()) return;
+    state.generationRun = run;
+    const detail = await run.getReview();
+    if (!stillCurrent()) return;
+    state.generationReview = { summary, detail };
+    generationReviewLoadedKey = reviewKey;
+  } catch {
+    if (!stillCurrent()) return;
+    state.generationReview = { summary, detail: null };
+    generationReviewLoadedKey = reviewKey;
+  }
+}
+
+async function decideGenerationReview(decision) {
+  const summary = state.generationReview?.summary;
+  if (!summary || state.generationReviewSubmitting) return;
+  state.generationReviewSubmitting = true; state.generationReviewError = null;
+  showGenerationRecovery(state.generationRecovery?.id || state.pendingGeneration?.id, "This turn needs your review");
+  try {
+    const run = state.generationRun || await composition.workflow.resume(state.campaignId);
+    if (!run) throw new Error("The saved review is unavailable.");
+    state.generationRun = run;
+    await run.decideReview({ reviewId: summary.reviewId, revision: summary.revision, decision });
+    // A live review remains on the existing stream. A rehydrated review has no
+    // watcher, so reload only in that case to read its later durable state.
+    if (!state.abortController) await loadCampaign(state.campaignId, { autoScroll: false });
+  } catch (error) {
+    state.generationReviewError = "Your decision could not be saved. The turn remains unchanged.";
+    // A stale review decision is commonly caused by another open tab resolving
+    // the same durable job. Re-read the authoritative campaign before showing
+    // the local failure so an accepted or replacement turn wins immediately.
+    if (error && typeof error === "object" && error.statusCode === 409 && state.campaignId) {
+      await loadCampaign(state.campaignId, { autoScroll: false }).catch(() => undefined);
+    }
+  } finally {
+    state.generationReviewSubmitting = false;
+    if (state.generationRecovery) showGenerationRecovery(state.generationRecovery.id, "This turn needs your review");
+  }
 }
 
 function resetGenerationStateForCampaignLoad() {
@@ -1619,6 +1726,10 @@ async function finalizeCompletedGeneration(result) {
 
   clearPendingSubmission();
   state.pendingGeneration = null;
+  // A completed result is authoritative even when its saved review was shown
+  // from the same live monitor. Remove that now-resolved review before the
+  // accepted turn replaces the streamed preview.
+  hideGenerationRecovery();
   commitGenerationDisplay(false);
   recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
   if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {
@@ -1705,7 +1816,26 @@ async function observeGenerationRun(run, action, retryFirst = false) {
   let resultUnavailable = false;
   let lastSnapshot = null;
   await observeGenerationRunEvents(run, retryFirst, state, (events) => presentGenerationEvents(events, {
-    onStatus: (snapshot) => { lastSnapshot = snapshot; updateGenerationProgress(snapshot); },
+    onStatus: (snapshot) => {
+      lastSnapshot = snapshot;
+      updateGenerationProgress(snapshot);
+      if (snapshot.review?.state === "decided" || snapshot.status === "completed") {
+        state.generationReview = null;
+      }
+      if (snapshot.status === "recoverable" && snapshot.review) {
+        const guidance = generationRecoveryGuidance(snapshot.diagnostic);
+        const presentation = generationDiagnosticPresentation(snapshot.diagnostic);
+        state.generationRecovery = snapshot;
+        showGenerationRecovery(run.jobId, "This turn needs your review", "generation", guidance, presentation);
+        renderTurnInput();
+        void loadGenerationReview().finally(() => {
+          if (state.generationRecovery?.id === run.jobId) {
+            showGenerationRecovery(run.jobId, "This turn needs your review", "generation", guidance, presentation);
+            renderTurnInput();
+          }
+        });
+      }
+    },
     onNarration: (text) => renderStreamingPreview(text, action || state.generationDisplayAction),
     onDegraded: (reason, failures) => recordActivity("system", "Generation monitoring degraded", `${reason} (${failures})`),
     onDetached: () => recordActivity("system", "Generation monitoring detached", `jobId=${run.jobId}`),
@@ -1715,6 +1845,7 @@ async function observeGenerationRun(run, action, retryFirst = false) {
         "The turn completed, but its result is temporarily unavailable. Retry loading it.",
         "result"
       );
+      renderTurnInput();
       recordActivity("system", "Completed turn result unavailable", error.message);
       resultUnavailable = true;
     },
@@ -1734,7 +1865,19 @@ async function observeGenerationRun(run, action, retryFirst = false) {
       if (outcome === "unrecoverable") {
         const guidance = generationRecoveryGuidance(lastSnapshot?.diagnostic);
         const presentation = generationDiagnosticPresentation(lastSnapshot?.diagnostic);
-        showGenerationRecovery(run.jobId, guidance?.message || "Generation is recoverable but needs your direction.", "generation", guidance, presentation);
+        if (lastSnapshot?.review) {
+          // A live review follows a terminal stream frame, so hydrate the saved
+          // detail before presenting its explicit choices.
+          state.generationRecovery = lastSnapshot;
+          showGenerationRecovery(run.jobId, "This turn needs your review", "generation", guidance, presentation);
+          void loadGenerationReview().finally(() => {
+            if (state.generationRecovery?.id === run.jobId) {
+              showGenerationRecovery(run.jobId, "This turn needs your review", "generation", guidance, presentation);
+            }
+          });
+        } else {
+          showGenerationRecovery(run.jobId, guidance?.message || "Generation is recoverable but needs your direction.", "generation", guidance, presentation);
+        }
       }
       terminalError = error;
     }
@@ -3468,6 +3611,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (state.generationRecoveryKind === "result") void retryCompletedGenerationResult();
     else void monitorRecoveryJob(true);
   });
+  const btnKeepGenerationReview = $("btnKeepGenerationReview");
+  if (btnKeepGenerationReview) btnKeepGenerationReview.addEventListener("click", () => { void decideGenerationReview("keep"); });
+  const btnRetryGenerationReview = $("btnRetryGenerationReview");
+  if (btnRetryGenerationReview) btnRetryGenerationReview.addEventListener("click", () => { void decideGenerationReview("retry"); });
 
   // Edit Response dialog
   const btnEditResponseSave = $("btnEditResponseSave");

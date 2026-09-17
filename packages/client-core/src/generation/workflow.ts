@@ -78,6 +78,9 @@ function createRun(
   dependencies: GenerationWorkflowDependencies
 ): GenerationRun {
   const machine = createGenerationMachine();
+  // A resumed review remains an explicit user decision even if a reconnecting
+  // stream frame has not yet repeated its public review summary.
+  let reviewRequiresDecision = "review" in operation && operation.review !== undefined;
   let watcherActive = false;
   let inFlightTerminalAction: {
     action: "cancel" | "discard";
@@ -231,6 +234,7 @@ function createRun(
             }
             const parsed = generationStreamSnapshotSchema.safeParse(sourceEvent.snapshot);
             if (!parsed.success) throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause: parsed.error });
+            if (parsed.data.status === "recoverable" && parsed.data.review !== undefined) reviewRequiresDecision = true;
             let observation = await observeSnapshot(parsed.data);
             // A new watcher must settle even if this run already observed the terminal snapshot.
             if (observation.kind === "duplicate"
@@ -255,6 +259,10 @@ function createRun(
               return;
             }
             if (observation.snapshot.status === "recoverable") {
+              if (reviewRequiresDecision) {
+                yield { type: "settled", outcome: "unrecoverable", error: terminalError(observation.snapshot.errorMessage) };
+                return;
+              }
               if (observation.snapshot.attempts === 1) {
                 try {
                   const retryError = await retryOrUnrecoverable();
