@@ -233,6 +233,9 @@ export type GenerationOrchestrationState = {
     mainRepairConsumed?: boolean;
     repairedFinalStoryHash?: string;
     repairedMainRequestPayloadHash?: string;
+    /** The sole review decision that may consume this event-fiction rewrite. */
+    authorizedReviewId?: string;
+    authorizedRevision?: number;
   } | undefined;
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
@@ -346,7 +349,10 @@ function hasValidEventCoverageRepair(value: unknown): boolean {
     && (repair.repairedFinalStoryHash === undefined
       || (typeof repair.repairedFinalStoryHash === "string" && repair.repairedFinalStoryHash.length > 0))
     && (repair.repairedMainRequestPayloadHash === undefined
-      || (typeof repair.repairedMainRequestPayloadHash === "string" && repair.repairedMainRequestPayloadHash.length > 0));
+      || (typeof repair.repairedMainRequestPayloadHash === "string" && repair.repairedMainRequestPayloadHash.length > 0))
+    && (repair.authorizedReviewId === undefined || typeof repair.authorizedReviewId === "string")
+    && (repair.authorizedRevision === undefined || (typeof repair.authorizedRevision === "number"
+      && Number.isSafeInteger(repair.authorizedRevision) && repair.authorizedRevision > 0));
 }
 
 export type GenerationStreamingState = Record<string, unknown> & {

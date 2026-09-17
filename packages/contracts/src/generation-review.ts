@@ -65,7 +65,9 @@ export function projectGenerationReviewDetail(value: unknown): GenerationReviewD
     choices: input.candidate?.choices ?? [],
     findings: input.review.reasons.map((code) => ({ code, message: reviewReasonMessages[code] })),
     retryDescription: "Retry this generation stage.",
-    retryFailure: null,
+    // Retry execution errors are private orchestration diagnostics.  The public
+    // surface records only that the one authorized replacement was unavailable.
+    retryFailure: input.review.retryFailure ? "The authorized retry did not produce an acceptable replacement." : null,
     omittedFindingCount: input.omittedFindingCount ?? 0
   });
 }

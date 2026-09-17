@@ -60,6 +60,7 @@ integration("T17 durable continuity review", () => {
   let needsChoiceRepair = false;
   let semanticRepairNeedsChoiceRepair = false;
   let extensionConflict = false;
+  let invalidSemanticRepair = false;
   let eventCoverageSequence: boolean[] = [];
   let sceneCoverageSequence: boolean[] = [];
   let repairSupersedesFactId: string | null = null;
@@ -76,7 +77,11 @@ integration("T17 durable continuity review", () => {
     if (semanticRepairNeedsChoiceRepair && userInput?.protocol === "story-continuity-repair-v1") {
       return JSON.stringify({ ...JSON.parse(reply("Mira waits at the observatory.")), choices: ["Wait.", "Wait.", "Listen.", "Leave."] });
     }
-    if (userInput?.task === "Determine whether the narration includes all concrete required beats without contradiction.") {
+    if (invalidSemanticRepair && userInput?.protocol === "story-continuity-repair-v1") {
+      return JSON.stringify({ narration: "This invalid repair omits the required turn fields." });
+    }
+    if (userInput?.task === "Determine whether the narration includes all concrete required beats without contradiction."
+        && !Array.isArray(userInput?.required_events)) {
       const covered = sceneCoverageSequence.shift() ?? true;
       return JSON.stringify({ covered, missing_required_beats: covered ? [] : ["The requested scene beat is absent."], contradictions: [] });
     }
@@ -278,6 +283,58 @@ integration("T17 durable continuity review", () => {
     } finally { reviewUnavailable = false; reviewVerdict = "pass"; }
   });
 
+  it("re-offers the original final candidate after a failed authorized continuity retry and keeps it offline", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["conflict"]; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `continuity-reoffer-initial-${randomUUID()}`, 30, credentialSecret);
+      const initialReview = await application.getReview({ ownerUserId, jobId: job.id });
+      const savedBeforeRetry = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: initialReview.reviewId, revision: initialReview.revision, decision: "retry"
+      });
+      invalidSemanticRepair = true;
+      await runGenerationJob(pool, `continuity-reoffer-retry-${randomUUID()}`, 30, credentialSecret);
+
+      const reoffered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(reoffered).toMatchObject({ state: "pending", stage: "continuity", canKeep: true, canRetry: false, retryFailure: expect.any(String) });
+      const savedAfterFailure = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string }; decisionJournal: unknown[] } } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(savedAfterFailure.generationReview.gateCandidate.storyHash).toBe(savedBeforeRetry.generationReview.gateCandidate.storyHash);
+      expect(savedAfterFailure.generationReview.decisionJournal).toHaveLength(1);
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count).toBe(acceptedBefore);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: reoffered.reviewId, revision: reoffered.revision, decision: "keep"
+      });
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const loadTextExecution = vi.fn(async () => { throw new Error("text provider must remain offline for re-offered final Keep"); });
+      const collaborators = {
+        ...createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation),
+        loadTextExecution
+      };
+      const workerId = `continuity-reoffer-keep-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+      expect(loadTextExecution).not.toHaveBeenCalled();
+      expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count).toBe(acceptedBefore + 1);
+    } finally { invalidSemanticRepair = false; reviewSequence = []; }
+  });
+
   it("keeps an uncovered scene main exactly, then pauses again for a later final continuity conflict", async () => {
     const { job, application, campaignId } = await enqueue("enforce", true, undefined, "Wait at the observatory.", false);
     reviewVerdict = "conflict"; sceneCoverageSequence = [false]; requests.length = 0;
@@ -364,6 +421,35 @@ integration("T17 durable continuity review", () => {
     const repair = JSON.parse(JSON.parse(requests.find((body) => body.includes("story-continuity-repair-v1"))!).messages[1].content);
     expect(repair.original_main.narration).not.toContain("The bell rings");
     expect(repair.rejected_final.narration).toContain("The bell rings");
+  });
+
+  it("pauses final event coverage before one authorized rewrite while preserving the main prefix", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    const triggerId = randomUUID();
+    await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [campaignId, JSON.stringify([{ id: triggerId, label: "Keeper arrival", timing: "after", condition: "Mira waits.", effect: "The bell rings as the keeper arrives.", addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }])]);
+    reviewVerdict = "pass"; eventCoverageSequence = [false, true, true]; requests.length = 0;
+    try {
+      const acceptedBefore = (await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count;
+      await runGenerationJob(pool, `event-coverage-gate-${randomUUID()}`, 30, credentialSecret);
+
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(gate).toMatchObject({ stage: "event_coverage", candidateScope: "final", canKeep: false, canRetry: true });
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(0);
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+      )).rows[0]!.count).toBe(acceptedBefore);
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `event-coverage-retry-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
+      expect(saved.eventCoverageRepair).toMatchObject({ authorizedReviewId: gate.reviewId, authorizedRevision: gate.revision });
+      expect(saved.extension.story.narration.startsWith(saved.validatedMainDraft.story.narration)).toBe(true);
+      expect(requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"))).toHaveLength(1);
+    } finally { eventCoverageSequence = []; }
   });
 
   it("does not repeat an event-coverage rewrite after a semantic main restart", async () => {

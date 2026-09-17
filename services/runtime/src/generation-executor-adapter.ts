@@ -1238,6 +1238,40 @@ async function executeLoadedGeneration(
           && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
           && entry.nextStage === "scene_coverage" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
       : undefined;
+    const eventRetryReceipt = savedReview.success && savedReview.data.state === "decided"
+      && savedReview.data.stage === "event_coverage"
+      ? savedReview.data.decisionJournal.find((entry) => entry.decision === "retry"
+          && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
+          && entry.nextStage === "event_coverage" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
+      : undefined;
+    const reofferFailedAuthorizedRetry = async (
+      stage: "structure" | "choices" | "scene_coverage" | "event_coverage" | "continuity",
+      retryFailure: string
+    ): Promise<boolean> => {
+      if (!savedReview.success || savedReview.data.state !== "decided"
+          || savedReview.data.stage !== stage) return false;
+      const receipt = savedReview.data.decisionJournal.find((entry) => entry.decision === "retry"
+        && entry.reviewId === savedReview.data.reviewId
+        && entry.revision === savedReview.data.revision - 1
+        && entry.nextStage === stage
+        && entry.candidateHash === savedReview.data.gateCandidate.storyHash);
+      if (!receipt) return false;
+      const gate = prepareGenerationReview({
+        candidate: savedReview.data.gateCandidate,
+        stage,
+        reasons: savedReview.data.originalFindings,
+        operationKind: job.operation_kind,
+        replacementTurnId: job.replacement_turn_id,
+        eligibility: { ...savedReview.data.eligibility, retryAvailable: false },
+        originalCandidate: savedReview.data.originalCandidate,
+        originalFindings: savedReview.data.originalFindings,
+        decisionJournal: savedReview.data.decisionJournal,
+        revision: savedReview.data.revision + 1,
+        retryFailure
+      });
+      assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "re-offering the original candidate after an authorized repair failed");
+      return true;
+    };
     if (structureRetryReceipt) {
       orchestration = await persistOrchestration(repository, scope, job, {
         primaryResult: undefined,
@@ -2580,8 +2614,47 @@ async function executeLoadedGeneration(
           eventCoverage = null;
         }
       }
-      if (!coveragePassed(eventCoverage)) {
+      const eventRetryAuthorized = Boolean(eventRetryReceipt && savedReview.success
+        && savedReview.data.candidateScope === "final"
+        && savedReview.data.gateCandidate.storyHash === sha256(canonicalEvidenceJson(committedStory)));
+      if (!coveragePassed(eventCoverage) || eventRetryAuthorized) {
         const rejectedFinalStoryHash = stableStringify(committedStory);
+        if (!eventRetryAuthorized && !orchestration.eventCoverageRepair) {
+          const producingBody = orchestration.extension?.producingRequestBody ?? orchestration.validatedMainDraft?.requestBody;
+          if (!job.world_id || !producingBody || !orchestration.validatedMainDraft) {
+            throw Object.assign(new Error("The rejected event candidate is missing its frozen provenance."), {
+              code: "generation_checkpoint_incompatible"
+            });
+          }
+          const producingResponse = orchestration.extension?.response ?? result;
+          const candidate: GenerationReviewCandidate = {
+            scope: "final", story: committedStory, storyHash: sha256(canonicalEvidenceJson(committedStory)), rawOutputReference: null,
+            producingRequestHash: sha256(producingBody), producingResponseId: producingResponse.responseId || null,
+            sentFactIds: [...finalSentFactIds], ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+            worldId: job.world_id, worldVersionId: job.world_version_id || null,
+            baseTurnNumber: job.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.expected_turn_number,
+            policy: frozenStoryMemoryPolicySnapshot?.policy ?? generationPolicy ?? {},
+            policyHash: frozenStoryMemoryPolicySnapshot?.policyHash ?? sha256(stableStringify(generationPolicy ?? {})),
+            baseIdentity: job.generation_base_identity,
+            protocol: { version: job.prompt_protocol_version, promptHash: promptSnapshot.continuityReview?.review.hash ?? sha256("") },
+            provider: { type: provider.providerType, profileId: job.provider_profile_id, configurationHash: effectiveProviderConfigurationHash(provider, job) },
+            resumeDependencies: {
+              generationContext: { contextFingerprint, contextDiagnostics, chronicleRetrieval },
+              producingProviderResult: structuredClone(producingResponse) as Record<string, unknown>,
+              stageState: { validatedMainDraft: orchestration.validatedMainDraft, extension: orchestration.extension ?? null },
+              frozenCommitInputs: {
+                inputs, fictionAction: safeAction, provider: { id: provider.id, providerType: provider.providerType, model: provider.model },
+                orchestration, finalSentFactIds: [...finalSentFactIds]
+              },
+              replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
+            }
+          };
+          const gate = prepareGenerationReview({ candidate, stage: "event_coverage", reasons: ["event_coverage_failed"],
+            operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
+            eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true } });
+          assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected event candidate for review");
+          return true;
+        }
         const existingRepair = orchestration.eventCoverageRepair;
         const eventCoverageConsumed = (orchestration.logicalAttempt?.eventCoverageRepairsConsumed ?? 0) >= 1;
         if (eventCoverageConsumed || (existingRepair
@@ -2603,6 +2676,8 @@ async function executeLoadedGeneration(
           extensionFinalStoryHash: orchestration.extension?.finalStoryHash || null,
           extensionProducingAttempt: orchestration.extension?.producingAttempt || null,
           consumedAttempt: job.attempts,
+          authorizedReviewId: eventRetryReceipt!.reviewId,
+          authorizedRevision: eventRetryReceipt!.revision,
           mainRepairConsumed: orchestration.eventCoverageRepair?.mainRepairConsumed === true
             || orchestration.eventCoverageRepair?.extensionFinalStoryHash === null
         };
@@ -2718,6 +2793,7 @@ async function executeLoadedGeneration(
         if (repairedStory && coveragePassed(eventCoverage)) {
           // The full replacement was revalidated; commit the durable final story below.
         } else {
+          if (await reofferFailedAuthorizedRetry("event_coverage", "The authorized event coverage retry did not produce a usable complete turn.")) return true;
           assertActiveGenerationUpdate(await repository.markRecoverable({
             ...scope,
             providerResponseId: result.responseId || null,
@@ -2834,10 +2910,12 @@ async function executeLoadedGeneration(
             decisionJournal: savedReview.data.decisionJournal,
             revision: savedReview.data.revision + 1
           } : {}) });
-        assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected final candidate for review");
         const retryAuthorizedRepair = Boolean(continuityRetryReceipt && savedReview.success
           && savedReview.data.reasons.includes("narrative_conflict"));
-        if (!retryAuthorizedRepair) return true;
+        if (!retryAuthorizedRepair) {
+          assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected final candidate for review");
+          return true;
+        }
         if (checkpoint.verdict === "conflict" && checkpoint.result && finalManifest && producingBody) {
           const rejectedFinalStoryHash = sha256(stableStringify(committedStory));
           const existingRepair = orchestration.semanticRepair;
@@ -2860,6 +2938,7 @@ async function executeLoadedGeneration(
                 direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
                 effectiveContextWindowTokens: effectiveContextWindow });
             } catch (error) {
+              if (await reofferFailedAuthorizedRetry("continuity", "The authorized continuity repair request could not be prepared.")) return true;
               assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
                 errorCode: "continuity_review_unavailable", errorMessage: "The required continuity repair request cannot fit the frozen provider budget.",
                 recoveryMetadata: { retryable: true, stage: "semantic_repair", reason: "repair_request_overflow" } }), "saving semantic repair overflow");
@@ -2870,6 +2949,7 @@ async function executeLoadedGeneration(
               automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0, choiceRepairsConsumed: orchestration.choiceRepair ? 1 : 0,
               eventCoverageRepairsConsumed: orchestration.eventCoverageRepair ? 1 : 0 };
             if (ledger.semanticRepairsConsumed >= 1) {
+              if (await reofferFailedAuthorizedRetry("continuity", "The authorized continuity repair allowance was already consumed.")) return true;
               assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
                 errorCode: "continuity_review_conflict", errorMessage: "The one permitted semantic repair was already consumed.",
                 recoveryMetadata: { retryable: true, stage: "semantic_repair", repairConsumed: true } }), "saving exhausted semantic repair");
@@ -2906,6 +2986,7 @@ async function executeLoadedGeneration(
               repairResponse = null as unknown as ProviderResult;
             }
             if (!repairedStory) {
+              if (await reofferFailedAuthorizedRetry("continuity", "The authorized continuity repair did not produce a usable candidate.")) return true;
               assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
                 errorCode: "continuity_review_conflict", errorMessage: "The reserved semantic repair was invalid and cannot be repeated.",
                 recoveryMetadata: { retryable: true, stage: "semantic_repair", repairConsumed: true } }), "saving invalid semantic repair");
