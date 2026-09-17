@@ -8,6 +8,17 @@ import type {
 } from "@infinite-quest/contracts";
 import type { Immutable } from "./store.js";
 
+export type GenerationReviewDetailState =
+  | { readonly state: "idle" }
+  | { readonly state: "loading" }
+  | { readonly state: "loaded"; readonly value: Immutable<import("@infinite-quest/contracts").GenerationReviewDetail> }
+  | { readonly state: "failed" };
+
+export interface GenerationReviewProjection {
+  readonly summary: Immutable<import("@infinite-quest/contracts").GenerationReviewSummary>;
+  readonly detail: GenerationReviewDetailState;
+}
+
 export type GenerationTransportHealth =
   | { readonly state: "unobserved" }
   | { readonly state: "healthy" }
@@ -31,6 +42,7 @@ export interface HydratedGenerationProjection {
   readonly attempts: number | null;
   readonly resultTurnId: string | null;
   readonly diagnostic: import("@infinite-quest/contracts").SafeGenerationDiagnostic | null;
+  readonly review: GenerationReviewProjection | null;
   readonly operation: GenerationOperationProjection;
 }
 
@@ -43,6 +55,7 @@ export interface GenerationJobProjection {
   readonly hydratedGeneration: Immutable<HydratedGenerationProjection> | null;
   readonly snapshot: Immutable<GenerationStreamSnapshot> | null;
   readonly narration: string;
+  readonly review: GenerationReviewProjection | null;
   readonly transport: GenerationTransportHealth;
   readonly result: GenerationResultState;
 }

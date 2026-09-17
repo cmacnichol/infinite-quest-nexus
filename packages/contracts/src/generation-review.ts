@@ -17,6 +17,12 @@ export const generationReviewSummarySchema = z.strictObject({
   canKeep: z.boolean(), canRetry: z.boolean()
 });
 
+/** A future review version is deliberately reduced to its version marker. */
+export const generationReviewTransportSchema = z.union([
+  generationReviewSummarySchema,
+  z.object({ version: z.number().int().safe().positive() }).passthrough().transform(({ version }) => ({ version }))
+]);
+
 export const generationReviewFindingSchema = z.strictObject({
   code: generationReviewReasonCodeSchema,
   message: z.string().trim().min(1).max(500)
@@ -109,5 +115,6 @@ export type GenerationReviewStage = z.infer<typeof generationReviewStageSchema>;
 export type GenerationReviewReasonCode = z.infer<typeof generationReviewReasonCodeSchema>;
 export type GenerationReviewDecisionRequest = Readonly<z.infer<typeof generationReviewDecisionRequestSchema>>;
 export type GenerationReviewSummary = Readonly<z.infer<typeof generationReviewSummarySchema>>;
+export type GenerationReviewTransport = Readonly<z.infer<typeof generationReviewTransportSchema>>;
 export type GenerationReviewFinding = Readonly<z.infer<typeof generationReviewFindingSchema>>;
 export type GenerationReviewDetail = Readonly<z.infer<typeof generationReviewDetailSchema>>;

@@ -1,4 +1,4 @@
-import type { GenerationStreamSnapshot } from "@infinite-quest/contracts";
+import { generationReviewSummarySchema, type GenerationReviewSummary, type GenerationStreamSnapshot } from "@infinite-quest/contracts";
 import { GenerationWorkflowProtocolError } from "./types.js";
 
 type GenerationStatus = GenerationStreamSnapshot["status"];
@@ -35,12 +35,41 @@ function isSameSnapshot(left: GenerationStreamSnapshot, right: GenerationStreamS
     && left.partialNarration === right.partialNarration
     && left.errorCode === right.errorCode
     && left.errorMessage === right.errorMessage
-    && left.resultTurnId === right.resultTurnId;
+    && left.resultTurnId === right.resultTurnId
+    && isSameReview(supportedReview(left.review), supportedReview(right.review));
+}
+
+function isSameReview(left: GenerationReviewSummary | undefined, right: GenerationReviewSummary | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left?.version === right?.version
+    && left?.reviewId === right?.reviewId
+    && left?.revision === right?.revision
+    && left?.state === right?.state
+    && left?.stage === right?.stage
+    && left?.candidateScope === right?.candidateScope
+    && left?.canKeep === right?.canKeep
+    && left?.canRetry === right?.canRetry
+    && left.reasons.length === right.reasons.length
+    && left.reasons.every((reason, index) => reason === right.reasons[index]);
+}
+
+function supportedReview(value: GenerationStreamSnapshot["review"]): GenerationReviewSummary | undefined {
+  const parsed = generationReviewSummarySchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function isOlderReview(current: GenerationReviewSummary | undefined, next: GenerationReviewSummary | undefined): boolean {
+  if (!current || !next) return false;
+  if (next.revision < current.revision) return true;
+  if (next.revision > current.revision) return false;
+  if (next.reviewId !== current.reviewId) return true;
+  return current.state === "decided" && next.state === "pending";
 }
 
 export interface GenerationMachine {
   observe(snapshot: GenerationStreamSnapshot): GenerationMachineObservation;
   acknowledgeRetry(): void;
+  acknowledgeReviewDecision(reviewId: string, revision: number): void;
   acknowledgeDiscard(): void;
   acknowledgeCancel(): void;
 }
@@ -48,6 +77,7 @@ export interface GenerationMachine {
 export function createGenerationMachine(): GenerationMachine {
   let highWater: GenerationStreamSnapshot | null = null;
   let retryAcknowledged = false;
+  let reviewDecisionAcknowledged: { reviewId: string; revision: number } | null = null;
   let terminalTransition: "discarded" | "cancelled" | null = null;
 
   return {
@@ -59,17 +89,29 @@ export function createGenerationMachine(): GenerationMachine {
 
       const currentRank = statusRanks[highWater.status];
       const nextRank = statusRanks[snapshot.status];
+      const currentReview = supportedReview(highWater.review);
+      const nextReview = supportedReview(snapshot.review);
+      if (isOlderReview(currentReview, nextReview)) return { kind: "stale" };
       const isRetryQueue = retryAcknowledged
         && (highWater.status === "recoverable" || highWater.status === "failed")
         && snapshot.attempts === highWater.attempts
         && (snapshot.status === "queued" || snapshot.status === "replacement_queued");
+      const isAcknowledgedReviewQueue = reviewDecisionAcknowledged !== null
+        && currentReview !== undefined
+        && reviewDecisionAcknowledged.reviewId === currentReview.reviewId
+        && reviewDecisionAcknowledged.revision === currentReview.revision;
+      const isReviewQueue = highWater.status === "recoverable"
+        && highWater.attempts === snapshot.attempts
+        && (snapshot.status === "queued" || snapshot.status === "replacement_queued")
+        && (isAcknowledgedReviewQueue || currentReview?.state === "decided");
       const isAcknowledgedTerminalTransition = terminalTransition === snapshot.status
         && highWater.attempts === snapshot.attempts
         && terminalStatuses.has(highWater.status)
         && terminalStatuses.has(snapshot.status);
 
-      if (isRetryQueue) {
+      if (isRetryQueue || isReviewQueue) {
         retryAcknowledged = false;
+        reviewDecisionAcknowledged = null;
         const narrationChanged = highWater.partialNarration !== snapshot.partialNarration;
         highWater = snapshot;
         return accepted(snapshot, narrationChanged);
@@ -102,6 +144,9 @@ export function createGenerationMachine(): GenerationMachine {
     acknowledgeRetry() {
       retryAcknowledged = true;
     },
+    acknowledgeReviewDecision(reviewId, revision) {
+      reviewDecisionAcknowledged = { reviewId, revision };
+    },
     acknowledgeDiscard() {
       terminalTransition = "discarded";
     },
@@ -117,5 +162,6 @@ function accepted(snapshot: GenerationStreamSnapshot, narrationChanged: boolean)
     snapshot,
     narrationChanged,
     terminal: terminalStatuses.has(snapshot.status)
+      && !(snapshot.status === "recoverable" && supportedReview(snapshot.review)?.state === "pending")
   };
 }

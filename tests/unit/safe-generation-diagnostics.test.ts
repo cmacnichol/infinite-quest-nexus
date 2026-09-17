@@ -1,9 +1,25 @@
 import { generationRecoverySchema } from "../../packages/contracts/src/client-api.js";
 import { describe, expect, it } from "vitest";
 import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic, safeGenerationDiagnosticSchema } from "../../packages/contracts/src/story-prompt.js";
-import { generationDiagnosticPresentation } from "../../packages/client-core/src/generation/projection.js";
+import { generationDiagnosticPresentation, generationReviewPresentation } from "../../packages/client-core/src/generation/projection.js";
 
 describe("safe public generation diagnostics", () => {
+  it("uses server review eligibility ahead of an older discard-and-reenqueue diagnostic", () => {
+    const presentation = generationReviewPresentation({
+      version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true
+    }, {
+      code: "context_budget_exceeded", operation: "story_generation", action: "discard_and_reenqueue"
+    });
+
+    expect(presentation).toMatchObject({ state: "review", canKeep: true, canRetry: true });
+  });
+
+  it("keeps an unknown review version non-authoritative", () => {
+    expect(generationReviewPresentation({ version: 2, reviewId: "future", revision: 9, canKeep: true }))
+      .toEqual(expect.objectContaining({ state: "unsupported", canKeep: false, canRetry: false }));
+  });
+
   it("keeps bounded omission/review details and rejects private content", () => {
     const privateCanary = "PRIVATE_PROMPT_PROVIDER_AND_SCRATCHPAD_CANARY";
     const source = {

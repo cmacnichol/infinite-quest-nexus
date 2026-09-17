@@ -15,7 +15,7 @@ import {
   turnInputModeSchema,
   turnInputModeSourceSchema
 } from "./generation.js";
-import { generationReviewSummarySchema } from "./generation-review.js";
+import { generationReviewSummarySchema, generationReviewTransportSchema } from "./generation-review.js";
 export { generationReviewDecisionRequestSchema, generationReviewDetailSchema } from "./generation-review.js";
 import { safeGenerationDiagnosticSchema } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
@@ -214,7 +214,8 @@ const pendingGenerationBaseSchema = z.object({
   action: z.string(),
   expectedTurnNumber: z.number().int().min(1),
   createdAt: apiTimestampSchema,
-  updatedAt: apiTimestampSchema
+  updatedAt: apiTimestampSchema,
+  review: generationReviewTransportSchema.optional()
 });
 
 const pendingGenerationSchema = z.discriminatedUnion("operationKind", [
@@ -237,7 +238,7 @@ const generationRecoveryBaseSchema = z.object({
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
   diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null),
   resultTurnId: z.uuid().nullable(),
-  review: generationReviewSummarySchema.optional()
+  review: generationReviewTransportSchema.optional()
 });
 
 export const generationRecoverySchema = z.discriminatedUnion("operationKind", [

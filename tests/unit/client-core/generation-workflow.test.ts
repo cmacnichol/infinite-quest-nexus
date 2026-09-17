@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CampaignSyncStatus, GenerationActionResponse, GenerationEnqueueResponse, GenerationResult, GenerationStreamSnapshot } from "../../../packages/contracts/src/index.js";
+import type { CampaignSyncStatus, GenerationActionResponse, GenerationEnqueueResponse, GenerationResult, GenerationReviewDecisionRequest, GenerationReviewDetail, GenerationStreamSnapshot } from "../../../packages/contracts/src/index.js";
 import { createGenerationWorkflow, GenerationWorkflowProtocolError } from "../../../packages/client-core/src/index.js";
 import type { AbortSignalLike, PendingSubmissionStore } from "../../../packages/client-core/src/ports.js";
 import type {
@@ -59,6 +59,42 @@ function completedResult(): GenerationResult {
   return { id: jobId, status: "completed" } as GenerationResult;
 }
 
+function reviewDetail(overrides: Partial<GenerationReviewDetail> = {}): GenerationReviewDetail {
+  return {
+    version: 1,
+    reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    revision: 1,
+    state: "pending",
+    stage: "continuity",
+    candidateScope: "final",
+    reasons: ["narrative_conflict"],
+    canKeep: true,
+    canRetry: true,
+    narration: "The gate opens.",
+    choices: ["Enter the gate"],
+    findings: [{ code: "narrative_conflict", message: "Possible chronology contradiction." }],
+    retryDescription: "Retry the continuity review.",
+    retryFailure: null,
+    omittedFindingCount: 0,
+    ...overrides
+  };
+}
+
+function reviewSummary(overrides: Partial<GenerationReviewDetail> = {}) {
+  const detail = reviewDetail(overrides);
+  return {
+    version: detail.version,
+    reviewId: detail.reviewId,
+    revision: detail.revision,
+    state: detail.state,
+    stage: detail.stage,
+    candidateScope: detail.candidateScope,
+    reasons: detail.reasons,
+    canKeep: detail.canKeep,
+    canRetry: detail.canRetry
+  };
+}
+
 function sync(pendingId: string | null = null): CampaignSyncStatus {
   return { pendingGeneration: pendingId ? { id: pendingId, operationKind: "append", replacementTurnId: null } : null } as CampaignSyncStatus;
 }
@@ -103,6 +139,8 @@ function api(overrides: Partial<GenerationApiPort> = {}): GenerationApiPort & { 
     enqueueReplacement: async () => enqueueResponse(),
     syncStatus: async () => sync(),
     result: async () => completedResult(),
+    getReview: async () => reviewDetail(),
+    decideReview: async () => actionResponse("queued"),
     retry: async () => actionResponse("queued"),
     cancel: async () => actionResponse("cancelled"),
     discard: async () => actionResponse("discarded"),
@@ -117,6 +155,64 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("generation workflow", () => {
+  it("fetches only the selected review detail without starting or retrying generation", async () => {
+    let reviewReads = 0;
+    const client = api({
+      getReview: async (id) => {
+        reviewReads += 1;
+        expect(id).toBe(jobId);
+        return reviewDetail();
+      },
+      retry: async () => {
+        throw new Error("review detail must not retry generation");
+      }
+    });
+    const workflow = createGenerationWorkflow({ api: client, source: sourceFromSessions([]), clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+
+    await expect(run.getReview()).resolves.toEqual(reviewDetail());
+    expect(reviewReads).toBe(1);
+  });
+
+  it("submits an ambiguous review decision again with the identical request and resumes only through watch", async () => {
+    const request: GenerationReviewDecisionRequest = {
+      reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      revision: 1,
+      decision: "keep"
+    };
+    const decisions: GenerationReviewDecisionRequest[] = [];
+    let first = true;
+    const client = api({
+      decideReview: async (_id, submitted) => {
+        decisions.push(submitted);
+        if (first) {
+          first = false;
+          throw new Error("network response lost");
+        }
+        return actionResponse("queued");
+      },
+      retry: async () => {
+        throw new Error("review decisions must not use generic retry");
+      }
+    });
+    const source = sourceFromSessions([[
+      { kind: "snapshot", snapshot: snapshot({ status: "recoverable", review: reviewSummary() }) },
+      { kind: "snapshot", snapshot: snapshot({ status: "queued", review: reviewSummary({ state: "decided", revision: 2 }) }) },
+      { kind: "snapshot", snapshot: snapshot({ status: "failed", review: reviewSummary({ state: "decided", revision: 2 }) }) }
+    ]]);
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+
+    await expect(run.decideReview(request)).rejects.toThrow("network response lost");
+    await expect(run.decideReview(request)).resolves.toEqual(actionResponse("queued"));
+    expect(decisions).toEqual([request, request]);
+    const events = await collect(run.watch(signal()));
+    expect(events.filter((event) => event.type === "status").slice(0, 2)).toMatchObject([
+      { snapshot: { status: "recoverable" } },
+      { snapshot: { status: "queued" } }
+    ]);
+  });
+
   it("exposes replacement provenance before watching and preserves it through completion", async () => {
     const replacementSnapshot = snapshot({
       operationKind: "replace_latest",

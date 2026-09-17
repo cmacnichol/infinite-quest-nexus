@@ -83,6 +83,7 @@ function createRun(
     action: "cancel" | "discard";
     response: Promise<GenerationActionResponse>;
   } | null = null;
+  let inFlightReviewDecision: Promise<GenerationActionResponse> | null = null;
 
   async function fetchResult(): Promise<
     | Extract<GenerationEvent, { type: "settled"; outcome: "completed" }>
@@ -131,6 +132,26 @@ function createRun(
       if (cause instanceof GenerationWorkflowProtocolError) throw cause;
       return toError(cause);
     }
+  }
+
+  function decideReview(request: import("@infinite-quest/contracts").GenerationReviewDecisionRequest): Promise<GenerationActionResponse> {
+    if (inFlightReviewDecision) return inFlightReviewDecision;
+    const response = dependencies.api.decideReview(jobId, request).then((actionResponse) => {
+      if (actionResponse.id !== jobId
+        || !["queued", "replacement_queued"].includes(actionResponse.status)
+        || actionResponse.operationKind !== operation.operationKind
+        || actionResponse.replacementTurnId !== operation.replacementTurnId) {
+        throw new GenerationWorkflowProtocolError("action_response_mismatch");
+      }
+      machine.acknowledgeReviewDecision(request.reviewId, request.revision);
+      return actionResponse;
+    });
+    inFlightReviewDecision = response;
+    void response.then(
+      () => { if (inFlightReviewDecision === response) inFlightReviewDecision = null; },
+      () => { if (inFlightReviewDecision === response) inFlightReviewDecision = null; }
+    );
+    return response;
   }
 
   async function observeSnapshot(snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot) {
@@ -307,6 +328,10 @@ function createRun(
     retryGeneration(signal: import("../ports.js").AbortSignalLike) {
       return observe(signal, true);
     },
+    getReview() {
+      return dependencies.api.getReview(jobId);
+    },
+    decideReview,
     cancelGeneration() {
       return performAction("cancel");
     },

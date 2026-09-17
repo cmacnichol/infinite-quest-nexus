@@ -13,7 +13,7 @@ import {
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
-import { generationReviewSummarySchema } from "./generation-review.js";
+import { generationReviewTransportSchema } from "./generation-review.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -455,7 +455,7 @@ const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({
   partialOutput: true,
   errorCode: true,
   errorMessage: true
-}).extend({ ...publicGenerationFailureFields, review: generationReviewSummarySchema.optional() });
+}).extend({ ...publicGenerationFailureFields, review: generationReviewTransportSchema.optional() });
 
 export const generationJobSnapshotSchema = z.discriminatedUnion("operationKind", [
   generationJobSnapshotBaseSchema.extend({
@@ -478,7 +478,7 @@ const generationStreamSnapshotBaseSchema = generationJobStatusSchema.pick({
   attempts: true,
   partialNarration: true,
   resultTurnId: true
-}).extend({ ...publicGenerationFailureFields, review: generationReviewSummarySchema.optional() });
+}).extend({ ...publicGenerationFailureFields, review: generationReviewTransportSchema.optional() });
 
 export const generationStreamSnapshotSchema = z.discriminatedUnion("operationKind", [
   generationStreamSnapshotBaseSchema.extend({

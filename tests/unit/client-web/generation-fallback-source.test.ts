@@ -64,7 +64,8 @@ function streamSnapshot(overrides: Partial<GenerationStreamSnapshot> = {}): Gene
     partialNarration: full.partialNarration,
     errorCode: full.errorCode,
     errorMessage: full.errorMessage,
-    resultTurnId: full.resultTurnId
+    resultTurnId: full.resultTurnId,
+    ...(full.review === undefined ? {} : { review: full.review })
   } as GenerationStreamSnapshot;
 }
 
@@ -170,6 +171,24 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("browser generation fallback source", () => {
+  it("keeps a pending review source open so a decision can resume the existing watch", async () => {
+    const events = eventSources();
+    const source = createBrowserGenerationSource(options({ eventSourceFactory: events.factory }));
+    const watchSignal = signal();
+    const iterator = source.watch(jobId, watchSignal)[Symbol.asyncIterator]();
+    const pending = iterator.next();
+    await Promise.resolve();
+    events.sources[0]?.message(streamSnapshot({ status: "recoverable", review: {
+      version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true
+    } }));
+
+    await expect(pending).resolves.toMatchObject({ done: false, value: { snapshot: { status: "recoverable", review: { state: "pending" } } } });
+    expect(events.sources[0]?.closed).toBe(false);
+    watchSignal.abort();
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+  });
+
   it("rejects an unsafe base path before consulting authorization", () => {
     let authorizationCalls = 0;
     const events = eventSources();
@@ -328,6 +347,8 @@ describe("browser generation fallback source", () => {
       enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }),
       syncStatus: async () => ({ pendingGeneration: null } as CampaignSyncStatus),
       result: async () => result,
+      getReview: async () => ({} as never),
+      decideReview: async () => ({ id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
       retry: async () => ({ id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
       cancel: async () => ({ id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
       discard: async () => ({ id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null } as GenerationActionResponse)
@@ -376,6 +397,8 @@ describe("browser generation fallback source", () => {
         enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }),
         syncStatus: async () => ({ pendingGeneration: null } as CampaignSyncStatus),
         result: async () => result,
+        getReview: async () => ({} as never),
+        decideReview: async () => ({ id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
         retry,
         cancel: async () => ({ id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),
         discard: async () => ({ id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null } as GenerationActionResponse)

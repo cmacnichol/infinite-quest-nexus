@@ -1,5 +1,7 @@
 import {
   projectSafeGenerationDiagnostic,
+  generationReviewDetailSchema,
+  generationReviewSummarySchema,
   type GenerationResult,
   type GenerationStreamSnapshot,
   type SafeGenerationDiagnostic,
@@ -28,6 +30,26 @@ export type GenerationDiagnosticPresentation = GenerationRecoveryGuidance & Read
   details: readonly string[];
 }>;
 
+export type GenerationReviewPresentation =
+  | Readonly<{
+      state: "review";
+      message: string;
+      canKeep: boolean;
+      canRetry: boolean;
+      keepDescription: string;
+      retryDescription: string;
+      retryFailure: string | null;
+    }>
+  | Readonly<{
+      state: "unsupported";
+      message: string;
+      canKeep: false;
+      canRetry: false;
+      keepDescription: string;
+      retryDescription: string;
+      retryFailure: null;
+    }>;
+
 const recoveryGuidanceByAction: Readonly<Record<SafeGenerationDiagnostic["action"], GenerationRecoveryGuidance>> = {
   adjust_context: { message: "Review the campaign context settings, then retry the generation.", retryable: true },
   adjust_output_or_state: { message: "Review the current campaign state or output settings, then retry the generation.", retryable: true },
@@ -43,6 +65,40 @@ const recoveryGuidanceByAction: Readonly<Record<SafeGenerationDiagnostic["action
 export function generationRecoveryGuidance(value: unknown): GenerationRecoveryGuidance | null {
   const diagnostic = projectSafeGenerationDiagnostic(value);
   return diagnostic ? recoveryGuidanceByAction[diagnostic.action] : null;
+}
+
+/**
+ * Presents review actions solely from the server's review authority. Legacy
+ * diagnostics remain explanatory and must not remove a server-offered Keep.
+ */
+export function generationReviewPresentation(review: unknown, _diagnostic?: unknown, detail?: unknown): GenerationReviewPresentation {
+  const summary = generationReviewSummarySchema.safeParse(review);
+  if (!summary.success) {
+    return {
+      state: "unsupported",
+      message: "This generation review needs a newer client before a decision can be made.",
+      canKeep: false,
+      canRetry: false,
+      keepDescription: "Keep is unavailable until the saved review can be verified.",
+      retryDescription: "Reload the generation status for safe recovery guidance.",
+      retryFailure: null
+    };
+  }
+  const parsedDetail = generationReviewDetailSchema.safeParse(detail);
+  const matchesDetail = parsedDetail.success
+    && parsedDetail.data.reviewId === summary.data.reviewId
+    && parsedDetail.data.revision === summary.data.revision;
+  return {
+    state: "review",
+    message: "This turn needs your review.",
+    canKeep: summary.data.canKeep,
+    canRetry: summary.data.canRetry,
+    keepDescription: summary.data.candidateScope === "main"
+      ? "Keep this text and finish the turn; normal event content may still be added."
+      : "Keep this saved turn exactly as reviewed.",
+    retryDescription: matchesDetail ? parsedDetail.data.retryDescription : "Retry this generation stage.",
+    retryFailure: matchesDetail ? parsedDetail.data.retryFailure : null
+  };
 }
 
 /**
@@ -135,7 +191,8 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         resultTurnId: snapshot.resultTurnId,
         errorCode: snapshot.errorCode,
         errorMessage: snapshot.errorMessage,
-        ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic })
+        ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
+        ...(snapshot.review === undefined ? {} : { review: snapshot.review })
       }
     : {
         id: snapshot.id,
@@ -150,7 +207,8 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         resultTurnId: snapshot.resultTurnId,
         errorCode: snapshot.errorCode,
         errorMessage: snapshot.errorMessage,
-        ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic })
+        ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
+        ...(snapshot.review === undefined ? {} : { review: snapshot.review })
       };
 }
 

@@ -24,6 +24,42 @@ function snapshot(overrides: Partial<GenerationStreamSnapshot> = {}): Generation
 }
 
 describe("generation machine", () => {
+  it("reconciles a review receipt through the same-attempt queue and rejects a delayed pending review", () => {
+    const machine = createGenerationMachine();
+    const pending = snapshot({
+      status: "recoverable",
+      partialNarration: "The gate groans.",
+      review: {
+        version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+        stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true
+      }
+    });
+    machine.observe(pending);
+    machine.acknowledgeReviewDecision((pending.review! as any).reviewId, (pending.review! as any).revision);
+
+    expect(machine.observe(snapshot({
+      status: "queued",
+      partialNarration: "The gate groans.",
+      review: { ...(pending.review! as any), revision: 2, state: "decided" }
+    }))).toMatchObject({ kind: "accepted" });
+    expect(machine.observe(pending)).toEqual({ kind: "stale" });
+  });
+
+  it("accepts a higher review revision from another tab without treating it as a duplicate", () => {
+    const machine = createGenerationMachine();
+    const pending = snapshot({
+      status: "recoverable",
+      review: {
+        version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+        stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true
+      }
+    });
+    machine.observe(pending);
+
+    expect(machine.observe(snapshot({ status: "recoverable", review: { ...(pending.review! as any), revision: 2, state: "decided" } })))
+      .toMatchObject({ kind: "accepted" });
+  });
+
   it("does not emit a narration change for an initial empty preview", () => {
     const machine = createGenerationMachine();
 

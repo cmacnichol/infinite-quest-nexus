@@ -48,8 +48,8 @@ export {
 } from "./errors.js";
 export { createGenerationWorkflow } from "./generation/workflow.js";
 export { GenerationWorkflowProtocolError } from "./generation/types.js";
-export { generationDiagnosticPresentation, generationRecoveryGuidance } from "./generation/projection.js";
-export type { GenerationDiagnosticPresentation, GenerationRecoveryGuidance } from "./generation/projection.js";
+export { generationDiagnosticPresentation, generationRecoveryGuidance, generationReviewPresentation } from "./generation/projection.js";
+export type { GenerationDiagnosticPresentation, GenerationRecoveryGuidance, GenerationReviewPresentation } from "./generation/projection.js";
 export { formatChronicleRetrievalAudit } from "./chronicle-retrieval-audit.js";
 export type { ChronicleRetrievalAuditPresentation } from "./chronicle-retrieval-audit.js";
 export {
