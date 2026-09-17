@@ -8,6 +8,7 @@ import {
 } from "../../packages/contracts/src/generation.js";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../packages/contracts/src/prompt-library.js";
+import { reviewBindingHash } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import {
   campaignCharacterProfileUpdateSchema,
@@ -448,7 +449,8 @@ integration("PostgreSQL generation execution repository", () => {
         : "A replacement narrator skips the kept observatory arrival."
     });
     const mainRequestHash = "b".repeat(64);
-    const finalRequestHash = "c".repeat(64);
+    const requestBody = JSON.stringify({ input: "{}" });
+    const finalRequestHash = sha256Hex(requestBody);
     const draftHash = "d".repeat(64);
     const mainCandidate = {
       ...keep.checkpoint.gateCandidate,
@@ -472,15 +474,28 @@ integration("PostgreSQL generation execution repository", () => {
     const finalReceipt = {
       ...keep.checkpoint.decisionJournal[0]!, candidateHash: finalCandidate.storyHash, offeredCandidate: finalCandidate
     };
+    const retryReceipt = {
+      ...finalReceipt, reviewId: crypto.randomUUID(), decision: "retry" as const, nextStage: "continuity" as const
+    };
     const checkpoint = {
       ...keep.checkpoint,
       originalCandidate: finalCandidate,
       gateCandidate: finalCandidate,
       workingCandidate: finalCandidate,
-      decisionJournal: [mainReceipt, finalReceipt, ...(supersedeWithFinalRetry ? [{
-        ...finalReceipt, reviewId: crypto.randomUUID(), decision: "retry" as const, nextStage: "continuity" as const
-      }] : [])]
+      decisionJournal: supersedeWithFinalRetry ? [mainReceipt, retryReceipt] : [mainReceipt, finalReceipt]
     } as GenerationReviewCheckpoint;
+    const manifest = {
+      version: "generation-evidence-v1" as const, attemptId: crypto.randomUUID(), producingRequestHash: finalRequestHash,
+      entries: [], requiredReviewEvidenceIds: [] as string[]
+    };
+    const manifestHash = sha256Hex(canonicalEvidenceJson(manifest));
+    const normalBinding = {
+      draftHash: sha256Hex(stableStringify(finalStory)), producingRequestHash: finalRequestHash, manifestHash,
+      auxiliaryRequestHashes: [] as string[],
+      providerConfigurationHash: finalCandidate.provider.configurationHash,
+      promptHash: finalCandidate.protocol.promptHash, promptProtocol: "story-continuity-review-v1" as const,
+      policyHash: finalCandidate.policyHash
+    };
     await pool.query(
       "UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1",
       [keep.scope.jobId, JSON.stringify({
@@ -492,8 +507,16 @@ integration("PostgreSQL generation execution repository", () => {
         extension: {
           story: finalStory, finalStoryHash: stableStringify(finalStory), producingAttempt: 1,
           producingOperation: "event_extension", validatedMainDraftHash: draftHash,
-          producingRequestPayloadHash: finalRequestHash, sentFactIds: []
-        }
+          producingRequestPayloadHash: finalRequestHash, producingRequestBody: requestBody, sentFactIds: []
+        },
+        sourceEvidenceManifest: { ...manifest, manifestHash },
+        ...(supersedeWithFinalRetry ? {
+          continuityReview: {
+            version: 1, mode: "enforce", binding: normalBinding, bindingHash: reviewBindingHash(normalBinding),
+            status: "completed", verdict: "pass", reviewRequestHash: "e".repeat(64),
+            result: { version: "story-continuity-review-v1", verdict: "pass", findings: [] }
+          }
+        } : {})
       })]
     );
     return finalStory;
