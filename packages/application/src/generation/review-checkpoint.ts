@@ -1,8 +1,14 @@
-import { generationReviewReasonCodeSchema, generationReviewStageSchema, storyTurnOutputSchema, z } from "@infinite-quest/contracts";
+import { generationReviewReasonCodeSchema, generationReviewStageSchema, sha256Hex, storyTurnOutputSchema, z, type GenerationReviewReasonCode } from "@infinite-quest/contracts";
 import { canonicalEvidenceJson, generationBaseIdentitySchema } from "../memory/generation-context.js";
 
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const immutableJsonSchema = z.record(z.string(), z.unknown());
+const generationReviewReasonsSchema = z.array(generationReviewReasonCodeSchema).min(1).max(20);
+
+/** Stable audit identity for the ordered review findings offered to a user. */
+export function generationReviewFindingsHash(reasons: readonly GenerationReviewReasonCode[]): string {
+  return sha256Hex(canonicalEvidenceJson(generationReviewReasonsSchema.parse(reasons)));
+}
 
 /** Immutable server-created candidate provenance for later worker decision handling. */
 export const generationReviewCandidateSchema = z.strictObject({
@@ -24,6 +30,9 @@ export const generationReviewCandidateSchema = z.strictObject({
 }).superRefine((candidate, context) => {
   if (!candidate.story && !candidate.rawOutputReference) context.addIssue({ code: "custom", message: "A candidate requires typed story content or an immutable raw-output reference." });
   if (candidate.story && !candidate.producingRequestHash) context.addIssue({ code: "custom", message: "Typed candidate content requires its producing request identity." });
+  if (candidate.story && candidate.storyHash !== sha256Hex(canonicalEvidenceJson(candidate.story))) {
+    context.addIssue({ code: "custom", message: "Typed candidate content must match its stable story hash." });
+  }
   if (candidate.baseTurnNumber !== candidate.baseIdentity.baseTurnNumber || candidate.expectedTurnNumber !== candidate.baseIdentity.expectedTurnNumber) {
     context.addIssue({ code: "custom", message: "Candidate turn numbers must match its frozen generation base identity." });
   }
@@ -45,6 +54,9 @@ export const generationReviewCheckpointSchema = z.strictObject({
   originalFindings: z.array(generationReviewReasonCodeSchema).min(1).max(20), originalFindingsHash: hashSchema,
   retryFailure: z.string().trim().min(1).max(500).nullable(), decisionJournal: z.array(generationReviewDecisionJournalEntrySchema).max(100)
 }).superRefine((checkpoint, context) => {
+  if (checkpoint.originalFindingsHash !== generationReviewFindingsHash(checkpoint.originalFindings)) {
+    context.addIssue({ code: "custom", path: ["originalFindingsHash"], message: "Original findings must match their stable audit hash." });
+  }
   const binding = checkpoint.gateCandidate;
   for (const candidate of [checkpoint.originalCandidate, checkpoint.gateCandidate, checkpoint.workingCandidate]) {
     if (candidate.ownerUserId !== binding.ownerUserId || candidate.campaignId !== binding.campaignId || candidate.worldId !== binding.worldId
@@ -60,7 +72,7 @@ export const generationReviewCheckpointSchema = z.strictObject({
   if (checkpoint.gateCandidate.scope !== checkpoint.candidateScope) context.addIssue({ code: "custom", path: ["gateCandidate", "scope"], message: "The offered candidate scope must match the checkpoint." });
   for (const entry of checkpoint.decisionJournal) {
     if (entry.candidateScope !== entry.offeredCandidate.scope || entry.candidateHash !== entry.offeredCandidate.storyHash
-      || entry.offeredReasons.length === 0) {
+      || entry.findingsHash !== generationReviewFindingsHash(entry.offeredReasons)) {
       context.addIssue({ code: "custom", path: ["decisionJournal"], message: "Decision evidence must bind its historical offered candidate." });
       break;
     }

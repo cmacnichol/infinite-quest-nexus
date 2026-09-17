@@ -6,7 +6,7 @@ import {
   projectGenerationReviewDetail,
   projectGenerationReviewSummary
 } from "../../packages/contracts/src/index.js";
-import { generationReviewCheckpointSchema } from "../../packages/application/src/generation/review-checkpoint.js";
+import { generationReviewCandidateSchema, generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../packages/application/src/generation/review-checkpoint.js";
 
 const review = {
   version: 1,
@@ -156,17 +156,25 @@ describe("generation review contracts", () => {
     });
     const main = candidate("main", "a".repeat(64));
     const final = candidate("final", "d".repeat(64));
-    expect(generationReviewCheckpointSchema.safeParse({
+    const originalFindings = ["scene_beats_missing"] as const;
+    const offeredReasons = ["scene_beats_missing"] as const;
+    const checkpoint = {
       version: 1, reviewId: review.reviewId, revision: 2, state: "pending", stage: "continuity", candidateScope: "final",
       reasons: ["review_uncertain"], originalCandidate: main, gateCandidate: final, workingCandidate: final,
-      originalFindings: ["scene_beats_missing"], originalFindingsHash: "1".repeat(64), retryFailure: null,
+      originalFindings, originalFindingsHash: generationReviewFindingsHash(originalFindings), retryFailure: null,
       decisionJournal: [{
         reviewId: "88888888-8888-4888-8888-888888888888", revision: 1, actorUserId: main.ownerUserId, decision: "keep",
         decidedAt: "2026-09-16T00:00:00.000Z", candidateScope: "main", candidateHash: main.storyHash,
-        findingsHash: "2".repeat(64), nextStage: "choices", offeredCandidate: main, offeredReasons: ["scene_beats_missing"],
+        findingsHash: generationReviewFindingsHash(offeredReasons), nextStage: "choices", offeredCandidate: main, offeredReasons,
         actionReceipt: { jobId: snapshot.id, status: "queued", operationKind: "append", replacementTurnId: null }
       }]
-    }).success).toBe(true);
+    };
+    expect(generationReviewCheckpointSchema.safeParse(checkpoint).success).toBe(true);
+    expect(generationReviewCheckpointSchema.safeParse({
+      ...checkpoint,
+      decisionJournal: [{ ...checkpoint.decisionJournal[0], findingsHash: "9".repeat(64) }]
+    }).success).toBe(false);
+    expect(generationReviewCheckpointSchema.safeParse({ ...checkpoint, originalFindingsHash: "9".repeat(64) }).success).toBe(false);
   });
 
   it("rejects a checkpoint when candidate base identity changes despite matching turn numbers", () => {
@@ -201,5 +209,18 @@ describe("generation review contracts", () => {
     ]);
     expect(detail).toMatchObject({ narration: "Mira crosses the quay.", choices: ["Follow Mira"], retryFailure: null, omittedFindingCount: 2 });
     expect(JSON.stringify(detail)).not.toContain("PRIVATE-CANARY");
+  });
+
+  it("rejects a typed story candidate whose stable hash does not match its content", () => {
+    expect(generationReviewCandidateSchema.safeParse({
+      scope: "main", storyHash: "a".repeat(64), rawOutputReference: null, producingRequestHash: "b".repeat(64), producingResponseId: null,
+      sentFactIds: [], ownerUserId: "33333333-3333-4333-8333-333333333333", campaignId: snapshot.campaignId,
+      worldId: "44444444-4444-4444-8444-444444444444", worldVersionId: null, baseTurnNumber: 0, expectedTurnNumber: 1,
+      baseIdentity: { operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 0, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "f".repeat(64), narrationFingerprint: null },
+      policy: {}, policyHash: "e".repeat(64), protocol: { version: "story-v1", promptHash: "c".repeat(64) },
+      provider: { type: "lmstudio", profileId: null, configurationHash: "d".repeat(64) },
+      resumeDependencies: { generationContext: {}, producingProviderResult: {}, stageState: {}, frozenCommitInputs: {}, replacementTarget: null },
+      story: { narration: "Mira waits at the quay.", choices: ["Wait", "Look", "Listen", "Leave"], custom_action_suggestion: "Wait", scratchpad: "Mira waits.", tracker_updates: [], image_prompt: "A quiet quay.", continuity_summary: "Mira waits at the quay.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }
+    }).success).toBe(false);
   });
 });
