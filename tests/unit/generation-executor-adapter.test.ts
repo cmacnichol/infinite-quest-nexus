@@ -559,6 +559,39 @@ describe("generation executor adapter", () => {
     expect(wire).not.toContain("PRIVATE_PENDING_CANARY");
   });
 
+  it("stops before validation when the complete primary capture cannot be persisted", async () => {
+    const job = completeGenerationExecutionPayload();
+    const policy = { version: 1, playMode: "story_only", turnControlStyle: "flexible_scene", protocolVersion: "story-only-v1", prompts: storyOnlyPromptSnapshot() } as const;
+    job.generation_policy = policy;
+    job.prompt_protocol_version = generationExecutionProtocolIdentity(snapshotProtocolIdentity(job.prompt_snapshot), policy);
+    job.resolved_input_mode = "scene";
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => !value.primaryResult),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Capture failure provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content: JSON.stringify({ narration: "The moonlit observatory opens.", choices: ["Enter.", "Wait.", "Study.", "Call."], custom_action_suggestion: "Study the lens.", scratchpad: "", tracker_updates: [], image_prompt: "A moonlit observatory.", continuity_summary: "The observatory opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), responseId: "capture-failure", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {} }))
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "capture-failure", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(provider.execute).toHaveBeenCalledOnce();
+    expect(repository.recordAttempt).not.toHaveBeenCalled();
+    expect(repository.markValidating).not.toHaveBeenCalled();
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
   it.each([
     { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation", "story_recovery"], errorCode: "invalid_json" },
     { label: "output-limited partial JSON", content: "{\"narration\":\"The observatory", outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit" },
