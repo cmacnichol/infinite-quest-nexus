@@ -14,6 +14,8 @@ export function createGenerationApplication(
     enqueueReplacement: (scope, request) => repository.enqueueReplacement(scope, request),
     getJob: (scope) => repository.getJob(scope),
     getResult: (scope) => repository.getResult(scope),
+    getReview: (scope) => repository.getReview(scope),
+    decideReview: (scope, request) => repository.decideReview(scope, request),
     retry: (scope) => repository.retry(scope),
     cancel: (scope) => repository.cancel(scope),
     discard: (scope) => repository.discard(scope)

@@ -114,6 +114,8 @@ function applicationFake(
     enqueueReplacement: { id: jobId, status: "queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "44444444-4444-4444-8444-444444444444" } as EnqueueGenerationResult,
     getJob: { id: jobId } as GenerationJob,
     getResult: { id: jobId } as GenerationResult,
+    getReview: { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1 } as never,
+    decideReview: { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
     retry: { id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
     cancel: { id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationMutationResult,
     discard: { id: jobId, status: "discarded", operationKind: "append", replacementTurnId: null } as GenerationMutationResult
@@ -126,6 +128,8 @@ function applicationFake(
     async enqueueReplacement(scope, input) { calls.push({ method: "enqueueReplacement", scope, request: input }); rejected("enqueueReplacement"); return successes.enqueueReplacement; },
     async getJob(scope) { calls.push({ method: "getJob", scope }); rejected("getJob"); return successes.getJob; },
     async getResult(scope) { calls.push({ method: "getResult", scope }); rejected("getResult"); return successes.getResult; },
+    async getReview(scope) { calls.push({ method: "getReview", scope }); rejected("getReview"); return successes.getReview; },
+    async decideReview(scope, input) { calls.push({ method: "decideReview", scope, request: input }); rejected("decideReview"); return successes.decideReview; },
     async retry(scope) { calls.push({ method: "retry", scope }); rejected("retry"); return successes.retry; },
     async cancel(scope) { calls.push({ method: "cancel", scope }); rejected("cancel"); return successes.cancel; },
     async discard(scope) { calls.push({ method: "discard", scope }); rejected("discard"); return successes.discard; }

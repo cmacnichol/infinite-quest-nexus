@@ -75,6 +75,7 @@ function guardedRepository(): GenerationExecutionRepository {
     renewLease: unexpectedBoolean,
     markGenerating: unexpectedBoolean,
     saveOrchestration: unexpectedBoolean,
+    pauseForReview: unexpectedBoolean,
     savePartialNarration: unexpectedBoolean,
     saveStreamingSegments: unexpectedBoolean,
     recordAttempt: vi.fn(async () => {
@@ -1150,6 +1151,7 @@ describe("generation executor adapter", () => {
       renewLease: vi.fn(async () => true),
       markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async () => true),
+      pauseForReview: vi.fn(async () => true),
       savePartialNarration: vi.fn(async () => true),
       saveStreamingSegments: vi.fn(async () => true),
       recordAttempt: vi.fn(async () => undefined),
@@ -1295,6 +1297,7 @@ describe("generation executor adapter", () => {
       renewLease: vi.fn(async () => true),
       markGenerating: vi.fn(async () => true),
       saveOrchestration: vi.fn(async () => true),
+      pauseForReview: vi.fn(async () => true),
       savePartialNarration: vi.fn(async () => true),
       saveStreamingSegments: vi.fn(async () => true),
       recordAttempt: vi.fn(async () => undefined),

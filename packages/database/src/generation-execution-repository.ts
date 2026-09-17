@@ -1,4 +1,5 @@
 import { assertContinuityReviewCommit, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
+import { generationReviewCheckpointSchema, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
 import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
@@ -135,6 +136,8 @@ export type GenerationOrchestrationState = {
     response?: ProviderResult;
   };
   continuityReview?: ContinuityReviewCheckpoint | undefined;
+  /** Private, immutable candidate and decision evidence for a user review gate. */
+  generationReview?: GenerationReviewCheckpoint | undefined;
   contextDiagnostic?: SafeGenerationDiagnostic;
   sourceEvidenceManifest?: GenerationEvidenceManifest;
   roll?: PrivateRollResolution | null;
@@ -408,6 +411,8 @@ export type GenerationExecutionRepository = Readonly<{
   /** Returns a repaired validating job to the normal assessment entrypoint. */
   restartAfterSemanticRepair?(scope: GenerationLeaseScope): Promise<boolean>;
   saveOrchestration(scope: GenerationLeaseScope, value: GenerationOrchestrationState): Promise<boolean>;
+  /** Atomically publishes a pending review and releases the worker lease. */
+  pauseForReview(scope: GenerationLeaseScope, checkpoint: GenerationReviewCheckpoint): Promise<boolean>;
   savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;
   saveStreamingSegments(scope: GenerationLeaseScope, value: GenerationStreamingState): Promise<boolean>;
   recordAttempt(input: GenerationAttemptRecord): Promise<void>;
@@ -1134,7 +1139,11 @@ export function createPostgresGenerationExecutionRepository(
     async saveOrchestration(scope, value) {
       const safeContextDiagnostic = projectSafeGenerationDiagnostic(value.contextDiagnostic);
       return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET orchestration_private = $4,
+        `UPDATE generation_jobs SET orchestration_private =
+              CASE WHEN $4::jsonb ? 'generationReview' THEN $4::jsonb
+                   WHEN orchestration_private ? 'generationReview' THEN ($4::jsonb || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
+                   ELSE $4::jsonb
+               END,
             recovery_metadata = CASE WHEN $5::jsonb IS NULL THEN recovery_metadata ELSE recovery_metadata || jsonb_build_object('diagnostic',$5::jsonb) END,
             updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
@@ -1142,6 +1151,20 @@ export function createPostgresGenerationExecutionRepository(
             AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, json(value), safeContextDiagnostic ? json(safeContextDiagnostic) : null]
+      ));
+    },
+
+    async pauseForReview(scope, checkpoint) {
+      const parsed = generationReviewCheckpointSchema.parse(checkpoint);
+      return changed(await pool.query<{ id: string }>(
+        `UPDATE generation_jobs
+            SET status = 'recoverable', orchestration_private = orchestration_private || jsonb_build_object('generationReview', $4::jsonb),
+                error_code = 'generation_review_required', error_message = 'Generation requires review before it can continue.',
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+            AND status IN ('assessing','generating','validating','committing') AND lease_expires_at > now()
+          RETURNING id`,
+        [scope.jobId, scope.ownerUserId, scope.workerId, json(parsed)]
       ));
     },
 

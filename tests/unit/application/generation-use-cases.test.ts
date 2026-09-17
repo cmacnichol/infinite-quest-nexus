@@ -15,6 +15,8 @@ import type {
   GenerationActionResponse,
   GenerationEnqueueResponse,
   GenerationJobStatus,
+  GenerationReviewDecisionRequest,
+  GenerationReviewDetail,
   GenerationRequest,
   GenerationResult,
   GenerationRetryLatestRequest
@@ -81,6 +83,8 @@ describe("generation application use cases", () => {
     const enqueueResult = { id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null } as GenerationEnqueueResponse;
     const job = { id: jobId } as GenerationJobStatus;
     const result = { id: jobId } as GenerationResult;
+    const review = { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1 } as GenerationReviewDetail;
+    const decision = { reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, decision: "keep" } as GenerationReviewDecisionRequest;
     const mutation = { id: jobId, status: "cancelled", operationKind: "append", replacementTurnId: null } as GenerationActionResponse;
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const repository: GenerationCommandRepository = {
@@ -88,6 +92,8 @@ describe("generation application use cases", () => {
       enqueueReplacement: async (...args) => { calls.push({ method: "enqueueReplacement", args }); return enqueueResult; },
       getJob: async (...args) => { calls.push({ method: "getJob", args }); return job; },
       getResult: async (...args) => { calls.push({ method: "getResult", args }); return result; },
+      getReview: async (...args) => { calls.push({ method: "getReview", args }); return review; },
+      decideReview: async (...args) => { calls.push({ method: "decideReview", args }); return mutation; },
       retry: async (...args) => { calls.push({ method: "retry", args }); return mutation; },
       cancel: async (...args) => { calls.push({ method: "cancel", args }); return mutation; },
       discard: async (...args) => { calls.push({ method: "discard", args }); return mutation; }
@@ -102,6 +108,8 @@ describe("generation application use cases", () => {
     await expect(application.enqueueReplacement(campaignScope, replacementRequest)).resolves.toBe(enqueueResult);
     await expect(application.getJob(jobScope)).resolves.toBe(job);
     await expect(application.getResult(jobScope)).resolves.toBe(result);
+    await expect(application.getReview(jobScope)).resolves.toBe(review);
+    await expect(application.decideReview(jobScope, decision)).resolves.toBe(mutation);
     await expect(application.retry(jobScope)).resolves.toBe(mutation);
     await expect(application.cancel(jobScope)).resolves.toBe(mutation);
     await expect(application.discard(jobScope)).resolves.toBe(mutation);
@@ -111,6 +119,8 @@ describe("generation application use cases", () => {
       { method: "enqueueReplacement", args: [campaignScope, replacementRequest] },
       { method: "getJob", args: [jobScope] },
       { method: "getResult", args: [jobScope] },
+      { method: "getReview", args: [jobScope] },
+      { method: "decideReview", args: [jobScope, decision] },
       { method: "retry", args: [jobScope] },
       { method: "cancel", args: [jobScope] },
       { method: "discard", args: [jobScope] }
@@ -146,6 +156,8 @@ describe("generation application use cases", () => {
       enqueueReplacement: async () => { throw unknownError; },
       getJob: async () => { throw unknownError; },
       getResult: async () => { throw unknownError; },
+      getReview: async () => { throw unknownError; },
+      decideReview: async () => { throw unknownError; },
       retry: async () => { throw unknownError; },
       cancel: async () => { throw unknownError; },
       discard: async () => { throw unknownError; }

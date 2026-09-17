@@ -1,5 +1,7 @@
 import type {
   GenerationRequest,
+  GenerationReviewDecisionRequest,
+  GenerationReviewDetail,
   GenerationResult,
   GenerationRetryLatestRequest
 } from "@infinite-quest/contracts";
@@ -25,6 +27,8 @@ export interface GenerationCommandRepository {
   ): Promise<EnqueueGenerationResult>;
   getJob(scope: GenerationJobScope): Promise<GenerationJob>;
   getResult(scope: GenerationJobScope): Promise<GenerationResult>;
+  getReview(scope: GenerationJobScope): Promise<GenerationReviewDetail>;
+  decideReview(scope: GenerationJobScope, request: GenerationReviewDecisionRequest): Promise<GenerationMutationResult>;
   retry(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   cancel(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   discard(scope: GenerationJobScope): Promise<GenerationMutationResult>;
@@ -49,6 +53,8 @@ export interface GenerationApplication {
   ): Promise<EnqueueGenerationResult>;
   getJob(scope: GenerationJobScope): Promise<GenerationJob>;
   getResult(scope: GenerationJobScope): Promise<GenerationResult>;
+  getReview(scope: GenerationJobScope): Promise<GenerationReviewDetail>;
+  decideReview(scope: GenerationJobScope, request: GenerationReviewDecisionRequest): Promise<GenerationMutationResult>;
   retry(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   cancel(scope: GenerationJobScope): Promise<GenerationMutationResult>;
   discard(scope: GenerationJobScope): Promise<GenerationMutationResult>;
