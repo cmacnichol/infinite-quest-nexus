@@ -103,7 +103,9 @@ export function createGenerationMachine(): GenerationMachine {
       const isReviewQueue = highWater.status === "recoverable"
         && highWater.attempts === snapshot.attempts
         && (snapshot.status === "queued" || snapshot.status === "replacement_queued")
-        && (isAcknowledgedReviewQueue || currentReview?.state === "decided");
+        && (isAcknowledgedReviewQueue || currentReview?.state === "decided"
+          || (currentReview !== undefined && nextReview !== undefined
+            && nextReview.revision > currentReview.revision && nextReview.state === "decided"));
       const isAcknowledgedTerminalTransition = terminalTransition === snapshot.status
         && highWater.attempts === snapshot.attempts
         && terminalStatuses.has(highWater.status)
@@ -162,6 +164,6 @@ function accepted(snapshot: GenerationStreamSnapshot, narrationChanged: boolean)
     snapshot,
     narrationChanged,
     terminal: terminalStatuses.has(snapshot.status)
-      && !(snapshot.status === "recoverable" && supportedReview(snapshot.review)?.state === "pending")
+      && !(snapshot.status === "recoverable" && snapshot.review !== undefined)
   };
 }

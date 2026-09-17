@@ -21,9 +21,8 @@ const TERMINAL_STATUSES = new Set([
 ]);
 
 function isTerminalSnapshot(snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot): boolean {
-  const review = snapshot.review;
   return TERMINAL_STATUSES.has(snapshot.status)
-    && !(snapshot.status === "recoverable" && review !== undefined && "state" in review && review.state === "pending");
+    && !(snapshot.status === "recoverable" && snapshot.review !== undefined);
 }
 
 export function generationStreamUrl(basePath: string, jobId: string): string {

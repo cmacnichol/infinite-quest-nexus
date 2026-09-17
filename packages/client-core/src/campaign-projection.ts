@@ -43,6 +43,7 @@ export interface HydratedGenerationProjection {
   readonly resultTurnId: string | null;
   readonly diagnostic: import("@infinite-quest/contracts").SafeGenerationDiagnostic | null;
   readonly review: GenerationReviewProjection | null;
+  readonly unsupportedReviewVersion: number | null;
   readonly operation: GenerationOperationProjection;
 }
 
@@ -56,6 +57,7 @@ export interface GenerationJobProjection {
   readonly snapshot: Immutable<GenerationStreamSnapshot> | null;
   readonly narration: string;
   readonly review: GenerationReviewProjection | null;
+  readonly unsupportedReviewVersion: number | null;
   readonly transport: GenerationTransportHealth;
   readonly result: GenerationResultState;
 }

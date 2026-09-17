@@ -174,6 +174,22 @@ describe("generation workflow", () => {
     expect(reviewReads).toBe(1);
   });
 
+  it("does not dispatch generic retry for an unsupported recoverable review", async () => {
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const source = sourceFromSessions([[
+      { kind: "snapshot", snapshot: snapshot({ status: "recoverable", review: { version: 2 } as never }) }
+    ]]);
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+    const aborted = signal();
+    const iterator = run.watch(aborted)[Symbol.asyncIterator]();
+    await iterator.next();
+    aborted.abort();
+    await iterator.next();
+
+    expect(client.retries).toBe(0);
+  });
+
   it("submits an ambiguous review decision again with the identical request and resumes only through watch", async () => {
     const request: GenerationReviewDecisionRequest = {
       reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

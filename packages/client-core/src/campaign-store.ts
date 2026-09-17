@@ -210,6 +210,7 @@ export function createCampaignStore(): CampaignStoreController {
           snapshot: null,
           narration: "",
           review: null,
+          unsupportedReviewVersion: null,
           transport: { state: "unobserved" },
           result: { state: "pending" }
         };
@@ -268,6 +269,7 @@ export function createCampaignStore(): CampaignStoreController {
       resultTurnId: recovery.resultTurnId,
       diagnostic: recovery.diagnostic ?? null,
       review: reviewProjection(recovery.review),
+      unsupportedReviewVersion: unsupportedReviewVersion(recovery.review),
       operation: operationOf(recovery)
     };
     const result = recovery.status === "failed"
@@ -294,6 +296,7 @@ export function createCampaignStore(): CampaignStoreController {
       snapshot: previous.snapshot,
       narration: previous.narration,
       review: mergeReview(previous.review, hydrated.review),
+      unsupportedReviewVersion: hydrated.unsupportedReviewVersion,
       transport: previous.transport
     };
   }
@@ -309,6 +312,7 @@ export function createCampaignStore(): CampaignStoreController {
       resultTurnId: null,
       diagnostic: null,
       review: reviewProjection(pending.review),
+      unsupportedReviewVersion: unsupportedReviewVersion(pending.review),
       operation: operationOf(pending)
     };
   }
@@ -329,6 +333,7 @@ export function createCampaignStore(): CampaignStoreController {
       snapshot: null,
       narration: "",
       review: hydratedGeneration.review,
+      unsupportedReviewVersion: hydratedGeneration.unsupportedReviewVersion,
       transport: { state: "unobserved" },
       result
     };
@@ -354,6 +359,7 @@ export function createCampaignStore(): CampaignStoreController {
           hydratedGeneration: null,
           snapshot: copySnapshot(event.snapshot),
           review: mergeReview(generation.review, nextReview),
+          unsupportedReviewVersion: unsupportedReviewVersion(event.snapshot.review),
           transport: { state: "healthy" },
           result: { state: "pending" }
         }
@@ -506,6 +512,11 @@ function createSession(
 function reviewProjection(summary: import("@infinite-quest/contracts").GenerationStreamSnapshot["review"]): import("./campaign-projection.js").GenerationReviewProjection | null {
   const parsed = generationReviewSummarySchema.safeParse(summary);
   return parsed.success ? { summary: clone(parsed.data), detail: { state: "idle" } } : null;
+}
+
+function unsupportedReviewVersion(value: import("@infinite-quest/contracts").GenerationStreamSnapshot["review"]): number | null {
+  const parsed = generationReviewSummarySchema.safeParse(value);
+  return !parsed.success && value !== undefined && "version" in value ? value.version : null;
 }
 
 type GenerationReviewIdentity = Readonly<Pick<GenerationReviewSummary, "version" | "reviewId" | "revision" | "state">>;

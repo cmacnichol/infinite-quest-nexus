@@ -267,6 +267,16 @@ describe("campaign store hydration", () => {
     expect(controller.store.get()).toMatchObject({ campaign: { id: otherCampaignId }, generation: null });
   });
 
+  it("retains an unsupported review version without exposing review actions", () => {
+    const controller = createCampaignStore();
+    controller.load(sync());
+    const session = controller.attachGeneration(run());
+    session.apply({ type: "status", snapshot: snapshot({ status: "recoverable", partialNarration: "Saved text.", review: { version: 2 } as never }) });
+    session.apply({ type: "narration", text: "Saved text." });
+
+    expect(controller.store.get().generation).toMatchObject({ narration: "Saved text.", review: null, unsupportedReviewVersion: 2 });
+  });
+
   it("refreshes an authoritative higher review on a 409 without submitting the opposite decision", async () => {
     const submitted: string[] = [];
     const controller = createCampaignStore();

@@ -60,6 +60,18 @@ describe("generation machine", () => {
       .toMatchObject({ kind: "accepted" });
   });
 
+  it("reconciles another tab's decided higher review revision into the same-attempt queue", () => {
+    const machine = createGenerationMachine();
+    const pending = snapshot({ status: "recoverable", review: {
+      version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true
+    } });
+    machine.observe(pending);
+
+    expect(machine.observe(snapshot({ status: "queued", review: { ...(pending.review! as any), revision: 2, state: "decided" } })))
+      .toMatchObject({ kind: "accepted", terminal: false });
+  });
+
   it("does not emit a narration change for an initial empty preview", () => {
     const machine = createGenerationMachine();
 
