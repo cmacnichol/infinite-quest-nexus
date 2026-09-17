@@ -1,4 +1,4 @@
-import type { GenerationSnapshotSource } from "@infinite-quest/client-core";
+import { GenerationWorkflowProtocolError, type GenerationSnapshotSource } from "@infinite-quest/client-core";
 import { normalizeBasePath } from "../api-url.js";
 import { createEventSourceSession, generationStreamUrl } from "./event-source.js";
 import { createPollSession } from "./poll-source.js";
@@ -43,6 +43,7 @@ async function* watchGeneration(
     signal,
     eventSourceFactory: options.eventSourceFactory
   });
+  let reason: "stream_lost" | "invalid_snapshot" = "stream_lost";
   try {
     while (true) {
       const next = await session.next();
@@ -51,13 +52,18 @@ async function* watchGeneration(
         continue;
       }
       if (next.value === "terminal" || next.value === "aborted") return;
-      yield { kind: "degraded", reason: "stream_lost", consecutiveFailures: 1 };
       break;
     }
+  } catch (error) {
+    if (!(error instanceof GenerationWorkflowProtocolError) || error.kind !== "invalid_snapshot") throw error;
+    // A rejected stream frame says nothing about the durable job outcome.
+    // Reconcile through the independently validated polling endpoint.
+    reason = "invalid_snapshot";
   } finally {
     await session.return("aborted");
   }
 
   if (signal.aborted) return;
+  yield { kind: "degraded", reason, consecutiveFailures: 1 };
   yield* createPollSession(options, jobId, signal);
 }
