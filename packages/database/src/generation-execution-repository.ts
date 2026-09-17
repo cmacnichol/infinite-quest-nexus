@@ -559,10 +559,11 @@ async function commitAcceptedTurn(
   // replay goes through the explicitly named Chronicle compatibility path.
   const story = storyTurnOutputSchema.parse(input.story);
   const lease = await client.query<{ id: string; owner_user_id: string; campaign_id: string; world_id: string; world_version_id: string | null; expected_turn_number: number; operation_kind: "append" | "replace_latest"; replacement_turn_id: string | null; generation_base_identity: unknown; context_options: Record<string, unknown>; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
-    `SELECT j.id, j.owner_user_id, j.campaign_id, wv.world_id, j.world_version_id, j.expected_turn_number,
+    `SELECT j.id, j.owner_user_id, j.campaign_id, wv.world_id, c.world_version_id, j.expected_turn_number,
             j.operation_kind, j.replacement_turn_id, j.generation_base_identity, j.context_options, j.prompt_snapshot,
             j.orchestration_private, j.streaming_segments_state
-       FROM generation_jobs j JOIN world_versions wv ON wv.id=j.world_version_id AND wv.owner_user_id=j.owner_user_id
+       FROM generation_jobs j JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
+       JOIN world_versions wv ON wv.id=c.world_version_id AND wv.owner_user_id=j.owner_user_id
       WHERE j.id = $1 AND j.owner_user_id = $2 AND j.lease_owner = $3 AND j.status = 'committing'
         AND j.lease_expires_at > now()
       FOR UPDATE OF j`,
