@@ -194,9 +194,10 @@ integration("PostgreSQL generation execution repository", () => {
       providerConfigurationFingerprint: string;
     } }).storyMemoryPolicy;
     const prompts = assertContinuityReviewPromptSnapshot(job.prompt_snapshot, "enforce");
+    const responseId = crypto.randomUUID();
     const candidate = {
       scope: "final" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
-      producingRequestHash: "a".repeat(64), producingResponseId: "reviewed-provider-response", sentFactIds: [],
+      producingRequestHash: "a".repeat(64), producingResponseId: responseId, sentFactIds: [],
       ownerUserId, campaignId, worldId: row.rows[0]!.world_id, worldVersionId: job.world_version_id!,
       baseTurnNumber: job.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.generation_base_identity.expectedTurnNumber,
       policy: policy.policy, policyHash: policy.policyHash, baseIdentity: job.generation_base_identity,
@@ -219,8 +220,14 @@ integration("PostgreSQL generation execution repository", () => {
       }]
     };
     checkpoint.decisionJournal[0]!.reviewId = checkpoint.reviewId;
-    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify(checkpoint)]);
-    return { repository, scope, job, story, checkpoint, campaignId };
+    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [queued.id, JSON.stringify({
+      generationReview: checkpoint,
+      validatedMainDraft: {
+        draftHash: "d".repeat(64), story, requestPayloadHash: candidate.producingRequestHash,
+        response: { responseId }
+      }
+    })]);
+    return { repository, scope, job, story, checkpoint, campaignId, responseId };
   }
 
   async function insertCanonicalFact(input: Readonly<{
@@ -324,6 +331,7 @@ integration("PostgreSQL generation execution repository", () => {
     scope: GenerationLeaseScope;
     job: AcceptedGenerationCommit["job"];
     story: ReturnType<typeof supersedingStory>;
+    responseId?: string;
     sentFactIds?: readonly string[];
   }>): AcceptedGenerationCommit {
     return {
@@ -338,7 +346,7 @@ integration("PostgreSQL generation execution repository", () => {
       },
       response: {
         content: JSON.stringify(input.story),
-        responseId: crypto.randomUUID(),
+        responseId: input.responseId ?? crypto.randomUUID(),
         finishReason: "stop",
         outputLimited: false,
         modelInstanceId: "execution-repository-instance",
@@ -368,12 +376,17 @@ integration("PostgreSQL generation execution repository", () => {
     const imported = await campaign();
     const accepted = await readyFinalKeepCommit(imported.campaignId, "final-keep-accepted-worker");
     await expect(accepted.repository.commitAcceptedTurn(acceptedCommitInput({
-      scope: accepted.scope, job: accepted.job, story: accepted.story
+      scope: accepted.scope, job: accepted.job, story: accepted.story, responseId: accepted.responseId
     }))).resolves.toMatchObject({ turnId: expect.any(String) });
     await expect(pool.query<{ accepted_turns: number }>(
       "SELECT count(*)::int AS accepted_turns FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL",
       [imported.campaignId]
     )).resolves.toMatchObject({ rows: [{ accepted_turns: 3 }] });
+    await expect(pool.query<{ model_metadata: Record<string, unknown> }>(
+      "SELECT model_metadata FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [expect.objectContaining({ model_metadata: expect.objectContaining({
+      reviewAcceptance: expect.objectContaining({ disposition: "accepted_by_user", originalVerdict: "unavailable", originalReasonCodes: ["narrative_conflict"] })
+    }) })] });
 
     const changedCampaign = await campaign();
     const changedCandidate = await readyFinalKeepCommit(changedCampaign.campaignId, "final-keep-changed-worker");
@@ -413,10 +426,100 @@ integration("PostgreSQL generation execution repository", () => {
     const stale = await readyFinalKeepCommit(staleCampaign.campaignId, "final-keep-stale-worker");
     await pool.query("UPDATE campaigns SET character_profile_revision=character_profile_revision+1 WHERE id=$1", [staleCampaign.campaignId]);
     await expect(stale.repository.commitAcceptedTurn(acceptedCommitInput({
-      scope: stale.scope, job: stale.job, story: stale.story
+      scope: stale.scope, job: stale.job, story: stale.story, responseId: stale.responseId
     }))).rejects.toMatchObject({ code: "stale_campaign" });
     await expect(pool.query<{ result_turn_id: string | null }>("SELECT result_turn_id FROM generation_jobs WHERE id=$1", [stale.scope.jobId]))
       .resolves.toMatchObject({ rows: [{ result_turn_id: null }] });
+  });
+
+  async function installActiveMainKeep(
+    keep: Awaited<ReturnType<typeof readyFinalKeepCommit>>,
+    preservesPrefix: boolean,
+    supersedeWithFinalRetry = false
+  ) {
+    const mainStory = storyTurnOutputSchema.parse({
+      ...keep.story,
+      narration: "The keeper reaches the observatory before the morning bell."
+    });
+    const finalStory = storyTurnOutputSchema.parse({
+      ...keep.story,
+      narration: preservesPrefix
+        ? `${mainStory.narration} The bell answers with a single clear note.`
+        : "A replacement narrator skips the kept observatory arrival."
+    });
+    const mainRequestHash = "b".repeat(64);
+    const finalRequestHash = "c".repeat(64);
+    const draftHash = "d".repeat(64);
+    const mainCandidate = {
+      ...keep.checkpoint.gateCandidate,
+      scope: "main" as const,
+      story: mainStory,
+      storyHash: sha256Hex(canonicalEvidenceJson(mainStory)),
+      producingRequestHash: mainRequestHash,
+      producingResponseId: "kept-main-provider-response"
+    };
+    const finalCandidate = {
+      ...keep.checkpoint.gateCandidate,
+      story: finalStory,
+      storyHash: sha256Hex(canonicalEvidenceJson(finalStory)),
+      producingRequestHash: finalRequestHash,
+      producingResponseId: keep.responseId
+    };
+    const mainReceipt = {
+      ...keep.checkpoint.decisionJournal[0]!, reviewId: crypto.randomUUID(), candidateScope: "main" as const,
+      candidateHash: mainCandidate.storyHash, offeredCandidate: mainCandidate
+    };
+    const finalReceipt = {
+      ...keep.checkpoint.decisionJournal[0]!, candidateHash: finalCandidate.storyHash, offeredCandidate: finalCandidate
+    };
+    const checkpoint = {
+      ...keep.checkpoint,
+      originalCandidate: finalCandidate,
+      gateCandidate: finalCandidate,
+      workingCandidate: finalCandidate,
+      decisionJournal: [mainReceipt, finalReceipt, ...(supersedeWithFinalRetry ? [{
+        ...finalReceipt, reviewId: crypto.randomUUID(), decision: "retry" as const, nextStage: "continuity" as const
+      }] : [])]
+    } as GenerationReviewCheckpoint;
+    await pool.query(
+      "UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1",
+      [keep.scope.jobId, JSON.stringify({
+        generationReview: checkpoint,
+        validatedMainDraft: {
+          draftHash, story: mainStory, requestPayloadHash: mainRequestHash,
+          response: { responseId: "kept-main-provider-response" }
+        },
+        extension: {
+          story: finalStory, finalStoryHash: stableStringify(finalStory), producingAttempt: 1,
+          producingOperation: "event_extension", validatedMainDraftHash: draftHash,
+          producingRequestPayloadHash: finalRequestHash, sentFactIds: []
+        }
+      })]
+    );
+    return finalStory;
+  }
+
+  it("preserves an active main Keep prefix through a provenance-bound extension", async () => {
+    const preservedCampaign = await campaign();
+    const preserved = await readyFinalKeepCommit(preservedCampaign.campaignId, "main-keep-prefix-worker");
+    const preservedStory = await installActiveMainKeep(preserved, true);
+    await expect(preserved.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: preserved.scope, job: preserved.job, story: preservedStory, responseId: preserved.responseId
+    }))).resolves.toMatchObject({ turnId: expect.any(String) });
+
+    const rewrittenCampaign = await campaign();
+    const rewritten = await readyFinalKeepCommit(rewrittenCampaign.campaignId, "main-keep-rewrite-worker");
+    const rewrittenStory = await installActiveMainKeep(rewritten, false);
+    await expect(rewritten.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: rewritten.scope, job: rewritten.job, story: rewrittenStory, responseId: rewritten.responseId
+    }))).rejects.toMatchObject({ code: "generation_review_acceptance_unavailable" });
+
+    const supersededCampaign = await campaign();
+    const superseded = await readyFinalKeepCommit(supersededCampaign.campaignId, "main-keep-superseded-worker");
+    const supersededStory = await installActiveMainKeep(superseded, false, true);
+    await expect(superseded.repository.commitAcceptedTurn(acceptedCommitInput({
+      scope: superseded.scope, job: superseded.job, story: supersededStory, responseId: superseded.responseId
+    }))).resolves.toMatchObject({ turnId: expect.any(String) });
   });
 
   async function acceptedAndChronicleSnapshot(

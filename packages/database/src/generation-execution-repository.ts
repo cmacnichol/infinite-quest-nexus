@@ -549,6 +549,44 @@ function mergedTrackers(current: unknown, updates: Array<Record<string, unknown>
   return normalizeCampaignTrackers([...map.values()]);
 }
 
+/** A main Keep remains active only until a later retry authorizes a rewrite. */
+function assertActiveMainKeepPreservation(
+  checkpoint: GenerationReviewCheckpoint,
+  orchestration: GenerationOrchestrationState,
+  finalStory: StoryTurnOutput
+): void {
+  const mainKeepIndex = checkpoint.decisionJournal.map((entry) => entry.candidateScope === "main" && entry.decision === "keep")
+    .lastIndexOf(true);
+  if (mainKeepIndex < 0) return;
+  const laterRewriteAuthorized = checkpoint.decisionJournal.slice(mainKeepIndex + 1).some((entry) => entry.decision === "retry"
+    && (entry.candidateScope === "final" || entry.nextStage === "scene_coverage"));
+  if (laterRewriteAuthorized) return;
+  const activeMainDecision = checkpoint.decisionJournal[mainKeepIndex]!;
+  const unavailable = (): never => {
+    throw Object.assign(new Error("The kept main candidate cannot authorize this final commit."), {
+      code: "generation_review_acceptance_unavailable"
+    });
+  };
+  const main = activeMainDecision.offeredCandidate;
+  const draft = orchestration.validatedMainDraft;
+  if (!main.story || !draft) unavailable();
+  const mainStory = main.story as StoryTurnOutput;
+  const validatedMainDraft = draft as GenerationValidatedMainDraftCheckpoint;
+  if (main.storyHash !== sha256Hex(canonicalEvidenceJson(mainStory))
+    || canonicalEvidenceJson(mainStory) !== canonicalEvidenceJson(validatedMainDraft.story)
+    || main.producingRequestHash !== validatedMainDraft.requestPayloadHash
+    || main.producingResponseId !== validatedMainDraft.response.responseId) unavailable();
+  if (!orchestration.extension) {
+    if (canonicalEvidenceJson(finalStory) !== canonicalEvidenceJson(mainStory)) unavailable();
+    return;
+  }
+  const extension = orchestration.extension;
+  if (extension.validatedMainDraftHash !== validatedMainDraft.draftHash
+    || extension.finalStoryHash !== stableStringify(finalStory)
+    || extension.producingRequestPayloadHash.length !== 64
+    || !finalStory.narration.startsWith(mainStory.narration)) unavailable();
+}
+
 async function commitAcceptedTurn(
   client: DatabaseClient,
   input: AcceptedGenerationCommit
@@ -575,6 +613,9 @@ async function commitAcceptedTurn(
     });
   }
   const storedJob = lease.rows[0]!;
+  let reviewAcceptanceAudit: Record<string, unknown> | undefined;
+  const storedReview = generationReviewCheckpointSchema.safeParse(storedJob.orchestration_private.generationReview);
+  if (storedReview.success) assertActiveMainKeepPreservation(storedReview.data, storedJob.orchestration_private, story);
   if (storedJob.context_options?.storyMemoryPolicy) {
     const policy = storyMemoryPolicySnapshotSchema.parse(storedJob.context_options.storyMemoryPolicy);
     if (policy.policy.continuityReview !== "off") {
@@ -591,8 +632,11 @@ async function commitAcceptedTurn(
         promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash
       } as const;
       const review = generationReviewCheckpointSchema.safeParse(saved.generationReview);
-      const hasFinalContinuityReview = review.success && review.data.state === "decided"
+      const isFinalContinuityCheckpoint = review.success && review.data.state === "decided"
         && review.data.candidateScope === "final" && review.data.stage === "continuity";
+      const hasFinalContinuityReview = isFinalContinuityCheckpoint
+        && review.data.decisionJournal.some((entry) => entry.reviewId === review.data.reviewId
+          && entry.revision === review.data.revision && entry.decision === "keep");
       if (hasFinalContinuityReview) {
         if (mechanicsLeakFields(story).length) {
           throw Object.assign(new Error("A kept generation candidate contains mechanics language."), { code: "mechanics_leak" });
@@ -606,7 +650,32 @@ async function commitAcceptedTurn(
           protocol: { version: job.prompt_protocol_version, promptHash: review.data.gateCandidate.protocol.promptHash },
           policyHash: policy.policyHash, operationKind: storedJob.operation_kind, replacementTurnId: storedJob.replacement_turn_id
         });
+        if (review.data.gateCandidate.producingResponseId !== response.responseId) {
+          throw Object.assign(new Error("The saved generation review candidate was not produced by this response."), {
+            code: "generation_review_acceptance_unavailable"
+          });
+        }
+        const producingRequestHash = saved.extension?.producingRequestPayloadHash
+          ?? saved.validatedMainDraft?.requestPayloadHash;
+        if (!producingRequestHash || review.data.gateCandidate.producingRequestHash !== producingRequestHash) {
+          throw Object.assign(new Error("The saved generation review candidate was not produced by the persisted request."), {
+            code: "generation_review_acceptance_unavailable"
+          });
+        }
+        const originalReview = continuityReviewCheckpointSchema.safeParse(saved.continuityReview);
+        reviewAcceptanceAudit = {
+          disposition: "accepted_by_user", reviewId: review.data.reviewId, revision: review.data.revision,
+          candidateHash: review.data.gateCandidate.storyHash,
+          originalVerdict: originalReview.success ? originalReview.data.verdict : "unavailable",
+          originalReasonCodes: review.data.originalFindings,
+          currentReasonCodes: review.data.reasons
+        };
       } else {
+        if (isFinalContinuityCheckpoint && !continuityReviewCheckpointSchema.safeParse(saved.continuityReview).success) {
+          throw Object.assign(new Error("The final generation review has no valid Keep receipt."), {
+            code: "generation_review_acceptance_unavailable"
+          });
+        }
         assertContinuityReviewCommit(policy.policy.continuityReview, saved.continuityReview, normalBinding);
       }
     }
@@ -808,7 +877,8 @@ async function commitAcceptedTurn(
         generationPolicy: job.generation_policy,
         contextFingerprint: input.contextFingerprint,
         contextDiagnostics: input.contextDiagnostics,
-        chronicleRetrieval
+        chronicleRetrieval,
+        ...(reviewAcceptanceAudit ? { reviewAcceptance: reviewAcceptanceAudit } : {})
       }), job.generation_policy === null ? null : json(job.generation_policy)]
   );
   const turnId = turnResult.rows[0]?.id;
