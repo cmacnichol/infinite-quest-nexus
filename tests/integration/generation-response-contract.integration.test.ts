@@ -242,6 +242,31 @@ integration("PostgreSQL response-contract persistence", () => {
     await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
 
+  it("preserves validated prepared-response failures across stale generic saves", async () => {
+    const imported = await campaign();
+    const queued = await commands(true).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Retain bounded failure evidence.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id);
+    const logicalAttemptId = crypto.randomUUID();
+    const frozen = selection();
+    const initial = { ...fixture.payload.orchestration_private, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } };
+    expect(await fixture.repository.saveOrchestration(fixture.scope, initial)).toBe(true);
+    await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyHash(policy()), frozen);
+    const requestBody = "{}";
+    const requestPayloadHash = sha256Hex(requestBody);
+    const request = audit(frozen);
+    expect(await fixture.repository.saveOrchestration(fixture.scope, { ...initial, primaryReservation: { version: 1 as const, requestBody, requestPayloadHash, providerConfigurationHash: hash, attempt: 1, status: "reserved" as const } })).toBe(true);
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash, request });
+    expect(reserved?.status).toBe("reserved");
+    await fixture.repository.markResponseContractInvocationDispatched!(fixture.scope, reserved!.id, requestPayloadHash);
+    await fixture.repository.completeResponseContractInvocation!(fixture.scope, reserved!.id, { returnedModel: null, returnedProviderRoute: null, diagnosticCode: "provider_schema_invalid" });
+    const failure = { version: 1 as const, invocationId: reserved!.id, requestBody, requestPayloadHash, responseId: "partial-id", partialContent: "private partial", partialContentTruncated: false, returnedModel: null, returnedProviderRoute: null, diagnosticCode: "provider_schema_invalid" };
+    expect(await fixture.repository.saveOrchestration(fixture.scope, { ...initial, preparedResponseFailures: [failure] } as never)).toBe(true);
+    expect(await fixture.repository.saveOrchestration(fixture.scope, { ...initial, preparedResponseFailures: [{ ...failure, partialContent: "tampered" }] } as never)).toBe(true);
+    const reloaded = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
+    expect(reloaded?.orchestration_private.preparedResponseFailures).toEqual([failure]);
+    await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
   it("fails closed on malformed private versions without mutating authoritative campaign rows", async () => {
     const imported = await campaign();
     const queued = await commands(true).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Reject unknown durable envelope.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));

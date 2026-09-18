@@ -1150,6 +1150,7 @@ export async function callCampaignTextProvider(
         const evidence = { version: 1 as const, invocationId: reserved.id,
           requestBody: checkedPrepared.body, requestPayloadHash: checkedPrepared.payloadHash,
           responseId: preparedError.responseId, partialContent: preparedError.partialContent.slice(0, 1_000_000),
+          partialContentTruncated: preparedError.partialContent.length > 1_000_000,
           returnedModel: preparedError.returnedModel, returnedProviderRoute: preparedError.returnedProviderRoute,
           diagnosticCode: preparedError.diagnosticCode };
         const existing = prior.find((entry) => entry.invocationId === reserved.id);

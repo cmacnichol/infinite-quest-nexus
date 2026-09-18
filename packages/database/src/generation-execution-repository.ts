@@ -4,6 +4,7 @@ import type { GenerationFailureDiagnostic } from "../../contracts/src/generation
 import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
+import { responseFormatDiagnosticCodeSchema } from "../../contracts/src/text-response-format.js";
 import {
   readFrozenResponseContracts,
   readQueuedResponsePolicy,
@@ -97,6 +98,30 @@ function json(value: unknown): string {
 /** v1 permits every currently authorized operation plus explicit retries without growing unbounded. */
 const responseContractInvocationLedgerLimit = 24;
 
+type PreparedResponseFailureEvidence = NonNullable<GenerationOrchestrationState["preparedResponseFailures"]>[number];
+
+function preparedResponseFailures(value: unknown, ledger: readonly ResponseContractInvocationAudit[] | undefined): readonly PreparedResponseFailureEvidence[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > responseContractInvocationLedgerLimit || !ledger) throw new Error("Prepared response failure evidence is invalid.");
+  const ids = new Set<string>();
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") throw new Error("Prepared response failure evidence is invalid.");
+    const item = entry as PreparedResponseFailureEvidence;
+    if (item.version !== 1 || typeof item.invocationId !== "string" || ids.has(item.invocationId)
+      || typeof item.requestBody !== "string" || item.requestBody.length > 1_000_000
+      || typeof item.requestPayloadHash !== "string" || item.requestPayloadHash !== sha256Hex(item.requestBody)
+      || !(item.responseId === null || typeof item.responseId === "string" && item.responseId.length <= 256)
+      || typeof item.partialContent !== "string" || item.partialContent.length > 1_000_000 || typeof item.partialContentTruncated !== "boolean"
+      || !(item.returnedModel === null || typeof item.returnedModel === "string" && item.returnedModel.length <= 256)
+      || !(item.returnedProviderRoute === null || typeof item.returnedProviderRoute === "string" && item.returnedProviderRoute.length <= 256)
+      || !(item.diagnosticCode === null || responseFormatDiagnosticCodeSchema.safeParse(item.diagnosticCode).success)
+      || !ledger.some((audit) => audit.id === item.invocationId && audit.requestPayloadHash === item.requestPayloadHash
+        && (audit.status === "dispatched" || audit.status === "completed"))) throw new Error("Prepared response failure evidence is invalid.");
+    ids.add(item.invocationId);
+    return item;
+  });
+}
+
 function responseContractInvocations(value: unknown): readonly ResponseContractInvocationAudit[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length > responseContractInvocationLedgerLimit) throw new Error("Response-contract invocation ledger is invalid.");
@@ -114,10 +139,12 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
   const queued = readQueuedResponsePolicy(value.queuedResponsePolicy);
   const frozen = readFrozenResponseContracts(value.frozenResponseContracts);
   const ledger = responseContractInvocations(value.responseContractInvocations);
+  const failures = preparedResponseFailures(value.preparedResponseFailures, ledger);
   if (frozen && (!queued || queuedResponsePolicyHash(queued) !== queuedResponsePolicyHash(frozen.queuedPolicy))) {
     throw new Error("Frozen response contract does not match the queued policy.");
   }
   if (ledger && !frozen) throw new Error("Response-contract invocation ledger requires a frozen contract.");
+  if (failures && !frozen) throw new Error("Prepared response failure evidence requires a frozen contract.");
   if (frozen) {
     // A frozen selection turns every producing checkpoint into replay evidence.
     // An absent ledger is only valid before any producing checkpoint exists.
@@ -129,6 +156,9 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
       || value.extension || value.semanticRepair?.status === "validated" || value.sceneCoverageRepair?.status === "validated"
       || (value.continuityReview?.status === "completed" && value.continuityReview.reviewRequestHash));
     if (!ledger && needsCompletedEvidence) throw new Error("Frozen response-contract checkpoint has no invocation ledger.");
+    // The request-only reservation is intentionally persisted immediately
+    // before its central invocation reservation. It has no ledger entry yet.
+    if (!ledger) return;
     for (const entry of entries) {
       if (!auditMatchesFrozenInvocation(frozen, entry.invocationKey, entry.request)
         || !operationMatchesInvocation(entry.operation, entry.invocationKey)
@@ -150,11 +180,9 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     if (primary && !completedFor(primary.requestPayloadHash, ["story_generation"])) {
       throw new Error("Primary response checkpoint has no completed response-contract invocation.");
     }
-    const reservation = value.primaryReservation;
-    if (reservation && !pendingFor(reservation.requestPayloadHash, ["story_generation"])
-      && !completedFor(reservation.requestPayloadHash, ["story_generation"])) {
-      throw new Error("Primary reservation does not match its response-contract invocation.");
-    }
+    // Reservation checkpoints are written before their own central ledger
+    // reservation. A prior completed logical attempt must not reject that
+    // new request-only state; completed results below remain fail-closed.
     const draft = value.validatedMainDraft;
     if (draft && !completedFor(draft.requestPayloadHash, ["story_generation", "story_recovery", "scene_coverage_rewrite", "story_continuity_repair"])) {
       throw new Error("Validated draft checkpoint has no completed response-contract invocation.");
@@ -162,10 +190,6 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     const choice = value.choiceRepair;
     if (choice && !completedFor(choice.originalRequestPayloadHash, ["story_generation", "story_recovery"])) {
       throw new Error("Choice repair original checkpoint has no completed response-contract invocation.");
-    }
-    if (choice?.status === "dispatched" && !pendingFor(choice.repairRequestPayloadHash, ["story_choice_repair"])
-      && !completedFor(choice.repairRequestPayloadHash, ["story_choice_repair"])) {
-      throw new Error("Choice repair dispatch checkpoint has no pending response-contract invocation.");
     }
     if (choice?.status === "validated" && !completedFor(choice.repairRequestPayloadHash, ["story_choice_repair"])) {
       throw new Error("Choice repair checkpoint has no completed response-contract invocation.");
@@ -175,24 +199,16 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
       throw new Error("Extension checkpoint has no completed response-contract invocation.");
     }
     const semantic = value.semanticRepair;
-    if (semantic && (semantic.status === "validated"
-      ? !completedFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"])
-      : !pendingFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"])
-        && !completedFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"]))) {
+    if (semantic?.status === "validated" && !completedFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"])) {
       throw new Error("Semantic repair checkpoint does not match its response-contract invocation.");
     }
     const rewrite = value.sceneCoverageRepair;
-    if (rewrite && (rewrite.status === "validated"
-      ? !completedFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"])
-      : !pendingFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"])
-        && !completedFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"]))) {
+    if (rewrite?.status === "validated" && !completedFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"])) {
       throw new Error("Scene rewrite checkpoint does not match its response-contract invocation.");
     }
     const review = value.continuityReview;
-    if (review?.reviewRequestHash && (review.status === "completed"
-      ? !completedFor(review.reviewRequestHash, ["story_continuity_review"])
-      : !pendingFor(review.reviewRequestHash, ["story_continuity_review"])
-        && !completedFor(review.reviewRequestHash, ["story_continuity_review"]))) {
+    if (review?.reviewRequestHash && review.status === "completed"
+      && !completedFor(review.reviewRequestHash, ["story_continuity_review"])) {
       throw new Error("Continuity review checkpoint does not match its response-contract invocation.");
     }
   }
@@ -331,6 +347,7 @@ export type GenerationOrchestrationState = {
     requestPayloadHash: string;
     responseId: string | null;
     partialContent: string;
+    partialContentTruncated: boolean;
     returnedModel: string | null;
     returnedProviderRoute: string | null;
     diagnosticCode: string | null;
@@ -1785,7 +1802,30 @@ export function createPostgresGenerationExecutionRepository(
 
     async saveOrchestration(scope, value) {
       const safeContextDiagnostic = projectSafeGenerationDiagnostic(value.contextDiagnostic);
-      return changed(await pool.query<{ id: string }>(
+      return withTransaction(pool, async (client) => {
+        const locked = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
+          `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
+            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3
+              AND status IN ('assessing','generating','validating','committing') AND lease_expires_at > now() FOR UPDATE`,
+          [scope.jobId, scope.ownerUserId, scope.workerId]
+        );
+        const prior = locked.rows[0]?.orchestrationPrivate;
+        if (!prior) return false;
+        const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen,
+          responseContractInvocations: _ledger, preparedResponseFailures: suppliedFailures, ...mutable } = value;
+        const priorFailures = prior.preparedResponseFailures;
+        const appendOnly = priorFailures === undefined || (suppliedFailures !== undefined
+          && priorFailures.every((entry) => suppliedFailures.some((candidate) => stableStringify(candidate) === stableStringify(entry))));
+        const merged: GenerationOrchestrationState = {
+          ...mutable,
+          ...(prior.queuedResponsePolicy === undefined ? {} : { queuedResponsePolicy: prior.queuedResponsePolicy }),
+          ...(prior.frozenResponseContracts === undefined ? {} : { frozenResponseContracts: prior.frozenResponseContracts }),
+          ...(prior.responseContractInvocations === undefined ? {} : { responseContractInvocations: prior.responseContractInvocations }),
+          ...(priorFailures === undefined ? (suppliedFailures === undefined ? {} : { preparedResponseFailures: suppliedFailures })
+            : appendOnly ? { preparedResponseFailures: suppliedFailures } : { preparedResponseFailures: priorFailures })
+        };
+        responseContractState(scope.jobId, merged);
+        return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =
               CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations')
                    WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
@@ -1793,15 +1833,26 @@ export function createPostgresGenerationExecutionRepository(
                END
                || CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object('queuedResponsePolicy', orchestration_private->'queuedResponsePolicy') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN jsonb_build_object('frozenResponseContracts', orchestration_private->'frozenResponseContracts') ELSE '{}'::jsonb END
-               || CASE WHEN orchestration_private ? 'responseContractInvocations' THEN jsonb_build_object('responseContractInvocations', orchestration_private->'responseContractInvocations') ELSE '{}'::jsonb END,
+               || CASE WHEN orchestration_private ? 'responseContractInvocations' THEN jsonb_build_object('responseContractInvocations', orchestration_private->'responseContractInvocations') ELSE '{}'::jsonb END
+               || CASE
+                    WHEN orchestration_private ? 'preparedResponseFailures'
+                      AND ($4::jsonb ? 'preparedResponseFailures')
+                      AND ($4::jsonb->'preparedResponseFailures') @> (orchestration_private->'preparedResponseFailures')
+                      THEN jsonb_build_object('preparedResponseFailures', $4::jsonb->'preparedResponseFailures')
+                    WHEN orchestration_private ? 'preparedResponseFailures'
+                      THEN jsonb_build_object('preparedResponseFailures', orchestration_private->'preparedResponseFailures')
+                    WHEN $4::jsonb ? 'preparedResponseFailures'
+                      THEN jsonb_build_object('preparedResponseFailures', $4::jsonb->'preparedResponseFailures')
+                    ELSE '{}'::jsonb END,
             recovery_metadata = CASE WHEN $5::jsonb IS NULL THEN recovery_metadata ELSE recovery_metadata || jsonb_build_object('diagnostic',$5::jsonb) END,
             updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
             AND status IN ('assessing','generating','validating','committing')
             AND lease_expires_at > now()
           RETURNING id`,
-        [scope.jobId, scope.ownerUserId, scope.workerId, json(value), safeContextDiagnostic ? json(safeContextDiagnostic) : null]
-      ));
+        [scope.jobId, scope.ownerUserId, scope.workerId, json(merged), safeContextDiagnostic ? json(safeContextDiagnostic) : null]
+        ));
+      });
     },
 
     async saveFrozenResponseContracts(scope, expectedQueuedPolicyHash, value) {
