@@ -117,8 +117,14 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     throw new Error("Frozen response contract does not match the queued policy.");
   }
   if (ledger && !frozen) throw new Error("Response-contract invocation ledger requires a frozen contract.");
-  if (ledger && frozen) {
-    for (const entry of ledger) {
+  if (frozen) {
+    // A frozen selection turns every producing checkpoint into replay evidence.
+    // An absent ledger is only valid before any producing checkpoint exists.
+    const entries = ledger ?? [];
+    const hasProducingCheckpoint = Boolean(value.primaryReservation || value.primaryResult || value.validatedMainDraft
+      || value.choiceRepair || value.extension || value.semanticRepair || value.sceneCoverageRepair || value.continuityReview);
+    if (!ledger && hasProducingCheckpoint) throw new Error("Frozen response-contract checkpoint has no invocation ledger.");
+    for (const entry of entries) {
       if (!auditMatchesFrozenInvocation(frozen, entry.invocationKey, entry.request)
         || !operationMatchesInvocation(entry.operation, entry.invocationKey)
         || entry.id !== responseContractInvocationAuditId(jobId, entry.logicalAttemptId, entry.invocationKey, entry.operation, entry.requestPayloadHash)
@@ -127,10 +133,11 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
       }
     }
     const completedFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperation[]) =>
-      typeof requestPayloadHash === "string" && ledger.some((entry) => entry.status === "completed"
+      typeof requestPayloadHash === "string" && entries.some((entry) => entry.status === "completed"
         && entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation));
-    const pendingFor = (requestPayloadHash: unknown) => typeof requestPayloadHash === "string" && ledger.some((entry) =>
-      entry.requestPayloadHash === requestPayloadHash && (entry.status === "reserved" || entry.status === "dispatched")
+    const pendingFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperation[]) => typeof requestPayloadHash === "string" && entries.some((entry) =>
+      entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation)
+        && (entry.status === "reserved" || entry.status === "dispatched")
     );
     // New-mode checkpoint bodies are replay evidence, never independently
     // trusted snapshots. The ledger also proves the frozen selection/key.
@@ -139,14 +146,45 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
       throw new Error("Primary response checkpoint has no completed response-contract invocation.");
     }
     const reservation = value.primaryReservation;
-    if (reservation && ((reservation.status === "reserved" || reservation.status === "dispatched")
-      ? !pendingFor(reservation.requestPayloadHash)
-      : !completedFor(reservation.requestPayloadHash, ["story_generation"]))) {
+    if (reservation && !pendingFor(reservation.requestPayloadHash, ["story_generation"])
+      && !completedFor(reservation.requestPayloadHash, ["story_generation"])) {
       throw new Error("Primary reservation does not match its response-contract invocation.");
     }
     const draft = value.validatedMainDraft;
     if (draft && !completedFor(draft.requestPayloadHash, ["story_generation", "story_recovery", "scene_coverage_rewrite", "story_continuity_repair"])) {
       throw new Error("Validated draft checkpoint has no completed response-contract invocation.");
+    }
+    const choice = value.choiceRepair;
+    if (choice && !completedFor(choice.originalRequestPayloadHash, ["story_generation", "story_recovery"])) {
+      throw new Error("Choice repair original checkpoint has no completed response-contract invocation.");
+    }
+    if (choice?.status === "dispatched" && !pendingFor(choice.repairRequestPayloadHash, ["story_choice_repair"])) {
+      throw new Error("Choice repair dispatch checkpoint has no pending response-contract invocation.");
+    }
+    if (choice?.status === "validated" && !completedFor(choice.repairRequestPayloadHash, ["story_choice_repair"])) {
+      throw new Error("Choice repair checkpoint has no completed response-contract invocation.");
+    }
+    const extension = value.extension;
+    if (extension && !completedFor(extension.producingRequestPayloadHash, [extension.producingOperation])) {
+      throw new Error("Extension checkpoint has no completed response-contract invocation.");
+    }
+    const semantic = value.semanticRepair;
+    if (semantic && (semantic.status === "validated"
+      ? !completedFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"])
+      : !pendingFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"]))) {
+      throw new Error("Semantic repair checkpoint does not match its response-contract invocation.");
+    }
+    const rewrite = value.sceneCoverageRepair;
+    if (rewrite && (rewrite.status === "validated"
+      ? !completedFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"])
+      : !pendingFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"]))) {
+      throw new Error("Scene rewrite checkpoint does not match its response-contract invocation.");
+    }
+    const review = value.continuityReview;
+    if (review?.reviewRequestHash && (review.status === "completed"
+      ? !completedFor(review.reviewRequestHash, ["story_continuity_review"])
+      : !pendingFor(review.reviewRequestHash, ["story_continuity_review"]))) {
+      throw new Error("Continuity review checkpoint does not match its response-contract invocation.");
     }
   }
 }
@@ -1327,6 +1365,9 @@ async function commitAcceptedTurn(
       json({
         scratchpad: story.scratchpad,
         trackers,
+        ...(storedJob.orchestration_private.queuedResponsePolicy
+          ? { acceptedTrackerUpdateEvidence: { version: 1, updates: story.tracker_updates } }
+          : {}),
         eventTriggers,
         pendingEventTriggers,
         rpgStats: storyOnly ? lockedMechanics?.rpg_stats : inputs.rpgStats,
