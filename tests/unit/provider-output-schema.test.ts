@@ -120,6 +120,35 @@ describe("provider output schema registry", () => {
     expect(continuityReviewSchema.parse(review)).toEqual(review);
   });
 
+  it("leaves continuity cross-field verdict and quote-offset constraints to the semantic contract", () => {
+    const contradiction = {
+      kind: "contradiction", category: "location", severity: "contradiction",
+      basis: { kind: "source", evidenceId: "a".repeat(64), quote: "Quay" },
+      output: { path: "/narration", start: 4, end: 4, quote: "Mira" }, explanation: "The locations conflict."
+    };
+    const malformedLocation = { version: "story-continuity-review-v1", verdict: "conflict", findings: [contradiction] };
+    const passWithContradiction = { ...malformedLocation, verdict: "pass" };
+    const conflictWithoutContradiction = { version: "story-continuity-review-v1", verdict: "conflict", findings: [] };
+
+    for (const response of [malformedLocation, passWithContradiction, conflictWithoutContradiction]) {
+      expect(validateWire("continuity_review", response)).toBe(true);
+      expect(continuityReviewSchema.safeParse(response).success).toBe(false);
+    }
+  });
+
+  it("keeps UTF-16 length authority in the continuity contract when JSON Schema counts Unicode code points", () => {
+    const astralQuote = "😀".repeat(1000);
+    const response = {
+      version: "story-continuity-review-v1", verdict: "conflict", findings: [{
+        kind: "contradiction", category: "location", severity: "contradiction",
+        basis: { kind: "source", evidenceId: "a".repeat(64), quote: "Quay" },
+        output: { path: "/narration", start: 0, end: astralQuote.length, quote: astralQuote }, explanation: "The locations conflict."
+      }]
+    };
+    expect(validateWire("continuity_review", response)).toBe(true);
+    expect(continuityReviewSchema.safeParse(response).success).toBe(false);
+  });
+
   it("uses immutable versioned schema content and a stable content hash", () => {
     const story = getProviderOutputSchema("story");
     expect(story.version).toBe("story-native-v1");
