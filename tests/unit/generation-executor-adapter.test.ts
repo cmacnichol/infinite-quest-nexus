@@ -17,6 +17,7 @@ import {
   createGenerationExecutor,
   appendFactFormatRepairApplication,
   bindCampaignResponseContract,
+  responseContractInvocationDetails,
   generationContextFingerprint,
   planGenerationPromptContext,
   preparePrimaryReservation,
@@ -204,6 +205,31 @@ describe("generation executor adapter", () => {
     expect(() => bindCampaignResponseContract(frozenJob, "story_choice_repair", { systemPrompt: "rules", input: "repair" }))
       .toThrow(/does not permit/u);
     expect(bindCampaignResponseContract(frozenJob, "rpg_assessment", { systemPrompt: "rules", input: "assess" }).responseContract).toBeUndefined();
+  });
+  it("derives immutable ledger provenance from the frozen contract and exact prepared body", () => {
+    const job = completeGenerationExecutionPayload();
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: {
+        selectionHash: "a".repeat(64),
+        contracts: {
+          "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+        }
+      }
+    } as never;
+    expect(responseContractInvocationDetails(job, "story_generation", false, "b".repeat(64), {
+      id: "provider", model: "model"
+    } as never)).toEqual({
+      logicalAttemptId: claim.jobId,
+      invocationKey: "story:nonstream",
+      operation: "story_generation",
+      requestPayloadHash: "b".repeat(64),
+      request: {
+        version: 1, selectionHash: "a".repeat(64), invocationKey: "story:nonstream", mode: "json_object",
+        schemaVersion: null, schemaHash: null, requestedModel: "model", providerRoutingSlugs: [],
+        returnedModel: null, returnedProviderRoute: null, diagnosticCode: null
+      }
+    });
   });
   it("records an applied fact-format repair exactly once and rejects a conflicting replay", () => {
     const application: FactFormatRepairApplication = {

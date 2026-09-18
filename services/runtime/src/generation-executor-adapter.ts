@@ -81,6 +81,7 @@ import {
   buildStoryOnlyChoiceRepairInput,
   generationExecutionProtocolIdentity,
   serializeProviderRequest,
+  serializeCheckedProviderRequest,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
   formatNarrationParagraphs,
@@ -98,6 +99,7 @@ import {
   parseStoryOnlyOutput,
   parseChoiceRepair,
   mergeChoiceRepair,
+  PreparedResponseContractError,
   performPrivateRoll,
   providerTransportErrorDetails,
   type ActivatedEvent,
@@ -117,7 +119,8 @@ import {
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerPromptProtocolVersion } from "./provider-application-composition.js";
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
-import { queuedResponsePolicyHash, type FrozenResponseContracts, type QueuedResponsePolicy } from "../../../packages/contracts/src/generation-response-contract.js";
+import { queuedResponsePolicyHash, type FrozenResponseContracts, type QueuedResponsePolicy, type ResponseContractOperation } from "../../../packages/contracts/src/generation-response-contract.js";
+import type { ResponseInvocationKey } from "../../../packages/contracts/src/text-response-format.js";
 
 type GenerationTextProvider = RuntimeTextExecution;
 
@@ -194,6 +197,8 @@ export type GenerationExecutorDependencies = Readonly<{
   pool: DatabasePool;
   repository: GenerationExecutionRepository;
   collaborators: GenerationExecutionCollaborators;
+  /** Present only while one leased executor invocation is active. */
+  responseContractScope?: GenerationLeaseScope;
 }>;
 
 type StoryCostOperation = "rpg_assessment" | "event_trigger_before" | "story_generation"
@@ -234,6 +239,42 @@ function responseContractForOperation(job: GenerationExecutionPayload, operation
 
 function frozenContractForOperation(job: GenerationExecutionPayload, operation: StoryCostOperation) {
   return bindCampaignResponseContract(job, operation, { systemPrompt: "", input: "" }).responseContract;
+}
+
+/** Builds the immutable request-side audit from the saved contract, never from
+ * provider metadata or a worker-claim counter. */
+export function responseContractInvocationDetails(
+  job: GenerationExecutionPayload,
+  operation: StoryCostOperation,
+  streaming: boolean,
+  requestPayloadHash: string,
+  provider: Pick<GenerationTextProvider, "model">
+) {
+  const frozen = job.orchestration_private?.frozenResponseContracts;
+  const contract = responseContractForOperation(job, operation, streaming);
+  if (!frozen || !contract) return undefined;
+  const invocationKey: ResponseInvocationKey = operation === "story_choice_repair" ? "choices:nonstream"
+    : operation === "story_continuity_review" ? "continuity_review:nonstream"
+      : streaming ? "story:stream" : "story:nonstream";
+  return {
+    logicalAttemptId: job.orchestration_private.logicalAttempt?.id ?? job.id,
+    invocationKey,
+    operation: operation as ResponseContractOperation,
+    requestPayloadHash,
+    request: {
+      version: 1 as const,
+      selectionHash: frozen.selectionHash,
+      invocationKey,
+      mode: contract.mode,
+      schemaVersion: contract.mode === "json_schema" ? contract.schemaVersion : null,
+      schemaHash: contract.mode === "json_schema" ? contract.schemaHash : null,
+      requestedModel: provider.model,
+      providerRoutingSlugs: contract.mode === "json_schema" ? [...contract.providerRoutingSlugs] : [],
+      returnedModel: null,
+      returnedProviderRoute: null,
+      diagnosticCode: null
+    }
+  };
 }
 
 type TurnGenerationDiagnosticContext = {
@@ -1024,6 +1065,82 @@ async function callCampaignTextProvider(
   request: ProviderRequest
 ) {
   const preparedRequest = bindCampaignResponseContract(job, operation, request);
+  const scope = dependencies.responseContractScope;
+  const frozenContract = preparedRequest.responseContract;
+  // Historical requests remain byte-for-byte on their legacy transport path.
+  // Contract requests must pass the same checked canonical serializer before a
+  // ledger entry can become dispatchable.
+  const prepared = frozenContract ? serializeCheckedProviderRequest({ ...provider, baseUrl: "" }, {
+    systemPrompt: preparedRequest.systemPrompt,
+    input: preparedRequest.input,
+    ...(preparedRequest.recoveryInput ? { recoveryInput: preparedRequest.recoveryInput } : {}),
+    ...(preparedRequest.rejectedResponse ? { completeRejectedDraft: { content: preparedRequest.rejectedResponse, complete: true as const } } : {}),
+    ...(preparedRequest.onChunk ? { onChunk: preparedRequest.onChunk } : {})
+  }, {
+    inputLimit: effectiveContextWindowTokens(provider, job) - provider.maxOutputTokens,
+    count: estimateStoryTokens,
+    countMode: "estimated",
+    safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
+    contextWindowTokens: effectiveContextWindowTokens(provider, job),
+    output: preparedRequest.budgetOutput ?? { kind: "story_append" },
+    responseContract: frozenContract
+  }) : undefined;
+  const invocation = prepared ? responseContractInvocationDetails(
+    job, operation, typeof preparedRequest.onChunk === "function", prepared.payloadHash, provider
+  ) : undefined;
+  if (invocation) {
+    const checkedPrepared = prepared!;
+    if (!scope || !dependencies.repository.reserveResponseContractInvocation
+      || !dependencies.repository.markResponseContractInvocationDispatched
+      || !dependencies.repository.completeResponseContractInvocation) {
+      throw Object.assign(new Error("This worker cannot durably audit the frozen response contract."), {
+        code: "response_contract_unavailable"
+      });
+    }
+    const reserved = await dependencies.repository.reserveResponseContractInvocation(scope, invocation);
+    if (!reserved || reserved.status !== "reserved") {
+      throw Object.assign(new Error("The saved response-contract invocation cannot be dispatched again."), {
+        code: "response_contract_unavailable"
+      });
+    }
+    const dispatched = await dependencies.repository.markResponseContractInvocationDispatched(
+      scope, reserved.id, checkedPrepared.payloadHash
+    );
+    if (!dispatched || dispatched.status !== "dispatched") {
+      throw Object.assign(new Error("The response-contract invocation lost its exclusive dispatch lease."), {
+        code: "response_contract_unavailable"
+      });
+    }
+    let result: ProviderResult;
+    try {
+      dependencies.collaborators.onProviderDispatch?.(operation);
+      result = await provider.execute({
+        ...preparedRequest,
+        canonicalBudgeting: true,
+        effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job)
+      });
+      const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
+        returnedModel: result.returnedModel ?? null,
+        returnedProviderRoute: result.returnedProviderRoute ?? null,
+        diagnosticCode: null
+      });
+      if (!completed || completed.status !== "completed") throw Object.assign(new Error("The response-contract completion lost its lease."), { code: "lease_lost" });
+    } catch (error) {
+      const preparedError = error instanceof PreparedResponseContractError ? error : undefined;
+      const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
+        returnedModel: preparedError?.returnedModel ?? null,
+        returnedProviderRoute: preparedError?.returnedProviderRoute ?? null,
+        diagnosticCode: preparedError?.diagnosticCode ?? null
+      });
+      if (!completed) throw Object.assign(new Error("The response-contract failure completion lost its lease."), { code: "lease_lost" });
+      throw error;
+    }
+    await dependencies.collaborators.recordProfileCost(
+      dependencies.pool, provider, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+        generationJobId: job.id, category: "story", operation }, result
+    );
+    return result;
+  }
   const startedAt = Date.now();
   logger.info({
     event: "turn_generation_provider_started",
@@ -1154,6 +1271,9 @@ async function executeLoadedGeneration(
 ): Promise<boolean> {
   const { repository, collaborators, pool } = dependencies;
   const scope = { jobId: job.id, ownerUserId: job.owner_user_id, workerId };
+  // Keep the lease scope invocation-local: a shared executor can process more
+  // than one job concurrently, while an audit must never borrow another job's lease.
+  const ledgerDependencies: GenerationExecutorDependencies = { ...dependencies, responseContractScope: scope };
   const generationStartedAt = Date.now();
   const diagnosticContext: TurnGenerationDiagnosticContext = {
     generationJobId: job.id,
@@ -1511,6 +1631,14 @@ async function executeLoadedGeneration(
     };
     const inputs = await phase("orchestration_loading", async () => job.orchestration_inputs);
     let orchestration = job.orchestration_private || {};
+    if (job.orchestration_private?.queuedResponsePolicy && !orchestration.logicalAttempt) {
+      orchestration = await persistOrchestration(repository, scope, job, {
+        logicalAttempt: {
+          version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0,
+          automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0
+        }
+      });
+    }
 
     // A review retry is the only authority to replace an unusable primary
     // response.  Drop the immutable capture only after the decision has been
@@ -1618,7 +1746,7 @@ async function executeLoadedGeneration(
           let assessmentError = "";
           try {
             const response = await callCampaignTextProvider(
-              dependencies,
+              ledgerDependencies,
               provider,
               job,
               "rpg_assessment",
@@ -2156,7 +2284,7 @@ async function executeLoadedGeneration(
     }
     const dispatchedPrimary = !validatedDraft && !savedChoiceRepair?.originalResponse && !capturedPrimary;
     let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", () =>
-      callCampaignTextProvider(dependencies, provider, job, "story_generation", primaryRequest));
+      callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest));
     if (dispatchedPrimary) {
       const preparedPrimary = preparedRequestForResult(result, provider, primaryRequest);
       orchestration = await persistOrchestration(repository, scope, job, {
@@ -2378,7 +2506,7 @@ async function executeLoadedGeneration(
               choiceRepair: { ...orchestration.choiceRepair!, status: "dispatched" }
             });
             const repairResponse = await phase("story_choice_repair", () => callCampaignTextProvider(
-              dependencies, provider, job, "story_choice_repair", repairRequest
+              ledgerDependencies, provider, job, "story_choice_repair", repairRequest
             ));
             if (repairResponse.outputLimited) throw new Error("Choice repair reached its output limit.");
             const fields = parseChoiceRepair(repairResponse.content);
@@ -2533,7 +2661,7 @@ async function executeLoadedGeneration(
       let coverageOutputLimited = true;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+          callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
             input: buildSceneCoveragePrompt(safeAction, parsedNarration)
           }));
@@ -2603,7 +2731,7 @@ async function executeLoadedGeneration(
           sceneCoverageRepair: { ...orchestration.sceneCoverageRepair!, status: "dispatched" }
         });
         const sceneRewriteResponse = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
-          dependencies,
+          ledgerDependencies,
           provider,
           job,
           "scene_coverage_rewrite",
@@ -2631,7 +2759,7 @@ async function executeLoadedGeneration(
           try {
             const coverageResponse = await phase("scene_coverage_validation", () =>
               callCampaignTextProvider(
-                dependencies,
+                ledgerDependencies,
                 provider,
                 job,
                 "scene_coverage_validation",
@@ -2745,7 +2873,7 @@ async function executeLoadedGeneration(
       let mainEventCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+          callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
             input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), currentMainStory.narration)
           })
@@ -2845,7 +2973,7 @@ async function executeLoadedGeneration(
         let repairedMain: ReturnType<typeof parseStoryOutput>;
         try {
           repairResult = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
-            dependencies, provider, job, "scene_coverage_rewrite", repairRequest
+            ledgerDependencies, provider, job, "scene_coverage_rewrite", repairRequest
           ));
           repairedMain = (repairResult.outputLimited
             ? { ok: false as const, code: "output_limit", errors: ["The event-coverage rewrite reached its output limit."] }
@@ -2879,7 +3007,7 @@ async function executeLoadedGeneration(
         let repairedCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
         try {
           const coverageResponse = await phase("scene_coverage_validation", () =>
-            callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+            callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
               input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), repairedStory.narration)
             })
@@ -2973,7 +3101,7 @@ async function executeLoadedGeneration(
             authoritative_context: promptContext
           }));
           const extensionResponse = await callCampaignTextProvider(
-            dependencies,
+            ledgerDependencies,
             provider,
             job,
             "event_extension",
@@ -3048,7 +3176,7 @@ async function executeLoadedGeneration(
       let eventCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+          callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
             input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), committedStory.narration)
           })
@@ -3062,7 +3190,7 @@ async function executeLoadedGeneration(
           .slice(formatNarrationParagraphs(parsed.story.narration).length).trim();
         try {
           const coverageResponse = await phase("scene_coverage_validation", () =>
-            callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+            callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
               input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
             })
@@ -3186,7 +3314,7 @@ async function executeLoadedGeneration(
         };
         try {
           repairResponse = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
-            dependencies,
+            ledgerDependencies,
             provider,
             job,
             "scene_coverage_rewrite",
@@ -3233,7 +3361,7 @@ async function executeLoadedGeneration(
           finalSentFactIds = repairSentFactIds;
           try {
             const coverageResponse = await phase("scene_coverage_validation", () =>
-              callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+              callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
                 systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
                 input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), repairedStory.narration)
               })
@@ -3243,7 +3371,7 @@ async function executeLoadedGeneration(
               const appendedNarration = formatNarrationParagraphs(repairedStory.narration)
                 .slice(formatNarrationParagraphs(parsed.story.narration).length).trim();
               const appendedCoverageResponse = await phase("scene_coverage_validation", () =>
-                callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+                callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
                   systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
                   input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
                 })
@@ -3316,7 +3444,7 @@ async function executeLoadedGeneration(
           if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
           const prepared = prepareContinuityReview({ provider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
             promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory, effectiveContextWindowTokens: effectiveContextWindow,
-            responseContract: frozenContractForOperation(job, "story_continuity_review") });
+            ...(frozenContractForOperation(job, "story_continuity_review") ? { responseContract: frozenContractForOperation(job, "story_continuity_review") } : {}) });
           const priorLedger = orchestration.logicalAttempt ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0,
             reviewsConsumed: 0, automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0,
             choiceRepairsConsumed: orchestration.choiceRepair ? 1 : 0, eventCoverageRepairsConsumed: orchestration.eventCoverageRepair ? 1 : 0 };
@@ -3324,7 +3452,7 @@ async function executeLoadedGeneration(
           checkpoint = { ...checkpoint, status: "dispatched", reviewRequestHash: prepared.requestHash };
           orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint,
             logicalAttempt: { ...priorLedger, reviewsConsumed: priorLedger.reviewsConsumed + 1 }, sourceEvidenceManifest: finalManifest });
-          const reviewed = await phase("story_continuity_review", () => callCampaignTextProvider(dependencies, provider, job, "story_continuity_review", prepared.request));
+          const reviewed = await phase("story_continuity_review", () => callCampaignTextProvider(ledgerDependencies, provider, job, "story_continuity_review", prepared.request));
           const validated = validatePreparedContinuityReviewResult(prepared, reviewed);
           checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"] };
         } catch (error) {
@@ -3407,7 +3535,7 @@ async function executeLoadedGeneration(
               preparedRepair = prepareContinuityRepair({ provider, manifest: finalManifest, promptSnapshot: frozenPromptEnvelope,
                 direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
                 effectiveContextWindowTokens: effectiveContextWindow,
-                responseContract: frozenContractForOperation(job, "story_continuity_repair") });
+                ...(frozenContractForOperation(job, "story_continuity_repair") ? { responseContract: frozenContractForOperation(job, "story_continuity_repair") } : {}) });
             } catch (error) {
               if (await reofferFailedAuthorizedRetry("continuity", "The authorized continuity repair request could not be prepared.")) return true;
               assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
@@ -3438,7 +3566,7 @@ async function executeLoadedGeneration(
             let repairResponse: ProviderResult;
             let repairedStory: StoryTurnOutput | null = null;
             try {
-              repairResponse = await phase("story_continuity_repair", () => callCampaignTextProvider(dependencies, provider, job, "story_continuity_repair", preparedRepair.request));
+              repairResponse = await phase("story_continuity_repair", () => callCampaignTextProvider(ledgerDependencies, provider, job, "story_continuity_repair", preparedRepair.request));
               if (!repairResponse.outputLimited) {
                 if (extensionOnly) repairedStory = parseEventExtension(
                   repairResponse.content,
