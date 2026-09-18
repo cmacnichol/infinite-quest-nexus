@@ -3,6 +3,7 @@ import {
   generationJobSnapshotSchema,
   generationReviewDecisionRequestSchema,
   generationReviewReasonCodeSchema,
+  projectGenerationValidationIssues,
   projectGenerationReviewDetail,
   projectGenerationReviewSummary
 } from "../../packages/contracts/src/index.js";
@@ -40,6 +41,38 @@ const snapshot = {
 };
 
 describe("generation review contracts", () => {
+  it("projects only known structural validation errors into finite safe issues", () => {
+    expect(projectGenerationValidationIssues([
+      "superseded_facts: Invalid input: expected array, received undefined",
+      "canonical_fact_updates: Invalid input: expected array, received undefined"
+    ])).toEqual([
+      { field: "superseded_facts", code: "missing_array" },
+      { field: "canonical_fact_updates", code: "missing_array" }
+    ]);
+    expect(projectGenerationValidationIssues([
+      "canonical_facts.0: Invalid input: expected string, received object",
+      "canonical_facts.1: Invalid input: expected string, received object"
+    ])).toEqual([{ field: "canonical_facts", code: "expected_string_item" }]);
+    expect(projectGenerationValidationIssues([
+      "PRIVATE_CANARY: provider response and prompt contents"
+    ])).toEqual([]);
+  });
+
+  it("rejects malformed, unsupported, repeated, and overlong validation diagnostics", () => {
+    const privateCanary = "PRIVATE_VALIDATION_CANARY";
+    expect(projectGenerationValidationIssues([
+      "canonical_facts.x: Invalid input: expected string, received object",
+      "unknown_field: Invalid input: expected array, received undefined",
+      "canonical_facts.0: Invalid input: expected number, received string",
+      `canonical_facts: ${privateCanary}`,
+      "canonical_facts: Invalid input: expected array, received object",
+      "canonical_facts: Invalid input: expected array, received object",
+      ...Array.from({ length: 20 }, () => "superseded_facts: Invalid input: expected array, received null")
+    ])).toEqual([
+      { field: "canonical_facts", code: "invalid_field_shape" },
+      { field: "superseded_facts", code: "invalid_field_shape" }
+    ]);
+  });
   it("rejects a decision request with user-controlled bypass fields", () => {
     expect(generationReviewDecisionRequestSchema.safeParse({
       reviewId: review.reviewId,
@@ -216,6 +249,11 @@ describe("generation review contracts", () => {
     ]);
     expect(detail).toMatchObject({ narration: "Mira crosses the quay.", choices: ["Follow Mira"], retryFailure: null, omittedFindingCount: 2 });
     expect(JSON.stringify(detail)).not.toContain("PRIVATE-CANARY");
+  });
+
+  it("keeps an absent validation issue field valid for stored review details", () => {
+    const detail = projectGenerationReviewDetail({ review, candidate: null });
+    expect(detail.validationIssues).toBeUndefined();
   });
 
   it("rejects a typed story candidate whose stable hash does not match its content", () => {

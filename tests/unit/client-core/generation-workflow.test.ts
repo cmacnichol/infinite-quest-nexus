@@ -99,6 +99,17 @@ function sync(pendingId: string | null = null): CampaignSyncStatus {
   return { pendingGeneration: pendingId ? { id: pendingId, operationKind: "append", replacementTurnId: null } : null } as CampaignSyncStatus;
 }
 
+function legacyRecovery(): CampaignSyncStatus {
+  return {
+    pendingGeneration: null,
+    generationRecovery: {
+      ...snapshot({ status: "recoverable" }),
+      errorCode: "generation_failed",
+      errorMessage: "Generation could not be completed."
+    }
+  } as unknown as CampaignSyncStatus;
+}
+
 function store(initial: StoredGenerationSubmission | null = null): PendingSubmissionStore & { value: StoredGenerationSubmission | null } {
   return {
     value: initial,
@@ -175,7 +186,7 @@ describe("generation workflow", () => {
   });
 
   it("does not dispatch generic retry for an unsupported recoverable review", async () => {
-    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const client = api({ syncStatus: async () => legacyRecovery(), retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const source = sourceFromSessions([[
       { kind: "snapshot", snapshot: snapshot({ status: "recoverable", review: { version: 2 } as never }) }
     ]]);
@@ -194,7 +205,7 @@ describe("generation workflow", () => {
   });
 
   it("does not dispatch generic retry while a supported review awaits an explicit decision", async () => {
-    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const client = api({ syncStatus: async () => legacyRecovery(), retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const source = sourceFromSessions([[
       // A reconnect can lose the review field on the stream frame. The
       // persisted recovery summary is still authoritative for this run.
@@ -230,8 +241,158 @@ describe("generation workflow", () => {
     expect(client.retries).toBe(0);
   });
 
+  it("refreshes missing review authority before recovering a first-attempt stream observation", async () => {
+    let statusReads = 0;
+    const client = api({
+      syncStatus: async () => {
+        statusReads += 1;
+        return {
+          pendingGeneration: null,
+          generationRecovery: {
+            ...snapshot({ status: "recoverable", review: reviewSummary() }),
+            errorCode: "generation_failed",
+            errorMessage: "Generation could not be completed."
+          }
+        } as unknown as CampaignSyncStatus;
+      },
+      retry: async () => {
+        client.retries += 1;
+        throw new Error("ordinary retry must wait for review authority");
+      }
+    });
+    const workflow = createGenerationWorkflow({
+      api: client,
+      source: sourceFromSessions([[
+        { kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }
+      ]]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.submit(campaignId, submission());
+
+    const aborted = signal();
+    const iterator = run.watch(aborted)[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    const terminal = iterator.next();
+    aborted.abort();
+    await terminal;
+    expect(statusReads).toBe(1);
+    expect(first).toMatchObject({ value: { type: "status", snapshot: { review: reviewSummary() } } });
+    expect(client.retries).toBe(0);
+    await expect(run.decideReview({ reviewId: reviewDetail().reviewId, revision: reviewDetail().revision, decision: "retry" }))
+      .resolves.toEqual(actionResponse("queued"));
+  });
+
+  it.each([
+    ["the status read fails", async () => { throw new Error("status unavailable"); }],
+    ["the status read belongs to another job", async () => sync(otherJobId)]
+  ])("does not dispatch ordinary retry when %s", async (_label, syncStatus) => {
+    const client = api({
+      syncStatus,
+      retry: async () => {
+        client.retries += 1;
+        return actionResponse("queued");
+      }
+    });
+    const workflow = createGenerationWorkflow({
+      api: client,
+      source: sourceFromSessions([[
+        { kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }
+      ]]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.submit(campaignId, submission());
+
+    const events = await collect(run.watch(signal()));
+
+    expect(events.at(-1)).toMatchObject({ type: "settled", outcome: "unrecoverable" });
+    expect(client.retries).toBe(0);
+  });
+
+  it("refreshes review authority after an ordinary retry races with a pending review", async () => {
+    let statusReads = 0;
+    const client = api({
+      syncStatus: async () => {
+        statusReads += 1;
+        return statusReads === 1 ? legacyRecovery() : {
+          pendingGeneration: null,
+          generationRecovery: {
+            ...snapshot({ status: "recoverable", review: reviewSummary() }),
+            errorCode: "generation_failed",
+            errorMessage: "Generation could not be completed."
+          }
+        } as unknown as CampaignSyncStatus;
+      },
+      retry: async () => {
+        client.retries += 1;
+        throw Object.assign(new Error("review required"), { statusCode: 409, details: { code: "generation_review_required" } });
+      }
+    });
+    const workflow = createGenerationWorkflow({
+      api: client,
+      source: sourceFromSessions([[
+        { kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }
+      ]]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.submit(campaignId, submission());
+
+    const events = await collect(run.watch(signal()));
+
+    expect(statusReads).toBe(2);
+    expect(client.retries).toBe(1);
+    expect(events).toContainEqual(expect.objectContaining({ type: "status", snapshot: expect.objectContaining({ review: reviewSummary() }) }));
+    expect(events.at(-1)).toMatchObject({ type: "settled", outcome: "unrecoverable" });
+  });
+
+  it("emits the authoritative review snapshot when manual retry receives a review conflict before streaming", async () => {
+    const decisions: GenerationReviewDecisionRequest[] = [];
+    const client = api({
+      syncStatus: async () => ({
+        pendingGeneration: null,
+        generationRecovery: {
+          ...snapshot({ status: "recoverable", review: reviewSummary() }),
+          errorCode: "generation_failed",
+          errorMessage: "Generation could not be completed."
+        }
+      } as unknown as CampaignSyncStatus),
+      retry: async () => {
+        client.retries += 1;
+        throw Object.assign(new Error("review required"), { statusCode: 409, details: { code: "generation_review_required" } });
+      },
+      decideReview: async (_id, request) => {
+        decisions.push(request);
+        return actionResponse("queued");
+      }
+    });
+    const workflow = createGenerationWorkflow({
+      api: client,
+      source: sourceFromSessions([]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.submit(campaignId, submission());
+
+    const events = await collect(run.retryGeneration(signal()));
+
+    expect(client.retries).toBe(1);
+    expect(decisions).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "status",
+      snapshot: expect.objectContaining({
+        id: jobId,
+        campaignId,
+        status: "recoverable",
+        review: reviewSummary()
+      })
+    }));
+    expect(events.at(-1)).toMatchObject({ type: "settled", outcome: "unrecoverable" });
+  });
+
   it("retains a live pending review across a reconnect frame that omits its summary", async () => {
-    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const client = api({ syncStatus: async () => legacyRecovery(), retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const source = sourceFromSessions([[
       { kind: "snapshot", snapshot: snapshot({ status: "recoverable", review: reviewSummary() }) },
       { kind: "degraded", reason: "stream_lost", consecutiveFailures: 1 },
@@ -507,7 +668,7 @@ describe("generation workflow", () => {
         { kind: "snapshot", snapshot: snapshot({ status: "completed", attempts: 2 }) }
       ]
     ]);
-    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const client = api({ syncStatus: async () => legacyRecovery(), retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
     const run = await workflow.submit(campaignId, submission());
 
@@ -523,7 +684,7 @@ describe("generation workflow", () => {
       [{ kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }],
       [{ kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 2 }) }]
     ]);
-    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const client = api({ syncStatus: async () => legacyRecovery(), retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
     const run = await workflow.submit(campaignId, submission());
 
@@ -579,7 +740,7 @@ describe("generation workflow", () => {
         return iterator;
       }
     };
-    const workflow = createGenerationWorkflow({ api: api(), source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const workflow = createGenerationWorkflow({ api: api({ syncStatus: async () => legacyRecovery() }), source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
     const run = await workflow.submit(campaignId, submission());
     const consumerSignal = signal();
     const iterator = run.watch(consumerSignal)[Symbol.asyncIterator]();
@@ -692,7 +853,7 @@ describe("generation workflow", () => {
         yield { kind: "snapshot", snapshot: snapshot({ status: "cancelled" }) };
       }
     };
-    const workflow = createGenerationWorkflow({ api: api(), source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const workflow = createGenerationWorkflow({ api: api({ syncStatus: async () => legacyRecovery() }), source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
     const run = await workflow.submit(campaignId, submission());
     const first = run.watch(signal())[Symbol.asyncIterator]();
     const firstNext = first.next();
@@ -729,7 +890,7 @@ describe("generation workflow", () => {
         return iterator;
       }
     };
-    const workflow = createGenerationWorkflow({ api: api(), source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const workflow = createGenerationWorkflow({ api: api({ syncStatus: async () => legacyRecovery() }), source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
     const run = await workflow.submit(campaignId, submission());
 
     await collect(run.watch(signal()));
@@ -750,7 +911,7 @@ describe("generation workflow", () => {
     ]);
 
     const mismatch = createGenerationWorkflow({
-      api: api({ retry: async () => actionResponse("queued", otherJobId) }),
+      api: api({ syncStatus: async () => legacyRecovery(), retry: async () => actionResponse("queued", otherJobId) }),
       source: sourceFromSessions([[{ kind: "snapshot", snapshot: snapshot({ status: "recoverable", attempts: 1 }) }]]),
       clock: { now: () => 1_000 },
       pendingSubmissions: store()

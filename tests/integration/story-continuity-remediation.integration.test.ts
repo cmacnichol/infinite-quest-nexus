@@ -145,4 +145,101 @@ integration("prompt-memory remediation composed workflow", () => {
     await expect(pool.query<{ attempts: string }>("SELECT count(*)::text AS attempts FROM generation_attempts WHERE generation_job_id=$1", [finalJob.id]))
       .resolves.toMatchObject({ rows: [{ attempts: "1" }] });
   });
+
+  it.each([
+    ["omitted no-op arrays", (value: Record<string, unknown>) => { delete value.superseded_facts; delete value.canonical_fact_updates; }],
+    ["content-only fact wrapper", (value: Record<string, unknown>) => { value.canonical_facts = [{ content: "The format beacon is lit." }]; }]
+  ])("accepts %s once, preserves raw evidence, and replays accepted authority", async (_label, format) => {
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Normalization composed ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "normalization.story", story: fixture }));
+    const ownerUserId = await initialOwnerId(pool);
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const seededFact = "The beacon keeper trusts the dawn watch.";
+    const seededThread = "Return to the beacon after dawn.";
+    const newFact = "The format beacon is lit.";
+    const storyDispatches = () => requests.filter((request) => Array.isArray(request.messages)).length;
+    const seedOutput = JSON.parse(story("The beacon keeper entrusts the dawn watch.", "The dawn watch has begun.", [seededThread]));
+    seedOutput.canonical_facts = [seededFact];
+    const beforeSeed = storyDispatches();
+    replies.push(JSON.stringify(seedOutput));
+    const seed = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Begin the dawn watch.", providerProfileId: providerId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(await runGenerationJob(pool, `normalization-seed-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    expect(storyDispatches()).toBe(beforeSeed + 1);
+    await expect(application.getJob({ ownerUserId, jobId: seed.id })).resolves.toMatchObject({ status: "completed" });
+
+    const output = JSON.parse(story("The format beacon is lit above the gate.", "The format beacon is lit.", [seededThread]));
+    output.canonical_facts = [newFact];
+    format(output);
+    const beforeRequests = storyDispatches();
+    replies.push(JSON.stringify(output));
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Light the format beacon.", providerProfileId: providerId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(await runGenerationJob(pool, `normalization-worker-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    expect(storyDispatches()).toBe(beforeRequests + 1);
+    await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: "completed" });
+    await expect(pool.query<{ content: string }>(
+      "SELECT content FROM campaign_canonical_facts WHERE campaign_id=$1 AND content = ANY($2::text[]) ORDER BY content",
+      [imported.campaignId, [newFact, seededFact]]
+    )).resolves.toMatchObject({ rows: [{ content: seededFact }, { content: newFact }] });
+    await expect(pool.query<{ raw: string }>("SELECT raw_output AS raw FROM generation_attempts WHERE generation_job_id=$1", [job.id]))
+      .resolves.toMatchObject({ rows: [{ raw: JSON.stringify(output) }] });
+    await expect(pool.query<{ snapshot: { openThreads: string[] } }>("SELECT state_snapshot_private AS snapshot FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]))
+      .resolves.toMatchObject({ rows: [{ snapshot: { openThreads: [seededThread] } }] });
+
+    const beforeReplay = storyDispatches();
+    replies.push(story("Dawn reaches the beacon.", "The beacon remains lit.", [seededThread]));
+    const replay = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Return to the beacon.", providerProfileId: providerId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(await runGenerationJob(pool, `normalization-replay-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    expect(storyDispatches()).toBe(beforeReplay + 1);
+    await expect(application.getJob({ ownerUserId, jobId: replay.id })).resolves.toMatchObject({ status: "completed" });
+    const replayRequest = JSON.stringify(requests.filter((request) => Array.isArray(request.messages)).at(-1));
+    expect(replayRequest).toContain(seededFact);
+    expect(replayRequest).toContain(newFact);
+    expect(replayRequest).toContain(seededThread);
+  });
+
+  it.each([
+    ["metadata-bearing fact wrapper", (value: Record<string, unknown>) => { value.canonical_facts = [{ content: "The beacon is lit.", supersedes_fact_ids: [] }]; }],
+    ["missing complete scratchpad", (value: Record<string, unknown>) => { delete value.scratchpad; }],
+    ["mechanics-bearing fact wrapper", (value: Record<string, unknown>) => { value.canonical_facts = [{ content: "The d20 roll is 18." }]; }],
+    ["unsupplied structured supersession", (value: Record<string, unknown>) => { value.canonical_fact_updates = [{ content: "The beacon is lit.", supersedes_fact_ids: ["11111111-1111-4111-8111-111111111111"] }]; }]
+  ])("rejects %s without mutating accepted authority", async (_label, corrupt) => {
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Normalization rejection ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "normalization-rejection.story", story: fixture }));
+    const ownerUserId = await initialOwnerId(pool);
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const before = await pool.query<{ turns: number; facts: number; memories: number; state: unknown }>(
+      `SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts,
+              (SELECT count(*)::int FROM chronicle_memories WHERE campaign_id=$1) AS memories,
+              (SELECT to_jsonb(campaign_state) FROM campaign_state WHERE campaign_id=$1) AS state`, [imported.campaignId]
+    );
+    const output = JSON.parse(story("The beacon is lit.", "The beacon is lit."));
+    corrupt(output);
+    const beforeDispatches = requests.filter((request) => Array.isArray(request.messages)).length;
+    replies.push(JSON.stringify(output));
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Light the beacon.", providerProfileId: providerId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(await runGenerationJob(pool, `normalization-reject-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    expect(requests.filter((request) => Array.isArray(request.messages))).toHaveLength(beforeDispatches + 1);
+    await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: expect.stringMatching(/^(recoverable|failed)$/u) });
+    await expect(pool.query<{ turns: number; facts: number; memories: number; state: unknown }>(
+      `SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts,
+              (SELECT count(*)::int FROM chronicle_memories WHERE campaign_id=$1) AS memories,
+              (SELECT to_jsonb(campaign_state) FROM campaign_state WHERE campaign_id=$1) AS state`, [imported.campaignId]
+    )).resolves.toEqual(before);
+  });
 });

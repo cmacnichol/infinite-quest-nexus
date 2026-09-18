@@ -15,6 +15,7 @@ import { createPromptRepository, resolveStoryMemoryPromptSnapshot } from "../../
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
 import { generationExecutionProtocolIdentity } from "../../packages/story-engine/src/story-only-prompt.js";
 import { effectiveProviderConfigurationFingerprint } from "../../packages/contracts/src/story-memory-policy.js";
+import { storyMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { createRuntimeProviderAdapter } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -157,29 +158,27 @@ integration("Story Memory enrollment", () => {
     await expect(commands().retry({ ownerUserId, jobId: queued.id })).rejects.toMatchObject({ details: { reason: "retry_protocol_incompatible" } });
     await expect(pool.query("SELECT status FROM generation_jobs WHERE id=$1", [queued.id])).resolves.toMatchObject({ rows: [{ status: "recoverable" }] });
   });
-  it("rejects an unacknowledged custom override, then freezes its v14 proof independently of later edits", async () => {
+  it("rejects an unacknowledged custom override, then freezes its current proof independently of later edits", async () => {
     const imported = await importCampaign("prompt acknowledgement");
     const owned = { ownerUserId, campaignId: imported.campaignId };
     const custom = "Keep the campaign's established creative voice.";
     const customHash = createHash("sha256").update(custom).digest("hex");
     await saveStoryMemoryEnrollment(pool, owned, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
 
-    await withTransaction(pool, (client) => createPromptRepository(client).savePromptOverride({
+    await expect(withTransaction(pool, (client) => createPromptRepository(client).savePromptOverride({
       ...owned, scope: "campaign", key: "story_system", content: custom,
       compatibilityAcknowledgement: {
         requiredShapeVersion: "story-output-v2",
         protocolIdentity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
         contentHash: customHash
       }
-    }));
-    await expect(commands().enqueueAppend(owned, append()))
-      .rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+    }))).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
 
     await withTransaction(pool, (client) => createPromptRepository(client).savePromptOverride({
       ...owned, scope: "campaign", key: "story_system", content: custom,
       compatibilityAcknowledgement: {
         requiredShapeVersion: "story-output-v2",
-        protocolIdentity: "story-v14-continuity-context|story-output-v2|current-continuity-v3",
+        protocolIdentity: storyMemoryPromptCompatibilityIdentity(),
         contentHash: customHash
       }
     }));
@@ -191,7 +190,7 @@ integration("Story Memory enrollment", () => {
       version: 2,
       templates: { story_system: { content: custom, hash: customHash, source: "campaign" } },
       storyMemoryCompatibility: {
-        protocolIdentity: "story-v14-continuity-context|story-output-v2|current-continuity-v3",
+        protocolIdentity: storyMemoryPromptCompatibilityIdentity(),
         templateHashes: { story_system: customHash }
       }
     });
@@ -201,7 +200,7 @@ integration("Story Memory enrollment", () => {
       ...owned, scope: "campaign", key: "story_system", content: edited,
       compatibilityAcknowledgement: {
         requiredShapeVersion: "story-output-v2",
-        protocolIdentity: "story-v14-continuity-context|story-output-v2|current-continuity-v3",
+        protocolIdentity: storyMemoryPromptCompatibilityIdentity(),
         contentHash: createHash("sha256").update(edited).digest("hex")
       }
     }));

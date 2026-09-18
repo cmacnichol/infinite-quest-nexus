@@ -42,6 +42,30 @@ describe("story-only output", () => {
       .toMatchObject({ ok: false, kind: "story" });
   });
 
+  it("normalizes supported provider formatting before protecting a choice-repair base", () => {
+    const parsed = parseStoryOnlyOutput(JSON.stringify({
+      ...base,
+      canonical_facts: [{ content: "The gate is closed." }],
+      choices: ["Wait.", " WAIT. ", "Listen.", "Look around."],
+      custom_action_suggestion: "Study the gate."
+    }));
+    expect(parsed).toMatchObject({
+      ok: false,
+      kind: "choices",
+      base: { canonical_facts: ["The gate is closed."] },
+      reasons: ["duplicate"]
+    });
+  });
+
+  it("keeps ambiguous canonical fact objects out of choice repair", () => {
+    expect(parseStoryOnlyOutput(JSON.stringify({
+      ...base,
+      canonical_facts: [{ content: "The gate is closed.", id: "untrusted" }],
+      choices: ["Wait.", " WAIT. ", "Listen.", "Look around."],
+      custom_action_suggestion: "Study the gate."
+    }))).toMatchObject({ ok: false, kind: "story" });
+  });
+
   it("strictly parses a repair and merges it without replacing protected fields", () => {
     const repaired = parseChoiceRepair(JSON.stringify(fields));
     const merged = mergeChoiceRepair(base, repaired);

@@ -85,6 +85,8 @@ export function mapGenerationApplicationError(error: GenerationApplicationError)
       );
     case "retry_source_state":
       return generationHttpError("Only recoverable or failed generation jobs can be retried.", 409);
+    case "review_decision_required":
+      return generationHttpError("This generation is waiting for a review decision. Refresh the story page and use Retry in the review panel.", 409, { code: "generation_review_required" });
     case "retry_protocol_incompatible":
       return generationHttpError("This generation uses an incompatible prompt protocol. Discard it and enqueue a new generation.", 409);
     case "story_memory_capability_unavailable":

@@ -444,7 +444,10 @@ describe("browser generation fallback source", () => {
       api: {
         enqueue: async () => ({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }),
         enqueueReplacement: async () => ({ id: jobId, status: "replacement_queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "33333333-3333-4333-8333-333333333333" }),
-        syncStatus: async () => ({ pendingGeneration: null } as CampaignSyncStatus),
+        syncStatus: async () => ({
+          pendingGeneration: null,
+          generationRecovery: snapshot({ status: "recoverable" })
+        } as unknown as CampaignSyncStatus),
         result: async () => result,
         getReview: async () => ({} as never),
         decideReview: async () => ({ id: jobId, status: "queued", operationKind: "append", replacementTurnId: null } as GenerationActionResponse),

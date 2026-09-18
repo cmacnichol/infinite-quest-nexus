@@ -977,6 +977,15 @@ async function executeLoadedGeneration(
     promptSnapshot = frozenStoryMemoryPolicySnapshot
       ? assertStoryMemoryPromptCompatibility(job.prompt_snapshot)
       : readPromptSnapshot(job.prompt_snapshot);
+    if (frozenStoryMemoryPolicySnapshot) {
+      const proof = promptSnapshot.storyMemoryCompatibility;
+      const expectedPrefix = `${frozenStoryMemoryPolicySnapshot.promptProtocol}|`;
+      // Pre-proof v14 shipped snapshots are the only compatible proof-less form.
+      if ((proof && !proof.protocolIdentity.startsWith(expectedPrefix))
+        || (!proof && frozenStoryMemoryPolicySnapshot.promptProtocol !== "story-v14-continuity-context")) {
+        throw new Error("Frozen Story Memory policy and prompt acknowledgement disagree.");
+      }
+    }
     if (frozenStoryMemoryPolicySnapshot) assertContinuityReviewPromptSnapshot(promptSnapshot, reviewMode);
     // Every downstream prompt use reads the one normalized frozen envelope.
     job = { ...job, prompt_snapshot: promptSnapshot.templates as PromptSnapshot };
@@ -993,6 +1002,21 @@ async function executeLoadedGeneration(
         code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
       } }
     }), "saving invalid prompt snapshot recovery state");
+    return false;
+  }
+  if (frozenStoryMemoryPolicySnapshot?.promptProtocol === "story-v14-continuity-context") {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id,
+      ownerUserId: job.owner_user_id,
+      workerId,
+      providerResponseId: null,
+      providerFinishReason: null,
+      errorCode: "generation_prompt_snapshot_invalid",
+      errorMessage: "Saved generation instructions require a newer protocol.",
+      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }), "saving legacy prompt protocol recovery state");
     return false;
   }
   const parsedGenerationPolicy = job.generation_policy === null
@@ -1018,15 +1042,13 @@ async function executeLoadedGeneration(
     : null;
   const stages = generationStagePolicy(generationPolicy?.playMode ?? "legacy");
   let frozenGenerationPolicyIdentity: string | null = null;
+  let expectedExecutionProtocol: string | null = null;
   try {
     frozenGenerationPolicyIdentity = generationPolicy ? generationPolicyIdentity(generationPolicy) : null;
     const basePromptProtocol = providerPromptProtocolVersion(promptSnapshot.templates as PromptSnapshot);
     const legacyExecutionProtocol = generationPolicy
       ? generationExecutionProtocolIdentity(basePromptProtocol, generationPolicy) : basePromptProtocol;
-    const expectedExecutionProtocol = hasFrozenStoryMemoryPolicy ? `story-memory-v1|${legacyExecutionProtocol}` : legacyExecutionProtocol;
-    if ((generationPolicy || hasFrozenStoryMemoryPolicy) && expectedExecutionProtocol !== job.prompt_protocol_version) {
-      throw new Error("Saved Story Direction protocol identity is incompatible.");
-    }
+    expectedExecutionProtocol = hasFrozenStoryMemoryPolicy ? `story-memory-v1|${legacyExecutionProtocol}` : legacyExecutionProtocol;
   } catch {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id,
@@ -1038,6 +1060,21 @@ async function executeLoadedGeneration(
       errorMessage: "Saved Story Direction instructions no longer match their frozen hash.",
       recoveryMetadata: { reason: "generation_policy_invalid", retryable: true }
     }), "saving invalid generation policy recovery state");
+    return false;
+  }
+  if ((generationPolicy || hasFrozenStoryMemoryPolicy) && expectedExecutionProtocol !== job.prompt_protocol_version) {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id,
+      ownerUserId: job.owner_user_id,
+      workerId,
+      providerResponseId: null,
+      providerFinishReason: null,
+      errorCode: "generation_prompt_snapshot_invalid",
+      errorMessage: "Saved generation instructions require a newer protocol.",
+      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }), "saving incompatible prompt protocol recovery state");
     return false;
   }
   logger.info({

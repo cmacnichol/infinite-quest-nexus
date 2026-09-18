@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { sha256Hex } from "./hash.js";
 import {
+  LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  STORY_MEMORY_CONTEXT_POLICY_VERSION,
   STORY_PROMPT_SCHEMA_VERSION,
   STORY_PROMPT_REQUIRED_SHAPE_PREVIEW,
   STORY_SYSTEM_PROMPT,
@@ -93,8 +95,9 @@ export const promptSnapshotSchema = z.object(
   >
 ).strict();
 
+const legacyStoryMemoryPromptCompatibilityIdentity = `${LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
 const storyMemoryCompatibilitySchema = z.object({
-  protocolIdentity: z.literal(storyMemoryPromptCompatibilityIdentity()),
+  protocolIdentity: z.union([z.literal(legacyStoryMemoryPromptCompatibilityIdentity), z.literal(storyMemoryPromptCompatibilityIdentity())]),
   templateHashes: z.object({
     story_system: z.string().regex(/^[a-f0-9]{64}$/),
     event_extension: z.string().regex(/^[a-f0-9]{64}$/)

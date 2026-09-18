@@ -1518,7 +1518,7 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
   }
   if (details) {
     details.replaceChildren();
-    for (const detail of presentation?.details || []) {
+    for (const detail of reviewView ? [] : presentation?.details || []) {
       const item = document.createElement("li");
       item.textContent = detail;
       details.append(item);
@@ -1535,7 +1535,13 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
     reviewPanel.classList.toggle("hidden", !reviewView);
     if (reviewView) {
       $("generationReviewHeading").textContent = reviewView.state === "review" ? "This turn needs your review" : "Generation review unavailable";
-      $("generationReviewReason").textContent = review?.detail?.findings?.map(finding => finding.message).join(" ") || reviewView.message;
+      const validationMessages = review?.detail?.validationIssues?.map(issue => {
+        if (issue.field === "canonical_fact_updates" && issue.code === "missing_array") return "The response omitted canonical_fact_updates; an array is required.";
+        if (issue.field === "canonical_facts" && issue.code === "expected_string_item") return "canonical_facts must contain text entries.";
+        if (issue.code === "missing_array") return `The response omitted ${issue.field}; an array is required.`;
+        return issue.code === "expected_string_item" ? `${issue.field} must contain text entries.` : `The response has an invalid ${issue.field} shape.`;
+      }) || [];
+      $("generationReviewReason").textContent = [...validationMessages, ...(review?.detail?.findings?.map(finding => finding.message) || [])].join(" ") || reviewView.message;
       const preview = $("generationReviewPreview");
       preview.replaceChildren();
       if (review?.detail?.narration) preview.append(...review.detail.narration.split(/\r?\n/).filter(Boolean).map(text => { const p = document.createElement("p"); p.textContent = text; return p; }));

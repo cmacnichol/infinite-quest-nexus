@@ -28,11 +28,45 @@ export const generationReviewFindingSchema = z.strictObject({
   message: z.string().trim().min(1).max(500)
 });
 
+export const generationValidationIssueFieldSchema = z.enum(["superseded_facts", "canonical_fact_updates", "canonical_facts"]);
+export const generationValidationIssueCodeSchema = z.enum(["missing_array", "expected_string_item", "invalid_field_shape"]);
+export const generationValidationIssueSchema = z.strictObject({
+  field: generationValidationIssueFieldSchema,
+  code: generationValidationIssueCodeSchema
+});
+
 export const generationReviewDetailSchema = generationReviewSummarySchema.extend({
   narration: z.string().max(200_000).nullable(), choices: z.array(z.string().max(20_000)).max(100),
   findings: z.array(generationReviewFindingSchema).max(20), retryDescription: z.string().trim().min(1).max(500),
-  retryFailure: z.string().trim().min(1).max(500).nullable(), omittedFindingCount: z.number().int().min(0)
+  retryFailure: z.string().trim().min(1).max(500).nullable(), omittedFindingCount: z.number().int().min(0),
+  validationIssues: z.array(generationValidationIssueSchema).max(8).optional()
 }).strict();
+
+const validationFields = ["superseded_facts", "canonical_fact_updates", "canonical_facts"] as const;
+const missingArrayPattern = /^(superseded_facts|canonical_fact_updates|canonical_facts): Invalid input: expected array, received undefined$/u;
+const expectedStringItemPattern = /^(superseded_facts|canonical_fact_updates|canonical_facts)\.\d+: Invalid input: expected string, received object$/u;
+const invalidFieldShapePattern = /^(superseded_facts|canonical_fact_updates|canonical_facts): Invalid input: expected array, received (?:null|boolean|number|string|object)$/u;
+
+/** Projects only recognized validator shapes; provider text is never retained. */
+export function projectGenerationValidationIssues(errors: readonly string[]): GenerationValidationIssue[] {
+  const issues: GenerationValidationIssue[] = [];
+  const seen = new Set<string>();
+  for (const error of errors.slice(0, 100)) {
+    const missing = missingArrayPattern.exec(error);
+    const item = expectedStringItemPattern.exec(error);
+    const shape = invalidFieldShapePattern.exec(error);
+    const match = missing ?? item ?? shape;
+    if (!match || !validationFields.includes(match[1] as GenerationValidationIssueField)) continue;
+    const issue: GenerationValidationIssue = {
+      field: match[1] as GenerationValidationIssueField,
+      code: missing ? "missing_array" : item ? "expected_string_item" : "invalid_field_shape"
+    };
+    const key = `${issue.field}:${issue.code}`;
+    if (!seen.has(key)) { seen.add(key); issues.push(issue); }
+    if (issues.length === 8) break;
+  }
+  return issues;
+}
 
 const reviewReasonMessages: Record<GenerationReviewReasonCode, string> = {
   scene_beats_missing: "The candidate does not cover all requested scene beats.",
@@ -57,7 +91,8 @@ const generationReviewDetailProjectionInputSchema = z.object({
   review: generationReviewSummarySchema.passthrough(),
   candidate: fictionPreviewSchema.nullable().optional(),
   continuityReview: continuityReviewSchema.nullable().optional(),
-  omittedFindingCount: z.number().int().min(0).optional()
+  omittedFindingCount: z.number().int().min(0).optional(),
+  validationIssues: z.array(generationValidationIssueSchema).max(8).optional()
 }).passthrough();
 
 const continuityCategoryLabels = {
@@ -99,7 +134,8 @@ export function projectGenerationReviewDetail(value: unknown): GenerationReviewD
     // Retry execution errors are private orchestration diagnostics.  The public
     // surface records only that the one authorized replacement was unavailable.
     retryFailure: input.review.retryFailure ? "The authorized retry did not produce an acceptable replacement." : null,
-    omittedFindingCount: input.omittedFindingCount ?? 0
+    omittedFindingCount: input.omittedFindingCount ?? 0,
+    ...(input.validationIssues ? { validationIssues: input.validationIssues } : {})
   });
 }
 
@@ -117,4 +153,7 @@ export type GenerationReviewDecisionRequest = Readonly<z.infer<typeof generation
 export type GenerationReviewSummary = Readonly<z.infer<typeof generationReviewSummarySchema>>;
 export type GenerationReviewTransport = Readonly<z.infer<typeof generationReviewTransportSchema>>;
 export type GenerationReviewFinding = Readonly<z.infer<typeof generationReviewFindingSchema>>;
+export type GenerationValidationIssueField = z.infer<typeof generationValidationIssueFieldSchema>;
+export type GenerationValidationIssueCode = z.infer<typeof generationValidationIssueCodeSchema>;
+export type GenerationValidationIssue = Readonly<z.infer<typeof generationValidationIssueSchema>>;
 export type GenerationReviewDetail = Readonly<z.infer<typeof generationReviewDetailSchema>>;

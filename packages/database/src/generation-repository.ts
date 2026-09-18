@@ -14,7 +14,7 @@ import {
 } from "../../application/src/index.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../application/src/generation/review-checkpoint.js";
 import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
-import { generationReviewDecisionRequestSchema, projectGenerationReviewDetail } from "../../contracts/src/generation-review.js";
+import { generationReviewDecisionRequestSchema, projectGenerationReviewDetail, projectGenerationValidationIssues } from "../../contracts/src/generation-review.js";
 import { continuityReviewCheckpointSchema } from "../../application/src/memory/continuity-review-checkpoint.js";
 import {
   assertStoryMemoryPromptCompatibility,
@@ -690,6 +690,19 @@ export function createPostgresGenerationCommandRepository(
       if (!row) throw notFound({ jobId: scope.jobId });
       const checkpoint = generationReviewCheckpointSchema.safeParse(row.orchestrationPrivate?.generationReview);
       if (!checkpoint.success) throw new GenerationApplicationError("invalid_state");
+      const producingResponseId = checkpoint.data.gateCandidate.producingResponseId;
+      const attempts = row.status !== "recoverable" || checkpoint.data.state !== "pending" || producingResponseId === null ? [] : (await pool.query<{ validationErrors: unknown }>(
+        `SELECT validation_errors AS "validationErrors"
+           FROM generation_attempts
+          WHERE generation_job_id = $1 AND owner_user_id = $2 AND provider_response_id = $3
+          LIMIT 2`,
+        [scope.jobId, scope.ownerUserId, producingResponseId]
+      )).rows;
+      const validationErrors = attempts.length === 1 && Array.isArray(attempts[0]!.validationErrors)
+        && attempts[0]!.validationErrors.every((error): error is string => typeof error === "string")
+        ? attempts[0]!.validationErrors
+        : [];
+      const validationIssues = projectGenerationValidationIssues(validationErrors);
       return projectGenerationReviewDetail({
         review: {
           ...checkpoint.data,
@@ -705,7 +718,8 @@ export function createPostgresGenerationCommandRepository(
             state.continuityReview ?? row.orchestrationPrivate?.continuityReview
           );
           return continuity.success ? continuity.data.result : null;
-        })()
+        })(),
+        ...(validationIssues.length ? { validationIssues } : {})
       });
     },
 
@@ -788,7 +802,7 @@ export function createPostgresGenerationCommandRepository(
         if (!job) throw notFound({ jobId: scope.jobId });
         const review = generationReviewCheckpointSchema.safeParse(job.orchestrationPrivate?.generationReview);
         if (job.generationStatus === "recoverable" && review.success && review.data.state === "pending") {
-          throw new GenerationApplicationError("conflict");
+          throw new GenerationApplicationError("conflict", { reason: "review_decision_required" });
         }
         if (job.generationStatus !== "recoverable" && job.generationStatus !== "failed") {
           throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: job.generationStatus });
