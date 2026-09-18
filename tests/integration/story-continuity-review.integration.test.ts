@@ -250,6 +250,32 @@ integration("T17 durable continuity review", () => {
     expect(saved.validatedMainDraft).toMatchObject({ factFormatRepair: { planHash } });
   });
 
+  it("retains an applied format-repair receipt through a later continuity Keep", async () => {
+    const { job, application } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewSequence = ["conflict"];
+    requests.length = 0;
+    await runGenerationJob(pool, `format-continuity-offer-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected format repair offer.");
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+    await runGenerationJob(pool, `format-continuity-review-${randomUUID()}`, 30, credentialSecret);
+    const continuity = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(continuity).toMatchObject({ stage: "continuity", canKeep: true });
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: continuity.reviewId, revision: continuity.revision, decision: "keep"
+    });
+    await runGenerationJob(pool, `format-continuity-keep-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    const saved = (await pool.query<{ orchestration_private: { generationReview: { decisionJournal: Array<{ decision: string }> } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    expect(saved.generationReview.decisionJournal.map((entry) => entry.decision)).toEqual(["repair_format", "keep"]);
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(1);
+  });
+
   it("pauses invalid Story Direction choices until one retry repairs the retained narration", async () => {
     const { job, application, campaignId } = await enqueue("enforce", true);
     reviewVerdict = "pass"; requests.length = 0; needsChoiceRepair = true;
