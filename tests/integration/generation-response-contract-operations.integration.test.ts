@@ -33,6 +33,13 @@ function story(choices = ["Wait.", "Wait.", "Listen.", "Leave."]) {
   return JSON.stringify({ narration: "Mira waits at the observatory.", choices, custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: "Mira waits at the observatory.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
+function extendedStory() {
+  const output = JSON.parse(story(["Continue.", "Wait.", "Listen.", "Leave."])) as Record<string, unknown>;
+  output.narration = "Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.";
+  output.continuity_summary = output.narration;
+  return JSON.stringify(output);
+}
+
 integration("strict response-contract operation workflow", () => {
   let pool: DatabasePool;
   let server: Server;
@@ -40,6 +47,7 @@ integration("strict response-contract operation workflow", () => {
   let providerId = "";
   let endpointIdentity = "";
   const requests: string[] = [];
+  const responses: Array<{ body: string; content: string }> = [];
   let reviewCalls = 0;
   let primaryHasDuplicateChoices = true;
   let eventCoverageSequence: boolean[] = [];
@@ -83,12 +91,13 @@ integration("strict response-contract operation workflow", () => {
             : system.includes("validate whether generated fiction") && Array.isArray(input.required_events)
               ? JSON.stringify((() => { const covered = eventCoverageSequence.shift() ?? true; return { event_results: input.required_events.map((event: { event_id: string }) => ({ event_id: event.event_id, covered, missing_required_beats: covered ? [] : ["The bell must ring."], contradictions: [] })) }; })())
           : system.includes("complete an already validated adventure turn") || body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat")
-            ? story(["Continue.", "Wait.", "Listen.", "Leave."]).replace("Mira waits at the observatory.", "Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.")
+            ? extendedStory()
           : input.protocol === "story-continuity-review-v1"
           ? JSON.stringify({ version: "story-continuity-review-v1", verdict: reviewCalls++ === 0 ? "conflict" : "pass", findings: reviewCalls === 1 ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: evidence?.id ?? "missing", quote: evidence?.content.slice(0, 20) ?? "missing" }, output: { path: "/narration", start: 0, end: 4, quote: "Mira" }, explanation: "Fixture conflict." }] : [] })
           : input.protocol === "story-continuity-repair-v1" ? story(["Continue.", "Wait.", "Listen.", "Leave."])
             : body.includes("final_narration") ? JSON.stringify({ choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." })
               : story(primaryHasDuplicateChoices ? undefined : ["Continue.", "Wait.", "Listen.", "Leave."]);
+        responses.push({ body, content });
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ id: randomUUID(), model, provider: "strict-route", choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } }));
       });
@@ -102,7 +111,7 @@ integration("strict response-contract operation workflow", () => {
   });
 
   afterAll(async () => { await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done())); await (server as Server & { transport?: { close(): Promise<void> } }).transport?.close(); await pool.end(); });
-  afterEach(() => { requests.length = 0; reviewCalls = 0; primaryHasDuplicateChoices = true; eventCoverageSequence = []; sceneCoverageSequence = []; });
+  afterEach(() => { requests.length = 0; responses.length = 0; reviewCalls = 0; primaryHasDuplicateChoices = true; eventCoverageSequence = []; sceneCoverageSequence = []; });
 
   function records() {
     return (["story", "choices", "continuity_review"] as const).map((operation) => ({
@@ -224,13 +233,15 @@ integration("strict response-contract operation workflow", () => {
     const workerId = `strict-extension-${randomUUID()}`;
     const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
     await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
-    expect(await fixture.application.getJob({ ownerUserId, jobId: fixture.job.id })).toMatchObject({ status: "completed" });
+    const outcome = await pool.query<{ status: string; errorCode: string | null; errorMessage: string | null; extensionError: string | null }>("SELECT status,error_code AS \"errorCode\",error_message AS \"errorMessage\",orchestration_private->>'extensionError' AS \"extensionError\" FROM generation_jobs WHERE id=$1", [fixture.job.id]);
+    expect(outcome.rows[0]).toMatchObject({ status: "completed", errorCode: null, errorMessage: null, extensionError: null });
     const saved = (await pool.query<{ orchestrationPrivate: Record<string, any> }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id])).rows[0]!.orchestrationPrivate;
     const invocations = saved.responseContractInvocations as Array<{ operation: string; requestPayloadHash: string }>;
     expect(invocations.map((entry) => entry.operation)).toEqual(["story_generation", "event_extension", "story_continuity_review"]);
     const extensionIndex = invocations.findIndex((entry) => entry.operation === "event_extension");
     const extensionBody = requests.find((body) => JSON.parse(body).messages[0].content.includes("complete an already validated adventure turn"));
     expect(extensionBody).toBeDefined();
+    expect(JSON.parse(responses.find((entry) => entry.body === extensionBody)!.content)).toMatchObject({ narration: "Mira waits at the observatory.\n\nThe bell rings as the keeper arrives." });
     const wire = JSON.parse(extensionBody!);
     const schema = getProviderOutputSchema("story");
     expect(wire).toMatchObject({ model, response_format: { type: "json_schema", json_schema: { name: schema.name, strict: true, schema: schema.schema } }, provider: { require_parameters: true, only: ["strict-route"] } });
@@ -268,6 +279,7 @@ integration("strict response-contract operation workflow", () => {
     expect(interrupted).toBe(true);
     const rewriteBodies = requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"));
     expect(rewriteBodies).toHaveLength(1);
+    expect(JSON.parse(responses.find((entry) => entry.body === rewriteBodies[0])!.content)).toMatchObject({ narration: "Mira waits at the observatory.\n\nThe bell rings as the keeper arrives." });
     const strictRewrite = JSON.parse(rewriteBodies[0]!);
     const schema = getProviderOutputSchema("story");
     expect(strictRewrite).toMatchObject({ model, response_format: { type: "json_schema", json_schema: { name: schema.name, strict: true, schema: schema.schema } }, provider: { require_parameters: true, only: ["strict-route"] } });
