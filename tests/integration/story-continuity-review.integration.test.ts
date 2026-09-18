@@ -254,6 +254,18 @@ integration("T17 durable continuity review", () => {
     return result.rows[0]!;
   }
 
+  function expectOneFactFormatRepairApplication(
+    orchestration: Record<string, any>,
+    expected: { jobId: string; reviewId: string; revision: number; planHash: string; sourceResponseId?: string; rawOutputReference?: string; producingRequestHash?: string; providerConfigurationHash?: string }
+  ) {
+    expect(orchestration.factFormatRepairApplications).toEqual([expect.objectContaining({
+      version: 1,
+      ...expected,
+      rawOutputHash: expect.any(String),
+      resultHash: expect.any(String)
+    })]);
+  }
+
   it("repairs malformed fact formatting once from the retained primary response", async () => {
     const { job, application, campaignId } = await enqueue("enforce");
     malformedFactFormatting = true;
@@ -367,6 +379,11 @@ integration("T17 durable continuity review", () => {
     expect(saved.generationReview.decisionJournal.filter((entry: { decision: string }) => entry.decision === "repair_format")).toHaveLength(1);
     expect(saved.generationReview.factFormatRepair).toMatchObject({ status: "applied", planHash: offer.formatRepair.planHash });
     expect(saved.validatedMainDraft).toMatchObject({ factFormatRepair: { planHash: offer.formatRepair.planHash } });
+    expectOneFactFormatRepairApplication(saved, {
+      jobId: job.id, reviewId: offer.reviewId, revision: offer.revision, planHash: offer.formatRepair.planHash,
+      sourceResponseId: savedAtOffer.primaryResult.response.responseId, rawOutputReference: savedAtOffer.primaryResult.rawOutputReference,
+      producingRequestHash: savedAtOffer.primaryResult.requestPayloadHash, providerConfigurationHash: savedAtOffer.primaryResult.providerConfigurationHash
+    });
 
     expect(await runGenerationJob(pool, `format-authority-duplicate-${randomUUID()}`, 30, credentialSecret)).toBe(false);
     expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(after);
@@ -621,6 +638,11 @@ integration("T17 durable continuity review", () => {
       response: { responseId: originalPrimary.response.responseId },
       factFormatRepair: { planHash: offer.formatRepair.planHash }
     });
+    expectOneFactFormatRepairApplication(saved, {
+      jobId: job.id, reviewId: offer.reviewId, revision: offer.revision, planHash: offer.formatRepair.planHash,
+      sourceResponseId: originalPrimary.response.responseId, rawOutputReference: originalPrimary.rawOutputReference,
+      producingRequestHash: originalPrimary.requestPayloadHash, providerConfigurationHash: originalPrimary.providerConfigurationHash
+    });
   });
 
   it("retains an applied format-repair receipt through a later continuity Keep", async () => {
@@ -675,6 +697,9 @@ integration("T17 durable continuity review", () => {
       "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.orchestration_private;
     expect(saved.generationReview).toMatchObject({ state: "pending", stage: "continuity", factFormatRepair: { status: "applied", planHash: offer.formatRepair.planHash } });
+    expectOneFactFormatRepairApplication(saved, {
+      jobId: job.id, reviewId: offer.reviewId, revision: offer.revision, planHash: offer.formatRepair.planHash
+    });
   });
 
   it("uses the current second repair receipt after a full Retry replaces the first malformed candidate", async () => {
@@ -722,6 +747,11 @@ integration("T17 durable continuity review", () => {
       requestPayloadHash: secondPrimary.requestPayloadHash,
       response: { responseId: secondPrimary.response.responseId },
       factFormatRepair: { reviewId: secondOffer.reviewId, planHash: secondOffer.formatRepair.planHash }
+    });
+    expectOneFactFormatRepairApplication(saved, {
+      jobId: job.id, reviewId: secondOffer.reviewId, revision: secondOffer.revision, planHash: secondOffer.formatRepair.planHash,
+      sourceResponseId: secondPrimary.response.responseId, rawOutputReference: secondPrimary.rawOutputReference,
+      producingRequestHash: secondPrimary.requestPayloadHash, providerConfigurationHash: secondPrimary.providerConfigurationHash
     });
     expect((await acceptedAuthoritySnapshot(campaignId)).turns as unknown[]).toHaveLength((acceptedBefore.turns as unknown[]).length + 1);
   });
@@ -793,6 +823,9 @@ integration("T17 durable continuity review", () => {
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
       expect(saved.extension.story.narration.startsWith(saved.validatedMainDraft.story.narration)).toBe(true);
       expect(saved.generationReview.factFormatRepair).toMatchObject({ status: "applied", planHash: offer.formatRepair.planHash });
+      expectOneFactFormatRepairApplication(saved, {
+        jobId: job.id, reviewId: offer.reviewId, revision: offer.revision, planHash: offer.formatRepair.planHash
+      });
     }
   });
 
