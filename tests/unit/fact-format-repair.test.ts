@@ -293,4 +293,24 @@ describe("fact format repair planner", () => {
     expect(changedResult.resultHash).not.toBe(first.resultHash);
     expect(first.resultHash).toMatch(/^[a-f0-9]{64}$/);
   });
+
+  it("repairs only malformed facts while preserving nested tracker JSON and its protected hash", () => {
+    const tracker = { name: "Trust", value: "wary", metadata: { history: [null, true, 2, { note: "guarded" }] } };
+    const first = eligible(rawSyntheticStory({ tracker_updates: [tracker], canonical_facts: [{ id: "label", content: "The beacon is lit." }] }), []);
+    const second = eligible(rawSyntheticStory({ tracker_updates: [tracker], canonical_facts: [{ id: "label", content: "The beacon is dark." }] }), []);
+
+    expect(first.story.tracker_updates).toEqual([tracker]);
+    expect(second.story.tracker_updates).toEqual([tracker]);
+    expect(second.protectedFieldsHash).toBe(first.protectedFieldsHash);
+    expect(second.resultHash).not.toBe(first.resultHash);
+  });
+
+  it("does not use fact repair to admit mechanics-contaminated tracker values", () => {
+    expect(planFactFormatRepair({
+      rawOutput: rawSyntheticStory({
+        tracker_updates: [{ name: "Trust", value: "Roll a d20 to make a strength check." }],
+        canonical_facts: [{ id: "label", content: "The beacon is lit." }]
+      }), visibleFacts: []
+    })).toEqual({ eligible: false, reason: "invalid_protected_fields" });
+  });
 });
