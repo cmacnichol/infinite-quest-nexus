@@ -194,6 +194,7 @@ export function mountStoryPlayerPage(
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
+  let retainedAppendDraft: Readonly<{ campaignId: string; expectedTurnNumber: number; action: string }> | null = null;
   let composerDraftEditRevision = 0;
   let programmaticFollowTarget: ViewportPosition | null = null;
   let illustrationRequestKey: string | null = null;
@@ -226,6 +227,8 @@ export function mountStoryPlayerPage(
       ui.setViewTurnNumber(result.turnNumber);
       if (submittedDraft !== null) ui.clearSubmittedComposerDraft(submittedDraft);
       submittedDraft = null;
+      retainedAppendDraft = null;
+      composition.failedTurnPrompts?.clear(result.campaignId);
       refreshCompletionResources(result.campaignId, result.turnNumber);
     },
     onError() {
@@ -485,6 +488,55 @@ export function mountStoryPlayerPage(
       && projection.generation === null
       && ui.get().viewTurnNumber === campaign.activeTurnNumber;
   };
+  const retainAppendDraft = (campaignId: string, expectedTurnNumber: number, action: string): void => {
+    if (!action || !Number.isSafeInteger(expectedTurnNumber) || expectedTurnNumber < 1) return;
+    retainedAppendDraft = { campaignId, expectedTurnNumber, action };
+    composition.failedTurnPrompts?.save(retainedAppendDraft);
+  };
+  const forgetRetainedAppendDraft = (): void => {
+    const campaignId = retainedAppendDraft?.campaignId ?? projection.campaign?.id;
+    retainedAppendDraft = null;
+    if (campaignId) composition.failedTurnPrompts?.clear(campaignId);
+  };
+  const restoreRetainedAppendDraft = (): void => {
+    const retained = retainedAppendDraft;
+    const campaign = projection.campaign;
+    if (retained === null || campaign === null
+      || campaign.id !== retained.campaignId
+      || campaign.activeTurnNumber + 1 !== retained.expectedTurnNumber
+      || ui.get().draft.trim()) return;
+    submittedDraft = null;
+    retainedAppendDraft = null;
+    ui.restoreComposerDraft(retained.action);
+  };
+  const captureHydratedAppendDraft = (sync: import("@infinite-quest/contracts").CampaignSyncStatus): void => {
+    const generation = sync.pendingGeneration ?? sync.generationRecovery;
+    if (generation?.operationKind !== "append") return;
+    const retained = composition.failedTurnPrompts?.load(sync.campaign.id);
+    if (retained?.expectedTurnNumber === generation.expectedTurnNumber) {
+      retainedAppendDraft = retained;
+      return;
+    }
+    let stored: ReturnType<typeof composition.pendingSubmissions.load>;
+    try {
+      stored = composition.pendingSubmissions.load(sync.campaign.id);
+    } catch {
+      stored = null;
+    }
+    if (stored?.operationKind === "append" && stored.expectedTurnNumber === generation.expectedTurnNumber) {
+      retainAppendDraft(sync.campaign.id, generation.expectedTurnNumber, stored.request.action);
+      return;
+    }
+    if (sync.pendingGeneration?.operationKind === "append") {
+      retainAppendDraft(sync.campaign.id, sync.pendingGeneration.expectedTurnNumber, sync.pendingGeneration.action);
+    }
+  };
+  const isUnrecoverableAppendFailure = (): boolean => {
+    const generation = projection.generation;
+    if (generation?.operation.operationKind !== "append" || generation.result.state !== "failed") return false;
+    if (generation.snapshot?.status === "recoverable") return false;
+    return generation.review?.summary.state !== "pending";
+  };
   const submitPreparedTurn = async (submission: PreparedStoryTurnSubmission) => {
     submittedDraft = submission.action;
     const pinnedReplacementTurnId = replacementTurnId;
@@ -494,6 +546,9 @@ export function mountStoryPlayerPage(
     if (!accepted) {
       if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
       return;
+    }
+    if (pinnedReplacementTurnId === null && projection.campaign !== null) {
+      retainAppendDraft(projection.campaign.id, projection.campaign.activeTurnNumber + 1, submission.action);
     }
     replacementTurnId = null;
     ui.setStoryLengthProfileOverride(null);
@@ -578,10 +633,11 @@ export function mountStoryPlayerPage(
   const composerActions: ComposerActions = {
     draft: (text) => {
       composerDraftEditRevision += 1;
+      forgetRetainedAppendDraft();
       ui.setComposerDraft(text);
       if (quietLeaf) render();
     },
-    clearDraft: () => { composerDraftEditRevision += 1; ui.clearComposerDraft(); focusDraft(); },
+    clearDraft: () => { composerDraftEditRevision += 1; forgetRetainedAppendDraft(); ui.clearComposerDraft(); focusDraft(); },
     mode: (mode) => selectInputMode(mode),
     choose: (index) => chooseStoryChoice(index),
     length: (profile) => ui.setStoryLengthProfileOverride(profile),
@@ -1077,6 +1133,7 @@ export function mountStoryPlayerPage(
       // Replace the handler rather than accumulating listeners on that node.
       textarea.oninput = () => {
         composerDraftEditRevision += 1;
+        forgetRetainedAppendDraft();
         ui.setComposerDraft(textarea.value);
         updateComposerDraftDom(textarea);
       };
@@ -1090,6 +1147,7 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='clear-story-draft']")) {
       control.addEventListener("click", () => {
         composerDraftEditRevision += 1;
+        forgetRetainedAppendDraft();
         ui.clearComposerDraft();
         focusDraft();
       });
@@ -1127,7 +1185,11 @@ export function mountStoryPlayerPage(
       control.addEventListener("click", () => { void generation.retry(); });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='discard-generation']")) {
-      control.addEventListener("click", () => { void generation.discard(); });
+      control.addEventListener("click", () => {
+        void generation.discard().then((discarded) => {
+          if (discarded) restoreRetainedAppendDraft();
+        });
+      });
     }
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='keep-generation-review'], [data-action='retry-generation-review']")) {
       control.addEventListener("click", () => {
@@ -1203,6 +1265,7 @@ export function mountStoryPlayerPage(
       storyMemorySaveInFlight = false;
     }
     projection = next;
+    if (isUnrecoverableAppendFailure()) restoreRetainedAppendDraft();
     inspectionRequestToken += 1;
     history.sync(next);
     syncComposer();
@@ -1240,6 +1303,8 @@ export function mountStoryPlayerPage(
         canBeginStory = canResolveStoryTextProvider(selectedCampaign, providerList.providers);
       } else canBeginStory = false;
       composition.campaignStore.load(sync);
+      captureHydratedAppendDraft(sync);
+      if (sync.generationRecovery?.status === "failed") restoreRetainedAppendDraft();
       syncComposer();
       if (route.turnNumber === null) ui.setViewTurnNumber(sync.campaign.activeTurnNumber);
       else if (!await history.loadTurn(route.turnNumber)) {

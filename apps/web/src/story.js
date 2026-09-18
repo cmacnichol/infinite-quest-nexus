@@ -139,6 +139,7 @@ const state = {
   streamingExpectedScrollY: null,
   turnInputMode: "action",
   nextTurnInputModeSource: null,
+  retainedAppendDraft: null,
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
   historySelectedTurnNumber: null,
@@ -437,6 +438,7 @@ async function checkOnboarding() {
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
+  if (state.campaignId !== campaignId) state.retainedAppendDraft = null;
   clearResponseEditSession();
   resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
@@ -457,6 +459,7 @@ async function loadCampaign(campaignId, options = {}) {
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
     state.generationRecovery = syncData.generationRecovery || null;
+    captureHydratedAppendDraft(syncData);
     syncTurnInputModeFromCampaign();
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
@@ -513,6 +516,7 @@ async function loadCampaign(campaignId, options = {}) {
         guidance,
         presentation
       );
+      if (state.generationRecovery.status === "failed") restoreRetainedAppendDraft();
     }
     return true;
   } catch (err) {
@@ -1264,6 +1268,9 @@ function renderTurnInput() {
 }
 
 async function submitResolvedTurn(action, details) {
+  if (details.operationKind !== "replace_latest") {
+    retainAppendDraft(state.campaignId, appendExpectedTurnNumber(state.campaign), action);
+  }
   const freeAction = $("freeAction");
   if (freeAction) freeAction.value = "";
   resetChoiceSelectionFromDraft("");
@@ -1288,6 +1295,52 @@ async function submitAction(actionText, options = {}) {
 // ── Generation Pipeline ───────────────────────────────────────
 function clearPendingSubmission() {
   if (state.campaignId) composition.pendingSubmissions.clear(state.campaignId);
+}
+
+function retainAppendDraft(campaignId, expectedTurnNumber, action) {
+  if (!campaignId || !action || !Number.isSafeInteger(expectedTurnNumber) || expectedTurnNumber < 1) return;
+  state.retainedAppendDraft = { campaignId, expectedTurnNumber, action };
+  composition.failedTurnPrompts?.save(state.retainedAppendDraft);
+}
+
+function restoreRetainedAppendDraft() {
+  const retained = state.retainedAppendDraft;
+  const freeAction = $("freeAction");
+  if (!retained || !freeAction
+    || retained.campaignId !== state.campaignId
+    || Number(state.campaign?.activeTurnNumber || 0) + 1 !== retained.expectedTurnNumber
+    || freeAction.value.trim()) return;
+  state.retainedAppendDraft = null;
+  freeAction.value = retained.action;
+  resetChoiceSelectionFromDraft(retained.action);
+  updateTurnInputCharacterCount();
+}
+
+function forgetRetainedAppendDraft() {
+  const campaignId = state.retainedAppendDraft?.campaignId || state.campaignId;
+  state.retainedAppendDraft = null;
+  if (campaignId) composition.failedTurnPrompts?.clear(campaignId);
+}
+
+function captureHydratedAppendDraft(syncData) {
+  const generation = syncData.pendingGeneration || syncData.generationRecovery;
+  if (generation?.operationKind !== "append") return;
+  const retained = composition.failedTurnPrompts?.load?.(syncData.campaign.id);
+  if (retained?.expectedTurnNumber === generation.expectedTurnNumber) {
+    state.retainedAppendDraft = retained;
+    return;
+  }
+  let stored = null;
+  try {
+    stored = composition.pendingSubmissions.load?.(syncData.campaign.id);
+  } catch (_) {
+    stored = null;
+  }
+  if (stored?.operationKind === "append" && stored.expectedTurnNumber === generation.expectedTurnNumber) {
+    retainAppendDraft(syncData.campaign.id, generation.expectedTurnNumber, stored.request.action);
+  } else if (syncData.pendingGeneration?.operationKind === "append") {
+    retainAppendDraft(syncData.campaign.id, syncData.pendingGeneration.expectedTurnNumber, syncData.pendingGeneration.action);
+  }
 }
 
 async function runGeneration(action, options = {}) {
@@ -1688,6 +1741,7 @@ async function discardRecoveryJob() {
     state.pendingGeneration = null;
     hideGenerationRecovery();
     restoreGenerationDisplay();
+    restoreRetainedAppendDraft();
     toast("Generation job discarded. The accepted turn was preserved.");
   } catch (error) {
     toast(`Could not discard generation: ${error.message}`);
@@ -1731,6 +1785,8 @@ async function finalizeCompletedGeneration(result) {
     : null;
 
   clearPendingSubmission();
+  state.retainedAppendDraft = null;
+  composition.failedTurnPrompts?.clear(result.campaignId);
   state.pendingGeneration = null;
   // A completed result is authoritative even when its saved review was shown
   // from the same live monitor. Remove that now-resolved review before the
@@ -1884,6 +1940,9 @@ async function observeGenerationRun(run, action, retryFirst = false) {
         } else {
           showGenerationRecovery(run.jobId, guidance?.message || "Generation is recoverable but needs your direction.", "generation", guidance, presentation);
         }
+      }
+      if (outcome === "failed" || (outcome === "unrecoverable" && lastSnapshot?.status === "failed")) {
+        restoreRetainedAppendDraft();
       }
       terminalError = error;
     }
@@ -3282,6 +3341,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   if (freeAction) {
     freeAction.addEventListener("input", () => {
+      forgetRetainedAppendDraft();
       resetChoiceSelectionFromDraft(freeAction.value);
       updateTurnInputCharacterCount();
     });
@@ -3292,6 +3352,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnClearTurnInput = $("btnClearTurnInput");
   if (btnClearTurnInput) btnClearTurnInput.addEventListener("click", () => {
     if (!freeAction || freeAction.disabled) return;
+    forgetRetainedAppendDraft();
     freeAction.value = "";
     resetChoiceSelectionFromDraft("");
     updateTurnInputCharacterCount();

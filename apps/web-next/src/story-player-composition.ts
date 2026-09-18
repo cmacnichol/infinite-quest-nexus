@@ -7,6 +7,8 @@ import {
   createNoopSessionPort,
   createNexusApiClient,
   createPendingSubmissionStore,
+  createFailedTurnPromptStore,
+  type FailedTurnPromptStore,
   type EventSourceFactory,
   type IllustrationApi,
   type NexusApiClient
@@ -20,11 +22,14 @@ import {
   type GenerationWorkflow,
   type IdFactory
 } from "@infinite-quest/client-core";
+import type { PendingSubmissionStore } from "@infinite-quest/client-core";
 
 export interface StoryPlayerComposition {
   readonly api: NexusApiClient;
   readonly campaignStore: CampaignStoreController;
   readonly workflow: GenerationWorkflow;
+  readonly pendingSubmissions: PendingSubmissionStore;
+  readonly failedTurnPrompts: FailedTurnPromptStore;
   readonly illustrations: IllustrationApi;
   readonly idFactory: IdFactory;
   readonly clock: Clock;
@@ -66,6 +71,8 @@ export function createStoryPlayerComposition(
     eventSourceFactory: environment.eventSourceFactory,
     random: environment.random
   });
+  const pendingSubmissions = createPendingSubmissionStore(environment.storage);
+  const failedTurnPrompts = createFailedTurnPromptStore(environment.storage);
 
   return {
     api,
@@ -73,9 +80,11 @@ export function createStoryPlayerComposition(
     workflow: createGenerationWorkflow({
       api: api.generation,
       clock,
-      pendingSubmissions: createPendingSubmissionStore(environment.storage),
+      pendingSubmissions,
       source
     }),
+    pendingSubmissions,
+    failedTurnPrompts,
     illustrations: api.illustrations,
     idFactory: createBrowserIdFactory(),
     clock,

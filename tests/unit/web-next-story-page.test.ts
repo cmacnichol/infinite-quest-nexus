@@ -1001,6 +1001,116 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("restores a persisted append draft after an authoritative failed recovery", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 },
+      activeTurnNumber: 1,
+      generationRecovery: {
+        id: "55555555-5555-4555-8555-555555555555",
+        status: "failed",
+        expectedTurnNumber: 2,
+        attempts: 2,
+        errorCode: "generation_failed",
+        errorMessage: "Story generation could not be completed.",
+        resultTurnId: null,
+        operationKind: "append",
+        replacementTurnId: null
+      },
+      turns: turnWindow([1])
+    });
+    const pendingSubmissions = {
+      load: vi.fn(() => ({
+        operationKind: "append" as const,
+        expectedTurnNumber: 2,
+        createdAt: 1,
+        request: {
+          action: "Return the lantern to its keeper.",
+          requestedInputMode: "action" as const,
+          resolvedInputMode: "action" as const,
+          inputModeSource: "explicit" as const,
+          idempotencyKey: "recovery-draft-key",
+          context: { budgetTokens: 32_000, compression: "auto" as const, recentTurns: 8 }
+        }
+      })),
+      save: vi.fn(),
+      clear: vi.fn()
+    };
+    const base = composition({ syncStatus: vi.fn().mockResolvedValue(loaded) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, {
+      ...base,
+      pendingSubmissions
+    } as StoryPlayerComposition);
+    await settle();
+
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value)
+      .toBe("Return the lantern to its keeper.");
+    mounted.dispose();
+  });
+
+  it("does not overwrite a newer composer draft when a recovered append becomes failed", async () => {
+    const page = fixture();
+    const campaignStore = createCampaignStore();
+    const recovery = {
+      id: "55555555-5555-4555-8555-555555555555",
+      status: "recoverable" as const,
+      expectedTurnNumber: 2,
+      attempts: 1,
+      errorCode: "generation_failed",
+      errorMessage: "Story generation could not be completed.",
+      resultTurnId: null,
+      operationKind: "append" as const,
+      replacementTurnId: null
+    };
+    const pendingSubmissions = {
+      load: vi.fn(() => ({
+        operationKind: "append" as const,
+        expectedTurnNumber: 2,
+        createdAt: 1,
+        request: {
+          action: "Original submitted prompt.", requestedInputMode: "action" as const,
+          resolvedInputMode: "action" as const, inputModeSource: "explicit" as const,
+          idempotencyKey: "newer-draft-key", context: { budgetTokens: 32_000, compression: "auto" as const, recentTurns: 8 }
+        }
+      })), save: vi.fn(), clear: vi.fn()
+    };
+    const initial = sync({ campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, generationRecovery: recovery, turns: turnWindow([1]) });
+    const base = composition({ campaignStore, syncStatus: vi.fn().mockResolvedValue(initial) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, { ...base, pendingSubmissions } as StoryPlayerComposition);
+    await settle();
+    const textarea = page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]");
+    if (!textarea) throw new Error("Story composer is missing.");
+    textarea.value = "Newer unsaved draft.";
+    textarea.dispatchEvent(new page.window.Event("input", { bubbles: true }));
+
+    campaignStore.load(sync({ campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, generationRecovery: { ...recovery, status: "failed", attempts: 2 }, turns: turnWindow([1]) }));
+    await settle();
+
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("Newer unsaved draft.");
+    mounted.dispose();
+  });
+
+  it("does not restore an append draft while durable recovery remains available", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1,
+      generationRecovery: {
+        id: "55555555-5555-4555-8555-555555555555", status: "recoverable", expectedTurnNumber: 2, attempts: 1,
+        errorCode: "generation_failed", errorMessage: "Story generation could not be completed.", resultTurnId: null,
+        operationKind: "append", replacementTurnId: null
+      }, turns: turnWindow([1])
+    });
+    const base = composition({ syncStatus: vi.fn().mockResolvedValue(loaded) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, {
+      ...base,
+      pendingSubmissions: { load: () => ({ operationKind: "append", expectedTurnNumber: 2, createdAt: 1, request: { action: "Keep for explicit retry.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", idempotencyKey: "recoverable-key", context: { budgetTokens: 32_000, compression: "auto", recentTurns: 8 } } }), save: vi.fn(), clear: vi.fn() }
+    } as StoryPlayerComposition);
+    await settle();
+
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("");
+    mounted.dispose();
+  });
+
   it("pauses streamed-preview following after manual scroll and resumes it explicitly", async () => {
     const page = fixture();
     const loaded = sync({

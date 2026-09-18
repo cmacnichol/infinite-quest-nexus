@@ -351,6 +351,24 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     });
   });
 
+  it("restores an append prompt after a terminal failed generation", async () => {
+    const workflow = {
+      resume: async () => null,
+      submit: vi.fn(async () => ({
+        jobId: "failed-append-job",
+        async *watch() { yield { type: "settled" as const, outcome: "failed" as const, error: new Error("provider stopped") }; }
+      }))
+    };
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      action.value = "Return the lantern to its keeper.";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(action.value).toBe("Return the lantern to its keeper."));
+      expect(workflow.submit).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("uses semantic progress and a served stylesheet for printable story documents", () => {
     expect(storyScript).toContain('<progress class="turn-progress-meter" max="100" value="${percent}"');
     expect(storyScript).toContain('href="/nexus/story-print.css"');
