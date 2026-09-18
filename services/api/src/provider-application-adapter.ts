@@ -17,8 +17,7 @@ import {
 } from "../../../packages/application/src/providers/index.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
-import { capabilityRouteConfigHash } from "../../runtime/src/provider-capability-cache.js";
-import { createHash } from "node:crypto";
+import { capabilityRouteConfigHash, providerEndpointIdentity } from "../../runtime/src/provider-capability-cache.js";
 import type { ModelParameterAdvertisement, ResponseSchemaOperation } from "../../../packages/contracts/src/text-response-format.js";
 
 type ApiRuntimeProviderAdapter = Readonly<{
@@ -48,6 +47,7 @@ type ProviderApiComposition = Readonly<{
   runtime: ApiRuntimeProviderAdapter;
   responseFormatCapabilities?: Readonly<{
     registryDigest: string;
+    now?: () => string;
     eligibility(input: Readonly<{ advertisement: ModelParameterAdvertisement | null; providerType: "openrouter" | "openai_compatible"; endpointIdentity: string; model: string; routeConfigHash: string; adapterProtocol: "text-schema-adapter-v1"; operation: ResponseSchemaOperation; schemaHash: string; streaming: boolean; now: string; nativeOpenTrackerObjects: boolean }>): Readonly<{ status: string; reason: string; verification: Readonly<{ verifiedAt: string; expiresAt: string }> | null }>;
   }>;
   transaction<T>(work: (binding: Readonly<{
@@ -59,12 +59,12 @@ type ProviderApiComposition = Readonly<{
 function responseFormatCapability(profile: ProviderProfileView, model: string, advertisement: ModelParameterAdvertisement | null | undefined, capabilities: ProviderApiComposition["responseFormatCapabilities"]) {
   if (profile.providerRole !== "text" || !capabilities) return undefined;
   const supportedProvider = profile.providerType === "openrouter" || profile.providerType === "openai_compatible";
-  const endpointIdentity = createHash("sha256").update(profile.baseUrl.replace(/\/+$/, "")).digest("hex");
+  const endpointIdentity = providerEndpointIdentity(profile.baseUrl);
   const operations = ([
     ["story", true], ["story", false], ["choices", false], ["continuity_review", false]
   ] as const).map(([operation, streaming]) => {
     const schema = getProviderOutputSchema(operation);
-    const result = supportedProvider ? capabilities.eligibility({ advertisement: advertisement ?? null, providerType: profile.providerType, endpointIdentity, model, routeConfigHash: capabilityRouteConfigHash(profile.configuration), adapterProtocol: "text-schema-adapter-v1", operation, schemaHash: schema.schemaHash, streaming, now: new Date().toISOString(), nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects }) : { status: "unknown", reason: "discovery_unavailable", verification: null };
+    const result = supportedProvider ? capabilities.eligibility({ advertisement: advertisement ?? null, providerType: profile.providerType, endpointIdentity, model, routeConfigHash: capabilityRouteConfigHash(profile.configuration), adapterProtocol: "text-schema-adapter-v1", operation, schemaHash: schema.schemaHash, streaming, now: capabilities.now?.() ?? new Date().toISOString(), nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects }) : { status: "unknown", reason: "discovery_unavailable", verification: null };
     return { operation, streaming, status: result.status, reason: result.reason, schemaVersion: schema.version, schemaHash: schema.schemaHash, verifiedAt: result.verification?.verifiedAt ?? null, expiresAt: result.verification?.expiresAt ?? null };
   });
   return { version: 1 as const, model, expectedRegistryDigest: capabilities.registryDigest, advertisedAt: advertisement?.discoveredAt ?? null, operations };

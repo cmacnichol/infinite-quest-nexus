@@ -30,7 +30,7 @@ describe("generation response-format public projection", () => {
 
   test("keeps malformed or future durable markers unknown rather than relabeling them as legacy or selected", () => {
     expect(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 2, policy: "future" } }))
-      .toMatchObject({ savedPolicy: "legacy", effectiveMode: "unknown", preflight: "unknown" });
+      .toMatchObject({ savedPolicy: "unknown", effectiveMode: "unknown", preflight: "unknown" });
     expect(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 1, policy: "auto" }, frozenResponseContracts: { version: 2 } }))
       .toMatchObject({ savedPolicy: "auto", effectiveMode: "unknown", preflight: "unknown" });
   });

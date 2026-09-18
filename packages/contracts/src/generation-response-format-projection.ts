@@ -4,7 +4,7 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const boundedIdentifier = z.string().trim().min(1).max(256);
 export const generationResponseFormatProjectionSchema = z.object({
   version: z.literal(1),
-  savedPolicy: z.enum(["legacy", "auto", "required"]),
+  savedPolicy: z.enum(["legacy", "auto", "required", "unknown"]),
   effectiveMode: z.enum(["legacy", "json_object", "json_schema", "unavailable", "unknown"]),
   schemaVersion: boundedIdentifier.nullable(),
   schemaHash: digest.nullable(),
@@ -43,15 +43,16 @@ export function projectGenerationResponseFormat(value: unknown): GenerationRespo
   const source = record(value) ?? {};
   const queued = record(source.queuedResponsePolicy);
   const queuedCurrent = queued?.version === undefined || queued.version === 1;
-  const savedPolicy = queuedCurrent && (queued?.policy === "auto" || queued?.policy === "required") ? queued.policy : "legacy";
+  const savedPolicy = queuedCurrent && (queued?.policy === "auto" || queued?.policy === "required") ? queued.policy
+    : queued === null && (source.queuedResponsePolicy === undefined || source.queuedResponsePolicy === null) ? "legacy" : "unknown";
   const base = {
     version: 1 as const, savedPolicy, schemaVersion: null, schemaHash: null, operation: null,
     streaming: null, requestedModel: null, returnedModel: null, returnedRoute: null, diagnosticCode: null
   };
-  if ((queued === null && (source.queuedResponsePolicy === undefined || source.queuedResponsePolicy === null))) return generationResponseFormatProjectionSchema.parse({
+  if (savedPolicy === "legacy") return generationResponseFormatProjectionSchema.parse({
     ...base, effectiveMode: "legacy", preflight: "unknown"
   });
-  if (savedPolicy === "legacy") return generationResponseFormatProjectionSchema.parse({
+  if (savedPolicy === "unknown") return generationResponseFormatProjectionSchema.parse({
     ...base, effectiveMode: "unknown", preflight: "unknown"
   });
   const ledger = Array.isArray(source.responseContractInvocations) ? source.responseContractInvocations.at(-1) : null;

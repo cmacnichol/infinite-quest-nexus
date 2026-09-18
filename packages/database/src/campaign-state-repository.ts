@@ -1558,6 +1558,7 @@ type CampaignSyncRow = {
   recoveryMetadata: Record<string, unknown> | null;
   recoveryReviewSummary: unknown;
   recoveryResponseFormat: unknown;
+  recoveryErrorCode: string | null;
   recoveryResultIsRecent: boolean | null;
   latestTurnId: string | null;
   latestTurnNumber: number | null;
@@ -1603,6 +1604,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
                 recovery.recovery_metadata AS "recoveryMetadata",
                  recovery."recoveryReviewSummary" AS "recoveryReviewSummary",
                  recovery."responseFormat" AS "recoveryResponseFormat",
+                 recovery.error_code AS "recoveryErrorCode",
                 latest_turn.id AS "latestTurnId", latest_turn.turn_number AS "latestTurnNumber",
                 (recovery.result_turn_id IS NOT NULL AND EXISTS (
                   SELECT 1 FROM (
@@ -1626,7 +1628,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
               ORDER BY created_at DESC LIMIT 1
            ) pending ON true
            LEFT JOIN LATERAL (
-             SELECT id, status, operation_kind, expected_turn_number, attempts,
+              SELECT id, status, operation_kind, expected_turn_number, attempts, error_code,
                     result_turn_id, replacement_turn_id, recovery_metadata,
                      ${generationReviewSummaryProjection("orchestration_private")} AS "recoveryReviewSummary",
                      ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat"
@@ -1732,7 +1734,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
           ...publicGenerationError(row.recoveryStatus),
           diagnostic: projectSafeGenerationDiagnostic(objectValue(row.recoveryMetadata).diagnostic),
            review: publicGenerationReview(row.recoveryReviewSummary, row.recoveryStatus),
-           responseFormat: projectGenerationResponseFormat(row.recoveryResponseFormat),
+           responseFormat: projectGenerationResponseFormat({ ...(typeof row.recoveryResponseFormat === "object" && row.recoveryResponseFormat !== null ? row.recoveryResponseFormat as Record<string, unknown> : {}), errorCode: row.recoveryErrorCode }),
           resultTurnId: row.recoveryResultTurnId
         }
         : null;

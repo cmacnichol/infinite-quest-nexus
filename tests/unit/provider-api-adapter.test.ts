@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createProviderApplicationAdapter } from "../../services/api/src/provider-application-adapter.js";
+import { providerEndpointIdentity } from "../../services/runtime/src/provider-capability-cache.js";
 
 const owner = "00000000-0000-4000-8000-000000000001";
 const id = "00000000-0000-4000-8000-000000000002";
@@ -54,7 +55,7 @@ describe("provider API configuration boundary", () => {
   });
 
   it("projects text-model capability only from server inventory and verification state", async () => {
-    const capabilities = { registryDigest: "a".repeat(64), eligibility: vi.fn(() => ({ status: "verified", reason: "verified", verification: { verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-19T00:00:00.000Z" } })) };
+    const capabilities = { registryDigest: "a".repeat(64), now: () => "2026-09-18T12:00:00.000Z", eligibility: vi.fn(() => ({ status: "verified", reason: "verified", verification: { verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-19T00:00:00.000Z" } })) };
     const value = adapter(capabilities);
     const profile = { ...input, id, configuration: { textResponseFormatPolicy: "auto" }, hasCredential: false, health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now" };
     value.application.listProfiles.mockResolvedValue([profile]);
@@ -64,6 +65,7 @@ describe("provider API configuration boundary", () => {
     expect(model!.responseFormatCapability).toMatchObject({ model: "model", expectedRegistryDigest: "a".repeat(64), advertisedAt: "2026-09-18T00:00:00.000Z" });
     const capability = model!.responseFormatCapability!;
     expect(capability.operations).toEqual(expect.arrayContaining([expect.objectContaining({ operation: "story", streaming: true, status: "verified" })]));
+    expect(capabilities.eligibility).toHaveBeenCalledWith(expect.objectContaining({ now: "2026-09-18T12:00:00.000Z", endpointIdentity: providerEndpointIdentity(input.baseUrl) }));
     expect(JSON.stringify(model!.responseFormatCapability)).not.toContain("browserProof");
   });
 });

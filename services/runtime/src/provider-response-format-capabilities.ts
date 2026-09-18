@@ -6,6 +6,7 @@ import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
 
 export type ProviderResponseFormatCapabilities = Readonly<{
   registryDigest: string;
+  now(): string;
   discover(key: ProviderCapabilityCacheKey, load: () => Promise<ModelParameterAdvertisement | null>, refresh?: boolean): Promise<ModelParameterAdvertisement | null>;
   discoverInventory(key: ProviderCapabilityCacheKey, load: () => Promise<ProviderModelInventory>, refresh?: boolean): Promise<ProviderModelInventory>;
   eligibility(input: Omit<ResponseFormatEligibilityInput, "verifications"> & Readonly<{ expectedRegistryDigest?: string }>): ReturnType<typeof resolveResponseFormatEligibility>;
@@ -21,7 +22,8 @@ export function createProviderResponseFormatCapabilities(options: Readonly<{ rec
   // records receive a deterministic identity unless an explicit file digest
   // was supplied.
   const registryDigest = options.registryDigest ?? (records.length === 0 ? sha256("") : sha256(stableStringify(records)));
-  return Object.freeze({ registryDigest, discover: async (key, load, refresh) => {
+  const now = () => new Date((options.now ?? Date.now)()).toISOString();
+  return Object.freeze({ registryDigest, now, discover: async (key, load, refresh) => {
     try { return await cache.load(key, load, refresh); } catch { return null; }
   }, discoverInventory: (key, load, refresh) => inventoryCache.load(key, load, refresh), invalidate: (id) => { cache.invalidate(id); inventoryCache.invalidate(id); }, transactionLocal: () => createProviderResponseFormatCapabilities({
     records,

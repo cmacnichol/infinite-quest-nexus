@@ -20,6 +20,10 @@ export function capabilityRouteConfigHash(configuration: Readonly<Record<string,
   };
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
+/** Shared with API capability projection and runtime dispatch identity checks. */
+export function providerEndpointIdentity(baseUrl: string): string {
+  return createHash("sha256").update(baseUrl.replace(/\/+$/, "")).digest("hex");
+}
 export class ProviderCapabilityCache<T> {
   private readonly entries = new Map<string, CacheEntry<T>>();
   private readonly inFlight = new Map<string, InFlightEntry<T>>();

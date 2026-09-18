@@ -35,7 +35,7 @@ import {
 } from "../../../packages/story-engine/src/index.js";
 import { resolveAuthoringContextWindowTokens } from "./source-authoring-budget.js";
 import type { ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
-import { capabilityRouteConfigHash, type ProviderCapabilityCacheKey } from "./provider-capability-cache.js";
+import { capabilityRouteConfigHash, providerEndpointIdentity, type ProviderCapabilityCacheKey } from "./provider-capability-cache.js";
 
 export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = Readonly<{
   id: string;
@@ -169,7 +169,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       maxOutputTokens: row.maxOutputTokens,
       temperature: row.temperature,
       requestTimeoutMs: row.requestTimeoutMs,
-      endpointIdentity: createHash("sha256").update(row.baseUrl.replace(/\/+$/, "")).digest("hex"),
+      endpointIdentity: providerEndpointIdentity(row.baseUrl),
       configuration: Object.freeze({ ...row.configuration })
     });
   }
@@ -179,7 +179,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       ownerUserId,
       providerProfileId: row.providerProfileId,
       providerType: row.providerType,
-      endpointIdentity: createHash("sha256").update(row.baseUrl.replace(/\/+$/, "")).digest("hex"),
+      endpointIdentity: providerEndpointIdentity(row.baseUrl),
       model,
       routeConfigHash: capabilityRouteConfigHash(row.configuration),
       adapterProtocol: "text-schema-adapter-v1"
