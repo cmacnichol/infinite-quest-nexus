@@ -868,8 +868,9 @@ async function readSseStream(
   onChunk: (delta: string, accumulated: string) => void | Promise<void>,
   profile: TextProviderProfile,
   operation: string,
-  url: string
-): Promise<{ content: string; finalData: Record<string, any>; allData: Record<string, any>[] }> {
+  url: string,
+  strictResponseContract = false
+): Promise<{ content: string; finalData: Record<string, any>; allData: Record<string, any>[]; terminalSignal: boolean }> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Response body stream is not readable.");
   const decoder = new TextDecoder();
@@ -878,6 +879,7 @@ async function readSseStream(
   let finalData: Record<string, any> = {};
   const allData: Record<string, any>[] = [];
   let receivedBytes = 0;
+  let sawDone = false;
 
   try {
     while (true) {
@@ -897,7 +899,11 @@ async function readSseStream(
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trim());
         for (const dataStr of dataLines) {
-          if (!dataStr || dataStr === "[DONE]") continue;
+          if (!dataStr) continue;
+          if (dataStr === "[DONE]") {
+            sawDone = true;
+            continue;
+          }
           try {
             const parsed = JSON.parse(dataStr);
             allData.push(parsed);
@@ -924,7 +930,8 @@ async function readSseStream(
               await onChunk(delta, accumulated);
             }
           } catch {
-            // ignore malformed or non-json SSE event data
+            if (strictResponseContract) throw new Error("Provider returned malformed SSE data for the prepared response contract.");
+            // Legacy streams tolerate malformed or non-json SSE event data.
           }
         }
       }
@@ -939,7 +946,7 @@ async function readSseStream(
   } finally {
     reader.releaseLock();
   }
-  return { content: accumulated, finalData, allData };
+  return { content: accumulated, finalData, allData, terminalSignal: sawDone || streamHasTerminalFinishReason(allData, finalData) };
 }
 
 type ResponseContractEvidence = {
@@ -954,13 +961,18 @@ function safeResponseIdentity(value: unknown): string | null {
   return typeof value === "string" && /^[a-zA-Z0-9_.:-]{1,200}$/.test(value) ? value : null;
 }
 
+function safeObservedIdentity(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 256
+    && !/[\u0000-\u001F\u007F-\u009F]/.test(value) ? value : null;
+}
+
 function responseContractEvidence(response?: Response, data?: Record<string, any>, partialContent = ""): ResponseContractEvidence {
   const responseId = safeResponseIdentity(response?.headers.get("x-generation-id"))
     ?? safeResponseIdentity(data?.id) ?? safeResponseIdentity(data?.response_id);
   return {
     responseId,
-    returnedModel: typeof data?.model === "string" && data.model ? data.model : typeof data?.model_instance_id === "string" && data.model_instance_id ? data.model_instance_id : null,
-    returnedProviderRoute: typeof data?.provider === "string" && data.provider ? data.provider : null,
+    returnedModel: safeObservedIdentity(data?.model) ?? safeObservedIdentity(data?.model_instance_id),
+    returnedProviderRoute: safeObservedIdentity(data?.provider),
     partialContent,
     diagnosticCode: null
   };
@@ -980,12 +992,27 @@ function responseContractStreamEvidence(response: Response, data: Record<string,
 }
 
 function responseRefusal(data: Record<string, any> | undefined, allData: Record<string, any>[] = []): boolean {
-  const values = [data, ...allData].flatMap((item) => [
+  const events = [data, ...allData];
+  const explicitRefusals = events.flatMap((item) => [
+    item?.refusal,
+    ...(Array.isArray(item?.choices) ? item.choices.flatMap((choice: any) => [choice?.message?.refusal, choice?.delta?.refusal]) : [])
+  ]);
+  if (explicitRefusals.some((value) => typeof value === "string" && value.trim().length > 0)) return true;
+  const values = events.flatMap((item) => [
     item?.type, item?.refusal, item?.finish_reason, item?.status, item?.incomplete_details?.reason,
     item?.error?.code, item?.error?.type,
     ...(Array.isArray(item?.choices) ? item.choices.flatMap((choice: any) => [choice?.message?.refusal, choice?.delta?.refusal, choice?.finish_reason]) : [])
   ]);
   return values.some((value) => typeof value === "string" && /refusal|content_filter/i.test(value));
+}
+
+function structuredSseError(allData: Record<string, any>[]): Record<string, any> | null {
+  return allData.find((item) => item?.type === "error" || (item?.error && typeof item.error === "object")) ?? null;
+}
+
+function streamHasTerminalFinishReason(allData: Record<string, any>[], finalData: Record<string, any>): boolean {
+  return [finalData, ...allData].some((item) => item?.finish_reason !== null && item?.finish_reason !== undefined
+    || (Array.isArray(item?.choices) && item.choices.some((choice: any) => choice?.finish_reason !== null && choice?.finish_reason !== undefined)));
 }
 
 function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
@@ -1047,8 +1074,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
       finishReason: String(finishValues.find(Boolean) || ""),
       outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
       modelInstanceId: String(finalData.model_instance_id || profile.model),
-      returnedModel: typeof finalData.model_instance_id === "string" && finalData.model_instance_id ? finalData.model_instance_id : null,
-      returnedProviderRoute: typeof finalData.provider === "string" && finalData.provider ? finalData.provider : null,
+      returnedModel: safeObservedIdentity(finalData.model_instance_id),
+      returnedProviderRoute: safeObservedIdentity(finalData.provider),
       usage: { inputTokens: Number(stats.input_tokens || 0), outputTokens, totalTokens: Number(stats.input_tokens || 0) + outputTokens },
       reportedCost: null,
       rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" },
@@ -1067,8 +1094,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
     finishReason: String(finishValues.find(Boolean) || ""),
     outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
     modelInstanceId: String(data.model_instance_id || profile.model),
-    returnedModel: typeof data.model_instance_id === "string" && data.model_instance_id ? data.model_instance_id : null,
-    returnedProviderRoute: typeof data.provider === "string" && data.provider ? data.provider : null,
+    returnedModel: safeObservedIdentity(data.model_instance_id),
+    returnedProviderRoute: safeObservedIdentity(data.provider),
     usage: { inputTokens: Number(data.stats?.input_tokens || 0), outputTokens, totalTokens: Number(data.stats?.input_tokens || 0) + outputTokens },
     reportedCost: null,
     rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" },
@@ -1121,12 +1148,26 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     }
   }
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const streamed = await readSseStream(response, request.onChunk, profile, "story generation", url);
+    const streamed = await readSseStream(response, request.onChunk, profile, "story generation", url, Boolean(request.responseContract));
     const { content, finalData, allData } = streamed;
     evidence = responseContractStreamEvidence(response, allData, finalData, content);
+    const sseError = request.responseContract ? structuredSseError(allData) : null;
+    if (sseError) {
+      const error = new Error("Provider returned an SSE error event for the prepared response contract.");
+      Object.assign(error, {
+        ...evidence,
+        responseFormatDiagnosticCode: classifyResponseFormatFailure(200, sseError)
+      });
+      throw error;
+    }
     if (request.responseContract && responseRefusal(finalData, allData)) {
       const error = new Error("Provider refused the prepared response contract.");
       Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal" });
+      throw error;
+    }
+    if (request.responseContract && !streamed.terminalSignal) {
+      const error = new Error("Provider stream ended before the prepared response contract completed.");
+      Object.assign(error, evidence);
       throw error;
     }
     const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
@@ -1139,8 +1180,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       finishReason,
       outputLimited: limitReason([finishReason]),
       modelInstanceId,
-      returnedModel: typeof allData.map((item) => item.model).find(Boolean) === "string" ? String(allData.map((item) => item.model).find(Boolean)) : typeof finalData.model === "string" && finalData.model ? finalData.model : null,
-      returnedProviderRoute: typeof allData.map((item) => item.provider).find(Boolean) === "string" ? String(allData.map((item) => item.provider).find(Boolean)) : typeof finalData.provider === "string" && finalData.provider ? finalData.provider : null,
+      returnedModel: safeObservedIdentity(allData.map((item) => item.model).find(Boolean)) ?? safeObservedIdentity(finalData.model),
+      returnedProviderRoute: safeObservedIdentity(allData.map((item) => item.provider).find(Boolean)) ?? safeObservedIdentity(finalData.provider),
       usage: {
         inputTokens: Number(usageObj.prompt_tokens || 0),
         outputTokens: Number(usageObj.completion_tokens || 0),
@@ -1169,8 +1210,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     finishReason,
     outputLimited: limitReason([finishReason]),
     modelInstanceId: String(data.model || profile.model),
-    returnedModel: typeof data.model === "string" && data.model ? data.model : null,
-    returnedProviderRoute: typeof data.provider === "string" && data.provider ? data.provider : null,
+    returnedModel: safeObservedIdentity(data.model),
+    returnedProviderRoute: safeObservedIdentity(data.provider),
     usage: {
       inputTokens: Number(data.usage?.prompt_tokens || 0),
       outputTokens: Number(data.usage?.completion_tokens || 0),
@@ -1185,8 +1226,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     const source = error as Record<string, any>;
     throw new PreparedResponseContractError(error, prepared, {
       responseId: safeResponseIdentity(source.responseId) ?? evidence.responseId,
-      returnedModel: typeof source.returnedModel === "string" && source.returnedModel ? source.returnedModel : evidence.returnedModel,
-      returnedProviderRoute: typeof source.returnedProviderRoute === "string" && source.returnedProviderRoute ? source.returnedProviderRoute : evidence.returnedProviderRoute,
+      returnedModel: safeObservedIdentity(source.returnedModel) ?? evidence.returnedModel,
+      returnedProviderRoute: safeObservedIdentity(source.returnedProviderRoute) ?? evidence.returnedProviderRoute,
       partialContent: typeof source.partialContent === "string" ? source.partialContent : evidence.partialContent,
       diagnosticCode: source.responseFormatDiagnosticCode ?? source.diagnosticCode ?? evidence.diagnosticCode
     });

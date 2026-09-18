@@ -69,6 +69,19 @@ describe("prepared response-contract transport", () => {
     expect(error.message).not.toContain("private refusal");
   });
 
+  it.each(["json_object", "json_schema"] as const)("treats ordinary non-stream refusal text as refusal for %s", async (mode) => {
+    const { error, fetcher } = await failure(mode, new Response(JSON.stringify({ id: "ordinary-id", choices: [{ message: { refusal: "I cannot help with that.", content: null }, finish_reason: "stop" }] }), { status: 200 }));
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(error).toMatchObject({ diagnosticCode: "provider_refusal", responseId: "ordinary-id", partialContent: "" });
+    expect(error.message).not.toContain("I cannot help");
+  });
+
+  it.each(["json_object", "json_schema"] as const)("treats ordinary top-level refusal text as refusal for %s", async (mode) => {
+    const { error, fetcher } = await failure(mode, new Response(JSON.stringify({ id: "top-id", refusal: "This response cannot be completed.", choices: [{ message: { content: null }, finish_reason: "stop" }] }), { status: 200 }));
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(error).toMatchObject({ diagnosticCode: "provider_refusal", responseId: "top-id" });
+  });
+
   it.each(["json_object", "json_schema"] as const)("preserves response evidence for malformed successful JSON in %s mode", async (mode) => {
     const { error, fetcher } = await failure(mode, new Response("{ private malformed", { status: 200, headers: { "x-generation-id": "malformed-header" } }));
     expect(fetcher).toHaveBeenCalledOnce();
@@ -84,12 +97,51 @@ describe("prepared response-contract transport", () => {
     expect(error.message).not.toContain("private stream refusal");
   });
 
+  it.each(["json_object", "json_schema"] as const)("treats ordinary streamed delta refusal text as refusal for %s", async (mode) => {
+    const response = new Response(sse([`data: ${JSON.stringify({ id: "ordinary-stream", choices: [{ delta: { refusal: "I cannot help with that." }, finish_reason: "stop" }] })}\n\n`]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const { error, fetcher } = await failure(mode, response, { onChunk: () => undefined, responseContract: contract(mode, true) });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(error).toMatchObject({ diagnosticCode: "provider_refusal", responseId: "ordinary-stream", partialContent: "" });
+  });
+
   it.each(["json_object", "json_schema"] as const)("classifies a structured SSE error event as refusal for %s", async (mode) => {
     const response = new Response(sse([`data: ${JSON.stringify({ id: "error-id", model: "error-model", provider: "error-route", type: "error", error: { code: "content_filter", message: "private error detail" } })}\n\n`]), { status: 200, headers: { "content-type": "text/event-stream" } });
     const { error, fetcher } = await failure(mode, response, { onChunk: () => undefined, responseContract: contract(mode, true) });
     expect(fetcher).toHaveBeenCalledOnce();
     expect(error).toMatchObject({ diagnosticCode: "provider_refusal", responseId: "error-id", returnedModel: "error-model", returnedProviderRoute: "error-route" });
     expect(error.message).not.toContain("private error detail");
+  });
+
+  it.each(["json_object", "json_schema"] as const)("fails a prepared stream after content on a generic SSE error event for %s", async (mode) => {
+    const response = new Response(sse([
+      `data: ${JSON.stringify({ id: "generic-id", model: "actual-model", provider: "actual-route", choices: [{ delta: { content: "partial" } }] })}\n\n`,
+      `data: ${JSON.stringify({ type: "error", error: { code: "server_error", message: "private provider error" } })}\n\n`
+    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const { error, fetcher } = await failure(mode, response, { onChunk: () => undefined, responseContract: contract(mode, true) });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(error).toMatchObject({ diagnosticCode: null, responseId: "generic-id", returnedModel: "actual-model", returnedProviderRoute: "actual-route", partialContent: "partial" });
+    expect(error.message).not.toContain("private provider error");
+  });
+
+  it.each(["json_object", "json_schema"] as const)("rejects malformed prepared SSE data with private partial evidence for %s", async (mode) => {
+    const response = new Response(sse([
+      `data: ${JSON.stringify({ id: "malformed-stream", choices: [{ delta: { content: "partial" } }] })}\n\n`,
+      "data: { malformed\n\n"
+    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const { error } = await failure(mode, response, { onChunk: () => undefined, responseContract: contract(mode, true) });
+    expect(error).toMatchObject({ responseId: "malformed-stream", partialContent: "partial", preparedRequest: { body: expect.any(String) } });
+  });
+
+  it.each(["json_object", "json_schema"] as const)("rejects a clean prepared SSE close without a terminal signal for %s", async (mode) => {
+    const response = new Response(sse([`data: ${JSON.stringify({ id: "incomplete-stream", choices: [{ delta: { content: "partial" } }] })}\n\n`]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const { error } = await failure(mode, response, { onChunk: () => undefined, responseContract: contract(mode, true) });
+    expect(error).toMatchObject({ responseId: "incomplete-stream", partialContent: "partial" });
+  });
+
+  it.each(["json_object", "json_schema"] as const)("accepts a [DONE]-terminated prepared stream for %s", async (mode) => {
+    const response = new Response(sse([`data: ${JSON.stringify({ id: "done-stream", choices: [{ delta: { content: "{}" } }] })}\n\n`, "data: [DONE]\n\n"]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const result = await callTextProvider(profile, { systemPrompt: "stream", input: "stream", onChunk: () => undefined, responseContract: contract(mode, true) } as never, transport(vi.fn(async () => response) as typeof fetch));
+    expect(result).toMatchObject({ content: "{}", responseId: "done-stream" });
   });
 
   it.each(["json_object", "json_schema"] as const)("retains partial text and earlier stream metadata after truncation for %s", async (mode) => {
@@ -133,6 +185,17 @@ describe("prepared response-contract transport", () => {
     ]), { status: 200, headers: { "content-type": "text/event-stream" } });
     const result = await callTextProvider(profile, { systemPrompt: "stream", input: "stream", onChunk: () => undefined, responseContract: contract(mode, true) } as never, transport(vi.fn(async () => response) as typeof fetch));
     expect(result).toMatchObject({ content: "{}", responseId: "stream-success", returnedModel: "early-model", returnedProviderRoute: "early-route" });
+  });
+
+  it.each(["json_object", "json_schema"] as const)("normalizes invalid observed success identities to null for %s", async (mode) => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ id: "identity-id", model: `actual\u0000model`, provider: "x".repeat(257), choices: [{ message: { content: "{}" }, finish_reason: "stop" }], usage: {} }), { status: 200 }));
+    const result = await callTextProvider(profile, { systemPrompt: "identity", input: "identity", responseContract: contract(mode) } as never, transport(fetcher as typeof fetch));
+    expect(result).toMatchObject({ returnedModel: null, returnedProviderRoute: null });
+  });
+
+  it.each(["json_object", "json_schema"] as const)("normalizes invalid observed error identities to null for %s", async (mode) => {
+    const { error } = await failure(mode, new Response(JSON.stringify({ id: "error-identity", model: "x".repeat(257), provider: `route\u0000value`, error: { code: "invalid_schema" } }), { status: 400 }));
+    expect(error).toMatchObject({ returnedModel: null, returnedProviderRoute: null });
   });
 
   it.each(["json_object", "json_schema"] as const)("preserves provider transport details when a response body fails for %s", async (mode) => {

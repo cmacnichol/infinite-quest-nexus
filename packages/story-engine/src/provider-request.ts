@@ -242,6 +242,12 @@ export function serializeCheckedProviderRequest(
   request: CanonicalProviderRequest,
   options: CheckedProviderRequestOptions
 ): PreparedProviderRequest {
+  if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) {
+    throw new Error("A prepared response contract cannot use legacy response-format options.");
+  }
+  if (options.responseContract && request.responseContract) {
+    throw new Error("A prepared response contract may be supplied only once.");
+  }
   const serializationOptions = options.responseContract ? { responseContract: options.responseContract }
     : options.responseFormat === undefined ? {} : { responseFormat: options.responseFormat };
   let serializedRequest = request;
