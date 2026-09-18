@@ -867,6 +867,15 @@
           </label>
           <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
           <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+          <label class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
+            <select id="providerResponseFormatPolicy" aria-describedby="providerResponseFormatPolicyNote">
+              <option value="legacy">Legacy JSON</option>
+              <option value="auto">Use schema when verified</option>
+              <option value="required">Require verified schema</option>
+            </select>
+            <span id="providerResponseFormatPolicyNote" class="field-note">Required blocks a new job before dispatch when server verification is unavailable. Changes apply to future jobs; pending jobs retain their frozen configuration and may require a compatible profile to resume.</span>
+          </label>
+          <div id="providerResponseFormatCapability" class="text-model-setting field-note" aria-live="polite">Schema compatibility is unknown until the server returns a capability summary.</div>
         </div>
       </fieldset>
       <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">

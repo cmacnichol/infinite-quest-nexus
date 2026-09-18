@@ -15,6 +15,35 @@ Create separate profiles for **Story text**, **Chronicle embeddings**, and
 Direction jobs do not use a classifier. Never reuse an endpoint or key across
 roles merely because the provider brand is the same.
 
+## Structured output policy for Story text
+
+The **Structured output** control appears only on Story text profiles. It changes
+the policy for new jobs; it never changes an accepted turn or rewrites a pending
+job's frozen response selection.
+
+| Policy | What a new job does |
+| --- | --- |
+| Legacy JSON | Uses the historical JSON path. Existing profiles that have no saved policy remain physically unchanged when saved without a policy change. |
+| Use schema when verified | Uses a schema only when the server has current verification for the selected model and operation; otherwise it chooses the compatible JSON path before dispatch. |
+| Require verified schema | Stops a new job before dispatch unless the server has current verification for the selected model and operation. |
+
+The provider editor shows a server-owned advisory summary for the selected model:
+**verified**, **advertised**, **unsupported**, or **unknown**. An advertised
+model is not verified. Verification expires, and missing, stale, or failed
+metadata is treated as unknown. The editor shows only operation coverage and
+timestamps; it does not expose schemas, endpoint routing, credentials, or
+operator records.
+
+Some adapters cannot use the full schema because Story tracker objects allow
+open-ended values. Nexus reports that limitation as unsupported rather than
+altering tracker data. Configure a compatible profile or retain Legacy JSON.
+
+Profile-policy edits apply to future jobs. Because the profile configuration is
+part of the compatibility fingerprint, a pending job can require its prior
+compatible configuration to resume; discard and explicitly re-enqueue it when
+appropriate. Do not assume that a policy toggle guarantees a pending job will
+continue.
+
 ## Structured response evidence limit
 
 For new Story text requests using `auto` or `required` structured responses,
