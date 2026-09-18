@@ -139,6 +139,7 @@ const state = {
   streamingExpectedScrollY: null,
   turnInputMode: "action",
   nextTurnInputModeSource: null,
+  retainedAppendDraft: null,
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
   historySelectedTurnNumber: null,
@@ -437,6 +438,7 @@ async function checkOnboarding() {
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
+  if (state.campaignId !== campaignId) state.retainedAppendDraft = null;
   clearResponseEditSession();
   resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
@@ -457,6 +459,7 @@ async function loadCampaign(campaignId, options = {}) {
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
     state.generationRecovery = syncData.generationRecovery || null;
+    captureHydratedAppendDraft(syncData);
     syncTurnInputModeFromCampaign();
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
@@ -513,6 +516,7 @@ async function loadCampaign(campaignId, options = {}) {
         guidance,
         presentation
       );
+      if (state.generationRecovery.status === "failed") restoreRetainedAppendDraft();
     }
     return true;
   } catch (err) {
@@ -1264,6 +1268,11 @@ function renderTurnInput() {
 }
 
 async function submitResolvedTurn(action, details) {
+  if (details.operationKind !== "replace_latest") {
+    // Keep this in-memory only until enqueue returns an authoritative job ID.
+    // An enqueue failure must not erase what the player just typed.
+    state.retainedAppendDraft = { campaignId: state.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
+  }
   const freeAction = $("freeAction");
   if (freeAction) freeAction.value = "";
   resetChoiceSelectionFromDraft("");
@@ -1290,8 +1299,54 @@ function clearPendingSubmission() {
   if (state.campaignId) composition.pendingSubmissions.clear(state.campaignId);
 }
 
+function retainAppendDraft(campaignId, expectedTurnNumber, generationId, action, requestedInputMode) {
+  if (!campaignId || !generationId || !action || !["action", "scene"].includes(requestedInputMode) || !Number.isSafeInteger(expectedTurnNumber) || expectedTurnNumber < 1) return;
+  state.retainedAppendDraft = { campaignId, expectedTurnNumber, generationId, action, requestedInputMode };
+  composition.failedTurnPrompts?.save(state.retainedAppendDraft);
+}
+
+function restoreRetainedAppendDraft() {
+  const retained = state.retainedAppendDraft;
+  const freeAction = $("freeAction");
+  if (!retained || !freeAction
+    || retained.campaignId !== state.campaignId
+    || Number(state.campaign?.activeTurnNumber || 0) + 1 !== retained.expectedTurnNumber
+    || freeAction.value.trim()) return;
+  state.retainedAppendDraft = null;
+  setTurnInputMode(retained.requestedInputMode, { refreshPlaceholder: true });
+  freeAction.value = retained.action;
+  resetChoiceSelectionFromDraft(retained.action);
+  updateTurnInputCharacterCount();
+}
+
+function forgetRetainedAppendDraft() {
+  const campaignId = state.retainedAppendDraft?.campaignId || state.campaignId;
+  state.retainedAppendDraft = null;
+  if (campaignId) composition.failedTurnPrompts?.clear(campaignId);
+}
+
+function captureHydratedAppendDraft(syncData) {
+  const generation = syncData.pendingGeneration || syncData.generationRecovery;
+  if (generation?.operationKind !== "append") return;
+  const retained = composition.failedTurnPrompts?.load?.(syncData.campaign.id);
+  if (retained?.expectedTurnNumber === generation.expectedTurnNumber && retained.generationId === generation.id) {
+    state.retainedAppendDraft = retained;
+    return;
+  }
+  let stored = null;
+  try {
+    stored = composition.pendingSubmissions.load?.(syncData.campaign.id);
+  } catch (_) {
+    stored = null;
+  }
+  if (syncData.pendingGeneration?.operationKind === "append" && stored?.operationKind === "append" && stored.jobId === syncData.pendingGeneration.id && stored.expectedTurnNumber === generation.expectedTurnNumber) {
+    retainAppendDraft(syncData.campaign.id, generation.expectedTurnNumber, stored.jobId, stored.request.action, stored.request.requestedInputMode);
+  }
+}
+
 async function runGeneration(action, options = {}) {
   if (!state.campaignLoaded) return;
+  const submissionCampaignId = state.campaignId;
   showBusy("Queueing turn with the Story Engine…");
   state.abortController = new AbortController();
   const progressEl = $("generationProgress");
@@ -1332,29 +1387,44 @@ async function runGeneration(action, options = {}) {
       ...(operationKind === "replace_latest" ? { expectedCurrentTurnNumber: expectedTurnNumber } : {})
     };
     let run;
+    let attachedConflict = false;
+    let conflictPendingGeneration = null;
     try {
       run = await composition.workflow.submit(
-        state.campaignId,
+        submissionCampaignId,
         generationSubmissionInput(submission, request)
       );
     } catch (error) {
-      const conflict = await resumeActiveGenerationConflict(error, state.campaignId, composition.workflow);
+      const conflict = await resumeActiveGenerationConflict(error, submissionCampaignId, composition.workflow);
       if (!conflict) throw error;
       toast(conflict.message);
       recordActivity("system", "Attached to active generation", `jobId=${conflict.pendingGeneration.id || "unknown"}`);
       run = conflict.run;
-      state.pendingGeneration = conflict.pendingGeneration;
+      attachedConflict = true;
+      conflictPendingGeneration = conflict.pendingGeneration;
     }
+    if (state.campaignId !== submissionCampaignId
+      || (operationKind === "append" && appendExpectedTurnNumber(state.campaign) !== expectedTurnNumber)) return;
     resetStoryLengthOverrideControls();
     options.onAttached?.();
     state.generationRun = run;
-    state.pendingGeneration = state.pendingGeneration?.id === run.jobId
+    if (operationKind === "append" && !attachedConflict) {
+      retainAppendDraft(submissionCampaignId, expectedTurnNumber, run.jobId, action, submission.requestedInputMode);
+    } else if (operationKind === "append") {
+      // The conflicting job belongs to another local submission. Keep this
+      // draft local, but never associate it with that authoritative job.
+      restoreRetainedAppendDraft();
+    }
+    state.pendingGeneration = attachedConflict
+      ? conflictPendingGeneration
+      : state.pendingGeneration?.id === run.jobId
       ? state.pendingGeneration
       : { id: run.jobId, action, operationKind, expectedTurnNumber };
-    completeButLoading = await observeGenerationRun(run, action) === "result_unavailable";
+    completeButLoading = await observeGenerationRun(run, attachedConflict ? (conflictPendingGeneration?.action || "") : action) === "result_unavailable";
   } catch (err) {
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
+    if (options.operationKind !== "replace_latest") restoreRetainedAppendDraft();
     if (err.name === "AbortError") {
       if (!state.cancellationConfirmed) {
         toast("Generation cancelled.");
@@ -1688,6 +1758,7 @@ async function discardRecoveryJob() {
     state.pendingGeneration = null;
     hideGenerationRecovery();
     restoreGenerationDisplay();
+    restoreRetainedAppendDraft();
     toast("Generation job discarded. The accepted turn was preserved.");
   } catch (error) {
     toast(`Could not discard generation: ${error.message}`);
@@ -1731,6 +1802,8 @@ async function finalizeCompletedGeneration(result) {
     : null;
 
   clearPendingSubmission();
+  state.retainedAppendDraft = null;
+  composition.failedTurnPrompts?.clear(result.campaignId);
   state.pendingGeneration = null;
   // A completed result is authoritative even when its saved review was shown
   // from the same live monitor. Remove that now-resolved review before the
@@ -1884,6 +1957,9 @@ async function observeGenerationRun(run, action, retryFirst = false) {
         } else {
           showGenerationRecovery(run.jobId, guidance?.message || "Generation is recoverable but needs your direction.", "generation", guidance, presentation);
         }
+      }
+      if (outcome === "failed" || (outcome === "unrecoverable" && lastSnapshot?.status === "failed")) {
+        restoreRetainedAppendDraft();
       }
       terminalError = error;
     }
@@ -3282,6 +3358,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   if (freeAction) {
     freeAction.addEventListener("input", () => {
+      forgetRetainedAppendDraft();
       resetChoiceSelectionFromDraft(freeAction.value);
       updateTurnInputCharacterCount();
     });
@@ -3292,6 +3369,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnClearTurnInput = $("btnClearTurnInput");
   if (btnClearTurnInput) btnClearTurnInput.addEventListener("click", () => {
     if (!freeAction || freeAction.disabled) return;
+    forgetRetainedAppendDraft();
     freeAction.value = "";
     resetChoiceSelectionFromDraft("");
     updateTurnInputCharacterCount();

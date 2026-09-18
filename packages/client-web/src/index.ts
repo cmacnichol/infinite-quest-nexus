@@ -50,6 +50,13 @@ export type {
   PendingSubmissionStorage
 } from "./storage/pending-submissions.js";
 export {
+  createFailedTurnPromptStore
+} from "./storage/failed-turn-prompts.js";
+export type {
+  FailedTurnPromptStore,
+  RetainedAppendPrompt
+} from "./storage/failed-turn-prompts.js";
+export {
   createBrowserClock
 } from "./platform/clock.js";
 export {

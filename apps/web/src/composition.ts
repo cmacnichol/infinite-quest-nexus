@@ -7,10 +7,11 @@ import {
   createDocumentVisibilitySource,
   createNoopSessionPort,
   createNexusApiClient,
-  createPendingSubmissionStore
+  createPendingSubmissionStore,
+  createFailedTurnPromptStore
 } from "@infinite-quest/client-web";
 import { createGenerationWorkflow, type Clock, type DelayScheduler, type GenerationWorkflow, type IdFactory, type PendingSubmissionStore, type SessionPort } from "@infinite-quest/client-core";
-import type { EventSourceFactory, NexusApiClient, StoryMemoryApi } from "@infinite-quest/client-web";
+import type { EventSourceFactory, FailedTurnPromptStore, NexusApiClient, StoryMemoryApi } from "@infinite-quest/client-web";
 import { createLegacyIllustrationApi, type LegacyIllustrationApi } from "./legacy-illustration-api.js";
 
 export interface StoryPlayerComposition {
@@ -20,6 +21,7 @@ export interface StoryPlayerComposition {
   readonly idFactory: IdFactory;
   readonly illustrations: LegacyIllustrationApi;
   readonly pendingSubmissions: PendingSubmissionStore;
+  readonly failedTurnPrompts: FailedTurnPromptStore;
   readonly session: SessionPort;
   readonly storyMemory: StoryMemoryApi;
   readonly workflow: GenerationWorkflow;
@@ -82,6 +84,7 @@ export function createStoryPlayerComposition(
   const idFactory = factories.createIdFactory();
   const api = factories.createApi({ basePath: "/api/v1", session });
   const pendingSubmissions = factories.createPendingSubmissions(environment.storage);
+  const failedTurnPrompts = createFailedTurnPromptStore(environment.storage);
   const source = factories.createSource({
     api: api.generation,
     basePath: "/api/v1",
@@ -106,6 +109,7 @@ export function createStoryPlayerComposition(
     idFactory,
     illustrations: factories.createIllustrations({ basePath: "/api/v1", session }),
     pendingSubmissions,
+    failedTurnPrompts,
     session,
     storyMemory: factories.createStoryMemory({ basePath: "/api/v1", session }),
     workflow
