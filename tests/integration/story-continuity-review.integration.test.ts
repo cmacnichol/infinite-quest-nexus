@@ -1143,6 +1143,75 @@ integration("T17 durable continuity review", () => {
     }
   });
 
+  it("fails the final Keep commit closed when its persisted producing ledger identity is corrupted", async () => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [
+      providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })
+    ]);
+    const { job, application, campaignId } = await enqueue("enforce");
+    reviewVerdict = "conflict";
+    requests.length = 0;
+    try {
+      await runGenerationJob(pool, `corrupted-keep-initial-${randomUUID()}`, 30, credentialSecret);
+      const review = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+      const durableResponseContract = (await pool.query<{
+        orchestration_private: {
+          queuedResponsePolicy?: unknown;
+          frozenResponseContracts?: unknown;
+          responseContractInvocations?: Array<{ operation?: string; status?: string }>;
+        };
+      }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+      expect(durableResponseContract.queuedResponsePolicy).toMatchObject({ policy: "auto" });
+      expect(durableResponseContract.frozenResponseContracts).toMatchObject({ queuedPolicy: { policy: "auto" } });
+      expect(durableResponseContract.responseContractInvocations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ operation: "story_generation", status: "completed" })
+      ]));
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: review.reviewId, revision: review.revision, decision: "keep"
+      });
+
+      const authorityBefore = await acceptedAuthoritySnapshot(campaignId);
+      const requestsBeforeCommit = requests.length;
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const loadTextExecution = vi.fn(async () => { throw new Error("a final Keep commit must not invoke the text provider"); });
+      const collaborators = {
+        ...createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation),
+        loadTextExecution
+      };
+      let commitAttempts = 0;
+      const corruptedCommitRepository = {
+        ...repository,
+        async commitAcceptedTurn(input: Parameters<typeof repository.commitAcceptedTurn>[0]) {
+          commitAttempts += 1;
+          await pool.query(
+            "UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{primaryResult,requestPayloadHash}',$2::jsonb) WHERE id=$1",
+            [job.id, JSON.stringify("f".repeat(64))]
+          );
+          return repository.commitAcceptedTurn(input);
+        }
+      };
+      const workerId = `corrupted-keep-commit-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository: corruptedCommitRepository, collaborators })
+        .execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+
+      expect(commitAttempts).toBe(1);
+      expect(loadTextExecution).not.toHaveBeenCalled();
+      expect(requests).toHaveLength(requestsBeforeCommit);
+      expect(await application.getJob({ ownerUserId, jobId: job.id }))
+        .toMatchObject({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(authorityBefore);
+      await expect(pool.query<{ result_turn_id: string | null }>(
+        "SELECT result_turn_id FROM generation_jobs WHERE id=$1", [job.id]
+      )).resolves.toMatchObject({ rows: [{ result_turn_id: null }] });
+    } finally {
+      reviewVerdict = "pass";
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  });
+
   it.each([
     { label: "append Action", operation: "append", scene: false, storyOnly: false },
     { label: "append scene", operation: "append", scene: true, storyOnly: false },
