@@ -259,12 +259,12 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(recovery).toContainText("invalid structure");
     await expect(recovery).not.toContainText("Context evidence was omitted");
     await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toHaveCount(0);
+    await page.reload();
+    await expect(recovery).toContainText("invalid structure");
     const retry = surface === "legacy" ? page.locator("#btnRetryGenerationReview") : recovery.getByRole("button", { name: "Continue with retry", exact: true });
     await retry.click();
     await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
-    await page.reload();
-    await expect(recovery).toContainText("invalid structure");
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
   });
 

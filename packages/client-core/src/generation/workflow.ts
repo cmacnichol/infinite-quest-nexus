@@ -81,6 +81,7 @@ function createRun(
   // A resumed review remains an explicit user decision even if a reconnecting
   // stream frame has not yet repeated its public review summary.
   let reviewRequiresDecision = "review" in operation && operation.review !== undefined;
+  let latestSnapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot | null = null;
   let watcherActive = false;
   let inFlightTerminalAction: {
     action: "cancel" | "discard";
@@ -217,7 +218,7 @@ function createRun(
         return;
       }
       if (retryFirst) {
-        const retry = await retryOrUnrecoverable();
+        const retry = await retryOrUnrecoverable(latestSnapshot);
         if (retry.reviewSnapshot) yield { type: "status", snapshot: retry.reviewSnapshot };
         if (retry.error) {
           yield { type: "settled", outcome: "unrecoverable", error: retry.error };
@@ -267,6 +268,7 @@ function createRun(
             }
             const parsed = generationStreamSnapshotSchema.safeParse(sourceEvent.snapshot);
             if (!parsed.success) throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause: parsed.error });
+            latestSnapshot = parsed.data;
             const reconciled = parsed.data.status === "recoverable"
               ? await reconcileRecoverableReview(parsed.data) ?? parsed.data
               : parsed.data;
