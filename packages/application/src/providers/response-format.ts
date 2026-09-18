@@ -14,13 +14,13 @@ export function resolveResponseFormatEligibility(input: ResponseFormatEligibilit
   if (!input.advertisement.supportedParameters.includes("response_format")) return { status: "unsupported", reason: "not_advertised", verification: null };
   if (input.providerType === "openrouter" && !input.advertisement.supportedParameters.includes("structured_outputs")) return { status: "unsupported", reason: "not_advertised", verification: null };
   if (input.operation === "story" && input.nativeOpenTrackerObjects === false) return { status: "unsupported", reason: "schema_incompatible", verification: null };
-  const matching = input.verifications.find((verification) => verification.providerType === input.providerType
+  const matches = input.verifications.filter((verification) => verification.providerType === input.providerType
     && verification.endpointIdentity === input.endpointIdentity && verification.model === input.model
     && verification.routeConfigHash === input.routeConfigHash && verification.adapterProtocol === input.adapterProtocol
     && verification.operation === input.operation && verification.schemaHash === input.schemaHash
     && verification.streaming === input.streaming && (input.operation !== "story" || verification.nativeOpenTrackerObjects));
-  if (!matching) return { status: "advertised", reason: "missing_verification", verification: null };
-  if (Date.parse(matching.expiresAt) <= Date.parse(input.now)) return { status: "advertised", reason: "expired", verification: null };
+  const matching = matches.find((verification) => Date.parse(verification.expiresAt) > Date.parse(input.now));
+  if (!matching) return { status: "advertised", reason: matches.length ? "expired" : "missing_verification", verification: null };
   return { status: "verified", reason: "verified", verification: matching };
 }
 

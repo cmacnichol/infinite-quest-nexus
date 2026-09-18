@@ -50,4 +50,25 @@ describe("response-format eligibility", () => {
     expect(selectResponseFormat("required", unknown)).toBe("unavailable");
     expect(selectResponseFormat("legacy", unknown)).toBe("legacy");
   });
+
+  it("uses current exact evidence and rejects every tuple mismatch, aliases, and incompatible story trackers", () => {
+    const input = {
+      advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: now },
+      providerType: "openrouter" as const, endpointIdentity: "endpoint-hash", model: "openrouter/model",
+      routeConfigHash: "route-hash", adapterProtocol: "text-schema-adapter-v1" as const, operation: "story" as const,
+      schemaHash: "schema-hash", streaming: false, now, verifications: [{ ...record, expiresAt: "2026-09-17T12:00:00.000Z" }, record]
+    };
+    expect(resolveResponseFormatEligibility(input)).toMatchObject({ status: "verified" });
+    for (const change of [
+      { operation: "choices" as const }, { streaming: true }, { schemaHash: "other" },
+      { adapterProtocol: "other" as never }, { endpointIdentity: "other" }, { routeConfigHash: "other" },
+      { providerType: "openai_compatible" as const }
+    ]) expect(resolveResponseFormatEligibility({ ...input, ...change })).toMatchObject({ status: "advertised" });
+    expect(resolveResponseFormatEligibility({ ...input, model: "openrouter/auto" })).toMatchObject({ status: "unknown", reason: "unresolved_model" });
+    expect(resolveResponseFormatEligibility({ ...input, advertisement: { supportedParameters: [], discoveredAt: now } })).toMatchObject({ status: "unsupported", reason: "not_advertised" });
+    expect(resolveResponseFormatEligibility({ ...input, advertisement: null })).toMatchObject({ status: "unknown", reason: "missing_metadata" });
+    expect(resolveResponseFormatEligibility({ ...input, nativeOpenTrackerObjects: false })).toMatchObject({ status: "unsupported", reason: "schema_incompatible" });
+    expect(resolveResponseFormatEligibility({ ...input, operation: "choices", nativeOpenTrackerObjects: false })).toMatchObject({ status: "advertised" });
+    expect(selectResponseFormat(undefined, { status: "unknown", reason: "missing_metadata", verification: null })).toBe("legacy");
+  });
 });

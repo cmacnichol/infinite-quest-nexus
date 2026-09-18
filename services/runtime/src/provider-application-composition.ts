@@ -162,6 +162,7 @@ function createInternals(
   pool: DatabasePool,
   options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ) {
+  const responseFormatCapabilities = createProviderResponseFormatCapabilities({ records: options.schemaVerifications, registryDigest: options.schemaVerificationDigest, now: options.clock });
   function bind(database: DatabaseClient | DatabasePool): ProviderApplicationTransaction {
     const client = database as DatabaseClient;
     const providerRepositories = createPostgresProviderRepositories(client);
@@ -171,18 +172,33 @@ function createInternals(
       database: client,
       credentialSecret: options.credentialSecret,
       transport: options.transport,
-      health: providerRepositories.health
+      health: providerRepositories.health,
+      responseFormatCapabilities
+    });
+    const rawApplication = createProviderApplication({
+      profiles: providerRepositories.profiles,
+      inventory: runtime.inventory,
+      health: providerRepositories.health,
+      resolution: providerRepositories.resolution,
+      prompts,
+      costs
+    });
+    const application = Object.freeze({
+      ...rawApplication,
+      updateProfile: async (command: Parameters<ProviderApplication["updateProfile"]>[0]) => {
+        const result = await rawApplication.updateProfile(command);
+        responseFormatCapabilities.invalidate(command.providerProfileId);
+        return result;
+      },
+      deleteProfile: async (command: Parameters<ProviderApplication["deleteProfile"]>[0]) => {
+        const result = await rawApplication.deleteProfile(command);
+        responseFormatCapabilities.invalidate(command.providerProfileId);
+        return result;
+      }
     });
     return {
       runtime,
-      application: createProviderApplication({
-        profiles: providerRepositories.profiles,
-        inventory: runtime.inventory,
-        health: providerRepositories.health,
-        resolution: providerRepositories.resolution,
-        prompts,
-        costs
-      })
+      application
     };
   }
 
@@ -282,7 +298,7 @@ function createInternals(
   return {
     application,
     runtimeAdapter: base.runtime,
-    responseFormatCapabilities: createProviderResponseFormatCapabilities({ records: options.schemaVerifications, registryDigest: options.schemaVerificationDigest, now: options.clock }),
+    responseFormatCapabilities,
     transaction: <T>(work: (binding: ProviderApplicationTransaction, client: DatabaseClient) => Promise<T>) =>
       withTransaction(pool, async (client) => work(bind(client), client)),
     generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs }),

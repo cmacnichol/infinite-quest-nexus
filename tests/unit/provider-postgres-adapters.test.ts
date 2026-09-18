@@ -14,8 +14,34 @@ import { encryptCredential } from "../../packages/story-engine/src/credentials.j
 import { buildRpgAssessmentPrompt } from "../../packages/story-engine/src/mechanics.js";
 import { reportedProviderCost } from "../../packages/story-engine/src/providers.js";
 import { createRuntimeProviderAdapter } from "../../services/runtime/src/provider-credential-transport-adapter.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 
 describe("provider PostgreSQL adapter boundaries", () => {
+  test("shares cached text inventory metadata while leaving embedding discovery independent", async () => {
+    const row = {
+      id: "00000000-0000-4000-8000-000000000010", name: "Cached text", provider_type: "openrouter", provider_role: "text",
+      base_url: "https://openrouter.example/api/v1", default_model: "story-model", context_window_tokens: 16_384,
+      max_output_tokens: 2_048, temperature: 0.5, request_timeout_ms: 60_000, configuration: { streaming: true },
+      encrypted_api_key: null, credential_nonce: null, credential_auth_tag: null, credential_key_version: null,
+      enabled: true, is_default: true, health_status: "unknown", consecutive_failures: 0, last_health_check_at: null,
+      created_at: new Date("2026-01-01T00:00:00Z"), updated_at: new Date("2026-01-01T00:00:00Z")
+    };
+    const fetch = vi.fn(async (_profile: unknown, operation: string) => new Response(JSON.stringify({ data: [{
+      id: operation === "embedding model discovery" ? "embedding-model" : "story-model", name: "Model", context_length: 16_384,
+      supported_parameters: ["response_format", "structured_outputs"]
+    }] }), { status: 200, headers: { "content-type": "application/json" } }));
+    const adapter = createRuntimeProviderAdapter({
+      database: { query: vi.fn().mockResolvedValue({ rows: [row], rowCount: 1 }) } as never,
+      credentialSecret: "credential-encryption-secret", transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() },
+      health: { recordHealth: vi.fn() }, responseFormatCapabilities: createProviderResponseFormatCapabilities()
+    });
+
+    await adapter.inventory.listModels({ ownerUserId: "owner", providerProfileId: row.id, providerRole: "text" });
+    await adapter.inventory.listModels({ ownerUserId: "owner", providerProfileId: row.id, providerRole: "text" });
+    await adapter.inventory.listModels({ ownerUserId: "owner", providerProfileId: row.id, providerRole: "embedding" });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
   test("validates provider-specific configuration before projecting its safe fields", () => {
     expect(() => validateProviderConfiguration("sogni", {
       pollIntervalMs: 4_000,

@@ -17,4 +17,29 @@ describe("provider capability cache", () => {
     await cache.load(key, load);
     expect(load).toHaveBeenCalledTimes(2);
   });
+
+  it("detaches an invalidated in-flight load so a fresh discovery cannot be overwritten", async () => {
+    let resolveFirst: ((value: { supportedParameters: readonly string[]; discoveredAt: string }) => void) | undefined;
+    const cache = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
+    const first = cache.load(key, () => new Promise((resolve) => { resolveFirst = resolve; }));
+    cache.invalidate(key.providerProfileId);
+    const second = cache.load(key, async () => ({ supportedParameters: ["structured_outputs"], discoveredAt: "second" }));
+    resolveFirst?.({ supportedParameters: ["response_format"], discoveredAt: "first" });
+
+    await expect(first).resolves.toMatchObject({ discoveredAt: "first" });
+    await expect(second).resolves.toMatchObject({ discoveredAt: "second" });
+    await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "second" });
+  });
+
+  it("makes an explicit refresh replace stale metadata even while the prior discovery is in flight", async () => {
+    let resolveFirst: ((value: { supportedParameters: readonly string[]; discoveredAt: string }) => void) | undefined;
+    const cache = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
+    const first = cache.load(key, () => new Promise((resolve) => { resolveFirst = resolve; }));
+    const refreshed = cache.load(key, async () => ({ supportedParameters: ["structured_outputs"], discoveredAt: "refresh" }), true);
+    resolveFirst?.({ supportedParameters: ["response_format"], discoveredAt: "first" });
+
+    await expect(first).resolves.toMatchObject({ discoveredAt: "first" });
+    await expect(refreshed).resolves.toMatchObject({ discoveredAt: "refresh" });
+    await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "refresh" });
+  });
 });
