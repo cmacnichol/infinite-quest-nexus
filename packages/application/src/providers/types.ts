@@ -207,6 +207,8 @@ export type ProviderModelInventory = Readonly<{
 export type ProviderModelInventoryRequest = OwnerScope & Readonly<{
   providerProfileId: string;
   providerRole: ProviderRole;
+  /** Explicit operator/API discovery may replace cached metadata. */
+  refresh?: boolean;
 }>;
 
 /** Safe, unsaved provider metadata; transient credentials remain outside the application call. */

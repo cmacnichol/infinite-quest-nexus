@@ -31,7 +31,7 @@ describe("provider capability cache", () => {
     await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "second" });
   });
 
-  it("makes an explicit refresh replace stale metadata even while the prior discovery is in flight", async () => {
+  it("joins an in-flight discovery when an explicit refresh arrives", async () => {
     let resolveFirst: ((value: { supportedParameters: readonly string[]; discoveredAt: string }) => void) | undefined;
     const cache = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
     const first = cache.load(key, () => new Promise((resolve) => { resolveFirst = resolve; }));
@@ -39,7 +39,25 @@ describe("provider capability cache", () => {
     resolveFirst?.({ supportedParameters: ["response_format"], discoveredAt: "first" });
 
     await expect(first).resolves.toMatchObject({ discoveredAt: "first" });
-    await expect(refreshed).resolves.toMatchObject({ discoveredAt: "refresh" });
-    await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "refresh" });
+    await expect(refreshed).resolves.toMatchObject({ discoveredAt: "first" });
+    await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "first" });
+  });
+
+  it("single-flights concurrent explicit refreshes", async () => {
+    const cache = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
+    const load = vi.fn(async () => ({ supportedParameters: ["response_format"], discoveredAt: "refresh" }));
+    await Promise.all([cache.load(key, load, true), cache.load(key, load, true)]);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restore a stale load after invalidation when the replacement discovery fails", async () => {
+    let resolveFirst: ((value: { supportedParameters: readonly string[]; discoveredAt: string }) => void) | undefined;
+    const cache = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
+    const first = cache.load(key, () => new Promise((resolve) => { resolveFirst = resolve; }));
+    cache.invalidate(key.providerProfileId);
+    await expect(cache.load(key, async () => { throw new Error("unavailable"); })).rejects.toThrow("unavailable");
+    resolveFirst?.({ supportedParameters: ["response_format"], discoveredAt: "stale" });
+    await first;
+    await expect(cache.load(key, async () => ({ supportedParameters: ["structured_outputs"], discoveredAt: "fresh" }))).resolves.toMatchObject({ discoveredAt: "fresh" });
   });
 });

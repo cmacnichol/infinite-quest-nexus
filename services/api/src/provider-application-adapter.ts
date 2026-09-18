@@ -41,6 +41,7 @@ type ApiRuntimeProviderAdapter = Readonly<{
 type ProviderApiComposition = Readonly<{
   application: ProviderApplication;
   runtime: ApiRuntimeProviderAdapter;
+  responseFormatCapabilities?: Readonly<{ registryDigest: string }>;
   transaction<T>(work: (binding: Readonly<{
     application: ProviderApplication;
     runtime: ApiRuntimeProviderAdapter;
@@ -160,7 +161,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       }));
     },
 
-    async models(ownerUserId: string, providerProfileId: string, requestedRole?: ProviderRole) {
+    async models(ownerUserId: string, providerProfileId: string, requestedRole?: ProviderRole, refresh = false) {
       const profile = (await composition.application.listProfiles({ ownerUserId }))
         .find((candidate) => candidate.id === providerProfileId);
       if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
@@ -172,7 +173,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       const inventory = await composition.application.listModels({
         ownerUserId,
         providerProfileId,
-        providerRole
+        providerRole,
+        refresh
       });
       return inventory.models.map((model) => ({
         id: model.id,
@@ -180,7 +182,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         loaded: false,
         instanceId: model.id,
         contextLength: model.contextWindowTokens ?? 0,
-        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {})
+        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
+        ...(composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
       }));
     },
 
@@ -206,7 +209,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         loaded: false,
         instanceId: model.id,
         contextLength: model.contextWindowTokens ?? 0,
-        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {})
+        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
+        ...(composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
       }));
     },
 

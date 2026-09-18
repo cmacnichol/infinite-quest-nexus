@@ -1308,7 +1308,9 @@ function inventoryItems(models: any[]): ModelInventoryItem[] {
     const instances = Array.isArray(model.loaded_instances) ? model.loaded_instances : [];
     const parameterValues = model?.supported_parameters;
     const supportedParameters = Array.isArray(parameterValues)
-      ? [...new Set(parameterValues.filter((value: unknown): value is string => typeof value === "string" && value.length <= 128))].slice(0, 128)
+      && parameterValues.length <= 128
+      && parameterValues.every((value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 128)
+      ? [...new Set(parameterValues)]
       : null;
     const responseFormatAdvertisement = Array.isArray(parameterValues) ? { supportedParameters, discoveredAt: new Date().toISOString() } : undefined;
     if (instances.length) return instances.map((instance: any) => ({

@@ -248,7 +248,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
                 ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {}),
                 ...(value.responseFormatAdvertisement ? { responseFormatAdvertisement: value.responseFormatAdvertisement } : {})
               }))
-            })
+            }), request.refresh === true
           )).models
           : (await (request.providerRole === "image"
           ? discoverImageModels(profile, options.transport)
