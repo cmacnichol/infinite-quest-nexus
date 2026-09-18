@@ -25,14 +25,14 @@ export class PreparedResponseContractError extends Error {
     this.name = "PreparedResponseContractError";
     Object.assign(this, error && typeof error === "object" ? {
       code: (error as any).code, statusCode: (error as any).statusCode, retryAfterMs: (error as any).retryAfterMs,
-      transport: (error as any).transport
+      transport: (error as any).transport, cause: error
     } : {});
     this.preparedRequest = preparedRequest;
     this.responseId = details.responseId ?? null;
     this.returnedModel = details.returnedModel ?? null;
     this.returnedProviderRoute = details.returnedProviderRoute ?? null;
     this.partialContent = details.partialContent ?? "";
-    this.diagnosticCode = details.diagnosticCode ?? null;
+    this.diagnosticCode = details.diagnosticCode ?? (error as any)?.responseFormatDiagnosticCode ?? null;
   }
 }
 
