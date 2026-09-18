@@ -665,7 +665,7 @@ export function mountStoryPlayerPage(
     } else {
       renderStoryPlayerView(root, state);
     }
-    if (recoveryFocusAction && ["retry-generation", "discard-generation", "resume-generation", "keep-generation-review", "retry-generation-review"].includes(recoveryFocusAction)) {
+    if (recoveryFocusAction && ["retry-generation", "discard-generation", "resume-generation", "keep-generation-review", "retry-generation-review", "repair-format-generation-review"].includes(recoveryFocusAction)) {
       root.querySelector<HTMLElement>(`[data-story-recovery] [data-action="${recoveryFocusAction}"]`)?.focus({ preventScroll: true });
     }
     const editState = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
@@ -1129,15 +1129,21 @@ export function mountStoryPlayerPage(
     for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='discard-generation']")) {
       control.addEventListener("click", () => { void generation.discard(); });
     }
-    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='keep-generation-review'], [data-action='retry-generation-review']")) {
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='keep-generation-review'], [data-action='retry-generation-review'], [data-action='repair-format-generation-review']")) {
       control.addEventListener("click", () => {
         const review = projection.generation?.review?.summary;
-        const decision = control.dataset.action === "keep-generation-review" ? "keep" : "retry";
         if (!review || reviewDecisionInFlight) return;
         reviewDecisionInFlight = true;
         reviewDecisionError = null;
         render();
-        void generation.decideReview({ reviewId: review.reviewId, revision: review.revision, decision }).then(async (saved) => {
+        const request = control.dataset.action === "keep-generation-review"
+          ? { reviewId: review.reviewId, revision: review.revision, decision: "keep" as const }
+          : control.dataset.action === "repair-format-generation-review"
+            ? review.version === 2 && review.canRepairFormat && review.formatRepair
+              ? { reviewId: review.reviewId, revision: review.revision, decision: "repair_format" as const, repairPlanHash: review.formatRepair.planHash } : null
+            : { reviewId: review.reviewId, revision: review.revision, decision: "retry" as const };
+        if (!request) return;
+        void generation.decideReview(request).then(async (saved) => {
           if (!saved && !disposed) {
             reviewDecisionError = "Your decision could not be saved. The turn remains unchanged.";
             const campaignId = projection.campaign?.id;

@@ -268,7 +268,7 @@ describe("generation review contracts", () => {
         status: "offered", failureCode: null
         };
       })()
-    }).success).toBe(true);
+    }).success).toBe(false);
     expect(generationReviewCheckpointSchema.safeParse({ ...checkpoint, originalFindingsHash: "9".repeat(64) }).success).toBe(false);
   });
 

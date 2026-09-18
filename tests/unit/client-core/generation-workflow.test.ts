@@ -190,7 +190,7 @@ describe("generation workflow", () => {
   it("does not dispatch generic retry for an unsupported recoverable review", async () => {
     const client = api({ syncStatus: async () => legacyRecovery(), retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const source = sourceFromSessions([[
-      { kind: "snapshot", snapshot: snapshot({ status: "recoverable", review: { version: 2 } as never }) }
+      { kind: "snapshot", snapshot: snapshot({ status: "recoverable", review: { version: 3 } as never }) }
     ]]);
     const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
     const run = await workflow.submit(campaignId, submission());

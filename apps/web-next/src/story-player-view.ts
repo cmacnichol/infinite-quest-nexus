@@ -176,6 +176,11 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
       retry.type = "button"; retry.dataset.action = "retry-generation-review"; retry.disabled = state.reviewDecisionInFlight;
       decisions.append(retry, element(document, "p", undefined, reviewView.retryDescription));
     }
+    if (reviewView.canRepairFormat) {
+      const repair = element(document, "button", undefined, "Repair fact formatting");
+      repair.type = "button"; repair.dataset.action = "repair-format-generation-review"; repair.disabled = state.reviewDecisionInFlight;
+      decisions.append(repair, element(document, "p", undefined, reviewView.repairDescription || ""));
+    }
     if (state.reviewDecisionInFlight) decisions.append(element(document, "p", undefined, "Saving your decision…"));
     if (state.reviewDecisionError) decisions.append(element(document, "p", "story-recovery-diagnostic", state.reviewDecisionError));
     if (reviewView.retryFailure) decisions.append(element(document, "p", "story-recovery-diagnostic", reviewView.retryFailure));

@@ -797,13 +797,13 @@ function compatibleValidatedMainDraft(
   }
   if (value.factFormatRepair) {
     const review = generationReviewCheckpointSchema.safeParse(generationReview);
-    if (!review.success || review.data.version !== 2) {
+    const receipt = review.success ? review.data.decisionJournal.find((entry) => entry.decision === "repair_format"
+      && entry.reviewId === value.factFormatRepair!.reviewId && entry.revision === value.factFormatRepair!.revision) : undefined;
+    if (!review.success || !receipt || receipt.decision !== "repair_format") {
       throw Object.assign(new Error("The applied fact-format repair has no compatible review receipt."), { code: "generation_checkpoint_incompatible" });
     }
-    const repair = review.data.factFormatRepair;
-    if (!repair || repair.status !== "applied"
-      || value.factFormatRepair.reviewId !== review.data.reviewId
-      || value.factFormatRepair.planHash !== repair.planHash
+    const repair = receipt.repair;
+    if (value.factFormatRepair.planHash !== repair.planHash
       || value.factFormatRepair.rawOutputHash !== repair.plan.rawOutputHash
       || value.factFormatRepair.resultHash !== repair.plan.resultHash
       || value.requestPayloadHash !== repair.producingRequestHash
@@ -1599,7 +1599,10 @@ async function executeLoadedGeneration(
       }
       const plan = applyAuthorizedFactFormatRepair({ checkpoint: savedReview.data, rawOutput: primary.response.content, requestBody: primary.requestBody });
       const repaired = plan ? parseStoryOutput(JSON.stringify(plan.story), storyMemoryDefaults) : null;
-      if (!plan || plan.resultHash !== repair.plan.resultHash || !repaired?.ok || mechanicsLeakFields(repaired.story).length) {
+      const storyOnlyRepair = generationPolicy?.playMode === "story_only" && plan
+        ? parseStoryOnlyOutput(JSON.stringify(plan.story)) : null;
+      if (!plan || plan.resultHash !== repair.plan.resultHash || !repaired?.ok || mechanicsLeakFields(repaired.story).length
+        || (generationPolicy?.playMode === "story_only" && !storyOnlyRepair?.ok)) {
         await incompatible(); return true;
       }
       const appliedReview = generationReviewCheckpointSchema.parse({
@@ -2060,8 +2063,13 @@ async function executeLoadedGeneration(
           replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
         }
       };
-      const offeredRepair = stage === "structure" && reason === "invalid_structure" && !result.outputLimited && primary?.rawOutputReference
+      // A length finish may still contain a complete JSON object. The pure
+      // planner proves completeness itself; do not discard that source solely
+      // because the provider reported a length finish.
+      const proposedRepair = stage === "structure" && primary?.rawOutputReference
         ? prepareFactFormatRepair(result.content, primary.requestBody) : null;
+      const offeredRepair = proposedRepair && (generationPolicy?.playMode !== "story_only"
+        || parseStoryOnlyOutput(JSON.stringify(proposedRepair.plan.story)).ok) ? proposedRepair : null;
       const gate = prepareGenerationReview({
         candidate,
         stage,

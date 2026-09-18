@@ -702,22 +702,20 @@ function assertAppliedFactFormatRepair(
   orchestration: GenerationOrchestrationState,
   finalStory: StoryTurnOutput
 ): void {
-  if (checkpoint.version !== 2 || checkpoint.factFormatRepair?.status !== "applied") return;
-  const repair = checkpoint.factFormatRepair;
   const draft = orchestration.validatedMainDraft;
+  if (!draft?.factFormatRepair) return;
   const receipt = checkpoint.decisionJournal.find((entry) => entry.decision === "repair_format"
-    && entry.reviewId === checkpoint.reviewId && entry.revision === checkpoint.revision - 1);
+    && entry.reviewId === draft.factFormatRepair!.reviewId && entry.revision === draft.factFormatRepair!.revision);
   const unavailable = (): never => { throw Object.assign(new Error("The applied fact-format repair cannot authorize this commit."), { code: "generation_review_acceptance_unavailable" }); };
-  if (!draft?.factFormatRepair || !receipt || receipt.decision !== "repair_format"
-    || draft.factFormatRepair.reviewId !== checkpoint.reviewId
+  if (!receipt || receipt.decision !== "repair_format"
     || draft.factFormatRepair.revision !== receipt.revision
-    || draft.factFormatRepair.planHash !== repair.planHash
-    || draft.factFormatRepair.rawOutputHash !== repair.plan.rawOutputHash
-    || draft.factFormatRepair.resultHash !== repair.plan.resultHash
-    || draft.requestPayloadHash !== repair.producingRequestHash
-    || draft.response.responseId !== repair.sourceResponseId
-    || sha256Hex(draft.response.content) !== repair.plan.rawOutputHash
-    || canonicalEvidenceJson(draft.story) !== canonicalEvidenceJson(repair.plan.story)
+    || draft.factFormatRepair.planHash !== receipt.repair.planHash
+    || draft.factFormatRepair.rawOutputHash !== receipt.repair.plan.rawOutputHash
+    || draft.factFormatRepair.resultHash !== receipt.repair.plan.resultHash
+    || draft.requestPayloadHash !== receipt.repair.producingRequestHash
+    || draft.response.responseId !== receipt.repair.sourceResponseId
+    || sha256Hex(draft.response.content) !== receipt.repair.plan.rawOutputHash
+    || canonicalEvidenceJson(draft.story) !== canonicalEvidenceJson(receipt.repair.plan.story)
     || (orchestration.extension === undefined && canonicalEvidenceJson(finalStory) !== canonicalEvidenceJson(draft.story))) unavailable();
 }
 

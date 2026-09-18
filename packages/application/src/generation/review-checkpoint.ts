@@ -65,6 +65,8 @@ const factFormatRepairCheckpointSchema = z.strictObject({
 
 const repairDecisionJournalEntrySchema = generationReviewDecisionJournalEntrySchema.extend({
   decision: z.literal("repair_format"), planHash: hashSchema,
+  /** Frozen offer evidence survives later review candidates. */
+  repair: factFormatRepairCheckpointSchema,
   nextStage: generationReviewStageSchema
 });
 
@@ -102,10 +104,9 @@ export const generationReviewCheckpointSchema = z.strictObject({
     || repair.plan.resultHash !== factFormatRepairHash(repair.plan.story))) {
     context.addIssue({ code: "custom", message: "Repair plan hashes must bind the exact frozen plan and result." });
   }
-  const source = checkpoint.originalCandidate;
-  if (repair && (repair.rawOutputReference !== source.rawOutputReference
-    || repair.producingRequestHash !== source.producingRequestHash
-    || repair.sourceResponseId !== source.producingResponseId)) {
+  if (repair && repair.status === "offered" && (repair.rawOutputReference !== binding.rawOutputReference
+    || repair.producingRequestHash !== binding.producingRequestHash
+    || repair.sourceResponseId !== binding.producingResponseId)) {
     context.addIssue({ code: "custom", message: "Repair authority must bind the immutable original source." });
   }
   for (const candidate of [checkpoint.originalCandidate, checkpoint.gateCandidate, checkpoint.workingCandidate]) {
@@ -136,10 +137,12 @@ export const generationReviewCheckpointSchema = z.strictObject({
       break;
     }
     if (entry.decision === "repair_format") {
-      if (checkpoint.version !== 2 || !repair || entry.planHash !== repair.planHash
-        || entry.offeredCandidate.rawOutputReference !== repair.rawOutputReference
-        || entry.offeredCandidate.producingRequestHash !== repair.producingRequestHash
-        || entry.offeredCandidate.producingResponseId !== repair.sourceResponseId) {
+      if (entry.planHash !== entry.repair.planHash
+        || entry.repair.planHash !== sha256Hex(canonicalEvidenceJson(entry.repair.plan))
+        || entry.repair.plan.resultHash !== factFormatRepairHash(entry.repair.plan.story)
+        || entry.offeredCandidate.rawOutputReference !== entry.repair.rawOutputReference
+        || entry.offeredCandidate.producingRequestHash !== entry.repair.producingRequestHash
+        || entry.offeredCandidate.producingResponseId !== entry.repair.sourceResponseId) {
         context.addIssue({ code: "custom", path: ["decisionJournal"], message: "Repair receipt must bind the frozen v2 plan." });
         break;
       }

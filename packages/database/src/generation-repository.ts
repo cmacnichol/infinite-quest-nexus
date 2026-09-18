@@ -787,7 +787,8 @@ export function createPostgresGenerationCommandRepository(
           findingsHash: generationReviewFindingsHash(checkpoint.reasons),
           nextStage: parsedRequest.decision === "keep" ? null : checkpoint.stage,
           offeredCandidate: checkpoint.gateCandidate, offeredReasons: checkpoint.reasons, actionReceipt,
-          ...(parsedRequest.decision === "repair_format" ? { planHash: parsedRequest.repairPlanHash } : {})
+          ...(parsedRequest.decision === "repair_format" ? { planHash: parsedRequest.repairPlanHash,
+            repair: checkpoint.factFormatRepair } : {})
         };
         const next = generationReviewCheckpointSchema.parse({
           ...checkpoint,

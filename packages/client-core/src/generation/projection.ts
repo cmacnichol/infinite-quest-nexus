@@ -36,8 +36,11 @@ export type GenerationReviewPresentation =
       message: string;
       canKeep: boolean;
       canRetry: boolean;
+      canRepairFormat: boolean;
       keepDescription: string;
       retryDescription: string;
+      repairDescription: string | null;
+      repairPlanHash: string | null;
       retryFailure: string | null;
     }>
   | Readonly<{
@@ -45,8 +48,11 @@ export type GenerationReviewPresentation =
       message: string;
       canKeep: false;
       canRetry: false;
+      canRepairFormat: false;
       keepDescription: string;
       retryDescription: string;
+      repairDescription: null;
+      repairPlanHash: null;
       retryFailure: null;
     }>;
 
@@ -79,8 +85,11 @@ export function generationReviewPresentation(review: unknown, _diagnostic?: unkn
       message: "This generation review needs a newer client before a decision can be made.",
       canKeep: false,
       canRetry: false,
+      canRepairFormat: false,
       keepDescription: "Keep is unavailable until the saved review can be verified.",
       retryDescription: "Reload the generation status for safe recovery guidance.",
+      repairDescription: null,
+      repairPlanHash: null,
       retryFailure: null
     };
   }
@@ -96,10 +105,15 @@ export function generationReviewPresentation(review: unknown, _diagnostic?: unkn
     message: fallbackMessage,
     canKeep: summary.data.canKeep,
     canRetry: summary.data.canRetry,
+    canRepairFormat: summary.data.version === 2 && summary.data.canRepairFormat,
     keepDescription: summary.data.candidateScope === "main"
       ? "Keep this text and finish the turn; normal event content may still be added."
       : "Keep this saved turn exactly as reviewed.",
     retryDescription: matchesDetail ? parsedDetail.data.retryDescription : "Retry this generation stage.",
+    repairDescription: summary.data.version === 2 && summary.data.formatRepair !== null
+      ? summary.data.formatRepair.description : null,
+    repairPlanHash: summary.data.version === 2 && summary.data.formatRepair !== null
+      ? summary.data.formatRepair.planHash : null,
     retryFailure: matchesDetail ? parsedDetail.data.retryFailure : null
   };
 }

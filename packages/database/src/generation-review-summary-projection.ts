@@ -28,7 +28,10 @@ export function generationReviewSummaryProjection(privateColumn: string): string
   const review = `${privateColumn} #> '{generationReview}'`;
   const field = (path: string) => `${privateColumn} #> '{generationReview,${path}}'`;
   const text = (path: string) => `${privateColumn} #>> '{generationReview,${path}}'`;
-  return `CASE WHEN ${review} IS NULL THEN NULL ELSE jsonb_build_object(
+  return `CASE WHEN ${review} IS NULL THEN NULL
+  WHEN CASE WHEN ${text("version")} ~ '^[0-9]+$' THEN (${text("version")})::int ELSE 0 END > 2
+    THEN jsonb_build_object('version', (${text("version")})::int)
+  ELSE jsonb_build_object(
     'version', (${text("version")})::int,
     'reviewId', ${text("reviewId")},
     'revision', (${text("revision")})::int,

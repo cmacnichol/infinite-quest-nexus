@@ -218,6 +218,20 @@ integration("PostgreSQL generation review persistence", () => {
     expect(second.syncToken).not.toBe(first.syncToken);
   });
 
+  it("projects an opaque future review marker before legacy SQL casts", async () => {
+    const fixture = await pendingReview();
+    await pool.query(
+      `UPDATE generation_jobs
+          SET orchestration_private = jsonb_set(
+            jsonb_set(orchestration_private, '{generationReview,version}', '3'::jsonb),
+            '{generationReview,eligibility,complete}', '"not-a-boolean"'::jsonb)
+        WHERE id=$1`, [fixture.queued.id]
+    );
+    await expect(commands().getJob({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
+      id: fixture.queued.id, review: { version: 3 }
+    });
+  });
+
   it("serializes a review race, replays the winning receipt, and keeps foreign owners out", async () => {
     const fixture = await pendingReview();
     const repository = commands();
