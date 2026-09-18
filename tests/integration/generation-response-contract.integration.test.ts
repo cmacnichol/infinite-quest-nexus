@@ -56,6 +56,19 @@ integration("PostgreSQL response-contract persistence", () => {
   function audit(frozen: ReturnType<typeof selection>) {
     return { version: 1 as const, selectionHash: frozen.selectionHash, invocationKey: "story:nonstream" as const, mode: "json_object" as const, schemaVersion: null, schemaHash: null, requestedModel: "contract-model", providerRoutingSlugs: [], returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
   }
+  function strictSelection() {
+    const queuedPolicy = policy("required");
+    const schema = { additionalProperties: false, properties: { answer: { type: "string" }, nullable: { type: ["string", "null"] } }, required: ["answer"], type: "object" };
+    const contract = { version: 1 as const, mode: "json_schema" as const, operation: "story" as const, streaming: false, forbidFormatFallback: true as const,
+      schemaVersion: "contract-schema-v1", schemaHash: sha256Hex(JSON.stringify(schema)), schemaName: "story_contract", schema,
+      providerRoutingSlugs: ["openai/structured"] as string[], routeConfigHash: hash, adapterProtocol: "text-schema-adapter-v1" as const };
+    const selected = { version: 1 as const, queuedPolicy, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash, contracts: { "story:nonstream": contract } };
+    return { ...selected, selectionHash: frozenResponseContractsSelectionHash(selected) };
+  }
+  function strictAudit(frozen: ReturnType<typeof strictSelection>) {
+    const contract = frozen.contracts["story:nonstream"];
+    return { version: 1 as const, selectionHash: frozen.selectionHash, invocationKey: "story:nonstream" as const, mode: "json_schema" as const, schemaVersion: contract.schemaVersion, schemaHash: contract.schemaHash, requestedModel: "contract-model", providerRoutingSlugs: contract.providerRoutingSlugs, returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
+  }
   async function claimed(queuedId: string, workerId = `matrix-${crypto.randomUUID()}`) {
     const repository = createPostgresGenerationExecutionRepository(pool);
     const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
@@ -276,6 +289,36 @@ integration("PostgreSQL response-contract persistence", () => {
       pool.query("SELECT id,turn_number FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId])
     ]);
     expect(after.map((result) => result.rows)).toEqual(before.map((result) => result.rows));
+    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+  });
+
+  it("persists and enforces a required json-schema contract through the complete invocation ledger", async () => {
+    const imported = await campaign();
+    const queued = await createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, owner, campaignId) => loadPromptSnapshotForTest(client, owner, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (owner, _campaign, turnIds) => readTurnReportedCostsForTest(pool, owner, [...turnIds]),
+      resolveQueuedResponsePolicy: async () => policy("required")
+    }).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Validate the strict archive contract.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id); const logicalAttemptId = crypto.randomUUID(); const frozen = strictSelection();
+    await fixture.repository.saveOrchestration(fixture.scope, { ...fixture.payload.orchestration_private, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } });
+    await expect(fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyHash(policy("required")), frozen)).resolves.toEqual(frozen);
+    const reloaded = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
+    expect(reloaded?.orchestration_private.frozenResponseContracts).toEqual(frozen);
+    expect(frozen.contracts["story:nonstream"].schema.properties.nullable).toEqual({ type: ["string", "null"] });
+    const request = strictAudit(frozen);
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request });
+    expect(reserved?.status).toBe("reserved");
+    for (const changed of [
+      { selectionHash: "b".repeat(64) }, { mode: "json_object" as const, schemaVersion: null, schemaHash: null, providerRoutingSlugs: [] },
+      { schemaVersion: "contract-schema-v2" }, { schemaHash: "c".repeat(64) }, { providerRoutingSlugs: ["other/route"] }, { requestedModel: "other-model" }
+    ]) await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: { ...request, ...changed } as never })).resolves.toBeNull();
+    const dispatched = await fixture.repository.markResponseContractInvocationDispatched!(fixture.scope, reserved!.id, hash);
+    await expect(fixture.repository.completeResponseContractInvocation!(fixture.scope, dispatched!.id, { returnedModel: "contract-model", returnedProviderRoute: "openai/structured", diagnosticCode: null })).resolves.toMatchObject({ status: "completed" });
+    const row = await pool.query<{ orchestrationPrivate: { responseContractInvocations: unknown[] } }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [queued.id]);
+    expect(row.rows[0]?.orchestrationPrivate.responseContractInvocations).toHaveLength(1);
+    await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
 
   it("gives an explicit retry a new logical attempt while retaining frozen selection and immutable ledger", async () => {
