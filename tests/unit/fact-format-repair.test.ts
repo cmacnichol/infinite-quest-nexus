@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { planFactFormatRepair } from "../../packages/story-engine/src/fact-format-repair.js";
 import { factFormatRepairHash, factFormatRepairStableJson } from "../../packages/contracts/src/fact-format-repair-hash.js";
 import { sha256, stableStringify } from "../../packages/domain/src/text.js";
+import { extractPartialNarration, parseStoryOutput } from "../../packages/story-engine/src/output.js";
 import {
   makeSyntheticStory,
   rawSyntheticStory,
@@ -22,6 +23,28 @@ function eligible(rawOutput: string, visible = visibleFacts) {
 }
 
 describe("fact format repair planner", () => {
+  it("preserves long narration in the existing display representation and binds the exact original raw output", () => {
+    const narration = [
+      "Mira follows the lantern light along the quiet passage beneath the old observatory.",
+      "The windows are shuttered, but a thin line of silver light marks the far doorway.",
+      "She pauses beside the wooden bench and places her folded map beside the waiting cup.",
+      "Beyond the doorway, the keeper is arranging a collection of weathered charts on the table.",
+      "He lifts one corner of the nearest chart and points toward the distant harbor.",
+      "Mira studies the penciled shoreline while the lantern flame settles into a steady glow."
+    ].join(" ");
+    const raw = rawSyntheticStory({ narration, canonical_facts: [{ id: "new.fact", content: "The beacon is lit." }] });
+    const plan = eligible(raw, []);
+    const preview = extractPartialNarration(raw);
+    expect(preview).toContain("\n\n");
+    expect(plan.story.narration).toBe(preview);
+    expect(plan.story.narration.replace(/\s/gu, "")).toBe(narration.replace(/\s/gu, ""));
+    expect(JSON.parse(raw).narration).toBe(narration);
+    expect(plan.rawOutputHash).toBe(sha256(raw));
+    const reparsed = parseStoryOutput(JSON.stringify(plan.story));
+    expect(reparsed.ok).toBe(true);
+    if (reparsed.ok) expect(reparsed.story.narration).toBe(plan.story.narration);
+  });
+
   it("keeps the planner's locale-key serialization distinct from review receipt canonical JSON", () => {
     const tracker = { z: 1, "ä": 2, a: 3 };
     expect(factFormatRepairStableJson(tracker)).toBe(stableStringify(tracker));
