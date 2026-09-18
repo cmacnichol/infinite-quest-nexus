@@ -50,13 +50,19 @@ function operationForKey(key: ResponseInvocationKey): Readonly<{ operation: Resp
   return { operation, streaming: delivery === "stream" };
 }
 
-function assertPolicyProfile(policy: QueuedResponsePolicy, profile: ResponseContractRuntimeProfile, registryDigest: string): void {
+export function assertQueuedResponseContractProfile(policy: QueuedResponsePolicy, profile: ResponseContractRuntimeProfile, registryDigest: string): void {
   if (policy.verificationRegistryHash !== registryDigest) {
     throw new ResponseContractPreflightError("response_contract_identity_mismatch", "The queued response-contract registry changed; re-enqueue this generation.");
   }
   if (policy.providerProfileId !== profile.id || policy.model !== profile.model
     || policy.endpointIdentity !== profile.endpointIdentity || policy.providerConfigurationHash !== profile.configurationHash) {
     throw new ResponseContractPreflightError("response_contract_identity_mismatch", "The queued response-contract provider identity changed; re-enqueue this generation.");
+  }
+}
+
+export function assertResponseContractAdapter(profile: ResponseContractRuntimeProfile): void {
+  if (profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
+    throw new ResponseContractPreflightError("response_contract_unsupported_adapter", "The selected provider adapter does not support response contracts.");
   }
 }
 
@@ -91,13 +97,11 @@ export function resolveGenerationResponseContracts(input: Readonly<{
   registryDigest: string;
   eligible(operation: ResponseSchemaOperation, streaming: boolean): ResponseFormatEligibility;
   selectedAt?: string;
-  capabilityEvidenceHash?: string;
+  capabilityEvidenceHash?: string | (() => string);
 }>): FrozenResponseContracts {
   const { queuedPolicy, profile } = input;
-  assertPolicyProfile(queuedPolicy, profile, input.registryDigest);
-  if (profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
-    throw new ResponseContractPreflightError("response_contract_unsupported_adapter", "The selected provider adapter does not support response contracts.");
-  }
+  assertQueuedResponseContractProfile(queuedPolicy, profile, input.registryDigest);
+  assertResponseContractAdapter(profile);
   const contracts: Partial<Record<ResponseInvocationKey, PreparedResponseContract>> = {};
   for (const key of queuedPolicy.invocationKeys) {
     const { operation, streaming } = operationForKey(key);
@@ -115,7 +119,9 @@ export function resolveGenerationResponseContracts(input: Readonly<{
     version: 1 as const,
     queuedPolicy,
     selectedAt: input.selectedAt ?? new Date().toISOString(),
-    capabilityEvidenceHash: input.capabilityEvidenceHash ?? input.registryDigest,
+    capabilityEvidenceHash: typeof input.capabilityEvidenceHash === "function"
+      ? input.capabilityEvidenceHash()
+      : input.capabilityEvidenceHash ?? input.registryDigest,
     contracts
   };
   return { ...selected, selectionHash: frozenResponseContractsSelectionHash(selected) } as FrozenResponseContracts;

@@ -72,6 +72,8 @@ export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Reado
   /** Private runtime preflight collaborator; never projected to browser status. */
   responseFormatCapabilities: ProviderResponseFormatCapabilities;
   responseFormatInventory: ProviderModelInventoryPort;
+  /** Uses the enqueue transaction's client; this never borrows a second pool connection. */
+  loadQueuedTextProfile(client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string): ReturnType<RuntimeProviderExecutionPort["text"]>;
 }>;
 
 export type WorkerGenerationProviderCollaborators = ApiGenerationProviderCollaborators & Readonly<{
@@ -332,7 +334,9 @@ function createInternals(
       for (const providerProfileId of invalidatedProfileIds) responseFormatCapabilities.invalidate(providerProfileId);
       return result;
     },
-    generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory }),
+    generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory,
+      loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
+        bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model) }),
     workerGeneration: Object.freeze({
       ...runtime,
       prompts: generationPrompts,
@@ -340,7 +344,9 @@ function createInternals(
       reads: costs,
       attributeCosts: costs,
       responseFormatCapabilities,
-      responseFormatInventory: base.runtime.inventory
+      responseFormatInventory: base.runtime.inventory,
+      loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
+        bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model)
     }),
     illustration: Object.freeze({ ...runtime, prompts: illustrationPrompts, costs: illustrationCosts }),
     chronicle: Object.freeze({ ...runtime, prompts: chroniclePrompts, costs: chronicleCosts }),

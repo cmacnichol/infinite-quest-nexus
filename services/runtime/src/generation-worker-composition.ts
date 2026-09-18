@@ -13,8 +13,15 @@ import {
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
+import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
+import type { ModelParameterAdvertisement } from "../../../packages/contracts/src/text-response-format.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
-import { resolveGenerationResponseContracts } from "./generation-response-contract.js";
+import {
+  assertQueuedResponseContractProfile,
+  assertResponseContractAdapter,
+  ResponseContractPreflightError,
+  resolveGenerationResponseContracts
+} from "./generation-response-contract.js";
 import type { WorkerGenerationProviderCollaborators } from "./provider-application-composition.js";
 import {
   createGenerationExecutor,
@@ -23,6 +30,16 @@ import {
 } from "./generation-executor-adapter.js";
 
 type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutionRepository;
+
+function boundedAdvertisement(value: unknown): ModelParameterAdvertisement | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Readonly<{ supportedParameters?: unknown; discoveredAt?: unknown }>;
+  if (typeof record.discoveredAt !== "string" || record.discoveredAt.length > 64) return null;
+  if (record.supportedParameters === null) return { supportedParameters: null, discoveredAt: record.discoveredAt };
+  if (!Array.isArray(record.supportedParameters) || record.supportedParameters.length > 64
+    || !record.supportedParameters.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 128)) return null;
+  return { supportedParameters: [...new Set(record.supportedParameters)].sort(), discoveredAt: record.discoveredAt };
+}
 
 export type WorkerGenerationCompositionFactories = Readonly<{
   createRepository(pool: DatabasePool): WorkerGenerationRepository;
@@ -55,33 +72,64 @@ export function createGenerationExecutionCollaborators(
       model
     ),
     resolveResponseContracts: async (ownerUserId, profile, queuedPolicy, runtimeProfile) => {
-      const inventory = await providers.responseFormatInventory.listModels({
-        ownerUserId, providerProfileId: profile.id, providerRole: "text"
-      });
-      const advertised = inventory.models.find((model: { id: string }) => model.id === profile.model)?.responseFormatAdvertisement ?? null;
+      // Identity and adapter validation must fail before discovery.  Discovery
+      // can be unavailable or malformed, but must never make an old queue
+      // policy silently bind a new provider configuration.
+      assertQueuedResponseContractProfile(queuedPolicy, runtimeProfile, providers.responseFormatCapabilities.registryDigest);
+      assertResponseContractAdapter(runtimeProfile);
+      let advertised: unknown = null;
+      try {
+        const inventory = await providers.responseFormatInventory.listModels({
+          ownerUserId, providerProfileId: profile.id, providerRole: "text"
+        });
+        if (inventory && Array.isArray(inventory.models)) {
+          const selected = inventory.models.find((model: unknown): model is Readonly<{ id: string; responseFormatAdvertisement?: unknown }> => {
+            const candidate = model as Readonly<{ id?: unknown; responseFormatAdvertisement?: unknown }> | null;
+            return candidate !== null && typeof candidate === "object" && typeof candidate.id === "string" && candidate.id === profile.model;
+          });
+          advertised = boundedAdvertisement(selected?.responseFormatAdvertisement);
+        }
+      } catch {
+        // Auto policy may use json_object when discovery is unavailable.  The
+        // required branch below converts the same bounded evidence into its
+        // finite preflight error without issuing a text request.
+      }
+      // Discovery is asynchronous.  Re-read the profile at the selection
+      // boundary and fail closed if the captured execution snapshot became
+      // stale; never adopt the newer profile for this leased job.
+      const current = await providers.execution.text({ ownerUserId }, profile.id, "text", profile.model);
+      if (current.id !== profile.id || current.providerType !== profile.providerType || current.model !== profile.model
+        || current.endpointIdentity !== profile.endpointIdentity || current.contextWindowTokens !== profile.contextWindowTokens
+        || current.maxOutputTokens !== profile.maxOutputTokens || current.temperature !== profile.temperature
+        || current.requestTimeoutMs !== profile.requestTimeoutMs || stableStringify(current.configuration) !== stableStringify(profile.configuration)) {
+        throw new ResponseContractPreflightError("response_contract_identity_mismatch", "The provider profile changed during response-contract discovery.");
+      }
+      const verificationEvidence: unknown[] = [];
+      const responseProfile = { ...profile, providerType: profile.providerType as "openrouter" | "openai_compatible" };
+      const eligibility = (operation: Parameters<typeof getProviderOutputSchema>[0], streaming: boolean) => {
+        const schema = getProviderOutputSchema(operation);
+        const result = providers.responseFormatCapabilities.eligibility({
+          advertisement: advertised as never,
+          providerType: responseProfile.providerType,
+          endpointIdentity: profile.endpointIdentity ?? "",
+          model: profile.model,
+          routeConfigHash: capabilityRouteConfigHash(profile.configuration),
+          adapterProtocol: "text-schema-adapter-v1",
+          operation,
+          schemaHash: schema.schemaHash,
+          streaming,
+          now: new Date().toISOString(),
+          nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects
+        });
+        verificationEvidence.push({ operation, streaming, status: result.status, reason: result.reason, verification: result.verification ?? null });
+        return result;
+      };
       return resolveGenerationResponseContracts({
         queuedPolicy,
         profile: runtimeProfile,
         registryDigest: providers.responseFormatCapabilities.registryDigest,
-        eligible: (operation, streaming) => {
-          const schema = getProviderOutputSchema(operation);
-          if (profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
-            return { status: "unsupported", reason: "not_advertised", verification: null };
-          }
-          return providers.responseFormatCapabilities.eligibility({
-            advertisement: advertised,
-            providerType: profile.providerType,
-            endpointIdentity: profile.endpointIdentity ?? "",
-            model: profile.model,
-            routeConfigHash: capabilityRouteConfigHash(profile.configuration),
-            adapterProtocol: "text-schema-adapter-v1",
-            operation,
-            schemaHash: schema.schemaHash,
-            streaming,
-            now: new Date().toISOString(),
-            nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects
-          });
-        }
+        eligible: eligibility,
+        capabilityEvidenceHash: () => sha256(stableStringify({ advertisement: advertised, verificationEvidence }))
       });
     },
     promptFromSnapshot: providers.promptTools.content,

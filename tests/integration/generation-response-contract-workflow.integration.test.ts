@@ -93,7 +93,9 @@ integration("response-contract composed generation workflow", () => {
   async function campaign() {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `response-contract-workflow-${randomUUID()}`;
-    return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "response-contract-workflow.story", story: fixture }));
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "response-contract-workflow.story", story: fixture }));
+    await pool.query("UPDATE campaign_story_memory_enrollments SET review_mode='off' WHERE campaign_id=$1", [imported.campaignId]);
+    return imported;
   }
 
   async function enqueue(policy: "auto" | "required" | "legacy") {
@@ -148,13 +150,16 @@ integration("response-contract composed generation workflow", () => {
 
     await expect(runGenerationJob(pool, `response-contract-required-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(true);
 
-    const row = await pool.query<{ status: string; errorCode: string | null; orchestrationPrivate: Record<string, unknown> }>(
-      "SELECT status,error_code AS \"errorCode\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]
+    const row = await pool.query<{ status: string; errorCode: string | null; orchestrationPrivate: Record<string, unknown>; attemptCount: number }>(
+      `SELECT j.status,j.error_code AS "errorCode",j.orchestration_private AS "orchestrationPrivate",
+              (SELECT count(*)::int FROM generation_attempts a WHERE a.generation_job_id=j.id) AS "attemptCount"
+       FROM generation_jobs j WHERE j.id=$1`, [fixture.job.id]
     );
     expect(row.rows[0]).toMatchObject({ status: "recoverable", errorCode: "response_contract_unavailable" });
     expect(row.rows[0]!.orchestrationPrivate.queuedResponsePolicy).toMatchObject({ policy: "required" });
     expect(row.rows[0]!.orchestrationPrivate.frozenResponseContracts).toBeUndefined();
     expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations).toBeUndefined();
+    expect(row.rows[0]!.attemptCount).toBe(0);
     expect(completions).toHaveLength(callsBefore);
     expect(await authoritySnapshot(fixture.campaignId)).toEqual(before);
   }, 60_000);
