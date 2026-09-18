@@ -1018,15 +1018,13 @@ async function executeLoadedGeneration(
     : null;
   const stages = generationStagePolicy(generationPolicy?.playMode ?? "legacy");
   let frozenGenerationPolicyIdentity: string | null = null;
+  let expectedExecutionProtocol: string | null = null;
   try {
     frozenGenerationPolicyIdentity = generationPolicy ? generationPolicyIdentity(generationPolicy) : null;
     const basePromptProtocol = providerPromptProtocolVersion(promptSnapshot.templates as PromptSnapshot);
     const legacyExecutionProtocol = generationPolicy
       ? generationExecutionProtocolIdentity(basePromptProtocol, generationPolicy) : basePromptProtocol;
-    const expectedExecutionProtocol = hasFrozenStoryMemoryPolicy ? `story-memory-v1|${legacyExecutionProtocol}` : legacyExecutionProtocol;
-    if ((generationPolicy || hasFrozenStoryMemoryPolicy) && expectedExecutionProtocol !== job.prompt_protocol_version) {
-      throw new Error("Saved Story Direction protocol identity is incompatible.");
-    }
+    expectedExecutionProtocol = hasFrozenStoryMemoryPolicy ? `story-memory-v1|${legacyExecutionProtocol}` : legacyExecutionProtocol;
   } catch {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id,
@@ -1038,6 +1036,21 @@ async function executeLoadedGeneration(
       errorMessage: "Saved Story Direction instructions no longer match their frozen hash.",
       recoveryMetadata: { reason: "generation_policy_invalid", retryable: true }
     }), "saving invalid generation policy recovery state");
+    return false;
+  }
+  if ((generationPolicy || hasFrozenStoryMemoryPolicy) && expectedExecutionProtocol !== job.prompt_protocol_version) {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id,
+      ownerUserId: job.owner_user_id,
+      workerId,
+      providerResponseId: null,
+      providerFinishReason: null,
+      errorCode: "generation_prompt_snapshot_invalid",
+      errorMessage: "Saved generation instructions require a newer protocol.",
+      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }), "saving incompatible prompt protocol recovery state");
     return false;
   }
   logger.info({

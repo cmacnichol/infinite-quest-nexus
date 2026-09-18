@@ -141,6 +141,11 @@ describe("story output integrity", () => {
     expect(parseStoryOutput(story({ canonical_fact_updates: malformed }))).toMatchObject({ ok: false, code: "invalid_schema" });
   });
 
+  it("rejects a nonempty deprecated superseded-facts array", () => {
+    expect(parseStoryOutput(story({ superseded_facts: ["Marker One was visible."] })))
+      .toMatchObject({ ok: false, code: "invalid_schema" });
+  });
+
   it("does not treat a typed canonical-fact UUID as fiction mechanics", () => {
     const structured = parseStoryOutput(story({
       canonical_fact_updates: [{
@@ -305,7 +310,7 @@ describe("story output integrity", () => {
   });
 
   it("privately requests readable narration paragraphs with a versioned protocol", () => {
-    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v13-current-state-corrections");
+    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v15-canonical-fact-format");
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
     expect(STORY_SYSTEM_PROMPT).toContain("The length range is a soft pacing goal, not a requirement.");
@@ -316,7 +321,7 @@ describe("story output integrity", () => {
     const enrolled = buildStoryMemoryUserPrompt({}, "I ask the keeper to open the gate.");
     const enrolledPayload = JSON.parse(enrolled) as { instructions: string[] };
 
-    expect(STORY_MEMORY_PROMPT_PROTOCOL_VERSION).toBe("story-v14-continuity-context");
+    expect(STORY_MEMORY_PROMPT_PROTOCOL_VERSION).toBe("story-v15-canonical-fact-format");
     expect(legacy).not.toContain("The player input is intent, not proof that its requested outcome happened.");
     expect(enrolledPayload.instructions).toContain("The player input is intent, not proof that its requested outcome happened.");
     expect(enrolledPayload.instructions).toContain("Omitted history is unknown, not evidence that it never happened.");
