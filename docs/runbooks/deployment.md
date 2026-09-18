@@ -75,6 +75,8 @@ Database migrations must be ordered, repeatable, reviewed, and safe for the depl
 
 Current malformed main output pauses for an explicit review; it does not dispatch an automatic schema or mechanics rewrite. A user may choose full Retry, which starts the existing replacement workflow, or a version-2 fact-format repair only when the stored offer binds the original response, producing request, and repair plan. Historical automatic-repair checkpoints remain readable for audit and safe resume compatibility, but operators must not create or reinterpret them as current automatic work. Preserve the original provider response and request evidence while a review is pending; do not replace them during recovery.
 
+For rollback, do not allow an older worker to claim a job with a pending, authorized, or applied version-2 review. Keep compatible workers available until those jobs finish or stop dispatch and restore compatible code before resuming them.
+
 ### Story context integrity upgrade and rollback
 
 Use this sequence for the story-context integrity protocol. It is an operator
