@@ -128,10 +128,10 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
     ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string; modelContextWindowTokens?: number;
   }>) => Promise<StoryMemoryPolicySnapshot | null>;
   /** Trusted, local-only queue metadata. It is deliberately not a browser request field. */
-  resolveQueuedResponsePolicy?: (scope: Readonly<{
+  resolveQueuedResponsePolicy?: (client: DatabaseClient, scope: Readonly<{
     ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string;
     operationKind: OperationKind; generationPolicy: GenerationPolicySnapshot;
-  }>) => QueuedResponsePolicy | undefined;
+  }>) => Promise<QueuedResponsePolicy | undefined>;
   readTurnReportedCosts: (
     ownerUserId: string,
     campaignId: string,
@@ -389,7 +389,7 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
-        const queuedResponsePolicy = readQueuedResponsePolicy(dependencies.resolveQueuedResponsePolicy?.({
+        const queuedResponsePolicy = readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
           operationKind: "append", generationPolicy
         }));
@@ -425,8 +425,8 @@ export function createPostgresGenerationCommandRepository(
                owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number,
                action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
                requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
-               generation_base_identity, generation_policy
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               generation_base_identity, generation_policy, orchestration_private
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
              RETURNING id, status, action, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId",
                        expected_turn_number AS "expectedTurnNumber", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number + 1,
@@ -434,7 +434,7 @@ export function createPostgresGenerationCommandRepository(
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
-              json({ requestFingerprint, ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}) }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy)]
+              json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy), json(queuedResponsePolicy ? { queuedResponsePolicy } : {})]
           );
           return enqueueResult(inserted.rows[0]!, false);
         } catch (error) {
@@ -514,7 +514,7 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
-        const queuedResponsePolicy = readQueuedResponsePolicy(dependencies.resolveQueuedResponsePolicy?.({
+        const queuedResponsePolicy = readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
           operationKind: "replace_latest", generationPolicy
         }));
@@ -581,8 +581,8 @@ export function createPostgresGenerationCommandRepository(
                action, requested_input_mode, resolved_input_mode, input_mode_source, turn_input_classification_id,
                requested_model, context_options, prompt_protocol_version, recovery_metadata, prompt_snapshot,
                operation_kind, replacement_turn_id, base_turn_number, base_state_private, base_scratchpad_safe_for_prompt,
-               generation_base_identity, status, generation_policy
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,$20,'replacement_queued',$21)
+               generation_base_identity, status, generation_policy, orchestration_private
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'replace_latest',$16,$17,$18,$19,$20,'replacement_queued',$21,$22)
             RETURNING id, status, action, expected_turn_number AS "expectedTurnNumber",
                       operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId", created_at AS "createdAt"`,
             [scope.ownerUserId, scope.campaignId, providerProfileId, request.idempotencyKey, campaign.active_turn_number,
@@ -590,8 +590,8 @@ export function createPostgresGenerationCommandRepository(
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
                request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
-              json({ requestFingerprint, ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}) }), json(promptSnapshot), replacementTurnId,
-              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy)]
+              json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
+              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy), json(queuedResponsePolicy ? { queuedResponsePolicy } : {})]
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
           return enqueueResult(inserted.rows[0]!, false);

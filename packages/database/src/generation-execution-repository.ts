@@ -120,7 +120,7 @@ async function updateResponseContractInvocation(
   return withTransaction(pool, async (client) => {
     const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
       `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
-        WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating') AND lease_expires_at > now() FOR UPDATE`,
+        WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating','validating') AND lease_expires_at > now() FOR UPDATE`,
       [scope.jobId, scope.ownerUserId, scope.workerId]
     );
     const row = result.rows[0]; if (!row) return null;
@@ -1630,11 +1630,10 @@ export function createPostgresGenerationExecutionRepository(
               CASE WHEN $4::jsonb ? 'generationReview' THEN $4::jsonb
                    WHEN orchestration_private ? 'generationReview' THEN ($4::jsonb || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
                    ELSE $4::jsonb
-               END || jsonb_strip_nulls(jsonb_build_object(
-                 'queuedResponsePolicy', CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN orchestration_private->'queuedResponsePolicy' END,
-                 'frozenResponseContracts', CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN orchestration_private->'frozenResponseContracts' END,
-                 'responseContractInvocations', CASE WHEN orchestration_private ? 'responseContractInvocations' THEN orchestration_private->'responseContractInvocations' END
-               )),
+               END
+               || CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object('queuedResponsePolicy', orchestration_private->'queuedResponsePolicy') ELSE '{}'::jsonb END
+               || CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN jsonb_build_object('frozenResponseContracts', orchestration_private->'frozenResponseContracts') ELSE '{}'::jsonb END
+               || CASE WHEN orchestration_private ? 'responseContractInvocations' THEN jsonb_build_object('responseContractInvocations', orchestration_private->'responseContractInvocations') ELSE '{}'::jsonb END,
             recovery_metadata = CASE WHEN $5::jsonb IS NULL THEN recovery_metadata ELSE recovery_metadata || jsonb_build_object('diagnostic',$5::jsonb) END,
             updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
@@ -1675,7 +1674,7 @@ export function createPostgresGenerationExecutionRepository(
       return withTransaction(pool, async (client) => {
         const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
           `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
-            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating') AND lease_expires_at > now() FOR UPDATE`,
+            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating','validating') AND lease_expires_at > now() FOR UPDATE`,
           [scope.jobId, scope.ownerUserId, scope.workerId]
         );
         const row = result.rows[0]; if (!row) return null;
