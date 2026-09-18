@@ -28,10 +28,10 @@ Scope: requested implementation phases 01–04. Status entries remain pending un
 | 01 public finite diagnostics | HTTP/SSE projection and injection tests | Passed at 9f5986ca; see phase-01 handoff and coordinator rerun |
 | 02 mandatory rule in actual composed requests | Default/override/Action/Story Direction payload tests | Passed at 1f4e9fb9; phase-02 handoff, coordinator Linux and exact Retry regression, review clean |
 | 02 old prompt identity preserved | Old job retry/resume and new enqueue integration evidence | Passed at 1f4e9fb9; phase-02 handoff, coordinator Linux and exact Retry regression, review clean |
-| 03 complete decision table | Each shape accepted or rejected as specified | Pending |
-| 03 content mass balance and protected fields | Exact preservation and collision tests | Pending |
-| 03 parser acceptance unchanged | Direct malformed object still rejected | Pending |
-| 03 ID/supersession and mechanics safety | Visible/unseen ID and mechanics fixtures | Pending |
+| 03 complete decision table | Each shape accepted or rejected as specified | Passed at 099d2394; independent reviewer and coordinator each ran 100 tests across three files |
+| 03 content mass balance and protected fields | Exact preservation and collision tests | Passed at 099d2394; trim-changing candidates rejected, mixed content wrappers preserved |
+| 03 parser acceptance unchanged | Direct malformed object still rejected | Passed at 099d2394; existing parser files unchanged and rejection regressions pass |
+| 03 ID/supersession and mechanics safety | Visible/unseen ID and mechanics fixtures | Passed at 099d2394; removed references checked for mechanics, shared UUID validation, review approved |
 | 04 v1/v2 wire and checkpoint compatibility | Old receipts, future versions, clients, compile checks | Pending |
 | 04 explicit decision, atomic concurrency | DB duplicate/stale/wrong owner/revision/plan tests | Pending |
 | 04 exact original request/source evidence | Tampering and changed authority tests | Pending |
@@ -50,3 +50,23 @@ Scope: requested implementation phases 01–04. Status entries remain pending un
 ## Outcome interpretation
 
 Report first-pass parse success separately from deterministic repair eligibility, strict validity after repair, and actual acceptance in composed tests. Retrospective parser replay cannot prove historical downstream acceptance. User-authorized recovery is not first-pass generation improvement. Live-provider quality remains unmeasured unless separately authorized.
+
+## Phase 04 checkpoint verification (incomplete phase)
+
+At immutable `0eaab2a6e5838b0f10858459c8c312760f1da879`, the coordinator independently ran eight focused unit files (169 passed) and `generation-review.integration.test.ts` against isolated Linux PostgreSQL (10 passed, no skips). Source was a Git archive, so subsequent implementation edits were excluded. The PostgreSQL suite includes the future-version projection regression. This evidence covers planner/adapter, review contracts/projections/policy, client workflow, parser, and receipt behavior; it does not establish composed repair acceptance, crash recovery, or rendered browser behavior. Those gates remain pending.
+
+At immutable `b973297c`, the coordinator independently ran the composed continuity-review and receipt suites against isolated Linux PostgreSQL: 58/58 passed, no skips. The new format-repair case proves a v2 offer, explicit repair decision, one primary call, completed job, one additional accepted turn and saved repair provenance. It does not yet prove all intermediate no-write, crash, policy/mode, later-review and optional-provider gates in the acceptance checklist. Expected synthetic unavailable-embedding diagnostics were logged by the harness; no live provider was used.
+
+At immutable `5cd223c7`, the coordinator independently ran the adapter and report suites: 12/12 passed. The repeated-receipt regression selects the matching current receipt after an older receipt. The report uses sanitized build identity with precedence `NEXUS_BUILD_COMMIT`, `GIT_SHA`, `BUILD_SHA`, then `unknown`; nine report tests cover precedence, fallback and unsafe labels. This closes the deferred deployed build environment naming gap, without claiming a deployed report was executed.
+
+### Broad unit checkpoint
+
+The coordinator ran the complete unit selection at immutable `5cd223c7` in the Git-equipped Linux test image: **306 files passed; 3,850 tests passed; one platform-conditional test skipped; exit 0**. The skipped test checks rejection on an unsupported secure-filesystem host; this Linux host supports that implementation, so its supported-host cases ran. The previously failing dropped-notification timing case passed at 15,062 ms. No unhandled FileHandle errors occurred. This closes the prior broad-run uncertainty at this intermediate SHA; final runtime/UI edits still require final verification.
+
+An initial coordinator invocation omitted `tests/unit` and incorrectly collected Playwright, integration and standalone fixture tests under Vitest. It failed and is not counted as verification. The corrected command matched the package script's `vitest run tests/unit` selection, with the required worktree exclusions. Neither run used live providers or production PostgreSQL.
+
+### Scope and later-review checkpoints
+
+- `fe37fe1a`: coordinator independently passed 59 real Linux PostgreSQL tests (48 continuity, 11 review persistence) and 61 adapter/executor unit tests. The coherent campaign-scope tamper fixture now explicitly passes checkpoint schema validation. Removing only the load-time actual-job scope guard in a disposable archive made the targeted test fail (`expected payload to be null`); the intact version passes. This proves that regression exercises the scope guard, while the full foreign-owner/world/base/commit matrix remains pending.
+- `da43fad8`: coordinator independently passed the targeted real-PostgreSQL repair → continuity conflict → explicit Keep → completed sequence (one passed, 48 deselected). Journal retains repair and Keep; primary call count remains one. This is not the second-repair/Retry or crash matrix.
+- `ea905754`: coordinator independently passed 57 executor unit tests after removing 122 provably unreachable automatic schema/mechanics repair dispatch lines. Existing structure-review call-count and historical recovery checkpoint cases remain. The runbook and full final verification remain outstanding.
