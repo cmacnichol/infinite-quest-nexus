@@ -111,6 +111,7 @@ integration("PostgreSQL response-contract persistence", () => {
     expect(dispatched?.status).toBe("dispatched");
     await expect(repository.markResponseContractInvocationDispatched!(scope, primary!.id, hash)).resolves.toBeNull();
     await expect(repository.markResponseContractInvocationDispatched!({ ...scope, workerId: "stale-worker" }, primary!.id, hash)).resolves.toBeNull();
+    await expect(repository.markResponseContractInvocationDispatched!({ ...scope, ownerUserId: crypto.randomUUID() }, primary!.id, hash)).resolves.toBeNull();
     const response = { returnedModel: "contract-model", returnedProviderRoute: null, diagnosticCode: null } as const;
     await expect(repository.completeResponseContractInvocation!(scope, primary!.id, { returnedModel: "", returnedProviderRoute: null, diagnosticCode: null } as never)).resolves.toBeNull();
     const completed = await repository.completeResponseContractInvocation!(scope, primary!.id, response);
@@ -124,6 +125,7 @@ integration("PostgreSQL response-contract persistence", () => {
 
   it("captures replacement policy privately once, ignoring client injection and duplicate resolution", async () => {
     const imported = await campaign();
+    const currentTurn = (await pool.query<{ activeTurnNumber: number }>("SELECT active_turn_number AS \"activeTurnNumber\" FROM campaigns WHERE id=$1", [imported.campaignId])).rows[0]!.activeTurnNumber;
     let resolutions = 0;
     const repository = createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, owner, campaignId) => loadPromptSnapshotForTest(client, owner, campaignId),
@@ -135,7 +137,7 @@ integration("PostgreSQL response-contract persistence", () => {
       }
     });
     const request = generationRetryLatestRequestSchema.parse({
-      action: "Replace the observatory with a trusted policy.", providerProfileId, expectedCurrentTurnNumber: 1,
+      action: "Replace the observatory with a trusted policy.", providerProfileId, expectedCurrentTurnNumber: currentTurn,
       idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 },
       queuedResponsePolicy: { policy: "required", model: "client-injected" }
     } as never);
@@ -158,7 +160,7 @@ integration("PostgreSQL response-contract persistence", () => {
     const logicalAttemptId = crypto.randomUUID();
     expect(await first.repository.saveOrchestration(first.scope, { ...first.payload.orchestration_private, logicalAttempt: { version: 1, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } })).toBe(true);
     const required = selection(policy("required"));
-    await expect(first.repository.saveFrozenResponseContracts!(first.scope, queuedResponsePolicyHash(policy()), required as never)).resolves.toBeNull();
+    await expect(first.repository.saveFrozenResponseContracts!(first.scope, queuedResponsePolicyHash(policy()), required as never)).rejects.toThrow("Frozen response contracts are invalid or incompatible");
     await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
     const second = await claimed(queued.id, `reclaimer-${crypto.randomUUID()}`);
     const valid = selection();
@@ -183,6 +185,14 @@ integration("PostgreSQL response-contract persistence", () => {
     const afterSave = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
     expect(afterSave?.orchestration_private.frozenResponseContracts).toEqual(frozen);
     expect((afterSave?.orchestration_private as Record<string, unknown> | undefined)?.harmless).toEqual({ nested: null });
+    const legacyImported = await campaign();
+    const legacyQueued = await commands(false).enqueueAppend({ ownerUserId, campaignId: legacyImported.campaignId }, generationRequestSchema.parse({ action: "Reject protected key injection.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const legacy = await claimed(legacyQueued.id);
+    expect(await legacy.repository.saveOrchestration(legacy.scope, { ...legacy.payload.orchestration_private, queuedResponsePolicy: policy(), frozenResponseContracts: frozen } as never)).toBe(true);
+    const legacyReloaded = await legacy.repository.loadExecutionPayload({ workerId: legacy.scope.workerId, leaseSeconds: 30, claim: legacy.claim });
+    expect(legacyReloaded?.orchestration_private.queuedResponsePolicy).toBeUndefined();
+    expect(legacyReloaded?.orchestration_private.frozenResponseContracts).toBeUndefined();
+    await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1", [legacyQueued.id]);
     const requestAudit = audit(frozen);
     for (let index = 0; index < 24; index += 1) {
       const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: index % 2 ? "event_extension" : "story_generation", requestPayloadHash: index.toString(16).padStart(64, "0"), request: requestAudit });
