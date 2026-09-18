@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
+import { generationJobSnapshotSchema, generationRequestSchema, generationStreamSnapshotSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -27,6 +27,7 @@ const model = "response-contract-failure-model";
 const digest = "f".repeat(64);
 const verificationNow = Date.parse("2026-09-18T12:00:00.000Z");
 const canary = "PRIVATE_PROVIDER_FAILURE_CANARY";
+const partialJson = `{\"narration\":\"Mira reaches the observatory.\",\"scratchpad\":\"${canary}`;
 
 type Scenario = "schema_rejection" | "refusal" | "partial_stream";
 
@@ -75,7 +76,7 @@ integration("response-contract provider failures", () => {
           return;
         }
         response.writeHead(200, { "content-type": "text/event-stream", "x-generation-id": "partial-stream-id" });
-        response.end(`data: ${JSON.stringify({ id: "partial-stream-id", model: "observed-stream-model", provider: "observed-stream-route", choices: [{ delta: { content: `partial ${canary}` }, finish_reason: null }] })}\n\n`);
+        response.end(`data: ${JSON.stringify({ id: "partial-stream-id", model: "observed-stream-model", provider: "observed-stream-route", choices: [{ delta: { content: partialJson }, finish_reason: null }] })}\n\n`);
       });
     });
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -171,10 +172,17 @@ integration("response-contract provider failures", () => {
     const failure = row.rows[0]!.orchestrationPrivate.preparedResponseFailures[0];
     expect(row.rows[0]!.status).toBe("failed");
     expect(row.rows[0]!.orchestrationPrivate.frozenResponseContracts).toMatchObject({ queuedPolicy: { policy: "required", invocationKeys: ["story:nonstream", "story:stream"] }, contracts: { "story:stream": { mode: "json_schema", streaming: true } } });
-    expect(failure).toMatchObject({ responseId: "partial-stream-id", requestBody: requestBodies[0], requestPayloadHash: createHash("sha256").update(requestBodies[0]!).digest("hex"), partialContent: `partial ${canary}`, returnedModel: "observed-stream-model", returnedProviderRoute: "observed-stream-route", diagnosticCode: null });
+    expect(failure).toMatchObject({ responseId: "partial-stream-id", requestBody: requestBodies[0], requestPayloadHash: createHash("sha256").update(requestBodies[0]!).digest("hex"), partialContent: partialJson, returnedModel: "observed-stream-model", returnedProviderRoute: "observed-stream-route", diagnosticCode: null });
     expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([expect.objectContaining({ status: "completed", response: expect.objectContaining({ returnedModel: "observed-stream-model", returnedProviderRoute: "observed-stream-route", diagnosticCode: null }) })]);
     expect(await authority(value.campaignId)).toEqual(before);
-    expect(JSON.stringify(await value.application.getJob({ ownerUserId, jobId: value.job.id }))).not.toContain(canary);
+    const internalJob = await value.application.getJob({ ownerUserId, jobId: value.job.id });
+    const publicJob = generationJobSnapshotSchema.parse(internalJob);
+    const publicStream = generationStreamSnapshotSchema.parse(internalJob);
+    expect(publicJob.partialNarration).toBe("Mira reaches the observatory.");
+    expect(publicStream.partialNarration).toBe("Mira reaches the observatory.");
+    expect(publicJob).not.toHaveProperty("partialOutput");
+    expect(JSON.stringify(publicJob)).not.toContain(canary);
+    expect(JSON.stringify(publicStream)).not.toContain(canary);
     const repository = createPostgresGenerationExecutionRepository(pool);
     expect(await repository.claimNext({ workerId: `response-contract-failure-reclaim-${randomUUID()}`, leaseSeconds: 30 })).toBeNull();
     expect(requestBodies).toHaveLength(1);
