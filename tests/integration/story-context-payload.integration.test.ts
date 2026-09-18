@@ -304,6 +304,33 @@ integration("story context payload baseline shape", () => {
     }
   });
 
+  it("rejects a corrupted frozen non-enrolled proof without queuing a retry", async () => {
+    const fixture = await importedCampaign("v16-non-enrolled-corrupted-retry");
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const queued = await application.enqueueAppend({ ownerUserId, campaignId: fixture.campaignId }, generationRequestSchema.parse({
+      action: "Inspect the relay lantern.", providerProfileId: providerId, idempotencyKey: randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    const original = (await pool.query<{ prompt_snapshot: { storyPromptCompatibility: { templateHash: string } } }>(
+      "SELECT prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!.prompt_snapshot;
+
+    await pool.query("UPDATE generation_jobs SET status='recoverable' WHERE id=$1", [queued.id]);
+    await expect(application.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+
+    const corrupted = structuredClone(original);
+    corrupted.storyPromptCompatibility.templateHash = "0".repeat(64);
+    await pool.query(
+      "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb WHERE id=$1",
+      [queued.id, JSON.stringify(corrupted)]
+    );
+
+    await expect(application.retry({ ownerUserId, jobId: queued.id }))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
+    await expect(pool.query("SELECT status,prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", prompt_snapshot: corrupted }] });
+  });
+
   it("retries an old non-enrolled v15 snapshot with its frozen bytes and protocol", async () => {
     const fixture = await importedCampaign("v15-non-enrolled-frozen-override");
     const application = createApiGenerationApplication(pool, credentialSecret);

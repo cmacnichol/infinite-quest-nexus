@@ -48,3 +48,11 @@ The actual PostgreSQL provider-payload test now covers a non-enrolled acknowledg
 - **RED:** the real PostgreSQL payload suite failed with the two non-enrolled missing-contract assertions before the repair; its historical fixture also intentionally failed until the verified fixed hash replaced its placeholder.
 - **GREEN:** focused prompt/executor units passed 134 tests; `corepack pnpm check` passed.
 - **GREEN, real PostgreSQL:** `story-context-payload.integration.test.ts` plus `story-memory-enrollment.integration.test.ts` passed 35 tests with 6 existing known-failure skips. No live provider or browser was used.
+
+## Retry proof-binding correction
+
+Change base: `efdf62256da410de99247f1b55ceddc0ab59eaa1`. A retry previously decoded a non-enrolled frozen snapshot without verifying that `storyPromptCompatibility.templateHash` still matched its captured `story_system` bytes. Retry now uses `assertStoryPromptCompatibility`, the same proof check as the executor. A malformed proof is rejected as `retry_protocol_incompatible`, leaves the job recoverable, and leaves its persisted raw snapshot untouched; valid marked retries continue to queue.
+
+- **RED, real PostgreSQL:** the isolated new regression changed only `storyPromptCompatibility.templateHash`; retry incorrectly resolved as `queued` before the correction.
+- **GREEN, real PostgreSQL:** the focused regression passed, and the full payload suite passed 23 tests with 6 existing known-failure skips.
+- **GREEN:** `corepack pnpm check` passed.

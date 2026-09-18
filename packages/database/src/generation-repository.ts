@@ -17,6 +17,7 @@ import { canKeepGenerationCandidate } from "../../application/src/generation/rev
 import { generationReviewDecisionRequestSchema, projectGenerationFailureDiagnostic, projectGenerationReviewDetail, projectGenerationValidationIssues } from "../../contracts/src/generation-review.js";
 import { continuityReviewCheckpointSchema } from "../../application/src/memory/continuity-review-checkpoint.js";
 import {
+  assertStoryPromptCompatibility,
   assertStoryMemoryPromptCompatibility,
   assertContinuityReviewPromptSnapshot,
   readPromptSnapshot,
@@ -822,7 +823,7 @@ export function createPostgresGenerationCommandRepository(
         try {
           promptSnapshot = storedPolicy
             ? assertContinuityReviewPromptSnapshot(assertStoryMemoryPromptCompatibility(job.promptSnapshot), storedPolicy.data.policy.continuityReview)
-            : readPromptSnapshot(job.promptSnapshot);
+            : assertStoryPromptCompatibility(job.promptSnapshot);
         } catch { promptSnapshot = null; }
         const generationPolicy = job.generationPolicy === null
           ? null
