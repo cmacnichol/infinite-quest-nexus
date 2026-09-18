@@ -125,6 +125,11 @@ integration("T17 durable continuity review", () => {
     ownerUserId = await initialOwnerId(pool);
     const transport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
+      if (request.url === "/models" || request.url === "/v1/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "t17-capturing-fake" }] }));
+        return;
+      }
       let body = "";
       request.setEncoding("utf8"); request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
