@@ -745,7 +745,10 @@ export function createPostgresGenerationCommandRepository(
         const checkpoint = parsed.data;
         const recorded = checkpoint.decisionJournal.find((entry) => entry.reviewId === parsedRequest.reviewId && entry.revision === parsedRequest.revision);
         if (recorded) {
-          if (recorded.decision !== parsedRequest.decision) throw new GenerationApplicationError("conflict");
+          if (recorded.decision !== parsedRequest.decision
+            || (parsedRequest.decision === "repair_format" && (recorded.decision !== "repair_format" || recorded.planHash !== parsedRequest.repairPlanHash))) {
+            throw new GenerationApplicationError("conflict");
+          }
           return recorded.actionReceipt.operationKind === "append"
             ? reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "append", replacementTurnId: null }, false)
             : reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "replace_latest", replacementTurnId: recorded.actionReceipt.replacementTurnId! }, false);
@@ -756,23 +759,30 @@ export function createPostgresGenerationCommandRepository(
         }
         if (parsedRequest.decision === "keep" && !checkpointCanKeep(checkpoint)) throw new GenerationApplicationError("conflict");
         if (parsedRequest.decision === "retry" && !checkpoint.eligibility.retryAvailable) throw new GenerationApplicationError("conflict");
+        if (parsedRequest.decision === "repair_format" && (checkpoint.version !== 2 || !checkpoint.factFormatRepair
+          || checkpoint.factFormatRepair.status !== "offered" || checkpoint.factFormatRepair.planHash !== parsedRequest.repairPlanHash)) {
+          throw new GenerationApplicationError("conflict");
+        }
         const status = job.operationKind === "replace_latest" ? "replacement_queued" as const : "queued" as const;
-        const receipt = {
+        const actionReceipt = {
           jobId: job.id, status, operationKind: job.operationKind,
           replacementTurnId: job.operationKind === "replace_latest" ? job.replacementTurnId! : null
+        };
+        const receipt = {
+          reviewId: parsedRequest.reviewId, revision: parsedRequest.revision, actorUserId: scope.ownerUserId, decision: parsedRequest.decision,
+          decidedAt: new Date().toISOString(), candidateScope: checkpoint.candidateScope,
+          candidateHash: checkpoint.gateCandidate.storyHash,
+          findingsHash: generationReviewFindingsHash(checkpoint.reasons),
+          nextStage: parsedRequest.decision === "keep" ? null : checkpoint.stage,
+          offeredCandidate: checkpoint.gateCandidate, offeredReasons: checkpoint.reasons, actionReceipt,
+          ...(parsedRequest.decision === "repair_format" ? { planHash: parsedRequest.repairPlanHash } : {})
         };
         const next = generationReviewCheckpointSchema.parse({
           ...checkpoint,
           state: "decided",
           revision: checkpoint.revision + 1,
-          decisionJournal: [...checkpoint.decisionJournal, {
-            reviewId: parsedRequest.reviewId, revision: parsedRequest.revision, actorUserId: scope.ownerUserId, decision: parsedRequest.decision,
-            decidedAt: new Date().toISOString(), candidateScope: checkpoint.candidateScope,
-            candidateHash: checkpoint.gateCandidate.storyHash,
-            findingsHash: generationReviewFindingsHash(checkpoint.reasons),
-            nextStage: parsedRequest.decision === "retry" ? checkpoint.stage : null,
-            offeredCandidate: checkpoint.gateCandidate, offeredReasons: checkpoint.reasons, actionReceipt: receipt
-          }]
+          ...(parsedRequest.decision === "repair_format" ? { factFormatRepair: { ...checkpoint.factFormatRepair!, status: "authorized" } } : {}),
+          decisionJournal: [...checkpoint.decisionJournal, receipt]
         });
         const updated = await client.query<MutationRow>(
           `UPDATE generation_jobs SET status = $3, lease_owner = NULL, lease_expires_at = NULL,

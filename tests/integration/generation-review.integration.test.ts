@@ -55,7 +55,7 @@ integration("PostgreSQL generation review persistence", () => {
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation-review.story", story: fixture }));
   }
 
-  async function pendingReview({ pause = true, eligible = false }: { pause?: boolean; eligible?: boolean } = {}) {
+  async function pendingReview({ pause = true, eligible = false, repair = false }: { pause?: boolean; eligible?: boolean; repair?: boolean } = {}) {
     const imported = await campaign();
     const queued = await commands().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
       action: "Inspect the review observatory.", providerProfileId, idempotencyKey: crypto.randomUUID(),
@@ -87,11 +87,20 @@ integration("PostgreSQL generation review persistence", () => {
       resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     };
     const checkpoint = {
-      version: 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: eligible ? "scene_coverage" as const : "structure" as const,
+      version: repair ? 2 as const : 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: eligible ? "scene_coverage" as const : "structure" as const,
       candidateScope: "main" as const, reasons, operationKind: "append" as const, replacementTurnId: null,
       eligibility: { complete: true, structurallyValid: eligible, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
-      originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: []
+      originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: [],
+      ...(repair ? { factFormatRepair: {
+        planHash: "e".repeat(64), rawOutputReference: `generation-primary:${queued.id}:1`, sourceResponseId: null,
+        plan: { version: 1 as const, rawOutputHash: "f".repeat(64), visibleFactsHash: "1".repeat(64), protectedFieldsHash: "2".repeat(64),
+          resultHash: "3".repeat(64), story, changes: [{ sourceIndex: 0, kind: "id_label_to_addition" as const }] },
+        producingRequestHash: candidate.producingRequestHash, ownerUserId, campaignId: imported.campaignId,
+        worldVersionId: candidate.worldVersionId, baseIdentity: candidate.baseIdentity,
+        providerConfigurationHash: candidate.provider.configurationHash, promptProtocolVersion: candidate.protocol.version,
+        status: "offered" as const, failureCode: null
+      } } : {})
     } satisfies GenerationReviewCheckpoint;
     const scope = { jobId: queued.id, ownerUserId, workerId };
     if (pause) expect(await execution.pauseForReview(scope, checkpoint)).toBe(true);
@@ -225,6 +234,21 @@ integration("PostgreSQL generation review persistence", () => {
       "SELECT jsonb_array_length(orchestration_private->'generationReview'->'decisionJournal')::int AS \"journalSize\" FROM generation_jobs WHERE id=$1",
       [fixture.queued.id]
     )).resolves.toMatchObject({ rows: [{ journalSize: 1 }] });
+  });
+
+  it("serializes a plan-bound format repair receipt without reinterpreting Retry", async () => {
+    const fixture = await pendingReview({ repair: true });
+    const repository = commands(); const scope = { ownerUserId, jobId: fixture.queued.id };
+    const request = { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "repair_format" as const, repairPlanHash: "e".repeat(64) };
+    const results = await Promise.allSettled([repository.decideReview(scope, request), repository.decideReview(scope, request)]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+    await expect(repository.decideReview(scope, { ...request, repairPlanHash: "0".repeat(64) })).rejects.toMatchObject({ kind: "conflict" });
+    await expect(repository.decideReview(scope, { reviewId: request.reviewId, revision: request.revision, decision: "retry" })).rejects.toMatchObject({ kind: "conflict" });
+    await expect(pool.query<{ status: string; repairStatus: string; journalSize: number }>(
+      `SELECT status, orchestration_private->'generationReview'->'factFormatRepair'->>'status' AS "repairStatus",
+              jsonb_array_length(orchestration_private->'generationReview'->'decisionJournal')::int AS "journalSize"
+         FROM generation_jobs WHERE id=$1`, [fixture.queued.id]
+    )).resolves.toMatchObject({ rows: [{ status: "queued", repairStatus: "authorized", journalSize: 1 }] });
   });
 
   it("serializes competing eligible Keep and Retry decisions with one durable winner", async () => {

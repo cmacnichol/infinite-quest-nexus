@@ -47,15 +47,44 @@ export const generationReviewDecisionJournalEntrySchema = z.strictObject({
   actionReceipt: z.strictObject({ jobId: z.uuid(), status: z.enum(["queued", "replacement_queued"]), operationKind: z.enum(["append", "replace_latest"]), replacementTurnId: z.uuid().nullable() })
 });
 
+const factFormatRepairPlanSchema = z.strictObject({
+  version: z.literal(1), rawOutputHash: hashSchema, visibleFactsHash: hashSchema,
+  protectedFieldsHash: hashSchema, resultHash: hashSchema, story: storyTurnOutputSchema,
+  changes: z.array(z.strictObject({ sourceIndex: z.number().int().min(0), kind: z.enum([
+    "id_label_to_addition", "visible_reference_removed", "metadata_to_addition", "misplaced_update_moved"
+  ]) })).max(100)
+});
+
+const factFormatRepairCheckpointSchema = z.strictObject({
+  plan: factFormatRepairPlanSchema, planHash: hashSchema, sourceResponseId: z.string().trim().min(1).max(500).nullable(),
+  rawOutputReference: z.string().trim().min(1).max(500), producingRequestHash: hashSchema,
+  ownerUserId: z.uuid(), campaignId: z.uuid(), worldVersionId: z.uuid().nullable(), baseIdentity: generationBaseIdentitySchema,
+  providerConfigurationHash: hashSchema, promptProtocolVersion: z.string().trim().min(1).max(200),
+  status: z.enum(["offered", "authorized", "applied", "failed"]), failureCode: z.string().trim().min(1).max(80).nullable()
+});
+
+const repairDecisionJournalEntrySchema = generationReviewDecisionJournalEntrySchema.extend({
+  decision: z.literal("repair_format"), planHash: hashSchema,
+  nextStage: generationReviewStageSchema
+});
+
 export const generationReviewCheckpointSchema = z.strictObject({
-  version: z.literal(1), reviewId: z.uuid(), revision: z.number().int().safe().positive(), state: z.enum(["pending", "decided"]),
+  version: z.union([z.literal(1), z.literal(2)]), reviewId: z.uuid(), revision: z.number().int().safe().positive(), state: z.enum(["pending", "decided"]),
   stage: generationReviewStageSchema, candidateScope: z.enum(["main", "final"]), reasons: z.array(generationReviewReasonCodeSchema).min(1).max(20),
   operationKind: z.enum(["append", "replace_latest"]), replacementTurnId: z.uuid().nullable(),
   eligibility: z.strictObject({ complete: z.boolean(), structurallyValid: z.boolean(), mechanicsClean: z.boolean(), authorityValid: z.boolean(), stageComplete: z.boolean(), retryAvailable: z.boolean() }),
   originalCandidate: generationReviewCandidateSchema, gateCandidate: generationReviewCandidateSchema, workingCandidate: generationReviewCandidateSchema,
   originalFindings: z.array(generationReviewReasonCodeSchema).min(1).max(20), originalFindingsHash: hashSchema,
-  retryFailure: z.string().trim().min(1).max(500).nullable(), decisionJournal: z.array(generationReviewDecisionJournalEntrySchema).max(100)
+  retryFailure: z.string().trim().min(1).max(500).nullable(),
+  factFormatRepair: factFormatRepairCheckpointSchema.optional(),
+  decisionJournal: z.array(z.union([generationReviewDecisionJournalEntrySchema, repairDecisionJournalEntrySchema])).max(100)
 }).superRefine((checkpoint, context) => {
+  if (checkpoint.version === 1 && checkpoint.factFormatRepair !== undefined) {
+    context.addIssue({ code: "custom", message: "V1 checkpoints cannot acquire repair authority." });
+  }
+  if (checkpoint.version === 2 && checkpoint.factFormatRepair === undefined) {
+    context.addIssue({ code: "custom", message: "V2 checkpoints require frozen repair authority." });
+  }
   if ((checkpoint.operationKind === "append") !== (checkpoint.replacementTurnId === null)) {
     context.addIssue({ code: "custom", message: "Review operation binding must match its replacement target." });
   }
@@ -63,6 +92,12 @@ export const generationReviewCheckpointSchema = z.strictObject({
     context.addIssue({ code: "custom", path: ["originalFindingsHash"], message: "Original findings must match their stable audit hash." });
   }
   const binding = checkpoint.gateCandidate;
+  const repair = checkpoint.factFormatRepair;
+  if (repair && (repair.ownerUserId !== binding.ownerUserId || repair.campaignId !== binding.campaignId
+    || repair.worldVersionId !== binding.worldVersionId || canonicalEvidenceJson(repair.baseIdentity) !== canonicalEvidenceJson(binding.baseIdentity)
+    || repair.providerConfigurationHash !== binding.provider.configurationHash || repair.promptProtocolVersion !== binding.protocol.version)) {
+    context.addIssue({ code: "custom", message: "Repair authority must share the frozen review binding." });
+  }
   for (const candidate of [checkpoint.originalCandidate, checkpoint.gateCandidate, checkpoint.workingCandidate]) {
     if (candidate.ownerUserId !== binding.ownerUserId || candidate.campaignId !== binding.campaignId || candidate.worldId !== binding.worldId
       || candidate.worldVersionId !== binding.worldVersionId || candidate.baseTurnNumber !== binding.baseTurnNumber
@@ -89,6 +124,12 @@ export const generationReviewCheckpointSchema = z.strictObject({
       || candidate.provider.type !== binding.provider.type || candidate.provider.configurationHash !== binding.provider.configurationHash) {
       context.addIssue({ code: "custom", path: ["decisionJournal"], message: "Historical decision evidence must share the checkpoint authority binding." });
       break;
+    }
+    if (entry.decision === "repair_format") {
+      if (checkpoint.version !== 2 || !repair || entry.planHash !== repair.planHash) {
+        context.addIssue({ code: "custom", path: ["decisionJournal"], message: "Repair receipt must bind the frozen v2 plan." });
+        break;
+      }
     }
   }
 });

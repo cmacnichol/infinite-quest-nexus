@@ -4,11 +4,23 @@ import { continuityReviewSchema } from "./story-continuity-review.js";
 export const generationReviewStageSchema = z.enum(["structure", "choices", "scene_coverage", "event_coverage", "continuity"]);
 export const generationReviewReasonCodeSchema = z.enum(["scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable", "invalid_choices", "invalid_structure", "output_incomplete", "mechanics_contamination", "event_coverage_failed", "candidate_stale", "candidate_invalid"]);
 
-export const generationReviewDecisionRequestSchema = z.strictObject({
+const reviewIdRevisionSchema = {
   reviewId: z.uuid(),
-  revision: z.number().int().safe().positive(),
+  revision: z.number().int().safe().positive()
+};
+
+/** v1 decisions deliberately remain closed: a historic Retry is never a repair. */
+export const generationReviewDecisionRequestSchema = z.discriminatedUnion("decision", [
+  z.strictObject({
+    ...reviewIdRevisionSchema,
   decision: z.enum(["keep", "retry"])
-});
+  }),
+  z.strictObject({
+    ...reviewIdRevisionSchema,
+    decision: z.literal("repair_format"),
+    repairPlanHash: z.string().regex(/^[a-f0-9]{64}$/u)
+  })
+]);
 
 /**
  * Versioned, private record of the last generation failure. The shape is
@@ -52,12 +64,30 @@ export function projectGenerationFailureDiagnostic(value: unknown): GenerationFa
   return { code, message: publicFailureDiagnosticMessages[code] };
 }
 
-export const generationReviewSummarySchema = z.strictObject({
+export const generationReviewV1SummarySchema = z.strictObject({
   version: z.literal(1), reviewId: z.uuid(), revision: z.number().int().safe().positive(),
   state: z.enum(["pending", "decided"]), stage: generationReviewStageSchema,
   candidateScope: z.enum(["main", "final"]), reasons: z.array(generationReviewReasonCodeSchema).min(1).max(20),
   canKeep: z.boolean(), canRetry: z.boolean()
 });
+
+const formatRepairOfferSchema = z.strictObject({
+  planHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  changedFactCount: z.number().int().min(1).max(100),
+  description: z.literal("Repair fact formatting and keep the narration unchanged.")
+});
+
+export const generationReviewV2SummarySchema = generationReviewV1SummarySchema.extend({
+  version: z.literal(2),
+  canRepairFormat: z.boolean(),
+  formatRepair: formatRepairOfferSchema.nullable()
+}).superRefine((review, context) => {
+  if (review.canRepairFormat !== (review.formatRepair !== null)) {
+    context.addIssue({ code: "custom", message: "Repair offer availability must match its bounded description." });
+  }
+});
+
+export const generationReviewSummarySchema = z.union([generationReviewV1SummarySchema, generationReviewV2SummarySchema]);
 
 /** A future review version is deliberately reduced to its version marker. */
 export const generationReviewTransportSchema = z.union([
@@ -77,12 +107,16 @@ export const generationValidationIssueSchema = z.strictObject({
   code: generationValidationIssueCodeSchema
 });
 
-export const generationReviewDetailSchema = generationReviewSummarySchema.extend({
+const generationReviewDetailFields = {
   narration: z.string().max(200_000).nullable(), choices: z.array(z.string().max(20_000)).max(100),
   findings: z.array(generationReviewFindingSchema).max(20), retryDescription: z.string().trim().min(1).max(500),
   retryFailure: z.string().trim().min(1).max(500).nullable(), omittedFindingCount: z.number().int().min(0),
   validationIssues: z.array(generationValidationIssueSchema).max(8).optional()
-}).strict();
+};
+export const generationReviewDetailSchema = z.union([
+  generationReviewV1SummarySchema.extend(generationReviewDetailFields).strict(),
+  generationReviewV2SummarySchema.extend(generationReviewDetailFields).strict()
+]);
 
 const validationFields = ["superseded_facts", "canonical_fact_updates", "canonical_facts"] as const;
 const missingArrayPattern = /^(superseded_facts|canonical_fact_updates|canonical_facts): Invalid input: expected array, received undefined$/u;
@@ -130,7 +164,7 @@ const fictionPreviewSchema = z.strictObject({
 });
 
 const generationReviewDetailProjectionInputSchema = z.object({
-  review: generationReviewSummarySchema.passthrough(),
+  review: z.union([generationReviewV1SummarySchema.passthrough(), generationReviewV2SummarySchema.passthrough()]),
   candidate: fictionPreviewSchema.nullable().optional(),
   continuityReview: continuityReviewSchema.nullable().optional(),
   omittedFindingCount: z.number().int().min(0).optional(),
@@ -183,10 +217,13 @@ export function projectGenerationReviewDetail(value: unknown): GenerationReviewD
 
 /** Selects the sole browser-safe review fields from private orchestration data. */
 export function projectGenerationReviewSummary(value: unknown): GenerationReviewSummary {
-  const parsed = generationReviewSummarySchema.passthrough().parse(value);
-  return { version: parsed.version, reviewId: parsed.reviewId, revision: parsed.revision, state: parsed.state,
+  const parsed = z.union([generationReviewV1SummarySchema.passthrough(), generationReviewV2SummarySchema.passthrough()]).parse(value);
+  const base = { version: parsed.version, reviewId: parsed.reviewId, revision: parsed.revision, state: parsed.state,
     stage: parsed.stage, candidateScope: parsed.candidateScope, reasons: parsed.reasons,
     canKeep: parsed.canKeep, canRetry: parsed.canRetry };
+  return parsed.version === 2
+    ? { ...base, version: 2, canRepairFormat: parsed.canRepairFormat, formatRepair: parsed.formatRepair }
+    : { ...base, version: 1 };
 }
 
 export type GenerationReviewStage = z.infer<typeof generationReviewStageSchema>;
@@ -194,10 +231,30 @@ export type GenerationFailureDiagnostic = Readonly<z.infer<typeof generationFail
 export type GenerationFailureDiagnosticProjection = Readonly<z.infer<typeof generationFailureDiagnosticProjectionSchema>>;
 export type GenerationReviewReasonCode = z.infer<typeof generationReviewReasonCodeSchema>;
 export type GenerationReviewDecisionRequest = Readonly<z.infer<typeof generationReviewDecisionRequestSchema>>;
-export type GenerationReviewSummary = Readonly<z.infer<typeof generationReviewSummarySchema>>;
+/**
+ * The browser treats v2's repair fields as optional at compile time so a
+ * stored future/older record cannot be mistaken for an authority grant. The
+ * runtime schemas above remain strict for each known version.
+ */
+export type GenerationReviewSummary = Readonly<Omit<z.infer<typeof generationReviewV1SummarySchema>, "version"> & {
+  version: 1 | 2;
+  canRepairFormat?: boolean;
+  formatRepair?: z.infer<typeof formatRepairOfferSchema> | null;
+}>;
 export type GenerationReviewTransport = Readonly<z.infer<typeof generationReviewTransportSchema>>;
 export type GenerationReviewFinding = Readonly<z.infer<typeof generationReviewFindingSchema>>;
 export type GenerationValidationIssueField = z.infer<typeof generationValidationIssueFieldSchema>;
 export type GenerationValidationIssueCode = z.infer<typeof generationValidationIssueCodeSchema>;
 export type GenerationValidationIssue = Readonly<z.infer<typeof generationValidationIssueSchema>>;
-export type GenerationReviewDetail = Readonly<z.infer<typeof generationReviewDetailSchema>>;
+export type GenerationReviewDetail = Readonly<Omit<z.infer<typeof generationReviewV1SummarySchema>, "version"> & {
+  version: 1 | 2;
+  canRepairFormat?: boolean;
+  formatRepair?: z.infer<typeof formatRepairOfferSchema> | null;
+  narration: string | null;
+  choices: string[];
+  findings: GenerationReviewFinding[];
+  retryDescription: string;
+  retryFailure: string | null;
+  omittedFindingCount: number;
+  validationIssues?: GenerationValidationIssue[] | undefined;
+}>;
