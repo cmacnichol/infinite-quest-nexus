@@ -30,6 +30,7 @@ interface ReviewFixtureOptions {
   readonly replaceLatest?: boolean;
   readonly structureReview?: boolean;
   readonly validationIssues?: readonly { field: "superseded_facts" | "canonical_fact_updates" | "canonical_facts"; code: "missing_array" | "expected_string_item" | "invalid_field_shape" }[];
+  readonly malformedReviewDetail?: unknown;
 }
 
 async function installReviewApi(page: Page, canKeep = true, decisionFails = false, decisionCompletes = false, options: ReviewFixtureOptions = {}) {
@@ -107,7 +108,7 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
   generationJobSnapshotSchema.parse(reofferedSnapshot);
   generationJobSnapshotSchema.parse(reofferedQueuedSnapshot);
   generationJobSnapshotSchema.parse(reofferedCompletedSnapshot);
-  generationReviewDetailSchema.parse(detail);
+  if (options.malformedReviewDetail === undefined) generationReviewDetailSchema.parse(detail);
   await page.route("**/api/v1/**", async route => {
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method() !== "GET") writePaths.push(`${request.method()} ${path}`);
@@ -152,7 +153,7 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
       if (options.delayReviewDetailMs) await new Promise<void>((resolve) => setTimeout(resolve, options.delayReviewDetailMs));
       settledReviewDetailRequests += 1;
       if (options.failReviewDetail) return respond({ error: "Review detail unavailable" }, 503);
-      return respond(reoffered ? reofferedDetail : detail);
+      return respond(reoffered ? reofferedDetail : (options.malformedReviewDetail ?? detail));
     }
     if (request.method() === "POST" && path === `/api/v1/generation-jobs/${jobId}/review-decision`) {
       const decision = request.postDataJSON() as { decision?: string };
@@ -306,6 +307,30 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(activeTurn).toHaveText(surface === "legacy" ? "Turn 1" : "Active turn 1");
     await expect(turnTwo).toHaveCount(0);
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+  });
+
+  test(`${surface} rejects malformed validation issue detail without rendering its canary`, async ({ page }) => {
+    const privateCanary = "PRIVATE_MALFORMED_VALIDATION_ISSUE_CANARY";
+    const api = await installReviewApi(page, false, false, false, {
+      structureReview: true,
+      malformedReviewDetail: {
+        version: 1, reviewId, revision: 1, state: "pending", stage: "structure", candidateScope: "final",
+        reasons: ["invalid_structure"], canKeep: false, canRetry: true, narration: null, choices: [],
+        findings: [{ code: "invalid_structure", message: privateCanary }], retryDescription: "Retry this generation stage.",
+        retryFailure: null, omittedFindingCount: 0,
+        validationIssues: [{ field: privateCanary, code: "raw_provider_message", message: privateCanary }]
+      }
+    });
+    if (surface === "legacy") {
+      const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
+      await page.route("**/vendor/photoswipe/photoswipe.css", route => route.fulfill({ contentType: "text/css", body: "" }));
+      await page.route(`**/story/${api.fixture.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+    }
+    await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`);
+    const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+    await expect(recovery).toContainText("The candidate does not meet the required story structure.");
+    await expect(recovery).not.toContainText(privateCanary);
+    await expect(recovery.getByRole("button", { name: "Continue with retry", exact: true })).toBeVisible();
   });
 
   test(`${surface} renders a saved review and posts only an explicit Keep decision`, async ({ page }) => {

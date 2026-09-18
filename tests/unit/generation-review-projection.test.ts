@@ -4,6 +4,7 @@ import {
   projectGenerationReviewSnapshot
 } from "../../services/api/src/generation-review-projection.js";
 import { projectGenerationReviewDetail } from "../../packages/contracts/src/generation-review.js";
+import { generationReviewPresentation } from "../../packages/client-core/src/generation/projection.js";
 
 const reviewId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -95,5 +96,25 @@ describe("generation review public projection", () => {
     });
     expect(detail.validationIssues).toEqual([{ field: "canonical_fact_updates", code: "missing_array" }]);
     expect(JSON.stringify(detail)).not.toContain(privateCanary);
+  });
+
+  test("rejects malformed validation issues and retains the generic structure fallback", () => {
+    const privateCanary = "PRIVATE_MALFORMED_VALIDATION_ISSUE_CANARY";
+    const malformed = {
+      version: 1, reviewId, revision: 1, state: "pending", stage: "structure", candidateScope: "final",
+      reasons: ["invalid_structure"], canKeep: false, canRetry: true, narration: null, choices: [],
+      findings: [{ code: "invalid_structure", message: "The candidate does not meet the required story structure." }],
+      retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0,
+      validationIssues: [{ field: privateCanary, code: "raw_provider_message", message: privateCanary }]
+    };
+    expect(() => projectGenerationReviewDetailResponse(malformed)).toThrow();
+    expect(JSON.stringify(generationReviewPresentation({
+      version: 1, reviewId, revision: 1, state: "pending", stage: "structure", candidateScope: "final",
+      reasons: ["invalid_structure"], canKeep: false, canRetry: true
+    }, undefined, malformed))).not.toContain(privateCanary);
+    expect(generationReviewPresentation({
+      version: 1, reviewId, revision: 1, state: "pending", stage: "structure", candidateScope: "final",
+      reasons: ["invalid_structure"], canKeep: false, canRetry: true
+    }, undefined, malformed).message).toBe("The candidate does not meet the required story structure.");
   });
 });

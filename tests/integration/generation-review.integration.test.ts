@@ -153,16 +153,18 @@ integration("PostgreSQL generation review persistence", () => {
     });
   });
 
-  it("binds diagnostics to one producing response and omits stale or ambiguous attempts", async () => {
+  it("binds diagnostics to the candidate response instead of a later attempt and omits ambiguity", async () => {
     const fixture = await pendingReview();
     const repository = commands();
     const insert = (number: number, responseId: string, errors: readonly string[]) => pool.query(
       `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, provider_response_id, validation_errors)
        VALUES ($1,$2,$3,$4,$5::jsonb)`, [ownerUserId, fixture.queued.id, number, responseId, JSON.stringify(errors)]
     );
-    await insert(1, "stale-response", ["canonical_facts.0: Invalid input: expected string, received object"]);
-    await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.not.toHaveProperty("validationIssues");
-    await insert(2, "review-response", ["canonical_facts.0: Invalid input: expected string, received object"]);
+    await insert(1, "review-response", ["canonical_facts.0: Invalid input: expected string, received object"]);
+    await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
+      validationIssues: [{ field: "canonical_facts", code: "expected_string_item" }]
+    });
+    await insert(2, "later-unrelated-response", ["canonical_fact_updates: Invalid input: expected array, received undefined"]);
     await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
       validationIssues: [{ field: "canonical_facts", code: "expected_string_item" }]
     });

@@ -88,9 +88,12 @@ export function generationReviewPresentation(review: unknown, _diagnostic?: unkn
   const matchesDetail = parsedDetail.success
     && parsedDetail.data.reviewId === summary.data.reviewId
     && parsedDetail.data.revision === summary.data.revision;
+  const fallbackMessage = summary.data.reasons.includes("invalid_structure")
+    ? "The candidate does not meet the required story structure."
+    : "This turn needs your review.";
   return {
     state: "review",
-    message: "This turn needs your review.",
+    message: fallbackMessage,
     canKeep: summary.data.canKeep,
     canRetry: summary.data.canRetry,
     keepDescription: summary.data.candidateScope === "main"
