@@ -35,6 +35,8 @@ import { withTransaction } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
+import { generationResponseFormatProjection } from "./generation-response-format-projection.js";
+import { projectGenerationResponseFormat } from "../../contracts/src/generation-response-format-projection.js";
 
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
@@ -74,6 +76,7 @@ type JobRow = {
   recoveryMetadata: Record<string, unknown>;
   failureDiagnostic: unknown;
   reviewSummary: unknown;
+  responseFormat: unknown;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -250,6 +253,7 @@ function jobResult(row: JobRow): GenerationJob {
     errorMessage: row.errorMessage,
     recoveryMetadata: row.recoveryMetadata,
     failureDiagnostic: projectGenerationFailureDiagnostic(row.failureDiagnostic),
+    responseFormat: projectGenerationResponseFormat({ ...(typeof row.responseFormat === "object" && row.responseFormat !== null ? row.responseFormat as Record<string, unknown> : {}), errorCode: row.errorCode }),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
@@ -653,6 +657,7 @@ export function createPostgresGenerationCommandRepository(
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
                 orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
                 ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
+                ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
                 partial_output AS "partialOutput", generation_policy AS "generationPolicy"
            FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,

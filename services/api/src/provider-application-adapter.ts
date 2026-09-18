@@ -16,6 +16,10 @@ import {
   type PromptScope
 } from "../../../packages/application/src/providers/index.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
+import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
+import { capabilityRouteConfigHash } from "../../runtime/src/provider-capability-cache.js";
+import { createHash } from "node:crypto";
+import type { ModelParameterAdvertisement, ResponseSchemaOperation } from "../../../packages/contracts/src/text-response-format.js";
 
 type ApiRuntimeProviderAdapter = Readonly<{
   execution: Readonly<{
@@ -42,16 +46,34 @@ type ApiRuntimeProviderAdapter = Readonly<{
 type ProviderApiComposition = Readonly<{
   application: ProviderApplication;
   runtime: ApiRuntimeProviderAdapter;
-  responseFormatCapabilities?: Readonly<{ registryDigest: string }>;
+  responseFormatCapabilities?: Readonly<{
+    registryDigest: string;
+    eligibility(input: Readonly<{ advertisement: ModelParameterAdvertisement | null; providerType: "openrouter" | "openai_compatible"; endpointIdentity: string; model: string; routeConfigHash: string; adapterProtocol: "text-schema-adapter-v1"; operation: ResponseSchemaOperation; schemaHash: string; streaming: boolean; now: string; nativeOpenTrackerObjects: boolean }>): Readonly<{ status: string; reason: string; verification: Readonly<{ verifiedAt: string; expiresAt: string }> | null }>;
+  }>;
   transaction<T>(work: (binding: Readonly<{
     application: ProviderApplication;
     runtime: ApiRuntimeProviderAdapter;
   }>) => Promise<T>): Promise<T>;
 }>;
 
+function responseFormatCapability(profile: ProviderProfileView, model: string, advertisement: ModelParameterAdvertisement | null | undefined, capabilities: ProviderApiComposition["responseFormatCapabilities"]) {
+  if (profile.providerRole !== "text" || !capabilities) return undefined;
+  const supportedProvider = profile.providerType === "openrouter" || profile.providerType === "openai_compatible";
+  const endpointIdentity = createHash("sha256").update(profile.baseUrl.replace(/\/+$/, "")).digest("hex");
+  const operations = ([
+    ["story", true], ["story", false], ["choices", false], ["continuity_review", false]
+  ] as const).map(([operation, streaming]) => {
+    const schema = getProviderOutputSchema(operation);
+    const result = supportedProvider ? capabilities.eligibility({ advertisement: advertisement ?? null, providerType: profile.providerType, endpointIdentity, model, routeConfigHash: capabilityRouteConfigHash(profile.configuration), adapterProtocol: "text-schema-adapter-v1", operation, schemaHash: schema.schemaHash, streaming, now: new Date().toISOString(), nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects }) : { status: "unknown", reason: "discovery_unavailable", verification: null };
+    return { operation, streaming, status: result.status, reason: result.reason, schemaVersion: schema.version, schemaHash: schema.schemaHash, verifiedAt: result.verification?.verifiedAt ?? null, expiresAt: result.verification?.expiresAt ?? null };
+  });
+  return { version: 1 as const, model, expectedRegistryDigest: capabilities.registryDigest, advertisedAt: advertisement?.discoveredAt ?? null, operations };
+}
+
 function profileResponse(
   profile: ProviderProfileView,
   mutation?: ProviderProfileMutationResult,
+  capabilities?: ProviderApiComposition["responseFormatCapabilities"],
 ) {
   const configuration = mutation?.configurationProjection.kind === "same_request_echo"
     ? mutation.configurationProjection.configuration
@@ -76,7 +98,8 @@ function profileResponse(
     lastHealthError: null,
     hasApiKey: profile.hasCredential,
     createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt
+    updatedAt: profile.updatedAt,
+    ...(profile.providerRole === "text" ? { responseFormatCapability: responseFormatCapability(profile, profile.defaultModel, null, capabilities) } : {})
   };
 }
 
@@ -86,7 +109,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
   return Object.freeze({
     application: composition.application,
     async list(ownerUserId: string) {
-      return (await composition.application.listProfiles({ ownerUserId })).map((profile) => profileResponse(profile));
+      return (await composition.application.listProfiles({ ownerUserId })).map((profile) => profileResponse(profile, undefined, composition.responseFormatCapabilities));
     },
 
     async create(ownerUserId: string, input: ProviderProfileInput) {
@@ -113,7 +136,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         const profile = input.apiKey === undefined
           ? mutation.profile
           : { ...mutation.profile, hasCredential: Boolean(input.apiKey) };
-        return profileResponse(profile, { ...mutation, profile });
+        return profileResponse(profile, { ...mutation, profile }, composition.responseFormatCapabilities);
       });
     },
 
@@ -144,7 +167,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         const profile = input.apiKey === undefined
           ? mutation.profile
           : { ...mutation.profile, hasCredential: Boolean(input.apiKey) };
-        return profileResponse(profile, { ...mutation, profile });
+        return profileResponse(profile, { ...mutation, profile }, composition.responseFormatCapabilities);
       });
     },
 
@@ -161,7 +184,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         ownerUserId,
         providerProfileId,
         providerRole: profile.providerRole
-      }));
+      }), undefined, composition.responseFormatCapabilities);
     },
 
     async models(ownerUserId: string, providerProfileId: string, requestedRole?: ProviderRole, refresh = false) {
@@ -187,7 +210,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         instanceId: model.id,
         contextLength: model.contextWindowTokens ?? 0,
         ...(exposeTextResponseFormatMetadata && model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
-        ...(exposeTextResponseFormatMetadata && composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
+        ...(exposeTextResponseFormatMetadata && composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {}),
+        ...(exposeTextResponseFormatMetadata ? { responseFormatCapability: responseFormatCapability(profile, model.id, model.responseFormatAdvertisement, composition.responseFormatCapabilities) } : {})
       }));
     },
 

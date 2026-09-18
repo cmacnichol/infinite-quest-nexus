@@ -9,12 +9,12 @@ const input = {
   configuration: {}, enabled: true, isDefault: false
 };
 
-function adapter() {
+function adapter(responseFormatCapabilities?: object) {
   const application = {
     createProfile: vi.fn(), updateProfile: vi.fn(), listProfiles: vi.fn(), listModels: vi.fn()
   };
   const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn() };
-  return { application, runtime, adapter: createProviderApplicationAdapter({ application, runtime, transaction: async (work: (binding: never) => Promise<unknown>) => work({ application, runtime } as never) } as never) };
+  return { application, runtime, adapter: createProviderApplicationAdapter({ application, runtime, responseFormatCapabilities, transaction: async (work: (binding: never) => Promise<unknown>) => work({ application, runtime } as never) } as never) };
 }
 
 describe("provider API configuration boundary", () => {
@@ -51,5 +51,19 @@ describe("provider API configuration boundary", () => {
     const embedding = await value.adapter.models(owner, id, "embedding");
     expect(embedding[0]).not.toHaveProperty("responseFormatAdvertisement");
     expect(embedding[0]).not.toHaveProperty("responseFormatRegistryDigest");
+  });
+
+  it("projects text-model capability only from server inventory and verification state", async () => {
+    const capabilities = { registryDigest: "a".repeat(64), eligibility: vi.fn(() => ({ status: "verified", reason: "verified", verification: { verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-19T00:00:00.000Z" } })) };
+    const value = adapter(capabilities);
+    const profile = { ...input, id, configuration: { textResponseFormatPolicy: "auto" }, hasCredential: false, health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now" };
+    value.application.listProfiles.mockResolvedValue([profile]);
+    value.application.listModels.mockResolvedValue({ models: [{ id: "model", name: "Model", responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-18T00:00:00.000Z" } }] });
+    const [model] = await value.adapter.models(owner, id, "text");
+    expect(model).toBeDefined();
+    expect(model!.responseFormatCapability).toMatchObject({ model: "model", expectedRegistryDigest: "a".repeat(64), advertisedAt: "2026-09-18T00:00:00.000Z" });
+    const capability = model!.responseFormatCapability!;
+    expect(capability.operations).toEqual(expect.arrayContaining([expect.objectContaining({ operation: "story", streaming: true, status: "verified" })]));
+    expect(JSON.stringify(model!.responseFormatCapability)).not.toContain("browserProof");
   });
 });
