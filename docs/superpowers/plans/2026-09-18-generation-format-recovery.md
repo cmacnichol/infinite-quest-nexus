@@ -1,6 +1,6 @@
 # Generation format and recovery correction plan
 
-**Status:** Planning only; no product changes, production retries, deployment, or database edits authorized by this document.
+**Status:** Implemented following subsequent user authorization, through `ed868dc0`. See the [verification report](../../review/generation-format-recovery.md) for passed checks, configured skips, and the reproduced baseline timing failure. No production recovery or deployment was performed.
 
 **Goal:** Avoid rejecting unambiguous provider formatting variations, explain remaining validation failures, and make recovery use the correct explicit review decision.
 

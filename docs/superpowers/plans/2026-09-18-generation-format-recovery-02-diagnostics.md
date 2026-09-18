@@ -24,7 +24,7 @@ Tests: `tests/unit/generation-review-contracts.test.ts`, `tests/unit/generation-
 
 Define exported pure function `projectGenerationValidationIssues(errors: readonly string[]): GenerationValidationIssue[]` in `generation-review.ts`. Match only anchored known validator messages. Collapse numeric indexes into the finite parent field, deduplicate, and cap results. Unknown messages contribute no details; existing `invalid_structure` remains the fallback.
 
-- [ ] Add these exact representative assertions:
+- [x] Add these exact representative assertions:
 
 ```ts
 expect(projectGenerationValidationIssues([
@@ -43,19 +43,19 @@ expect(projectGenerationValidationIssues([
 ])).toEqual([]);
 ```
 
-- [ ] Add malformed-path, overlong input, repeated-error, unknown-field, unsupported-code, and private-canary tests. For `invalid_field_shape`, recognize only the three allowed fields and exact known type-error forms; no substring extraction or arbitrary text passthrough.
-- [ ] Run `corepack pnpm exec vitest run tests/unit/generation-review-contracts.test.ts tests/unit/generation-review-projection.test.ts`; record RED.
-- [ ] Implement the strict schema and projection. Revalidate entries at the API response boundary. Do not add them to `GenerationReviewSummary` or relax that schema.
-- [ ] Run the same command; record GREEN.
+- [x] Add malformed-path, overlong input, repeated-error, unknown-field, unsupported-code, and private-canary tests. For `invalid_field_shape`, recognize only the three allowed fields and exact known type-error forms; no substring extraction or arbitrary text passthrough.
+- [x] Run `corepack pnpm exec vitest run tests/unit/generation-review-contracts.test.ts tests/unit/generation-review-projection.test.ts`; record RED.
+- [x] Implement the strict schema and projection. Revalidate entries at the API response boundary. Do not add them to `GenerationReviewSummary` or relax that schema.
+- [x] Run the same command; record GREEN.
 
 ## Task 2 — Bind detail to the rejected attempt and render it
 
-- [ ] In the existing integration fixture, persist the two missing-array errors on the rejected attempt. Fetch owner-scoped review detail and assert exact safe codes; fetch as another owner and assert no access.
-- [ ] Add a later-attempt fixture and a decided/discarded checkpoint. Prevent old attempt diagnostics being presented as a new candidate's failure. Match the rejected candidate's producing response identity to its job-owned attempt; when no unique matching attempt exists, omit `validationIssues` and use the generic reason. Do not choose an unrelated “latest attempt.”
-- [ ] Implement a bounded lookup for matching `generation_attempts.validation_errors` inside `getReview`, scoped through the already owner-validated job. Exclude `raw_output`, prompts, request bodies, and credentials from this lookup. Feed only projected codes into the public detail.
-- [ ] Add browser fixtures in both surfaces. Render static copy from validated codes: “The response omitted canonical_fact_updates; an array is required.” and “canonical_facts must contain text entries.” Context omissions may appear as secondary information but must not replace the rejection reason. Unknown or absent codes use the existing structure message.
-- [ ] Verify the public API projector preserves only the new strict field and regenerates any display copy from fixed mappings. Test an injected raw message cannot reach the DOM, polling/SSE, or API detail.
-- [ ] Run:
+- [x] In the existing integration fixture, persist the two missing-array errors on the rejected attempt. Fetch owner-scoped review detail and assert exact safe codes; fetch as another owner and assert no access.
+- [x] Add a later-attempt fixture and a decided/discarded checkpoint. Prevent old attempt diagnostics being presented as a new candidate's failure. Match the rejected candidate's producing response identity to its job-owned attempt; when no unique matching attempt exists, omit `validationIssues` and use the generic reason. Do not choose an unrelated “latest attempt.”
+- [x] Implement a bounded lookup for matching `generation_attempts.validation_errors` inside `getReview`, scoped through the already owner-validated job. Exclude `raw_output`, prompts, request bodies, and credentials from this lookup. Feed only projected codes into the public detail.
+- [x] Add browser fixtures in both surfaces. Render static copy from validated codes: “The response omitted canonical_fact_updates; an array is required.” and “canonical_facts must contain text entries.” Context omissions may appear as secondary information but must not replace the rejection reason. Unknown or absent codes use the existing structure message.
+- [x] Verify the public API projector preserves only the new strict field and regenerates any display copy from fixed mappings. Test an injected raw message cannot reach the DOM, polling/SSE, or API detail.
+- [x] Run:
 
 ```powershell
 corepack pnpm exec vitest run tests/unit/generation-review-contracts.test.ts tests/unit/generation-review-projection.test.ts
@@ -65,4 +65,4 @@ corepack pnpm check
 git diff --check
 ```
 
-- [ ] Capture paired-surface desktop/mobile screenshots and commit `Explain generation structure review failures`. Release gate: recognized errors are actionable, unrecognized errors remain safely generic, and no private canary appears in any public response or DOM.
+- [x] Capture paired-surface desktop/mobile screenshots and commit `Explain generation structure review failures`. Release gate: recognized errors are actionable, unrecognized errors remain safely generic, and no private canary appears in any public response or DOM.

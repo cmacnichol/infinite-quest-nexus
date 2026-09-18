@@ -35,7 +35,7 @@ Tests: `tests/unit/story-output.test.ts`, `tests/unit/story-only-output.test.ts`
 
 **Interface:** Preserve `parseStoryOutput(content: string, memoryDefaults?: StoryMemoryDefaults): StoryParseResult`. Add internal pure `normalizeProviderStoryOutput(parsed: unknown): unknown`. Do not reuse `normalizeHistoricalStoryOutput` or expose permissive domain schemas.
 
-- [ ] Using the existing synthetic `story()` fixture, add:
+- [x] Using the existing synthetic `story()` fixture, add:
 
 ```ts
 it("treats omitted top-level no-op arrays as empty", () => {
@@ -56,32 +56,32 @@ it("accepts only a lossless content-only fact wrapper", () => {
 });
 ```
 
-- [ ] Update the existing test that explicitly requires `canonical_fact_updates` from current responses: retain its valid structured-update and missing nested supersession-ID assertions, change only the missing top-level-array expectation. Keep tests requiring full replacement fields unchanged.
-- [ ] Add every negative row in the policy table, mixed string/wrapper arrays, whitespace-only/overlong content, contamination within a wrapper, and an input immutability assertion. Test normalization through Story-only parsing and its invalid-choice/protected-base path too.
-- [ ] Run `corepack pnpm exec vitest run tests/unit/story-output.test.ts tests/unit/story-only-output.test.ts`; record RED.
-- [ ] Implement this algorithm: return non-record input unchanged; shallow-copy a record; add only the two absent arrays; map fact entries only when they are non-array records with exactly one own key `content` whose value is a string; leave all other entries unchanged so the strict schema rejects them. Then apply the existing schema and mechanics validation. Do not trim, concatenate, stringify, or deduplicate fact objects yourself.
-- [ ] Keep raw provider output and request hashes unchanged in durable attempts. Normalized typed stories get their normal downstream candidate hashes; never rewrite raw evidence. Do not backfill old jobs or normalize already accepted turns.
-- [ ] Run the same focused tests; record GREEN and commit `Normalize safe story output formatting`.
+- [x] Update the existing test that explicitly requires `canonical_fact_updates` from current responses: retain its valid structured-update and missing nested supersession-ID assertions, change only the missing top-level-array expectation. Keep tests requiring full replacement fields unchanged.
+- [x] Add every negative row in the policy table, mixed string/wrapper arrays, whitespace-only/overlong content, contamination within a wrapper, and an input immutability assertion. Test normalization through Story-only parsing and its invalid-choice/protected-base path too.
+- [x] Run `corepack pnpm exec vitest run tests/unit/story-output.test.ts tests/unit/story-only-output.test.ts`; record RED.
+- [x] Implement this algorithm: return non-record input unchanged; shallow-copy a record; add only the two absent arrays; map fact entries only when they are non-array records with exactly one own key `content` whose value is a string; leave all other entries unchanged so the strict schema rejects them. Then apply the existing schema and mechanics validation. Do not trim, concatenate, stringify, or deduplicate fact objects yourself.
+- [x] Keep raw provider output and request hashes unchanged in durable attempts. Normalized typed stories get their normal downstream candidate hashes; never rewrite raw evidence. Do not backfill old jobs or normalize already accepted turns.
+- [x] Run the same focused tests; record GREEN and commit `Normalize safe story output formatting`.
 
 ## Task 2 — Align prompts and preserve frozen jobs
 
-- [ ] Add tests that actual composed RPG and Story-only system prompts distinguish replacement fields from fact deltas, explicitly request `canonical_facts` as strings, and show empty top-level arrays. Test serialized request examples, not only a standalone constant.
-- [ ] Replace contradictory complete-replacement wording for fact delta arrays. Keep `scratchpad`, `continuity_summary`, and `open_threads` as explicit complete replacements. Tell models to always emit both arrays despite boundary tolerance; use `canonical_fact_updates` for structured content and exact visible supersession IDs.
-- [ ] Use this copy consistently in the mandatory contract and default examples:
+- [x] Add tests that actual composed RPG and Story-only system prompts distinguish replacement fields from fact deltas, explicitly request `canonical_facts` as strings, and show empty top-level arrays. Test serialized request examples, not only a standalone constant.
+- [x] Replace contradictory complete-replacement wording for fact delta arrays. Keep `scratchpad`, `continuity_summary`, and `open_threads` as explicit complete replacements. Tell models to always emit both arrays despite boundary tolerance; use `canonical_fact_updates` for structured content and exact visible supersession IDs.
+- [x] Use this copy consistently in the mandatory contract and default examples:
 
 ```text
 canonical_facts is an array of strings containing only facts established this turn; do not put objects in it. canonical_fact_updates is an array of structured updates with content and supersedes_fact_ids. Emit [] when there are no updates. superseded_facts must always be []. scratchpad, continuity_summary, and open_threads are explicit complete replacements and must not be omitted.
 ```
 
-- [ ] Advance the affected owning prompt-protocol version using the repository's existing mechanism and update exact protocol/hash expectations. Verify saved prompt snapshots/overrides are not silently rewritten, saved chains cannot be reused across changed identity, and old pending jobs are not relabeled. Existing compatible explicit retries keep their frozen request; incompatible jobs receive the supported discard/re-enqueue guidance.
-- [ ] Run the prompt suites and `corepack pnpm check`; commit `Clarify canonical fact output contract` separately from parser normalization.
+- [x] Advance the affected owning prompt-protocol version using the repository's existing mechanism and update exact protocol/hash expectations. Verify saved prompt snapshots/overrides are not silently rewritten, saved chains cannot be reused across changed identity, and old pending jobs are not relabeled. Existing compatible explicit retries keep their frozen request; incompatible jobs receive the supported discard/re-enqueue guidance.
+- [x] Run the prompt suites and `corepack pnpm check`; commit `Clarify canonical fact output contract` separately from parser normalization.
 
 ## Task 3 — Composed integrity verification
 
-- [ ] Use real PostgreSQL and a deterministic mock provider to generate the missing-array fixture and content-only-wrapper fixture. Each must complete with one provider dispatch, persist the expected facts, preserve existing facts/threads unless explicitly replaced, and replay correct authority on the next turn.
-- [ ] Test structured supersession with an unsent UUID, ambiguous object metadata, omitted replacement fields, output limitation, and mechanics contamination: none may mutate accepted turns, campaign state, or Chronicle. Keep must remain unavailable for invalid structure.
-- [ ] Verify a pending review for invalid structure consumes no further provider calls until an explicit decision. One authorized stage retry is bounded; lease reclaim and duplicate decision delivery do not duplicate provider dispatch or accepted turns. Include cross-owner/campaign and latest-turn replacement coverage.
-- [ ] Run:
+- [x] Use real PostgreSQL and a deterministic mock provider to generate the missing-array fixture and content-only-wrapper fixture. Each must complete with one provider dispatch, persist the expected facts, preserve existing facts/threads unless explicitly replaced, and replay correct authority on the next turn.
+- [x] Test structured supersession with an unsent UUID, ambiguous object metadata, omitted replacement fields, output limitation, and mechanics contamination: none may mutate accepted turns, campaign state, or Chronicle. Keep must remain unavailable for invalid structure.
+- [x] Verify a pending review for invalid structure consumes no further provider calls until an explicit decision. One authorized stage retry is bounded; lease reclaim and duplicate decision delivery do not duplicate provider dispatch or accepted turns. Include cross-owner/campaign and latest-turn replacement coverage.
+- [x] Run:
 
 ```powershell
 corepack pnpm exec vitest run tests/unit/story-output.test.ts tests/unit/story-only-output.test.ts tests/unit/prompt.test.ts tests/unit/story-only-prompt.test.ts tests/unit/prompt-library.test.ts tests/unit/worker-generation-adapter.test.ts
@@ -91,4 +91,4 @@ corepack pnpm build
 git diff --check
 ```
 
-- [ ] Complete the combined release gates in the parent plan. Record focused and broad evidence separately, then commit the composed regressions. No live provider call or production recovery is part of this plan's implementation authorization.
+- [x] Complete the combined release gates in the parent plan. Record focused and broad evidence separately, then commit the composed regressions. No live provider call or production recovery is part of this plan's implementation authorization.
