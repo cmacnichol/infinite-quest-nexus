@@ -11,8 +11,8 @@ export type ProviderResponseFormatCapabilities = Readonly<{
   invalidate(providerProfileId: string): void;
 }>;
 export function createProviderResponseFormatCapabilities(options: Readonly<{ records?: readonly SchemaVerification[]; registryDigest?: string; now?: () => number; cache?: ProviderCapabilityCache<ModelParameterAdvertisement | null>; inventoryCache?: ProviderCapabilityCache<ProviderModelInventory> }> = {}): ProviderResponseFormatCapabilities {
-  const cache = options.cache ?? new ProviderCapabilityCache<ModelParameterAdvertisement | null>({ now: options.now });
-  const inventoryCache = options.inventoryCache ?? new ProviderCapabilityCache<ProviderModelInventory>({ now: options.now });
+  const cache = options.cache ?? new ProviderCapabilityCache<ModelParameterAdvertisement | null>(options.now ? { now: options.now } : {});
+  const inventoryCache = options.inventoryCache ?? new ProviderCapabilityCache<ProviderModelInventory>(options.now ? { now: options.now } : {});
   const registryDigest = options.registryDigest ?? "";
   return Object.freeze({ registryDigest, discover: async (key, load, refresh) => {
     try { return await cache.load(key, load, refresh); } catch { return null; }

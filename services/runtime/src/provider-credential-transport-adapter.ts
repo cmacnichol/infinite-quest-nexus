@@ -35,7 +35,7 @@ import {
 } from "../../../packages/story-engine/src/index.js";
 import { resolveAuthoringContextWindowTokens } from "./source-authoring-budget.js";
 import type { ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
-import type { ProviderCapabilityCacheKey } from "./provider-capability-cache.js";
+import { capabilityRouteConfigHash, type ProviderCapabilityCacheKey } from "./provider-capability-cache.js";
 
 export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = Readonly<{
   id: string;
@@ -174,15 +174,6 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     });
   }
 
-  function stableConfiguration(value: unknown): string {
-    if (Array.isArray(value)) return `[${value.map(stableConfiguration).join(",")}]`;
-    if (value && typeof value === "object") {
-      const record = value as Record<string, unknown>;
-      return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableConfiguration(record[key])}`).join(",")}}`;
-    }
-    return JSON.stringify(value);
-  }
-
   function capabilityKey(row: Awaited<ReturnType<typeof load>>, ownerUserId: string, model = row.defaultModel): ProviderCapabilityCacheKey {
     return {
       ownerUserId,
@@ -190,7 +181,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       providerType: row.providerType,
       endpointIdentity: createHash("sha256").update(row.baseUrl.replace(/\/+$/, "")).digest("hex"),
       model,
-      routeConfigHash: createHash("sha256").update(stableConfiguration(row.configuration)).digest("hex"),
+      routeConfigHash: capabilityRouteConfigHash(row.configuration),
       adapterProtocol: "text-schema-adapter-v1"
     };
   }
@@ -262,7 +253,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
           models: models.map((value) => ({
             id: value.id,
             name: "displayName" in value ? value.displayName : value.name,
-            ...(("contextLength" in value ? value.contextLength : value.contextWindowTokens) > 0 ? { contextWindowTokens: "contextLength" in value ? value.contextLength : value.contextWindowTokens } : {}),
+            ...(() => { const contextWindowTokens = "contextLength" in value ? value.contextLength : value.contextWindowTokens; return contextWindowTokens !== undefined && contextWindowTokens > 0 ? { contextWindowTokens } : {}; })(),
             ...(request.providerRole === "text" && value.responseFormatAdvertisement ? { responseFormatAdvertisement: value.responseFormatAdvertisement } : {})
           }))
         };

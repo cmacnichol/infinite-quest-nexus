@@ -341,8 +341,17 @@ describe("API server security and CORS headers", () => {
     expect(listModels).toHaveBeenCalledWith({
       ownerUserId,
       providerProfileId,
-      providerRole: "embedding"
+      providerRole: "embedding",
+      refresh: false
     });
+    const refreshed = await app.inject({
+      method: "GET",
+      url: `/api/v1/providers/${providerProfileId}/models?providerRole=embedding&refresh=true`
+    });
+    expect(refreshed.statusCode).toBe(200);
+    expect(listModels).toHaveBeenLastCalledWith({ ownerUserId, providerProfileId, providerRole: "embedding", refresh: true });
+    const invalidRefresh = await app.inject({ method: "GET", url: `/api/v1/providers/${providerProfileId}/models?refresh=invalid` });
+    expect(invalidRefresh.statusCode).toBe(400);
     await app.close();
   });
 

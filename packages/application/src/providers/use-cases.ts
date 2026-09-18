@@ -82,7 +82,8 @@ export function toSafeProviderConfiguration(configuration: unknown): SafeProvide
   return Object.freeze(safeFields) as SafeProviderConfiguration;
 }
 
-function assertResponseFormatPolicy(configuration: unknown): void {
+/** Reject an explicitly supplied invalid policy before safe-field projection. */
+export function assertResponseFormatPolicy(configuration: unknown): void {
   if (!configuration || typeof configuration !== "object" || Array.isArray(configuration)) return;
   const value = (configuration as Record<string, unknown>).textResponseFormatPolicy;
   if (value !== undefined && value !== "legacy" && value !== "auto" && value !== "required") {

@@ -6,6 +6,7 @@ import type {
 } from "../../../packages/contracts/src/index.js";
 import {
   toSafeProviderConfiguration,
+  assertResponseFormatPolicy,
   type ProviderApplication,
   type ProviderCandidate,
   type ProviderModelInventory,
@@ -89,6 +90,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async create(ownerUserId: string, input: ProviderProfileInput) {
+      assertResponseFormatPolicy(input.configuration);
       return composition.transaction(async ({ application, runtime }) => {
         const mutation = await application.createProfile({
           ownerUserId,
@@ -116,6 +118,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
+      assertResponseFormatPolicy(input.configuration);
       return composition.transaction(async ({ application, runtime }) => {
         const mutation = await application.updateProfile({
           ownerUserId,
@@ -188,6 +191,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async discoverModels(ownerUserId: string, input: ProviderProfileInput) {
+      assertResponseFormatPolicy(input.configuration);
       const inventory = await composition.runtime.discoverCandidateModelsWithCredential({
         ownerUserId,
         name: input.name,

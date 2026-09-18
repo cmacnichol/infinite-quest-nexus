@@ -1303,7 +1303,7 @@ function inventoryRows(data: Record<string, any> | any[]): any[] {
   return Array.isArray(data) ? data : Array.isArray(data.models) ? data.models : Array.isArray(data.data) ? data.data : [];
 }
 
-function inventoryItems(models: any[]): ModelInventoryItem[] {
+function inventoryItems(models: any[], advertiseResponseFormat = false): ModelInventoryItem[] {
   return models.flatMap((model: any) => {
     const instances = Array.isArray(model.loaded_instances) ? model.loaded_instances : [];
     const parameterValues = model?.supported_parameters;
@@ -1312,20 +1312,22 @@ function inventoryItems(models: any[]): ModelInventoryItem[] {
       && parameterValues.every((value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 128)
       ? [...new Set(parameterValues)]
       : null;
-    const responseFormatAdvertisement = Array.isArray(parameterValues) ? { supportedParameters, discoveredAt: new Date().toISOString() } : undefined;
+    // A successful text inventory always records what was observed. Null is
+    // unknown (absent/malformed); [] is the provider's explicit negative.
+    const responseFormatAdvertisement = { supportedParameters, discoveredAt: new Date().toISOString() };
     if (instances.length) return instances.map((instance: any) => ({
       id: String(model.key || model.id || instance.id || ""),
       displayName: String(model.display_name || model.name || model.key || model.id || ""),
       loaded: true,
       instanceId: String(instance.id || model.key || model.id || ""),
-      contextLength: Number(instance.config?.context_length || instance.context_length || model.max_context_length || 0), ...(responseFormatAdvertisement ? { responseFormatAdvertisement } : {})
+      contextLength: Number(instance.config?.context_length || instance.context_length || model.max_context_length || 0), ...(advertiseResponseFormat ? { responseFormatAdvertisement } : {})
     }));
     return [{
       id: String(model.id || model.key || ""),
       displayName: String(model.name || model.display_name || model.id || model.key || ""),
       loaded: Boolean(model.loaded),
       instanceId: String(model.instance_id || model.id || model.key || ""),
-      contextLength: Number(model.context_length || model.max_context_length || model.loaded_context_length || 0), ...(responseFormatAdvertisement ? { responseFormatAdvertisement } : {})
+      contextLength: Number(model.context_length || model.max_context_length || model.loaded_context_length || 0), ...(advertiseResponseFormat ? { responseFormatAdvertisement } : {})
     }];
   }).filter((model: ModelInventoryItem) => model.id);
 }
@@ -1564,7 +1566,7 @@ export async function discoverModels(
     : `${openAiRoot(profile.baseUrl)}/models`;
   const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile, url) }, transport), profile, "model discovery", url);
   const rows = inventoryRows(data);
-  const items = inventoryItems(rows);
+  const items = inventoryItems(rows, true);
   if (profile.providerType !== "openrouter") return items;
   const byId = new Map(rows.map((row: any) => [String(row.id || row.key || ""), row]));
   return items.map((item) => {

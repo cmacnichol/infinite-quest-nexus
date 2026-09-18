@@ -191,7 +191,7 @@ describe("provider PostgreSQL adapter boundaries", () => {
     );
     await adapter.storeCredential("00000000-0000-4000-8000-000000000012", row.id, plaintext);
 
-    expect(inventory.models).toEqual([{ id: "story-model", name: "Story Model", contextWindowTokens: 16_384 }]);
+    expect(inventory.models).toEqual([expect.objectContaining({ id: "story-model", name: "Story Model", contextWindowTokens: 16_384, responseFormatAdvertisement: expect.objectContaining({ supportedParameters: null, discoveredAt: expect.any(String) }) })]);
     expect(execution).toMatchObject({
       id: row.id,
       name: row.name,

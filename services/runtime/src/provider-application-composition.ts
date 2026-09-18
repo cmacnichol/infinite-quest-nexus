@@ -162,7 +162,11 @@ function createInternals(
   pool: DatabasePool,
   options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ) {
-  const responseFormatCapabilities = createProviderResponseFormatCapabilities({ records: options.schemaVerifications, registryDigest: options.schemaVerificationDigest, now: options.clock });
+  const responseFormatCapabilities = createProviderResponseFormatCapabilities({
+    ...(options.schemaVerifications ? { records: options.schemaVerifications } : {}),
+    ...(options.schemaVerificationDigest ? { registryDigest: options.schemaVerificationDigest } : {}),
+    ...(options.clock ? { now: options.clock } : {})
+  });
   function bind(database: DatabaseClient | DatabasePool): ProviderApplicationTransaction {
     const client = database as DatabaseClient;
     const providerRepositories = createPostgresProviderRepositories(client);

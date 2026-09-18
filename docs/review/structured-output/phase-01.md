@@ -1,5 +1,17 @@
 # Structured output phase 01 handoff
 
+## Final correction at `17a053a1`
+
+The API now validates the raw submitted `textResponseFormatPolicy` before its safe projection for create, update, and candidate discovery. Successful text inventory always projects a bounded advertisement with the server observation time: absent or malformed support is `null`, while `[]` remains an explicit negative. Image and text-as-embedding-fallback public inventories exclude this text-only metadata.
+
+The composition cache distinguishes ordinary and explicit flights. An explicit refresh detaches an ordinary pending discovery, concurrent explicit requests join the replacement, and stale/invalidation completions cannot restore old values. Cache route identity is a versioned SHA-256 of only `streaming`, `streamingSupport`, and `textResponseFormatPolicy`; ignored and secret-like stored fields are excluded.
+
+RED evidence: before these corrections, the focused suite recorded the old refresh result (`first`) rather than the replacement, and text inventory assertions lacked the required unknown advertisement. New behavioral API-adapter tests cover invalid raw policy for create, update, and candidate discovery; the server inject test covers `refresh=false`, `refresh=true`, and invalid query parsing. Inventory cases cover both advertised values, response-format only, absent, empty, malformed, and over-limit support.
+
+GREEN evidence: `corepack pnpm exec vitest run tests/unit/provider-capability-cache.test.ts tests/unit/providers.test.ts tests/unit/provider-postgres-adapters.test.ts tests/unit/provider-api-adapter.test.ts` passed 79 tests in 4 files. `corepack pnpm exec vitest run tests/unit/server-security.test.ts` passed 38 tests. `corepack pnpm check` passed with exit 0. `git diff --check` passed.
+
+No PostgreSQL, browser, live-provider, deployment, main-branch, or production calls were made. API/worker operation coverage remains deferred to schema registry patch 02 and durable preflight patch 04.
+
 Patch 01 preserves bounded OpenRouter `supported_parameters` advertisements for text inventory only. Image and embedding discovery remains unchanged. Missing or malformed advertisements remain unknown, and no model-name or JSON-mode inference is used.
 
 `textResponseFormatPolicy` is a closed safe configuration value. Its absence remains absent in stored historical configuration, while selection resolves an absent policy as `legacy`; this preserves existing configuration fingerprints and serializer behavior.

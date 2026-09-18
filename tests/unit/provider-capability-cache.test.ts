@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ProviderCapabilityCache } from "../../services/runtime/src/provider-capability-cache.js";
+import { capabilityRouteConfigHash, ProviderCapabilityCache } from "../../services/runtime/src/provider-capability-cache.js";
 
 const key = {
   ownerUserId: "owner", providerProfileId: "profile", providerType: "openrouter" as const,
@@ -31,7 +31,7 @@ describe("provider capability cache", () => {
     await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "second" });
   });
 
-  it("joins an in-flight discovery when an explicit refresh arrives", async () => {
+  it("replaces an ordinary in-flight discovery when an explicit refresh arrives", async () => {
     let resolveFirst: ((value: { supportedParameters: readonly string[]; discoveredAt: string }) => void) | undefined;
     const cache = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
     const first = cache.load(key, () => new Promise((resolve) => { resolveFirst = resolve; }));
@@ -39,8 +39,8 @@ describe("provider capability cache", () => {
     resolveFirst?.({ supportedParameters: ["response_format"], discoveredAt: "first" });
 
     await expect(first).resolves.toMatchObject({ discoveredAt: "first" });
-    await expect(refreshed).resolves.toMatchObject({ discoveredAt: "first" });
-    await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "first" });
+    await expect(refreshed).resolves.toMatchObject({ discoveredAt: "refresh" });
+    await expect(cache.load(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toMatchObject({ discoveredAt: "refresh" });
   });
 
   it("single-flights concurrent explicit refreshes", async () => {
@@ -59,5 +59,13 @@ describe("provider capability cache", () => {
     resolveFirst?.({ supportedParameters: ["response_format"], discoveredAt: "stale" });
     await first;
     await expect(cache.load(key, async () => ({ supportedParameters: ["structured_outputs"], discoveredAt: "fresh" }))).resolves.toMatchObject({ discoveredAt: "fresh" });
+  });
+
+  it("partitions only capability-relevant non-secret configuration", () => {
+    expect(capabilityRouteConfigHash({ streaming: true, apiKey: "secret", ignored: "one" }))
+      .toBe(capabilityRouteConfigHash({ streaming: true, credential: "other", ignored: "two" }));
+    expect(capabilityRouteConfigHash({ streaming: true })).not.toBe(capabilityRouteConfigHash({ streaming: false }));
+    expect(capabilityRouteConfigHash({ streamingSupport: true })).not.toBe(capabilityRouteConfigHash({ streamingSupport: false }));
+    expect(capabilityRouteConfigHash({ textResponseFormatPolicy: "auto" })).not.toBe(capabilityRouteConfigHash({ textResponseFormatPolicy: "required" }));
   });
 });
