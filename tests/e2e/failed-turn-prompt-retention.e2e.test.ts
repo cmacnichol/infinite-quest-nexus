@@ -93,6 +93,12 @@ async function installFixture(page: Page): Promise<Fixture> {
     if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/illustration-config`) return respond(fixture.illustrationConfig);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/illustration-segments`) return respond(fixture.illustrationSegments);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/image-jobs`) return respond({ jobs: [] });
+    if (request.method() === "GET" && path === "/api/v1/turns/88888888-8888-4888-8888-888888888888/illustration-resolution") return respond({
+      id: "99999999-9999-4999-8999-999999999999", campaignId: fixture.campaignId, turnId: "88888888-8888-4888-8888-888888888888",
+      sourcePolicy: "library_only", matchingScope: "campaign", confidenceProfile: "strict", status: "no_match", selectedAssetId: null,
+      selectedScore: null, resolvedThreshold: null, algorithmVersion: "fixture-v1", imageJobId: null, reasonCode: null,
+      createdAt: timestamp, updatedAt: timestamp, completedAt: timestamp, candidates: []
+    });
     if (request.method() === "POST" && path === `/api/v1/campaigns/${fixture.campaignId}/generations`) {
       const body = request.postDataJSON() as Record<string, unknown>; writes.push({ path, body });
       base.action = String(body.action); base.requestedInputMode = String(body.requestedInputMode); base.resolvedInputMode = String(body.resolvedInputMode);
@@ -149,8 +155,8 @@ for (const surface of ["legacy", "web-next"] as const) {
     await page.locator(ui.submit).click();
     await expect.poll(() => api.writes.length).toBe(2);
     expect(api.writes[1]!.body).toMatchObject({ action: "Follow the blue lantern.", requestedInputMode: "scene", resolvedInputMode: "scene" });
-    expect(api.errors).toEqual([]);
     expect(api.unhandledApiRoutes).toEqual([]);
+    expect(api.errors).toEqual([]);
   });
 
   test(`${surface} waits for explicit discard before restoring a review draft and forgets it after a newer draft reload`, async ({ page }) => {
@@ -171,8 +177,8 @@ for (const surface of ["legacy", "web-next"] as const) {
     await page.reload();
     await expect(page.locator(ui.draft)).not.toHaveValue("Send this for review.");
     expect(api.writes).toHaveLength(1);
-    expect(api.errors).toEqual([]);
     expect(api.unhandledApiRoutes).toEqual([]);
+    expect(api.errors).toEqual([]);
   });
 
   test(`${surface} clears completed prompts without a restored ghost`, async ({ page }) => {
@@ -187,7 +193,7 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(page.getByText("Accepted fixture turn.", { exact: true }).first()).toBeVisible();
     await expect.poll(() => page.evaluate(() => Object.keys(localStorage).some((key) => key.includes("FailedAppendPrompt")))).toBe(false);
     await expect(page.locator(ui.draft)).toHaveValue("");
-    expect(api.errors).toEqual([]);
     expect(api.unhandledApiRoutes).toEqual([]);
+    expect(api.errors).toEqual([]);
   });
 }
