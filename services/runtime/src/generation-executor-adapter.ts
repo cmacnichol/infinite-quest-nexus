@@ -1129,6 +1129,12 @@ export async function callCampaignTextProvider(
       });
     }
     let result: ProviderResult;
+    const startedAt = Date.now();
+    logger.info({
+      event: "turn_generation_provider_started",
+      ...generationLogContext(job), storyOperation: operation, providerType: provider.providerType,
+      requestedModel: provider.model, streaming: typeof request.onChunk === "function", recovery: Boolean(request.recoveryInput)
+    });
     try {
       dependencies.collaborators.onProviderDispatch?.(operation);
       result = await provider.execute({
@@ -1137,6 +1143,9 @@ export async function callCampaignTextProvider(
         effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job)
       });
     } catch (error) {
+      logProviderTransportError(error, {
+        generationJobId: job.id, campaignId: job.campaign_id, providerProfileId: job.provider_profile_id, storyOperation: operation
+      });
       const preparedError = error instanceof PreparedResponseContractError ? error : undefined;
       if (preparedError) {
         if (preparedError.preparedRequest.body !== checkedPrepared.body
@@ -1186,8 +1195,16 @@ export async function callCampaignTextProvider(
     if (!completed || completed.status !== "completed") throw Object.assign(new Error("The response-contract completion lost its lease."), { code: "lease_lost" });
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool, provider, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
-        generationJobId: job.id, category: "story", operation }, result
+      generationJobId: job.id, category: "story", operation }, result
     );
+    logger.info({
+      event: "turn_generation_provider_completed",
+      ...generationLogContext(job), storyOperation: operation, providerType: provider.providerType,
+      requestedModel: provider.model, streaming: typeof request.onChunk === "function", recovery: Boolean(request.recoveryInput),
+      providerResponseId: result.responseId || null, finishReason: result.finishReason || null, outputLimited: result.outputLimited,
+      modelInstanceId: result.modelInstanceId || null, inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens, totalTokens: result.usage.totalTokens, durationMs: Date.now() - startedAt
+    });
     return result;
   }
   const startedAt = Date.now();
