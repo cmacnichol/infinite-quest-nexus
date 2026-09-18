@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type { ProviderRequest, TextProviderProfile } from "./providers.js";
 import { ContextBudgetError, assertOutputFeasible } from "./context-budget.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
-import { preparedResponseContractSchema, type PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import { prepareResponseContract } from "./provider-response-format.js";
 
 export type ProviderRequestOperation = "story generation";
 
@@ -144,12 +145,17 @@ export function serializeProviderRequest(
   if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) throw new Error("A prepared response contract cannot use legacy response-format options.");
   if (options.responseContract && request.responseContract) throw new Error("A prepared response contract may be supplied only once.");
   const responseContract = options.responseContract || request.responseContract
-    ? preparedResponseContractSchema.parse(options.responseContract ?? request.responseContract)
+    ? prepareResponseContract(options.responseContract ?? request.responseContract)
     : null;
   if (responseContract && responseContract.streaming !== Boolean(request.onChunk)) throw new Error("Prepared response contract streaming does not match the request.");
-  if (responseContract && profile.providerType === "lmstudio") throw new Error("Native LM Studio does not support prepared response contracts.");
+  if (responseContract && profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
+    throw new Error("This provider adapter does not support prepared response contracts.");
+  }
   if (responseContract?.mode === "json_schema" && profile.providerType === "openrouter" && !responseContract.providerRoutingSlugs.length) {
     throw new Error("OpenRouter prepared response contracts require explicit provider routing.");
+  }
+  if (responseContract?.mode === "json_schema" && profile.providerType !== "openrouter" && responseContract.providerRoutingSlugs.length) {
+    throw new Error("Non-OpenRouter prepared response contracts cannot carry provider routing.");
   }
   const isRecovery = Boolean(request.recoveryInput);
   const rejectedResponse = completeRejectedDraftContent(request);

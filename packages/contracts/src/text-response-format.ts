@@ -31,7 +31,7 @@ export const preparedResponseContractSchema = z.discriminatedUnion("mode", [
   commonPreparedContractSchema.extend({
     mode: z.literal("json_schema"), schemaVersion: z.string().min(1).max(200), schemaHash: sha256Schema,
     schemaName: z.string().min(1).max(200), schema: z.record(z.string(), z.unknown()),
-    providerRoutingSlugs: z.array(z.string().min(1).max(200)).max(64), routeConfigHash: sha256Schema,
+    providerRoutingSlugs: z.array(z.string().min(1).max(128).regex(/^[a-z0-9][a-z0-9._/-]*$/i)).max(64), routeConfigHash: sha256Schema,
     adapterProtocol: protocolSchema
   }).strict()
 ]);

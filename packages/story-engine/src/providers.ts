@@ -1023,7 +1023,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
   let prepared = request.responseContract
-    ? serializeProviderRequest(profile, canonicalRequest(request), { responseContract: request.responseContract })
+    ? checkedStoryRequest(profile, request)
     : request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
   const send = async (preparedRequest: PreparedProviderRequest) => {

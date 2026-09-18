@@ -15,6 +15,7 @@ import {
 import { planContext } from "../../packages/story-engine/src/context-budget.js";
 import { parseEventExtension } from "../../packages/story-engine/src/mechanics.js";
 import { buildStoryOnlyChoiceRepairInput } from "../../packages/story-engine/src/story-only-prompt.js";
+import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 
 const profile: TextProviderProfile = {
   providerType: "lmstudio",
@@ -46,10 +47,11 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 describe("provider request serialization", () => {
   it("serializes a prepared strict OpenRouter contract into the exact dispatched body", async () => {
     const openRouter = { ...profile, providerType: "openrouter" as const, baseUrl: "https://openrouter.ai/api/v1" };
+    const storySchema = getProviderOutputSchema("story");
     const responseContract = {
       version: 1, mode: "json_schema", operation: "story", streaming: false,
-      schemaVersion: "story-native-v1", schemaHash: "a".repeat(64), schemaName: "story",
-      schema: { type: "object", properties: { narration: { type: "string" } }, required: ["narration"], additionalProperties: false },
+      schemaVersion: storySchema.version, schemaHash: storySchema.schemaHash, schemaName: storySchema.name,
+      schema: storySchema.schema,
       providerRoutingSlugs: ["provider/region"], routeConfigHash: "b".repeat(64),
       adapterProtocol: "text-schema-adapter-v1", forbidFormatFallback: true
     } as const;
@@ -63,9 +65,39 @@ describe("provider request serialization", () => {
     });
     await callTextProvider(openRouter, { systemPrompt: "rules", input: "action", responseContract } as never, createTestProviderTransport(fetcher as typeof fetch));
     const body = JSON.parse(prepared.body);
-    expect(body.response_format).toEqual({ type: "json_schema", json_schema: { name: "story", strict: true, schema: responseContract.schema } });
+    expect(body.response_format).toEqual({ type: "json_schema", json_schema: { name: responseContract.schemaName, strict: true, schema: responseContract.schema } });
     expect(body.provider).toEqual({ require_parameters: true, only: ["provider/region"] });
     expect(sent).toEqual([prepared.body]);
+  });
+  it("rejects strict schema overhead before canonical transport", async () => {
+    const fetcher = vi.fn();
+    const storySchema = getProviderOutputSchema("story");
+    const responseContract = {
+      version: 1, mode: "json_schema", operation: "story", streaming: false,
+      schemaVersion: storySchema.version, schemaHash: storySchema.schemaHash, schemaName: storySchema.name,
+      schema: storySchema.schema,
+      providerRoutingSlugs: ["provider/region"], routeConfigHash: "b".repeat(64),
+      adapterProtocol: "text-schema-adapter-v1", forbidFormatFallback: true
+    } as const;
+    await expect(callTextProvider({
+      ...profile, providerType: "openrouter", baseUrl: "https://openrouter.ai/api/v1", contextWindowTokens: 1_500, maxOutputTokens: 1_024
+    }, { systemPrompt: "rules", input: "action", canonicalBudgeting: true, responseContract } as never,
+    createTestProviderTransport(fetcher as typeof fetch))).rejects.toMatchObject({ code: "context_budget_exceeded", scope: "provider_request" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("rejects a tampered prepared schema before provider dispatch", async () => {
+    const fetcher = vi.fn();
+    const storySchema = getProviderOutputSchema("story");
+    const responseContract = {
+      version: 1, mode: "json_schema", operation: "story", streaming: false,
+      schemaVersion: storySchema.version, schemaHash: storySchema.schemaHash, schemaName: storySchema.name,
+      schema: { ...storySchema.schema, tampered: true }, providerRoutingSlugs: ["provider/region"],
+      routeConfigHash: "b".repeat(64), adapterProtocol: "text-schema-adapter-v1", forbidFormatFallback: true
+    } as const;
+    await expect(callTextProvider({ ...profile, providerType: "openrouter", baseUrl: "https://openrouter.ai/api/v1" },
+      { systemPrompt: "rules", input: "action", responseContract } as never, createTestProviderTransport(fetcher as typeof fetch)
+    )).rejects.toThrow("tampered");
+    expect(fetcher).not.toHaveBeenCalled();
   });
   it("measures the compact Story Direction choice repair wire body and rejects an oversized protected base before transport", () => {
     const base = {

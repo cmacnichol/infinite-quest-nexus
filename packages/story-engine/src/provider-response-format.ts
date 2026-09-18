@@ -27,7 +27,10 @@ export function prepareResponseContract(value: unknown): PreparedResponseContrac
       throw new Error("Prepared response contract schema body was tampered.");
     }
   }
-  return freezeDeep({ ...contract, ...(contract.mode === "json_schema" ? { providerRoutingSlugs: [...contract.providerRoutingSlugs] } : {}) });
+  return freezeDeep({ ...contract, ...(contract.mode === "json_schema" ? {
+    schema: JSON.parse(stableStringify(contract.schema)) as Record<string, unknown>,
+    providerRoutingSlugs: [...contract.providerRoutingSlugs]
+  } : {}) });
 }
 
 export function classifyResponseFormatFailure(status: number, value: unknown): ResponseFormatDiagnosticCode | null {
