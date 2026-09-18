@@ -12,7 +12,7 @@ import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/
 import { characterFictionAuthority, sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson, readStoryEvidenceFromSource } from "../../packages/application/src/memory/generation-context.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
-import { generationExecutionProtocolIdentity, serializeProviderRequest, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
+import { generationExecutionProtocolIdentity, PreparedResponseContractError, serializeProviderRequest, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
   callCampaignTextProvider,
@@ -218,6 +218,23 @@ describe("generation executor adapter", () => {
     await expect(callCampaignTextProvider(dependencies, provider as never, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toThrow("cost write failed");
     expect(completed).toHaveBeenCalledTimes(1);
     expect(completed).toHaveBeenCalledWith(expect.any(Object), expect.any(String), { returnedModel: "returned", returnedProviderRoute: "route", diagnosticCode: null });
+  });
+
+  it("persists bounded private partial prepared-response evidence before completing the failed invocation", async () => {
+    const { job, provider, dependencies, completed } = contractDispatchFixture();
+    const saveOrchestration = vi.fn(async (_scope: unknown, value: unknown) => { job.orchestration_private = value as never; return true; });
+    dependencies.repository.saveOrchestration = saveOrchestration;
+    provider.execute = vi.fn(async (request: any) => {
+      const prepared = serializeProviderRequest({ ...provider, baseUrl: "" }, request);
+      throw new PreparedResponseContractError(Object.assign(new Error("private transport"), { code: "provider_schema_invalid" }), prepared, {
+        responseId: "partial-id", partialContent: "private partial", returnedModel: "returned", returnedProviderRoute: "route", diagnosticCode: "provider_schema_invalid"
+      });
+    });
+    await expect(callCampaignTextProvider(dependencies, provider, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toBeInstanceOf(PreparedResponseContractError);
+    expect(saveOrchestration).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      preparedResponseFailures: [expect.objectContaining({ invocationId: "b".repeat(64), responseId: "partial-id", partialContent: "private partial", diagnosticCode: "provider_schema_invalid" })]
+    }));
+    expect(completed).toHaveBeenCalledOnce();
   });
   it("binds the frozen stream contract before reservation and preserves the legacy reservation body", () => {
     const provider = { id: "provider", providerType: "openai_compatible", model: "model", contextWindowTokens: 100_000, maxOutputTokens: 100,

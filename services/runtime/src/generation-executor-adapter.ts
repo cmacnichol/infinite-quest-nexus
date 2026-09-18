@@ -1138,6 +1138,29 @@ export async function callCampaignTextProvider(
       });
     } catch (error) {
       const preparedError = error instanceof PreparedResponseContractError ? error : undefined;
+      if (preparedError) {
+        if (preparedError.preparedRequest.body !== checkedPrepared.body
+          || preparedError.preparedRequest.payloadHash !== checkedPrepared.payloadHash
+          || preparedError.preparedRequest.payloadHash !== sha256(preparedError.preparedRequest.body)) {
+          throw Object.assign(new Error("The provider failure does not match the reserved response-contract request."), {
+            code: "response_contract_identity_mismatch"
+          });
+        }
+        const prior = job.orchestration_private?.preparedResponseFailures ?? [];
+        const evidence = { version: 1 as const, invocationId: reserved.id,
+          requestBody: checkedPrepared.body, requestPayloadHash: checkedPrepared.payloadHash,
+          responseId: preparedError.responseId, partialContent: preparedError.partialContent.slice(0, 1_000_000),
+          returnedModel: preparedError.returnedModel, returnedProviderRoute: preparedError.returnedProviderRoute,
+          diagnosticCode: preparedError.diagnosticCode };
+        const existing = prior.find((entry) => entry.invocationId === reserved.id);
+        if (existing && stableStringify(existing) !== stableStringify(evidence)) {
+          throw Object.assign(new Error("The provider failure evidence conflicts with the reserved invocation."), { code: "response_contract_identity_mismatch" });
+        }
+        if (!existing) {
+          if (prior.length >= 24) throw Object.assign(new Error("Prepared response failure evidence is full."), { code: "response_contract_unavailable" });
+          await persistOrchestration(dependencies.repository, scope, job, { preparedResponseFailures: [...prior, evidence] });
+        }
+      }
       const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
         returnedModel: preparedError?.returnedModel ?? null,
         returnedProviderRoute: preparedError?.returnedProviderRoute ?? null,

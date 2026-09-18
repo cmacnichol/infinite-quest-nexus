@@ -110,6 +110,7 @@ function responseContractInvocations(value: unknown): readonly ResponseContractI
 }
 
 function responseContractState(jobId: string, value: GenerationOrchestrationState): void {
+  try {
   const queued = readQueuedResponsePolicy(value.queuedResponsePolicy);
   const frozen = readFrozenResponseContracts(value.frozenResponseContracts);
   const ledger = responseContractInvocations(value.responseContractInvocations);
@@ -121,9 +122,13 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     // A frozen selection turns every producing checkpoint into replay evidence.
     // An absent ledger is only valid before any producing checkpoint exists.
     const entries = ledger ?? [];
-    const hasProducingCheckpoint = Boolean(value.primaryReservation || value.primaryResult || value.validatedMainDraft
-      || value.choiceRepair || value.extension || value.semanticRepair || value.sceneCoverageRepair || value.continuityReview);
-    if (!ledger && hasProducingCheckpoint) throw new Error("Frozen response-contract checkpoint has no invocation ledger.");
+    // Checkpoints are saved before their call's ledger reservation.  Those
+    // pre-dispatch reservations are legitimate, but no returned-result or
+    // validated checkpoint may survive without its durable invocation.
+    const needsCompletedEvidence = Boolean(value.primaryResult || value.validatedMainDraft || value.choiceRepair
+      || value.extension || value.semanticRepair?.status === "validated" || value.sceneCoverageRepair?.status === "validated"
+      || (value.continuityReview?.status === "completed" && value.continuityReview.reviewRequestHash));
+    if (!ledger && needsCompletedEvidence) throw new Error("Frozen response-contract checkpoint has no invocation ledger.");
     for (const entry of entries) {
       if (!auditMatchesFrozenInvocation(frozen, entry.invocationKey, entry.request)
         || !operationMatchesInvocation(entry.operation, entry.invocationKey)
@@ -158,7 +163,8 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     if (choice && !completedFor(choice.originalRequestPayloadHash, ["story_generation", "story_recovery"])) {
       throw new Error("Choice repair original checkpoint has no completed response-contract invocation.");
     }
-    if (choice?.status === "dispatched" && !pendingFor(choice.repairRequestPayloadHash, ["story_choice_repair"])) {
+    if (choice?.status === "dispatched" && !pendingFor(choice.repairRequestPayloadHash, ["story_choice_repair"])
+      && !completedFor(choice.repairRequestPayloadHash, ["story_choice_repair"])) {
       throw new Error("Choice repair dispatch checkpoint has no pending response-contract invocation.");
     }
     if (choice?.status === "validated" && !completedFor(choice.repairRequestPayloadHash, ["story_choice_repair"])) {
@@ -171,21 +177,29 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     const semantic = value.semanticRepair;
     if (semantic && (semantic.status === "validated"
       ? !completedFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"])
-      : !pendingFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"]))) {
+      : !pendingFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"])
+        && !completedFor(semantic.repairRequestPayloadHash, ["story_continuity_repair"]))) {
       throw new Error("Semantic repair checkpoint does not match its response-contract invocation.");
     }
     const rewrite = value.sceneCoverageRepair;
     if (rewrite && (rewrite.status === "validated"
       ? !completedFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"])
-      : !pendingFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"]))) {
+      : !pendingFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"])
+        && !completedFor(rewrite.repairRequestPayloadHash, ["scene_coverage_rewrite"]))) {
       throw new Error("Scene rewrite checkpoint does not match its response-contract invocation.");
     }
     const review = value.continuityReview;
     if (review?.reviewRequestHash && (review.status === "completed"
       ? !completedFor(review.reviewRequestHash, ["story_continuity_review"])
-      : !pendingFor(review.reviewRequestHash, ["story_continuity_review"]))) {
+      : !pendingFor(review.reviewRequestHash, ["story_continuity_review"])
+        && !completedFor(review.reviewRequestHash, ["story_continuity_review"]))) {
       throw new Error("Continuity review checkpoint does not match its response-contract invocation.");
     }
+  }
+  } catch {
+    throw Object.assign(new Error("Saved response-contract replay evidence is incompatible."), {
+      code: "generation_checkpoint_incompatible"
+    });
   }
 }
 
@@ -309,6 +323,18 @@ export type GenerationOrchestrationState = {
   queuedResponsePolicy?: QueuedResponsePolicy;
   frozenResponseContracts?: FrozenResponseContracts;
   responseContractInvocations?: readonly ResponseContractInvocationAudit[];
+  /** Bounded private transport evidence for an unusable prepared response. */
+  preparedResponseFailures?: readonly {
+    version: 1;
+    invocationId: string;
+    requestBody: string;
+    requestPayloadHash: string;
+    responseId: string | null;
+    partialContent: string;
+    returnedModel: string | null;
+    returnedProviderRoute: string | null;
+    diagnosticCode: string | null;
+  }[];
   /** Safe, last-known failure classification; attempts remain the historical ledger. */
   lastFailureDiagnostic?: GenerationFailureDiagnostic;
   /** A primary request was durably reserved; a lease reclaim cannot treat it as an unseen request. */
