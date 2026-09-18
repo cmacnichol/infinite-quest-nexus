@@ -4,6 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
 import { frozenResponseContractsSelectionHash, queuedResponsePolicyHash } from "../../packages/contracts/src/generation-response-contract.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
+import { sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
+import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
+import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -60,6 +63,28 @@ integration("PostgreSQL response-contract persistence", () => {
     const payload = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
     expect(payload?.id).toBe(queuedId);
     return { repository, claim: claim!, payload: payload!, scope: { jobId: queuedId, ownerUserId, workerId } };
+  }
+  async function checkpointForPause(job: Awaited<ReturnType<typeof claimed>>, campaignId: string): Promise<GenerationReviewCheckpoint> {
+    const world = await pool.query<{ worldId: string }>("SELECT w.id AS \"worldId\" FROM campaigns c JOIN world_versions v ON v.id=c.world_version_id JOIN worlds w ON w.id=v.world_id WHERE c.id=$1", [campaignId]);
+    const story = storyTurnOutputSchema.parse({ narration: "The archive waits beneath the observatory.", choices: ["Enter.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the archive.", scratchpad: "", tracker_updates: [], image_prompt: "An observatory archive.", continuity_summary: "The archive is open.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const candidate = {
+      scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
+      producingRequestHash: "a".repeat(64), producingResponseId: "pause-response", sentFactIds: [], ownerUserId, campaignId,
+      worldId: world.rows[0]!.worldId, worldVersionId: job.payload.world_version_id ?? null,
+      baseTurnNumber: job.payload.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.payload.expected_turn_number,
+      policy: {}, policyHash: "b".repeat(64), baseIdentity: job.payload.generation_base_identity,
+      protocol: { version: job.payload.prompt_protocol_version, promptHash: "c".repeat(64) },
+      provider: { type: "openai_compatible" as const, profileId: providerProfileId, configurationHash: "d".repeat(64) },
+      resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
+    };
+    const reasons = ["invalid_structure"];
+    return {
+      version: 1, reviewId: crypto.randomUUID(), revision: 1, state: "pending", stage: "structure", candidateScope: "main",
+      reasons, operationKind: "append", replacementTurnId: null,
+      eligibility: { complete: true, structurallyValid: false, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+      originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate, originalFindings: reasons,
+      originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: []
+    } satisfies GenerationReviewCheckpoint;
   }
   it("persists a trusted queued policy privately and retains a legacy row's absent shape", async () => {
     const imported = await campaign();
@@ -229,5 +254,59 @@ integration("PostgreSQL response-contract persistence", () => {
     ]);
     expect(after.map((result) => result.rows)).toEqual(before.map((result) => result.rows));
     await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id])).resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+  });
+
+  it.each(["frozenResponseContracts", "responseContractInvocations"] as const)("fails closed on an unknown %s version without mutating derived rows", async (key) => {
+    const imported = await campaign();
+    const queued = await commands(true).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: `Reject unknown ${key}.`, providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const before = await Promise.all([
+      pool.query("SELECT id,status FROM chronicle_jobs WHERE campaign_id=$1 ORDER BY id", [imported.campaignId]),
+      pool.query("SELECT id,memory_kind,content FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id", [imported.campaignId]),
+      pool.query("SELECT id,turn_number FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId])
+    ]);
+    const invalid = key === "responseContractInvocations" ? [{ version: 99 }] : { version: 99 };
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object($2::text,$3::jsonb) WHERE id=$1", [queued.id, key, JSON.stringify(invalid)]);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `unknown-${crypto.randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await expect(repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+    const after = await Promise.all([
+      pool.query("SELECT id,status FROM chronicle_jobs WHERE campaign_id=$1 ORDER BY id", [imported.campaignId]),
+      pool.query("SELECT id,memory_kind,content FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id", [imported.campaignId]),
+      pool.query("SELECT id,turn_number FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [imported.campaignId])
+    ]);
+    expect(after.map((result) => result.rows)).toEqual(before.map((result) => result.rows));
+  });
+
+  it("gives an explicit retry a new logical attempt while retaining frozen selection and immutable ledger", async () => {
+    const imported = await campaign();
+    const command = commands(true);
+    const queued = await command.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Retry without rewriting audit history.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id);
+    const originalAttempt = crypto.randomUUID(); const frozen = selection();
+    await fixture.repository.saveOrchestration(fixture.scope, { ...fixture.payload.orchestration_private, logicalAttempt: { version: 1 as const, id: originalAttempt, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } });
+    await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyHash(policy()), frozen);
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, { logicalAttemptId: originalAttempt, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: audit(frozen) });
+    expect(reserved).not.toBeNull();
+    expect(await fixture.repository.markRecoverable({ ...fixture.scope, providerResponseId: null, providerFinishReason: null, errorCode: "provider_failed", errorMessage: "retry fixture", recoveryMetadata: {} })).toBe(true);
+    await expect(command.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ id: queued.id });
+    const reclaimer = await claimed(queued.id, `retry-${crypto.randomUUID()}`);
+    expect(reclaimer.payload.orchestration_private.logicalAttempt?.id).not.toBe(originalAttempt);
+    expect(reclaimer.payload.orchestration_private.frozenResponseContracts).toEqual(frozen);
+    expect(reclaimer.payload.orchestration_private.responseContractInvocations).toEqual([reserved]);
+    await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
+  it("preserves frozen contracts, ledger nulls, and nested generic state through a real review pause", async () => {
+    const imported = await campaign();
+    const queued = await commands(true).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Pause without dropping private contract evidence.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id);
+    const logicalAttemptId = crypto.randomUUID(); const frozen = selection();
+    await fixture.repository.saveOrchestration(fixture.scope, { ...fixture.payload.orchestration_private, harmless: { nested: null }, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } } as never);
+    await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyHash(policy()), frozen);
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: audit(frozen) });
+    expect(await fixture.repository.pauseForReview(fixture.scope, await checkpointForPause(fixture, imported.campaignId))).toBe(true);
+    const row = await pool.query<{ orchestrationPrivate: Record<string, unknown>; status: string }>("SELECT status,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [queued.id]);
+    expect(row.rows[0]).toMatchObject({ status: "recoverable", orchestrationPrivate: { frozenResponseContracts: frozen, responseContractInvocations: [reserved], harmless: { nested: null } } });
   });
 });
