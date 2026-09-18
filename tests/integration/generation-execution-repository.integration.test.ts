@@ -587,7 +587,8 @@ integration("PostgreSQL generation execution repository", () => {
     campaignId: string,
     factScopes: readonly Readonly<{ ownerUserId: string; campaignId: string }>[] = [{ ownerUserId, campaignId }]
   ) {
-    const [turns, memories, factResults] = await Promise.all([
+    const campaignScopes = [...new Map(factScopes.map((scope) => [`${scope.ownerUserId}:${scope.campaignId}`, scope])).values()];
+    const [turns, memories, campaignStateResults, factResults] = await Promise.all([
       pool.query<{ id: string; turn_number: number; narration: string }>(
         `SELECT id,turn_number,narration FROM turns
           WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY turn_number,id`,
@@ -598,7 +599,13 @@ integration("PostgreSQL generation execution repository", () => {
           WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY id`,
         [ownerUserId, campaignId]
       ),
-      Promise.all(factScopes.map((scope) => pool.query<{
+      Promise.all(campaignScopes.map((scope) => pool.query<{ campaign_id: string; state: unknown }>(
+        `SELECT campaign_id,to_jsonb(cs) AS state
+           FROM campaign_state cs
+          WHERE campaign_id=$1`,
+        [scope.campaignId]
+      ))),
+      Promise.all(campaignScopes.map((scope) => pool.query<{
         id: string;
         owner_user_id: string;
         campaign_id: string;
@@ -617,6 +624,7 @@ integration("PostgreSQL generation execution repository", () => {
     return {
       turns: turns.rows,
       memories: memories.rows,
+      campaignStates: campaignStateResults.flatMap((result) => result.rows),
       facts: factResults.flatMap((result) => result.rows)
     };
   }
@@ -1303,7 +1311,11 @@ integration("PostgreSQL generation execution repository", () => {
       ...scope,
       errorCode: "generation_failed",
       errorMessage: "The story could not be generated.",
-      recoveryMetadata: { transportError: false }
+      recoveryMetadata: { transportError: false },
+      lastFailureDiagnostic: {
+        version: 1, category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation",
+        attemptNumber: 1, occurredAt: "2026-09-18T00:00:00.000Z"
+      }
     })).resolves.toBe(true);
     await expect(repository.markFailed({
       ...scope,
@@ -1324,7 +1336,10 @@ integration("PostgreSQL generation execution repository", () => {
     )).resolves.toMatchObject({ rows: [{
       status: "failed",
       partial_output: "A safe fictional preview.",
-      orchestration_private: { roll: null },
+      orchestration_private: { roll: null, lastFailureDiagnostic: {
+        version: 1, category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation",
+        attemptNumber: 1, occurredAt: "2026-09-18T00:00:00.000Z"
+      } },
       streaming_segments_state: { provisionalSetId: null }
     }] });
     await expect(pool.query<{ attempt_number: number }>(

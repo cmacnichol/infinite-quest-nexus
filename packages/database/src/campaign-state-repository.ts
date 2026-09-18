@@ -1769,9 +1769,9 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         recoveryStatus: generationRecovery?.status ?? null,
         recoveryAttempts: generationRecovery?.attempts ?? null,
         recoveryReplacementTurnId: generationRecovery?.replacementTurnId ?? null,
-        recoveryReviewId: generationRecovery?.review?.reviewId ?? null,
-        recoveryReviewRevision: generationRecovery?.review?.revision ?? null,
-        recoveryReviewState: generationRecovery?.review?.state ?? null
+        recoveryReviewId: generationRecovery?.review && "reviewId" in generationRecovery.review ? generationRecovery.review.reviewId : null,
+        recoveryReviewRevision: generationRecovery?.review && "revision" in generationRecovery.review ? generationRecovery.review.revision : null,
+        recoveryReviewState: generationRecovery?.review && "state" in generationRecovery.review ? generationRecovery.review.state : null
       }));
       return {
         syncToken,

@@ -132,9 +132,13 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
   section.dataset.storyRecovery = "";
   const review = generation.review;
   const detail = review?.detail.state === "loaded" ? review.detail.value : null;
-  const reviewView = review === null ? null : generationReviewPresentation(
-    review.summary, generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic, detail
-  );
+  const reviewView = review === null
+    ? generation.unsupportedReviewVersion === null
+      ? null
+      : generationReviewPresentation({ version: generation.unsupportedReviewVersion })
+    : generationReviewPresentation(
+        review.summary, generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic, detail
+      );
   if (reviewView !== null) {
     section.setAttribute("role", "status");
     section.setAttribute("aria-live", "polite");
@@ -175,6 +179,11 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
       const retry = element(document, "button", undefined, "Continue with retry");
       retry.type = "button"; retry.dataset.action = "retry-generation-review"; retry.disabled = state.reviewDecisionInFlight;
       decisions.append(retry, element(document, "p", undefined, reviewView.retryDescription));
+    }
+    if (reviewView.canRepairFormat) {
+      const repair = element(document, "button", undefined, "Repair fact formatting");
+      repair.type = "button"; repair.dataset.action = "repair-format-generation-review"; repair.disabled = state.reviewDecisionInFlight;
+      decisions.append(repair, element(document, "p", undefined, reviewView.repairDescription || ""));
     }
     if (state.reviewDecisionInFlight) decisions.append(element(document, "p", undefined, "Saving your decision…"));
     if (state.reviewDecisionError) decisions.append(element(document, "p", "story-recovery-diagnostic", state.reviewDecisionError));

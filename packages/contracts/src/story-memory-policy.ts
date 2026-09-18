@@ -2,6 +2,7 @@ import { z } from "zod";
 import { sha256Hex } from "./hash.js";
 import {
   LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_MEMORY_CONTEXT_POLICY_VERSION,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION
 } from "./story-prompt.js";
@@ -170,7 +171,11 @@ export const storyMemoryPolicySnapshotSchema = z.object({
   policy: storyMemoryPolicySchema,
   policyHash: z.string().regex(/^[a-f0-9]{64}$/),
   contextProtocol: z.literal(STORY_MEMORY_CONTEXT_POLICY_VERSION),
-  promptProtocol: z.union([z.literal(LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION), z.literal(STORY_MEMORY_PROMPT_PROTOCOL_VERSION)]),
+  promptProtocol: z.union([
+    z.literal(LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION),
+    z.literal(PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION),
+    z.literal(STORY_MEMORY_PROMPT_PROTOCOL_VERSION)
+  ]),
   providerConfigurationFingerprint: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict().superRefine((value, context) => {
   if (storyMemoryPolicyHash(value.policy) !== value.policyHash) context.addIssue({ code: "custom", path: ["policyHash"], message: "Policy hash does not match the frozen policy." });

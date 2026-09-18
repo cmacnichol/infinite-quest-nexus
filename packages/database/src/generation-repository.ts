@@ -14,9 +14,10 @@ import {
 } from "../../application/src/index.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../application/src/generation/review-checkpoint.js";
 import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
-import { generationReviewDecisionRequestSchema, projectGenerationReviewDetail, projectGenerationValidationIssues } from "../../contracts/src/generation-review.js";
+import { generationReviewDecisionRequestSchema, projectGenerationFailureDiagnostic, projectGenerationReviewDetail, projectGenerationValidationIssues } from "../../contracts/src/generation-review.js";
 import { continuityReviewCheckpointSchema } from "../../application/src/memory/continuity-review-checkpoint.js";
 import {
+  assertStoryPromptCompatibility,
   assertStoryMemoryPromptCompatibility,
   assertContinuityReviewPromptSnapshot,
   readPromptSnapshot,
@@ -70,6 +71,7 @@ type JobRow = {
   errorCode: string | null;
   errorMessage: string | null;
   recoveryMetadata: Record<string, unknown>;
+  failureDiagnostic: unknown;
   reviewSummary: unknown;
   createdAt: string;
   updatedAt: string;
@@ -138,10 +140,12 @@ function json(value: unknown): string {
 function executionProtocolIdentity(
   promptProtocol: string,
   generationPolicy: GenerationPolicySnapshot,
-  storyMemoryPolicy: StoryMemoryPolicySnapshot | null
+  storyMemoryPolicy: StoryMemoryPolicySnapshot | null,
+  storyPromptContractProtocol?: string
 ): string {
   const legacyIdentity = generationExecutionProtocolIdentity(promptProtocol, generationPolicy);
-  return storyMemoryPolicy ? `story-memory-v1|${legacyIdentity}` : legacyIdentity;
+  if (storyMemoryPolicy) return `story-memory-v1|${legacyIdentity}`;
+  return storyPromptContractProtocol ? `story-prompt-v1|${storyPromptContractProtocol}|${legacyIdentity}` : legacyIdentity;
 }
 
 function sqlState(error: unknown): string | null {
@@ -226,6 +230,7 @@ function jobResult(row: JobRow): GenerationJob {
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
     recoveryMetadata: row.recoveryMetadata,
+    failureDiagnostic: projectGenerationFailureDiagnostic(row.failureDiagnostic),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
@@ -418,7 +423,7 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy),
+              request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy)]
           );
           return enqueueResult(inserted.rows[0]!, false);
@@ -570,7 +575,7 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy),
+               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy)]
           );
@@ -617,6 +622,7 @@ export function createPostgresGenerationCommandRepository(
                 requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
+                orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
                 ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
                 partial_output AS "partialOutput", generation_policy AS "generationPolicy"
@@ -707,7 +713,19 @@ export function createPostgresGenerationCommandRepository(
         review: {
           ...checkpoint.data,
           canKeep: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpointCanKeep(checkpoint.data),
-          canRetry: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable
+          canRetry: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable,
+          ...(checkpoint.data.version === 2 ? (() => {
+            const repair = checkpoint.data.factFormatRepair!;
+            const offered = row.status === "recoverable" && checkpoint.data.state === "pending" && repair.status === "offered";
+            return {
+              canRepairFormat: offered,
+              formatRepair: offered ? {
+                planHash: repair.planHash,
+                changedFactCount: repair.plan.changes.length,
+                description: "Repair fact formatting and keep the narration unchanged."
+              } : null
+            };
+          })() : {})
         },
         candidate: checkpoint.data.gateCandidate.story
           ? { narration: checkpoint.data.gateCandidate.story.narration, choices: checkpoint.data.gateCandidate.story.choices }
@@ -739,7 +757,10 @@ export function createPostgresGenerationCommandRepository(
         const checkpoint = parsed.data;
         const recorded = checkpoint.decisionJournal.find((entry) => entry.reviewId === parsedRequest.reviewId && entry.revision === parsedRequest.revision);
         if (recorded) {
-          if (recorded.decision !== parsedRequest.decision) throw new GenerationApplicationError("conflict");
+          if (recorded.decision !== parsedRequest.decision
+            || (parsedRequest.decision === "repair_format" && (recorded.decision !== "repair_format" || recorded.planHash !== parsedRequest.repairPlanHash))) {
+            throw new GenerationApplicationError("conflict");
+          }
           return recorded.actionReceipt.operationKind === "append"
             ? reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "append", replacementTurnId: null }, false)
             : reviewDecisionResult({ id: recorded.actionReceipt.jobId, status: recorded.actionReceipt.status, operationKind: "replace_latest", replacementTurnId: recorded.actionReceipt.replacementTurnId! }, false);
@@ -750,23 +771,31 @@ export function createPostgresGenerationCommandRepository(
         }
         if (parsedRequest.decision === "keep" && !checkpointCanKeep(checkpoint)) throw new GenerationApplicationError("conflict");
         if (parsedRequest.decision === "retry" && !checkpoint.eligibility.retryAvailable) throw new GenerationApplicationError("conflict");
+        if (parsedRequest.decision === "repair_format" && (checkpoint.version !== 2 || !checkpoint.factFormatRepair
+          || checkpoint.factFormatRepair.status !== "offered" || checkpoint.factFormatRepair.planHash !== parsedRequest.repairPlanHash)) {
+          throw new GenerationApplicationError("conflict");
+        }
         const status = job.operationKind === "replace_latest" ? "replacement_queued" as const : "queued" as const;
-        const receipt = {
+        const actionReceipt = {
           jobId: job.id, status, operationKind: job.operationKind,
           replacementTurnId: job.operationKind === "replace_latest" ? job.replacementTurnId! : null
+        };
+        const receipt = {
+          reviewId: parsedRequest.reviewId, revision: parsedRequest.revision, actorUserId: scope.ownerUserId, decision: parsedRequest.decision,
+          decidedAt: new Date().toISOString(), candidateScope: checkpoint.candidateScope,
+          candidateHash: checkpoint.gateCandidate.storyHash,
+          findingsHash: generationReviewFindingsHash(checkpoint.reasons),
+          nextStage: parsedRequest.decision === "keep" ? null : checkpoint.stage,
+          offeredCandidate: checkpoint.gateCandidate, offeredReasons: checkpoint.reasons, actionReceipt,
+          ...(parsedRequest.decision === "repair_format" ? { planHash: parsedRequest.repairPlanHash,
+            repair: checkpoint.factFormatRepair } : {})
         };
         const next = generationReviewCheckpointSchema.parse({
           ...checkpoint,
           state: "decided",
           revision: checkpoint.revision + 1,
-          decisionJournal: [...checkpoint.decisionJournal, {
-            reviewId: parsedRequest.reviewId, revision: parsedRequest.revision, actorUserId: scope.ownerUserId, decision: parsedRequest.decision,
-            decidedAt: new Date().toISOString(), candidateScope: checkpoint.candidateScope,
-            candidateHash: checkpoint.gateCandidate.storyHash,
-            findingsHash: generationReviewFindingsHash(checkpoint.reasons),
-            nextStage: parsedRequest.decision === "retry" ? checkpoint.stage : null,
-            offeredCandidate: checkpoint.gateCandidate, offeredReasons: checkpoint.reasons, actionReceipt: receipt
-          }]
+          ...(parsedRequest.decision === "repair_format" ? { factFormatRepair: { ...checkpoint.factFormatRepair!, status: "authorized" } } : {}),
+          decisionJournal: [...checkpoint.decisionJournal, receipt]
         });
         const updated = await client.query<MutationRow>(
           `UPDATE generation_jobs SET status = $3, lease_owner = NULL, lease_expires_at = NULL,
@@ -817,7 +846,7 @@ export function createPostgresGenerationCommandRepository(
         try {
           promptSnapshot = storedPolicy
             ? assertContinuityReviewPromptSnapshot(assertStoryMemoryPromptCompatibility(job.promptSnapshot), storedPolicy.data.policy.continuityReview)
-            : readPromptSnapshot(job.promptSnapshot);
+            : assertStoryPromptCompatibility(job.promptSnapshot);
         } catch { promptSnapshot = null; }
         const generationPolicy = job.generationPolicy === null
           ? null
@@ -829,7 +858,8 @@ export function createPostgresGenerationCommandRepository(
             && executionProtocolIdentity(
               dependencies.promptProtocolVersion(promptSnapshot.templates as PromptSnapshot),
               generationPolicy === null ? { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" } : generationPolicy.data,
-              storedPolicy?.success ? storedPolicy.data : null
+              storedPolicy?.success ? storedPolicy.data : null,
+              promptSnapshot.storyPromptCompatibility?.protocolIdentity
             ) === job.promptProtocolVersion;
         } catch {
           protocolCompatible = false;

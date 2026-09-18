@@ -1,6 +1,7 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
+import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson, isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
@@ -26,6 +27,7 @@ import {
 } from "../../../packages/contracts/src/memory.js";
 import {
   promptSnapshotSchema,
+  assertStoryPromptCompatibility,
   assertStoryMemoryPromptCompatibility,
   assertContinuityReviewPromptSnapshot,
   readPromptSnapshot,
@@ -41,14 +43,20 @@ import {
   storyLengthWordRange,
   type StoryLengthWordRange
 } from "../../../packages/contracts/src/story-settings.js";
-import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
+import {
+  composeStoryPromptSystemPrompt,
+  projectSafeGenerationContextDiagnostic,
+  projectSafeGenerationDiagnostic
+} from "../../../packages/contracts/src/story-prompt.js";
+import type { GenerationFailureDiagnostic } from "../../../packages/contracts/src/generation-review.js";
 import type {
   AcceptedGenerationCommitCollaborators,
   GenerationExecutionPayload,
   GenerationExecutionRepository,
   GenerationLeaseScope,
   GenerationOrchestrationState,
-  GenerationStreamingState
+  GenerationStreamingState,
+  FactFormatRepairApplication
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import {
@@ -430,6 +438,62 @@ function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): stri
   return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
 }
 
+function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: string): GenerationFailureDiagnostic {
+  const transport = providerTransportErrorDetails(error);
+  const code = transport
+    ? (transport.timedOut ? "provider_request_timeout" : "provider_transport_error")
+    : safeLogErrorCode(errorCodeFrom(error) || "generation_failed", "generation_failed");
+  const category = code === "provider_request_timeout" ? "provider_timeout"
+    : code === "provider_transport_error" ? "provider_transport"
+    : code === "mechanics_leak" ? "mechanics"
+    : code === "scene_coverage" ? "continuity"
+    : code === "invalid_schema" || code === "invalid_json" ? "format"
+    : code === "output_limit" ? "output_incomplete"
+    : code === "stale_campaign" ? "authority"
+    : "unknown";
+  const supportedCode = code === "provider_request_timeout" || code === "provider_transport_error"
+    || code === "mechanics_leak" || code === "scene_coverage" || code === "invalid_schema"
+    || code === "invalid_json" || code === "output_limit" || code === "stale_campaign"
+    ? code : "generation_failed";
+  return {
+    version: 1,
+    category,
+    code: supportedCode === "invalid_json" ? "invalid_schema" : supportedCode,
+    phase,
+    attemptNumber,
+    occurredAt: new Date().toISOString()
+  } as GenerationFailureDiagnostic;
+}
+
+function emptyOutputFailureDiagnostic(attemptNumber: number): GenerationFailureDiagnostic {
+  return {
+    version: 1,
+    category: "output_incomplete",
+    code: "empty_output",
+    phase: "story_validation",
+    attemptNumber,
+    occurredAt: new Date().toISOString()
+  };
+}
+
+function rejectedCandidateFailureDiagnostic(
+  reason: "invalid_structure" | "output_incomplete" | "mechanics_contamination" | "invalid_choices",
+  attemptNumber: number
+): GenerationFailureDiagnostic {
+  const code = reason === "output_incomplete" ? "output_limit"
+    : reason === "mechanics_contamination" ? "mechanics_leak"
+    : "invalid_schema";
+  return {
+    version: 1,
+    category: reason === "output_incomplete" ? "output_incomplete"
+      : reason === "mechanics_contamination" ? "mechanics" : "format",
+    code,
+    phase: "story_validation",
+    attemptNumber,
+    occurredAt: new Date().toISOString()
+  };
+}
+
 function assertActiveGenerationUpdate(changed: boolean, action: string): void {
   if (!changed) {
     throw Object.assign(new Error(`Generation was cancelled or its lease was lost while ${action}.`), {
@@ -686,7 +750,8 @@ function compatibleValidatedMainDraft(
   job: GenerationExecutionPayload,
   provider: GenerationTextProvider,
   storyInput: string,
-  semanticRepair?: GenerationOrchestrationState["semanticRepair"]
+  semanticRepair?: GenerationOrchestrationState["semanticRepair"],
+  generationReview?: GenerationOrchestrationState["generationReview"]
 ) {
   if (!value) return null;
   const validResponse = value.response && typeof value.response.content === "string"
@@ -730,6 +795,50 @@ function compatibleValidatedMainDraft(
   }
   if (!repairedRequest && value.requestPayloadHash !== sha256(value.requestBody)) {
     throw Object.assign(new Error("The persisted repaired draft request is incompatible."), { code: "generation_checkpoint_incompatible" });
+  }
+  if (value.factFormatRepair) {
+    const review = generationReviewCheckpointSchema.safeParse(generationReview);
+    const receipts = review.success ? review.data.decisionJournal.filter((entry) => entry.decision === "repair_format"
+      && entry.reviewId === value.factFormatRepair!.reviewId && entry.revision === value.factFormatRepair!.revision) : [];
+    const receipt = receipts.length === 1 ? receipts[0] : undefined;
+    if (!review.success || !receipt || receipt.decision !== "repair_format") {
+      throw Object.assign(new Error("The applied fact-format repair has no compatible review receipt."), { code: "generation_checkpoint_incompatible" });
+    }
+    const repair = receipt.repair;
+    if (value.factFormatRepair.planHash !== repair.planHash
+      || value.factFormatRepair.rawOutputHash !== repair.plan.rawOutputHash
+      || value.factFormatRepair.resultHash !== repair.plan.resultHash
+      || value.requestPayloadHash !== repair.producingRequestHash
+      || value.response.responseId !== repair.sourceResponseId
+      || sha256(value.response.content) !== repair.plan.rawOutputHash
+      || canonicalEvidenceJson(parsedStory.data) !== canonicalEvidenceJson(repair.plan.story)
+      || value.providerConfigurationHash !== repair.providerConfigurationHash
+      || repair.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)
+      || receipt.actorUserId !== job.owner_user_id
+      || receipt.actionReceipt.jobId !== job.id
+      || receipt.actionReceipt.operationKind !== job.operation_kind
+      || receipt.actionReceipt.replacementTurnId !== job.replacement_turn_id) {
+      throw Object.assign(new Error("The applied fact-format repair provenance is incompatible."), {
+        code: "generation_checkpoint_incompatible"
+      });
+    }
+    if (repair.ownerUserId !== job.owner_user_id
+      || repair.campaignId !== job.campaign_id
+      || repair.worldVersionId !== (job.world_version_id ?? null)
+      || repair.promptProtocolVersion !== job.prompt_protocol_version
+      || canonicalEvidenceJson(repair.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
+      || receipt.offeredCandidate.ownerUserId !== job.owner_user_id
+      || receipt.offeredCandidate.campaignId !== job.campaign_id
+      || receipt.offeredCandidate.worldId !== job.world_id
+      || receipt.offeredCandidate.worldVersionId !== (job.world_version_id ?? null)
+      || receipt.offeredCandidate.expectedTurnNumber !== job.expected_turn_number
+      || receipt.offeredCandidate.provider.profileId !== job.provider_profile_id
+      || receipt.offeredCandidate.protocol.version !== job.prompt_protocol_version
+      || canonicalEvidenceJson(receipt.offeredCandidate.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)) {
+      throw Object.assign(new Error("The applied fact-format repair is not bound to this generation job."), {
+        code: "generation_checkpoint_incompatible"
+      });
+    }
   }
   if (!sameFactIds(value.sentFactIds, sentCanonicalFactIds(value.requestBody))) {
     throw Object.assign(new Error("The persisted validated draft fact visibility does not match its producing request."), {
@@ -799,6 +908,22 @@ async function persistOrchestration(
   );
   job.orchestration_private = merged;
   return merged;
+}
+
+export function appendFactFormatRepairApplication(
+  prior: readonly FactFormatRepairApplication[] | undefined,
+  application: FactFormatRepairApplication
+): readonly FactFormatRepairApplication[] {
+  const sameKey = (entry: FactFormatRepairApplication) => entry.jobId === application.jobId
+    && entry.reviewId === application.reviewId && entry.revision === application.revision;
+  const existing = (prior ?? []).find(sameKey);
+  if (!existing) return [...(prior ?? []), application];
+  if (stableStringify(existing) !== stableStringify(application)) {
+    throw Object.assign(new Error("The saved fact-format application conflicts with its receipt."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  return prior ?? [application];
 }
 
 async function callCampaignTextProvider(
@@ -948,8 +1073,11 @@ async function executeLoadedGeneration(
     jobAttempt: job.attempts,
     workerId
   };
-  const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) =>
-    runTurnGenerationPhase(diagnosticContext, phaseName, generationStartedAt, operation);
+  let activePhase: TurnGenerationPhase = "orchestration_loading";
+  const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) => {
+    activePhase = phaseName;
+    return runTurnGenerationPhase(diagnosticContext, phaseName, generationStartedAt, operation);
+  };
   const frozenStoryMemoryPolicy = job.context_options && typeof job.context_options === "object" && "storyMemoryPolicy" in job.context_options
     ? storyMemoryPolicySnapshotSchema.safeParse((job.context_options as Record<string, unknown>).storyMemoryPolicy)
     : null;
@@ -976,7 +1104,7 @@ async function executeLoadedGeneration(
     // overrides while executing or reclaiming a lease.
     promptSnapshot = frozenStoryMemoryPolicySnapshot
       ? assertStoryMemoryPromptCompatibility(job.prompt_snapshot)
-      : readPromptSnapshot(job.prompt_snapshot);
+      : assertStoryPromptCompatibility(job.prompt_snapshot);
     if (frozenStoryMemoryPolicySnapshot) {
       const proof = promptSnapshot.storyMemoryCompatibility;
       const expectedPrefix = `${frozenStoryMemoryPolicySnapshot.promptProtocol}|`;
@@ -1037,8 +1165,20 @@ async function executeLoadedGeneration(
   }
   const generationPolicy = parsedGenerationPolicy === null ? null : parsedGenerationPolicy.data;
   const hasFrozenStoryMemoryPolicy = frozenStoryMemoryPolicySnapshot !== null;
+  const frozenStoryPromptContractProtocol = hasFrozenStoryMemoryPolicy
+    ? undefined
+    : promptSnapshot.storyPromptCompatibility?.protocolIdentity;
+  const storySystemContractProtocol = frozenStoryPromptContractProtocol
+    && promptSnapshot.template("story_system").source !== "shipped"
+    ? frozenStoryPromptContractProtocol
+    : undefined;
   const storyOnlyChoiceRepairSystemPrompt = generationPolicy?.playMode === "story_only"
-    ? composeStoryOnlyChoiceRepairSystemPrompt(generationPolicy.prompts.choiceRepairSystem, hasFrozenStoryMemoryPolicy)
+    ? composeStoryOnlyChoiceRepairSystemPrompt(
+      generationPolicy.prompts.choiceRepairSystem,
+      hasFrozenStoryMemoryPolicy,
+      frozenStoryMemoryPolicySnapshot?.promptProtocol,
+      frozenStoryPromptContractProtocol
+    )
     : null;
   const stages = generationStagePolicy(generationPolicy?.playMode ?? "legacy");
   let frozenGenerationPolicyIdentity: string | null = null;
@@ -1048,7 +1188,11 @@ async function executeLoadedGeneration(
     const basePromptProtocol = providerPromptProtocolVersion(promptSnapshot.templates as PromptSnapshot);
     const legacyExecutionProtocol = generationPolicy
       ? generationExecutionProtocolIdentity(basePromptProtocol, generationPolicy) : basePromptProtocol;
-    expectedExecutionProtocol = hasFrozenStoryMemoryPolicy ? `story-memory-v1|${legacyExecutionProtocol}` : legacyExecutionProtocol;
+    expectedExecutionProtocol = hasFrozenStoryMemoryPolicy
+      ? `story-memory-v1|${legacyExecutionProtocol}`
+      : frozenStoryPromptContractProtocol
+        ? `story-prompt-v1|${frozenStoryPromptContractProtocol}|${legacyExecutionProtocol}`
+        : legacyExecutionProtocol;
   } catch {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id,
@@ -1175,10 +1319,18 @@ async function executeLoadedGeneration(
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
       const storySystemPrompt = generationPolicy?.playMode === "story_only"
-        ? composeStoryOnlySystemPrompt(baseStorySystemPrompt, generationPolicy, hasFrozenStoryMemoryPolicy)
+        ? composeStoryOnlySystemPrompt(
+          baseStorySystemPrompt,
+          generationPolicy,
+          hasFrozenStoryMemoryPolicy,
+          frozenStoryMemoryPolicySnapshot?.promptProtocol,
+          storySystemContractProtocol
+        )
         : hasFrozenStoryMemoryPolicy
-          ? composeStoryMemorySystemPrompt(baseStorySystemPrompt)
-          : baseStorySystemPrompt;
+          ? composeStoryMemorySystemPrompt(baseStorySystemPrompt, "", frozenStoryMemoryPolicySnapshot.promptProtocol)
+          : storySystemContractProtocol
+            ? composeStoryPromptSystemPrompt(baseStorySystemPrompt, storySystemContractProtocol)
+            : baseStorySystemPrompt;
       const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
         + estimateStoryTokens((hasFrozenStoryMemoryPolicy ? buildStoryMemoryUserPrompt : buildStoryUserPrompt)(
           emptyPromptContext,
@@ -1282,6 +1434,16 @@ async function executeLoadedGeneration(
           && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
           && entry.nextStage === "event_coverage" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
       : undefined;
+    // An applied representation repair remains part of the later review's
+    // provenance. Its historical receipt is bound to validatedMainDraft.
+    const carriedAppliedFactFormatRepair = () => {
+      const currentReview = generationReviewCheckpointSchema.safeParse(orchestration.generationReview);
+      const repair = currentReview.success && currentReview.data.version === 2
+        && currentReview.data.factFormatRepair?.status === "applied"
+        ? currentReview.data.factFormatRepair
+        : undefined;
+      return repair ? { factFormatRepair: repair } : {};
+    };
     const reofferFailedAuthorizedRetry = async (
       stage: "structure" | "choices" | "scene_coverage" | "event_coverage" | "continuity",
       retryFailure: string
@@ -1305,6 +1467,7 @@ async function executeLoadedGeneration(
         originalFindings: savedReview.data.originalFindings,
         decisionJournal: savedReview.data.decisionJournal,
         revision: savedReview.data.revision + 1,
+        ...carriedAppliedFactFormatRepair(),
         retryFailure
       });
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "re-offering the original candidate after an authorized repair failed");
@@ -1454,13 +1617,96 @@ async function executeLoadedGeneration(
       orchestration = await persistOrchestration(repository, scope, job, { contextDiagnostic: orchestration.contextDiagnostic, ...(sourceManifest ? { sourceEvidenceManifest: sourceManifest } : {}) });
     }
     const plannedSentFactIds = sentCanonicalFactIds(storyInput);
-    const validatedDraft = compatibleValidatedMainDraft(
+    let validatedDraft = compatibleValidatedMainDraft(
       orchestration.validatedMainDraft,
       job,
       provider,
       storyInput,
-      orchestration.semanticRepair
+      orchestration.semanticRepair,
+      orchestration.generationReview
     );
+    const formatRepairReceipts = savedReview.success && savedReview.data.version === 2
+      && savedReview.data.state === "decided" && savedReview.data.stage === "structure"
+      && savedReview.data.candidateScope === "main" && savedReview.data.factFormatRepair?.status === "authorized"
+      ? savedReview.data.decisionJournal.filter((entry) => entry.decision === "repair_format"
+        && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1)
+      : [];
+    const formatRepairReceipt = formatRepairReceipts.length === 1 ? formatRepairReceipts[0] : undefined;
+    if (!validatedDraft && savedReview.success && savedReview.data.version === 2
+      && savedReview.data.factFormatRepair?.status === "authorized") {
+      const repair = savedReview.data.factFormatRepair!;
+      const primary = orchestration.primaryResult;
+      const incompatible = async (): Promise<true> => {
+        assertActiveGenerationUpdate(await repository.markRecoverable({
+          ...scope, providerResponseId: null, providerFinishReason: null,
+          errorCode: "generation_checkpoint_incompatible",
+          errorMessage: "The authorized fact-format repair no longer matches its original response.",
+          recoveryMetadata: { retryable: true, stage: "structure", reason: "fact_format_repair_incompatible" }
+        }), "saving incompatible fact-format repair checkpoint");
+        return true;
+      };
+      if (formatRepairReceipts.length !== 1) {
+        await incompatible(); return true;
+      }
+      const receipt = formatRepairReceipts[0]!;
+      if (!primary || !primary.rawOutputReference || primary.rawOutputReference !== repair.rawOutputReference
+        || primary.requestPayloadHash !== repair.producingRequestHash
+        || primary.response.responseId !== repair.sourceResponseId
+        || primary.providerConfigurationHash !== repair.providerConfigurationHash
+        || repair.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)
+        || receipt.actionReceipt.jobId !== job.id
+        || receipt.actionReceipt.operationKind !== job.operation_kind
+        || receipt.actionReceipt.replacementTurnId !== job.replacement_turn_id
+        || receipt.actorUserId !== job.owner_user_id) {
+        await incompatible(); return true;
+      }
+      const plan = applyAuthorizedFactFormatRepair({
+        checkpoint: savedReview.data, rawOutput: primary.response.content, requestBody: primary.requestBody, sentFactIds: primary.sentFactIds
+      });
+      const repaired = plan ? parseStoryOutput(JSON.stringify(plan.story), storyMemoryDefaults) : null;
+      const storyOnlyRepair = generationPolicy?.playMode === "story_only" && plan
+        ? parseStoryOnlyOutput(JSON.stringify(plan.story)) : null;
+      if (!plan || plan.resultHash !== repair.plan.resultHash || !repaired?.ok || mechanicsLeakFields(repaired.story).length
+        || (generationPolicy?.playMode === "story_only" && !storyOnlyRepair?.ok)) {
+        await incompatible(); return true;
+      }
+      const appliedReview = generationReviewCheckpointSchema.parse({
+        ...savedReview.data, factFormatRepair: { ...repair, status: "applied", failureCode: null }
+      });
+      const applications = appendFactFormatRepairApplication(orchestration.factFormatRepairApplications, {
+        version: 1,
+        jobId: job.id,
+        reviewId: savedReview.data.reviewId,
+        revision: receipt.revision,
+        planHash: repair.planHash,
+        sourceResponseId: repair.sourceResponseId,
+        rawOutputReference: repair.rawOutputReference,
+        producingRequestHash: repair.producingRequestHash,
+        rawOutputHash: repair.plan.rawOutputHash,
+        resultHash: repair.plan.resultHash,
+        providerConfigurationHash: repair.providerConfigurationHash
+      });
+      const draft = {
+        version: 2 as const, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+        worldVersionId: job.world_version_id || null, baseIdentity: job.generation_base_identity,
+        promptProtocolVersion: job.prompt_protocol_version,
+        ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}),
+        providerId: provider.id, providerModel: provider.model,
+        providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), action: job.action,
+        originalInputHash: sha256(storyInput), requestBody: primary.requestBody,
+        requestPayloadHash: primary.requestPayloadHash, draftHash: sha256(stableStringify(repaired.story)),
+        producingAttempt: job.attempts, story: repaired.story, response: primary.response, sentFactIds: primary.sentFactIds,
+        factFormatRepair: { version: 1 as const, reviewId: savedReview.data.reviewId, revision: receipt.revision,
+          planHash: repair.planHash, rawOutputHash: repair.plan.rawOutputHash, resultHash: repair.plan.resultHash }
+      };
+      orchestration = await persistOrchestration(repository, scope, job, {
+        generationReview: appliedReview,
+        validatedMainDraft: draft,
+        factFormatRepairApplications: applications
+      });
+      validatedDraft = compatibleValidatedMainDraft(orchestration.validatedMainDraft, job, provider, storyInput, orchestration.semanticRepair, orchestration.generationReview);
+      if (!validatedDraft) { await incompatible(); return true; }
+    }
     if (stages.allowSceneCoverage && !compatibleEventCoverageRepair(
       orchestration.eventCoverageRepair,
       validatedDraft,
@@ -1797,6 +2043,7 @@ async function executeLoadedGeneration(
         primaryResult: {
           version: 1, requestBody: preparedPrimary.body, requestPayloadHash: preparedPrimary.payloadHash,
           response: result, sentFactIds: sentCanonicalFactIds(preparedPrimary.body),
+          rawOutputReference: `generation-primary:${job.id}:${job.attempts}`,
           providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
           contextFingerprint, contextDiagnostics, chronicleRetrieval
         }
@@ -1867,16 +2114,25 @@ async function executeLoadedGeneration(
       stage: "structure" | "choices",
       reason: "invalid_structure" | "output_incomplete" | "mechanics_contamination" | "invalid_choices"
     ): Promise<true> => {
-      if (await reofferFailedAuthorizedRetry(stage, "The authorized retry did not produce a usable complete turn.")) return true;
+      const primary = orchestration.primaryResult;
+      // A full retry can produce a new complete-but-malformed fact payload.
+      // Its repair plan is bound to that new primary response, so prefer the
+      // new offer over re-opening the old candidate as a terminal failure.
+      const proposedRepair = stage === "structure" && primary?.rawOutputReference
+        ? prepareFactFormatRepair(result.content, primary.requestBody, primary.sentFactIds) : null;
+      const offeredRepair = proposedRepair && (generationPolicy?.playMode !== "story_only"
+        || parseStoryOnlyOutput(JSON.stringify(proposedRepair.plan.story)).ok) ? proposedRepair : null;
+      if (!offeredRepair && await reofferFailedAuthorizedRetry(
+        stage, "The authorized retry did not produce a usable complete turn."
+      )) return true;
       if (!job.world_id) {
         throw Object.assign(new Error("The rejected primary response cannot be bound to its world."), {
           code: "generation_checkpoint_incompatible"
         });
       }
-      const primary = orchestration.primaryResult;
       const candidate: GenerationReviewCandidate = {
         scope: "main", story: null, storyHash: sha256(canonicalEvidenceJson(null)),
-        rawOutputReference: `generation-primary:${job.id}:${job.attempts}`,
+        rawOutputReference: primary?.rawOutputReference ?? `generation-primary:${job.id}:${job.attempts}`,
         producingRequestHash: primary?.requestPayloadHash ?? null,
         producingResponseId: result.responseId || null,
         sentFactIds: [...(primary?.sentFactIds ?? [])],
@@ -1898,6 +2154,9 @@ async function executeLoadedGeneration(
           replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
         }
       };
+      // A length finish may still contain a complete JSON object. The pure
+      // planner proves completeness itself; do not discard that source solely
+      // because the provider reported a length finish.
       const gate = prepareGenerationReview({
         candidate,
         stage,
@@ -1910,7 +2169,22 @@ async function executeLoadedGeneration(
           originalFindings: savedReview.data.originalFindings,
           decisionJournal: savedReview.data.decisionJournal,
           revision: savedReview.data.revision + 1
-        } : {}) });
+        } : {}),
+        ...(offeredRepair ? { factFormatRepair: {
+          plan: { ...offeredRepair.plan, changes: [...offeredRepair.plan.changes] }, planHash: offeredRepair.planHash, sourceResponseId: result.responseId || null,
+          rawOutputReference: candidate.rawOutputReference!, producingRequestHash: primary!.requestPayloadHash,
+          ownerUserId: job.owner_user_id, campaignId: job.campaign_id, worldVersionId: job.world_version_id || null,
+          baseIdentity: job.generation_base_identity, providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+          promptProtocolVersion: job.prompt_protocol_version, status: "offered" as const, failureCode: null
+        } } : {}) });
+      const diagnostic = !result.content.trim()
+        ? emptyOutputFailureDiagnostic(initialAttemptNumber)
+        : rejectedCandidateFailureDiagnostic(reason, initialAttemptNumber);
+      if (diagnostic) {
+        orchestration = await persistOrchestration(repository, scope, job, {
+          lastFailureDiagnostic: diagnostic
+        });
+      }
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected primary candidate for review");
       return true;
     };
@@ -2024,128 +2298,6 @@ async function executeLoadedGeneration(
           : "invalid_structure" as const;
       return pauseRejectedMain("structure", reason);
     }
-    // A provider can report a length finish after it has delivered a complete
-    // structured response.  Accept that response when validation succeeds;
-    // an incomplete output remains recoverable rather than being silently
-    // replaced with a shorter turn.
-    if (firstReason && !result.outputLimited) {
-      recoveryAttempted = true;
-      const recoveryReason = firstReason;
-      const recoveryKind = recoveryReason === "mechanics_leak"
-        ? "mechanics_cleanup"
-        : "schema_repair";
-      const rejectedResponse = result.content;
-      logger.warn({
-        event: "turn_generation_recovery_started",
-        ...generationLogContext(job, workerId),
-        firstReason: recoveryReason,
-        recoveryKind,
-        initialAttemptNumber,
-        validationErrorCount: initialValidationErrors.length
-      });
-      orchestration = await persistOrchestration(repository, scope, job, {
-        logicalAttempt: incrementLogicalAllowance(orchestration, "automaticRepairsConsumed"),
-        automaticRepair: {
-          stage: recoveryKind,
-          rejectedDraftHash: sha256(rejectedResponse),
-          consumedAttempt: job.attempts
-        }
-      });
-      const recoveryRequest = {
-        ...baseRequest,
-        recoveryInput: recoveryPromptFromSnapshot(
-          collaborators,
-          job,
-          recoveryReason,
-          initialValidationErrors,
-          storyLength
-        ),
-        rejectedResponse
-      };
-      result = await phase("story_recovery", () => callCampaignTextProvider(
-        dependencies,
-        provider,
-        job,
-        "story_recovery",
-        recoveryRequest
-      ));
-      validation = await phase("story_validation", async () => {
-        const recoveredParsed = parseStoryOutput(result.content, storyMemoryDefaults);
-        logger.info({
-          event: "turn_generation_validation_completed",
-          ...generationLogContext(job, workerId),
-          storyOperation: "story_recovery",
-          valid: recoveredParsed.ok && !result.outputLimited,
-          outputLimited: result.outputLimited,
-          validationCode: result.outputLimited
-            ? "output_limit"
-            : (recoveredParsed.ok ? null : recoveredParsed.code),
-          validationErrorCount: recoveredParsed.ok ? 0 : recoveredParsed.errors.length,
-          attemptNumber: initialAttemptNumber + 1
-        });
-        await repository.recordAttempt({
-          ...scope,
-          attemptNumber: initialAttemptNumber + 1,
-          recoveryKind,
-          requestMetadata: {
-            model: provider.model,
-            providerType: provider.providerType,
-            previousResponseIdUsed: provider.providerType === "lmstudio"
-              && recoveryReason !== "mechanics_leak",
-            rejectedResponseIncluded: Boolean(rejectedResponse)
-          },
-          responseMetadata: {
-            usage: result.usage,
-            outputLimited: result.outputLimited,
-            modelInstanceId: result.modelInstanceId
-          },
-          providerResponseId: result.responseId || null,
-          finishReason: result.finishReason || null,
-          rawOutput: result.content || null,
-          validationErrors: recoveredParsed.ok ? [] : recoveredParsed.errors,
-          overwrite: false
-        });
-        return {
-          parsed: recoveredParsed,
-          firstReason: recoveryReason,
-          initialValidationErrors,
-          initialAttemptNumber
-        };
-      });
-      ({ parsed, firstReason, initialValidationErrors, initialAttemptNumber } = validation);
-      if (generationPolicy?.playMode === "story_only") {
-        const recoveredChoiceOnly = parseStoryOnlyOutput(result.content);
-        if (!recoveredChoiceOnly.ok && recoveredChoiceOnly.kind === "choices") {
-          const preparedRecoveryRequest = preparedRequestForResult(result, provider, recoveryRequest);
-          const preparedChoiceRepair = choiceRepairPreparedRequest(
-            provider,
-            storyOnlyChoiceRepairSystemPrompt!,
-            recoveredChoiceOnly.base,
-            "json_object"
-          );
-          orchestration = await persistOrchestration(repository, scope, job, {
-            logicalAttempt: incrementLogicalAllowance(orchestration, "choiceRepairsConsumed"),
-            choiceRepair: {
-              version: 1, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
-              baseIdentity: job.generation_base_identity, providerId: provider.id, providerModel: provider.model,
-              providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
-              policyIdentity: frozenGenerationPolicyIdentity!, baseHash: sha256(stableStringify(recoveredChoiceOnly.base)),
-              base: recoveredChoiceOnly.base, originalRequestBody: preparedRecoveryRequest.body,
-              originalRequestPayloadHash: preparedRecoveryRequest.payloadHash,
-              originalSentFactIds: sentCanonicalFactIds(preparedRecoveryRequest.body), originalResponse: result,
-              consumedAttempt: job.attempts, repairRequestBody: preparedChoiceRepair.body,
-              repairRequestPayloadHash: preparedChoiceRepair.payloadHash, repairResponseFormat: "json_object", status: "pending"
-            }
-          });
-          assertActiveGenerationUpdate(await repository.markRecoverable({
-            ...scope, providerResponseId: result.responseId || null, providerFinishReason: result.finishReason || null,
-            errorCode: "invalid_schema", errorMessage: "Recovered Story Direction choices require an explicit retry.",
-            recoveryMetadata: { retryable: true, stage: "choice_repair", attemptCount: 2 }
-          }), "saving recovered Story Direction choice repair state");
-          return true;
-        }
-      }
-    }
     const validationFailure = "code" in parsed ? parsed : null;
     if (validationFailure) {
       const code = result.outputLimited
@@ -2229,6 +2381,7 @@ async function executeLoadedGeneration(
         ...(savedReview.success ? {
           originalCandidate: savedReview.data.originalCandidate, originalFindings: savedReview.data.originalFindings,
           decisionJournal: savedReview.data.decisionJournal, revision: savedReview.data.revision + 1,
+          ...carriedAppliedFactFormatRepair(),
           ...(priorRetry ? { retryFailure: "The authorized scene rewrite did not produce a usable complete turn." } : {})
         } : {})
       });
@@ -2523,7 +2676,8 @@ async function executeLoadedGeneration(
               originalCandidate: savedReview.data.originalCandidate,
               originalFindings: savedReview.data.originalFindings,
               decisionJournal: savedReview.data.decisionJournal,
-              revision: savedReview.data.revision + 1
+              revision: savedReview.data.revision + 1,
+              ...carriedAppliedFactFormatRepair()
             } : {})
           });
           assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected before-event candidate for review");
@@ -2842,7 +2996,8 @@ async function executeLoadedGeneration(
               originalCandidate: savedReview.data.originalCandidate,
               originalFindings: savedReview.data.originalFindings,
               decisionJournal: savedReview.data.decisionJournal,
-              revision: savedReview.data.revision + 1
+              revision: savedReview.data.revision + 1,
+              ...carriedAppliedFactFormatRepair()
             } : {}) });
           assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected event candidate for review");
           return true;
@@ -3101,7 +3256,8 @@ async function executeLoadedGeneration(
             originalCandidate: savedReview.data.originalCandidate,
             originalFindings: savedReview.data.originalFindings,
             decisionJournal: savedReview.data.decisionJournal,
-            revision: savedReview.data.revision + 1
+            revision: savedReview.data.revision + 1,
+            ...carriedAppliedFactFormatRepair()
           } : {}) });
         const retryAuthorizedRepair = Boolean(continuityRetryReceipt && savedReview.success
           && savedReview.data.reasons.includes("narrative_conflict"));
@@ -3313,7 +3469,8 @@ async function executeLoadedGeneration(
       ...scope,
       errorCode: PUBLIC_GENERATION_FAILURE_CODE,
       errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
-      recoveryMetadata: transportError ? { transportError } : {}
+      recoveryMetadata: transportError ? { transportError } : {},
+      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, activePhase)
     });
     if (failed) {
       logger.error({

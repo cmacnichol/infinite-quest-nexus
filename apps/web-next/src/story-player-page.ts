@@ -725,7 +725,7 @@ export function mountStoryPlayerPage(
     } else {
       renderStoryPlayerView(root, state);
     }
-    if (recoveryFocusAction && ["retry-generation", "discard-generation", "resume-generation", "keep-generation-review", "retry-generation-review"].includes(recoveryFocusAction)) {
+    if (recoveryFocusAction && ["retry-generation", "discard-generation", "resume-generation", "keep-generation-review", "retry-generation-review", "repair-format-generation-review"].includes(recoveryFocusAction)) {
       root.querySelector<HTMLElement>(`[data-story-recovery] [data-action="${recoveryFocusAction}"]`)?.focus({ preventScroll: true });
     }
     const editState = toolsDisclosure?.querySelector<HTMLButtonElement>("[data-tool-action='edit-campaign-state']");
@@ -1195,15 +1195,45 @@ export function mountStoryPlayerPage(
         });
       });
     }
-    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='keep-generation-review'], [data-action='retry-generation-review']")) {
+    for (const control of root.querySelectorAll<HTMLButtonElement>("[data-action='keep-generation-review'], [data-action='retry-generation-review'], [data-action='repair-format-generation-review']")) {
       control.addEventListener("click", () => {
         const review = projection.generation?.review?.summary;
-        const decision = control.dataset.action === "keep-generation-review" ? "keep" : "retry";
         if (!review || reviewDecisionInFlight) return;
         reviewDecisionInFlight = true;
         reviewDecisionError = null;
         render();
-        void generation.decideReview({ reviewId: review.reviewId, revision: review.revision, decision }).then(async (saved) => {
+        void (async () => {
+          const current = await generation.readCurrentReview();
+          const stillCurrent = current !== null
+            && current.reviewId === review.reviewId
+            && current.revision === review.revision
+            && current.state === "pending";
+          if (!stillCurrent) {
+            reviewDecisionError = "The review changed. Reloaded status before sending a decision.";
+            const campaignId = projection.campaign?.id;
+            if (campaignId) {
+              try {
+                const sync = await composition.api.generation.syncStatus(campaignId);
+                if (!disposed && projection.campaign?.id === campaignId) composition.campaignStore.load(sync);
+              } catch {
+                // Preserve the explicit local uncertainty when refresh fails.
+              }
+            }
+            return;
+          }
+          const request = control.dataset.action === "keep-generation-review"
+            ? current.canKeep
+              ? { reviewId: current.reviewId, revision: current.revision, decision: "keep" as const } : null
+            : control.dataset.action === "repair-format-generation-review"
+              ? current.version === 2 && current.canRepairFormat && current.formatRepair
+                ? { reviewId: current.reviewId, revision: current.revision, decision: "repair_format" as const, repairPlanHash: current.formatRepair.planHash } : null
+              : control.dataset.action === "retry-generation-review" && current.canRetry
+                ? { reviewId: current.reviewId, revision: current.revision, decision: "retry" as const } : null;
+          if (!request) {
+            reviewDecisionError = "This review no longer offers that decision.";
+            return;
+          }
+          const saved = await generation.decideReview(request);
           if (!saved && !disposed) {
             reviewDecisionError = "Your decision could not be saved. The turn remains unchanged.";
             const campaignId = projection.campaign?.id;
@@ -1219,7 +1249,7 @@ export function mountStoryPlayerPage(
               }
             }
           }
-        }).finally(() => {
+        })().finally(() => {
           if (!disposed) { reviewDecisionInFlight = false; render(); }
         });
       });

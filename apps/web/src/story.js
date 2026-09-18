@@ -1618,10 +1618,14 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
       const choices = $("generationReviewChoices");
       choices.replaceChildren();
       for (const choice of review?.detail?.choices || []) { const button = document.createElement("button"); button.type = "button"; button.disabled = true; button.textContent = choice; choices.append(button); }
-      const keep = $("btnKeepGenerationReview"); const retry = $("btnRetryGenerationReview");
+      const keep = $("btnKeepGenerationReview"); const retry = $("btnRetryGenerationReview"); const repair = $("btnRepairFormatGenerationReview");
       if (keep) { keep.classList.toggle("hidden", !reviewView.canKeep); keep.disabled = state.generationReviewSubmitting; }
       if (retry) { retry.classList.toggle("hidden", !reviewView.canRetry); retry.disabled = state.generationReviewSubmitting; }
-      $("generationReviewStatus").textContent = state.generationReviewSubmitting ? "Saving your decision…" : state.generationReviewError || reviewView.retryFailure || "";
+      if (repair) { repair.classList.toggle("hidden", !reviewView.canRepairFormat); repair.disabled = state.generationReviewSubmitting; repair.title = reviewView.repairDescription || ""; }
+      $("generationReviewStatus").textContent = state.generationReviewSubmitting
+        ? "Saving your decision…"
+        : state.generationReviewError || reviewView.retryFailure
+          || (reviewView.canRepairFormat ? `${reviewView.repairDescription} ${reviewView.retryDescription}` : "");
     }
   }
 }
@@ -1685,7 +1689,34 @@ async function decideGenerationReview(decision) {
     const run = state.generationRun || await composition.workflow.resume(state.campaignId);
     if (!run) throw new Error("The saved review is unavailable.");
     state.generationRun = run;
-    await run.decideReview({ reviewId: summary.reviewId, revision: summary.revision, decision });
+    const current = await run.getReview();
+    const stillCurrent = current.reviewId === summary.reviewId
+      && current.revision === summary.revision
+      && current.state === "pending";
+    if (!stillCurrent) {
+      state.generationReview = {
+        summary: current.version === 2
+          ? { version: 2, reviewId: current.reviewId, revision: current.revision, state: current.state, stage: current.stage, candidateScope: current.candidateScope, reasons: current.reasons, canKeep: current.canKeep, canRetry: current.canRetry, canRepairFormat: current.canRepairFormat, formatRepair: current.formatRepair }
+          : { version: 1, reviewId: current.reviewId, revision: current.revision, state: current.state, stage: current.stage, candidateScope: current.candidateScope, reasons: current.reasons, canKeep: current.canKeep, canRetry: current.canRetry },
+        detail: current
+      };
+      state.generationReviewError = "The review changed. Reloaded status before sending a decision.";
+      return;
+    }
+    const request = decision === "repair_format"
+      ? (current.version === 2 && current.canRepairFormat && current.formatRepair
+        ? { reviewId: current.reviewId, revision: current.revision, decision, repairPlanHash: current.formatRepair.planHash }
+        : null)
+      : decision === "keep" && current.canKeep
+        ? { reviewId: current.reviewId, revision: current.revision, decision }
+        : decision === "retry" && current.canRetry
+          ? { reviewId: current.reviewId, revision: current.revision, decision }
+          : null;
+    if (!request) {
+      state.generationReviewError = "This review no longer offers that decision.";
+      return;
+    }
+    await run.decideReview(request);
     // A live review remains on the existing stream. A rehydrated review has no
     // watcher, so reload only in that case to read its later durable state.
     if (!state.abortController) await loadCampaign(state.campaignId, { autoScroll: false });
@@ -3699,6 +3730,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnKeepGenerationReview) btnKeepGenerationReview.addEventListener("click", () => { void decideGenerationReview("keep"); });
   const btnRetryGenerationReview = $("btnRetryGenerationReview");
   if (btnRetryGenerationReview) btnRetryGenerationReview.addEventListener("click", () => { void decideGenerationReview("retry"); });
+  const btnRepairFormatGenerationReview = $("btnRepairFormatGenerationReview");
+  if (btnRepairFormatGenerationReview) btnRepairFormatGenerationReview.addEventListener("click", () => { void decideGenerationReview("repair_format"); });
 
   // Edit Response dialog
   const btnEditResponseSave = $("btnEditResponseSave");

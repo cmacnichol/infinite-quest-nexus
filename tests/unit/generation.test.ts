@@ -464,7 +464,7 @@ describe("generation contracts", () => {
 
     it("identifies a resolved prompt snapshot with protocol, schema, policy, and template hashes", () => {
       expect(storyPromptProtocolIdentity({ story_system: "abc", event_trigger: "def" }))
-        .toBe("story-v15-canonical-fact-format|story-output-v2|current-continuity-v2|event_trigger:def|story_system:abc");
+        .toBe("story-v16-fact-wire-distinction|story-output-v2|current-continuity-v2|event_trigger:def|story_system:abc");
     });
 
     it("requires exactly 4 choices", () => {

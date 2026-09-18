@@ -4,9 +4,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
-import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
+import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
-import { generationRequestSchema, sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
+import { factFormatRepairHash, generationRequestSchema, sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
@@ -55,7 +55,7 @@ integration("PostgreSQL generation review persistence", () => {
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "generation-review.story", story: fixture }));
   }
 
-  async function pendingReview({ pause = true, eligible = false }: { pause?: boolean; eligible?: boolean } = {}) {
+  async function pendingReview({ pause = true, eligible = false, repair = false }: { pause?: boolean; eligible?: boolean; repair?: boolean } = {}) {
     const imported = await campaign();
     const queued = await commands().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
       action: "Inspect the review observatory.", providerProfileId, idempotencyKey: crypto.randomUUID(),
@@ -78,7 +78,7 @@ integration("PostgreSQL generation review persistence", () => {
     });
     const reasons: GenerationReviewCheckpoint["reasons"] = eligible ? ["scene_beats_missing"] : ["invalid_structure"];
     const candidate = {
-      scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
+      scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: repair ? `generation-primary:${queued.id}:1` : null,
       producingRequestHash: "a".repeat(64), producingResponseId: "review-response", sentFactIds: [], ownerUserId, campaignId: imported.campaignId,
       worldId: world.rows[0]!.worldId, worldVersionId: payload.world_version_id ?? null, baseTurnNumber: payload.generation_base_identity.baseTurnNumber,
       expectedTurnNumber: payload.expected_turn_number, policy: {}, policyHash: "b".repeat(64), baseIdentity: payload.generation_base_identity,
@@ -87,11 +87,23 @@ integration("PostgreSQL generation review persistence", () => {
       resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     };
     const checkpoint = {
-      version: 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: eligible ? "scene_coverage" as const : "structure" as const,
+      version: repair ? 2 as const : 1 as const, reviewId: crypto.randomUUID(), revision: 1, state: "pending" as const, stage: eligible ? "scene_coverage" as const : "structure" as const,
       candidateScope: "main" as const, reasons, operationKind: "append" as const, replacementTurnId: null,
       eligibility: { complete: true, structurallyValid: eligible, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
-      originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: []
+      originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: [],
+      ...(repair ? { factFormatRepair: (() => {
+        const plan = { version: 1 as const, rawOutputHash: "f".repeat(64), visibleFactsHash: "1".repeat(64), protectedFieldsHash: "2".repeat(64),
+          resultHash: factFormatRepairHash(story), story, changes: [{ sourceIndex: 0, kind: "id_label_to_addition" as const }] };
+        return {
+        planHash: sha256Hex(canonicalEvidenceJson(plan)), rawOutputReference: candidate.rawOutputReference!, sourceResponseId: candidate.producingResponseId,
+        plan,
+        producingRequestHash: candidate.producingRequestHash, ownerUserId, campaignId: imported.campaignId,
+        worldVersionId: candidate.worldVersionId, baseIdentity: candidate.baseIdentity,
+        providerConfigurationHash: candidate.provider.configurationHash, promptProtocolVersion: candidate.protocol.version,
+        status: "offered" as const, failureCode: null
+        };
+      })() } : {})
     } satisfies GenerationReviewCheckpoint;
     const scope = { jobId: queued.id, ownerUserId, workerId };
     if (pause) expect(await execution.pauseForReview(scope, checkpoint)).toBe(true);
@@ -206,6 +218,20 @@ integration("PostgreSQL generation review persistence", () => {
     expect(second.syncToken).not.toBe(first.syncToken);
   });
 
+  it("projects an opaque future review marker before legacy SQL casts", async () => {
+    const fixture = await pendingReview();
+    await pool.query(
+      `UPDATE generation_jobs
+          SET orchestration_private = jsonb_set(
+            jsonb_set(orchestration_private, '{generationReview,version}', '3'::jsonb),
+            '{generationReview,eligibility,complete}', '"not-a-boolean"'::jsonb)
+        WHERE id=$1`, [fixture.queued.id]
+    );
+    await expect(commands().getJob({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
+      id: fixture.queued.id, review: { version: 3 }
+    });
+  });
+
   it("serializes a review race, replays the winning receipt, and keeps foreign owners out", async () => {
     const fixture = await pendingReview();
     const repository = commands();
@@ -225,6 +251,147 @@ integration("PostgreSQL generation review persistence", () => {
       "SELECT jsonb_array_length(orchestration_private->'generationReview'->'decisionJournal')::int AS \"journalSize\" FROM generation_jobs WHERE id=$1",
       [fixture.queued.id]
     )).resolves.toMatchObject({ rows: [{ journalSize: 1 }] });
+  });
+
+  it("serializes a plan-bound format repair receipt without reinterpreting Retry", async () => {
+    const fixture = await pendingReview({ repair: true });
+    const repository = commands(); const scope = { ownerUserId, jobId: fixture.queued.id };
+    const request = { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "repair_format" as const, repairPlanHash: fixture.checkpoint.factFormatRepair!.planHash };
+    await expect(repository.getReview(scope)).resolves.toMatchObject({
+      version: 2, canRepairFormat: true,
+      formatRepair: { planHash: fixture.checkpoint.factFormatRepair!.planHash, changedFactCount: 1,
+        description: "Repair fact formatting and keep the narration unchanged." }
+    });
+    const results = await Promise.allSettled([repository.decideReview(scope, request), repository.decideReview(scope, request)]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+    await expect(repository.decideReview(scope, { ...request, repairPlanHash: "0".repeat(64) })).rejects.toMatchObject({ kind: "conflict" });
+    await expect(repository.decideReview(scope, { reviewId: request.reviewId, revision: request.revision, decision: "retry" })).rejects.toMatchObject({ kind: "conflict" });
+    await expect(pool.query<{ status: string; repairStatus: string; journalSize: number }>(
+      `SELECT status, orchestration_private->'generationReview'->'factFormatRepair'->>'status' AS "repairStatus",
+              jsonb_array_length(orchestration_private->'generationReview'->'decisionJournal')::int AS "journalSize"
+         FROM generation_jobs WHERE id=$1`, [fixture.queued.id]
+    )).resolves.toMatchObject({ rows: [{ status: "queued", repairStatus: "authorized", journalSize: 1 }] });
+  });
+
+  it("halts a coherently tampered repair checkpoint before it can resume or write a turn", async () => {
+    const fixture = await pendingReview({ repair: true });
+    await commands().decideReview({ ownerUserId, jobId: fixture.queued.id }, {
+      reviewId: fixture.checkpoint.reviewId, revision: fixture.checkpoint.revision,
+      decision: "repair_format", repairPlanHash: fixture.checkpoint.factFormatRepair!.planHash
+    });
+    const workerId = `tampered-repair-${crypto.randomUUID()}`;
+    const claim = await fixture.execution.claimNext({ workerId, leaseSeconds: 30 });
+    if (!claim) throw new Error("Expected the authorized repair to be claimed.");
+    const saved = (await pool.query<{ orchestration_private: { generationReview: GenerationReviewCheckpoint } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [fixture.queued.id]
+    )).rows[0]!.orchestration_private;
+    const review = structuredClone(saved.generationReview);
+    const receipt = review.decisionJournal[0]!;
+    if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
+    receipt.actionReceipt.jobId = crypto.randomUUID();
+    expect(generationReviewCheckpointSchema.safeParse(review).success).toBe(true);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ ...saved, generationReview: review })]);
+    await expect(fixture.execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; error_code: string; acceptedTurns: number }>(
+      `SELECT status,error_code,
+         (SELECT count(*)::int FROM turns WHERE campaign_id=$2 AND accepted_at IS NOT NULL) AS "acceptedTurns"
+         FROM generation_jobs WHERE id=$1`, [fixture.queued.id, fixture.imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_checkpoint_incompatible", acceptedTurns: 2 }] });
+  });
+
+  it("rejects every schema-valid applied repair receipt and campaign-scope tamper before a resumed job can write", async () => {
+    const cases: readonly [string, (review: GenerationReviewCheckpoint) => void][] = [
+      ["wrong receipt job", (review) => {
+        const receipt = review.decisionJournal[0]!;
+        if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
+        receipt.actionReceipt.jobId = crypto.randomUUID();
+      }],
+      ["wrong receipt operation", (review) => {
+        const receipt = review.decisionJournal[0]!;
+        if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
+        receipt.actionReceipt.operationKind = "replace_latest";
+      }],
+      ["wrong receipt replacement", (review) => {
+        const receipt = review.decisionJournal[0]!;
+        if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
+        receipt.actionReceipt.replacementTurnId = crypto.randomUUID();
+      }],
+      ["foreign receipt actor", (review) => {
+        const receipt = review.decisionJournal[0]!;
+        receipt.actorUserId = crypto.randomUUID();
+      }],
+      ["duplicate matching receipts", (review) => {
+        review.decisionJournal.push(structuredClone(review.decisionJournal[0]!));
+      }],
+      ["coherent campaign scope", (review) => {
+        const campaignId = crypto.randomUUID();
+        const candidates = [review.originalCandidate, review.gateCandidate, review.workingCandidate];
+        for (const candidate of candidates) candidate.campaignId = campaignId;
+        review.factFormatRepair!.campaignId = campaignId;
+        const receipt = review.decisionJournal[0]!;
+        receipt.offeredCandidate.campaignId = campaignId;
+        if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
+        receipt.repair.campaignId = campaignId;
+      }]
+    ];
+
+    for (const [name, tamper] of cases) {
+      const fixture = await pendingReview({ repair: true });
+      await commands().decideReview({ ownerUserId, jobId: fixture.queued.id }, {
+        reviewId: fixture.checkpoint.reviewId, revision: fixture.checkpoint.revision,
+        decision: "repair_format", repairPlanHash: fixture.checkpoint.factFormatRepair!.planHash
+      });
+      const workerId = `applied-repair-${crypto.randomUUID()}`;
+      const claim = await fixture.execution.claimNext({ workerId, leaseSeconds: 30 });
+      if (!claim) throw new Error(`Expected ${name} repair to be claimed.`);
+      const saved = (await pool.query<{ orchestration_private: { generationReview: GenerationReviewCheckpoint } }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [fixture.queued.id]
+      )).rows[0]!.orchestration_private;
+      const savedReview = structuredClone(saved.generationReview);
+      const receipt = savedReview.decisionJournal[0]!;
+      if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
+      // A later semantic review has its own current identity; the applied repair
+      // must remain bound to the historical receipt recorded on the draft.
+      const review = {
+        ...savedReview,
+        reviewId: crypto.randomUUID(),
+        revision: 5,
+        state: "pending" as const,
+        factFormatRepair: { ...savedReview.factFormatRepair!, status: "applied" as const }
+      } satisfies GenerationReviewCheckpoint;
+      const applied = {
+        ...saved,
+        generationReview: review,
+        validatedMainDraft: {
+          factFormatRepair: {
+            version: 1 as const, reviewId: receipt.reviewId, revision: receipt.revision,
+            planHash: receipt.repair.planHash, rawOutputHash: receipt.repair.plan.rawOutputHash,
+            resultHash: receipt.repair.plan.resultHash
+          }
+        },
+        factFormatRepairApplications: [{
+          version: 1 as const, jobId: fixture.queued.id, reviewId: receipt.reviewId, revision: receipt.revision,
+          planHash: receipt.repair.planHash, sourceResponseId: receipt.repair.sourceResponseId,
+          rawOutputReference: receipt.repair.rawOutputReference,
+          producingRequestHash: receipt.repair.producingRequestHash,
+          rawOutputHash: receipt.repair.plan.rawOutputHash, resultHash: receipt.repair.plan.resultHash,
+          providerConfigurationHash: receipt.repair.providerConfigurationHash
+        }]
+      };
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify(applied)]);
+      await expect(fixture.execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim }), `${name} positive control`)
+        .resolves.toMatchObject({ id: fixture.queued.id });
+      tamper(review);
+      expect(generationReviewCheckpointSchema.safeParse(review).success, name).toBe(true);
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ ...applied, generationReview: review })]);
+
+      await expect(fixture.execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim }), name).resolves.toBeNull();
+      await expect(pool.query<{ status: string; error_code: string; acceptedTurns: number }>(
+        `SELECT status,error_code,
+           (SELECT count(*)::int FROM turns WHERE campaign_id=$2 AND accepted_at IS NOT NULL) AS "acceptedTurns"
+           FROM generation_jobs WHERE id=$1`, [fixture.queued.id, fixture.imported.campaignId]
+      ), name).resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_checkpoint_incompatible", acceptedTurns: 2 }] });
+    }
   });
 
   it("serializes competing eligible Keep and Retry decisions with one durable winner", async () => {

@@ -1,6 +1,9 @@
-import { STORY_MEMORY_MANDATORY_CONTRACT } from "../../packages/contracts/src/story-prompt.js";
+import { STORY_MEMORY_MANDATORY_CONTRACT, storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
+import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
+import { generationExecutionProtocolIdentity } from "../../packages/story-engine/src/story-only-prompt.js";
 import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -10,7 +13,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
+import { storyMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
@@ -225,6 +229,140 @@ integration("story context payload baseline shape", () => {
     expect(captured.body).not.toContain("buildContextPreview");
   });
 
+  it("serializes the fact wire distinction in the default Action system message", async () => {
+    const fixture = await importedCampaign("v16-default-action");
+    const captured = await dispatch(fixture.campaignId, "Inspect the relay lantern.");
+    const system = (captured.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content;
+
+    expect(system).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+    expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+  });
+
+  it("serializes the fact wire distinction after a non-enrolled acknowledged creative override for Action", async () => {
+    const fixture = await importedCampaign("v16-non-enrolled-creative-action");
+    const creativeOverride = "Input canonical facts are complete reference objects and should be repeated as additions.";
+    await withTransaction(pool, async (client) => createPromptRepository(client).savePromptOverride({
+      ownerUserId,
+      scope: "campaign",
+      campaignId: fixture.campaignId,
+      key: "story_system",
+      content: creativeOverride,
+      compatibilityAcknowledgement: {
+        requiredShapeVersion: "story-output-v2",
+        protocolIdentity: storyPromptCompatibilityIdentity(),
+        contentHash: createHash("sha256").update(creativeOverride).digest("hex")
+      }
+    }));
+
+    const captured = await dispatch(fixture.campaignId, "Inspect the relay lantern.");
+    const system = (captured.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
+    const frozen = (await pool.query<{ prompt_snapshot: { version: number; templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }>; storyPromptCompatibility: { protocolIdentity: string; templateHash: string } }; prompt_protocol_version: string }>(
+      "SELECT prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE campaign_id=$1 ORDER BY created_at DESC LIMIT 1",
+      [fixture.campaignId]
+    )).rows[0]!;
+
+    expect(system).toContain(creativeOverride);
+    expect(system.lastIndexOf("Output canonical_facts contains strings only"))
+      .toBeGreaterThan(system.indexOf(creativeOverride));
+    expect(frozen.prompt_snapshot.storyPromptCompatibility).toMatchObject({
+      protocolIdentity: storyPromptCompatibilityIdentity()
+    });
+    const rawTemplateIdentity = providerPromptProtocolVersion(frozen.prompt_snapshot.templates as never);
+    expect(frozen.prompt_protocol_version).toBe(`story-prompt-v1|${storyPromptCompatibilityIdentity()}|${rawTemplateIdentity}`);
+    expect(frozen.prompt_protocol_version).not.toBe(rawTemplateIdentity);
+  });
+
+  it("serializes the fact wire distinction after a non-enrolled acknowledged creative override for Story Direction", async () => {
+    const fixture = await importedCampaign("v16-non-enrolled-creative-scene");
+    const creativeOverride = "Input canonical facts are complete reference objects and should be repeated as additions.";
+    await withTransaction(pool, async (client) => createPromptRepository(client).savePromptOverride({
+      ownerUserId,
+      scope: "campaign",
+      campaignId: fixture.campaignId,
+      key: "story_system",
+      content: creativeOverride,
+      compatibilityAcknowledgement: {
+        requiredShapeVersion: "story-output-v2",
+        protocolIdentity: storyPromptCompatibilityIdentity(),
+        contentHash: createHash("sha256").update(creativeOverride).digest("hex")
+      }
+    }));
+    await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [fixture.campaignId]);
+    const before = requests.length;
+    replies.push(candidateReply({ choices: [] }), JSON.stringify({ choices: storyContinuityCandidateOutput.choices,
+      custom_action_suggestion: storyContinuityCandidateOutput.customActionSuggestion }));
+
+    await dispatch(fixture.campaignId, "Set the relay scene.", false, "scene", true);
+    const actual = requests.slice(before);
+
+    expect(actual).toHaveLength(2);
+    for (const request of actual) {
+      const system = (request.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
+      expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+      expect(system.lastIndexOf("Output canonical_facts contains strings only"))
+        .toBeGreaterThan(system.indexOf(creativeOverride));
+    }
+  });
+
+  it("rejects a corrupted frozen non-enrolled proof without queuing a retry", async () => {
+    const fixture = await importedCampaign("v16-non-enrolled-corrupted-retry");
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const queued = await application.enqueueAppend({ ownerUserId, campaignId: fixture.campaignId }, generationRequestSchema.parse({
+      action: "Inspect the relay lantern.", providerProfileId: providerId, idempotencyKey: randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    const original = (await pool.query<{ prompt_snapshot: { storyPromptCompatibility: { templateHash: string } } }>(
+      "SELECT prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!.prompt_snapshot;
+
+    await pool.query("UPDATE generation_jobs SET status='recoverable' WHERE id=$1", [queued.id]);
+    await expect(application.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+
+    const corrupted = structuredClone(original);
+    corrupted.storyPromptCompatibility.templateHash = "0".repeat(64);
+    await pool.query(
+      "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb WHERE id=$1",
+      [queued.id, JSON.stringify(corrupted)]
+    );
+
+    await expect(application.retry({ ownerUserId, jobId: queued.id }))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "retry_protocol_incompatible" } });
+    await expect(pool.query("SELECT status,prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", prompt_snapshot: corrupted }] });
+  });
+
+  it("retries an old non-enrolled v15 snapshot with its frozen bytes and protocol", async () => {
+    const fixture = await importedCampaign("v15-non-enrolled-frozen-override");
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const queued = await application.enqueueAppend({ ownerUserId, campaignId: fixture.campaignId }, generationRequestSchema.parse({
+      action: "Inspect the relay lantern.", providerProfileId: providerId, idempotencyKey: randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    const current = (await pool.query<{ prompt_snapshot: { templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }> } }>(
+      "SELECT prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!;
+    const historicalV15Override = "Frozen non-enrolled v15 creative override bytes.";
+    const historicalV15OverrideHash = "507fa51d4448e4b327aabd850bb08013d75d8705ee0c58d00f1241cee0762ee9";
+    expect(createHash("sha256").update(historicalV15Override).digest("hex")).toBe(historicalV15OverrideHash);
+    const oldSnapshot = structuredClone(current.prompt_snapshot.templates);
+    oldSnapshot.story_system = { content: historicalV15Override, hash: historicalV15OverrideHash, source: "campaign" };
+    const oldProtocol = providerPromptProtocolVersion(oldSnapshot as never);
+    await pool.query(
+      "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      [queued.id, JSON.stringify(oldSnapshot), oldProtocol]
+    );
+
+    await expect(application.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+    const before = requests.length;
+    expect(await runGenerationJob(pool, `payload-v15-non-enrolled-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+    const system = (requests.at(before)!.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content;
+
+    expect(system).toBe(historicalV15Override);
+    expect(system).not.toContain("Output canonical_facts contains strings only");
+    await expect(pool.query("SELECT prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ prompt_snapshot: oldSnapshot, prompt_protocol_version: oldProtocol }] });
+  });
+
   it("keeps a deliberately empty correction oracle independent from transported candidate output", () => {
     expect(storyContinuitySourceOracle.intentionalEmptyCorrection).toEqual({
       id: storyContinuitySourceOracle.intentionalEmptyCorrection.id,
@@ -433,6 +571,73 @@ integration("story context payload baseline shape", () => {
   const dispatchR1 = (campaignId: string, action: string) => dispatch(campaignId, action, true);
 
   describe("enrolled R1 actual provider-payload regressions", () => {
+    it("serializes the frozen v15 creative override and mandatory contract unchanged on retry", async () => {
+      const fixture = await enrolledCampaign("v15-frozen-creative-override");
+      const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r1", enforceEnabled: false });
+      const queued = await application.enqueueAppend({ ownerUserId, campaignId: fixture.campaignId }, generationRequestSchema.parse({
+        action: "Inspect the relay lantern.", providerProfileId: providerId, idempotencyKey: randomUUID(),
+        context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+      }));
+      const current = (await pool.query<{ prompt_snapshot: { templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }>; storyMemoryCompatibility: { protocolIdentity: string; templateHashes: Record<string, string> } }; context_options: { storyMemoryPolicy: { promptProtocol: string } } }>(
+        "SELECT prompt_snapshot,context_options FROM generation_jobs WHERE id=$1", [queued.id]
+      )).rows[0]!;
+      const frozenCreativeOverride = "Frozen v15 creative override bytes.";
+      const frozenHash = createHash("sha256").update(frozenCreativeOverride).digest("hex");
+      const oldSnapshot = structuredClone(current.prompt_snapshot);
+      oldSnapshot.templates.story_system = { content: frozenCreativeOverride, hash: frozenHash, source: "campaign" };
+      oldSnapshot.storyMemoryCompatibility = {
+        protocolIdentity: "story-v15-canonical-fact-format|story-output-v2|current-continuity-v3",
+        templateHashes: { ...oldSnapshot.storyMemoryCompatibility.templateHashes, story_system: frozenHash }
+      };
+      const oldContext = structuredClone(current.context_options);
+      oldContext.storyMemoryPolicy.promptProtocol = "story-v15-canonical-fact-format";
+      const oldProtocol = `story-memory-v1|${generationExecutionProtocolIdentity(providerPromptProtocolVersion(oldSnapshot.templates as never), { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" })}`;
+      await pool.query(
+        "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb,context_options=$3::jsonb,prompt_protocol_version=$4 WHERE id=$1",
+        [queued.id, JSON.stringify(oldSnapshot), JSON.stringify(oldContext), oldProtocol]
+      );
+
+      await expect(application.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+      const before = requests.length;
+      expect(await runGenerationJob(pool, `payload-v15-retry-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+      const system = (requests.at(before)!.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content;
+
+      const historicalV15SystemPrompt = `${frozenCreativeOverride}\n\nStory Memory authority contract: application scope and privacy boundaries come first. Pinned world rules and approved corrections outrank profile guidance, accepted state, selected history, summaries, plans, and the current player request.
+Treat effective character profile guidance as portrayal authority. Preserve accepted historical references with their source time. Dynamic location, possessions, clothing, and relationship status use the latest applicable accepted change or explicit correction; an origin profile is never a reset. A personality guideline does not make an unusual accepted action a contradiction.
+If an immutable world rule conflicts with an approved correction or profile edit, preserve the conflict as uncertainty for an explicit user decision; do not invent a retcon. Apply explicit corrections exactly at their effective base. An empty corrected summary, scratchpad, or thread list is intentional and must not be restored from older material.
+Label supplied material by role: player input is intent, accepted narration is an outcome, selected world records are reference authority, and optional excerpts are limited historical evidence. The player input is intent, not proof that its requested outcome happened. Omitted history is unknown, not evidence that it never happened. Older narration remains true at its labeled source time even when current state later changed.
+continuity_summary, scratchpad, and open_threads are complete replacements for current continuity and may intentionally be empty. canonical_facts and canonical_fact_updates describe only additions or structured current-turn updates; never repeat all historical facts merely to make those arrays comprehensive. A proposed output cannot grant itself source authority or authorize a new supersession ID. Supersede only a visible, supplied canonical fact ID, and only when the update actually replaces that fact.
+Use only the bounded supplied context. Do not claim that all campaign history was verified or that an omitted record is absent. Derived summaries, plans, and candidate output are navigation or proposals, never authority overrides.`;
+      expect(createHash("sha256").update(historicalV15SystemPrompt).digest("hex")).toBe("f7760dc26ce74011ebbad21530ab56f41a04ce19ad5bbe0bbf6607da9f6fc5ea");
+      expect(system).toBe(historicalV15SystemPrompt);
+      expect(system).not.toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+    });
+
+    it("serializes the fact wire distinction after an acknowledged creative override", async () => {
+      const fixture = await enrolledCampaign("v16-creative-override");
+      const creativeOverride = "Input canonical facts are complete reference objects and should be repeated as additions.";
+      await withTransaction(pool, async (client) => createPromptRepository(client).savePromptOverride({
+        ownerUserId,
+        scope: "campaign",
+        campaignId: fixture.campaignId,
+        key: "story_system",
+        content: creativeOverride,
+        compatibilityAcknowledgement: {
+          requiredShapeVersion: "story-output-v2",
+          protocolIdentity: storyMemoryPromptCompatibilityIdentity(),
+          contentHash: createHash("sha256").update(creativeOverride).digest("hex")
+        }
+      }));
+
+      const captured = await dispatchR1(fixture.campaignId, "Inspect the relay lantern.");
+      const system = (captured.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
+
+      expect(system).toContain(creativeOverride);
+      expect(system).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+      expect(system.lastIndexOf("Output canonical_facts contains strings only"))
+        .toBeGreaterThan(system.indexOf(creativeOverride));
+    });
+
     it("runs enrolled Story Direction choice repair with the mandatory contract on both actual requests", async () => {
       const fixture = await enrolledCampaign("r1-scene-repair");
       await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [fixture.campaignId]);
@@ -445,6 +650,8 @@ integration("story context payload baseline shape", () => {
       for (const request of actual) {
         const messages = request.parsed.messages as { role: string; content: string }[];
         expect(messages.find((message) => message.role === "system")?.content).toContain(STORY_MEMORY_MANDATORY_CONTRACT);
+        expect(messages.find((message) => message.role === "system")?.content).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+        expect(messages.find((message) => message.role === "system")?.content).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
         expect(request.body).not.toContain("are facts that happen in this turn");
       }
       expect((await pool.query("SELECT narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [fixture.campaignId])).rows[0]!.narration)

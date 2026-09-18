@@ -543,7 +543,7 @@ function mergeReview(
 }
 
 function reviewSummary(detail: import("@infinite-quest/contracts").GenerationReviewDetail): import("@infinite-quest/contracts").GenerationReviewSummary {
-  return {
+  const base = {
     version: detail.version,
     reviewId: detail.reviewId,
     revision: detail.revision,
@@ -554,6 +554,9 @@ function reviewSummary(detail: import("@infinite-quest/contracts").GenerationRev
     canKeep: detail.canKeep,
     canRetry: detail.canRetry
   };
+  return detail.version === 2
+    ? { ...base, version: 2, canRepairFormat: detail.canRepairFormat === true, formatRepair: detail.formatRepair ?? null }
+    : { ...base, version: 1 };
 }
 
 function normalizeTurns(turns: readonly Immutable<TurnSummary>[]): readonly Immutable<TurnSummary>[] {

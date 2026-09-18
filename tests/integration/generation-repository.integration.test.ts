@@ -640,6 +640,42 @@ integration("PostgreSQL generation command repository", () => {
     await expect(discardCommands.getResult({ ownerUserId, jobId: discardCompletedJobId })).resolves.toEqual(discardResultBefore);
   });
 
+  it("preserves the last safe failure diagnostic when a job is cancelled or discarded", async () => {
+    const diagnostic = {
+      version: 1,
+      category: "provider_timeout",
+      code: "provider_request_timeout",
+      phase: "story_generation",
+      attemptNumber: 1,
+      occurredAt: "2026-09-18T00:00:00.000Z",
+      privateMessage: "provider-specific detail is retained only in orchestration state"
+    };
+    const cancelledCampaign = await campaign();
+    const cancelledJobId = await directGenerationJob(cancelledCampaign.campaignId, "queued");
+    const discardedCampaign = await campaign();
+    const discardedJobId = await directGenerationJob(discardedCampaign.campaignId, "failed");
+    await pool.query(
+      "UPDATE generation_jobs SET orchestration_private = jsonb_build_object('lastFailureDiagnostic', $2::jsonb) WHERE id = ANY($1::uuid[])",
+      [[cancelledJobId, discardedJobId], JSON.stringify(diagnostic)]
+    );
+
+    await expect(repository().cancel({ ownerUserId, jobId: cancelledJobId })).resolves.toMatchObject({
+      id: cancelledJobId, status: "cancelled"
+    });
+    await expect(repository().discard({ ownerUserId, jobId: discardedJobId })).resolves.toMatchObject({
+      id: discardedJobId, status: "discarded"
+    });
+    const after = await pool.query<{ id: string; status: string; failure_diagnostic: unknown }>(
+      `SELECT id, status, orchestration_private->'lastFailureDiagnostic' AS failure_diagnostic
+         FROM generation_jobs WHERE id = ANY($1::uuid[]) ORDER BY id`,
+      [[cancelledJobId, discardedJobId]]
+    );
+    expect(Object.fromEntries(after.rows.map((row) => [row.id, { status: row.status, failureDiagnostic: row.failure_diagnostic }]))).toEqual({
+      [cancelledJobId]: { status: "cancelled", failureDiagnostic: diagnostic },
+      [discardedJobId]: { status: "discarded", failureDiagnostic: diagnostic }
+    });
+  });
+
   it("rejects an incompatible retry without rewriting its durable prompt snapshot", async () => {
     const imported = await campaign();
     const jobId = await directGenerationJob(imported.campaignId, "recoverable");

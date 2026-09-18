@@ -45,7 +45,7 @@ import {
   providerProfileUpdateSchema,
   providerTextRequestSchema
 } from "../../../packages/contracts/src/generation.js";
-import { generationReviewDecisionRequestSchema } from "../../../packages/contracts/src/generation-review.js";
+import { generationFailureDiagnosticProjectionSchema, generationReviewDecisionRequestSchema } from "../../../packages/contracts/src/generation-review.js";
 import { projectGenerationReviewDetailResponse, projectGenerationReviewSnapshot } from "./generation-review-projection.js";
 import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import { storyMemorySettingsUpdateSchema } from "../../../packages/contracts/src/story-memory-policy.js";
@@ -349,12 +349,21 @@ function generationPublicDiagnostic(value: unknown) {
   return projectSafeGenerationDiagnostic(candidate);
 }
 
+function generationPublicFailureDiagnostic(value: unknown) {
+  const candidate = typeof value === "object" && value !== null && "failureDiagnostic" in value
+    ? (value as { failureDiagnostic?: unknown }).failureDiagnostic
+    : null;
+  const parsed = generationFailureDiagnosticProjectionSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
 function generationSnapshot(value: unknown) {
   const { recoveryMetadata: _recoveryMetadata, ...job } = value as Record<string, unknown>;
   return parseResponseProjection(generationJobSnapshotSchema, {
     ...job,
     ...generationPublicError(value),
     diagnostic: generationPublicDiagnostic(value),
+    failureDiagnostic: generationPublicFailureDiagnostic(value),
     ...projectGenerationReviewSnapshot(value)
   });
 }
@@ -364,6 +373,7 @@ function generationStreamSnapshot(value: unknown) {
     ...value as object,
     ...generationPublicError(value),
     diagnostic: generationPublicDiagnostic(value),
+    failureDiagnostic: generationPublicFailureDiagnostic(value),
     ...projectGenerationReviewSnapshot(value)
   });
 }

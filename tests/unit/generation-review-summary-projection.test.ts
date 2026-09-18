@@ -46,4 +46,29 @@ describe("generation review hot-path SQL projection", () => {
     }, "recoverable");
     expect(review).toBeUndefined();
   });
+
+  test("projects only the bounded v2 repair capability", () => {
+    const review = projectBoundedGenerationReviewSummary({
+      version: 2, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "structure", candidateScope: "main", reasons: ["invalid_structure"],
+      eligibility: { complete: false, structurallyValid: false, mechanicsClean: true, authorityValid: true, stageComplete: false, retryAvailable: true },
+      candidatePresent: false, repairPlanHash: "a".repeat(64), repairChangedFactCount: 2, repairStatus: "offered"
+    }, "recoverable");
+    expect(review).toEqual({
+      version: 2, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "structure", candidateScope: "main", reasons: ["invalid_structure"], canKeep: false, canRetry: true,
+      canRepairFormat: true,
+      formatRepair: { planHash: "a".repeat(64), changedFactCount: 2, description: "Repair fact formatting and keep the narration unchanged." }
+    });
+  });
+
+  test("keeps a future stored version as an inert marker and withdraws non-offered repair capability", () => {
+    expect(projectBoundedGenerationReviewSummary({ version: 3, private: "never public" }, "recoverable")).toEqual({ version: 3 });
+    expect(projectBoundedGenerationReviewSummary({
+      version: 2, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "structure", candidateScope: "main", reasons: ["invalid_structure"],
+      eligibility: { complete: false, structurallyValid: false, mechanicsClean: true, authorityValid: true, stageComplete: false, retryAvailable: true },
+      candidatePresent: false, repairPlanHash: "a".repeat(64), repairChangedFactCount: 2, repairStatus: "applied"
+    }, "recoverable")).toMatchObject({ version: 2, canRepairFormat: false, formatRepair: null });
+  });
 });

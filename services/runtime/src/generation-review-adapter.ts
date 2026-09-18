@@ -21,6 +21,7 @@ export function prepareGenerationReview(input: Readonly<{
   originalFindings?: readonly GenerationReviewReasonCode[];
   decisionJournal?: GenerationReviewCheckpoint["decisionJournal"];
   retryFailure?: string | null;
+  factFormatRepair?: NonNullable<GenerationReviewCheckpoint["factFormatRepair"]>;
 }>): GenerationReviewCheckpoint {
   const originalFindings = input.originalFindings ?? input.reasons;
   const eligibility = {
@@ -33,7 +34,7 @@ export function prepareGenerationReview(input: Readonly<{
     ...input.eligibility
   };
   return generationReviewCheckpointSchema.parse({
-    version: 1,
+    version: input.factFormatRepair ? 2 : 1,
     reviewId: input.reviewId ?? randomUUID(),
     revision: input.revision ?? 1,
     state: "pending",
@@ -49,6 +50,7 @@ export function prepareGenerationReview(input: Readonly<{
     originalFindings: [...originalFindings],
     originalFindingsHash: generationReviewFindingsHash(originalFindings),
     retryFailure: input.retryFailure ?? null,
+    ...(input.factFormatRepair ? { factFormatRepair: input.factFormatRepair } : {}),
     decisionJournal: input.decisionJournal ?? []
   });
 }

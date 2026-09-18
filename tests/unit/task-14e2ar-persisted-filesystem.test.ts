@@ -181,6 +181,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     });
     const upload = first.issueOwnerBoundUpload(owner, createReadStream(archivePath), archiveBytes.byteLength);
     const staged = await first.stagingPort.stagePortableArchive(upload);
+    await first.close();
 
     const restarted = createPortableArchiveFilesystemAdapter({
       archiveRoot,
@@ -209,6 +210,7 @@ describe("Task 14e2aR persisted filesystem capability", () => {
     const first = createPortableArchiveFilesystemAdapter({ archiveRoot, assetRoot: archiveRoot, limits, persistence });
     const upload = first.issueOwnerBoundUpload(owner, createReadStream(archivePath), archiveBytes.byteLength);
     const staged = await first.stagingPort.stagePortableArchive(upload);
+    await first.close();
     const stagedDirectory = join(archiveRoot, "staging");
     const stagedName = (await readdir(stagedDirectory))[0]!;
     const stagedPath = join(stagedDirectory, stagedName);

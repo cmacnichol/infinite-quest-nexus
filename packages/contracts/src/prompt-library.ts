@@ -2,11 +2,13 @@ import { z } from "zod";
 import { sha256Hex } from "./hash.js";
 import {
   LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_MEMORY_CONTEXT_POLICY_VERSION,
   STORY_PROMPT_SCHEMA_VERSION,
   STORY_PROMPT_REQUIRED_SHAPE_PREVIEW,
   STORY_SYSTEM_PROMPT,
   STORY_PROSE_GUIDANCE,
+  previousStoryMemoryPromptCompatibilityIdentity,
   storyMemoryPromptCompatibilityIdentity,
   storyPromptCompatibilityIdentity
 } from "./story-prompt.js";
@@ -96,8 +98,16 @@ export const promptSnapshotSchema = z.object(
 ).strict();
 
 const legacyStoryMemoryPromptCompatibilityIdentity = `${LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
+const storyPromptCompatibilitySchema = z.object({
+  protocolIdentity: z.literal(storyPromptCompatibilityIdentity()),
+  templateHash: z.string().regex(/^[a-f0-9]{64}$/)
+}).strict();
 const storyMemoryCompatibilitySchema = z.object({
-  protocolIdentity: z.union([z.literal(legacyStoryMemoryPromptCompatibilityIdentity), z.literal(storyMemoryPromptCompatibilityIdentity())]),
+  protocolIdentity: z.union([
+    z.literal(legacyStoryMemoryPromptCompatibilityIdentity),
+    z.literal(previousStoryMemoryPromptCompatibilityIdentity()),
+    z.literal(storyMemoryPromptCompatibilityIdentity())
+  ]),
   templateHashes: z.object({
     story_system: z.string().regex(/^[a-f0-9]{64}$/),
     event_extension: z.string().regex(/^[a-f0-9]{64}$/)
@@ -115,7 +125,9 @@ const promptSnapshotV2Schema = z.object({
     }).strict()
   ]),
   /** Optional for pre-T07 v2 snapshots. New Story Memory work freezes it. */
-  storyMemoryCompatibility: storyMemoryCompatibilitySchema.nullable().optional()
+  storyMemoryCompatibility: storyMemoryCompatibilitySchema.nullable().optional(),
+  /** Optional for pre-v16 snapshots. New non-enrolled work freezes it. */
+  storyPromptCompatibility: storyPromptCompatibilitySchema.nullable().optional()
 }).strict();
 
 export type PromptSnapshotV2 = Readonly<z.infer<typeof promptSnapshotV2Schema>>;
@@ -124,6 +136,7 @@ export type ReadPromptSnapshot = Readonly<{
   templates: Readonly<Record<string, PromptSnapshotEntry>>;
   continuityReview: PromptSnapshotV2["continuityReview"];
   storyMemoryCompatibility: PromptSnapshotV2["storyMemoryCompatibility"];
+  storyPromptCompatibility: PromptSnapshotV2["storyPromptCompatibility"];
   template(key: string): PromptSnapshotEntry;
 }>;
 
@@ -138,13 +151,19 @@ function validateSnapshotEntry(entry: PromptSnapshotEntry): PromptSnapshotEntry 
  */
 export function readPromptSnapshot(input: unknown): ReadPromptSnapshot {
   const v2 = promptSnapshotV2Schema.safeParse(input);
-  const parsed = v2.success ? { kind: "v2" as const, templates: v2.data.templates, continuityReview: v2.data.continuityReview, storyMemoryCompatibility: v2.data.storyMemoryCompatibility ?? null } : (() => {
+  const parsed = v2.success ? {
+    kind: "v2" as const,
+    templates: v2.data.templates,
+    continuityReview: v2.data.continuityReview,
+    storyMemoryCompatibility: v2.data.storyMemoryCompatibility ?? null,
+    storyPromptCompatibility: v2.data.storyPromptCompatibility ?? null
+  } : (() => {
     const legacy = promptSnapshotSchema.safeParse(input);
     if (!legacy.success) {
       if (input && typeof input === "object" && "version" in input) throw new Error("Unsupported prompt snapshot version.");
       throw new Error("Invalid frozen legacy prompt snapshot.");
     }
-    return { kind: "legacy" as const, templates: legacy.data as Record<string, PromptSnapshotEntry>, continuityReview: null, storyMemoryCompatibility: null };
+    return { kind: "legacy" as const, templates: legacy.data as Record<string, PromptSnapshotEntry>, continuityReview: null, storyMemoryCompatibility: null, storyPromptCompatibility: null };
   })();
   for (const entry of Object.values(parsed.templates)) validateSnapshotEntry(entry);
   if (parsed.continuityReview) {
@@ -193,6 +212,17 @@ export function assertStoryMemoryPromptCompatibility(input: unknown): ReadPrompt
   }
   for (const key of nonShipped) {
     if (proof.templateHashes[key] !== snapshot.template(key).hash) throw new Error("Frozen Story Memory prompt acknowledgement does not match captured content.");
+  }
+  return snapshot;
+}
+
+/** New non-enrolled v16 jobs freeze a proof that binds the acknowledged
+ * story-system bytes to the mandatory fact-wire contract. */
+export function assertStoryPromptCompatibility(input: unknown): ReadPromptSnapshot {
+  const snapshot = readPromptSnapshot(input);
+  const proof = snapshot.storyPromptCompatibility;
+  if (proof && proof.templateHash !== snapshot.template("story_system").hash) {
+    throw new Error("Frozen story prompt acknowledgement does not match captured content.");
   }
   return snapshot;
 }

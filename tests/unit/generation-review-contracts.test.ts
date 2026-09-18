@@ -5,9 +5,12 @@ import {
   generationReviewReasonCodeSchema,
   projectGenerationValidationIssues,
   projectGenerationReviewDetail,
-  projectGenerationReviewSummary
+  projectGenerationReviewSummary,
+  factFormatRepairHash,
+  sha256Hex
 } from "../../packages/contracts/src/index.js";
 import { generationReviewCandidateSchema, generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../packages/application/src/generation/review-checkpoint.js";
+import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 
 const review = {
   version: 1,
@@ -95,6 +98,24 @@ describe("generation review contracts", () => {
     }).success).toBe(false);
   });
 
+  it("accepts only a plan-bound v2 format repair decision", () => {
+    const repair = {
+      reviewId: review.reviewId,
+      revision: 1,
+      decision: "repair_format",
+      repairPlanHash: "a".repeat(64)
+    };
+    expect(generationReviewDecisionRequestSchema.parse(repair)).toEqual(repair);
+    expect(generationReviewDecisionRequestSchema.safeParse({ ...repair, repairPlanHash: "wrong" }).success).toBe(false);
+    expect(generationReviewDecisionRequestSchema.safeParse({ ...repair, extra: true }).success).toBe(false);
+    expect(generationReviewDecisionRequestSchema.safeParse({
+      reviewId: review.reviewId,
+      revision: 1,
+      decision: "retry",
+      repairPlanHash: "a".repeat(64)
+    }).success).toBe(false);
+  });
+
   it("rejects an unknown review reason", () => {
     expect(generationReviewReasonCodeSchema.safeParse("unreviewed_failure").success).toBe(false);
   });
@@ -106,6 +127,20 @@ describe("generation review contracts", () => {
       ownerUserId: "33333333-3333-4333-8333-333333333333",
       rawProviderResponse: "private"
     })).toEqual(review);
+  });
+
+  it("projects the bounded v2 repair offer without candidate data", () => {
+    const v2 = {
+      ...review,
+      version: 2,
+      canRepairFormat: true,
+      formatRepair: {
+        planHash: "a".repeat(64),
+        changedFactCount: 2,
+        description: "Repair fact formatting and keep the narration unchanged."
+      }
+    };
+    expect(projectGenerationReviewSummary({ ...v2, rawOutput: "PRIVATE" })).toEqual(v2);
   });
 
   it("accepts old snapshots without a review and projects a supplied review", () => {
@@ -190,7 +225,7 @@ describe("generation review contracts", () => {
       provider: { type: "lmstudio", profileId: null, configurationHash: "c".repeat(64) },
       resumeDependencies: { generationContext: {}, producingProviderResult: {}, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     });
-    const main = candidate("main", "a".repeat(64));
+    const main = { ...candidate("main", "a".repeat(64)), producingRequestHash: "6".repeat(64) };
     const final = candidate("final", "d".repeat(64));
     const originalFindings = ["scene_beats_missing"] as const;
     const offeredReasons = ["scene_beats_missing"] as const;
@@ -211,6 +246,28 @@ describe("generation review contracts", () => {
     expect(generationReviewCheckpointSchema.safeParse({
       ...checkpoint,
       decisionJournal: [{ ...checkpoint.decisionJournal[0], findingsHash: "9".repeat(64) }]
+    }).success).toBe(false);
+    expect(generationReviewCheckpointSchema.safeParse({
+      ...checkpoint,
+      version: 2,
+      factFormatRepair: (() => {
+        const story = {
+          narration: "The beacon burns.", choices: ["Wait", "Watch", "Leave", "Listen"], custom_action_suggestion: "Wait",
+          scratchpad: "", tracker_updates: [], image_prompt: "A beacon.", continuity_summary: "The beacon burns.",
+          canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
+        };
+        const plan = {
+          version: 1, rawOutputHash: "2".repeat(64), visibleFactsHash: "3".repeat(64),
+          protectedFieldsHash: "4".repeat(64), resultHash: factFormatRepairHash(story), story, changes: []
+        };
+        return {
+        planHash: sha256Hex(canonicalEvidenceJson(plan)), rawOutputReference: main.rawOutputReference!, sourceResponseId: main.producingResponseId,
+        plan, producingRequestHash: main.producingRequestHash!, ownerUserId: main.ownerUserId, campaignId: main.campaignId,
+        worldVersionId: main.worldVersionId, baseIdentity: main.baseIdentity,
+        providerConfigurationHash: main.provider.configurationHash, promptProtocolVersion: main.protocol.version,
+        status: "offered", failureCode: null
+        };
+      })()
     }).success).toBe(false);
     expect(generationReviewCheckpointSchema.safeParse({ ...checkpoint, originalFindingsHash: "9".repeat(64) }).success).toBe(false);
   });

@@ -13,7 +13,7 @@ import {
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
-import { generationReviewTransportSchema } from "./generation-review.js";
+import { generationFailureDiagnosticProjectionSchema, generationReviewTransportSchema } from "./generation-review.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -432,6 +432,8 @@ export const generationJobStatusSchema = z.object({
   errorCode: z.string().nullable().optional(),
   errorMessage: z.string().nullable().optional(),
   recoveryMetadata: z.record(z.string(), z.unknown()).optional(),
+  /** Private at rest; repository supplies only the fixed public projection. */
+  failureDiagnostic: generationFailureDiagnosticProjectionSchema.nullable().optional(),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema,
   completedAt: apiTimestampSchema.nullable().optional(),
@@ -446,7 +448,8 @@ export const PUBLIC_GENERATION_FAILURE_MESSAGE = "Generation could not be comple
 const publicGenerationFailureFields = {
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
-  diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null)
+  diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null),
+  failureDiagnostic: generationFailureDiagnosticProjectionSchema.nullable().optional().catch(null)
 };
 
 const generationJobSnapshotBaseSchema = generationJobStatusSchema.omit({

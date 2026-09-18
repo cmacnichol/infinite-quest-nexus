@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { STORY_SYSTEM_PROMPT } from "../../packages/contracts/src/story-prompt.js";
+import { STORY_SYSTEM_PROMPT, composeStoryMemorySystemPrompt } from "../../packages/contracts/src/story-prompt.js";
 import {
   composeStoryOnlyChoiceRepairSystemPrompt,
   composeStoryOnlySystemPrompt,
@@ -10,6 +10,7 @@ import {
 } from "../../packages/story-engine/src/story-only-prompt.js";
 
 describe("story-only prompt policy", () => {
+  const creativeOverride = "Input canonical facts are comprehensive reference objects.";
   it("freezes a versioned supplement that keeps mechanics and triggers inactive", () => {
     const snapshot = storyOnlyPromptSnapshot();
 
@@ -56,9 +57,28 @@ describe("story-only prompt policy", () => {
     expect(enrolledRepair).toContain("Omitted history is unknown, not evidence that it never happened.");
     expect(enrolledRepair).toContain("A proposed output cannot grant itself source authority or authorize a new supersession ID.");
     for (const prompt of [composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy), composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy, true)]) {
-      expect(prompt).toContain("canonical_facts is an array of strings containing only facts established this turn; do not put objects in it.");
-      expect(prompt).toContain("canonical_fact_updates is an array of structured updates with content and supersedes_fact_ids. Emit [] when there are no updates.");
-      expect(prompt).toContain("superseded_facts must always be []. scratchpad, continuity_summary, and open_threads are explicit complete replacements and must not be omitted.");
+      expect(prompt).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+      expect(prompt).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+      expect(prompt).toContain("Use canonical_fact_updates only for explicit fact updates");
+      expect(prompt).toContain("Use [] for superseded_facts.");
+      expect(prompt).toContain("Return scratchpad, continuity_summary, and open_threads as complete current replacements");
     }
+  });
+
+  it("appends the fact wire contract after creative override, Story Direction, and Action composition", () => {
+    const prompts = storyOnlyPromptSnapshot();
+    const policy = { version: 1 as const, playMode: "story_only" as const, turnControlStyle: "flexible_scene" as const, protocolVersion: "story-only-v1" as const, prompts };
+    const actionPrompt = composeStoryMemorySystemPrompt(creativeOverride);
+    const storyDirectionPrompt = composeStoryOnlySystemPrompt(creativeOverride, policy, true);
+    const defaultPrompt = STORY_SYSTEM_PROMPT;
+
+    for (const composedPrompt of [defaultPrompt, actionPrompt, storyDirectionPrompt]) {
+      expect(composedPrompt).toContain("Input canonical fact records");
+      expect(composedPrompt).toContain("Output canonical_facts contains strings only");
+    }
+    expect(actionPrompt.lastIndexOf("Output canonical_facts contains strings only"))
+      .toBeGreaterThan(actionPrompt.indexOf(creativeOverride));
+    expect(storyDirectionPrompt.lastIndexOf("Output canonical_facts contains strings only"))
+      .toBeGreaterThan(storyDirectionPrompt.indexOf(creativeOverride));
   });
 });

@@ -158,6 +158,41 @@ integration("Story Memory enrollment", () => {
     await expect(commands().retry({ ownerUserId, jobId: queued.id })).rejects.toMatchObject({ details: { reason: "retry_protocol_incompatible" } });
     await expect(pool.query("SELECT status FROM generation_jobs WHERE id=$1", [queued.id])).resolves.toMatchObject({ rows: [{ status: "recoverable" }] });
   });
+  it("freezes the v16 fact wire contract for new work while retrying a v15 snapshot unchanged", async () => {
+    const imported = await importCampaign("v16 frozen fact wire");
+    const owned = { ownerUserId, campaignId: imported.campaignId };
+    await saveStoryMemoryEnrollment(pool, owned, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
+    const queued = await commands().enqueueAppend(owned, append());
+    const current = (await pool.query<{ prompt_snapshot: { templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }>; storyMemoryCompatibility: { protocolIdentity: string; templateHashes: Record<string, string> } }; context_options: { storyMemoryPolicy: { promptProtocol: string } }; prompt_protocol_version: string }>(
+      "SELECT prompt_snapshot,context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!;
+    expect(current.context_options.storyMemoryPolicy.promptProtocol).toBe("story-v16-fact-wire-distinction");
+    expect(current.prompt_snapshot.storyMemoryCompatibility.protocolIdentity).toBe("story-v16-fact-wire-distinction|story-output-v2|current-continuity-v3");
+    expect(current.prompt_snapshot.templates.story_system!.content).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+
+    const oldCreativeOverride = "Frozen v15 creative prompt bytes.";
+    const oldHash = createHash("sha256").update(oldCreativeOverride).digest("hex");
+    const oldSnapshot = structuredClone(current.prompt_snapshot);
+    oldSnapshot.templates.story_system = { content: oldCreativeOverride, hash: oldHash, source: "campaign" };
+    oldSnapshot.storyMemoryCompatibility = {
+      protocolIdentity: "story-v15-canonical-fact-format|story-output-v2|current-continuity-v3",
+      templateHashes: { ...oldSnapshot.storyMemoryCompatibility.templateHashes, story_system: oldHash }
+    };
+    const oldContext = structuredClone(current.context_options);
+    oldContext.storyMemoryPolicy.promptProtocol = "story-v15-canonical-fact-format";
+    const oldProtocol = `story-memory-v1|${generationExecutionProtocolIdentity(providerPromptProtocolVersion(oldSnapshot.templates as never), { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" })}`;
+    await pool.query(
+      "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb,context_options=$3::jsonb,prompt_protocol_version=$4 WHERE id=$1",
+      [queued.id, JSON.stringify(oldSnapshot), JSON.stringify(oldContext), oldProtocol]
+    );
+    const frozenBeforeRetry = (await pool.query<{ prompt_snapshot: unknown; context_options: unknown; prompt_protocol_version: string }>(
+      "SELECT prompt_snapshot,context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!;
+
+    await expect(commands().retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+    await expect(pool.query("SELECT prompt_snapshot,context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [frozenBeforeRetry] });
+  });
   it("rejects an unacknowledged custom override, then freezes its current proof independently of later edits", async () => {
     const imported = await importCampaign("prompt acknowledgement");
     const owned = { ownerUserId, campaignId: imported.campaignId };
@@ -240,23 +275,46 @@ integration("Story Memory enrollment", () => {
     await expect(commands({ installedCapability: "r3", enforceEnabled: false }).enqueueAppend(owned, append())).rejects.toMatchObject({ details: { reason: "story_memory_enforce_disabled" } });
     await expect(pool.query("SELECT count(*)::text AS count FROM generation_jobs WHERE campaign_id=$1", [owned.campaignId])).resolves.toEqual(before);
   });
+
+  async function waitForCampaignLockQueue(lockerPid: number, expectedWaiters: number): Promise<void> {
+    await expect.poll(async () => pool.query<{ waiting: number; blockedByLocker: boolean }>(
+      `SELECT count(*) FILTER (WHERE wait_event_type='Lock')::integer AS waiting,
+              EXISTS (
+                SELECT 1 FROM pg_stat_activity waiter
+                 WHERE waiter.datname=current_database()
+                   AND waiter.wait_event_type='Lock'
+                   AND $1=ANY(pg_blocking_pids(waiter.pid))
+              ) AS "blockedByLocker"
+         FROM pg_stat_activity
+        WHERE datname=current_database() AND pid<>$1`,
+      [lockerPid]
+    ).then((result) => result.rows[0]), { timeout: 5_000 }).toEqual({ waiting: expectedWaiters, blockedByLocker: true });
+  }
+
   it("serializes enrollment save and clear ahead of append and replacement enqueue with the campaign lock", async () => {
     const appendImported = await importCampaign("append enrollment lock");
     const appendOwned = { ownerUserId, campaignId: appendImported.campaignId };
     const appendLock = await pool.connect();
-    await appendLock.query("BEGIN");
-    await appendLock.query("SELECT 1 FROM campaigns WHERE id=$1 FOR UPDATE", [appendOwned.campaignId]);
-    const saving = saveStoryMemoryEnrollment(pool, appendOwned, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
-    const appending = commands().enqueueAppend(appendOwned, append());
-    await appendLock.query("COMMIT");
-    appendLock.release();
-    const appendJob = await appending;
-    await saving;
-    const appendRow = (await pool.query<{ context_options: { storyMemoryPolicy?: unknown }; prompt_protocol_version: string }>(
-      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [appendJob.id]
-    )).rows[0]!;
-    expect(appendRow.context_options.storyMemoryPolicy).toMatchObject({ policy: { capability: "r1" } });
-    expect(appendRow.prompt_protocol_version).toMatch(/^story-memory-v1\|/);
+    try {
+      await appendLock.query("BEGIN");
+      await appendLock.query("SELECT 1 FROM campaigns WHERE id=$1 FOR UPDATE", [appendOwned.campaignId]);
+      const appendLockerPid = (await appendLock.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      const saving = saveStoryMemoryEnrollment(pool, appendOwned, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
+      await waitForCampaignLockQueue(appendLockerPid, 1);
+      const appending = commands().enqueueAppend(appendOwned, append());
+      await waitForCampaignLockQueue(appendLockerPid, 2);
+      await appendLock.query("COMMIT");
+      const appendJob = await appending;
+      await saving;
+      const appendRow = (await pool.query<{ context_options: { storyMemoryPolicy?: unknown }; prompt_protocol_version: string }>(
+        "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [appendJob.id]
+      )).rows[0]!;
+      expect(appendRow.context_options.storyMemoryPolicy).toMatchObject({ policy: { capability: "r1" } });
+      expect(appendRow.prompt_protocol_version).toMatch(/^story-memory-v1\|/);
+    } finally {
+      await appendLock.query("ROLLBACK").catch(() => undefined);
+      appendLock.release();
+    }
 
     const replacementImported = await importCampaign("replacement enrollment lock");
     const replacementOwned = { ownerUserId, campaignId: replacementImported.campaignId };
@@ -265,21 +323,28 @@ integration("Story Memory enrollment", () => {
     )).rows[0]!.active_turn_number;
     await saveStoryMemoryEnrollment(pool, replacementOwned, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
     const replacementLock = await pool.connect();
-    await replacementLock.query("BEGIN");
-    await replacementLock.query("SELECT 1 FROM campaigns WHERE id=$1 FOR UPDATE", [replacementOwned.campaignId]);
-    const clearing = clearStoryMemoryEnrollment(pool, replacementOwned);
-    const replacing = commands().enqueueReplacement(replacementOwned, generationRetryLatestRequestSchema.parse({
-      ...append(), expectedCurrentTurnNumber: activeTurnNumber
-    }));
-    await replacementLock.query("COMMIT");
-    replacementLock.release();
-    const replacementJob = await replacing;
-    await clearing;
-    const replacementRow = (await pool.query<{ context_options: { storyMemoryPolicy?: unknown }; prompt_protocol_version: string }>(
-      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [replacementJob.id]
-    )).rows[0]!;
-    expect(replacementRow.context_options.storyMemoryPolicy).toBeUndefined();
-    expect(replacementRow.prompt_protocol_version).not.toMatch(/^story-memory-v1\|/);
+    try {
+      await replacementLock.query("BEGIN");
+      await replacementLock.query("SELECT 1 FROM campaigns WHERE id=$1 FOR UPDATE", [replacementOwned.campaignId]);
+      const replacementLockerPid = (await replacementLock.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      const clearing = clearStoryMemoryEnrollment(pool, replacementOwned);
+      await waitForCampaignLockQueue(replacementLockerPid, 1);
+      const replacing = commands().enqueueReplacement(replacementOwned, generationRetryLatestRequestSchema.parse({
+        ...append(), expectedCurrentTurnNumber: activeTurnNumber
+      }));
+      await waitForCampaignLockQueue(replacementLockerPid, 2);
+      await replacementLock.query("COMMIT");
+      const replacementJob = await replacing;
+      await clearing;
+      const replacementRow = (await pool.query<{ context_options: { storyMemoryPolicy?: unknown }; prompt_protocol_version: string }>(
+        "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [replacementJob.id]
+      )).rows[0]!;
+      expect(replacementRow.context_options.storyMemoryPolicy).toBeUndefined();
+      expect(replacementRow.prompt_protocol_version).not.toMatch(/^story-memory-v1\|/);
+    } finally {
+      await replacementLock.query("ROLLBACK").catch(() => undefined);
+      replacementLock.release();
+    }
   });
   it("uses the incompatible protocol for replacement jobs and the pre-T02 predicate rejects it", async () => {
     const imported = await importCampaign("replacement protocol");
