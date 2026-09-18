@@ -167,8 +167,9 @@ integration("prompt-memory remediation composed workflow", () => {
     expect(await runGenerationJob(pool, `normalization-worker-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
     expect(storyDispatches()).toBe(beforeRequests + 1);
     await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: "completed" });
-    await expect(pool.query<{ content: string }>("SELECT content FROM campaign_canonical_facts WHERE campaign_id=$1 AND content=$2", [imported.campaignId, "The format beacon is lit."]))
-      .resolves.toMatchObject({ rows: [{ content: "The format beacon is lit." }] });
+    const expectedFact = _label === "content-only fact wrapper" ? "The format beacon is lit." : "Captain Alia guards the harbor.";
+    await expect(pool.query<{ content: string }>("SELECT content FROM campaign_canonical_facts WHERE campaign_id=$1 AND content=$2", [imported.campaignId, expectedFact]))
+      .resolves.toMatchObject({ rows: [{ content: expectedFact }] });
     await expect(pool.query<{ raw: string }>("SELECT raw_output AS raw FROM generation_attempts WHERE generation_job_id=$1", [job.id]))
       .resolves.toMatchObject({ rows: [expect.objectContaining({ raw: expect.stringContaining("canonical_facts") })] });
   });
