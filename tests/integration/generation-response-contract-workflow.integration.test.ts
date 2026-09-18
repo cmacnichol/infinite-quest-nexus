@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -43,7 +43,9 @@ integration("response-contract composed generation workflow", () => {
   let pool: DatabasePool;
   let server: Server;
   let ownerUserId = "";
+  let invalidPrimary = false;
   const completions: string[] = [];
+  const ownedJobIds: string[] = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
@@ -64,7 +66,7 @@ integration("response-contract composed generation workflow", () => {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({
           id: randomUUID(), model: "workflow-model",
-          choices: [{ message: { content: storyResponse() }, finish_reason: "stop" }],
+          choices: [{ message: { content: invalidPrimary ? JSON.stringify({ narration: "Incomplete fixture response." }) : storyResponse() }, finish_reason: "stop" }],
           usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 }
         }));
       });
@@ -77,6 +79,14 @@ integration("response-contract composed generation workflow", () => {
     await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
     await (server as Server & { transport?: { close(): Promise<void> } }).transport?.close();
     await pool.end();
+  });
+
+  afterEach(async () => {
+    invalidPrimary = false;
+    if (ownedJobIds.length) {
+      await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=ANY($1::uuid[]) AND status IN ('queued','assessing','generating','validating')", [ownedJobIds]);
+      ownedJobIds.length = 0;
+    }
   });
 
   async function provider(policy: "auto" | "required" | "legacy") {
@@ -116,6 +126,7 @@ integration("response-contract composed generation workflow", () => {
       action: "Open the observatory archive.", providerProfileId: profile.id, idempotencyKey: randomUUID(),
       context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
     }));
+    ownedJobIds.push(job.id);
     return { application, campaignId: imported.campaignId, job };
   }
 
@@ -202,7 +213,7 @@ integration("response-contract composed generation workflow", () => {
     };
     const callsBefore = completions.length;
     await expect(createGenerationExecutor({ pool, repository: crashingRepository, collaborators })
-      .execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(false);
+      .execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
     expect(completions).toHaveLength(callsBefore);
     const crashed = await pool.query<{ attempts: number; orchestrationPrivate: Record<string, any> }>(
       "SELECT attempts,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]
@@ -223,6 +234,39 @@ integration("response-contract composed generation workflow", () => {
     expect(completions).toHaveLength(callsBefore + 1);
     await expect(runGenerationJob(pool, `response-contract-selection-crash-c-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(false);
     expect(completions).toHaveLength(callsBefore + 1);
+  }, 60_000);
+
+  it("gives an authorized review retry a new durable primary identity and one nonstream dispatch", async () => {
+    const fixture = await enqueue("auto");
+    invalidPrimary = true;
+    const callsBefore = completions.length;
+    try {
+      await expect(runGenerationJob(pool, `response-contract-review-first-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(true);
+      const review = await fixture.application.getReview({ ownerUserId, jobId: fixture.job.id });
+      const before = await pool.query<{ orchestrationPrivate: Record<string, any> }>(
+        "SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]
+      );
+      expect(before.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([
+        expect.objectContaining({ invocationKey: "story:nonstream", operation: "story_generation", status: "completed" })
+      ]);
+      await fixture.application.decideReview({ ownerUserId, jobId: fixture.job.id }, {
+        reviewId: review.reviewId, revision: review.revision, decision: "retry"
+      });
+      invalidPrimary = false;
+      await expect(runGenerationJob(pool, `response-contract-review-retry-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(true);
+      const after = await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>(
+        "SELECT status,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]
+      );
+      expect(after.rows[0]?.status).toBe("completed");
+      expect(after.rows[0]!.orchestrationPrivate.logicalAttempt.id).not.toBe(before.rows[0]!.orchestrationPrivate.logicalAttempt.id);
+      expect(after.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([
+        expect.objectContaining({ invocationKey: "story:nonstream", operation: "story_generation", status: "completed" }),
+        expect.objectContaining({ invocationKey: "story:nonstream", operation: "story_generation", status: "completed" })
+      ]);
+      expect(completions).toHaveLength(callsBefore + 2);
+    } finally {
+      invalidPrimary = false;
+    }
   }, 60_000);
 
   it("runs a legacy job through the composed provider without inventing a response-contract envelope", async () => {
