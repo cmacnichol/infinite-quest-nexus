@@ -37,7 +37,7 @@ integration("turn validation report PostgreSQL projection", () => {
     const oversized = `${canary}${"x".repeat(1_000_000)}`;
     const futureQueue = {
       queuedResponsePolicy: { version: 2, policy: "required", operationClosureVersion: 1 },
-      lastFailureDiagnostic: { version: 1, category: "provider_transport", code: oversized, phase: oversized, attemptNumber: oversized, occurredAt: oversized },
+      lastFailureDiagnostic: { version: "1", category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation", attemptNumber: 1, occurredAt: "2026-09-18T00:00:00.000Z" },
       responseContractInvocations: [{ version: 2, invocationKey: "story:stream", operation: "story_generation", status: "completed", dispatchedAt: oversized, completedAt: oversized, request: { mode: "json_schema", schemaVersion: "v1", schemaHash: "a".repeat(64), requestedModel: "report-model" }, response: { returnedModel: "report-model", returnedProviderRoute: oversized } }]
     };
     const malformedSelection = {
@@ -45,11 +45,19 @@ integration("turn validation report PostgreSQL projection", () => {
       frozenResponseContracts: { version: 2, queuedPolicy: { version: 1, policy: "required", operationClosureVersion: 1 } },
       responseContractInvocations: [{ version: 1, invocationKey: "story:stream", operation: "story_generation", status: "completed", dispatchedAt: "2026-09-18T00:00:00.000Z", completedAt: "2026-09-18T00:00:01.000Z", request: { mode: "json_schema", schemaVersion: "v1", schemaHash: "a".repeat(64), requestedModel: "report-model" }, response: { returnedModel: "report-model", returnedProviderRoute: "route" } }]
     };
+    const validTransport = {
+      lastFailureDiagnostic: { version: 1, category: "provider_transport", code: "provider_transport_error", phase: "story_generation", attemptNumber: 1, occurredAt: "2026-09-18T00:00:00.000Z" }
+    };
+    const validTimeout = {
+      lastFailureDiagnostic: { version: 1, category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation", attemptNumber: 2, occurredAt: "2026-09-18T00:00:01.000Z" }
+    };
     await pool.query(
       `INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,requested_model,orchestration_private)
        VALUES ($1,$2,$3,$4,1,'report fixture','failed','report-model',$5::jsonb),
-              ($1,$2,$3,$6,2,'report fixture','failed','report-model',$7::jsonb)`,
-      [ownerUserId, imported.campaignId, profile.id, randomUUID(), JSON.stringify(futureQueue), randomUUID(), JSON.stringify(malformedSelection)]
+              ($1,$2,$3,$6,2,'report fixture','failed','report-model',$7::jsonb),
+              ($1,$2,$3,$8,3,'report fixture','failed','report-model',$9::jsonb),
+              ($1,$2,$3,$10,4,'report fixture','failed','report-model',$11::jsonb)`,
+      [ownerUserId, imported.campaignId, profile.id, randomUUID(), JSON.stringify(futureQueue), randomUUID(), JSON.stringify(malformedSelection), randomUUID(), JSON.stringify(validTransport), randomUUID(), JSON.stringify(validTimeout)]
     );
     const selectedRows: unknown[] = [];
     const client = {
@@ -62,12 +70,17 @@ integration("turn validation report PostgreSQL projection", () => {
 
     const report = await readTurnValidationReport(client, { limit: 10, since: null, format: "json" });
 
-    expect(selectedRows).toHaveLength(2);
+    expect(selectedRows).toHaveLength(4);
     expect(JSON.stringify(selectedRows)).not.toContain(canary);
     expect(JSON.stringify(report)).not.toContain(canary);
     expect(report.cohorts).toEqual(expect.arrayContaining([
       expect.objectContaining({ policy: "unknown", effectiveMode: "unknown", operation: "unknown", streaming: "unknown" })
     ]));
     expect(report.metrics.primaryCalls).toBe(0);
+    expect(report.jobsWithPersistedTransportDiagnostic).toBe(2);
+    expect(report.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ failureDiagnostic: { code: "provider_transport_error", message: "The provider connection failed." } }),
+      expect.objectContaining({ failureDiagnostic: { code: "provider_request_timeout", message: "The provider request timed out." } })
+    ]));
   });
 });
