@@ -1,6 +1,6 @@
 # Turn validation success: verification matrix
 
-Scope: requested implementation phases 01–04. Status entries remain pending until coordinator inspection establishes evidence at the final integrated SHA. No deployment or live-model improvement is implied.
+Scope: requested implementation phases 01–04. Final implementation `d9ab9570` is verified; see [the final report](final.md) for immutable run identities and test-only source equivalence. Historical checkpoint entries below retain their original scope. No deployment or live-model improvement is implied.
 
 ## Baseline
 
@@ -32,20 +32,20 @@ Scope: requested implementation phases 01–04. Status entries remain pending un
 | 03 content mass balance and protected fields | Exact preservation and collision tests | Passed at 099d2394; trim-changing candidates rejected, mixed content wrappers preserved |
 | 03 parser acceptance unchanged | Direct malformed object still rejected | Passed at 099d2394; existing parser files unchanged and rejection regressions pass |
 | 03 ID/supersession and mechanics safety | Visible/unseen ID and mechanics fixtures | Passed at 099d2394; removed references checked for mechanics, shared UUID validation, review approved |
-| 04 v1/v2 wire and checkpoint compatibility | Old receipts, future versions, clients, compile checks | Pending |
-| 04 explicit decision, atomic concurrency | DB duplicate/stale/wrong owner/revision/plan tests | Pending |
-| 04 exact original request/source evidence | Tampering and changed authority tests | Pending |
-| 04 no repeated primary generation | Composed provider-call counts before/after repair | Pending |
-| 04 ordinary downstream validation retained | Strict parser, choice, continuity-off/observe/enforce and commit tests | Pending |
-| 04 crash/reclaim boundaries | Before/after receipt/checkpoint/review/commit tests | Pending |
-| 04 no rejected authoritative writes | Turn/state/fact/accepted Chronicle row comparisons | Pending |
-| 04 Action and Story Direction, append/replacement | Composed mode/operation matrix | Pending |
-| 04 optional illustrations independent | Acceptance despite illustration failure, no duplicate enqueue | Pending |
-| 04 both UI surfaces | Desktop/mobile Playwright interactions and screenshots | Pending |
-| 04 unreachable dispatch removed safely | Route call-count and historical resume regressions | Pending |
-| Combined source quality | Fresh Terra spec/code review plus coordinator findings adjudication | Pending |
-| Combined verification | Focused/full relevant units, real DB, type/check/build, diff | Pending |
-| Reduces observed format failures | Bounded read-only saved-response replay and synthetic acceptance comparison | Pending |
+| 04 v1/v2 wire and checkpoint compatibility | Old receipts, future versions, clients, compile checks | Passed in final evidence; see final report and acceptance checklist |
+| 04 explicit decision, atomic concurrency | DB duplicate/stale/wrong owner/revision/plan tests | Passed in final evidence; see final report and acceptance checklist |
+| 04 exact original request/source evidence | Tampering and changed authority tests | Passed in final evidence; see final report and acceptance checklist |
+| 04 no repeated primary generation | Composed provider-call counts before/after repair | Passed in final evidence; see final report and acceptance checklist |
+| 04 ordinary downstream validation retained | Strict parser, choice, continuity-off/observe/enforce and commit tests | Passed in final evidence; see final report and acceptance checklist |
+| 04 crash/reclaim boundaries | Before/after receipt/checkpoint/review/commit tests | Passed in final evidence; see final report and acceptance checklist |
+| 04 no rejected authoritative writes | Turn/state/fact/accepted Chronicle row comparisons | Passed in final evidence; see final report and acceptance checklist |
+| 04 Action and Story Direction, append/replacement | Composed mode/operation matrix | Passed in final evidence; see final report and acceptance checklist |
+| 04 optional illustrations independent | Acceptance despite illustration failure, no duplicate enqueue | Passed in final evidence; see final report and acceptance checklist |
+| 04 both UI surfaces | Desktop/mobile Playwright interactions and screenshots | Passed in final evidence; see final report and acceptance checklist |
+| 04 unreachable dispatch removed safely | Route call-count and historical resume regressions | Passed in final evidence; see final report and acceptance checklist |
+| Combined source quality | Fresh Terra spec/code review plus coordinator findings adjudication | Passed in final evidence; see final report and acceptance checklist |
+| Combined verification | Focused/full relevant units, real DB, type/check/build, diff | Passed in final evidence; see final report and acceptance checklist |
+| Reduces observed format failures | Bounded read-only saved-response replay and synthetic acceptance comparison | Passed in final evidence; see final report and acceptance checklist |
 
 ## Outcome interpretation
 
@@ -98,3 +98,9 @@ At immutable `62f09bdf`, coordinator verification passed **83/83 real PostgreSQL
 The first full per-file integration run at `af4da9f6` stopped at `story-only-generation.integration.test.ts`: nine benchmark cases rejected the container's internal port 5432 because their safety guard requires the dedicated test port. This was a failed full run, not a pass. The coordinator mapped loopback 55432 to the same dedicated test database inside its container network, leaving repository guards and database-name restrictions unchanged. The exact same immutable suite then passed **17/17**. The full runner is ready for final verification with this environment correction; later files were not exercised by the stopped run.
 
 An independent static code audit of `af4da9f6` found no additional concrete defect outside the explicitly tracked application-history, current-review provenance, Retry and rejected-write work. The application-history correction `3868d156` remains under separate review and is not covered by the earlier approval.
+
+## Final integrated verification
+
+Final implementation: `d9ab9570db951f8d473d7ebcd24d4fc3529dfb34`. Complete units: 306 files, 3,860 passed, one platform skip, exit 0. Check/build passed. Serializer/hash comparison: 144 cases passed. Full PostgreSQL at `b6210ed4`: 103 files, 1,244 passed, seven opt-in skips, exit 0. Both browser suites at that checkpoint: 99 passed, one optional-build skip, exit 0. The only subsequent code difference is two adapter-close calls in one unit fixture; all production and integration/browser inputs are identical. Independent final specification audit and fixture review approved the result.
+
+The final report records the preceding unit timeout, Node 26 fixture-handle leak, enrollment-test scheduling race, missing Linux browser and native package-manager launcher correction. Those failed runs remain failures. Their corrected final results do not establish live-provider quality. The historical replay remains four supported invalid primary responses made structurally valid, including two first responses; live improvement is unmeasured.
