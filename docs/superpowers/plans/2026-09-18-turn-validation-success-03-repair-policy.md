@@ -47,15 +47,19 @@ Apply only after explicit consent in phase 04. Preserve original raw output inde
 | Input item under `canonical_facts` | Proposed action | Required checks |
 |---|---|---|
 | String or `{content}` | Existing parser behavior | Existing schema and mechanics checks |
-| Exactly `{id,content}`, id is a valid UUID absent from visible facts | New string addition; discard the ID label only in the proposal | Nonempty bounded content; never use this ID as stored fact ID or supersession ID |
+| Exactly `{id,content}`, id is null or an ASCII label matching `[A-Za-z0-9_.:-]{0,200}`, absent from visible fact identity | New string addition; discard the ID label only in the explicit proposal | Nonempty bounded content; never use this ID as stored fact ID or supersession ID. UUID-shaped labels must first be checked against visible UUIDs case-insensitively |
 | Exactly `{id,content}`, id is visible and content exactly equals that visible fact | Remove redundant reference from additions | Exact code-point equality; journal the index; never mutate the referenced fact |
 | Exactly `{id,content}`, id is visible but content differs | Ineligible | Do not infer an update or replacement |
 | Exactly `{content,estimatedTokens}` | String addition | `estimatedTokens` finite nonnegative integer; metadata is not story authority |
 | Exactly `{content,supersedes_fact_ids}` with empty IDs | String addition | Valid content, preserve once |
 | Exactly `{content,supersedes_fact_ids}` with nonempty IDs | Move to `canonical_fact_updates` | Valid UUIDs, each visible, no duplicate/conflicting target in proposed updates |
-| Unknown keys, nested values, malformed UUID/content/metadata, unseen supersession ID | Ineligible | Preserve candidate for existing Retry; never silently drop unknown information |
+| Unknown keys, nested/numeric/boolean ID values, non-ASCII/control/overlong labels, malformed content/metadata, unseen or malformed supersession ID | Ineligible | Preserve candidate for existing Retry; never silently drop unknown information |
 
 Do not read other campaigns to classify an ID. An arbitrary ID label is never trusted as authority. Supersession validity is rechecked against the database at commit; the visible inventory alone does not authorize an inactive fact. This proposal changes only representation or removes an exactly proven redundant reference; it does not determine narrative truth.
+
+Implementation-time evidence correction: a read-only replay of the fixed 50-job cohort found 145 malformed ID-bearing facts: 63 UUID-shaped labels, 66 short ASCII labels, nine empty strings, and seven nulls. The original UUID-only label rule would leave several recent failures unresolved. The expanded rule applies only to explicitly authorized removal of an inert label; replacement references still require exact supplied UUIDs. Include synthetic fixtures for all four observed classes and a UUID-casing collision with changed visible content.
+
+Independent Terra preflight approved this adjustment with these required bounds: match labels against raw `^[A-Za-z0-9_.:-]{0,200}$` with no trimming, coercion, or Unicode normalization; validate visible inventory UUIDs; compare case-insensitively only for ignored ID labels, never supersession references. Same-content comparison remains exact. Test whitespace, control characters, Unicode, every allowed punctuation class, 201-character labels, and mixed eligible/ineligible arrays.
 
 ## Task 1: Eligibility and exact preservation
 
@@ -88,7 +92,7 @@ expect(result.plan.changes).toEqual([{ sourceIndex: 0, kind: "id_label_to_additi
 ## Task 2: Adversarial and mass-balance matrix
 
 - [ ] Add one named test for each decision-table row, mixed supported shapes, and a supported item followed by an unsupported one. A partially repairable array must produce no plan.
-- [ ] Add visible-ID changed content, unseen replacement ID, duplicate targets, UUID-like text containing `ac12`, mechanics in content, empty/oversized content, null, array-as-object, invalid metadata, and excess fact count cases.
+- [ ] Add visible-ID changed content (including differently cased UUID), unseen replacement ID, duplicate targets, UUID-like text containing `ac12`, mechanics in content, empty/oversized content, null fact item, array-as-object, invalid metadata, and excess fact count cases. Separately verify null and empty ID labels are supported without granting authority.
 - [ ] Add `{}`, malformed/truncated JSON, missing narration, missing summary, missing choices, and unrelated tracker shape failures. They remain ineligible.
 - [ ] Assert deterministic hashes, changes to raw bytes/source inventory affecting bindings, and protected field mutations affecting the protected hash. Use `extractJsonObject` as the production extraction boundary; do not evaluate raw content.
 - [ ] Re-run `tests/unit/story-output.test.ts` and `tests/unit/story-only-output.test.ts`. Existing direct-parser rejection of `{id,content}` must still pass.
