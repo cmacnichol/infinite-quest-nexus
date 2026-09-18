@@ -14,9 +14,9 @@ export type TurnValidationReportOptions = Readonly<{
 }>;
 
 type QueryClient = Readonly<{ query<T = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<{ rows: T[] }> }>;
-type JobRow = Readonly<{ id: string; status: JobOutcome["status"]; createdAt: string; promptProtocol: string | null; requestedModel: string; errorCode: string | null; failureDiagnostic: unknown; failureDiagnosticCode: string | null; queuedPolicy: string | null; operationClosureVersion: string | null; contextOptions: Record<string, unknown> | null; generationPolicy: Record<string, unknown> | null; storyPromptCompatibility: unknown }>;
+type JobRow = Readonly<{ id: string; status: JobOutcome["status"]; createdAt: string; promptProtocol: string | null; requestedModel: string; errorCode: string | null; failureDiagnostic: unknown; failureDiagnosticCode: string | null; queuedPolicyPresent: boolean; queuedPolicyVersionType: string | null; queuedPolicyVersion: string | null; queuedPolicy: string | null; operationClosureVersionType: string | null; operationClosureVersion: string | null; frozenContractsPresent: boolean; frozenContractsVersionType: string | null; frozenContractsVersion: string | null; frozenQueuedPolicyVersionType: string | null; frozenQueuedPolicyVersion: string | null; frozenQueuedPolicy: string | null; frozenOperationClosureVersionType: string | null; frozenOperationClosureVersion: string | null; contextOptions: Record<string, unknown> | null; generationPolicy: Record<string, unknown> | null; storyPromptCompatibility: unknown }>;
 type AttemptRow = Readonly<{ jobId: string; attemptNumber: number; recoveryKind: string; completedAt: string | null; hasOutput: boolean; hasProviderResponseId: boolean; validationErrorCount: number | null; requestModel: string | null; responseModel: string | null }>;
-type ContractLedgerRow = Readonly<{ jobId: string; invocationOrdinal: number; policy: string | null; mode: string | null; schemaVersion: string | null; schemaHash: string | null; invocationKey: string | null; operation: string | null; requestedModel: string | null; returnedModel: string | null; returnedRoute: string | null; status: string | null; diagnosticCode: string | null; failureRecorded: boolean; dispatchedAt: string | null; completedAt: string | null; latencyMs: number | null; costMicrounits: number | null }>;
+type ContractLedgerRow = Readonly<{ jobId: string; invocationOrdinal: number; versionType: string | null; version: string | null; policy: string | null; mode: string | null; schemaVersion: string | null; schemaHash: string | null; invocationKey: string | null; operation: string | null; requestedModel: string | null; returnedModel: string | null; returnedRoute: string | null; status: string | null; diagnosticCode: string | null; failureRecorded: boolean; dispatchedAt: string | null; completedAt: string | null; latencyMs: number | null; costMicrounits: number | null }>;
 
 function reportLabel(value: unknown): string {
   const label = typeof value === "string" ? value.trim() : "";
@@ -137,12 +137,39 @@ function attemptResponseModel(row: AttemptRow): string | null {
   return row.responseModel;
 }
 
+type ResponseContractState = "legacy" | "known" | "unknown";
+
+function responseContractState(job: JobRow): ResponseContractState {
+  if (!job.queuedPolicyPresent) return "legacy";
+  return job.queuedPolicyVersionType === "number" && job.queuedPolicyVersion === "1"
+    && (job.queuedPolicy === "auto" || job.queuedPolicy === "required")
+    && job.operationClosureVersionType === "number" && job.operationClosureVersion === "1"
+    ? "known"
+    : "unknown";
+}
+
 function selectedPrimaryLedger(ledger: readonly ContractLedgerRow[], jobId: string): ContractLedgerRow | undefined {
   return ledger.filter((entry) => entry.jobId === jobId && (entry.operation === "story_generation" || entry.operation === "story_recovery"))
     .sort((left, right) => left.invocationOrdinal - right.invocationOrdinal)[0];
 }
 
-function ledgerObservation(entry: ContractLedgerRow): ValidationObservation | undefined {
+function validLedgerEntry(job: JobRow, entry: ContractLedgerRow | undefined): entry is ContractLedgerRow {
+  return responseContractState(job) === "known"
+    && job.frozenContractsPresent
+    && job.frozenContractsVersionType === "number" && job.frozenContractsVersion === "1"
+    && job.frozenQueuedPolicyVersionType === "number" && job.frozenQueuedPolicyVersion === "1"
+    && job.frozenQueuedPolicy === job.queuedPolicy
+    && job.frozenOperationClosureVersionType === "number" && job.frozenOperationClosureVersion === "1"
+    && entry?.versionType === "number" && entry.version === "1"
+    && entry.policy === job.queuedPolicy
+    && (entry.mode === "json_object" || entry.mode === "json_schema")
+    && (entry.invocationKey === "story:stream" || entry.invocationKey === "story:nonstream")
+    && (entry.operation === "story_generation" || entry.operation === "story_recovery")
+    && (entry.status === "dispatched" || entry.status === "completed");
+}
+
+function ledgerObservation(job: JobRow, entry: ContractLedgerRow): ValidationObservation | undefined {
+  if (!validLedgerEntry(job, entry)) return undefined;
   if (!(entry.operation === "story_generation" || entry.operation === "story_recovery")
     || !(entry.status === "dispatched" || entry.status === "completed")) return undefined;
   const responseState = entry.diagnosticCode === "provider_refusal" ? "refused"
@@ -152,7 +179,7 @@ function ledgerObservation(entry: ContractLedgerRow): ValidationObservation | un
 }
 
 function preflightObservation(job: JobRow, ledger: readonly ContractLedgerRow[]): ValidationObservation | undefined {
-  const unavailable = job.queuedPolicy === "required" && (job.errorCode === "response_contract_unavailable"
+  const unavailable = responseContractState(job) === "known" && job.queuedPolicy === "required" && (job.errorCode === "response_contract_unavailable"
     || job.errorCode === "response_contract_unsupported_adapter");
   return unavailable ? { jobId: job.id, attemptNumber: 0, operation: "preflight", outcome: "unknown", preflightUnavailable: true } : undefined;
 }
@@ -167,23 +194,28 @@ function cohort(row: JobRow, configuredModel: string, protocol: ProtocolCohortId
   const policyMetadata = memoryPolicy && typeof memoryPolicy.policy === "object" && memoryPolicy.policy !== null
     ? memoryPolicy.policy as Record<string, unknown>
     : null;
+  const state = responseContractState(row);
+  const knownLedger = validLedgerEntry(row, ledger);
+  const incompatibleLedger = state !== "legacy" && ledger !== undefined && !knownLedger;
+  const responseLabels = state === "legacy" ? {
+    policy: "legacy", effectiveMode: "legacy", schemaVersion: "unknown", schemaHash: "unknown", operation: "unknown",
+    requestedModel: reportLabel(configuredModel), returnedModel: "unknown", returnedRoute: "unknown", operationClosureVersion: "unknown", streaming: "unknown"
+  } : state === "unknown" || incompatibleLedger ? {
+    policy: "unknown", effectiveMode: "unknown", schemaVersion: "unknown", schemaHash: "unknown", operation: "unknown",
+    requestedModel: "unknown", returnedModel: "unknown", returnedRoute: "unknown", operationClosureVersion: "unknown", streaming: "unknown"
+  } : {
+    policy: reportLabel(row.queuedPolicy), effectiveMode: reportLabel(ledger?.mode), schemaVersion: reportLabel(ledger?.schemaVersion), schemaHash: reportLabel(ledger?.schemaHash),
+    operation: reportLabel(ledger?.operation), requestedModel: reportLabel(ledger?.requestedModel ?? configuredModel), returnedModel: reportLabel(ledger?.returnedModel),
+    returnedRoute: reportLabel(ledger?.returnedRoute), operationClosureVersion: "1", streaming: ledger?.invocationKey?.endsWith(":stream") ? "stream" : ledger ? "nonstream" : "unknown"
+  };
   return {
     ...protocol,
     configuredModel,
     playMode: reportLabel(policy.playMode),
     reviewMode: reportLabel(policyMetadata?.continuityReview),
     contextBucket: budget === null ? "unknown" : budget < 32_000 ? "under-32k" : budget < 128_000 ? "32k-127k" : "128k-plus",
-    policy: reportLabel(ledger?.policy ?? row.queuedPolicy ?? "legacy"),
-    effectiveMode: reportLabel(ledger?.mode ?? (row.queuedPolicy ? null : "legacy")),
-    schemaVersion: reportLabel(ledger?.schemaVersion),
-    schemaHash: reportLabel(ledger?.schemaHash),
-    operation: reportLabel(ledger?.operation),
-    requestedModel: reportLabel(ledger?.requestedModel ?? configuredModel),
-    returnedModel: reportLabel(ledger?.returnedModel),
-    returnedRoute: reportLabel(ledger?.returnedRoute),
+    ...responseLabels,
     contractProtocol: "unknown",
-    operationClosureVersion: reportLabel(row.operationClosureVersion),
-    streaming: ledger?.invocationKey?.endsWith(":stream") ? "stream" : ledger ? "nonstream" : "unknown"
   };
 }
 
@@ -191,14 +223,29 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
   await client.query("BEGIN READ ONLY");
   try {
     const jobs = await client.query<JobRow>(
-      `SELECT id, status, created_at AS "createdAt", CASE WHEN length(prompt_protocol_version) <= 512 THEN prompt_protocol_version END AS "promptProtocol", CASE WHEN length(requested_model) <= 512 THEN requested_model END AS "requestedModel",
+      `SELECT id, status, created_at AS "createdAt", CASE WHEN length(prompt_protocol_version) BETWEEN 1 AND 512 THEN prompt_protocol_version END AS "promptProtocol", CASE WHEN length(requested_model) BETWEEN 1 AND 512 THEN requested_model END AS "requestedModel",
               error_code AS "errorCode",
-              jsonb_build_object('version', orchestration_private #> '{lastFailureDiagnostic,version}', 'category', orchestration_private #> '{lastFailureDiagnostic,category}',
-                'code', orchestration_private #> '{lastFailureDiagnostic,code}', 'phase', orchestration_private #> '{lastFailureDiagnostic,phase}',
-                'attemptNumber', orchestration_private #> '{lastFailureDiagnostic,attemptNumber}', 'occurredAt', orchestration_private #> '{lastFailureDiagnostic,occurredAt}') AS "failureDiagnostic",
-              orchestration_private #>> '{queuedResponsePolicy,policy}' AS "queuedPolicy",
-              orchestration_private #>> '{queuedResponsePolicy,operationClosureVersion}' AS "operationClosureVersion",
-              orchestration_private #>> '{lastFailureDiagnostic,code}' AS "failureDiagnosticCode",
+               jsonb_strip_nulls(jsonb_build_object('version', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,version}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{lastFailureDiagnostic,version}' END,
+                 'category', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,category}') BETWEEN 1 AND 80 THEN orchestration_private #>> '{lastFailureDiagnostic,category}' END,
+                 'code', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,code}') BETWEEN 1 AND 80 THEN orchestration_private #>> '{lastFailureDiagnostic,code}' END,
+                 'phase', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,phase}') BETWEEN 1 AND 120 THEN orchestration_private #>> '{lastFailureDiagnostic,phase}' END,
+                 'attemptNumber', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,attemptNumber}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{lastFailureDiagnostic,attemptNumber}' END,
+                 'occurredAt', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,occurredAt}') BETWEEN 1 AND 64 THEN orchestration_private #>> '{lastFailureDiagnostic,occurredAt}' END)) AS "failureDiagnostic",
+               (orchestration_private ? 'queuedResponsePolicy') AS "queuedPolicyPresent",
+               jsonb_typeof(orchestration_private #> '{queuedResponsePolicy,version}') AS "queuedPolicyVersionType",
+               CASE WHEN jsonb_typeof(orchestration_private #> '{queuedResponsePolicy,version}') = 'number' AND length(orchestration_private #>> '{queuedResponsePolicy,version}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{queuedResponsePolicy,version}' END AS "queuedPolicyVersion",
+               CASE WHEN length(orchestration_private #>> '{queuedResponsePolicy,policy}') BETWEEN 1 AND 32 THEN orchestration_private #>> '{queuedResponsePolicy,policy}' END AS "queuedPolicy",
+               jsonb_typeof(orchestration_private #> '{queuedResponsePolicy,operationClosureVersion}') AS "operationClosureVersionType",
+               CASE WHEN jsonb_typeof(orchestration_private #> '{queuedResponsePolicy,operationClosureVersion}') = 'number' AND length(orchestration_private #>> '{queuedResponsePolicy,operationClosureVersion}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{queuedResponsePolicy,operationClosureVersion}' END AS "operationClosureVersion",
+               (orchestration_private ? 'frozenResponseContracts') AS "frozenContractsPresent",
+               jsonb_typeof(orchestration_private #> '{frozenResponseContracts,version}') AS "frozenContractsVersionType",
+               CASE WHEN jsonb_typeof(orchestration_private #> '{frozenResponseContracts,version}') = 'number' AND length(orchestration_private #>> '{frozenResponseContracts,version}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{frozenResponseContracts,version}' END AS "frozenContractsVersion",
+               jsonb_typeof(orchestration_private #> '{frozenResponseContracts,queuedPolicy,version}') AS "frozenQueuedPolicyVersionType",
+               CASE WHEN jsonb_typeof(orchestration_private #> '{frozenResponseContracts,queuedPolicy,version}') = 'number' AND length(orchestration_private #>> '{frozenResponseContracts,queuedPolicy,version}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{frozenResponseContracts,queuedPolicy,version}' END AS "frozenQueuedPolicyVersion",
+               CASE WHEN length(orchestration_private #>> '{frozenResponseContracts,queuedPolicy,policy}') BETWEEN 1 AND 32 THEN orchestration_private #>> '{frozenResponseContracts,queuedPolicy,policy}' END AS "frozenQueuedPolicy",
+               jsonb_typeof(orchestration_private #> '{frozenResponseContracts,queuedPolicy,operationClosureVersion}') AS "frozenOperationClosureVersionType",
+               CASE WHEN jsonb_typeof(orchestration_private #> '{frozenResponseContracts,queuedPolicy,operationClosureVersion}') = 'number' AND length(orchestration_private #>> '{frozenResponseContracts,queuedPolicy,operationClosureVersion}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{frozenResponseContracts,queuedPolicy,operationClosureVersion}' END AS "frozenOperationClosureVersion",
+               CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,code}') BETWEEN 1 AND 80 THEN orchestration_private #>> '{lastFailureDiagnostic,code}' END AS "failureDiagnosticCode",
               context_options AS "contextOptions", generation_policy AS "generationPolicy",
               prompt_snapshot->'storyPromptCompatibility' AS "storyPromptCompatibility"
          FROM generation_jobs
@@ -213,27 +260,30 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
               (raw_output IS NOT NULL AND length(raw_output) > 0) AS "hasOutput",
               (provider_response_id IS NOT NULL) AS "hasProviderResponseId",
               CASE WHEN jsonb_typeof(validation_errors) = 'array' THEN jsonb_array_length(validation_errors) ELSE NULL END AS "validationErrorCount",
-              CASE WHEN length(request_metadata->>'model') <= 512 THEN request_metadata->>'model' END AS "requestModel",
-              CASE WHEN length(response_metadata->>'modelInstanceId') <= 256 THEN response_metadata->>'modelInstanceId' END AS "responseModel"
+              CASE WHEN length(request_metadata->>'model') BETWEEN 1 AND 512 THEN request_metadata->>'model' END AS "requestModel",
+              CASE WHEN length(response_metadata->>'modelInstanceId') BETWEEN 1 AND 256 THEN response_metadata->>'modelInstanceId' END AS "responseModel"
          FROM generation_attempts WHERE generation_job_id = ANY($1::uuid[]) ORDER BY generation_job_id, attempt_number LIMIT $2`, [ids, attemptLimit + 1]
     );
     const attemptsTruncated = attemptQuery.rows.length > attemptLimit;
     const attempts = { rows: attemptQuery.rows.slice(0, attemptLimit) };
     const ledger = await client.query<ContractLedgerRow>(
       `SELECT job.id AS "jobId", entries.ordinality AS "invocationOrdinal",
-              CASE WHEN length(entries.entry #>> '{request,mode}') <= 32 THEN entries.entry #>> '{request,mode}' END AS "mode",
-              CASE WHEN length(entries.entry #>> '{request,schemaVersion}') <= 200 THEN entries.entry #>> '{request,schemaVersion}' END AS "schemaVersion",
-              CASE WHEN entries.entry #>> '{request,schemaHash}' ~ '^[a-f0-9]{64}$' THEN entries.entry #>> '{request,schemaHash}' END AS "schemaHash",
-              CASE WHEN length(entries.entry->>'invocationKey') <= 64 THEN entries.entry->>'invocationKey' END AS "invocationKey",
-              CASE WHEN length(entries.entry->>'operation') <= 64 THEN entries.entry->>'operation' END AS "operation",
-              CASE WHEN length(entries.entry #>> '{request,requestedModel}') <= 512 THEN entries.entry #>> '{request,requestedModel}' END AS "requestedModel",
-              CASE WHEN length(entries.entry #>> '{response,returnedModel}') <= 256 THEN entries.entry #>> '{response,returnedModel}' END AS "returnedModel",
-              CASE WHEN length(entries.entry #>> '{response,returnedProviderRoute}') <= 256 THEN entries.entry #>> '{response,returnedProviderRoute}' END AS "returnedRoute",
-              CASE WHEN length(entries.entry->>'status') <= 16 THEN entries.entry->>'status' END AS "status",
-              CASE WHEN length(entries.entry #>> '{response,diagnosticCode}') <= 80 THEN entries.entry #>> '{response,diagnosticCode}' END AS "diagnosticCode",
-              (failures.failure IS NOT NULL) AS "failureRecorded", entries.entry->>'dispatchedAt' AS "dispatchedAt",
-              entries.entry->>'completedAt' AS "completedAt", NULL::integer AS "latencyMs", NULL::bigint AS "costMicrounits",
-              job.orchestration_private #>> '{queuedResponsePolicy,policy}' AS "policy"
+              jsonb_typeof(entries.entry->'version') AS "versionType",
+              CASE WHEN jsonb_typeof(entries.entry->'version') = 'number' AND length(entries.entry->>'version') BETWEEN 1 AND 16 THEN entries.entry->>'version' END AS "version",
+              CASE WHEN length(entries.entry #>> '{request,mode}') BETWEEN 1 AND 32 THEN entries.entry #>> '{request,mode}' END AS "mode",
+              CASE WHEN length(entries.entry #>> '{request,schemaVersion}') BETWEEN 1 AND 200 THEN entries.entry #>> '{request,schemaVersion}' END AS "schemaVersion",
+              CASE WHEN length(entries.entry #>> '{request,schemaHash}') = 64 AND entries.entry #>> '{request,schemaHash}' ~ '^[a-f0-9]{64}$' THEN entries.entry #>> '{request,schemaHash}' END AS "schemaHash",
+              CASE WHEN length(entries.entry->>'invocationKey') BETWEEN 1 AND 64 THEN entries.entry->>'invocationKey' END AS "invocationKey",
+              CASE WHEN length(entries.entry->>'operation') BETWEEN 1 AND 64 THEN entries.entry->>'operation' END AS "operation",
+              CASE WHEN length(entries.entry #>> '{request,requestedModel}') BETWEEN 1 AND 512 THEN entries.entry #>> '{request,requestedModel}' END AS "requestedModel",
+              CASE WHEN length(entries.entry #>> '{response,returnedModel}') BETWEEN 1 AND 256 THEN entries.entry #>> '{response,returnedModel}' END AS "returnedModel",
+              CASE WHEN length(entries.entry #>> '{response,returnedProviderRoute}') BETWEEN 1 AND 256 THEN entries.entry #>> '{response,returnedProviderRoute}' END AS "returnedRoute",
+              CASE WHEN length(entries.entry->>'status') BETWEEN 1 AND 16 THEN entries.entry->>'status' END AS "status",
+              CASE WHEN length(entries.entry #>> '{response,diagnosticCode}') BETWEEN 1 AND 80 THEN entries.entry #>> '{response,diagnosticCode}' END AS "diagnosticCode",
+              (failures.failure IS NOT NULL) AS "failureRecorded",
+              CASE WHEN length(entries.entry->>'dispatchedAt') BETWEEN 1 AND 64 THEN entries.entry->>'dispatchedAt' END AS "dispatchedAt",
+              CASE WHEN length(entries.entry->>'completedAt') BETWEEN 1 AND 64 THEN entries.entry->>'completedAt' END AS "completedAt", NULL::integer AS "latencyMs", NULL::bigint AS "costMicrounits",
+              CASE WHEN length(job.orchestration_private #>> '{queuedResponsePolicy,policy}') BETWEEN 1 AND 32 THEN job.orchestration_private #>> '{queuedResponsePolicy,policy}' END AS "policy"
          FROM generation_jobs job CROSS JOIN LATERAL (
            SELECT entry, ordinality
              FROM jsonb_array_elements(CASE WHEN jsonb_typeof(job.orchestration_private->'responseContractInvocations') = 'array'
@@ -244,15 +294,21 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
            SELECT failure
              FROM jsonb_array_elements(CASE WHEN jsonb_typeof(job.orchestration_private->'preparedResponseFailures') = 'array'
                THEN job.orchestration_private->'preparedResponseFailures' ELSE '[]'::jsonb END) AS source(failure)
-            WHERE failure->>'invocationId' = entries.entry->>'id' AND failure->>'version' = '1'
+             WHERE length(failure->>'invocationId') BETWEEN 1 AND 128
+               AND length(entries.entry->>'id') BETWEEN 1 AND 128
+               AND failure->>'invocationId' = entries.entry->>'id'
+               AND jsonb_typeof(failure->'version') = 'number' AND failure->>'version' = '1'
             LIMIT 1
          ) AS failures ON true
         WHERE job.id = ANY($1::uuid[])`, [ids]
     );
     const observations = [
-      ...attempts.rows.map((attempt) => observationFrom(attempt, jobs.rows.find((job) => job.id === attempt.jobId)?.queuedPolicy === null || jobs.rows.find((job) => job.id === attempt.jobId)?.queuedPolicy === undefined)),
+       ...attempts.rows.map((attempt) => observationFrom(attempt, responseContractState(jobs.rows.find((job) => job.id === attempt.jobId)!) === "legacy")),
       ...jobs.rows.map((job) => preflightObservation(job, ledger.rows)).filter((value): value is ValidationObservation => Boolean(value)),
-      ...ledger.rows.map((entry) => ledgerObservation(entry)).filter((value): value is ValidationObservation => Boolean(value))
+       ...ledger.rows.map((entry) => {
+         const job = jobs.rows.find((candidate) => candidate.id === entry.jobId);
+         return job ? ledgerObservation(job, entry) : undefined;
+       }).filter((value): value is ValidationObservation => Boolean(value))
     ];
     const metrics = summarizeValidationOutcomes(jobs.rows.map((row) => ({ jobId: row.id, status: row.status })), observations);
     const jobsWithPersistedTransportDiagnostic = jobs.rows.filter((job) => {
@@ -310,10 +366,10 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
         finalErrorCode: failureDiagnostic?.code ?? (row.errorCode ? "generation_failed" : "unknown"),
         failureDiagnostic,
         configuredModel,
-        actualReturnedModel: reportLabel(primaryLedger?.returnedModel ?? (row.queuedPolicy ? null : primaryAttempt ? attemptResponseModel(primaryAttempt) : null)),
-        actualReturnedRoute: reportLabel(primaryLedger?.returnedRoute),
-        observedLatencyMs: primaryLedger?.latencyMs ?? "unknown",
-        observedCostMicrounits: primaryLedger?.costMicrounits ?? "unknown",
+         actualReturnedModel: reportLabel(validLedgerEntry(row, primaryLedger) ? primaryLedger.returnedModel : responseContractState(row) === "legacy" && primaryAttempt ? attemptResponseModel(primaryAttempt) : null),
+         actualReturnedRoute: reportLabel(validLedgerEntry(row, primaryLedger) ? primaryLedger.returnedRoute : null),
+         observedLatencyMs: validLedgerEntry(row, primaryLedger) ? primaryLedger.latencyMs ?? "unknown" : "unknown",
+         observedCostMicrounits: validLedgerEntry(row, primaryLedger) ? primaryLedger.costMicrounits ?? "unknown" : "unknown",
         preflightUnavailable: preflightObservation(row, ledger.rows)?.preflightUnavailable === true,
         ...protocol };
       }),

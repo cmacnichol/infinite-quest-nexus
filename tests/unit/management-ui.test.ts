@@ -671,7 +671,7 @@ describe("Nexus management UI contracts", () => {
   });
 
   it("hides text-generation limits for every illustration provider role", () => {
-    expect(managementHtml.match(/class="text-model-setting"/g)).toHaveLength(3);
+    expect(managementHtml.match(/class="text-model-setting"/g)).toHaveLength(4);
     expect(managementScript).toContain('const illustration = elements.providerRole.value === "image";');
     expect(managementScript).toContain('field.classList.toggle("hidden", illustration)');
     expect(managementScript).toContain('field.hidden = illustration');

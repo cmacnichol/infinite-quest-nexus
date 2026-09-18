@@ -8,6 +8,7 @@ export * from "./generation-review.js";
 export * from "./fact-format-repair-hash.js";
 export * from "./story-memory-policy.js";
 export * from "./hash.js";
+export * from "./provider-capability-identity.js";
 export * from "./story-continuity-review.js";
 export { z } from "zod";
 export * from "./campaign-generation-policy.js";

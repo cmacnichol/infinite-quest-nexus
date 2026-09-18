@@ -3,27 +3,6 @@ type CacheEntry<T> = Readonly<{ loadedAt: number; value: T }>;
 type InFlightEntry<T> = Readonly<{ promise: Promise<T>; refresh: boolean }>;
 const DAY_MS = 86_400_000;
 
-/**
- * Versioned identity for cache/verification routing. It deliberately includes
- * only non-secret settings which can change text schema capability: stream
- * behavior and the selected response-format policy. Other stored keys (and
- * credentials) cannot partition or disclose this cache.
- */
-export function capabilityRouteConfigHash(configuration: Readonly<Record<string, unknown>>): string {
-  const normalized = {
-    version: 1,
-    ...(typeof configuration.streaming === "boolean" ? { streaming: configuration.streaming } : {}),
-    ...(typeof configuration.streamingSupport === "boolean" ? { streamingSupport: configuration.streamingSupport } : {}),
-    ...(configuration.textResponseFormatPolicy === "legacy" || configuration.textResponseFormatPolicy === "auto" || configuration.textResponseFormatPolicy === "required"
-      ? { textResponseFormatPolicy: configuration.textResponseFormatPolicy }
-      : {})
-  };
-  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
-}
-/** Shared with API capability projection and runtime dispatch identity checks. */
-export function providerEndpointIdentity(baseUrl: string): string {
-  return createHash("sha256").update(baseUrl.replace(/\/+$/, "")).digest("hex");
-}
 export class ProviderCapabilityCache<T> {
   private readonly entries = new Map<string, CacheEntry<T>>();
   private readonly inFlight = new Map<string, InFlightEntry<T>>();
@@ -60,4 +39,6 @@ export class ProviderCapabilityCache<T> {
     }
   }
 }
-import { createHash } from "node:crypto";
+import { capabilityRouteConfigHash, providerEndpointIdentity } from "../../../packages/contracts/src/provider-capability-identity.js";
+
+export { capabilityRouteConfigHash, providerEndpointIdentity };

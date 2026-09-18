@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { capabilityRouteConfigHash, ProviderCapabilityCache } from "../../services/runtime/src/provider-capability-cache.js";
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
+import { providerEndpointIdentity } from "../../packages/contracts/src/provider-capability-identity.js";
 
 const key = {
   ownerUserId: "owner", providerProfileId: "profile", providerType: "openrouter" as const,
@@ -97,6 +98,11 @@ describe("provider capability cache", () => {
     expect(capabilityRouteConfigHash({ streaming: true })).not.toBe(capabilityRouteConfigHash({ streaming: false }));
     expect(capabilityRouteConfigHash({ streamingSupport: true })).not.toBe(capabilityRouteConfigHash({ streamingSupport: false }));
     expect(capabilityRouteConfigHash({ textResponseFormatPolicy: "auto" })).not.toBe(capabilityRouteConfigHash({ textResponseFormatPolicy: "required" }));
+  });
+
+  it("preserves stable cross-layer capability identities", () => {
+    expect(capabilityRouteConfigHash({})).toBe("2430f1a2ad2982d0067885488a4c89e21ad1d7c83b115ba8f1b20acc88dfaea8");
+    expect(providerEndpointIdentity("https://example.test/api///")).toBe("066c887c55bc422605d7b5dd62443bcff0dbfb13bb965b4a981a372b94a7367d");
   });
 
   it("keeps transaction-local discovery out of the global cache until a successful commit invalidates it", async () => {

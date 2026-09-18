@@ -88,7 +88,38 @@ describe("turn validation report", () => {
     expect(ledgerCall?.[0]).toContain("jsonb_array_elements");
     expect(ledgerCall?.[0]).toContain("LIMIT 24");
     expect(ledgerCall?.[0]).not.toMatch(/requestBody|partialContent|raw_output|credential|privateMessage/i);
+    expect(query.mock.calls[1]?.[0]).toContain("queuedResponsePolicy,version");
+    expect(query.mock.calls[1]?.[0]).toContain("length(orchestration_private #>> '{queuedResponsePolicy,policy}') BETWEEN 1 AND 32");
+    expect(query.mock.calls[1]?.[0]).toContain("length(orchestration_private #>> '{lastFailureDiagnostic,phase}') BETWEEN 1 AND 120");
+    expect(ledgerCall?.[0]).toContain("length(entries.entry->>'dispatchedAt') BETWEEN 1 AND 64");
+    expect(ledgerCall?.[0]).toContain("length(job.orchestration_private #>> '{queuedResponsePolicy,policy}') BETWEEN 1 AND 32");
     expect(report.metrics).toEqual(expect.objectContaining({ jobs: 0, initialValid: 0 }));
+  });
+
+  it("keeps future or malformed response-contract envelopes out of known cohorts", async () => {
+    const query = vi.fn(async (text: string) => {
+      if (text.includes("jsonb_array_elements")) return { rows: [
+        { jobId: "future", invocationOrdinal: 1, versionType: "number", version: "2", policy: "required", mode: "json_schema", schemaVersion: "story-native-v1", schemaHash: "a".repeat(64), invocationKey: "story:stream", operation: "story_generation", requestedModel: "configured", returnedModel: "observed", returnedRoute: "route", status: "completed", diagnosticCode: null, failureRecorded: false, dispatchedAt: "2026-09-18T00:00:00.000Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: null, costMicrounits: null }
+        , { jobId: "future-selection", invocationOrdinal: 1, versionType: "number", version: "1", policy: "required", mode: "unsupported-mode", schemaVersion: "story-native-v1", schemaHash: "a".repeat(64), invocationKey: "story:stream", operation: "story_generation", requestedModel: "configured", returnedModel: "observed", returnedRoute: "route", status: "completed", diagnosticCode: null, failureRecorded: false, dispatchedAt: "2026-09-18T00:00:00.000Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: null, costMicrounits: null }
+      ] };
+      if (text.includes("FROM generation_jobs")) return { rows: [
+        { id: "future", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, failureDiagnostic: null, failureDiagnosticCode: null, queuedPolicyPresent: true, queuedPolicyVersionType: "number", queuedPolicyVersion: "2", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: false, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+        { id: "malformed", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, failureDiagnostic: null, failureDiagnosticCode: null, queuedPolicyPresent: true, queuedPolicyVersionType: "string", queuedPolicyVersion: "1", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: false, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+        { id: "future-selection", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, failureDiagnostic: null, failureDiagnosticCode: null, queuedPolicyPresent: true, queuedPolicyVersionType: "number", queuedPolicyVersion: "1", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: true, frozenContractsVersionType: "number", frozenContractsVersion: "2", frozenQueuedPolicyVersionType: "number", frozenQueuedPolicyVersion: "1", frozenQueuedPolicy: "required", frozenOperationClosureVersionType: "number", frozenOperationClosureVersion: "1", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
+      ] };
+      return { rows: [] };
+    });
+
+    const report = await readTurnValidationReport({ query } as any, { limit: 2, since: null, format: "json" });
+
+    expect(report.cohorts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ policy: "unknown", effectiveMode: "unknown", schemaVersion: "unknown", operation: "unknown", streaming: "unknown" })
+    ]));
+    expect(report.cohorts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ policy: "required", effectiveMode: "json_schema" }),
+      expect.objectContaining({ policy: "legacy" })
+    ]));
+    expect(report.metrics.primaryCalls).toBe(0);
   });
 
   it("renders bounded counter and streaming cohort visibility in the default Markdown report", () => {
@@ -107,10 +138,10 @@ describe("turn validation report", () => {
 
   it("counts only legacy initial attempts with durable response evidence and treats a recorded null-diagnostic contract failure as missing", async () => {
     const query = vi.fn(async (text: string) => {
-      if (text.includes("jsonb_array_elements")) return { rows: [{ jobId: "contract", invocationOrdinal: 1, policy: "required", mode: "json_schema", schemaVersion: "v1", schemaHash: "a".repeat(64), invocationKey: "story:nonstream", operation: "story_generation", requestedModel: "model", returnedModel: null, returnedRoute: null, status: "completed", diagnosticCode: null, failureRecorded: true, dispatchedAt: "2026-09-18T00:00:00.000Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: null, costMicrounits: null }] };
+      if (text.includes("jsonb_array_elements")) return { rows: [{ jobId: "contract", invocationOrdinal: 1, versionType: "number", version: "1", policy: "required", mode: "json_schema", schemaVersion: "v1", schemaHash: "a".repeat(64), invocationKey: "story:nonstream", operation: "story_generation", requestedModel: "model", returnedModel: null, returnedRoute: null, status: "completed", diagnosticCode: null, failureRecorded: true, dispatchedAt: "2026-09-18T00:00:00.000Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: null, costMicrounits: null }] };
       if (text.includes("FROM generation_jobs")) return { rows: [
         { id: "legacy", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "legacy-model", errorCode: null, queuedPolicy: null, operationClosureVersion: null, failureDiagnostic: null, failureDiagnosticCode: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
-        { id: "contract", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: { version: 1, category: "provider_transport", code: "provider_transport_error", phase: "story_generation", attemptNumber: 2, occurredAt: "2026-09-18T00:00:02.000Z" }, failureDiagnosticCode: "provider_transport_error", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+        { id: "contract", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: null, queuedPolicyPresent: true, queuedPolicyVersionType: "number", queuedPolicyVersion: "1", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: true, frozenContractsVersionType: "number", frozenContractsVersion: "1", frozenQueuedPolicyVersionType: "number", frozenQueuedPolicyVersion: "1", frozenQueuedPolicy: "required", frozenOperationClosureVersionType: "number", frozenOperationClosureVersion: "1", failureDiagnostic: { version: 1, category: "provider_transport", code: "provider_transport_error", phase: "story_generation", attemptNumber: 2, occurredAt: "2026-09-18T00:00:02.000Z" }, failureDiagnosticCode: "provider_transport_error", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
         { id: "malformed-transport", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: null, queuedPolicy: null, operationClosureVersion: null, failureDiagnostic: { code: "provider_request_timeout" }, failureDiagnosticCode: "provider_request_timeout", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
       ] };
       if (text.includes("FROM generation_attempts")) return { rows: [
@@ -129,7 +160,7 @@ describe("turn validation report", () => {
 
   it("counts required unsupported-adapter preflight failures separately", async () => {
     const query = vi.fn(async (text: string) => {
-      if (text.includes("FROM generation_jobs")) return { rows: [{ id: "unsupported", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: "response_contract_unsupported_adapter", queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, failureDiagnosticCode: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }] };
+      if (text.includes("FROM generation_jobs")) return { rows: [{ id: "unsupported", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: "response_contract_unsupported_adapter", queuedPolicyPresent: true, queuedPolicyVersionType: "number", queuedPolicyVersion: "1", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: false, failureDiagnostic: null, failureDiagnosticCode: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }] };
       return { rows: [] };
     });
     const report = await readTurnValidationReport({ query } as any, { limit: 1, since: null, format: "json" });
@@ -138,15 +169,15 @@ describe("turn validation report", () => {
 
   it("reports contract cohorts from bounded ledger scalars without repairing the first response", async () => {
     const jobs = [
-      { id: "strict-valid", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
-      { id: "strict-repaired", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
-      { id: "required-preflight", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: "response_contract_unavailable", queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
+        { id: "strict-valid", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, queuedPolicyPresent: true, queuedPolicyVersionType: "number", queuedPolicyVersion: "1", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: true, frozenContractsVersionType: "number", frozenContractsVersion: "1", frozenQueuedPolicyVersionType: "number", frozenQueuedPolicyVersion: "1", frozenQueuedPolicy: "required", frozenOperationClosureVersionType: "number", frozenOperationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+        { id: "strict-repaired", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, queuedPolicyPresent: true, queuedPolicyVersionType: "number", queuedPolicyVersion: "1", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: true, frozenContractsVersionType: "number", frozenContractsVersion: "1", frozenQueuedPolicyVersionType: "number", frozenQueuedPolicyVersion: "1", frozenQueuedPolicy: "required", frozenOperationClosureVersionType: "number", frozenOperationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+        { id: "required-preflight", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: "response_contract_unavailable", queuedPolicyPresent: true, queuedPolicyVersionType: "number", queuedPolicyVersion: "1", queuedPolicy: "required", operationClosureVersionType: "number", operationClosureVersion: "1", frozenContractsPresent: false, failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
     ];
     const query = vi.fn(async (text: string) => {
       if (text.includes("jsonb_array_elements")) return { rows: [
-        { jobId: "strict-valid", invocationOrdinal: 1, policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), operation: "story_generation", requestedModel: "configured", returnedModel: "observed-primary", returnedRoute: "route-a", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:00.500Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: 500, costMicrounits: null },
-        { jobId: "strict-repaired", invocationOrdinal: 1, policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), operation: "story_generation", requestedModel: "configured", returnedModel: "first-observed", returnedRoute: "route-a", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:00.500Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: 500, costMicrounits: 42 },
-        { jobId: "strict-repaired", invocationOrdinal: 2, policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), operation: "story_choice_repair", requestedModel: "configured", returnedModel: "repair-observed", returnedRoute: "route-b", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:01.500Z", completedAt: "2026-09-18T00:00:02.000Z", latencyMs: 500, costMicrounits: 99 },
+        { jobId: "strict-valid", invocationOrdinal: 1, versionType: "number", version: "1", policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), invocationKey: "story:nonstream", operation: "story_generation", requestedModel: "configured", returnedModel: "observed-primary", returnedRoute: "route-a", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:00.500Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: 500, costMicrounits: null },
+        { jobId: "strict-repaired", invocationOrdinal: 1, versionType: "number", version: "1", policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), invocationKey: "story:nonstream", operation: "story_generation", requestedModel: "configured", returnedModel: "first-observed", returnedRoute: "route-a", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:00.500Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: 500, costMicrounits: 42 },
+        { jobId: "strict-repaired", invocationOrdinal: 2, versionType: "number", version: "1", policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), invocationKey: "choices:nonstream", operation: "story_choice_repair", requestedModel: "configured", returnedModel: "repair-observed", returnedRoute: "route-b", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:01.500Z", completedAt: "2026-09-18T00:00:02.000Z", latencyMs: 500, costMicrounits: 99 },
         { jobId: "required-preflight", invocationOrdinal: 0, policy: "required", mode: "unknown", schemaVersion: null, schemaHash: null, operation: "preflight", requestedModel: "configured", returnedModel: null, returnedRoute: null, status: "reserved", diagnosticCode: "provider_route_unavailable", dispatchedAt: null, completedAt: null, latencyMs: null, costMicrounits: null }
       ] };
       if (text.includes("FROM generation_jobs")) return { rows: jobs };

@@ -17,7 +17,7 @@ import {
 } from "../../../packages/application/src/providers/index.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
-import { capabilityRouteConfigHash, providerEndpointIdentity } from "../../runtime/src/provider-capability-cache.js";
+import { capabilityRouteConfigHash, providerEndpointIdentity } from "../../../packages/contracts/src/provider-capability-identity.js";
 import type { ModelParameterAdvertisement, ResponseSchemaOperation } from "../../../packages/contracts/src/text-response-format.js";
 
 type ApiRuntimeProviderAdapter = Readonly<{
