@@ -56,3 +56,13 @@ git diff --check
 ## Exit gate
 
 Deterministic implementation checks and review are complete. A live success claim requires the separately authorized evidence; lack of compatible full-story routes is a legitimate supported result, not permission to weaken the tracker contract or validation.
+
+## Selected compatibility-probe target
+
+The user selected OpenRouter preset `@preset/nexus-nsfw` and identified its model as **DeepSeek: DeepSeek V3.2 Exp** (`deepseek/deepseek-v3.2-exp`). Prepare the dry-run around that concrete model. Do not qualify a mutable preset alias from a concrete-model result: preset versions can change model and provider preferences. The actual preset configuration and selected provider profile have not been read.
+
+Public endpoint metadata checked on 2026-09-18 advertised `response_format` and `structured_outputs` for SiliconFlow (`siliconflow/fp8`), AtlasCloud (`atlas-cloud/fp8`), and Novita (`novita/fp8`). The advertised price was $0.27 per million input tokens and $0.41 per million output tokens. This is capability advertisement, not verification of our full story schema or its open nested tracker objects. Propose one concrete route in the dry-run and clearly label it as proposed; do not claim it is the preset's configured route.
+
+The final priced artifact must derive its input bound from the actual prepared requests, include the 12-call and 2,048-output-token-per-call limits, and record the price observation time. No live generation requests or spend are authorized by these model-selection answers. Keep execution and installation of a successful verification record as separate explicit steps.
+
+Sources: [model page](https://openrouter.ai/deepseek/deepseek-v3.2-exp), [endpoint inventory](https://openrouter.ai/api/v1/models/deepseek/deepseek-v3.2-exp/endpoints), [presets](https://openrouter.ai/docs/guides/features/presets), and [structured-output requirements](https://openrouter.ai/docs/guides/features/structured-outputs).
