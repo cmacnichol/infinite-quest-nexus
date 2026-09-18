@@ -26,6 +26,7 @@ import { createApiGenerationApplication as composeGeneration } from "../../servi
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
 import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import { getCampaignRuntimeState, importLegacyStory, updateCampaignRuntimeState } from "../helpers/memory-aware-services.js";
+import { snapshotCorrectionEvidence } from "../helpers/campaign-state-correction-fixtures.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { deriveStoryContinuityRunFromExecutorCapture, evaluateStoryContinuity, type StoryContinuityEvidence } from "../../scripts/lib/story-continuity-evaluator.js";
@@ -46,8 +47,8 @@ type CorpusScenario = Readonly<{
 }>;
 type CapturedDispatch = Readonly<{ body: string; jobId: string; manifest: GenerationEvidenceManifest }>;
 
-function reply(narration: string): string {
-  return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+function reply(narration: string, trackerUpdates: Record<string, unknown>[] = []): string {
+  return JSON.stringify({ narration, choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: trackerUpdates, image_prompt: "Fixture relay.", continuity_summary: narration, canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 }
 
 integration("T17 durable continuity review", () => {
@@ -67,6 +68,7 @@ integration("T17 durable continuity review", () => {
   let semanticRepairNeedsChoiceRepair = false;
   let extensionConflict = false;
   let invalidSemanticRepair = false;
+  let nestedTrackerUpdates: Record<string, unknown>[] | null = null;
   let eventCoverageSequence: boolean[] = [];
   let sceneCoverageSequence: boolean[] = [];
   let rejectSceneRewriteResponseFormat = false;
@@ -102,7 +104,7 @@ integration("T17 durable continuity review", () => {
         ? { choices: ["Wait.", "Wait."] }
         : { choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." });
       if (invalidPrimary) return JSON.stringify({ narration: "Mira waits at the observatory." });
-      const story = JSON.parse(reply("Mira waits at the observatory."));
+      const story = JSON.parse(reply("Mira waits at the observatory.", nestedTrackerUpdates ?? []));
       if (malformedFactFormatting) story.canonical_facts = [{ id: "keeper-arrival", content: "The keeper has arrived." }];
       if (needsChoiceRepair) story.choices = ["Wait.", "Wait.", "Listen.", "Leave."];
       return JSON.stringify(story);
@@ -172,6 +174,7 @@ integration("T17 durable continuity review", () => {
     semanticRepairNeedsChoiceRepair = false;
     extensionConflict = false;
     invalidSemanticRepair = false;
+    nestedTrackerUpdates = null;
     eventCoverageSequence = [];
     sceneCoverageSequence = [];
     rejectSceneRewriteResponseFormat = false;
@@ -299,6 +302,113 @@ integration("T17 durable continuity review", () => {
     )).rows[0]!.orchestration_private;
     expect(saved.validatedMainDraft).toMatchObject({ factFormatRepair: { planHash } });
   });
+
+  it("keeps a nested private tracker through local fact repair, a crashed enforce review, and one reclaimed commit", async () => {
+    const nestedTracker = [{
+      tracker_private_canary: "do-not-project",
+      location: { room: "observatory archive", shelves: [3, { sealed: false, labels: ["astral", "ledger"] }] },
+      discoveries: [{ title: "brass key", tags: ["cold", "etched"] }, "keeper-note"],
+      active: true,
+      urgency: 2
+    }];
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
+    nestedTrackerUpdates = nestedTracker;
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    try {
+      const { job, application, campaignId } = await enqueue("enforce");
+      const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+      const derivedBefore = await snapshotCorrectionEvidence(pool, campaignId);
+
+      await expect(runGenerationJob(pool, `nested-format-offer-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(true);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+      expect(await snapshotCorrectionEvidence(pool, campaignId)).toEqual(derivedBefore);
+      const formatOffer = await application.getReview({ ownerUserId, jobId: job.id });
+      if (formatOffer.version !== 2 || !formatOffer.formatRepair) throw new Error("Expected malformed facts to offer a local repair.");
+      const beforeRepair = (await pool.query<{ orchestration_private: Record<string, any> }>(
+        "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!.orchestration_private;
+      expect(beforeRepair.queuedResponsePolicy).toMatchObject({ policy: "auto", invocationKeys: expect.arrayContaining(["story:nonstream", "continuity_review:nonstream"]) });
+      expect(beforeRepair.primaryResult.response.content).toContain("tracker_private_canary");
+      const frozenBeforeRepair = beforeRepair.frozenResponseContracts;
+      const primaryBeforeRepair = beforeRepair.primaryResult;
+      const callsBeforeRepair = requests.length;
+
+      await application.decideReview({ ownerUserId, jobId: job.id }, {
+        reviewId: formatOffer.reviewId, revision: formatOffer.revision, decision: "repair_format", repairPlanHash: formatOffer.formatRepair.planHash
+      });
+      expect(requests).toHaveLength(callsBeforeRepair);
+
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+      const illustrationInputs: string[] = [];
+      const enqueueIllustrations = collaborators.illustration.enqueueAcceptedTurnIllustrationSegments;
+      collaborators.illustration.enqueueAcceptedTurnIllustrationSegments = async (...args) => {
+        illustrationInputs.push(JSON.stringify(args));
+        return enqueueIllustrations(...args);
+      };
+      let interrupted = false;
+      const crashingRepository = {
+        ...repository,
+        async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+          const saved = await repository.saveOrchestration(scope, value);
+          if (!interrupted && value.continuityReview?.status === "completed") {
+            interrupted = true;
+            await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+            throw Object.assign(new Error("Injected termination after persisted nested-tracker continuity review."), { code: "generation_cancelled" });
+          }
+          return saved;
+        }
+      };
+      const firstWorkerId = `nested-format-crash-a-${randomUUID()}`;
+      const firstClaim = await repository.claimNext({ workerId: firstWorkerId, leaseSeconds: 30 });
+      expect(firstClaim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository: crashingRepository, collaborators })
+        .execute({ claim: firstClaim!, workerId: firstWorkerId, leaseSeconds: 30 })).resolves.toBe(true);
+      expect(interrupted).toBe(true);
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+      const checkpoint = (await pool.query<{ orchestration_private: Record<string, any>; attempts: number }>(
+        "SELECT orchestration_private,attempts FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!;
+      expect(checkpoint.orchestration_private.frozenResponseContracts).toEqual(frozenBeforeRepair);
+      expect(checkpoint.orchestration_private.primaryResult).toEqual(primaryBeforeRepair);
+      expect(checkpoint.orchestration_private.continuityReview).toMatchObject({ status: "completed", verdict: "pass" });
+      const reviewRequest = requests.find((request) => request.includes("story-continuity-review-v1"));
+      expect(reviewRequest).toBeDefined();
+      expect(reviewRequest).not.toContain("tracker_private_canary");
+      expect(requests).toHaveLength(callsBeforeRepair + 1);
+
+      const secondWorkerId = `nested-format-crash-b-${randomUUID()}`;
+      const secondClaim = await repository.claimNext({ workerId: secondWorkerId, leaseSeconds: 30 });
+      expect(secondClaim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository, collaborators })
+        .execute({ claim: secondClaim!, workerId: secondWorkerId, leaseSeconds: 30 })).resolves.toBe(true);
+      const accepted = (await pool.query<{ state_snapshot_private: { tracker_updates: unknown } }>(
+        "SELECT state_snapshot_private FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]
+      )).rows[0]!;
+      expect(accepted.state_snapshot_private.tracker_updates).toEqual(nestedTracker);
+      expect(illustrationInputs).toHaveLength(1);
+      expect(illustrationInputs[0]).not.toContain("tracker_private_canary");
+      const completed = (await pool.query<{ status: string; attempts: number; orchestration_private: Record<string, any> }>(
+        "SELECT status,attempts,orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+      )).rows[0]!;
+      expect(completed).toMatchObject({ status: "completed" });
+      expect(completed.attempts).toBeGreaterThan(checkpoint.attempts);
+      expect(completed.orchestration_private.frozenResponseContracts).toEqual(frozenBeforeRepair);
+      expect(completed.orchestration_private.primaryResult).toEqual(primaryBeforeRepair);
+      expect(requests).toHaveLength(callsBeforeRepair + 1);
+      expect(await runGenerationJob(pool, `nested-format-crash-idempotent-${randomUUID()}`, 30, credentialSecret)).toBe(false);
+      expect(requests).toHaveLength(callsBeforeRepair + 1);
+      expect((await pool.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]
+      )).rows[0]!.count).toBe(1);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+    }
+  }, 60_000);
 
   it("offers an explicit format repair for complete JSON marked length-limited by the provider", async () => {
     const { job, application, campaignId } = await enqueue("enforce");
