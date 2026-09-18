@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
-import { queuedResponsePolicyHash } from "../../packages/contracts/src/generation-response-contract.js";
+import { frozenResponseContractsSelectionHash, queuedResponsePolicyHash } from "../../packages/contracts/src/generation-response-contract.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
@@ -52,6 +52,7 @@ integration("PostgreSQL response-contract persistence", () => {
     expect(stored.get(protectedJob.id)?.orchestrationPrivate.queuedResponsePolicy).toMatchObject({ providerProfileId, model: "contract-model" });
     expect(stored.get(protectedJob.id)?.recoveryMetadata.queuedResponsePolicy).toBeUndefined();
     expect(stored.get(legacyJob.id)?.orchestrationPrivate.queuedResponsePolicy).toBeUndefined();
+    await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id = ANY($1::uuid[])", [[protectedJob.id, legacyJob.id]]);
   });
 
   it("binds multiple concrete operations to the persisted logical attempt and finalizes each response once", async () => {
@@ -67,12 +68,13 @@ integration("PostgreSQL response-contract persistence", () => {
     const scope = { jobId: queued.id, ownerUserId, workerId };
     const logicalAttemptId = job?.orchestration_private.logicalAttempt?.id;
     expect(logicalAttemptId).toMatch(/^[0-9a-f-]{36}$/u);
-    const frozen = { version: 1 as const, queuedPolicy, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash, contracts: { "story:nonstream": { version: 1 as const, mode: "json_object" as const, operation: "story" as const, streaming: false, forbidFormatFallback: true as const } }, selectionHash: hash };
+    const frozenSelection = { version: 1 as const, queuedPolicy, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash, contracts: { "story:nonstream": { version: 1 as const, mode: "json_object" as const, operation: "story" as const, streaming: false, forbidFormatFallback: true as const } } };
+    const frozen = { ...frozenSelection, selectionHash: frozenResponseContractsSelectionHash(frozenSelection) };
     await expect(repository.saveFrozenResponseContracts!(scope, hash, frozen)).resolves.toBeNull();
     await expect(repository.saveFrozenResponseContracts!(scope, queuedResponsePolicyHash(queuedPolicy), frozen)).resolves.toEqual(frozen);
     expect(await repository.markGenerating(scope)).toBe(true);
     expect(await repository.markValidating(scope)).toBe(true);
-    const audit = { version: 1 as const, selectionHash: hash, invocationKey: "story:nonstream" as const, mode: "json_object" as const, schemaVersion: null, schemaHash: null, requestedModel: "contract-model", providerRoutingSlugs: [], returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
+    const audit = { version: 1 as const, selectionHash: frozen.selectionHash, invocationKey: "story:nonstream" as const, mode: "json_object" as const, schemaVersion: null, schemaHash: null, requestedModel: "contract-model", providerRoutingSlugs: [], returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
     const primary = await repository.reserveResponseContractInvocation!(scope, { logicalAttemptId: logicalAttemptId!, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: audit });
     expect(primary?.status).toBe("reserved");
     await expect(repository.reserveResponseContractInvocation!(scope, { logicalAttemptId: logicalAttemptId!, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: audit })).resolves.toEqual(primary);
@@ -92,6 +94,6 @@ integration("PostgreSQL response-contract persistence", () => {
     await expect(repository.completeResponseContractInvocation!(scope, primary!.id, { ...response, returnedModel: "changed-model" })).resolves.toBeNull();
     expect(await repository.saveOrchestration(scope, { ...job!.orchestration_private, frozenResponseContracts: { ...frozen, selectionHash: "c".repeat(64) } })).toBe(true);
     const stored = await pool.query<{ orchestrationPrivate: { frozenResponseContracts?: { selectionHash: string } } }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [queued.id]);
-    expect(stored.rows[0]?.orchestrationPrivate.frozenResponseContracts?.selectionHash).toBe(hash);
+    expect(stored.rows[0]?.orchestrationPrivate.frozenResponseContracts?.selectionHash).toBe(frozen.selectionHash);
   });
 });

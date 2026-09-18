@@ -131,6 +131,7 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
   resolveQueuedResponsePolicy?: (client: DatabaseClient, scope: Readonly<{
     ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string;
     operationKind: OperationKind; generationPolicy: GenerationPolicySnapshot;
+    storyMemoryPolicy: StoryMemoryPolicySnapshot | null;
   }>) => Promise<QueuedResponsePolicy | undefined>;
   readTurnReportedCosts: (
     ownerUserId: string,
@@ -141,6 +142,18 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
 
 function json(value: unknown): string {
   return JSON.stringify(value ?? null);
+}
+
+function assertQueuedResponsePolicyIdentity(
+  value: QueuedResponsePolicy | undefined,
+  providerProfileId: string,
+  requestedModel: string
+): QueuedResponsePolicy | undefined {
+  if (!value) return undefined;
+  if (value.providerProfileId !== providerProfileId || (requestedModel.length > 0 && value.model !== requestedModel)) {
+    throw new GenerationApplicationError("invalid_state");
+  }
+  return value;
 }
 
 function executionProtocolIdentity(
@@ -389,10 +402,10 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
-        const queuedResponsePolicy = readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
+        const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
-          operationKind: "append", generationPolicy
-        }));
+          operationKind: "append", generationPolicy, storyMemoryPolicy
+        })), providerProfileId, request.model || "");
         const storyLengthProfile = request.storyLengthProfileOverride
           ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
@@ -514,10 +527,10 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
-        const queuedResponsePolicy = readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
+        const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
-          operationKind: "replace_latest", generationPolicy
-        }));
+          operationKind: "replace_latest", generationPolicy, storyMemoryPolicy
+        })), providerProfileId, request.model || "");
         const baseTurnNumber = campaign.active_turn_number - 1;
         let baseState: Record<string, unknown> = {};
         let baseScratchpadSafeForPrompt = false;

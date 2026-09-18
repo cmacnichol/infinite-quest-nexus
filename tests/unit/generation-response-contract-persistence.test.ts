@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readAttemptResponseContractAudit, readFrozenResponseContracts, readQueuedResponsePolicy, readResponseContractInvocationAudit, responseContractInvocationAuditId } from "../../packages/contracts/src/index.js";
+import { frozenResponseContractsSelectionHash, readAttemptResponseContractAudit, readFrozenResponseContracts, readQueuedResponsePolicy, readResponseContractInvocationAudit, responseContractInvocationAuditId } from "../../packages/contracts/src/index.js";
 
 const hash = "a".repeat(64);
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -18,7 +18,8 @@ describe("durable response-contract persistence contracts", () => {
   });
 
   it("binds frozen contracts to their exact queued policy and selection hashes", () => {
-    const frozen = { version: 1, queuedPolicy: queued, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash, contracts: { "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true } }, selectionHash: hash } as const;
+    const selection = { version: 1 as const, queuedPolicy: queued, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash, contracts: { "story:nonstream": { version: 1 as const, mode: "json_object" as const, operation: "story" as const, streaming: false, forbidFormatFallback: true as const } } };
+    const frozen = { ...selection, selectionHash: frozenResponseContractsSelectionHash(selection) };
     expect(readFrozenResponseContracts(frozen)).toEqual(frozen);
     expect(() => readFrozenResponseContracts({ ...frozen, contracts: { "story:stream": frozen.contracts["story:nonstream"] } })).toThrow();
     expect(() => readFrozenResponseContracts({ ...frozen, queuedPolicy: { ...queued, policy: "required" } })).toThrow();

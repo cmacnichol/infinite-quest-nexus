@@ -109,10 +109,24 @@ function responseContractInvocations(value: unknown): readonly ResponseContractI
   });
 }
 
-function responseContractState(value: GenerationOrchestrationState): void {
-  readQueuedResponsePolicy(value.queuedResponsePolicy);
-  readFrozenResponseContracts(value.frozenResponseContracts);
-  responseContractInvocations(value.responseContractInvocations);
+function responseContractState(jobId: string, value: GenerationOrchestrationState): void {
+  const queued = readQueuedResponsePolicy(value.queuedResponsePolicy);
+  const frozen = readFrozenResponseContracts(value.frozenResponseContracts);
+  const ledger = responseContractInvocations(value.responseContractInvocations);
+  if (frozen && (!queued || queuedResponsePolicyHash(queued) !== queuedResponsePolicyHash(frozen.queuedPolicy))) {
+    throw new Error("Frozen response contract does not match the queued policy.");
+  }
+  if (ledger && !frozen) throw new Error("Response-contract invocation ledger requires a frozen contract.");
+  if (ledger && frozen) {
+    for (const entry of ledger) {
+      if (!auditMatchesFrozenInvocation(frozen, entry.invocationKey, entry.request)
+        || !operationMatchesInvocation(entry.operation, entry.invocationKey)
+        || entry.id !== responseContractInvocationAuditId(jobId, entry.logicalAttemptId, entry.invocationKey, entry.operation, entry.requestPayloadHash)
+        || entry.request.returnedModel !== null || entry.request.returnedProviderRoute !== null || entry.request.diagnosticCode !== null) {
+        throw new Error("Response-contract invocation ledger is inconsistent with its frozen contract.");
+      }
+    }
+  }
 }
 
 function operationMatchesInvocation(operation: ResponseContractOperation, invocationKey: ResponseInvocationKey): boolean {
@@ -131,7 +145,7 @@ function auditMatchesFrozenInvocation(
     || audit.requestedModel !== frozen.queuedPolicy.model || audit.mode !== contract.mode) return false;
   if (contract.mode === "json_object") return audit.schemaVersion === null && audit.schemaHash === null && audit.providerRoutingSlugs.length === 0;
   return audit.schemaVersion === contract.schemaVersion && audit.schemaHash === contract.schemaHash
-    && JSON.stringify(audit.providerRoutingSlugs) === JSON.stringify(contract.providerRoutingSlugs);
+    && stableStringify(audit.providerRoutingSlugs) === stableStringify(contract.providerRoutingSlugs);
 }
 
 async function updateResponseContractInvocation(
@@ -153,7 +167,7 @@ async function updateResponseContractInvocation(
     if (index < 0) return null;
     const existing = ledger[index]!;
     if (existing.status === "completed") {
-      if (nextStatus === "completed" && JSON.stringify(existing.response) === JSON.stringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null })) return existing;
+      if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null })) return existing;
       return null;
     }
     if (nextStatus === "dispatched" && existing.status !== "reserved") return existing;
@@ -1498,7 +1512,7 @@ export function createPostgresGenerationExecutionRepository(
       const row = result.rows[0];
       if (!row) return null;
       let responseContractValid = true;
-      try { responseContractState(row.orchestration_private); } catch { responseContractValid = false; }
+      try { responseContractState(row.id, row.orchestration_private); } catch { responseContractValid = false; }
       const storedReview = row.orchestration_private?.generationReview === undefined
         ? undefined : generationReviewCheckpointSchema.safeParse(row.orchestration_private.generationReview);
       if (!responseContractValid || (row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
@@ -1680,11 +1694,13 @@ export function createPostgresGenerationExecutionRepository(
           || queuedResponsePolicyHash(parsed.queuedPolicy) !== expectedQueuedPolicyHash) return null;
         const existing = readFrozenResponseContracts(stored.frozenResponseContracts);
         if (existing) return existing;
-        await client.query(
+        const write = await client.query<{ id: string }>(
           `UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('frozenResponseContracts',$4::jsonb), updated_at=now()
-            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status='assessing' AND lease_expires_at > now()`,
+            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status='assessing' AND lease_expires_at > now()
+              AND NOT orchestration_private ? 'frozenResponseContracts' RETURNING id`,
           [scope.jobId, scope.ownerUserId, scope.workerId, json(parsed)]
         );
+        if (!write.rows[0]) return null;
         return parsed;
       });
     },
@@ -1713,7 +1729,7 @@ export function createPostgresGenerationExecutionRepository(
         if (existing) {
           if (existing.logicalAttemptId !== input.logicalAttemptId || existing.invocationKey !== input.invocationKey
             || existing.operation !== input.operation || existing.requestPayloadHash !== input.requestPayloadHash
-            || JSON.stringify(existing.request) !== JSON.stringify(input.request)) return null;
+            || stableStringify(existing.request) !== stableStringify(input.request)) return null;
           return existing;
         }
         if (ledger.length >= responseContractInvocationLedgerLimit) return null;

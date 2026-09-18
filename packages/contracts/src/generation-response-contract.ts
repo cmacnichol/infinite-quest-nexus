@@ -47,11 +47,24 @@ export const frozenResponseContractsSchema = z.object({
     if (!keys.has(key as z.infer<typeof responseInvocationKeySchema>) || !contractMatchesKey(key as z.infer<typeof responseInvocationKeySchema>, contract)) context.addIssue({ code: "custom", path: ["contracts", key], message: "Frozen response contract does not match its queued invocation." });
   }
   for (const key of keys) if (!Object.hasOwn(value.contracts, key)) context.addIssue({ code: "custom", path: ["contracts", key], message: "Each queued invocation requires a frozen contract." });
+  for (const [key, contract] of Object.entries(value.contracts)) {
+    if (contract.mode === "json_schema" && contract.schemaHash !== sha256Hex(canonicalJson(contract.schema))) {
+      context.addIssue({ code: "custom", path: ["contracts", key, "schemaHash"], message: "Frozen schema body does not match its digest." });
+    }
+  }
   if (value.queuedPolicy.policy === "required" && Object.values(value.contracts).some((contract) => contract.mode !== "json_schema")) {
     context.addIssue({ code: "custom", path: ["contracts"], message: "Required queued policy permits only schema-mode contracts." });
   }
+  if (value.selectionHash !== frozenResponseContractsSelectionHash(value)) {
+    context.addIssue({ code: "custom", path: ["selectionHash"], message: "Frozen response-contract selection hash is invalid." });
+  }
 });
 export type FrozenResponseContracts = Readonly<z.infer<typeof frozenResponseContractsSchema>>;
+/** Digest all selected evidence and contract bodies, excluding its own digest field. */
+export function frozenResponseContractsSelectionHash(value: Readonly<Record<string, unknown>>): string {
+  const { selectionHash: _selectionHash, ...selection } = value;
+  return sha256Hex(canonicalJson(selection));
+}
 export function readFrozenResponseContracts(value: unknown): FrozenResponseContracts | undefined {
   if (value === undefined) return undefined;
   const parsed = frozenResponseContractsSchema.safeParse(value);
