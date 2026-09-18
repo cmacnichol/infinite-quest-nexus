@@ -56,6 +56,18 @@ integration("strict response-contract operation workflow", () => {
       let body = "";
       request.setEncoding("utf8"); request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
+        if (request.url?.endsWith("/embeddings")) {
+          const input = JSON.parse(body) as { input?: unknown };
+          const documents = Array.isArray(input.input) ? input.input : [input.input];
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({ object: "list", model, data: documents.map((_document, index) => ({ object: "embedding", index, embedding: [0.25, 0.75] })), usage: { prompt_tokens: documents.length, total_tokens: documents.length } }));
+          return;
+        }
+        if (!request.url?.endsWith("/chat/completions")) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "fixture_route_not_found" } }));
+          return;
+        }
         requests.push(body);
         const parsed = JSON.parse(body) as { messages: Array<{ content: string }> };
         const input = JSON.parse(parsed.messages[1]!.content) as Record<string, unknown>;
