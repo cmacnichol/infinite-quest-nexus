@@ -63,6 +63,7 @@ integration("T17 durable continuity review", () => {
   let invalidChoiceRepair = false;
   let invalidPrimary = false;
   let malformedFactFormatting = false;
+  let primaryFinishReason: "stop" | "length" = "stop";
   let semanticRepairNeedsChoiceRepair = false;
   let extensionConflict = false;
   let invalidSemanticRepair = false;
@@ -141,12 +142,12 @@ integration("T17 durable continuity review", () => {
           for (const chunk of [content.slice(0, midpoint), content.slice(midpoint)]) {
             response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`);
           }
-          response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } })}\n\n`);
+          response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: {}, finish_reason: primaryFinishReason }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } })}\n\n`);
           response.end("data: [DONE]\n\n");
           return;
         }
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110, cost: 0.001 } }));
+        response.end(JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ message: { content }, finish_reason: primaryFinishReason }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110, cost: 0.001 } }));
       });
     });
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -167,6 +168,7 @@ integration("T17 durable continuity review", () => {
     invalidChoiceRepair = false;
     invalidPrimary = false;
     malformedFactFormatting = false;
+    primaryFinishReason = "stop";
     semanticRepairNeedsChoiceRepair = false;
     extensionConflict = false;
     invalidSemanticRepair = false;
@@ -199,6 +201,7 @@ integration("T17 durable continuity review", () => {
     story.world.title = `Review replacement ${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "review-replacement.story", story }));
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
+    if (scene) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const current = (await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id=$1", [imported.campaignId])).rows[0]!;
     const job = await application.enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, generationRetryLatestRequestSchema.parse({
@@ -220,6 +223,35 @@ integration("T17 durable continuity review", () => {
       if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = previousDatabaseUrl;
     }
+  }
+
+  /**
+   * Accepted authority is the only state a rejected or pending repair may not
+   * change.  Keep this as direct PostgreSQL evidence instead of inferring it
+   * from the job projection, which intentionally includes private pending
+   * review state.
+   */
+  async function acceptedAuthoritySnapshot(campaignId: string) {
+    const result = await pool.query<{
+      turns: unknown;
+      campaignState: unknown;
+      facts: unknown;
+      acceptedChronicle: unknown;
+    }>(
+      `SELECT
+         COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY t.turn_number, t.id)
+                   FROM turns t
+                   WHERE t.campaign_id=$1 AND t.accepted_at IS NOT NULL), '[]'::jsonb) AS turns,
+         (SELECT to_jsonb(cs) FROM campaign_state cs WHERE cs.campaign_id=$1) AS "campaignState",
+         COALESCE((SELECT jsonb_agg(to_jsonb(f) ORDER BY f.source_turn_number, f.source_fact_index, f.id)
+                   FROM campaign_canonical_facts f WHERE f.campaign_id=$1), '[]'::jsonb) AS facts,
+         COALESCE((SELECT jsonb_agg(to_jsonb(m) ORDER BY m.created_at, m.id)
+                   FROM chronicle_memories m
+                   JOIN turns t ON t.id=m.turn_id
+                   WHERE m.campaign_id=$1 AND t.accepted_at IS NOT NULL), '[]'::jsonb) AS "acceptedChronicle"`,
+      [campaignId]
+    );
+    return result.rows[0]!;
   }
 
   it("repairs malformed fact formatting once from the retained primary response", async () => {
@@ -254,6 +286,338 @@ integration("T17 durable continuity review", () => {
       "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.orchestration_private;
     expect(saved.validatedMainDraft).toMatchObject({ factFormatRepair: { planHash } });
+  });
+
+  it("offers an explicit format repair for complete JSON marked length-limited by the provider", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    primaryFinishReason = "length";
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+
+    await runGenerationJob(pool, `format-length-offer-${randomUUID()}`, 30, credentialSecret);
+
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+      status: "recoverable", errorCode: "generation_review_required"
+    });
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(offer).toMatchObject({ version: 2, stage: "structure", canRepairFormat: true });
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+  });
+
+  it("does not offer fact formatting repair when the same candidate has invalid Story Direction choices", async () => {
+    const { job, application, campaignId } = await enqueue("enforce", true);
+    malformedFactFormatting = true;
+    needsChoiceRepair = true;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+
+    await runGenerationJob(pool, `format-invalid-scene-choices-${randomUUID()}`, 30, credentialSecret);
+
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+      status: "recoverable", errorCode: "generation_review_required"
+    });
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(offer).toMatchObject({ version: 1, stage: "structure" });
+    expect("canRepairFormat" in offer && offer.canRepairFormat).toBe(false);
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+  });
+
+  it("keeps accepted authority frozen through the repair offer and receipt, then commits the exact repaired candidate once", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+
+    await runGenerationJob(pool, `format-authority-offer-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected the malformed fact candidate to offer a v2 repair.");
+    const savedAtOffer = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+    const original = JSON.parse(savedAtOffer.primaryResult.response.content);
+    const primaryCalls = requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"));
+    expect(primaryCalls).toHaveLength(1);
+
+    await Promise.all([
+      application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash }),
+      application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash })
+    ]);
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+
+    await runGenerationJob(pool, `format-authority-apply-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(1);
+    const costs = await pool.query<{ operation: string }>("SELECT operation FROM provider_cost_events WHERE generation_job_id=$1 ORDER BY created_at", [job.id]);
+    expect(costs.rows.filter((row) => row.operation === "story_generation")).toHaveLength(1);
+    expect(costs.rows.filter((row) => row.operation === "story_continuity_review")).toHaveLength(1);
+
+    const accepted = await application.getResult({ ownerUserId, jobId: job.id });
+    expect(accepted).toMatchObject({
+      narration: original.narration,
+      choices: original.choices,
+      customActionSuggestion: original.custom_action_suggestion
+    });
+    await expect(pool.query<{ content: string }>(
+      "SELECT content FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY source_turn_number,source_fact_index,id", [campaignId]
+    )).resolves.toEqual(expect.objectContaining({ rows: expect.arrayContaining([{ content: "The keeper has arrived." }]) }));
+    const after = await acceptedAuthoritySnapshot(campaignId);
+    expect((after.turns as unknown[]).length).toBe((acceptedBefore.turns as unknown[]).length + 1);
+    const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+    expect(saved.generationReview.decisionJournal.filter((entry: { decision: string }) => entry.decision === "repair_format")).toHaveLength(1);
+    expect(saved.generationReview.factFormatRepair).toMatchObject({ status: "applied", planHash: offer.formatRepair.planHash });
+    expect(saved.validatedMainDraft).toMatchObject({ factFormatRepair: { planHash: offer.formatRepair.planHash } });
+
+    expect(await runGenerationJob(pool, `format-authority-duplicate-${randomUUID()}`, 30, credentialSecret)).toBe(false);
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(after);
+  });
+
+  it.each([
+    { mode: "off" as const, semanticCalls: 0 },
+    { mode: "observe" as const, semanticCalls: 1 },
+    { mode: "enforce" as const, semanticCalls: 1 }
+  ])("preserves the $mode continuity policy after an explicit fact-format repair", async ({ mode, semanticCalls }) => {
+    const { job, application } = await enqueue(mode);
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+
+    await runGenerationJob(pool, `format-policy-offer-${mode}-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected a format repair offer.");
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+    await runGenerationJob(pool, `format-policy-apply-${mode}-${randomUUID()}`, 30, credentialSecret);
+
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(semanticCalls);
+    const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestration_private;
+    if (mode === "off") expect(saved.continuityReview).toBeUndefined();
+    else expect(saved.continuityReview).toMatchObject({ mode, status: "completed", verdict: "pass" });
+  });
+
+  it.each([
+    { label: "Action append", operation: "append", scene: false },
+    { label: "Action replace-latest", operation: "replace_latest", scene: false },
+    { label: "Story Direction append", operation: "append", scene: true },
+    { label: "Story Direction replace-latest", operation: "replace_latest", scene: true }
+  ] as const)("applies a format repair for $label without replacing the primary candidate", async ({ operation, scene }) => {
+    const fixture = operation === "append"
+      ? await enqueue("enforce", scene)
+      : await enqueueReplacement("enforce", scene);
+    const { job, application, campaignId } = fixture;
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+
+    await runGenerationJob(pool, `format-operation-offer-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected a format repair offer.");
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+    await runGenerationJob(pool, `format-operation-apply-${randomUUID()}`, 30, credentialSecret);
+
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", operationKind: operation });
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(1);
+    const acceptedAfter = await acceptedAuthoritySnapshot(campaignId);
+    expect((acceptedAfter.turns as unknown[]).length).toBe((acceptedBefore.turns as unknown[]).length + (operation === "append" ? 1 : 0));
+    expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id])).rows[0]!.count).toBe(1);
+  });
+
+  it("keeps a repaired turn accepted when its optional illustration enqueue fails, without a duplicate enqueue on resume", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+    await runGenerationJob(pool, `format-artwork-offer-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected a format repair offer.");
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    const enqueueIllustrations = vi.fn(async () => { throw new Error("Injected optional illustration enqueue failure."); });
+    collaborators.illustration.enqueueAcceptedTurnIllustrationSegments = enqueueIllustrations;
+    const workerId = `format-artwork-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect(enqueueIllustrations).toHaveBeenCalledTimes(1);
+    expect((await acceptedAuthoritySnapshot(campaignId)).turns as unknown[]).toHaveLength((acceptedBefore.turns as unknown[]).length + 1);
+    expect(await runGenerationJob(pool, `format-artwork-duplicate-${randomUUID()}`, 30, credentialSecret)).toBe(false);
+    expect(enqueueIllustrations).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a foreign owner and an actual foreign campaign repair scope without accepted writes", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    await runGenerationJob(pool, `format-scope-offer-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected a format repair offer.");
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+    const foreignOwner = (await pool.query<{ id: string }>(
+      "INSERT INTO users(display_name) VALUES($1) RETURNING id", [`format repair foreign owner ${randomUUID()}`]
+    )).rows[0]!.id;
+    const foreignStory = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    foreignStory.world.title = `Format repair foreign campaign ${randomUUID()}`;
+    const foreignCampaign = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "format-repair-foreign.story", story: foreignStory }));
+    const foreignBefore = await acceptedAuthoritySnapshot(foreignCampaign.campaignId);
+
+    await expect(application.decideReview({ ownerUserId: foreignOwner, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    })).rejects.toThrow();
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+    const saved = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    const repair = saved.generationReview.factFormatRepair;
+    repair.campaignId = foreignCampaign.campaignId;
+    const receipt = saved.generationReview.decisionJournal.find((entry: { decision: string }) => entry.decision === "repair_format");
+    receipt.repair.campaignId = foreignCampaign.campaignId;
+    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(saved)]);
+
+    await runGenerationJob(pool, `format-scope-apply-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: expect.stringMatching(/^(recoverable|failed)$/u) });
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+    expect(await acceptedAuthoritySnapshot(foreignCampaign.campaignId)).toEqual(foreignBefore);
+  });
+
+  it.each([
+    { boundary: "before decision", point: "before_decision" },
+    { boundary: "after receipt", point: "after_receipt" },
+    { boundary: "after applied repair checkpoint", point: "after_applied" },
+    { boundary: "after semantic-review checkpoint", point: "after_semantic" },
+    { boundary: "before commit", point: "before_commit" },
+    { boundary: "after commit acknowledgement loss", point: "after_commit" }
+  ] as const)("reclaims an explicit repair crash $boundary without a second accepted turn or primary call", async ({ point }) => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+    await runGenerationJob(pool, `format-crash-offer-${point}-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected a format repair offer.");
+    const offeredOrchestration = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    const originalPrimary = offeredOrchestration.primaryResult;
+    expect(originalPrimary).toMatchObject({
+      rawOutputReference: expect.any(String), requestPayloadHash: expect.any(String),
+      providerConfigurationHash: expect.any(String), response: { responseId: expect.any(String), content: expect.any(String) }
+    });
+    let acceptedIllustrationEnqueues: ReturnType<typeof vi.fn> | null = null;
+
+    if (point === "before_decision") {
+      expect(await runGenerationJob(pool, `format-crash-pending-${randomUUID()}`, 30, credentialSecret)).toBe(false);
+    }
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+
+    if (point === "after_receipt") {
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const claim = await repository.claimNext({ workerId: `format-crash-receipt-${randomUUID()}`, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(job.id);
+      await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+    } else if (point !== "before_decision") {
+      const repository = createPostgresGenerationExecutionRepository(pool);
+      const providers = workerProviderGraph(pool, credentialSecret);
+      const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+      if (point === "before_commit" || point === "after_commit") {
+        acceptedIllustrationEnqueues = vi.fn(collaborators.illustration.enqueueAcceptedTurnIllustrationSegments);
+        collaborators.illustration.enqueueAcceptedTurnIllustrationSegments = acceptedIllustrationEnqueues;
+      }
+      let interrupted = false;
+      const wrapped = {
+        ...repository,
+        async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+          const updated = await repository.saveOrchestration(scope, value);
+          const factRepair = (value as { generationReview?: { factFormatRepair?: { status?: string } } }).generationReview?.factFormatRepair;
+          const continuity = (value as { continuityReview?: { status?: string } }).continuityReview;
+          if (!interrupted && ((point === "after_applied" && factRepair?.status === "applied")
+            || (point === "after_semantic" && continuity?.status === "completed"))) {
+            interrupted = true;
+            await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+            throw Object.assign(new Error(`Injected repair crash at ${point}.`), { code: "generation_cancelled" });
+          }
+          return updated;
+        },
+        async commitAcceptedTurn(input: Parameters<typeof repository.commitAcceptedTurn>[0]) {
+          if (point === "before_commit") {
+            interrupted = true;
+            await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+            throw Object.assign(new Error("Injected repair crash before commit."), { code: "generation_cancelled" });
+          }
+          const committed = await repository.commitAcceptedTurn(input);
+          if (point === "after_commit") {
+            interrupted = true;
+            throw Object.assign(new Error("Injected acknowledgement loss after repair commit."), { code: "generation_cancelled" });
+          }
+          return committed;
+        }
+      };
+      const workerId = `format-crash-${point}-${randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(job.id);
+      await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+      expect(interrupted).toBe(true);
+      if (acceptedIllustrationEnqueues) {
+        expect(acceptedIllustrationEnqueues).toHaveBeenCalledTimes(point === "after_commit" ? 1 : 0);
+      }
+    }
+
+    const authorityBeforeReclaim = await acceptedAuthoritySnapshot(campaignId);
+    if (point === "after_commit") {
+      expect((authorityBeforeReclaim.turns as unknown[]).length).toBe((acceptedBefore.turns as unknown[]).length + 1);
+    } else {
+      expect(authorityBeforeReclaim).toEqual(acceptedBefore);
+    }
+    const callsBeforeReclaim = requests.length;
+    await runGenerationJob(pool, `format-crash-reclaim-${point}-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(1);
+    expect(requests.length).toBeGreaterThanOrEqual(callsBeforeReclaim);
+    const after = await acceptedAuthoritySnapshot(campaignId);
+    expect((after.turns as unknown[]).length).toBe((acceptedBefore.turns as unknown[]).length + 1);
+    expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id])).rows[0]!.count).toBe(1);
+    if (point === "after_commit") expect(after).toEqual(authorityBeforeReclaim);
+    const saved = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    expect(saved.primaryResult).toMatchObject({
+      rawOutputReference: originalPrimary.rawOutputReference,
+      requestPayloadHash: originalPrimary.requestPayloadHash,
+      providerConfigurationHash: originalPrimary.providerConfigurationHash,
+      response: { responseId: originalPrimary.response.responseId, content: originalPrimary.response.content }
+    });
+    const receipts = saved.generationReview.decisionJournal.filter((entry: { decision: string }) => entry.decision === "repair_format");
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ reviewId: offer.reviewId, revision: offer.revision, planHash: offer.formatRepair.planHash });
+    expect(saved.generationReview.factFormatRepair).toMatchObject({ status: "applied", planHash: offer.formatRepair.planHash });
+    expect(saved.validatedMainDraft).toMatchObject({
+      requestPayloadHash: originalPrimary.requestPayloadHash,
+      response: { responseId: originalPrimary.response.responseId },
+      factFormatRepair: { planHash: offer.formatRepair.planHash }
+    });
   });
 
   it("retains an applied format-repair receipt through a later continuity Keep", async () => {
