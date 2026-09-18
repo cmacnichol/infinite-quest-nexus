@@ -5,6 +5,7 @@ import { createGenerationExecutionCollaborators } from "../../services/runtime/s
 import { responseContractInvocationClosure } from "../../services/runtime/src/generation-response-contract.js";
 import { createApiProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
 import type { WorkerGenerationProviderCollaborators } from "../../services/runtime/src/provider-application-composition.js";
+import { readFrozenResponseContracts, readQueuedResponsePolicy } from "../../packages/contracts/src/generation-response-contract.js";
 
 const profile = {
   id: "11111111-1111-4111-8111-111111111111", providerType: "openrouter", model: "model-a",
@@ -50,6 +51,50 @@ function collaborators(input: Readonly<{ inventory?: () => Promise<unknown>; reg
 }
 
 describe("generation response-contract production preflight collaborators", () => {
+  it.each([
+    ["append action non-streaming without review", "append", "legacy", false, "off", ["story:nonstream"]],
+    ["replacement action streaming with observe review", "replacement", "legacy", true, "observe", ["story:nonstream", "story:stream", "continuity_review:nonstream"]],
+    ["append story-only non-streaming without review", "append", "story_only", false, "off", ["story:nonstream", "choices:nonstream"]],
+    ["replacement story-only streaming with enforce review", "replacement", "story_only", true, "enforce", ["story:nonstream", "story:stream", "choices:nonstream", "continuity_review:nonstream"]],
+    ["append story-only non-streaming with observe review", "append", "story_only", false, "observe", ["story:nonstream", "choices:nonstream", "continuity_review:nonstream"]],
+    ["replacement action non-streaming with enforce review", "replacement", "legacy", false, "enforce", ["story:nonstream", "continuity_review:nonstream"]]
+  ] as const)("round-trips exact queue and frozen closures for %s", async (_name, operationKind, playMode, streaming, continuityReview, expectedKeys) => {
+    const queueProfile = { ...profile, configuration: { textResponseFormatPolicy: "auto", ...(streaming ? { streaming: true } : {}) } };
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => queueProfile), responseFormatCapabilities: { registryDigest }
+    } as never;
+    const queued = await createQueuedResponsePolicyResolver(apiProviders)({} as never, {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: profile.model,
+      operationKind, generationPolicy: { playMode }, storyMemoryPolicy: continuityReview === "off" ? null : { policy: { continuityReview } }
+    } as never);
+    const policy = readQueuedResponsePolicy(JSON.parse(JSON.stringify(queued)));
+    expect(policy?.invocationKeys).toEqual(expectedKeys);
+    const workerProviders = {
+      execution: { text: vi.fn(async () => queueProfile) }, responseFormatInventory: { listModels: vi.fn(async () => ({ models: [] })) },
+      responseFormatCapabilities: { registryDigest, eligibility: vi.fn(() => ({ status: "unknown", reason: "discovery_unavailable", verification: null })) },
+      promptTools: { content: vi.fn() }, costs: { recordGenerationCost: vi.fn() }, costContext: vi.fn(), attributeCosts: { attributeGenerationCostsToTurn: vi.fn() }
+    } as unknown as WorkerGenerationProviderCollaborators;
+    const worker = createGenerationExecutionCollaborators({} as never, {} as never, { generation: {} } as never, workerProviders);
+    const frozen = await worker.resolveResponseContracts!("owner", queueProfile as never, policy!, {
+      id: policy!.providerProfileId, providerType: queueProfile.providerType, model: policy!.model,
+      endpointIdentity: queueProfile.endpointIdentity, configurationHash: policy!.providerConfigurationHash
+    });
+    const parsed = readFrozenResponseContracts(JSON.parse(JSON.stringify(frozen)));
+    expect(Object.keys(parsed!.contracts)).toEqual(expectedKeys);
+    expect(parsed!.queuedPolicy.invocationKeys).toEqual(expectedKeys);
+  });
+
+  it("keeps legacy policy physically absent across the queue callback", async () => {
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => ({ ...profile, configuration: { textResponseFormatPolicy: "legacy" } })),
+      responseFormatCapabilities: { registryDigest }
+    } as never;
+    await expect(createQueuedResponsePolicyResolver(apiProviders)({} as never, {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: profile.model,
+      operationKind: "append", generationPolicy: { playMode: "legacy" }, storyMemoryPolicy: null
+    } as never)).resolves.toBeUndefined();
+  });
+
   it("uses the supplied composition client for queue-time profile loading without borrowing from the pool", async () => {
     const row = {
       id: profile.id, name: "Text", provider_type: "openrouter", provider_role: "text", base_url: "https://provider.example/v1",
