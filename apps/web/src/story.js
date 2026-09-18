@@ -1269,7 +1269,9 @@ function renderTurnInput() {
 
 async function submitResolvedTurn(action, details) {
   if (details.operationKind !== "replace_latest") {
-    retainAppendDraft(state.campaignId, appendExpectedTurnNumber(state.campaign), action);
+    // Keep this in-memory only until enqueue returns an authoritative job ID.
+    // An enqueue failure must not erase what the player just typed.
+    state.retainedAppendDraft = { campaignId: state.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
   }
   const freeAction = $("freeAction");
   if (freeAction) freeAction.value = "";
@@ -1297,9 +1299,9 @@ function clearPendingSubmission() {
   if (state.campaignId) composition.pendingSubmissions.clear(state.campaignId);
 }
 
-function retainAppendDraft(campaignId, expectedTurnNumber, action) {
-  if (!campaignId || !action || !Number.isSafeInteger(expectedTurnNumber) || expectedTurnNumber < 1) return;
-  state.retainedAppendDraft = { campaignId, expectedTurnNumber, action };
+function retainAppendDraft(campaignId, expectedTurnNumber, generationId, action, requestedInputMode) {
+  if (!campaignId || !generationId || !action || !["action", "scene"].includes(requestedInputMode) || !Number.isSafeInteger(expectedTurnNumber) || expectedTurnNumber < 1) return;
+  state.retainedAppendDraft = { campaignId, expectedTurnNumber, generationId, action, requestedInputMode };
   composition.failedTurnPrompts?.save(state.retainedAppendDraft);
 }
 
@@ -1311,6 +1313,7 @@ function restoreRetainedAppendDraft() {
     || Number(state.campaign?.activeTurnNumber || 0) + 1 !== retained.expectedTurnNumber
     || freeAction.value.trim()) return;
   state.retainedAppendDraft = null;
+  setTurnInputMode(retained.requestedInputMode, { refreshPlaceholder: true });
   freeAction.value = retained.action;
   resetChoiceSelectionFromDraft(retained.action);
   updateTurnInputCharacterCount();
@@ -1326,7 +1329,7 @@ function captureHydratedAppendDraft(syncData) {
   const generation = syncData.pendingGeneration || syncData.generationRecovery;
   if (generation?.operationKind !== "append") return;
   const retained = composition.failedTurnPrompts?.load?.(syncData.campaign.id);
-  if (retained?.expectedTurnNumber === generation.expectedTurnNumber) {
+  if (retained?.expectedTurnNumber === generation.expectedTurnNumber && retained.generationId === generation.id) {
     state.retainedAppendDraft = retained;
     return;
   }
@@ -1336,10 +1339,8 @@ function captureHydratedAppendDraft(syncData) {
   } catch (_) {
     stored = null;
   }
-  if (stored?.operationKind === "append" && stored.expectedTurnNumber === generation.expectedTurnNumber) {
-    retainAppendDraft(syncData.campaign.id, generation.expectedTurnNumber, stored.request.action);
-  } else if (syncData.pendingGeneration?.operationKind === "append") {
-    retainAppendDraft(syncData.campaign.id, syncData.pendingGeneration.expectedTurnNumber, syncData.pendingGeneration.action);
+  if (syncData.pendingGeneration?.operationKind === "append" && stored?.operationKind === "append" && stored.jobId === syncData.pendingGeneration.id && stored.expectedTurnNumber === generation.expectedTurnNumber) {
+    retainAppendDraft(syncData.campaign.id, generation.expectedTurnNumber, stored.jobId, stored.request.action, stored.request.requestedInputMode);
   }
 }
 
@@ -1401,6 +1402,9 @@ async function runGeneration(action, options = {}) {
     resetStoryLengthOverrideControls();
     options.onAttached?.();
     state.generationRun = run;
+    if (operationKind === "append") {
+      retainAppendDraft(state.campaignId, expectedTurnNumber, run.jobId, action, submission.requestedInputMode);
+    }
     state.pendingGeneration = state.pendingGeneration?.id === run.jobId
       ? state.pendingGeneration
       : { id: run.jobId, action, operationKind, expectedTurnNumber };
@@ -1408,6 +1412,7 @@ async function runGeneration(action, options = {}) {
   } catch (err) {
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
+    if (options.operationKind !== "replace_latest") restoreRetainedAppendDraft();
     if (err.name === "AbortError") {
       if (!state.cancellationConfirmed) {
         toast("Generation cancelled.");

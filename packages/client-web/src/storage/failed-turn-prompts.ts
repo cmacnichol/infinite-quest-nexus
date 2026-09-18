@@ -1,7 +1,9 @@
 export interface RetainedAppendPrompt {
   readonly campaignId: string;
   readonly expectedTurnNumber: number;
+  readonly generationId: string;
   readonly action: string;
+  readonly requestedInputMode: "action" | "scene";
 }
 
 export interface FailedTurnPromptStore {
@@ -39,6 +41,8 @@ function isPrompt(value: unknown): value is RetainedAppendPrompt {
     && typeof (value as RetainedAppendPrompt).expectedTurnNumber === "number"
     && Number.isSafeInteger((value as RetainedAppendPrompt).expectedTurnNumber)
     && (value as RetainedAppendPrompt).expectedTurnNumber > 0
+    && typeof (value as RetainedAppendPrompt).generationId === "string"
+    && ((value as RetainedAppendPrompt).requestedInputMode === "action" || (value as RetainedAppendPrompt).requestedInputMode === "scene")
     && typeof (value as RetainedAppendPrompt).action === "string"
     && (value as RetainedAppendPrompt).action.length > 0;
 }

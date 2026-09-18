@@ -231,6 +231,12 @@ export function mountStoryPlayerPage(
       composition.failedTurnPrompts?.clear(result.campaignId);
       refreshCompletionResources(result.campaignId, result.turnNumber);
     },
+    onSubmitted(run, submission) {
+      const campaign = projection.campaign;
+      if (run.operationKind === "append" && campaign !== null) {
+        retainAppendDraft(campaign.id, campaign.activeTurnNumber + 1, run.jobId, submission.action, submission.requestedInputMode);
+      }
+    },
     onError() {
       if (!disposed) ui.setMessage("Story generation could not be completed. Your accepted turns are unchanged.");
     }
@@ -488,9 +494,9 @@ export function mountStoryPlayerPage(
       && projection.generation === null
       && ui.get().viewTurnNumber === campaign.activeTurnNumber;
   };
-  const retainAppendDraft = (campaignId: string, expectedTurnNumber: number, action: string): void => {
-    if (!action || !Number.isSafeInteger(expectedTurnNumber) || expectedTurnNumber < 1) return;
-    retainedAppendDraft = { campaignId, expectedTurnNumber, action };
+  const retainAppendDraft = (campaignId: string, expectedTurnNumber: number, generationId: string, action: string, requestedInputMode: "action" | "scene"): void => {
+    if (!generationId || !action || !Number.isSafeInteger(expectedTurnNumber) || expectedTurnNumber < 1) return;
+    retainedAppendDraft = { campaignId, expectedTurnNumber, generationId, action, requestedInputMode };
     composition.failedTurnPrompts?.save(retainedAppendDraft);
   };
   const forgetRetainedAppendDraft = (): void => {
@@ -507,13 +513,14 @@ export function mountStoryPlayerPage(
       || ui.get().draft.trim()) return;
     submittedDraft = null;
     retainedAppendDraft = null;
+    ui.setRequestedInputMode(retained.requestedInputMode);
     ui.restoreComposerDraft(retained.action);
   };
   const captureHydratedAppendDraft = (sync: import("@infinite-quest/contracts").CampaignSyncStatus): void => {
     const generation = sync.pendingGeneration ?? sync.generationRecovery;
     if (generation?.operationKind !== "append") return;
     const retained = composition.failedTurnPrompts?.load(sync.campaign.id);
-    if (retained?.expectedTurnNumber === generation.expectedTurnNumber) {
+    if (retained?.expectedTurnNumber === generation.expectedTurnNumber && retained.generationId === generation.id) {
       retainedAppendDraft = retained;
       return;
     }
@@ -523,12 +530,8 @@ export function mountStoryPlayerPage(
     } catch {
       stored = null;
     }
-    if (stored?.operationKind === "append" && stored.expectedTurnNumber === generation.expectedTurnNumber) {
-      retainAppendDraft(sync.campaign.id, generation.expectedTurnNumber, stored.request.action);
-      return;
-    }
-    if (sync.pendingGeneration?.operationKind === "append") {
-      retainAppendDraft(sync.campaign.id, sync.pendingGeneration.expectedTurnNumber, sync.pendingGeneration.action);
+    if (sync.pendingGeneration?.operationKind === "append" && stored?.operationKind === "append" && stored.jobId === sync.pendingGeneration.id && stored.expectedTurnNumber === generation.expectedTurnNumber) {
+      retainAppendDraft(sync.campaign.id, generation.expectedTurnNumber, stored.jobId, stored.request.action, stored.request.requestedInputMode);
     }
   };
   const isUnrecoverableAppendFailure = (): boolean => {
@@ -546,9 +549,6 @@ export function mountStoryPlayerPage(
     if (!accepted) {
       if (!disposed) ui.setMessage("Story generation could not be started. Your accepted turns are unchanged.");
       return;
-    }
-    if (pinnedReplacementTurnId === null && projection.campaign !== null) {
-      retainAppendDraft(projection.campaign.id, projection.campaign.activeTurnNumber + 1, submission.action);
     }
     replacementTurnId = null;
     ui.setStoryLengthProfileOverride(null);

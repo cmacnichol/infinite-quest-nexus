@@ -1004,7 +1004,7 @@ describe("Story Player page shell", () => {
   it("restores a persisted append draft after an authoritative failed recovery", async () => {
     const page = fixture();
     const loaded = sync({
-      campaign: { ...sync().campaign, activeTurnNumber: 1 },
+      campaign: { ...sync().campaign, activeTurnNumber: 1, turnControlStyle: "flexible_action" },
       activeTurnNumber: 1,
       generationRecovery: {
         id: "55555555-5555-4555-8555-555555555555",
@@ -1019,27 +1019,13 @@ describe("Story Player page shell", () => {
       },
       turns: turnWindow([1])
     });
-    const pendingSubmissions = {
-      load: vi.fn(() => ({
-        operationKind: "append" as const,
-        expectedTurnNumber: 2,
-        createdAt: 1,
-        request: {
-          action: "Return the lantern to its keeper.",
-          requestedInputMode: "action" as const,
-          resolvedInputMode: "action" as const,
-          inputModeSource: "explicit" as const,
-          idempotencyKey: "recovery-draft-key",
-          context: { budgetTokens: 32_000, compression: "auto" as const, recentTurns: 8 }
-        }
-      })),
-      save: vi.fn(),
-      clear: vi.fn()
-    };
     const base = composition({ syncStatus: vi.fn().mockResolvedValue(loaded) });
     const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, {
       ...base,
-      pendingSubmissions
+      failedTurnPrompts: {
+        load: vi.fn(() => ({ campaignId, expectedTurnNumber: 2, generationId: "55555555-5555-4555-8555-555555555555", requestedInputMode: "scene" as const, action: "Return the lantern to its keeper." })),
+        save: vi.fn(), clear: vi.fn()
+      }
     } as StoryPlayerComposition);
     await settle();
 

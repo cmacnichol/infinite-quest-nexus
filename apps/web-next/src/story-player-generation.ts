@@ -42,6 +42,7 @@ export interface StoryGenerationControllerDependencies {
   readonly idFactory: IdFactory;
   /** The controller refuses to apply a run after this authoritative scope changes. */
   readonly currentCampaign: () => StoryGenerationCampaign | null;
+  readonly onSubmitted?: (run: GenerationRun, submission: StoryGenerationSubmission) => void;
   readonly onCompleted?: (result: GenerationResult) => void | Promise<void>;
   readonly onError?: (error: unknown) => void;
 }
@@ -173,6 +174,7 @@ export function createStoryGenerationController(
           expectedTurnNumber: appendExpectedTurnNumber(campaign),
           request: submissionRequest(submission)
         });
+        dependencies.onSubmitted?.(run, submission);
         return attach(run);
       } catch (error) {
         dependencies.onError?.(error);
