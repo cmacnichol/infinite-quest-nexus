@@ -36,13 +36,28 @@ function recoveryFixture() {
           review: { status: "uncertain", automaticRepair: "not_consumed" }
         },
         resultTurnId: null,
+        responseFormat: {
+          version: 1,
+          savedPolicy: "required",
+          effectiveMode: "unavailable",
+          schemaVersion: null,
+          schemaHash: null,
+          operation: "story",
+          streaming: true,
+          requestedModel: "fixture-story-model",
+          returnedModel: null,
+          returnedRoute: null,
+          preflight: "identity_mismatch",
+          preflightDiagnostic: null,
+          diagnosticCode: null
+        },
         privatePromptAndProviderError: PRIVATE_CANARY
       }
     }
   };
 }
 
-async function installRecoveryApi(page: Page, options: { operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; streamLoss?: boolean; profileConflict?: boolean } = {}) {
+async function installRecoveryApi(page: Page, options: { operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; responseFormat?: Record<string, unknown>; review?: Record<string, unknown>; streamLoss?: boolean; profileConflict?: boolean } = {}) {
   const payloads = recoveryFixture();
   const requests: string[] = [];
   const writes: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -52,6 +67,8 @@ async function installRecoveryApi(page: Page, options: { operation?: "append" | 
   if (options.incompatible) recovery.diagnostic = { code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue" };
   if (options.legacyDiagnostic) delete recovery.diagnostic;
   if (options.diagnostic) recovery.diagnostic = options.diagnostic;
+  if (options.responseFormat) Object.assign(recovery.responseFormat, options.responseFormat);
+  if (options.review) recovery.review = options.review;
   const snapshot = { ...recovery, campaignId: payloads.campaignId, action: "Preserve the unsent scene.", requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit", partialNarration: "" };
   const characterProfile = {
     campaignId: payloads.campaignId,
@@ -130,8 +147,15 @@ async function installRecoveryApi(page: Page, options: { operation?: "append" | 
 
 test("web-next Story renders only safe recovery guidance and recovery actions", async ({ page }) => {
   const payloads = await installRecoveryApi(page);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${webNextOrigin}/app/story/${payloads.campaignId}`);
+
+  await expect(page).toHaveURL(`${webNextOrigin}/app/story/${payloads.campaignId}`);
+  await expect(page).toHaveTitle(/Infinite Quest/u);
+  await expect(page.locator("[data-page=story-player]")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 
   const recovery = page.locator("[data-story-recovery]");
   await expect(recovery).toBeVisible();
@@ -142,21 +166,32 @@ test("web-next Story renders only safe recovery guidance and recovery actions", 
   await expect(recovery).toContainText("Historical excerpts: 2 complete, 1 limited.");
   await expect(recovery).toContainText("Protected context estimates: world canon 12, current state 4, direction 3.");
   await expect(recovery).toContainText("Continuity review is uncertain; it was not a full-history pass.");
+  await expect(recovery).toContainText("Saved response format: Required");
+  await expect(recovery).toContainText("Effective mode: Unavailable for the saved story operation.");
+  await expect(recovery).toContainText("saved provider identity no longer matches this job");
+  await expect(recovery).toContainText("Historical jobs keep their saved response-format selection.");
   await expect(recovery.getByRole("button", { name: "Retry generation", exact: true })).toBeVisible();
   await expect(recovery.getByRole("button", { name: "Discard generation job", exact: true })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
-  await page.screenshot({ path: "docs/review/assets/generation-integrity-diagnostics/web-next-recovery-desktop.png", fullPage: true });
+  await page.screenshot({ path: "docs/review/assets/structured-output/story-web-next-response-format-desktop.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "docs/review/assets/generation-integrity-diagnostics/web-next-recovery-mobile.png", fullPage: true });
+  await page.screenshot({ path: "docs/review/assets/structured-output/story-web-next-response-format-mobile.png", fullPage: true });
+  expect(errors).toEqual([]);
 });
 
 test("legacy Story renders safe recovery guidance without private diagnostic data", async ({ page }) => {
   const payloads = await installRecoveryApi(page);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 1000 });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
   await page.route(`**/story/${payloads.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(`${legacyOrigin}/story/${payloads.campaignId}`);
+
+  await expect(page).toHaveURL(`${legacyOrigin}/story/${payloads.campaignId}`);
+  await expect(page).toHaveTitle(/Infinite Quest/u);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
 
   const recovery = page.locator("#generationRecoveryPanel");
   await expect(recovery).toBeVisible();
@@ -165,15 +200,20 @@ test("legacy Story renders safe recovery guidance without private diagnostic dat
   await expect(recovery).toContainText("World references: 4 included, 1 omitted.");
   await expect(recovery).toContainText("Protected context estimates: world canon 12, current state 4, direction 3.");
   await expect(recovery).toContainText("Continuity review is uncertain; it was not a full-history pass.");
+  await expect(recovery).toContainText("Saved response format: Required");
+  await expect(recovery).toContainText("Effective mode: Unavailable for the saved story operation.");
+  await expect(recovery).toContainText("saved provider identity no longer matches this job");
+  await expect(recovery).toContainText("Historical jobs keep their saved response-format selection.");
   await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
   await expect(recovery.getByRole("button", { name: "Resume monitoring", exact: true })).toBeVisible();
   await expect(recovery.getByRole("button", { name: "Retry generation job", exact: true })).toBeVisible();
   await expect(recovery.getByRole("button", { name: "Discard generation job", exact: true })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
-  await page.screenshot({ path: "docs/review/assets/generation-integrity-diagnostics/legacy-recovery-desktop.png", fullPage: true });
+  await page.screenshot({ path: "docs/review/assets/structured-output/story-legacy-response-format-desktop.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "docs/review/assets/generation-integrity-diagnostics/legacy-recovery-mobile.png", fullPage: true });
+  await page.screenshot({ path: "docs/review/assets/structured-output/story-legacy-response-format-mobile.png", fullPage: true });
+  expect(errors).toEqual([]);
 });
 
 for (const scope of ["application", "campaign"] as const) test(`Prompt Library requires ${scope} acknowledgement before saving a protected override`, async ({ page }) => {
@@ -282,6 +322,65 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect.poll(() => payloads.requests.some((request) => request.endsWith(`/${generationId}/discard`))).toBe(true);
     expect(payloads.requests.some((request) => request.endsWith(`/${generationId}/retry`))).toBe(false);
   });
+}
+
+for (const surface of ["legacy", "web-next"] as const) {
+  test(`${surface} retains the server-authorized format repair offer with saved response metadata after reload`, async ({ page }) => {
+    const payloads = await installRecoveryApi(page, {
+      review: {
+        version: 2,
+        reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        revision: 1,
+        state: "pending",
+        stage: "structure",
+        candidateScope: "final",
+        reasons: ["invalid_structure"],
+        canKeep: false,
+        canRetry: true,
+        canRepairFormat: true,
+        formatRepair: {
+          planHash: "a".repeat(64),
+          changedFactCount: 1,
+          description: "Repair fact formatting and keep the narration unchanged."
+        }
+      }
+    });
+    if (surface === "legacy") {
+      const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
+      await page.route(`**/story/${payloads.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+    }
+    await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${payloads.campaignId}` : `${webNextOrigin}/app/story/${payloads.campaignId}`);
+    const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+    await expect(recovery).toContainText("Saved response format: Required");
+    await expect(recovery.getByRole("button", { name: "Repair fact formatting", exact: true })).toBeVisible();
+    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
+    await page.reload();
+    await expect(recovery.getByRole("button", { name: "Repair fact formatting", exact: true })).toBeVisible();
+  });
+}
+
+for (const surface of ["legacy", "web-next"] as const) {
+  for (const [label, responseFormat, message] of [
+    ["preflight", { preflight: "unavailable", diagnosticCode: null }, "saved response-format preflight is unavailable"],
+    ["unsupported-adapter", { preflight: "unavailable", preflightDiagnostic: "unsupported_adapter", diagnosticCode: null }, "saved provider adapter does not support response formats"],
+    ["schema", { preflight: "selected", diagnosticCode: "provider_schema_invalid" }, "saved response schema was rejected as invalid"],
+    ["refusal", { preflight: "selected", diagnosticCode: "provider_refusal" }, "provider refused the request under the saved response format"]
+  ] as const) {
+    test(`${surface} safely presents saved response-format ${label} guidance after reload`, async ({ page }) => {
+      const payloads = await installRecoveryApi(page, { responseFormat });
+      if (surface === "legacy") {
+        const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
+        await page.route(`**/story/${payloads.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+      }
+      await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${payloads.campaignId}` : `${webNextOrigin}/app/story/${payloads.campaignId}`);
+      const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+      await expect(recovery).toContainText(message);
+      await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
+      await expect(recovery.getByRole("button", { name: "Repair fact formatting", exact: true })).toBeHidden();
+      await page.reload();
+      await expect(recovery).toContainText(message);
+    });
+  }
 }
 
 for (const surface of ["legacy", "web-next"] as const) {

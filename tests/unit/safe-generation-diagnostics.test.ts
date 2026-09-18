@@ -2,7 +2,7 @@ import { generationRecoverySchema } from "../../packages/contracts/src/client-ap
 import { describe, expect, it } from "vitest";
 import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic, safeGenerationDiagnosticSchema } from "../../packages/contracts/src/story-prompt.js";
 import { projectGenerationFailureDiagnostic } from "../../packages/contracts/src/generation-review.js";
-import { generationDiagnosticPresentation, generationReviewPresentation } from "../../packages/client-core/src/generation/projection.js";
+import { generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation } from "../../packages/client-core/src/generation/projection.js";
 
 describe("safe public generation diagnostics", () => {
   it("projects fixed timeout and empty-output failure messages without private error details", () => {
@@ -71,6 +71,56 @@ describe("safe public generation diagnostics", () => {
   it("keeps old-client recovery usable while dropping an unknown private diagnostic", () => {
     const parsed = generationRecoverySchema.parse({ id: "55555555-5555-4555-8555-555555555555", status: "recoverable", expectedTurnNumber: 2, attempts: 1, operationKind: "append", replacementTurnId: null, resultTurnId: null, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", diagnostic: { code: "future_code", private: "PRIVATE_CANARY" } });
     expect(parsed.diagnostic).toBeNull(); expect(JSON.stringify(parsed)).not.toContain("PRIVATE_CANARY");
+  });
+
+  it("presents a saved required preflight failure without inventing review authority", () => {
+    const presentation = generationResponseFormatPresentation({
+      version: 1,
+      savedPolicy: "required",
+      effectiveMode: "unavailable",
+      schemaVersion: null,
+      schemaHash: null,
+      operation: "story",
+      streaming: true,
+      requestedModel: "saved-story-model",
+      returnedModel: null,
+      returnedRoute: null,
+      preflight: "identity_mismatch",
+      preflightDiagnostic: null,
+      diagnosticCode: null
+    });
+
+    expect(presentation).toEqual({
+      heading: "Saved response format: Required",
+      details: [
+        "Effective mode: Unavailable for the saved story operation.",
+        "The saved provider identity no longer matches this job. Review the provider settings before starting a new generation.",
+        "Historical jobs keep their saved response-format selection."
+      ],
+      retryable: false
+    });
+  });
+
+  it("presents the finite unsupported-adapter marker without changing review authority", () => {
+    expect(generationResponseFormatPresentation({
+      version: 1,
+      savedPolicy: "auto",
+      effectiveMode: "unavailable",
+      schemaVersion: null,
+      schemaHash: null,
+      operation: null,
+      streaming: null,
+      requestedModel: null,
+      returnedModel: null,
+      returnedRoute: null,
+      preflight: "unavailable",
+      preflightDiagnostic: "unsupported_adapter",
+      diagnosticCode: null
+    })).toEqual(expect.objectContaining({
+      heading: "Saved response format: Auto",
+      retryable: false,
+      details: expect.arrayContaining(["The saved provider adapter does not support response formats. Review the provider settings before starting a new generation."])
+    }));
   });
 
 });

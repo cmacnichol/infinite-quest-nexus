@@ -254,6 +254,42 @@ describe("campaign store hydration", () => {
     expect(controller.store.get().generation).toMatchObject({ narration: "The preserved gate text.", review: { summary: { revision: 2, state: "decided" }, detail: { state: "idle" } } });
   });
 
+  it("keeps the finite saved response-format projection through status events and sync reconciliation", () => {
+    const responseFormat = {
+      version: 1 as const,
+      savedPolicy: "required" as const,
+      effectiveMode: "unavailable" as const,
+      schemaVersion: null,
+      schemaHash: null,
+      operation: "story" as const,
+      streaming: true,
+      requestedModel: "saved-model",
+      returnedModel: null,
+      returnedRoute: null,
+      preflight: "identity_mismatch" as const,
+      preflightDiagnostic: null,
+      diagnosticCode: null
+    };
+    const controller = createCampaignStore();
+    controller.load(sync({ generationRecovery: {
+      id: jobId, status: "recoverable", operationKind: "append", replacementTurnId: null,
+      expectedTurnNumber: 3, attempts: 1, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", resultTurnId: null,
+      responseFormat
+    } }));
+    const session = controller.attachGeneration(run());
+    session.apply({ type: "status", snapshot: snapshot({ status: "recoverable", responseFormat }) });
+    controller.load(sync({ generationRecovery: {
+      id: jobId, status: "recoverable", operationKind: "append", replacementTurnId: null,
+      expectedTurnNumber: 3, attempts: 1, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", resultTurnId: null,
+      responseFormat
+    } }));
+
+    expect(controller.store.get().generation).toMatchObject({
+      snapshot: { responseFormat },
+      hydratedGeneration: { responseFormat }
+    });
+  });
+
   it("drops a review detail response after switching campaigns", async () => {
     let resolveDetail: ((value: GenerationReviewDetail) => void) | undefined;
     const controller = createCampaignStore();

@@ -1,4 +1,4 @@
-import { generationDiagnosticPresentation, generationReviewPresentation, type CampaignProjection } from "@infinite-quest/client-core";
+import { generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation, type CampaignProjection } from "@infinite-quest/client-core";
 import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile, StoryMemorySettings } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
@@ -205,6 +205,19 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
       for (const detail of presentation.details) details.append(element(document, "li", undefined, detail));
       section.append(details);
     }
+  }
+  const responseFormat = generationResponseFormatPresentation(
+    generation.snapshot?.responseFormat ?? generation.hydratedGeneration?.responseFormat
+  );
+  if (responseFormat !== null) {
+    const format = element(document, "section", "story-response-format");
+    format.dataset.storyResponseFormat = "";
+    format.append(element(document, "h3", undefined, responseFormat.heading));
+    const details = element(document, "ul", "story-recovery-details");
+    details.setAttribute("aria-label", "Saved response format details");
+    for (const detail of responseFormat.details) details.append(element(document, "li", undefined, detail));
+    format.append(details);
+    section.append(format);
   }
   const actions = element(document, "div", "story-generation-actions");
   if (generation.monitoring === "detached" && reviewView === null) {
