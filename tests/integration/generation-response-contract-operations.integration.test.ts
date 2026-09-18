@@ -27,6 +27,7 @@ const credentialSecret = "strict-operation-contract-fixture-secret";
 const digest = "d".repeat(64);
 const model = "strict-operation-model";
 const configuration = { textResponseFormatPolicy: "required" };
+const verificationNow = Date.parse("2026-09-18T12:00:00.000Z");
 
 function story(choices = ["Wait.", "Wait.", "Listen.", "Leave."]) {
   return JSON.stringify({ narration: "Mira waits at the observatory.", choices, custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: "Mira waits at the observatory.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
@@ -95,7 +96,7 @@ integration("strict response-contract operation workflow", () => {
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "strict-operations.story", story: fixture }));
     await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
-    const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest });
+    const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest, clock: () => verificationNow });
     const application = createApiGenerationApplication(pool, apiGraph.generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Wait at the observatory.", requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 } }));
     return { job, campaignId: imported.campaignId };
@@ -103,20 +104,66 @@ integration("strict response-contract operation workflow", () => {
 
   it("uses verified strict schemas for primary, choice repair, continuity review, and semantic repair", async () => {
     const fixture = await enqueue();
-    const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest });
+    const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest, clock: () => verificationNow });
     const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, workerGraph.illustration), apiMemoryApplication(pool, credentialSecret), workerGraph.generation);
     const repository = createPostgresGenerationExecutionRepository(pool);
-    const claim = await repository.claimNext({ workerId: `strict-operations-${randomUUID()}`, leaseSeconds: 30 });
-    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId: `strict-operations-${randomUUID()}`, leaseSeconds: 30 })).resolves.toBe(true);
-    const row = await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>("SELECT status,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]);
+    const workerId = `strict-operations-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+    const row = await pool.query<{ status: string; generationPolicy: { playMode: string }; orchestrationPrivate: Record<string, any> }>("SELECT status,generation_policy AS \"generationPolicy\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]);
     expect(row.rows[0]?.status).toBe("completed");
-    const invocations = row.rows[0]!.orchestrationPrivate.responseContractInvocations;
-    expect(invocations.map((entry: { operation: string }) => entry.operation)).toEqual(expect.arrayContaining(["story_generation", "story_choice_repair", "story_continuity_review", "story_continuity_repair"]));
-    for (const body of requests) {
+    expect(row.rows[0]!.generationPolicy.playMode).toBe("story_only");
+    expect(row.rows[0]!.orchestrationPrivate.queuedResponsePolicy.invocationKeys).toEqual(["story:nonstream", "choices:nonstream", "continuity_review:nonstream"]);
+    const invocations = row.rows[0]!.orchestrationPrivate.responseContractInvocations as Array<{ operation: string; requestPayloadHash: string }>;
+    const expectedOperations = ["story_generation", "story_choice_repair", "story_continuity_review", "story_continuity_repair", "story_continuity_review"];
+    expect(invocations.map((entry) => entry.operation)).toEqual(expectedOperations);
+    const expectedSchemas = ["story", "choices", "continuity_review", "story", "continuity_review"] as const;
+    expect(requests).toHaveLength(expectedSchemas.length);
+    for (const [index, body] of requests.entries()) {
       const wire = JSON.parse(body);
-      expect(wire.response_format).toMatchObject({ type: "json_schema", json_schema: { strict: true } });
+      const schema = getProviderOutputSchema(expectedSchemas[index]!);
+      expect(wire.model).toBe(model);
+      expect(wire.response_format).toEqual({ type: "json_schema", json_schema: { name: schema.name, strict: true, schema: schema.schema } });
       expect(wire.provider).toEqual({ require_parameters: true, only: ["strict-route"] });
+      expect(invocations[index]!.requestPayloadHash).toBe(createHash("sha256").update(body).digest("hex"));
     }
-    expect(requests).toHaveLength(5);
+  }, 60_000);
+
+  it("reclaims a completed strict primary audit without a usable result and makes zero new provider calls", async () => {
+    const fixture = await enqueue();
+    const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest, clock: () => verificationNow });
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, workerGraph.illustration), apiMemoryApplication(pool, credentialSecret), workerGraph.generation);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `strict-audit-crash-a-${randomUUID()}`;
+    const firstClaim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    let interrupted = false;
+    const crashingRepository = {
+      ...repository,
+      async completeResponseContractInvocation(...args: Parameters<NonNullable<typeof repository.completeResponseContractInvocation>>) {
+        const completed = await repository.completeResponseContractInvocation!(...args);
+        if (!interrupted && completed?.status === "completed") {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [fixture.job.id]);
+          throw Object.assign(new Error("Injected termination after provider response audit completion."), { code: "generation_cancelled" });
+        }
+        return completed;
+      }
+    };
+    await expect(createGenerationExecutor({ pool, repository: crashingRepository, collaborators })
+      .execute({ claim: firstClaim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+    expect(interrupted).toBe(true);
+    const beforeReclaim = requests.length;
+    const crashed = await pool.query<{ orchestrationPrivate: Record<string, any> }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]);
+    expect(crashed.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([
+      expect.objectContaining({ operation: "story_generation", status: "completed" })
+    ]);
+    expect(crashed.rows[0]!.orchestrationPrivate.primaryResult).toBeUndefined();
+    const reclaimWorker = `strict-audit-crash-b-${randomUUID()}`;
+    const reclaim = await repository.claimNext({ workerId: reclaimWorker, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository, collaborators })
+      .execute({ claim: reclaim!, workerId: reclaimWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    expect(requests).toHaveLength(beforeReclaim);
+    const result = await pool.query<{ status: string; errorCode: string | null }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [fixture.job.id]);
+    expect(result.rows[0]).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
   }, 60_000);
 });
