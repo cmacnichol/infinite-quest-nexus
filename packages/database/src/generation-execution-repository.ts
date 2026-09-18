@@ -163,6 +163,7 @@ async function updateResponseContractInvocation(
       [scope.jobId, scope.ownerUserId, scope.workerId]
     );
     const row = result.rows[0]; if (!row) return null;
+    responseContractState(scope.jobId, row.orchestrationPrivate);
     const ledger = [...(responseContractInvocations(row.orchestrationPrivate.responseContractInvocations) ?? [])];
     const index = ledger.findIndex((item) => item.id === invocationId);
     if (index < 0) return null;
@@ -178,10 +179,12 @@ async function updateResponseContractInvocation(
     const updated: ResponseContractInvocationAudit = nextStatus === "dispatched"
       ? { ...existing, status: "dispatched", dispatchedAt: existing.dispatchedAt ?? at }
       : { ...existing, status: "completed", completedAt: at, response: { returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null } };
-    ledger[index] = updated;
+    let parsed: ResponseContractInvocationAudit;
+    try { parsed = readResponseContractInvocationAudit(updated); } catch { return null; }
+    ledger[index] = parsed;
     const write = await client.query<{ id: string }>(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating','validating') AND lease_expires_at > now() RETURNING id`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
     if (!write.rows[0]) return null;
-    return updated;
+    return parsed;
   });
 }
 
@@ -1710,6 +1713,7 @@ export function createPostgresGenerationExecutionRepository(
 
     async reserveResponseContractInvocation(scope, input) {
       readAttemptResponseContractAudit(input.request);
+      if (input.request.returnedModel !== null || input.request.returnedProviderRoute !== null || input.request.diagnosticCode !== null) return null;
       return withTransaction(pool, async (client) => {
         const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
           `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
@@ -1717,6 +1721,7 @@ export function createPostgresGenerationExecutionRepository(
           [scope.jobId, scope.ownerUserId, scope.workerId]
         );
         const row = result.rows[0]; if (!row) return null;
+        responseContractState(scope.jobId, row.orchestrationPrivate);
         const frozen = readFrozenResponseContracts(row.orchestrationPrivate.frozenResponseContracts);
         const logicalAttempt = row.orchestrationPrivate.logicalAttempt;
         if (!logicalAttempt || !hasValidLogicalAttempt(logicalAttempt)
