@@ -157,6 +157,31 @@ function normalizeHistoricalStoryOutput(parsed: unknown, defaults: StoryMemoryDe
   };
 }
 
+/**
+ * Current provider boundary: accept only documented no-op omissions and a
+ * content-only fact wrapper, then let the strict wire schema reject anything
+ * else. Historical/import compatibility remains in normalizeHistoricalStoryOutput.
+ */
+function normalizeProviderStoryOutput(parsed: unknown): unknown {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+  const story = parsed as Record<string, unknown>;
+  const canonicalFacts = Array.isArray(story.canonical_facts)
+    ? story.canonical_facts.map((fact) => {
+      if (!fact || typeof fact !== "object" || Array.isArray(fact)) return fact;
+      const keys = Object.keys(fact);
+      return keys.length === 1 && keys[0] === "content" && typeof fact.content === "string"
+        ? fact.content
+        : fact;
+    })
+    : story.canonical_facts;
+  return {
+    ...story,
+    ...(story.superseded_facts === undefined ? { superseded_facts: [] } : {}),
+    ...(story.canonical_fact_updates === undefined ? { canonical_fact_updates: [] } : {}),
+    ...(canonicalFacts === story.canonical_facts ? {} : { canonical_facts: canonicalFacts })
+  };
+}
+
 export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDefaults = {}): StoryParseResult {
   let parsed: unknown;
   try {
@@ -164,7 +189,7 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
   } catch (error) {
     return { ok: false, code: "invalid_json", errors: [error instanceof Error ? error.message : String(error)] };
   }
-  const validated = storyTurnOutputSchema.safeParse(parsed);
+  const validated = storyTurnOutputSchema.safeParse(normalizeProviderStoryOutput(parsed));
   if (!validated.success) {
     return { ok: false, code: "invalid_schema", errors: validated.error.issues.map((issue) => `${issue.path.join(".") || "response"}: ${issue.message}`) };
   }

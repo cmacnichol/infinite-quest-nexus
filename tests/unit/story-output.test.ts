@@ -70,7 +70,7 @@ describe("story output integrity", () => {
     expect(parseStoryOutput(story({ canonical_facts: "not an array" }))).toMatchObject({ ok: false, code: "invalid_schema" });
   });
 
-  it("accepts structured canonical fact updates and requires them from current responses", () => {
+  it("accepts structured canonical fact updates and defaults only omitted no-op arrays", () => {
     const factId = "11111111-1111-4111-8111-111111111111";
     const structured = parseStoryOutput(story({
       canonical_fact_updates: [{ content: "Marker One is now dark.", supersedes_fact_ids: [factId] }]
@@ -82,7 +82,10 @@ describe("story output integrity", () => {
 
     const legacy = JSON.parse(story());
     delete legacy.canonical_fact_updates;
-    expect(parseStoryOutput(JSON.stringify(legacy))).toMatchObject({ ok: false, code: "invalid_schema" });
+    expect(parseStoryOutput(JSON.stringify(legacy))).toMatchObject({
+      ok: true,
+      story: { canonical_fact_updates: [] }
+    });
     expect(parseHistoricalStoryOutput(JSON.stringify(legacy))).toMatchObject({
       ok: true,
       story: { canonical_fact_updates: [] }
@@ -96,6 +99,46 @@ describe("story output integrity", () => {
       ok: true,
       story: { canonical_fact_updates: [{ content: "Marker One is now dark.", supersedes_fact_ids: [] }] }
     });
+  });
+
+  it("treats omitted top-level no-op arrays as empty without mutating extracted input", () => {
+    const input = JSON.parse(story());
+    delete input.superseded_facts;
+    delete input.canonical_fact_updates;
+    const before = structuredClone(input);
+
+    expect(parseStoryOutput(JSON.stringify(input))).toMatchObject({
+      ok: true,
+      story: { superseded_facts: [], canonical_fact_updates: [] }
+    });
+    expect(input).toEqual(before);
+  });
+
+  it("accepts only a lossless content-only canonical fact wrapper", () => {
+    expect(parseStoryOutput(story({ canonical_facts: [{ content: "The beacon is lit." }] })))
+      .toMatchObject({ ok: true, story: { canonical_facts: ["The beacon is lit."] } });
+    expect(parseStoryOutput(story({ canonical_facts: [{ content: "The beacon is lit." }, "Another beacon is dark."] })))
+      .toMatchObject({ ok: true, story: { canonical_facts: ["The beacon is lit.", "Another beacon is dark."] } });
+
+    for (const canonical_facts of [
+      [{ content: "The beacon is lit.", supersedes_fact_ids: [] }],
+      [{ content: "The beacon is lit.", id: "11111111-1111-4111-8111-111111111111" }],
+      [{ content: "   " }],
+      [{ content: "x".repeat(4001) }]
+    ]) {
+      expect(parseStoryOutput(story({ canonical_facts }))).toMatchObject({ ok: false, code: "invalid_schema" });
+    }
+    expect(parseStoryOutput(story({ canonical_facts: [{ content: "A d20 check lights the beacon." }] })))
+      .toMatchObject({ ok: false, code: "mechanics_leak" });
+  });
+
+  it.each([
+    ["null", null],
+    ["string", "[]"],
+    ["object", {}]
+  ])("rejects a malformed supplied %s no-op array", (_label, malformed) => {
+    expect(parseStoryOutput(story({ superseded_facts: malformed }))).toMatchObject({ ok: false, code: "invalid_schema" });
+    expect(parseStoryOutput(story({ canonical_fact_updates: malformed }))).toMatchObject({ ok: false, code: "invalid_schema" });
   });
 
   it("does not treat a typed canonical-fact UUID as fiction mechanics", () => {
