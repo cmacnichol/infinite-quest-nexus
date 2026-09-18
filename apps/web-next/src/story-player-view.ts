@@ -143,6 +143,14 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
     if (detail) {
       const findings = element(document, "ul", "story-recovery-details");
       findings.setAttribute("aria-label", "Review findings");
+      for (const issue of detail.validationIssues ?? []) {
+        const message = issue.code === "missing_array"
+          ? `The response omitted ${issue.field}; an array is required.`
+          : issue.code === "expected_string_item"
+            ? `${issue.field} must contain text entries.`
+            : `The response has an invalid ${issue.field} shape.`;
+        findings.append(element(document, "li", undefined, message));
+      }
       for (const finding of detail.findings) findings.append(element(document, "li", undefined, finding.message));
       section.append(findings);
       if (detail.narration !== null) {

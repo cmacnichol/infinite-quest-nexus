@@ -29,6 +29,7 @@ interface ReviewFixtureOptions {
   readonly conflictWhenAccepted?: boolean;
   readonly replaceLatest?: boolean;
   readonly structureReview?: boolean;
+  readonly validationIssues?: readonly { field: "superseded_facts" | "canonical_fact_updates" | "canonical_facts"; code: "missing_array" | "expected_string_item" | "invalid_field_shape" }[];
 }
 
 async function installReviewApi(page: Page, canKeep = true, decisionFails = false, decisionCompletes = false, options: ReviewFixtureOptions = {}) {
@@ -39,7 +40,7 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
   const review = { version: 1, reviewId, revision: 1, state: "pending", stage: options.structureReview ? "structure" : "continuity", candidateScope: "final", reasons: [options.structureReview ? "invalid_structure" : canKeep ? "narrative_conflict" : "invalid_choices"], canKeep: options.structureReview ? false : canKeep, canRetry: true };
   const candidateNarration = options.structureReview ? null : "The lighthouse bell answered across the harbor.";
   const candidateChoices = options.structureReview ? [] : ["Follow the bell", "Wait at the quay"];
-  const detail = { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: options.structureReview ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0 };
+  const detail = { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: options.structureReview ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0, ...(options.validationIssues ? { validationIssues: options.validationIssues } : {}) };
   const decisions: Record<string, unknown>[] = [];
   const writePaths: string[] = [];
   const sharedState = options.sharedState ?? { accepted: false };
@@ -253,7 +254,10 @@ async function installStagedReviewStream(page: Page, snapshots: { readonly gener
 
 for (const surface of ["legacy", "web-next"] as const) {
   test(`${surface} reloads a structure review ahead of context advice and posts only its explicit Retry decision`, async ({ page }) => {
-    const api = await installReviewApi(page, false, false, false, { structureReview: true });
+    const api = await installReviewApi(page, false, false, false, { structureReview: true, validationIssues: [
+      { field: "canonical_fact_updates", code: "missing_array" },
+      { field: "canonical_facts", code: "expected_string_item" }
+    ] });
     if (surface === "legacy") {
       const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
       await page.route("**/vendor/photoswipe/photoswipe.css", route => route.fulfill({ contentType: "text/css", body: "" }));
@@ -277,6 +281,8 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(activeTurn).toHaveText(surface === "legacy" ? "Turn 1" : "Active turn 1");
     await expect(turnTwo).toHaveCount(0);
     await expect(recovery).toContainText("invalid structure");
+    await expect(recovery).toContainText("The response omitted canonical_fact_updates; an array is required.");
+    await expect(recovery).toContainText("canonical_facts must contain text entries.");
     await expect(recovery).not.toContainText("Context evidence was omitted");
     await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toHaveCount(0);
     await expect(preview).toBeHidden();

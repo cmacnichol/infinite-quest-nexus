@@ -83,4 +83,17 @@ describe("generation review public projection", () => {
     });
     expect(detail.findings).toEqual([{ code: "narrative_conflict", message: "Possible location contradiction in “sealed”." }]);
   });
+
+  test("retains only strict validation issue codes at the API response boundary", () => {
+    const privateCanary = "PRIVATE_VALIDATION_RESPONSE_CANARY";
+    const detail = projectGenerationReviewDetailResponse({
+      version: 1, reviewId, revision: 1, state: "pending", stage: "structure", candidateScope: "final",
+      reasons: ["invalid_structure"], canKeep: false, canRetry: true, narration: null, choices: [],
+      findings: [{ code: "invalid_structure", message: privateCanary }], retryDescription: "Retry this generation stage.",
+      retryFailure: null, omittedFindingCount: 0,
+      validationIssues: [{ field: "canonical_fact_updates", code: "missing_array" }]
+    });
+    expect(detail.validationIssues).toEqual([{ field: "canonical_fact_updates", code: "missing_array" }]);
+    expect(JSON.stringify(detail)).not.toContain(privateCanary);
+  });
 });

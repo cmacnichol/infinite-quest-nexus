@@ -79,7 +79,7 @@ integration("PostgreSQL generation review persistence", () => {
     const reasons: GenerationReviewCheckpoint["reasons"] = eligible ? ["scene_beats_missing"] : ["invalid_structure"];
     const candidate = {
       scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
-      producingRequestHash: "a".repeat(64), producingResponseId: null, sentFactIds: [], ownerUserId, campaignId: imported.campaignId,
+      producingRequestHash: "a".repeat(64), producingResponseId: "review-response", sentFactIds: [], ownerUserId, campaignId: imported.campaignId,
       worldId: world.rows[0]!.worldId, worldVersionId: payload.world_version_id ?? null, baseTurnNumber: payload.generation_base_identity.baseTurnNumber,
       expectedTurnNumber: payload.expected_turn_number, policy: {}, policyHash: "b".repeat(64), baseIdentity: payload.generation_base_identity,
       protocol: { version: payload.prompt_protocol_version, promptHash: "c".repeat(64) },
@@ -101,6 +101,14 @@ integration("PostgreSQL generation review persistence", () => {
   it("publishes the complete checkpoint while releasing its lease and blocking ordinary retry", async () => {
     const fixture = await pendingReview();
     const commandsAfterPause = commands();
+    await pool.query(
+      `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, provider_response_id, validation_errors)
+       VALUES ($1,$2,1,$3,$4::jsonb)`,
+      [ownerUserId, fixture.queued.id, "review-response", JSON.stringify([
+        "superseded_facts: Invalid input: expected array, received undefined",
+        "canonical_fact_updates: Invalid input: expected array, received undefined"
+      ])]
+    );
     const row = await pool.query<{ status: string; lease_owner: string | null; orchestration_private: { generationReview?: unknown } }>(
       "SELECT status,lease_owner,orchestration_private FROM generation_jobs WHERE id=$1", [fixture.queued.id]
     );
@@ -126,7 +134,11 @@ integration("PostgreSQL generation review persistence", () => {
     )).resolves.toEqual(retryBefore);
     await expect(commandsAfterPause.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
       reviewId: fixture.checkpoint.reviewId, revision: 1, state: "pending", narration: fixture.checkpoint.gateCandidate.story?.narration,
-      canKeep: false, canRetry: true, choices: fixture.checkpoint.gateCandidate.story?.choices, findings: [{ code: "invalid_structure", message: expect.any(String) }]
+      canKeep: false, canRetry: true, choices: fixture.checkpoint.gateCandidate.story?.choices, findings: [{ code: "invalid_structure", message: expect.any(String) }],
+      validationIssues: [
+        { field: "superseded_facts", code: "missing_array" },
+        { field: "canonical_fact_updates", code: "missing_array" }
+      ]
     });
     await expect(commandsAfterPause.getJob({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
       id: fixture.queued.id,
@@ -139,6 +151,37 @@ integration("PostgreSQL generation review persistence", () => {
     await expect(commandsAfterPause.retry({ ownerUserId, jobId: fixture.queued.id })).rejects.toMatchObject({
       kind: "invalid_state", details: { reason: "retry_source_state", generationStatus: "discarded" }
     });
+  });
+
+  it("binds diagnostics to one producing response and omits stale or ambiguous attempts", async () => {
+    const fixture = await pendingReview();
+    const repository = commands();
+    const insert = (number: number, responseId: string, errors: readonly string[]) => pool.query(
+      `INSERT INTO generation_attempts (owner_user_id, generation_job_id, attempt_number, provider_response_id, validation_errors)
+       VALUES ($1,$2,$3,$4,$5::jsonb)`, [ownerUserId, fixture.queued.id, number, responseId, JSON.stringify(errors)]
+    );
+    await insert(1, "stale-response", ["canonical_facts.0: Invalid input: expected string, received object"]);
+    await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.not.toHaveProperty("validationIssues");
+    await insert(2, "review-response", ["canonical_facts.0: Invalid input: expected string, received object"]);
+    await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
+      validationIssues: [{ field: "canonical_facts", code: "expected_string_item" }]
+    });
+    await insert(3, "review-response", ["canonical_fact_updates: Invalid input: expected array, received undefined"]);
+    await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.not.toHaveProperty("validationIssues");
+    await pool.query(
+      `UPDATE generation_jobs
+          SET orchestration_private = jsonb_set(orchestration_private, '{generationReview,gateCandidate,producingResponseId}', 'null'::jsonb)
+        WHERE id=$1`, [fixture.queued.id]
+    );
+    await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.not.toHaveProperty("validationIssues");
+    await pool.query(
+      `UPDATE generation_jobs
+          SET status='discarded', orchestration_private = jsonb_set(orchestration_private, '{generationReview,state}', '"decided"'::jsonb)
+        WHERE id=$1`, [fixture.queued.id]
+    );
+    await expect(repository.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.not.toHaveProperty("validationIssues");
+    const foreignOwner = (await pool.query<{ id: string }>("INSERT INTO users(display_name) VALUES ('Diagnostic foreign owner') RETURNING id")).rows[0]!.id;
+    await expect(repository.getReview({ ownerUserId: foreignOwner, jobId: fixture.queued.id })).rejects.toMatchObject({ kind: "not_found" });
   });
 
   it("hydrates the pending review into recovery sync and changes its fingerprint when only the review revision changes", async () => {
