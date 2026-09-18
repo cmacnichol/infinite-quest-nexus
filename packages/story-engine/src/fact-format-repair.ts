@@ -1,6 +1,6 @@
-import type { StoryTurnOutput } from "../../contracts/src/generation.js";
+import { canonicalFactUpdateSchema, type StoryTurnOutput } from "../../contracts/src/generation.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
-import { extractJsonObject, parseStoryOutput } from "./output.js";
+import { containsMechanicsLanguage, extractJsonObject, parseStoryOutput } from "./output.js";
 
 export type VisibleRepairFact = Readonly<{ id: string; content: string }>;
 
@@ -26,7 +26,7 @@ export type FactFormatRepairResult =
 type FactFormatRepairReason = Extract<FactFormatRepairResult, { eligible: false }>["reason"];
 
 const ID_LABEL = /^[A-Za-z0-9_.:-]{0,200}$/u;
-const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u;
+const UUID_SHAPED = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u;
 
 type VisibleFactIndex = Readonly<{
   exact: ReadonlyMap<string, VisibleRepairFact>;
@@ -42,19 +42,23 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 }
 
-function isFactContent(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0 && value.length <= 4000;
+function isExactFactContent(value: unknown): value is string {
+  return typeof value === "string" && value === value.trim() && value.length > 0 && value.length <= 4000;
 }
 
-function isUuid(value: unknown): value is string {
-  return typeof value === "string" && UUID.test(value);
+function isContractUuid(value: unknown): value is string {
+  return canonicalFactUpdateSchema.shape.supersedes_fact_ids.element.safeParse(value).success;
+}
+
+function isUuidShaped(value: string): boolean {
+  return UUID_SHAPED.test(value);
 }
 
 function indexVisibleFacts(visibleFacts: readonly VisibleRepairFact[]): VisibleFactIndex | null {
   const exact = new Map<string, VisibleRepairFact>();
   const foldedUuid = new Map<string, VisibleRepairFact>();
   for (const visible of visibleFacts) {
-    if (!isRecord(visible) || !isUuid(visible.id) || typeof visible.content !== "string") return null;
+    if (!isRecord(visible) || !isContractUuid(visible.id) || typeof visible.content !== "string") return null;
     const folded = visible.id.toLowerCase();
     if (exact.has(visible.id) || foldedUuid.has(folded)) return null;
     exact.set(visible.id, visible);
@@ -82,6 +86,16 @@ function protectedCandidate(source: Record<string, unknown>): Record<string, unk
   return { ...source, canonical_facts: [] };
 }
 
+const PROTECTED_STORY_FIELDS = [
+  "choices", "custom_action_suggestion", "scratchpad", "tracker_updates", "image_prompt",
+  "continuity_summary", "superseded_facts", "canonical_fact_updates", "open_threads"
+] as const;
+
+function preservesProtectedFields(source: Record<string, unknown>, story: StoryTurnOutput): boolean {
+  return PROTECTED_STORY_FIELDS.every((field) => source[field] === undefined
+    || stableStringify(source[field]) === stableStringify(story[field]));
+}
+
 function result(reason: FactFormatRepairReason): FactFormatRepairResult {
   return { eligible: false, reason };
 }
@@ -107,7 +121,7 @@ export function planFactFormatRepair(input: Readonly<{
 
   const protectedSource = protectedCandidate(extracted);
   const protectedParsed = parseStoryOutput(JSON.stringify(protectedSource));
-  if (!protectedParsed.ok) return result("invalid_protected_fields");
+  if (!protectedParsed.ok || !preservesProtectedFields(protectedSource, protectedParsed.story)) return result("invalid_protected_fields");
 
   const facts = extracted.canonical_facts;
   if (!Array.isArray(facts) || facts.length > 100) return result("unsupported_fact_shape");
@@ -122,18 +136,28 @@ export function planFactFormatRepair(input: Readonly<{
 
   for (const [sourceIndex, fact] of facts.entries()) {
     if (typeof fact === "string") {
+      if (!isExactFactContent(fact)) return result("unsupported_fact_shape");
+      if (containsMechanicsLanguage(fact)) return result("invalid_protected_fields");
       additions.push(fact);
       continue;
     }
     if (!isRecord(fact)) return result("unsupported_fact_shape");
 
+    if (hasExactKeys(fact, ["content"])) {
+      if (!isExactFactContent(fact.content)) return result("unsupported_fact_shape");
+      if (containsMechanicsLanguage(fact.content)) return result("invalid_protected_fields");
+      additions.push(fact.content);
+      continue;
+    }
+
     if (hasExactKeys(fact, ["content", "id"])) {
       const { content, id } = fact;
-      if (!isFactContent(content)) return result("unsupported_fact_shape");
+      if (!isExactFactContent(content)) return result("unsupported_fact_shape");
+      if (containsMechanicsLanguage(content)) return result("invalid_protected_fields");
       if (id !== null && typeof id !== "string") return result("unsupported_fact_shape");
 
       const visibleFact = typeof id === "string"
-        ? visible.exact.get(id) ?? (isUuid(id) ? visible.foldedUuid.get(id.toLowerCase()) : undefined)
+        ? visible.exact.get(id) ?? (isUuidShaped(id) ? visible.foldedUuid.get(id.toLowerCase()) : undefined)
         : undefined;
       if (visibleFact) {
         if (content !== visibleFact.content) return result("ambiguous_authority");
@@ -149,20 +173,22 @@ export function planFactFormatRepair(input: Readonly<{
     }
 
     if (hasExactKeys(fact, ["content", "estimatedTokens"])) {
-      if (!isFactContent(fact.content)
+      if (!isExactFactContent(fact.content)
         || typeof fact.estimatedTokens !== "number"
         || !Number.isFinite(fact.estimatedTokens)
         || !Number.isInteger(fact.estimatedTokens)
         || fact.estimatedTokens < 0) return result("unsupported_fact_shape");
+      if (containsMechanicsLanguage(fact.content)) return result("invalid_protected_fields");
       additions.push(fact.content);
       changes.push({ sourceIndex, kind: "metadata_to_addition" });
       continue;
     }
 
     if (hasExactKeys(fact, ["content", "supersedes_fact_ids"])) {
-      if (!isFactContent(fact.content) || !Array.isArray(fact.supersedes_fact_ids)) return result("unsupported_fact_shape");
+      if (!isExactFactContent(fact.content) || !Array.isArray(fact.supersedes_fact_ids)) return result("unsupported_fact_shape");
+      if (containsMechanicsLanguage(fact.content)) return result("invalid_protected_fields");
       const ids = fact.supersedes_fact_ids;
-      if (!ids.every(isUuid)) return result("ambiguous_authority");
+      if (!ids.every(isContractUuid)) return result("ambiguous_authority");
       if (!ids.length) {
         additions.push(fact.content);
         changes.push({ sourceIndex, kind: "metadata_to_addition" });

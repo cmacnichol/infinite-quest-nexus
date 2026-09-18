@@ -28,3 +28,13 @@ PostgreSQL, browser, and live-provider checks are skipped because this patch has
 ## Risks and Phase 04 contract
 
 The result is a proposal only. Phase 04 must bind its explicit, revision-scoped decision and durable journal to all four hashes; reload current authority at commit; rerun mode-specific choice validation; and preserve the original raw candidate. The supplied visible inventory is sufficient only to propose a replacement mapping; it does not prove that a target fact remains active at commit time.
+
+## Review correction
+
+Independent review found four planner defects in the first Phase 03 commit: a content-only wrapper failed when mixed with a malformed object; a mechanics-bearing exact visible reference was removed before mechanics validation; Zod trimming could silently change protected strings, additions, and existing updates; and a broad UUID shape accepted an invalid visible inventory variant that the shared fact-update contract rejects.
+
+The follow-up rejects any candidate whose protected non-narration values or fact content would change under strict parsing. It preserves content-only wrappers in a mixed canonical-fact array, checks mechanics in every supported source fact before removing or moving it, and uses the shared `canonicalFactUpdateSchema` UUID validator for visible and supersession authority. Raw UUID shape matching remains limited to case-insensitive collision protection for inert ID labels.
+
+- **RED:** the first correction matrix added five tests and failed all five; the UUID-inventory regression then failed separately before shared-schema validation.
+- **GREEN:** `corepack pnpm exec vitest run tests/unit/fact-format-repair.test.ts tests/unit/story-output.test.ts tests/unit/story-only-output.test.ts` passed: 3 files, 100 tests.
+- **GREEN:** `corepack pnpm check` passed.

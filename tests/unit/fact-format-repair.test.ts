@@ -62,6 +62,15 @@ describe("fact format repair planner", () => {
     expect(result).toEqual({ eligible: false, reason: "ambiguous_authority" });
   });
 
+  it("rejects mechanics in a redundant visible reference before removing it", () => {
+    const mechanical = "Roll a d20 to make a strength check.";
+    const result = planFactFormatRepair({
+      rawOutput: rawSyntheticStory({ canonical_facts: [{ id: visibleBeaconId, content: mechanical }] }),
+      visibleFacts: [{ id: visibleBeaconId, content: mechanical }]
+    });
+    expect(result).toEqual({ eligible: false, reason: "invalid_protected_fields" });
+  });
+
   it("moves an explicit valid replacement to canonical_fact_updates in source order", () => {
     const plan = eligible(rawSyntheticStory({ canonical_facts: [
       { content: "The beacon is lit.", supersedes_fact_ids: [] },
@@ -92,6 +101,15 @@ describe("fact format repair planner", () => {
       { content: "The gate is open.", supersedes_fact_ids: [visibleGateId] }
     ]);
     expect(plan.changes).toHaveLength(2);
+  });
+
+  it("preserves a content-only wrapper when another item needs repair", () => {
+    const plan = eligible(rawSyntheticStory({ canonical_facts: [
+      { content: "The gate is open." },
+      { id: "f1", content: "The beacon is lit." }
+    ] }), []);
+    expect(plan.story.canonical_facts).toEqual(["The gate is open.", "The beacon is lit."]);
+    expect(plan.changes).toEqual([{ sourceIndex: 1, kind: "id_label_to_addition" }]);
   });
 
   it("keeps a content-only wrapper under the normal parser instead of proposing repair", () => {
@@ -156,7 +174,8 @@ describe("fact format repair planner", () => {
       { id: visibleBeaconId, content: "The beacon is dark." },
       { id: visibleBeaconId.toUpperCase(), content: "Different visible content." }
     ]],
-    ["malformed visible UUID", [{ id: "not-a-uuid", content: "The beacon is dark." }]]
+    ["malformed visible UUID", [{ id: "not-a-uuid", content: "The beacon is dark." }]],
+    ["invalid UUID variant accepted by a broad shape check", [{ id: "11111111-1111-4111-c111-111111111111", content: "The beacon is dark." }]]
   ])("rejects an invalid %s inventory", (_name, inventory) => {
     const result = planFactFormatRepair({
       rawOutput: rawSyntheticStory({ canonical_facts: [{ id: "label", content: "The beacon is lit." }] }),
@@ -188,6 +207,36 @@ describe("fact format repair planner", () => {
     ["mechanics", rawSyntheticStory({ narration: "The die shows seventeen.", canonical_facts: [{ id: "label", content: "The beacon is lit." }] }), "invalid_protected_fields"]
   ])("does not conceal %s", (_name, rawOutput, reason) => {
     expect(planFactFormatRepair({ rawOutput, visibleFacts: [] })).toEqual({ eligible: false, reason });
+  });
+
+  it("rejects protected values that strict parsing would trim", () => {
+    const result = planFactFormatRepair({
+      rawOutput: rawSyntheticStory({
+        choices: [" Approach the beacon. ", "Wait at the gate.", "Study the horizon.", "Call to the keeper."],
+        canonical_facts: [{ id: "f1", content: "The beacon is lit." }]
+      }),
+      visibleFacts: []
+    });
+    expect(result).toEqual({ eligible: false, reason: "invalid_protected_fields" });
+  });
+
+  it("rejects fact additions that strict parsing would trim", () => {
+    const result = planFactFormatRepair({
+      rawOutput: rawSyntheticStory({ canonical_facts: [{ id: "f1", content: " The beacon is lit. " }] }),
+      visibleFacts: []
+    });
+    expect(result).toEqual({ eligible: false, reason: "unsupported_fact_shape" });
+  });
+
+  it("rejects existing fact updates that strict parsing would trim", () => {
+    const result = planFactFormatRepair({
+      rawOutput: rawSyntheticStory({
+        canonical_facts: [{ id: "f1", content: "The beacon is lit." }],
+        canonical_fact_updates: [{ content: " The beacon is dark. ", supersedes_fact_ids: [visibleBeaconId] }]
+      }),
+      visibleFacts
+    });
+    expect(result).toEqual({ eligible: false, reason: "invalid_protected_fields" });
   });
 
   it("rejects excess facts before a strict result can be proposed", () => {
