@@ -23,6 +23,7 @@
     "migrate": "tsx packages/database/src/migrate-cli.ts",
     "evaluate:chronicle": "tsx scripts/evaluate-chronicle-retrieval.ts",
     "evaluate:story-continuity": "tsx scripts/evaluate-story-continuity.ts",
+    "probe:structured-output": "tsx scripts/probe-structured-output.ts",
     "system-archive": "tsx scripts/system-archive.ts",
     "test": "pnpm test:unit && pnpm test:integration",
     "test:unit": "vitest run tests/unit",
