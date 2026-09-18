@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { generationExecutionProtocolIdentity, generationPolicyIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
-import { parseTurnValidationReportOptions, readTurnValidationReport } from "../../scripts/report-turn-validation.js";
+import { formatTurnValidationMarkdown, parseTurnValidationReportOptions, readTurnValidationReport } from "../../scripts/report-turn-validation.js";
 
 const buildIdentityEnvironmentKeys = ["NEXUS_BUILD_COMMIT", "GIT_SHA", "BUILD_SHA"] as const;
 type BuildIdentityEnvironmentKey = typeof buildIdentityEnvironmentKeys[number];
@@ -89,6 +89,41 @@ describe("turn validation report", () => {
     expect(ledgerCall?.[0]).toContain("LIMIT 24");
     expect(ledgerCall?.[0]).not.toMatch(/requestBody|partialContent|raw_output|credential|privateMessage/i);
     expect(report.metrics).toEqual(expect.objectContaining({ jobs: 0, initialValid: 0 }));
+  });
+
+  it("renders bounded counter and streaming cohort visibility in the default Markdown report", () => {
+    const markdown = formatTurnValidationMarkdown({
+      window: { since: null, limit: 1, reportedAt: "2026-09-18T00:00:00.000Z", attemptsTruncated: true }, buildIdentity: "unknown", transportFailureClassification: "unavailable", jobsWithPersistedTransportDiagnostic: 1,
+      metrics: { jobs: 1, completedJobs: 1, jobsWithInitialResponse: 1, initialValid: 1, initialInvalid: 0, initialUnknown: 0, repairResponses: 0, validRepairResponses: 0, preflightUnavailable: 0, missingPrimaryResponse: 1, refusedResponses: 0, transportFailures: 0, primaryCalls: 1, acceptedJobs: 1, discardedJobs: 0, cancelledJobs: 0 },
+      outcomes: [],
+      cohorts: [{ promptProtocol: "unknown", executionProtocolHash: "unknown", configuredModel: "unknown", playMode: "unknown", reviewMode: "unknown", contextBucket: "unknown", policy: "legacy", effectiveMode: "legacy", schemaVersion: "unknown", schemaHash: "unknown", operation: "unknown", requestedModel: "unknown", returnedModel: "unknown", returnedRoute: "unknown", contractProtocol: "unknown", operationClosureVersion: "unknown", streaming: "stream", metrics: { jobs: 1, completedJobs: 1, jobsWithInitialResponse: 1, initialValid: 1, initialInvalid: 0, initialUnknown: 0, repairResponses: 0, validRepairResponses: 0, preflightUnavailable: 0, missingPrimaryResponse: 1, refusedResponses: 0, transportFailures: 0, primaryCalls: 1, acceptedJobs: 1, discardedJobs: 0, cancelledJobs: 0 } }]
+    });
+    expect(markdown).toContain("Earliest initial application-valid");
+    expect(markdown).toContain("Missing primary response: 1");
+    expect(markdown).toContain("Jobs with persisted transport/timeout diagnostic: 1/1");
+    expect(markdown).toContain("| legacy | legacy | stream |");
+    expect(markdown).toContain("Attempt rows truncated");
+  });
+
+  it("counts only legacy initial attempts with durable response evidence and treats a recorded null-diagnostic contract failure as missing", async () => {
+    const query = vi.fn(async (text: string) => {
+      if (text.includes("jsonb_array_elements")) return { rows: [{ jobId: "contract", invocationOrdinal: 1, policy: "required", mode: "json_schema", schemaVersion: "v1", schemaHash: "a".repeat(64), invocationKey: "story:nonstream", operation: "story_generation", requestedModel: "model", returnedModel: null, returnedRoute: null, status: "completed", diagnosticCode: null, failureRecorded: true, dispatchedAt: "2026-09-18T00:00:00.000Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: null, costMicrounits: null }] };
+      if (text.includes("FROM generation_jobs")) return { rows: [
+        { id: "legacy", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "legacy-model", errorCode: null, queuedPolicy: null, operationClosureVersion: null, failureDiagnostic: null, failureDiagnosticCode: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+        { id: "contract", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, failureDiagnosticCode: "provider_transport_error", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
+      ] };
+      if (text.includes("FROM generation_attempts")) return { rows: [
+        { jobId: "legacy", attemptNumber: 1, recoveryKind: "initial", completedAt: null, hasOutput: false, hasProviderResponseId: false, validationErrorCount: null, requestModel: "legacy-model", responseModel: null },
+        { jobId: "legacy", attemptNumber: 2, recoveryKind: "initial", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, hasProviderResponseId: true, validationErrorCount: 0, requestModel: "legacy-model", responseModel: null }
+      ] };
+      return { rows: [] };
+    });
+    const report = await readTurnValidationReport({ query } as any, { limit: 5, since: null, format: "json" });
+    expect(report.metrics).toMatchObject({ primaryCalls: 2, missingPrimaryResponse: 1, transportFailures: 0, initialValid: 0, initialUnknown: 1 });
+    expect(report.cohorts).toEqual(expect.arrayContaining([expect.objectContaining({ policy: "legacy", effectiveMode: "legacy" })]));
+    expect(report.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ jobId: "legacy", actualReturnedModel: "unknown" })]));
+    expect(report.transportFailureClassification).toBe("unavailable");
+    expect(report.jobsWithPersistedTransportDiagnostic).toBe(1);
   });
 
   it("reports contract cohorts from bounded ledger scalars without repairing the first response", async () => {

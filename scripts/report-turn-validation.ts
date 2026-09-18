@@ -15,8 +15,8 @@ export type TurnValidationReportOptions = Readonly<{
 
 type QueryClient = Readonly<{ query<T = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<{ rows: T[] }> }>;
 type JobRow = Readonly<{ id: string; status: JobOutcome["status"]; createdAt: string; promptProtocol: string | null; requestedModel: string; errorCode: string | null; failureDiagnostic: unknown; failureDiagnosticCode: string | null; queuedPolicy: string | null; operationClosureVersion: string | null; contextOptions: Record<string, unknown> | null; generationPolicy: Record<string, unknown> | null; storyPromptCompatibility: unknown }>;
-type AttemptRow = Readonly<{ jobId: string; attemptNumber: number; recoveryKind: string; completedAt: string | null; hasOutput: boolean; validationErrorCount: number | null; requestModel: string | null; responseModel: string | null }>;
-type ContractLedgerRow = Readonly<{ jobId: string; invocationOrdinal: number; policy: string | null; mode: string | null; schemaVersion: string | null; schemaHash: string | null; operation: string | null; requestedModel: string | null; returnedModel: string | null; returnedRoute: string | null; status: string | null; diagnosticCode: string | null; dispatchedAt: string | null; completedAt: string | null; latencyMs: number | null; costMicrounits: number | null }>;
+type AttemptRow = Readonly<{ jobId: string; attemptNumber: number; recoveryKind: string; completedAt: string | null; hasOutput: boolean; hasProviderResponseId: boolean; validationErrorCount: number | null; requestModel: string | null; responseModel: string | null }>;
+type ContractLedgerRow = Readonly<{ jobId: string; invocationOrdinal: number; policy: string | null; mode: string | null; schemaVersion: string | null; schemaHash: string | null; invocationKey: string | null; operation: string | null; requestedModel: string | null; returnedModel: string | null; returnedRoute: string | null; status: string | null; diagnosticCode: string | null; failureRecorded: boolean; dispatchedAt: string | null; completedAt: string | null; latencyMs: number | null; costMicrounits: number | null }>;
 
 function reportLabel(value: unknown): string {
   const label = typeof value === "string" ? value.trim() : "";
@@ -39,6 +39,7 @@ type CohortLabels = Readonly<ProtocolCohortIdentity & {
   returnedRoute: string;
   contractProtocol: string;
   operationClosureVersion: string;
+  streaming: string;
 }>;
 
 function legacyPromptLibraryLabel(executionProtocol: string, generationPolicy: unknown): string | null {
@@ -113,13 +114,13 @@ export function parseTurnValidationReportOptions(args: readonly string[]): TurnV
   return { limit, since, format };
 }
 
-function observationFrom(row: AttemptRow): ValidationObservation {
+function observationFrom(row: AttemptRow, legacy: boolean): ValidationObservation {
   return {
     jobId: row.jobId,
     attemptNumber: row.attemptNumber,
     operation: row.recoveryKind === "initial" ? "initial" : "repair",
     outcome: !row.completedAt || !row.hasOutput || row.validationErrorCount === null ? "unknown" : row.validationErrorCount ? "invalid" : "valid",
-    primaryCall: false
+    primaryCall: legacy && row.recoveryKind === "initial" && (row.completedAt !== null || row.hasOutput || row.hasProviderResponseId)
   };
 }
 
@@ -141,12 +142,11 @@ function selectedPrimaryLedger(ledger: readonly ContractLedgerRow[], jobId: stri
     .sort((left, right) => left.invocationOrdinal - right.invocationOrdinal)[0];
 }
 
-function ledgerObservation(entry: ContractLedgerRow, job: JobRow | undefined): ValidationObservation | undefined {
+function ledgerObservation(entry: ContractLedgerRow): ValidationObservation | undefined {
   if (!(entry.operation === "story_generation" || entry.operation === "story_recovery")
     || !(entry.status === "dispatched" || entry.status === "completed")) return undefined;
   const responseState = entry.diagnosticCode === "provider_refusal" ? "refused"
-    : job?.failureDiagnosticCode === "provider_transport_error" || job?.failureDiagnosticCode === "provider_request_timeout" ? "transport"
-      : entry.status === "dispatched" || entry.completedAt === null ? "missing" : undefined;
+    : entry.status === "dispatched" || entry.completedAt === null || entry.failureRecorded ? "missing" : undefined;
   return { jobId: entry.jobId, attemptNumber: 1_000_000 + entry.invocationOrdinal, operation: "preflight", outcome: "unknown", primaryCall: true,
     ...(responseState ? { responseState } : {}) };
 }
@@ -172,8 +172,8 @@ function cohort(row: JobRow, configuredModel: string, protocol: ProtocolCohortId
     playMode: reportLabel(policy.playMode),
     reviewMode: reportLabel(policyMetadata?.continuityReview),
     contextBucket: budget === null ? "unknown" : budget < 32_000 ? "under-32k" : budget < 128_000 ? "32k-127k" : "128k-plus",
-    policy: reportLabel(ledger?.policy ?? row.queuedPolicy),
-    effectiveMode: reportLabel(ledger?.mode),
+    policy: reportLabel(ledger?.policy ?? row.queuedPolicy ?? "legacy"),
+    effectiveMode: reportLabel(ledger?.mode ?? (row.queuedPolicy ? null : "legacy")),
     schemaVersion: reportLabel(ledger?.schemaVersion),
     schemaHash: reportLabel(ledger?.schemaHash),
     operation: reportLabel(ledger?.operation),
@@ -181,7 +181,8 @@ function cohort(row: JobRow, configuredModel: string, protocol: ProtocolCohortId
     returnedModel: reportLabel(ledger?.returnedModel),
     returnedRoute: reportLabel(ledger?.returnedRoute),
     contractProtocol: "unknown",
-    operationClosureVersion: reportLabel(row.operationClosureVersion)
+    operationClosureVersion: reportLabel(row.operationClosureVersion),
+    streaming: ledger?.invocationKey?.endsWith(":stream") ? "stream" : ledger ? "nonstream" : "unknown"
   };
 }
 
@@ -189,7 +190,7 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
   await client.query("BEGIN READ ONLY");
   try {
     const jobs = await client.query<JobRow>(
-      `SELECT id, status, created_at AS "createdAt", prompt_protocol_version AS "promptProtocol", requested_model AS "requestedModel",
+      `SELECT id, status, created_at AS "createdAt", CASE WHEN length(prompt_protocol_version) <= 512 THEN prompt_protocol_version END AS "promptProtocol", CASE WHEN length(requested_model) <= 512 THEN requested_model END AS "requestedModel",
               error_code AS "errorCode",
               jsonb_build_object('version', orchestration_private #> '{lastFailureDiagnostic,version}', 'category', orchestration_private #> '{lastFailureDiagnostic,category}',
                 'code', orchestration_private #> '{lastFailureDiagnostic,code}', 'phase', orchestration_private #> '{lastFailureDiagnostic,phase}',
@@ -205,20 +206,31 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
       [options.since, options.limit]
     );
     const ids = jobs.rows.map((row) => row.id);
-    const attempts = ids.length === 0 ? { rows: [] as AttemptRow[] } : await client.query<AttemptRow>(
+    const attemptLimit = options.limit * 24;
+    const attemptQuery = ids.length === 0 ? { rows: [] as AttemptRow[] } : await client.query<AttemptRow>(
       `SELECT generation_job_id AS "jobId", attempt_number AS "attemptNumber", recovery_kind AS "recoveryKind", completed_at AS "completedAt",
               (raw_output IS NOT NULL AND length(raw_output) > 0) AS "hasOutput",
+              (provider_response_id IS NOT NULL) AS "hasProviderResponseId",
               CASE WHEN jsonb_typeof(validation_errors) = 'array' THEN jsonb_array_length(validation_errors) ELSE NULL END AS "validationErrorCount",
-              request_metadata->>'model' AS "requestModel", response_metadata->>'modelInstanceId' AS "responseModel"
-         FROM generation_attempts WHERE generation_job_id = ANY($1::uuid[]) ORDER BY generation_job_id, attempt_number`, [ids]
+              CASE WHEN length(request_metadata->>'model') <= 512 THEN request_metadata->>'model' END AS "requestModel",
+              CASE WHEN length(response_metadata->>'modelInstanceId') <= 256 THEN response_metadata->>'modelInstanceId' END AS "responseModel"
+         FROM generation_attempts WHERE generation_job_id = ANY($1::uuid[]) ORDER BY generation_job_id, attempt_number LIMIT $2`, [ids, attemptLimit + 1]
     );
+    const attemptsTruncated = attemptQuery.rows.length > attemptLimit;
+    const attempts = { rows: attemptQuery.rows.slice(0, attemptLimit) };
     const ledger = await client.query<ContractLedgerRow>(
       `SELECT job.id AS "jobId", entries.ordinality AS "invocationOrdinal",
-              entries.entry #>> '{request,mode}' AS "mode", entries.entry #>> '{request,schemaVersion}' AS "schemaVersion",
-              entries.entry #>> '{request,schemaHash}' AS "schemaHash", entries.entry->>'operation' AS "operation",
-              entries.entry #>> '{request,requestedModel}' AS "requestedModel", entries.entry #>> '{response,returnedModel}' AS "returnedModel",
-              entries.entry #>> '{response,returnedProviderRoute}' AS "returnedRoute", entries.entry->>'status' AS "status",
-              entries.entry #>> '{response,diagnosticCode}' AS "diagnosticCode", entries.entry->>'dispatchedAt' AS "dispatchedAt",
+              CASE WHEN length(entries.entry #>> '{request,mode}') <= 32 THEN entries.entry #>> '{request,mode}' END AS "mode",
+              CASE WHEN length(entries.entry #>> '{request,schemaVersion}') <= 200 THEN entries.entry #>> '{request,schemaVersion}' END AS "schemaVersion",
+              CASE WHEN entries.entry #>> '{request,schemaHash}' ~ '^[a-f0-9]{64}$' THEN entries.entry #>> '{request,schemaHash}' END AS "schemaHash",
+              CASE WHEN length(entries.entry->>'invocationKey') <= 64 THEN entries.entry->>'invocationKey' END AS "invocationKey",
+              CASE WHEN length(entries.entry->>'operation') <= 64 THEN entries.entry->>'operation' END AS "operation",
+              CASE WHEN length(entries.entry #>> '{request,requestedModel}') <= 512 THEN entries.entry #>> '{request,requestedModel}' END AS "requestedModel",
+              CASE WHEN length(entries.entry #>> '{response,returnedModel}') <= 256 THEN entries.entry #>> '{response,returnedModel}' END AS "returnedModel",
+              CASE WHEN length(entries.entry #>> '{response,returnedProviderRoute}') <= 256 THEN entries.entry #>> '{response,returnedProviderRoute}' END AS "returnedRoute",
+              CASE WHEN length(entries.entry->>'status') <= 16 THEN entries.entry->>'status' END AS "status",
+              CASE WHEN length(entries.entry #>> '{response,diagnosticCode}') <= 80 THEN entries.entry #>> '{response,diagnosticCode}' END AS "diagnosticCode",
+              (failures.failure IS NOT NULL) AS "failureRecorded", entries.entry->>'dispatchedAt' AS "dispatchedAt",
               entries.entry->>'completedAt' AS "completedAt", NULL::integer AS "latencyMs", NULL::bigint AS "costMicrounits",
               job.orchestration_private #>> '{queuedResponsePolicy,policy}' AS "policy"
          FROM generation_jobs job CROSS JOIN LATERAL (
@@ -227,14 +239,23 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
                THEN job.orchestration_private->'responseContractInvocations' ELSE '[]'::jsonb END) WITH ORDINALITY AS source(entry, ordinality)
             LIMIT 24
          ) AS entries
+         LEFT JOIN LATERAL (
+           SELECT failure
+             FROM jsonb_array_elements(CASE WHEN jsonb_typeof(job.orchestration_private->'preparedResponseFailures') = 'array'
+               THEN job.orchestration_private->'preparedResponseFailures' ELSE '[]'::jsonb END) AS source(failure)
+            WHERE failure->>'invocationId' = entries.entry->>'id' AND failure->>'version' = '1'
+            LIMIT 1
+         ) AS failures ON true
         WHERE job.id = ANY($1::uuid[])`, [ids]
     );
     const observations = [
-      ...attempts.rows.map(observationFrom),
+      ...attempts.rows.map((attempt) => observationFrom(attempt, jobs.rows.find((job) => job.id === attempt.jobId)?.queuedPolicy === null || jobs.rows.find((job) => job.id === attempt.jobId)?.queuedPolicy === undefined)),
       ...jobs.rows.map((job) => preflightObservation(job, ledger.rows)).filter((value): value is ValidationObservation => Boolean(value)),
-      ...ledger.rows.map((entry) => ledgerObservation(entry, jobs.rows.find((job) => job.id === entry.jobId))).filter((value): value is ValidationObservation => Boolean(value))
+      ...ledger.rows.map((entry) => ledgerObservation(entry)).filter((value): value is ValidationObservation => Boolean(value))
     ];
     const metrics = summarizeValidationOutcomes(jobs.rows.map((row) => ({ jobId: row.id, status: row.status })), observations);
+    const jobsWithPersistedTransportDiagnostic = jobs.rows.filter((job) => job.failureDiagnosticCode === "provider_transport_error"
+      || job.failureDiagnosticCode === "provider_request_timeout").length;
     const frozenInitialModels = new Map<string, { attemptNumber: number; model: string }>();
     for (const attempt of attempts.rows) {
       const initialModel = attemptRequestModel(attempt);
@@ -267,8 +288,10 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
       cohortGroups.set(key, group);
     }
     return {
-      window: { since: options.since, limit: options.limit, reportedAt: new Date().toISOString() },
+      window: { since: options.since, limit: options.limit, reportedAt: new Date().toISOString(), attemptsTruncated },
       buildIdentity: reportLabel(process.env.NEXUS_BUILD_COMMIT ?? process.env.GIT_SHA ?? process.env.BUILD_SHA),
+      transportFailureClassification: "unavailable" as const,
+      jobsWithPersistedTransportDiagnostic,
       metrics,
       outcomes: jobs.rows.map((row) => {
         const failureDiagnostic = projectGenerationFailureDiagnostic(row.failureDiagnostic);
@@ -299,12 +322,19 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
   }
 }
 
-function markdown(report: Awaited<ReturnType<typeof readTurnValidationReport>>): string {
+export function formatTurnValidationMarkdown(report: Awaited<ReturnType<typeof readTurnValidationReport>>): string {
   const m = report.metrics;
   const percent = (numerator: number, denominator: number) => denominator === 0 ? "n/a (0/0)" : `${(numerator / denominator * 100).toFixed(1)}% (${numerator}/${denominator})`;
+  const cohortRows = report.cohorts.slice(0, 50).map((cohort) => `| ${cohort.policy} | ${cohort.effectiveMode} | ${cohort.streaming} | ${cohort.operation} | ${cohort.requestedModel} | ${cohort.returnedModel} | ${cohort.metrics.jobs} |`);
   return ["# Turn validation report", "", `UTC since: ${report.window.since ?? "unbounded latest window"}`, `Jobs: ${m.jobs}`, `Completed: ${percent(m.completedJobs, m.jobs)}`,
-    `Initial valid: ${percent(m.initialValid, m.jobsWithInitialResponse)}`, `Initial invalid: ${percent(m.initialInvalid, m.jobsWithInitialResponse)}`,
-    `Initial unknown: ${m.initialUnknown}`, `Valid repairs: ${percent(m.validRepairResponses, m.repairResponses)}`, "", "Cohort labels are frozen job metadata; unknown labels are retained as unknown."].join("\n") + "\n";
+    `Earliest initial application-valid: ${percent(m.initialValid, m.jobsWithInitialResponse)}`, `Earliest initial application-invalid: ${percent(m.initialInvalid, m.jobsWithInitialResponse)}`,
+    `Initial unknown: ${m.initialUnknown}`, `Primary calls: ${m.primaryCalls}`, `Preflight unavailable: ${m.preflightUnavailable}`,
+    `Missing primary response: ${m.missingPrimaryResponse}`, `Refused responses: ${m.refusedResponses}`, `Per-invocation transport failures: ${report.transportFailureClassification === "unavailable" ? "unavailable (no per-invocation durable evidence)" : m.transportFailures}`,
+    `Jobs with persisted transport/timeout diagnostic: ${report.jobsWithPersistedTransportDiagnostic}/${m.jobs}`,
+    `Accepted: ${m.acceptedJobs}`, `Discarded: ${m.discardedJobs}`, `Cancelled: ${m.cancelledJobs}`, `Valid repairs: ${percent(m.validRepairResponses, m.repairResponses)}`,
+    "", "## Bounded cohorts", "", "| Policy | Mode | Streaming | Operation | Requested model | Observed model | Jobs |", "| --- | --- | --- | --- | --- | --- | --- |", ...cohortRows,
+    ...(report.cohorts.length > 50 ? ["", `Cohorts truncated: showing 50 of ${report.cohorts.length}.`] : []),
+    ...(report.window.attemptsTruncated ? ["", "Attempt rows truncated at the bounded report limit; counters may be incomplete."] : []), "", "Initial results are application-validation observations, not proof of provider schema enforcement or narrative quality. Cohort labels are frozen job metadata; unknown labels are retained as unknown."].join("\n") + "\n";
 }
 
 export async function main(): Promise<void> {
@@ -320,7 +350,7 @@ export async function main(): Promise<void> {
   const client = await pool.connect();
   try {
     const report = await readTurnValidationReport(client, options);
-    process.stdout.write(options.format === "json" ? `${JSON.stringify(report, null, 2)}\n` : markdown(report));
+    process.stdout.write(options.format === "json" ? `${JSON.stringify(report, null, 2)}\n` : formatTurnValidationMarkdown(report));
   } finally {
     client.release();
     await pool.end();
