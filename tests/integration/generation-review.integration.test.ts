@@ -347,15 +347,18 @@ integration("PostgreSQL generation review persistence", () => {
       const saved = (await pool.query<{ orchestration_private: { generationReview: GenerationReviewCheckpoint } }>(
         "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [fixture.queued.id]
       )).rows[0]!.orchestration_private;
-      const review = structuredClone(saved.generationReview);
-      review.factFormatRepair!.status = "applied";
-      const receipt = review.decisionJournal[0]!;
+      const savedReview = structuredClone(saved.generationReview);
+      const receipt = savedReview.decisionJournal[0]!;
       if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
       // A later semantic review has its own current identity; the applied repair
       // must remain bound to the historical receipt recorded on the draft.
-      review.reviewId = crypto.randomUUID();
-      review.revision = 5;
-      review.state = "pending";
+      const review = {
+        ...savedReview,
+        reviewId: crypto.randomUUID(),
+        revision: 5,
+        state: "pending" as const,
+        factFormatRepair: { ...savedReview.factFormatRepair!, status: "applied" as const }
+      } satisfies GenerationReviewCheckpoint;
       const applied = {
         ...saved,
         generationReview: review,

@@ -1417,6 +1417,16 @@ async function executeLoadedGeneration(
           && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1
           && entry.nextStage === "event_coverage" && entry.candidateHash === savedReview.data.gateCandidate.storyHash)
       : undefined;
+    // An applied representation repair remains part of the later review's
+    // provenance. Its historical receipt is bound to validatedMainDraft.
+    const carriedAppliedFactFormatRepair = () => {
+      const currentReview = generationReviewCheckpointSchema.safeParse(orchestration.generationReview);
+      const repair = currentReview.success && currentReview.data.version === 2
+        && currentReview.data.factFormatRepair?.status === "applied"
+        ? currentReview.data.factFormatRepair
+        : undefined;
+      return repair ? { factFormatRepair: repair } : {};
+    };
     const reofferFailedAuthorizedRetry = async (
       stage: "structure" | "choices" | "scene_coverage" | "event_coverage" | "continuity",
       retryFailure: string
@@ -1440,6 +1450,7 @@ async function executeLoadedGeneration(
         originalFindings: savedReview.data.originalFindings,
         decisionJournal: savedReview.data.decisionJournal,
         revision: savedReview.data.revision + 1,
+        ...carriedAppliedFactFormatRepair(),
         retryFailure
       });
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "re-offering the original candidate after an authorized repair failed");
@@ -2069,13 +2080,22 @@ async function executeLoadedGeneration(
       stage: "structure" | "choices",
       reason: "invalid_structure" | "output_incomplete" | "mechanics_contamination" | "invalid_choices"
     ): Promise<true> => {
-      if (await reofferFailedAuthorizedRetry(stage, "The authorized retry did not produce a usable complete turn.")) return true;
+      const primary = orchestration.primaryResult;
+      // A full retry can produce a new complete-but-malformed fact payload.
+      // Its repair plan is bound to that new primary response, so prefer the
+      // new offer over re-opening the old candidate as a terminal failure.
+      const proposedRepair = stage === "structure" && primary?.rawOutputReference
+        ? prepareFactFormatRepair(result.content, primary.requestBody, primary.sentFactIds) : null;
+      const offeredRepair = proposedRepair && (generationPolicy?.playMode !== "story_only"
+        || parseStoryOnlyOutput(JSON.stringify(proposedRepair.plan.story)).ok) ? proposedRepair : null;
+      if (!offeredRepair && await reofferFailedAuthorizedRetry(
+        stage, "The authorized retry did not produce a usable complete turn."
+      )) return true;
       if (!job.world_id) {
         throw Object.assign(new Error("The rejected primary response cannot be bound to its world."), {
           code: "generation_checkpoint_incompatible"
         });
       }
-      const primary = orchestration.primaryResult;
       const candidate: GenerationReviewCandidate = {
         scope: "main", story: null, storyHash: sha256(canonicalEvidenceJson(null)),
         rawOutputReference: primary?.rawOutputReference ?? `generation-primary:${job.id}:${job.attempts}`,
@@ -2103,10 +2123,6 @@ async function executeLoadedGeneration(
       // A length finish may still contain a complete JSON object. The pure
       // planner proves completeness itself; do not discard that source solely
       // because the provider reported a length finish.
-      const proposedRepair = stage === "structure" && primary?.rawOutputReference
-        ? prepareFactFormatRepair(result.content, primary.requestBody, primary.sentFactIds) : null;
-      const offeredRepair = proposedRepair && (generationPolicy?.playMode !== "story_only"
-        || parseStoryOnlyOutput(JSON.stringify(proposedRepair.plan.story)).ok) ? proposedRepair : null;
       const gate = prepareGenerationReview({
         candidate,
         stage,
@@ -2331,6 +2347,7 @@ async function executeLoadedGeneration(
         ...(savedReview.success ? {
           originalCandidate: savedReview.data.originalCandidate, originalFindings: savedReview.data.originalFindings,
           decisionJournal: savedReview.data.decisionJournal, revision: savedReview.data.revision + 1,
+          ...carriedAppliedFactFormatRepair(),
           ...(priorRetry ? { retryFailure: "The authorized scene rewrite did not produce a usable complete turn." } : {})
         } : {})
       });
@@ -2625,7 +2642,8 @@ async function executeLoadedGeneration(
               originalCandidate: savedReview.data.originalCandidate,
               originalFindings: savedReview.data.originalFindings,
               decisionJournal: savedReview.data.decisionJournal,
-              revision: savedReview.data.revision + 1
+              revision: savedReview.data.revision + 1,
+              ...carriedAppliedFactFormatRepair()
             } : {})
           });
           assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected before-event candidate for review");
@@ -2944,7 +2962,8 @@ async function executeLoadedGeneration(
               originalCandidate: savedReview.data.originalCandidate,
               originalFindings: savedReview.data.originalFindings,
               decisionJournal: savedReview.data.decisionJournal,
-              revision: savedReview.data.revision + 1
+              revision: savedReview.data.revision + 1,
+              ...carriedAppliedFactFormatRepair()
             } : {}) });
           assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected event candidate for review");
           return true;
@@ -3203,7 +3222,8 @@ async function executeLoadedGeneration(
             originalCandidate: savedReview.data.originalCandidate,
             originalFindings: savedReview.data.originalFindings,
             decisionJournal: savedReview.data.decisionJournal,
-            revision: savedReview.data.revision + 1
+            revision: savedReview.data.revision + 1,
+            ...carriedAppliedFactFormatRepair()
           } : {}) });
         const retryAuthorizedRepair = Boolean(continuityRetryReceipt && savedReview.success
           && savedReview.data.reasons.includes("narrative_conflict"));
