@@ -110,7 +110,8 @@ describe("turn validation report", () => {
       if (text.includes("jsonb_array_elements")) return { rows: [{ jobId: "contract", invocationOrdinal: 1, policy: "required", mode: "json_schema", schemaVersion: "v1", schemaHash: "a".repeat(64), invocationKey: "story:nonstream", operation: "story_generation", requestedModel: "model", returnedModel: null, returnedRoute: null, status: "completed", diagnosticCode: null, failureRecorded: true, dispatchedAt: "2026-09-18T00:00:00.000Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: null, costMicrounits: null }] };
       if (text.includes("FROM generation_jobs")) return { rows: [
         { id: "legacy", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "legacy-model", errorCode: null, queuedPolicy: null, operationClosureVersion: null, failureDiagnostic: null, failureDiagnosticCode: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
-        { id: "contract", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, failureDiagnosticCode: "provider_transport_error", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
+        { id: "contract", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: { version: 1, category: "provider_transport", code: "provider_transport_error", phase: "story_generation", attemptNumber: 2, occurredAt: "2026-09-18T00:00:02.000Z" }, failureDiagnosticCode: "provider_transport_error", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+        { id: "malformed-transport", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: null, queuedPolicy: null, operationClosureVersion: null, failureDiagnostic: { code: "provider_request_timeout" }, failureDiagnosticCode: "provider_request_timeout", contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
       ] };
       if (text.includes("FROM generation_attempts")) return { rows: [
         { jobId: "legacy", attemptNumber: 1, recoveryKind: "initial", completedAt: null, hasOutput: false, hasProviderResponseId: false, validationErrorCount: null, requestModel: "legacy-model", responseModel: null },
@@ -124,6 +125,15 @@ describe("turn validation report", () => {
     expect(report.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ jobId: "legacy", actualReturnedModel: "unknown" })]));
     expect(report.transportFailureClassification).toBe("unavailable");
     expect(report.jobsWithPersistedTransportDiagnostic).toBe(1);
+  });
+
+  it("counts required unsupported-adapter preflight failures separately", async () => {
+    const query = vi.fn(async (text: string) => {
+      if (text.includes("FROM generation_jobs")) return { rows: [{ id: "unsupported", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "model", errorCode: "response_contract_unsupported_adapter", queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, failureDiagnosticCode: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }] };
+      return { rows: [] };
+    });
+    const report = await readTurnValidationReport({ query } as any, { limit: 1, since: null, format: "json" });
+    expect(report.metrics.preflightUnavailable).toBe(1);
   });
 
   it("reports contract cohorts from bounded ledger scalars without repairing the first response", async () => {

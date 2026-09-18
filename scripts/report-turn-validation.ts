@@ -152,7 +152,8 @@ function ledgerObservation(entry: ContractLedgerRow): ValidationObservation | un
 }
 
 function preflightObservation(job: JobRow, ledger: readonly ContractLedgerRow[]): ValidationObservation | undefined {
-  const unavailable = job.queuedPolicy === "required" && job.errorCode === "response_contract_unavailable";
+  const unavailable = job.queuedPolicy === "required" && (job.errorCode === "response_contract_unavailable"
+    || job.errorCode === "response_contract_unsupported_adapter");
   return unavailable ? { jobId: job.id, attemptNumber: 0, operation: "preflight", outcome: "unknown", preflightUnavailable: true } : undefined;
 }
 
@@ -254,8 +255,10 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
       ...ledger.rows.map((entry) => ledgerObservation(entry)).filter((value): value is ValidationObservation => Boolean(value))
     ];
     const metrics = summarizeValidationOutcomes(jobs.rows.map((row) => ({ jobId: row.id, status: row.status })), observations);
-    const jobsWithPersistedTransportDiagnostic = jobs.rows.filter((job) => job.failureDiagnosticCode === "provider_transport_error"
-      || job.failureDiagnosticCode === "provider_request_timeout").length;
+    const jobsWithPersistedTransportDiagnostic = jobs.rows.filter((job) => {
+      const diagnostic = projectGenerationFailureDiagnostic(job.failureDiagnostic);
+      return diagnostic?.code === "provider_transport_error" || diagnostic?.code === "provider_request_timeout";
+    }).length;
     const frozenInitialModels = new Map<string, { attemptNumber: number; model: string }>();
     for (const attempt of attempts.rows) {
       const initialModel = attemptRequestModel(attempt);

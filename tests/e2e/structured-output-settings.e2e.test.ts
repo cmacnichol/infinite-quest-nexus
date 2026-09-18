@@ -92,6 +92,8 @@ test("Nexus saves explicit policy choices while retaining an absent legacy polic
   await expect(page.locator("#providerResponseFormatPolicy")).toHaveValue("auto");
   await page.locator("#refreshProviderModels").click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("Verified schema coverage");
+  await page.locator("#closeProviderModelDialog").click();
+  await expect(page.locator("#providerModelDialog")).not.toBeVisible();
   await page.screenshot({ path: `${screenshots}/settings-desktop-verified.png`, fullPage: true });
   await page.locator("#providerResponseFormatPolicy").selectOption("required");
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
@@ -106,6 +108,26 @@ test("Nexus saves explicit policy choices while retaining an absent legacy polic
   await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
   await expect.poll(() => api.writes.length).toBe(4);
   expect((requiredAt(api.writes, 3, "explicit legacy provider save").configuration as Record<string, unknown>).textResponseFormatPolicy).toBe("legacy");
+  expect(relevantRuntimeErrors(api.runtimeErrors)).toEqual([]);
+});
+
+test("Nexus fences saved-profile and cached-picker capability evidence after relevant edits", async ({ page }) => {
+  const api = await installProviderApi(page);
+  await page.goto("http://127.0.0.1:43173/nexus/index.html#providers");
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.locator("#refreshProviderModels").click();
+  await expect(page.locator("#providerResponseFormatCapability")).toContainText("Verified schema coverage");
+  await page.locator("#closeProviderModelDialog").click();
+
+  await page.locator("#providerBaseUrl").fill("https://edited.invalid");
+  await page.locator("#providerStreaming").check();
+  await page.locator("#providerResponseFormatPolicy").selectOption("required");
+  await page.locator("#providerDefaultModel").click();
+  await page.getByRole("button", { name: /Safe model/ }).click();
+  await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
+  await page.locator("#refreshProviderModels").click();
+  await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
+  await page.locator("#closeProviderModelDialog").click();
   expect(relevantRuntimeErrors(api.runtimeErrors)).toEqual([]);
 });
 
