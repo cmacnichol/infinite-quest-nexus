@@ -12,6 +12,9 @@ import {
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
+import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
+import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
+import { resolveGenerationResponseContracts } from "./generation-response-contract.js";
 import type { WorkerGenerationProviderCollaborators } from "./provider-application-composition.js";
 import {
   createGenerationExecutor,
@@ -51,6 +54,36 @@ export function createGenerationExecutionCollaborators(
       "text",
       model
     ),
+    resolveResponseContracts: async (ownerUserId, profile, queuedPolicy, runtimeProfile) => {
+      const inventory = await providers.responseFormatInventory.listModels({
+        ownerUserId, providerProfileId: profile.id, providerRole: "text"
+      });
+      const advertised = inventory.models.find((model: { id: string }) => model.id === profile.model)?.responseFormatAdvertisement ?? null;
+      return resolveGenerationResponseContracts({
+        queuedPolicy,
+        profile: runtimeProfile,
+        registryDigest: providers.responseFormatCapabilities.registryDigest,
+        eligible: (operation, streaming) => {
+          const schema = getProviderOutputSchema(operation);
+          if (profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
+            return { status: "unsupported", reason: "not_advertised", verification: null };
+          }
+          return providers.responseFormatCapabilities.eligibility({
+            advertisement: advertised,
+            providerType: profile.providerType,
+            endpointIdentity: profile.endpointIdentity ?? "",
+            model: profile.model,
+            routeConfigHash: capabilityRouteConfigHash(profile.configuration),
+            adapterProtocol: "text-schema-adapter-v1",
+            operation,
+            schemaHash: schema.schemaHash,
+            streaming,
+            now: new Date().toISOString(),
+            nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects
+          });
+        }
+      });
+    },
     promptFromSnapshot: providers.promptTools.content,
     recordProfileCost: (_database, profile, attribution, result) => withTransaction(pool, (client) =>
       providers.costs.recordGenerationCost(providers.costContext(client), {

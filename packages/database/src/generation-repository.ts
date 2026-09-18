@@ -130,7 +130,7 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
   /** Trusted, local-only queue metadata. It is deliberately not a browser request field. */
   resolveQueuedResponsePolicy?: (client: DatabaseClient, scope: Readonly<{
     ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string;
-    operationKind: OperationKind; generationPolicy: GenerationPolicySnapshot;
+    modelContextWindowTokens?: number; operationKind: OperationKind; generationPolicy: GenerationPolicySnapshot;
     storyMemoryPolicy: StoryMemoryPolicySnapshot | null;
   }>) => Promise<QueuedResponsePolicy | undefined>;
   readTurnReportedCosts: (
@@ -404,6 +404,7 @@ export function createPostgresGenerationCommandRepository(
           : null;
         const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
+          ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }),
           operationKind: "append", generationPolicy, storyMemoryPolicy
         })), providerProfileId, request.model || "");
         const storyLengthProfile = request.storyLengthProfileOverride
@@ -529,6 +530,7 @@ export function createPostgresGenerationCommandRepository(
           : null;
         const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
+          ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }),
           operationKind: "replace_latest", generationPolicy, storyMemoryPolicy
         })), providerProfileId, request.model || "");
         const baseTurnNumber = campaign.active_turn_number - 1;

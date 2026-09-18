@@ -36,6 +36,7 @@ import {
   type RuntimeProviderExecutionPort
 } from "./provider-credential-transport-adapter.js";
 import type { SourceAuthoringModelInventory } from "./source-authoring-budget.js";
+import type { ProviderModelInventoryPort } from "../../../packages/application/src/providers/ports.js";
 import {
   generateTemplateWorld,
   worldGenerationFailureDiagnostic,
@@ -68,6 +69,9 @@ export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Reado
   prompts: GenerationPromptPort;
   costs: GenerationCostPort;
   reads: Pick<ProviderCostPort, "getTurnCosts">;
+  /** Private runtime preflight collaborator; never projected to browser status. */
+  responseFormatCapabilities: ProviderResponseFormatCapabilities;
+  responseFormatInventory: ProviderModelInventoryPort;
 }>;
 
 export type WorkerGenerationProviderCollaborators = ApiGenerationProviderCollaborators & Readonly<{
@@ -328,13 +332,15 @@ function createInternals(
       for (const providerProfileId of invalidatedProfileIds) responseFormatCapabilities.invalidate(providerProfileId);
       return result;
     },
-    generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs }),
+    generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory }),
     workerGeneration: Object.freeze({
       ...runtime,
       prompts: generationPrompts,
       costs: generationCosts,
       reads: costs,
-      attributeCosts: costs
+      attributeCosts: costs,
+      responseFormatCapabilities,
+      responseFormatInventory: base.runtime.inventory
     }),
     illustration: Object.freeze({ ...runtime, prompts: illustrationPrompts, costs: illustrationCosts }),
     chronicle: Object.freeze({ ...runtime, prompts: chroniclePrompts, costs: chronicleCosts }),

@@ -116,6 +116,8 @@ import {
 } from "../../../packages/domain/src/index.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerPromptProtocolVersion } from "./provider-application-composition.js";
+import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
+import { queuedResponsePolicyHash, type FrozenResponseContracts, type QueuedResponsePolicy } from "../../../packages/contracts/src/generation-response-contract.js";
 
 type GenerationTextProvider = RuntimeTextExecution;
 
@@ -172,6 +174,13 @@ export type GenerationExecutionCollaborators = Readonly<{
   ): Promise<string | null>;
   /** Observes every actual provider dispatch, including attempts that fail before a cost row exists. */
   onProviderDispatch?(operation: StoryCostOperation): void;
+  /** Resolves inventory only after the job lease has been loaded, never during enqueue. */
+  resolveResponseContracts?(
+    ownerUserId: string,
+    profile: GenerationTextProvider,
+    queuedPolicy: QueuedResponsePolicy,
+    runtimeProfile: ResponseContractRuntimeProfile
+  ): Promise<FrozenResponseContracts>;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
     ownerUserId: string,
@@ -231,6 +240,9 @@ const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
   "context_budget_invalid",
   "continuity_output_budget_exceeded",
   "extension_narration_limit_exceeded",
+  "response_contract_unavailable",
+  "response_contract_unsupported_adapter",
+  "response_contract_identity_mismatch",
   "generation_cancelled",
   "invalid_json",
   "invalid_schema",
@@ -417,6 +429,10 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
         ...((error as { field?: unknown }).field === "canonical_facts" ? { field: "canonical_facts" } : {}) })
       : errorCode === "continuity_review_unavailable" || errorCode === "continuity_review_conflict"
         ? projectSafeGenerationDiagnostic({ code: errorCode, operation: "story_continuity_review", action: "discard_and_reenqueue" })
+        : errorCode === "response_contract_unavailable" || errorCode === "response_contract_unsupported_adapter"
+          ? projectSafeGenerationDiagnostic({ code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "retry" })
+          : errorCode === "response_contract_identity_mismatch"
+            ? projectSafeGenerationDiagnostic({ code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue" })
         : errorCode === "generation_checkpoint_incompatible"
           ? projectSafeGenerationDiagnostic({ code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue" }) : null;
   return {
@@ -655,7 +671,7 @@ export function sentCanonicalFactIds(storyInput: string): string[] {
 function preparedRequestForResult(
   result: ProviderResult,
   provider: GenerationTextProvider,
-  request: Pick<ProviderRequest, "systemPrompt" | "input" | "recoveryInput" | "rejectedResponse">
+  request: Pick<ProviderRequest, "systemPrompt" | "input" | "recoveryInput" | "rejectedResponse" | "onChunk" | "responseContract">
 ): Readonly<{ body: string; payloadHash: string }> {
   const prepared = result.preparedRequest;
   if (prepared && typeof prepared.body === "string" && typeof prepared.payloadHash === "string"
@@ -664,7 +680,9 @@ function preparedRequestForResult(
     systemPrompt: request.systemPrompt,
     input: request.input,
     ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
-    ...(request.rejectedResponse ? { completeRejectedDraft: { content: request.rejectedResponse, complete: true as const } } : {})
+    ...(request.rejectedResponse ? { completeRejectedDraft: { content: request.rejectedResponse, complete: true as const } } : {}),
+    ...(request.onChunk ? { onChunk: request.onChunk } : {}),
+    ...(request.responseContract ? { responseContract: request.responseContract } : {})
   }).body;
   return { body, payloadHash: sha256(body) };
 }
@@ -706,6 +724,13 @@ function effectiveProviderConfigurationHash(provider: GenerationTextProvider, jo
     effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job),
     inputSafetyPolicy: "estimated_20_percent_plus_1024"
   });
+}
+
+function responseContractProfile(provider: GenerationTextProvider, job: GenerationExecutionPayload): ResponseContractRuntimeProfile {
+  return {
+    id: provider.id, providerType: provider.providerType, model: provider.model,
+    endpointIdentity: provider.endpointIdentity ?? "", configurationHash: effectiveProviderConfigurationHash(provider, job)
+  };
 }
 
 function sameFactIds(left: readonly string[], right: readonly string[]): boolean {
@@ -1302,6 +1327,26 @@ async function executeLoadedGeneration(
         } }
       }), "saving changed provider configuration");
       return false;
+    }
+
+    // New-mode jobs must select (or reload) their full closure before *any*
+    // text operation, including mechanics and trigger assessments below.
+    const queuedResponsePolicy = job.orchestration_private?.queuedResponsePolicy;
+    if (queuedResponsePolicy) {
+      let frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
+      if (!frozenResponseContracts) {
+        if (!collaborators.resolveResponseContracts || !repository.saveFrozenResponseContracts) {
+          throw Object.assign(new Error("This worker cannot preflight the queued response contract."), { code: "response_contract_unavailable" });
+        }
+        const selected = await collaborators.resolveResponseContracts(job.owner_user_id, provider, queuedResponsePolicy, responseContractProfile(provider, job));
+        const saved = await repository.saveFrozenResponseContracts(scope, queuedResponsePolicyHash(queuedResponsePolicy), selected);
+        if (!saved) throw Object.assign(new Error("The response-contract preflight lost its lease."), { code: "lease_lost" });
+        frozenResponseContracts = saved;
+        job = { ...job, orchestration_private: { ...job.orchestration_private, frozenResponseContracts } };
+      }
+      if (frozenResponseContracts.queuedPolicy.providerConfigurationHash !== responseContractProfile(provider, job).configurationHash) {
+        throw Object.assign(new Error("The frozen response-contract provider identity changed."), { code: "generation_checkpoint_incompatible" });
+      }
     }
 
     if (reviewMode !== "off" && job.streaming_segments_state?.provisionalSetId) {
@@ -1949,7 +1994,12 @@ async function executeLoadedGeneration(
       && (provider.configuration.streaming === true
         || provider.configuration.streamingSupport === true)
     );
-    const baseRequest = { systemPrompt: storySystemPrompt, input: storyInput };
+    const frozenContracts = job.orchestration_private?.frozenResponseContracts?.contracts;
+    const baseRequest = {
+      systemPrompt: storySystemPrompt,
+      input: storyInput,
+      ...(frozenContracts ? { responseContract: frozenContracts[supportsStreaming && job.attempts === 1 ? "story:stream" : "story:nonstream"] } : {})
+    };
     const primaryRequest = supportsStreaming && job.attempts === 1
       ? { ...baseRequest, onChunk }
       : baseRequest;
@@ -1965,10 +2015,7 @@ async function executeLoadedGeneration(
       return true;
     }
     if (!validatedDraft && !savedChoiceRepair?.originalResponse && !orchestration.primaryResult && !orchestration.primaryReservation) {
-      const preparedReservation = serializeProviderRequest({ ...provider, baseUrl: "" }, {
-        systemPrompt: primaryRequest.systemPrompt,
-        input: primaryRequest.input
-      });
+      const preparedReservation = serializeProviderRequest({ ...provider, baseUrl: "" }, primaryRequest);
       orchestration = await persistOrchestration(repository, scope, job, {
         primaryReservation: {
           version: 1, requestBody: preparedReservation.body, requestPayloadHash: preparedReservation.payloadHash,
