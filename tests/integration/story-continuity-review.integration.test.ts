@@ -233,6 +233,9 @@ integration("T17 durable continuity review", () => {
     await runGenerationJob(pool, `format-offer-${randomUUID()}`, 30, credentialSecret);
     const offered = await application.getReview({ ownerUserId, jobId: job.id });
     expect(offered).toMatchObject({ version: 2, stage: "structure", canRepairFormat: true });
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: acceptedBefore }] });
     const planHash = offered.version === 2 ? offered.formatRepair?.planHash : null;
     expect(planHash).toEqual(expect.any(String));
     await application.decideReview({ ownerUserId, jobId: job.id }, {
@@ -244,6 +247,9 @@ integration("T17 durable continuity review", () => {
     await expect(pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
     )).resolves.toMatchObject({ rows: [{ count: acceptedBefore + 1 }] });
+    await expect(pool.query<{ narration: string }>(
+      "SELECT narration FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL ORDER BY turn_number DESC LIMIT 1", [campaignId]
+    )).resolves.toMatchObject({ rows: [{ narration: "Mira waits at the observatory." }] });
     const saved = (await pool.query<{ orchestration_private: Record<string, unknown> }>(
       "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.orchestration_private;
