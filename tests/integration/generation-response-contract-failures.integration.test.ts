@@ -88,11 +88,14 @@ integration("response-contract provider failures", () => {
   afterEach(() => { requestBodies.length = 0; });
 
   function records(streaming: boolean) {
-    return ["story", "choices", "continuity_review"].map((operation) => ({
+    const operationRecords = streaming
+      ? [{ operation: "story" as const, streaming: false }, { operation: "story" as const, streaming: true }]
+      : ["story", "choices", "continuity_review"].map((operation) => ({ operation: operation as "story" | "choices" | "continuity_review", streaming: false }));
+    return operationRecords.map(({ operation, streaming: verifiedStreaming }) => ({
       version: 1 as const, providerType: "openrouter" as const, endpointIdentity, model,
       routeConfigHash: capabilityRouteConfigHash({ textResponseFormatPolicy: "required", ...(streaming ? { streaming: true } : {}) }),
-      adapterProtocol: "text-schema-adapter-v1" as const, operation: operation as "story" | "choices" | "continuity_review",
-      schemaHash: getProviderOutputSchema(operation as "story" | "choices" | "continuity_review").schemaHash, streaming,
+      adapterProtocol: "text-schema-adapter-v1" as const, operation,
+      schemaHash: getProviderOutputSchema(operation).schemaHash, streaming: verifiedStreaming,
       verifiedAt: "2026-09-01T00:00:00.000Z", expiresAt: "2026-09-30T00:00:00.000Z", providerRoutingSlugs: ["verified-route"], nativeOpenTrackerObjects: true
     }));
   }
@@ -104,8 +107,9 @@ integration("response-contract provider failures", () => {
     const legacy = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     legacy.world.title = `response-contract-failure-${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "response-contract-failure.story", story: legacy }));
+    await pool.query("UPDATE campaign_story_memory_enrollments SET review_mode='off' WHERE campaign_id=$1", [imported.campaignId]);
     const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: policy === "required" ? records(streaming) : [], schemaVerificationDigest: digest, clock: () => verificationNow });
-    const application = createApiGenerationApplication(pool, apiGraph.generation);
+    const application = createApiGenerationApplication(pool, apiGraph.generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Open the observatory archive.", providerProfileId: provider.id, idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } }));
     const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: policy === "required" ? records(streaming) : [], schemaVerificationDigest: digest, clock: () => verificationNow });
     const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, workerGraph.illustration), apiMemoryApplication(pool, credentialSecret), workerGraph.generation);
@@ -166,7 +170,7 @@ integration("response-contract provider failures", () => {
     const row = await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>("SELECT status,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [value.job.id]);
     const failure = row.rows[0]!.orchestrationPrivate.preparedResponseFailures[0];
     expect(row.rows[0]!.status).toBe("failed");
-    expect(row.rows[0]!.orchestrationPrivate.frozenResponseContracts).toMatchObject({ queuedPolicy: { policy: "required", invocationKeys: ["story:stream"] }, contracts: { "story:stream": { mode: "json_schema", streaming: true } } });
+    expect(row.rows[0]!.orchestrationPrivate.frozenResponseContracts).toMatchObject({ queuedPolicy: { policy: "required", invocationKeys: ["story:nonstream", "story:stream"] }, contracts: { "story:stream": { mode: "json_schema", streaming: true } } });
     expect(failure).toMatchObject({ responseId: "partial-stream-id", requestBody: requestBodies[0], requestPayloadHash: createHash("sha256").update(requestBodies[0]!).digest("hex"), partialContent: `partial ${canary}`, returnedModel: "observed-stream-model", returnedProviderRoute: "observed-stream-route", diagnosticCode: null });
     expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([expect.objectContaining({ status: "completed", response: expect.objectContaining({ returnedModel: "observed-stream-model", returnedProviderRoute: "observed-stream-route", diagnosticCode: null }) })]);
     expect(await authority(value.campaignId)).toEqual(before);
