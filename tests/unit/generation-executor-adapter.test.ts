@@ -1592,6 +1592,40 @@ describe("generation executor adapter", () => {
     }));
   });
 
+  it("rejects a coherent frozen v14 Story Memory job before current prompt composition", async () => {
+    const policy = defaultStoryMemoryPolicy("r2");
+    const job = completeGenerationExecutionPayload();
+    job.context_options = {
+      ...job.context_options,
+      storyMemoryPolicy: {
+        policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v3",
+        promptProtocol: "story-v14-continuity-context", providerConfigurationFingerprint: "a".repeat(64)
+      }
+    } as never;
+    const templates = validPromptSnapshot();
+    job.prompt_protocol_version = `story-memory-v1|${snapshotProtocolIdentity(templates)}`;
+    job.prompt_snapshot = {
+      version: 2, templates, continuityReview: null,
+      storyMemoryCompatibility: {
+        protocolIdentity: "story-v14-continuity-context|story-output-v2|current-continuity-v3",
+        templateHashes: { story_system: templates.story_system.hash, event_extension: templates.event_extension.hash }
+      }
+    } as never;
+    const repository = { ...guardedRepository(), loadExecutionPayload: vi.fn(async () => job), markRecoverable: vi.fn(async () => true) };
+    const collaborators = rejectedCollaborators();
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
+
+    expect(collaborators.loadTextExecution).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "generation_prompt_snapshot_invalid",
+      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }));
+  });
+
   it("does not dispatch a v15 Story Memory policy with a captured v14 acknowledgement", async () => {
     const policy = defaultStoryMemoryPolicy("r2");
     const job = completeGenerationExecutionPayload();

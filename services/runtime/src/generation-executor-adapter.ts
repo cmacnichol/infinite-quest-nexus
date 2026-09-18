@@ -1004,6 +1004,21 @@ async function executeLoadedGeneration(
     }), "saving invalid prompt snapshot recovery state");
     return false;
   }
+  if (frozenStoryMemoryPolicySnapshot?.promptProtocol === "story-v14-continuity-context") {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id,
+      ownerUserId: job.owner_user_id,
+      workerId,
+      providerResponseId: null,
+      providerFinishReason: null,
+      errorCode: "generation_prompt_snapshot_invalid",
+      errorMessage: "Saved generation instructions require a newer protocol.",
+      recoveryMetadata: { reason: "generation_prompt_snapshot_invalid", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }), "saving legacy prompt protocol recovery state");
+    return false;
+  }
   const parsedGenerationPolicy = job.generation_policy === null
     ? null
     : generationPolicySnapshotSchema.safeParse(job.generation_policy);

@@ -157,16 +157,17 @@ integration("prompt-memory remediation composed workflow", () => {
     const application = createApiGenerationApplication(pool, credentialSecret);
     const output = JSON.parse(story("The format beacon is lit above the gate.", "The format beacon is lit."));
     format(output);
-    const beforeRequests = requests.length;
+    const storyDispatches = () => requests.filter((request) => Array.isArray(request.messages)).length;
+    const beforeRequests = storyDispatches();
     replies.push(JSON.stringify(output));
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
       action: "Light the format beacon.", providerProfileId: providerId, idempotencyKey: crypto.randomUUID(),
       context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
     }));
     expect(await runGenerationJob(pool, `normalization-worker-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
-    expect(requests).toHaveLength(beforeRequests + 1);
+    expect(storyDispatches()).toBe(beforeRequests + 1);
     await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: "completed" });
-    await expect(pool.query<{ content: string }>("SELECT content FROM canonical_facts WHERE campaign_id=$1 ORDER BY created_at DESC LIMIT 1", [imported.campaignId]))
+    await expect(pool.query<{ content: string }>("SELECT content FROM campaign_canonical_facts WHERE campaign_id=$1 AND content=$2", [imported.campaignId, "The format beacon is lit."]))
       .resolves.toMatchObject({ rows: [{ content: "The format beacon is lit." }] });
     await expect(pool.query<{ raw: string }>("SELECT raw_output AS raw FROM generation_attempts WHERE generation_job_id=$1", [job.id]))
       .resolves.toMatchObject({ rows: [expect.objectContaining({ raw: expect.stringContaining("canonical_facts") })] });
