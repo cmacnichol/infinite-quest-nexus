@@ -14,6 +14,7 @@ export const generationResponseFormatProjectionSchema = z.object({
   returnedModel: boundedIdentifier.nullable(),
   returnedRoute: boundedIdentifier.nullable(),
   preflight: z.enum(["pending", "selected", "unavailable", "identity_mismatch", "unknown"]),
+  preflightDiagnostic: z.enum(["unsupported_adapter"]).nullable().optional().default(null),
   diagnosticCode: z.enum(["provider_schema_unsupported", "provider_schema_invalid", "provider_route_unavailable", "provider_refusal"]).nullable()
 }).strict();
 export type GenerationResponseFormatProjection = z.infer<typeof generationResponseFormatProjectionSchema>;
@@ -47,7 +48,7 @@ export function projectGenerationResponseFormat(value: unknown): GenerationRespo
     : queued === null && (source.queuedResponsePolicy === undefined || source.queuedResponsePolicy === null) ? "legacy" : "unknown";
   const base = {
     version: 1 as const, savedPolicy, schemaVersion: null, schemaHash: null, operation: null,
-    streaming: null, requestedModel: null, returnedModel: null, returnedRoute: null, diagnosticCode: null
+    streaming: null, requestedModel: null, returnedModel: null, returnedRoute: null, diagnosticCode: null, preflightDiagnostic: null
   };
   if (savedPolicy === "legacy") return generationResponseFormatProjectionSchema.parse({
     ...base, effectiveMode: "legacy", preflight: "unknown"
@@ -81,6 +82,7 @@ export function projectGenerationResponseFormat(value: unknown): GenerationRespo
     operation: entryOperation, streaming,
     requestedModel: nullableIdentifier(request?.requestedModel ?? queued?.model),
     returnedModel: nullableIdentifier(response?.returnedModel), returnedRoute: nullableIdentifier(response?.returnedProviderRoute),
-    preflight, diagnosticCode: diagnosticCode(response?.diagnosticCode)
+    preflight, preflightDiagnostic: errorCode === "response_contract_unsupported_adapter" ? "unsupported_adapter" : null,
+    diagnosticCode: diagnosticCode(response?.diagnosticCode)
   });
 }

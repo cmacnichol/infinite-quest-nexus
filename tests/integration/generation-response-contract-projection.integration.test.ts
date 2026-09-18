@@ -21,4 +21,16 @@ integration("generation response-contract SQL projection", () => {
     expect(result.rows[0]?.projected).toMatchObject({ queuedResponsePolicy: { version: 1 }, frozenResponseContracts: { version: 1 } });
     expect(projectGenerationResponseFormat(result.rows[0]?.projected)).toMatchObject({ savedPolicy: "required", effectiveMode: "unknown", preflight: "unknown" });
   });
+
+  test("projects absent legacy, selected v1 ledger, and preflight unavailability from actual PostgreSQL JSONB", async () => {
+    const selected = {
+      queuedResponsePolicy: { version: 1, policy: "auto", model: "model-a" },
+      frozenResponseContracts: { version: 1, contracts: { "story:nonstream": { mode: "json_object", operation: "story", streaming: false } } },
+      responseContractInvocations: [{ version: 1, invocationKey: "story:nonstream", request: { mode: "json_object", requestedModel: "model-a" }, response: { returnedModel: "model-b", returnedProviderRoute: "route-b", diagnosticCode: null } }]
+    };
+    const result = await pool.query<{ projected: unknown }>(`SELECT ${generationResponseFormatProjection("source")} AS projected FROM (VALUES ('{}'::jsonb), ($1::jsonb)) AS cases(source) ORDER BY source = '{}'::jsonb DESC`, [JSON.stringify(selected)]);
+    expect(projectGenerationResponseFormat(result.rows[0]?.projected)).toMatchObject({ savedPolicy: "legacy", effectiveMode: "legacy" });
+    expect(projectGenerationResponseFormat(result.rows[1]?.projected)).toMatchObject({ savedPolicy: "auto", effectiveMode: "json_object", operation: "story", streaming: false, requestedModel: "model-a", returnedModel: "model-b", returnedRoute: "route-b", preflight: "selected" });
+    expect(projectGenerationResponseFormat({ ...(result.rows[0]?.projected as object), queuedResponsePolicy: { version: 1, policy: "required" }, errorCode: "response_contract_unavailable" })).toMatchObject({ savedPolicy: "required", effectiveMode: "unavailable", preflight: "unavailable" });
+  });
 });

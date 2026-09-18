@@ -14,7 +14,7 @@ describe("generation response-format public projection", () => {
       }, response: { returnedModel: "model-b", returnedProviderRoute: "route-a", diagnosticCode: null }, private: privateCanary }]
     })).toEqual({
       version: 1, savedPolicy: "required", effectiveMode: "json_schema", schemaVersion: "story-native-v1", schemaHash: "a".repeat(64),
-      operation: "story", streaming: true, requestedModel: "model-a", returnedModel: "model-b", returnedRoute: "route-a", preflight: "selected", diagnosticCode: null
+      operation: "story", streaming: true, requestedModel: "model-a", returnedModel: "model-b", returnedRoute: "route-a", preflight: "selected", preflightDiagnostic: null, diagnosticCode: null
     });
     expect(JSON.stringify(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 1, policy: "required", endpointIdentity: privateCanary } }))).not.toContain(privateCanary);
   });
@@ -22,10 +22,12 @@ describe("generation response-format public projection", () => {
   test("keeps absent legacy markers legacy and maps saved preflight failures without current-profile inference", () => {
     expect(projectGenerationResponseFormat({})).toEqual({
       version: 1, savedPolicy: "legacy", effectiveMode: "legacy", schemaVersion: null, schemaHash: null,
-      operation: null, streaming: null, requestedModel: null, returnedModel: null, returnedRoute: null, preflight: "unknown", diagnosticCode: null
+      operation: null, streaming: null, requestedModel: null, returnedModel: null, returnedRoute: null, preflight: "unknown", preflightDiagnostic: null, diagnosticCode: null
     });
     expect(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 1, policy: "required" }, errorCode: "response_contract_unavailable" }))
       .toMatchObject({ savedPolicy: "required", effectiveMode: "unavailable", preflight: "unavailable" });
+    expect(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 1, policy: "required" }, errorCode: "response_contract_unsupported_adapter" }))
+      .toMatchObject({ preflight: "unavailable", preflightDiagnostic: "unsupported_adapter" });
   });
 
   test("keeps malformed or future durable markers unknown rather than relabeling them as legacy or selected", () => {
