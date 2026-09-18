@@ -311,8 +311,14 @@ integration("T17 durable continuity review", () => {
   it("keeps a nested private tracker through local fact repair, a crashed enforce review, and one reclaimed commit", async () => {
     const nestedTracker = [{
       tracker_private_canary: "do-not-project",
-      location: { room: "observatory archive", shelves: [3, { sealed: false, labels: ["astral", "ledger"] }] },
-      discoveries: [{ title: "brass key", tags: ["cold", "etched"] }, "keeper-note"],
+      id: "observatory-archive",
+      name: "Observatory archive",
+      value: "open",
+      rules: "Fiction-only location state.",
+      private_nested: {
+        shelves: [3, { sealed: false, labels: ["astral", "ledger"] }],
+        discoveries: [{ title: "brass key", tags: ["cold", "etched"] }, "keeper-note"]
+      },
       active: true,
       urgency: 2
     }];
@@ -391,10 +397,17 @@ integration("T17 durable continuity review", () => {
       expect(secondClaim?.jobId).toBe(job.id);
       await expect(createGenerationExecutor({ pool, repository, collaborators })
         .execute({ claim: secondClaim!, workerId: secondWorkerId, leaseSeconds: 30 })).resolves.toBe(true);
-      const accepted = (await pool.query<{ state_snapshot_private: { tracker_updates: unknown } }>(
+      const accepted = (await pool.query<{ state_snapshot_private: {
+        trackers: Array<Record<string, unknown>>;
+        acceptedTrackerUpdateEvidence: { version: number; updates: unknown };
+      } }>(
         "SELECT state_snapshot_private FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]
       )).rows[0]!;
-      expect(accepted.state_snapshot_private.tracker_updates).toEqual(nestedTracker);
+      expect(accepted.state_snapshot_private.acceptedTrackerUpdateEvidence).toEqual({ version: 1, updates: nestedTracker });
+      expect(accepted.state_snapshot_private.trackers).toEqual(expect.arrayContaining([{
+        id: "observatory-archive", name: "Observatory archive", value: "open", rules: "Fiction-only location state."
+      }]));
+      expect(accepted.state_snapshot_private.trackers).not.toContainEqual(expect.objectContaining({ private_nested: expect.anything() }));
       expect(illustrationInputs).toHaveLength(1);
       expect(illustrationInputs[0]).not.toContain("tracker_private_canary");
       const completed = (await pool.query<{ status: string; attempts: number; orchestration_private: Record<string, any> }>(
