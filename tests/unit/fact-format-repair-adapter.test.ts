@@ -10,6 +10,9 @@ describe("fact format repair request evidence", () => {
     });
     expect(visibleFactsFromProducingRequest(empty)).toEqual([]);
     expect(visibleFactsFromProducingRequest(JSON.stringify({ authoritative_context: {} }))).toBeNull();
+    expect(visibleFactsFromProducingRequest(JSON.stringify({
+      authoritative_context: { currentContinuity: { canonicalFacts: [] } }
+    }))).toBeNull();
   });
 
   it("rejects conflicting frozen current and Chronicle fact content", () => {
@@ -18,6 +21,20 @@ describe("fact format repair request evidence", () => {
       chronicle: [{ kind: "canonical_fact", id: "11111111-1111-4111-8111-111111111111", content: "Lantern dark." }]
     } });
     expect(visibleFactsFromProducingRequest(request)).toBeNull();
+  });
+
+  it("rejects conflicting authority envelopes and inventory IDs that differ from the saved primary result", () => {
+    const first = { authoritative_context: {
+      currentContinuity: { canonicalFacts: [{ id: "11111111-1111-4111-8111-111111111111", content: "The beacon is lit." }] }, chronicle: []
+    } };
+    const second = { authoritative_context: {
+      currentContinuity: { canonicalFacts: [{ id: "22222222-2222-4222-8222-222222222222", content: "The gate is open." }] }, chronicle: []
+    } };
+    expect(visibleFactsFromProducingRequest(JSON.stringify({ messages: [
+      { role: "user", content: JSON.stringify(first) }, { role: "user", content: JSON.stringify(second) }
+    ] }))).toBeNull();
+    const rawOutput = rawSyntheticStory({ canonical_facts: [{ id: "new-label", content: "The beacon is lit." }] });
+    expect(prepareFactFormatRepair(rawOutput, JSON.stringify(first), ["22222222-2222-4222-8222-222222222222"])).toBeNull();
   });
 
   it("uses the authorized current receipt instead of an older repair receipt", () => {

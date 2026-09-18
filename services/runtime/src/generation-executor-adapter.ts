@@ -814,6 +814,23 @@ function compatibleValidatedMainDraft(
         code: "generation_checkpoint_incompatible"
       });
     }
+    if (repair.ownerUserId !== job.owner_user_id
+      || repair.campaignId !== job.campaign_id
+      || repair.worldVersionId !== (job.world_version_id ?? null)
+      || repair.promptProtocolVersion !== job.prompt_protocol_version
+      || canonicalEvidenceJson(repair.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
+      || receipt.offeredCandidate.ownerUserId !== job.owner_user_id
+      || receipt.offeredCandidate.campaignId !== job.campaign_id
+      || receipt.offeredCandidate.worldId !== job.world_id
+      || receipt.offeredCandidate.worldVersionId !== (job.world_version_id ?? null)
+      || receipt.offeredCandidate.expectedTurnNumber !== job.expected_turn_number
+      || receipt.offeredCandidate.provider.profileId !== job.provider_profile_id
+      || receipt.offeredCandidate.protocol.version !== job.prompt_protocol_version
+      || canonicalEvidenceJson(receipt.offeredCandidate.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)) {
+      throw Object.assign(new Error("The applied fact-format repair is not bound to this generation job."), {
+        code: "generation_checkpoint_incompatible"
+      });
+    }
   }
   if (!sameFactIds(value.sentFactIds, sentCanonicalFactIds(value.requestBody))) {
     throw Object.assign(new Error("The persisted validated draft fact visibility does not match its producing request."), {
@@ -1597,7 +1614,9 @@ async function executeLoadedGeneration(
         || primary.providerConfigurationHash !== repair.providerConfigurationHash) {
         await incompatible(); return true;
       }
-      const plan = applyAuthorizedFactFormatRepair({ checkpoint: savedReview.data, rawOutput: primary.response.content, requestBody: primary.requestBody });
+      const plan = applyAuthorizedFactFormatRepair({
+        checkpoint: savedReview.data, rawOutput: primary.response.content, requestBody: primary.requestBody, sentFactIds: primary.sentFactIds
+      });
       const repaired = plan ? parseStoryOutput(JSON.stringify(plan.story), storyMemoryDefaults) : null;
       const storyOnlyRepair = generationPolicy?.playMode === "story_only" && plan
         ? parseStoryOnlyOutput(JSON.stringify(plan.story)) : null;
@@ -2067,7 +2086,7 @@ async function executeLoadedGeneration(
       // planner proves completeness itself; do not discard that source solely
       // because the provider reported a length finish.
       const proposedRepair = stage === "structure" && primary?.rawOutputReference
-        ? prepareFactFormatRepair(result.content, primary.requestBody) : null;
+        ? prepareFactFormatRepair(result.content, primary.requestBody, primary.sentFactIds) : null;
       const offeredRepair = proposedRepair && (generationPolicy?.playMode !== "story_only"
         || parseStoryOnlyOutput(JSON.stringify(proposedRepair.plan.story)).ok) ? proposedRepair : null;
       const gate = prepareGenerationReview({

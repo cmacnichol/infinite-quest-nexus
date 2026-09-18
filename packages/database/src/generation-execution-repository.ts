@@ -394,6 +394,32 @@ function hasValidEventCoverageRepair(value: unknown): boolean {
       && Number.isSafeInteger(repair.authorizedRevision) && repair.authorizedRevision > 0));
 }
 
+type GenerationReviewExecutionBinding = Pick<GenerationExecutionPayload,
+  "owner_user_id" | "campaign_id" | "world_id" | "expected_turn_number" | "operation_kind" | "replacement_turn_id" | "generation_base_identity" | "provider_profile_id" | "prompt_protocol_version"
+> & Readonly<{ world_version_id?: string | null }>;
+
+/** A parsed private review still must be bound to the locked job that resumes it. */
+function generationReviewMatchesExecutionJob(review: GenerationReviewCheckpoint, job: GenerationReviewExecutionBinding): boolean {
+  const candidate = review.gateCandidate;
+  const matchesJob = candidate.ownerUserId === job.owner_user_id
+    && candidate.campaignId === job.campaign_id
+    && candidate.worldId === job.world_id
+    && candidate.worldVersionId === (job.world_version_id ?? null)
+    && candidate.expectedTurnNumber === job.expected_turn_number
+    && candidate.provider.profileId === job.provider_profile_id
+    && candidate.protocol.version === job.prompt_protocol_version
+    && canonicalEvidenceJson(candidate.baseIdentity) === canonicalEvidenceJson(job.generation_base_identity)
+    && review.operationKind === job.operation_kind
+    && review.replacementTurnId === job.replacement_turn_id;
+  if (!matchesJob || review.version !== 2) return matchesJob;
+  const repair = review.factFormatRepair!;
+  return repair.ownerUserId === job.owner_user_id
+    && repair.campaignId === job.campaign_id
+    && repair.worldVersionId === (job.world_version_id ?? null)
+    && repair.promptProtocolVersion === job.prompt_protocol_version
+    && canonicalEvidenceJson(repair.baseIdentity) === canonicalEvidenceJson(job.generation_base_identity);
+}
+
 export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
 };
@@ -700,7 +726,8 @@ function assertActiveMainKeepPreservation(
 function assertAppliedFactFormatRepair(
   checkpoint: GenerationReviewCheckpoint,
   orchestration: GenerationOrchestrationState,
-  finalStory: StoryTurnOutput
+  finalStory: StoryTurnOutput,
+  job: GenerationReviewExecutionBinding
 ): void {
   const draft = orchestration.validatedMainDraft;
   if (!draft?.factFormatRepair) return;
@@ -716,6 +743,25 @@ function assertAppliedFactFormatRepair(
     || draft.response.responseId !== receipt.repair.sourceResponseId
     || sha256Hex(draft.response.content) !== receipt.repair.plan.rawOutputHash
     || canonicalEvidenceJson(draft.story) !== canonicalEvidenceJson(receipt.repair.plan.story)
+    || !generationReviewMatchesExecutionJob(checkpoint, job)
+    || draft.ownerUserId !== job.owner_user_id
+    || draft.campaignId !== job.campaign_id
+    || draft.worldVersionId !== (job.world_version_id ?? null)
+    || draft.promptProtocolVersion !== job.prompt_protocol_version
+    || canonicalEvidenceJson(draft.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
+    || receipt.repair.ownerUserId !== job.owner_user_id
+    || receipt.repair.campaignId !== job.campaign_id
+    || receipt.repair.worldVersionId !== (job.world_version_id ?? null)
+    || receipt.repair.promptProtocolVersion !== job.prompt_protocol_version
+    || canonicalEvidenceJson(receipt.repair.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
+    || receipt.offeredCandidate.ownerUserId !== job.owner_user_id
+    || receipt.offeredCandidate.campaignId !== job.campaign_id
+    || receipt.offeredCandidate.worldId !== job.world_id
+    || receipt.offeredCandidate.worldVersionId !== (job.world_version_id ?? null)
+    || receipt.offeredCandidate.expectedTurnNumber !== job.expected_turn_number
+    || receipt.offeredCandidate.provider.profileId !== job.provider_profile_id
+    || receipt.offeredCandidate.protocol.version !== job.prompt_protocol_version
+    || canonicalEvidenceJson(receipt.offeredCandidate.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
     || (orchestration.extension === undefined && canonicalEvidenceJson(finalStory) !== canonicalEvidenceJson(draft.story))) unavailable();
 }
 
@@ -728,8 +774,8 @@ async function commitAcceptedTurn(
   // The commit boundary accepts only the current protocol. Historical/import
   // replay goes through the explicitly named Chronicle compatibility path.
   const story = storyTurnOutputSchema.parse(input.story);
-  const lease = await client.query<{ id: string; owner_user_id: string; campaign_id: string; world_id: string; world_version_id: string | null; expected_turn_number: number; operation_kind: "append" | "replace_latest"; replacement_turn_id: string | null; generation_base_identity: unknown; context_options: Record<string, unknown>; prompt_protocol_version: string; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
-    `SELECT j.id, j.owner_user_id, j.campaign_id, wv.world_id, c.world_version_id, j.expected_turn_number,
+  const lease = await client.query<{ id: string; owner_user_id: string; campaign_id: string; world_id: string; world_version_id: string | null; provider_profile_id: string; expected_turn_number: number; operation_kind: "append" | "replace_latest"; replacement_turn_id: string | null; generation_base_identity: GenerationBaseIdentity; context_options: Record<string, unknown>; prompt_protocol_version: string; prompt_snapshot: unknown; orchestration_private: GenerationOrchestrationState; streaming_segments_state: { provisionalSetId?: string } }>(
+    `SELECT j.id, j.owner_user_id, j.campaign_id, j.provider_profile_id, wv.world_id, c.world_version_id, j.expected_turn_number,
             j.operation_kind, j.replacement_turn_id, j.generation_base_identity, j.context_options, j.prompt_protocol_version, j.prompt_snapshot,
             j.orchestration_private, j.streaming_segments_state
        FROM generation_jobs j JOIN campaigns c ON c.id=j.campaign_id AND c.owner_user_id=j.owner_user_id
@@ -754,7 +800,7 @@ async function commitAcceptedTurn(
   }
   if (storedReview.success) {
     assertActiveMainKeepPreservation(storedReview.data, storedJob.orchestration_private, story);
-    assertAppliedFactFormatRepair(storedReview.data, storedJob.orchestration_private, story);
+    assertAppliedFactFormatRepair(storedReview.data, storedJob.orchestration_private, story, storedJob);
   }
   if (storedJob.context_options?.storyMemoryPolicy) {
     const policy = storyMemoryPolicySnapshotSchema.parse(storedJob.context_options.storyMemoryPolicy);
@@ -1238,7 +1284,10 @@ export function createPostgresGenerationExecutionRepository(
       );
       const row = result.rows[0];
       if (!row) return null;
+      const storedReview = row.orchestration_private?.generationReview === undefined
+        ? undefined : generationReviewCheckpointSchema.safeParse(row.orchestration_private.generationReview);
       if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
+          || (storedReview !== undefined && (!storedReview.success || !generationReviewMatchesExecutionJob(storedReview.data, row)))
           || !hasValidLogicalAttempt(row.orchestration_private?.logicalAttempt)
           || !hasValidPrimaryReservation(row.orchestration_private?.primaryReservation)
           || !hasValidPrimaryResult(row.orchestration_private?.primaryResult)

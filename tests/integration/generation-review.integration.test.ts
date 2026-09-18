@@ -273,6 +273,37 @@ integration("PostgreSQL generation review persistence", () => {
     )).resolves.toMatchObject({ rows: [{ status: "queued", repairStatus: "authorized", journalSize: 1 }] });
   });
 
+  it("halts a coherently tampered repair checkpoint before it can resume or write a turn", async () => {
+    const fixture = await pendingReview({ repair: true });
+    await commands().decideReview({ ownerUserId, jobId: fixture.queued.id }, {
+      reviewId: fixture.checkpoint.reviewId, revision: fixture.checkpoint.revision,
+      decision: "repair_format", repairPlanHash: fixture.checkpoint.factFormatRepair!.planHash
+    });
+    const workerId = `tampered-repair-${crypto.randomUUID()}`;
+    const claim = await fixture.execution.claimNext({ workerId, leaseSeconds: 30 });
+    if (!claim) throw new Error("Expected the authorized repair to be claimed.");
+    const saved = (await pool.query<{ orchestration_private: { generationReview: GenerationReviewCheckpoint } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [fixture.queued.id]
+    )).rows[0]!.orchestration_private;
+    const review = structuredClone(saved.generationReview);
+    const foreignCampaignId = crypto.randomUUID();
+    for (const candidate of [review.originalCandidate, review.gateCandidate, review.workingCandidate]) candidate.campaignId = foreignCampaignId;
+    review.factFormatRepair!.campaignId = foreignCampaignId;
+    const receipt = review.decisionJournal[0]!;
+    if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
+    receipt.offeredCandidate.campaignId = foreignCampaignId;
+    receipt.repair.campaignId = foreignCampaignId;
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
+      fixture.queued.id, JSON.stringify({ ...saved, generationReview: review })
+    ]);
+    await expect(fixture.execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; error_code: string; acceptedTurns: number }>(
+      `SELECT status,error_code,
+         (SELECT count(*)::int FROM turns WHERE campaign_id=$2 AND accepted_at IS NOT NULL) AS "acceptedTurns"
+         FROM generation_jobs WHERE id=$1`, [fixture.queued.id, fixture.imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "generation_checkpoint_incompatible", acceptedTurns: 2 }] });
+  });
+
   it("serializes competing eligible Keep and Retry decisions with one durable winner", async () => {
     const fixture = await pendingReview({ eligible: true });
     const repository = commands(); const scope = { ownerUserId, jobId: fixture.queued.id };

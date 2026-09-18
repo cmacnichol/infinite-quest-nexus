@@ -12,19 +12,35 @@ function originalAuthority(value: unknown): RecordValue | null {
   try { return record(JSON.parse(original)); } catch { return null; }
 }
 
+function authorityFromEnvelope(value: unknown): RecordValue | null {
+  const envelope = record(value);
+  return record(envelope?.authoritative_context ?? envelope?.protected_fiction_safe_base_authority);
+}
+
+function sameFactIds(actual: readonly VisibleRepairFact[], expected: readonly string[]): boolean {
+  const left = [...actual.map((fact) => fact.id)].sort();
+  const right = [...expected].sort();
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 /** Reads only the exact serialized producing request, never live campaign state. */
 export function visibleFactsFromProducingRequest(requestBody: string): readonly VisibleRepairFact[] | null {
   let rendered: RecordValue | null;
   try { rendered = record(JSON.parse(requestBody)); } catch { return null; }
   if (!rendered) return null;
-  const inputAuthority = originalAuthority(rendered.input);
-  const messageAuthority = Array.isArray(rendered.messages)
-    ? rendered.messages.flatMap((message) => record(message)?.role === "user" ? [originalAuthority(record(message)?.content)] : []).find(Boolean) ?? null : null;
-  const authority = record(rendered.authoritative_context ?? rendered.protected_fiction_safe_base_authority
-    ?? inputAuthority?.authoritative_context ?? inputAuthority?.protected_fiction_safe_base_authority
-    ?? messageAuthority?.authoritative_context ?? messageAuthority?.protected_fiction_safe_base_authority);
+  const authorities = [
+    authorityFromEnvelope(rendered),
+    authorityFromEnvelope(originalAuthority(rendered.input)),
+    ...(Array.isArray(rendered.messages) ? rendered.messages.flatMap((message) => {
+      const row = record(message);
+      return row?.role === "user" ? [authorityFromEnvelope(originalAuthority(row.content))] : [];
+    }) : [])
+  ].filter((authority): authority is RecordValue => authority !== null);
+  if (authorities.length === 0) return null;
+  const authority = authorities[0]!;
+  if (authorities.some((candidate) => canonicalEvidenceJson(candidate) !== canonicalEvidenceJson(authority))) return null;
   const continuity = record(authority?.currentContinuity);
-  if (!continuity || !Array.isArray(continuity.canonicalFacts)) return null;
+  if (!continuity || !Array.isArray(continuity.canonicalFacts) || !Array.isArray(authority.chronicle)) return null;
   const facts = new Map<string, string>();
   const add = (value: unknown): boolean => {
     const fact = record(value);
@@ -34,7 +50,7 @@ export function visibleFactsFromProducingRequest(requestBody: string): readonly 
     facts.set(fact.id, fact.content); return true;
   };
   for (const fact of continuity.canonicalFacts) if (!add(fact)) return null;
-  if (Array.isArray(authority?.chronicle)) for (const entry of authority!.chronicle) {
+  for (const entry of authority.chronicle) {
     const row = record(entry); if (row?.kind === "canonical_fact" && !add(row)) return null;
   }
   return [...facts.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([id, content]) => ({ id, content }));
@@ -42,15 +58,15 @@ export function visibleFactsFromProducingRequest(requestBody: string): readonly 
 
 export function repairPlanHash(plan: FactFormatRepairPlan): string { return sha256(canonicalEvidenceJson(plan)); }
 
-export function prepareFactFormatRepair(rawOutput: string, requestBody: string): Readonly<{ plan: FactFormatRepairPlan; planHash: string }> | null {
+export function prepareFactFormatRepair(rawOutput: string, requestBody: string, sentFactIds?: readonly string[]): Readonly<{ plan: FactFormatRepairPlan; planHash: string }> | null {
   const visibleFacts = visibleFactsFromProducingRequest(requestBody);
-  if (visibleFacts === null) return null;
+  if (visibleFacts === null || (sentFactIds !== undefined && !sameFactIds(visibleFacts, sentFactIds))) return null;
   const result = planFactFormatRepair({ rawOutput, visibleFacts });
   return result.eligible ? { plan: result.plan, planHash: repairPlanHash(result.plan) } : null;
 }
 
 /** Replays a saved offer against the same immutable source and rejects tampering. */
-export function applyAuthorizedFactFormatRepair(input: Readonly<{ checkpoint: GenerationReviewCheckpoint; rawOutput: string; requestBody: string }>): FactFormatRepairPlan | null {
+export function applyAuthorizedFactFormatRepair(input: Readonly<{ checkpoint: GenerationReviewCheckpoint; rawOutput: string; requestBody: string; sentFactIds?: readonly string[] }>): FactFormatRepairPlan | null {
   const repair = input.checkpoint.version === 2 ? input.checkpoint.factFormatRepair : undefined;
   const receipt = input.checkpoint.decisionJournal.find((entry) => entry.decision === "repair_format"
     && entry.reviewId === input.checkpoint.reviewId
@@ -61,7 +77,7 @@ export function applyAuthorizedFactFormatRepair(input: Readonly<{ checkpoint: Ge
     && entry.repair.sourceResponseId === repair?.sourceResponseId);
   if (!repair || repair.status !== "authorized" || !receipt || receipt.decision !== "repair_format"
     || sha256(input.rawOutput) !== repair.plan.rawOutputHash || sha256(input.requestBody) !== repair.producingRequestHash) return null;
-  const recalculated = prepareFactFormatRepair(input.rawOutput, input.requestBody);
+  const recalculated = prepareFactFormatRepair(input.rawOutput, input.requestBody, input.sentFactIds);
   if (!recalculated || recalculated.planHash !== repair.planHash || receipt.planHash !== repair.planHash
     || canonicalEvidenceJson(recalculated.plan) !== canonicalEvidenceJson(repair.plan)) return null;
   return recalculated.plan;
