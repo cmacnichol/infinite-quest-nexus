@@ -40,6 +40,8 @@ import {
   generateTemplateWorld,
   worldGenerationFailureDiagnostic,
 } from "./provider-world-generation-adapter.js";
+import { createProviderResponseFormatCapabilities, type ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
+import type { SchemaVerification } from "@infinite-quest/contracts";
 
 export type ProviderApplicationTransaction = Readonly<{
   application: ProviderApplication;
@@ -118,6 +120,7 @@ export type ApiProviderApplicationComposition = Readonly<{
   role: "api";
   application: ProviderApplication;
   runtime: RuntimeProviderAdapter;
+  responseFormatCapabilities: ProviderResponseFormatCapabilities;
   generation: ApiGenerationProviderCollaborators;
   illustration: IllustrationProviderCollaborators;
   chronicle: ChronicleProviderCollaborators;
@@ -129,6 +132,7 @@ export type ApiProviderApplicationComposition = Readonly<{
 
 export type WorkerProviderApplicationComposition = Readonly<{
   role: "worker";
+  responseFormatCapabilities: ProviderResponseFormatCapabilities;
   generation: WorkerGenerationProviderCollaborators;
   illustration: IllustrationProviderCollaborators;
   chronicle: ChronicleProviderCollaborators;
@@ -156,7 +160,7 @@ export function providerPromptProtocolVersion(snapshot: PromptSnapshotVersion["s
 
 function createInternals(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ) {
   function bind(database: DatabaseClient | DatabasePool): ProviderApplicationTransaction {
     const client = database as DatabaseClient;
@@ -278,6 +282,7 @@ function createInternals(
   return {
     application,
     runtimeAdapter: base.runtime,
+    responseFormatCapabilities: createProviderResponseFormatCapabilities({ records: options.schemaVerifications, registryDigest: options.schemaVerificationDigest, now: options.clock }),
     transaction: <T>(work: (binding: ProviderApplicationTransaction, client: DatabaseClient) => Promise<T>) =>
       withTransaction(pool, async (client) => work(bind(client), client)),
     generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs }),
@@ -298,13 +303,14 @@ function createInternals(
 
 export function createApiProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ): ApiProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({
     role: "api",
     application: graph.application,
     runtime: graph.runtimeAdapter,
+    responseFormatCapabilities: graph.responseFormatCapabilities,
     generation: graph.generation,
     illustration: graph.illustration,
     chronicle: graph.chronicle,
@@ -317,11 +323,12 @@ export function createApiProviderApplicationComposition(
 
 export function createWorkerProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ): WorkerProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({
     role: "worker",
+    responseFormatCapabilities: graph.responseFormatCapabilities,
     generation: graph.workerGeneration,
     illustration: graph.illustration,
     chronicle: graph.chronicle,

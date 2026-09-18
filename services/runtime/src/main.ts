@@ -26,8 +26,10 @@ import {
   createWorkerProviderApplicationComposition
 } from "./provider-application-composition.js";
 import { createProviderApplicationAdapter } from "../../api/src/provider-application-adapter.js";
+import { loadSchemaVerificationFile } from "./provider-schema-verification.js";
 
 const config = loadRuntimeConfig();
+const schemaVerification = loadSchemaVerificationFile(process.env.TEXT_SCHEMA_VERIFICATION_FILE?.trim() || undefined);
 const abortController = new AbortController();
 
 async function shutdown(signal: string): Promise<void> {
@@ -52,11 +54,11 @@ await runRuntimeLifecycle(config, abortController, {
     waitForDatabaseMigrations,
     createApiProviders: (pool, credentialSecret, transport) => createApiProviderApplicationComposition(
       pool,
-      { credentialSecret, transport }
+      { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest }
     ),
     createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
       pool,
-      { credentialSecret, transport }
+      { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest }
     ),
     createProviderApiAdapter: createProviderApplicationAdapter,
     createApiGeneration: (pool, providers, operatorConfig) => createApiGenerationApplication(pool, providers, undefined, operatorConfig),
