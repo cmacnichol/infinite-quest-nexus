@@ -1,4 +1,7 @@
 import { Ajv } from "ajv";
+import { unlink } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { expect, it, vi } from "vitest";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import {
@@ -105,6 +108,21 @@ it("stops at the first failed synthetic response and fabricates no proposed reco
   expect(result.observations).toEqual([{ call: 1, operation: "story", streaming: false, status: "failed", returnedModel: "DeepSeek V3.2 Exp", returnedProviderRoute: "Novita" }]);
 });
 
+it.each([
+  ["timeout", async () => { throw new Error("timeout"); }, "timeout"],
+  ["refusal", async () => { throw new Error("refusal"); }, "refusal"],
+  ["partial stream", async (request: any) => ({ content: JSON.stringify(request.syntheticResponse), finishReason: "length", returnedModel: request.model, returnedProviderRoute: request.route, preparedRequest: { body: request.body, payloadHash: request.payloadHash } }), "response_identity_or_completion"],
+  ["malformed JSON", async (request: any) => ({ content: "{", finishReason: "stop", returnedModel: request.model, returnedProviderRoute: request.route, preparedRequest: { body: request.body, payloadHash: request.payloadHash } }), "invalid_json"],
+  ["wire schema", async (request: any) => ({ content: JSON.stringify({ ...request.syntheticResponse, narration: "" }), finishReason: "stop", returnedModel: request.model, returnedProviderRoute: request.route, preparedRequest: { body: request.body, payloadHash: request.payloadHash } }), "wire_schema"],
+  ["tracker data loss", async (request: any) => ({ content: JSON.stringify({ ...request.syntheticResponse, tracker_updates: [] }), finishReason: "stop", returnedModel: request.model, returnedProviderRoute: request.route, preparedRequest: { body: request.body, payloadHash: request.payloadHash } }), "story_parser"]
+])("stops after the first %s without a proposed record", async (_label, execute, reason) => {
+  const plan = prepareStructuredOutputProbe(options);
+  const dispatch = vi.fn(execute as ProbeExecutor);
+  const result = await runStructuredOutputProbe(plan, dispatch);
+  expect(dispatch).toHaveBeenCalledTimes(1);
+  expect(result).toMatchObject({ proposedRecords: [], failure: { call: 1, reason } });
+});
+
 it("qualifies all twelve synthetic calls and produces only complete proposed verification records", async () => {
   const plan = prepareStructuredOutputProbe(options);
   const execute: ProbeExecutor = async (request) => ({
@@ -127,6 +145,7 @@ it("qualifies all twelve synthetic calls and produces only complete proposed ver
 
 it("rejects stale price evidence and refuses execution before runtime loading when no private report is reserved", async () => {
   expect(() => validateExecutionPriceObservation(options.priceObservedAt, "2026-09-19T18:52:22.332Z")).toThrow(/current/);
+  const loadLiveRuntime = vi.fn();
   await expect(probeCli([
     "--execute", "--model", options.model, "--route", options.route,
     "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken),
@@ -134,5 +153,51 @@ it("rejects stale price evidence and refuses execution before runtime loading wh
     "--max-calls", "12", "--max-output-tokens", "2048", "--max-input-tokens", "163840",
     "--max-cost-usd", "0.540918", "--accept-max-cost-usd", "0.540918",
     "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved"
-  ])).rejects.toThrow(/private --report/);
+  ], { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow(/private --report/);
+  expect(loadLiveRuntime).not.toHaveBeenCalled();
+});
+
+it("rejects unknown, duplicate, missing, and below-cap execute guards before loading runtime", async () => {
+  const loadLiveRuntime = vi.fn();
+  for (const args of [
+    ["--unknown"],
+    ["--price-observed-at", options.priceObservedAt, "--price-observed-at", options.priceObservedAt],
+    ["--execute", "--model", options.model],
+    ["--execute", "--model", options.model, "--route", options.route, "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken), "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "12", "--max-output-tokens", "2048", "--max-input-tokens", "1"]
+  ]) await expect(probeCli(args, { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow();
+  expect(loadLiveRuntime).not.toHaveBeenCalled();
+});
+
+it("keeps dry-run stdout free of synthetic prompt content", async () => {
+  const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  try {
+    await probeCli(["--price-observed-at", options.priceObservedAt], { loadLiveRuntime: vi.fn() });
+    expect(write.mock.calls.join("\n")).not.toContain("tracker_updates");
+  } finally { write.mockRestore(); }
+});
+
+it("sets the standalone runtime role for documented execute arguments and attempts every cleanup", async () => {
+  const report = join(tmpdir(), `iq-probe-${Date.now()}-${Math.random()}.json`);
+  const previousRole = process.env.APP_ROLE;
+  delete process.env.APP_ROLE;
+  const poolEnd = vi.fn(async () => undefined);
+  const transportClose = vi.fn(async () => { throw new Error("close"); });
+  const loadLiveRuntime = vi.fn(async () => ({
+    loadRuntimeConfig: () => ({ databaseUrl: "unused", credentialEncryptionKey: "unused", security: { providerNetworkAllowlist: [] } }),
+    createDatabasePool: () => ({ end: poolEnd }),
+    initialOwnerId: async () => { expect(process.env.APP_ROLE).toBe("all"); throw new Error("preflight"); },
+    createProviderTransport: () => ({ close: transportClose }),
+    createProviderNetworkPolicy: () => ({}),
+    createWorkerProviderApplicationComposition: vi.fn()
+  }));
+  try {
+    await expect(probeCli([
+      "--execute", "--model", options.model, "--route", options.route, "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken), "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "12", "--max-output-tokens", "2048", "--max-input-tokens", "163840", "--max-cost-usd", "0.540918", "--accept-max-cost-usd", "0.540918", "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
+    ], { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow(/Probe execution failed/);
+    expect(poolEnd).toHaveBeenCalledTimes(1);
+    expect(transportClose).toHaveBeenCalledTimes(1);
+  } finally {
+    if (previousRole === undefined) delete process.env.APP_ROLE; else process.env.APP_ROLE = previousRole;
+    await unlink(report).catch(() => undefined);
+  }
 });

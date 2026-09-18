@@ -66,7 +66,7 @@ async function reservePrivateReport(path: string): Promise<Readonly<{ target: st
   return { target, write: (report) => handle.writeFile(`${JSON.stringify(report, null, 2)}\n`, "utf8"), close: () => handle.close() };
 }
 
-function executionGuards(values: Map<string, string>, plan: ReturnType<typeof prepareStructuredOutputProbe>) {
+function executionGuards(values: Map<string, string>, plan: ReturnType<typeof prepareStructuredOutputProbe>, now: Date) {
   for (const required of ["--model", "--route", "--input-usd-per-token", "--output-usd-per-token", "--price-observed-at", "--context-tokens", "--max-calls", "--max-output-tokens"] as const) if (!values.has(required)) throw new Error(`--execute requires ${required}.`);
   const profileId = values.get("--profile-id");
   if (!profileId || !uuid.test(profileId)) throw new Error("--execute requires a UUID --profile-id.");
@@ -78,11 +78,11 @@ function executionGuards(values: Map<string, string>, plan: ReturnType<typeof pr
   const acceptedCost = numeric(values, "--accept-max-cost-usd", 0);
   const ceiling = Number(plan.safePlan.maxInferenceCostUsd);
   if (maxInputTokens < DEFAULT_STRUCTURED_OUTPUT_PROBE.contextTokens || maxCostUsd < ceiling || acceptedCost !== ceiling) throw new Error("Execution ceilings do not cover the prepared conservative bound exactly.");
-  validateExecutionPriceObservation(String(plan.safePlan.priceObservedAt), new Date().toISOString());
+  validateExecutionPriceObservation(String(plan.safePlan.priceObservedAt), now.toISOString());
   return { profileId, authorization };
 }
 
-export type ProbeCliDependencies = Readonly<{ loadLiveRuntime?: () => Promise<any> }>;
+export type ProbeCliDependencies = Readonly<{ loadLiveRuntime?: () => Promise<any>; now?: () => Date }>;
 async function defaultLiveRuntime() {
   const [{ loadRuntimeConfig }, { createDatabasePool, initialOwnerId }, { createWorkerProviderApplicationComposition }, { createProviderTransport }, { createProviderNetworkPolicy }] = await Promise.all([
     import("../packages/database/src/config.js"), import("../packages/database/src/pool.js"), import("../services/runtime/src/provider-application-composition.js"),
@@ -96,13 +96,16 @@ export async function main(argv = process.argv.slice(2), dependencies: ProbeCliD
   const input = probeInput(values);
   const plan = prepareStructuredOutputProbe(input);
   if (!execute) { await writePrivateReport(values.get("--report"), { mode: "offline_preparation", ...plan.safePlan }); return; }
-  const guarded = executionGuards(values, plan);
+  const guarded = executionGuards(values, plan, (dependencies.now ?? (() => new Date()))());
   const reportPath = values.get("--report");
   if (!reportPath) throw new Error("--execute requires a private --report path reserved before dispatch.");
   const report = await reservePrivateReport(reportPath);
   let pool: { end(): Promise<void> } | null = null;
   let transport: { close(): Promise<void> } | null = null;
   try {
+    // The shared runtime config historically treats argv[2] as a service role.
+    // This standalone CLI owns argv, so flags must never become APP_ROLE values.
+    process.env.APP_ROLE ??= "all";
     const { loadRuntimeConfig, createDatabasePool, initialOwnerId, createWorkerProviderApplicationComposition, createProviderTransport, createProviderNetworkPolicy } = await (dependencies.loadLiveRuntime ?? defaultLiveRuntime)();
     const runtime = loadRuntimeConfig();
     pool = createDatabasePool(runtime.databaseUrl, 2);
@@ -124,7 +127,10 @@ export async function main(argv = process.argv.slice(2), dependencies: ProbeCliD
   } catch {
     await report.write({ mode: "execute", executionAuthorization: guarded.authorization, safePlan: plan.safePlan, result: { proposedRecords: [], failure: { call: 0, reason: "runtime_preflight_failure" }, observations: [] } }).catch(() => undefined);
     throw new Error("Probe execution failed; the private failure report contains the safe status.");
-  } finally { await transport?.close(); await pool?.end(); await report.close(); }
+  } finally {
+    const cleanup = await Promise.allSettled([transport?.close(), pool?.end(), report.close()].filter((value): value is Promise<void> => Boolean(value)));
+    if (cleanup.some((result) => result.status === "rejected")) process.stderr.write("Probe cleanup encountered a safe close failure.\n");
+  }
 }
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) await main();
