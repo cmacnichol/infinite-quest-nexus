@@ -74,6 +74,7 @@ describe("turn validation report", () => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
     const client = { query, release: vi.fn() };
     const report = await readTurnValidationReport(client as any, { limit: 50, since: null, format: "json" });
@@ -83,7 +84,45 @@ describe("turn validation report", () => {
     expect(query.mock.calls[1]?.[0]).toContain("LIMIT $2");
     expect(query.mock.calls[1]?.[0]).not.toContain("raw_output");
     expect(query.mock.calls[1]?.[1]).toEqual([null, 50]);
+    const ledgerCall = query.mock.calls.find(([text]) => typeof text === "string" && text.includes("jsonb_array_elements"));
+    expect(ledgerCall?.[0]).toContain("jsonb_array_elements");
+    expect(ledgerCall?.[0]).toContain("LIMIT 24");
+    expect(ledgerCall?.[0]).not.toMatch(/requestBody|partialContent|raw_output|credential|privateMessage/i);
     expect(report.metrics).toEqual(expect.objectContaining({ jobs: 0, initialValid: 0 }));
+  });
+
+  it("reports contract cohorts from bounded ledger scalars without repairing the first response", async () => {
+    const jobs = [
+      { id: "strict-valid", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+      { id: "strict-repaired", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: null, queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null },
+      { id: "required-preflight", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: null, requestedModel: "configured", errorCode: "response_contract_unavailable", queuedPolicy: "required", operationClosureVersion: "1", failureDiagnostic: null, contextOptions: null, generationPolicy: null, storyPromptCompatibility: null }
+    ];
+    const query = vi.fn(async (text: string) => {
+      if (text.includes("jsonb_array_elements")) return { rows: [
+        { jobId: "strict-valid", invocationOrdinal: 1, policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), operation: "story_generation", requestedModel: "configured", returnedModel: "observed-primary", returnedRoute: "route-a", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:00.500Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: 500, costMicrounits: null },
+        { jobId: "strict-repaired", invocationOrdinal: 1, policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), operation: "story_generation", requestedModel: "configured", returnedModel: "first-observed", returnedRoute: "route-a", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:00.500Z", completedAt: "2026-09-18T00:00:01.000Z", latencyMs: 500, costMicrounits: 42 },
+        { jobId: "strict-repaired", invocationOrdinal: 2, policy: "required", mode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), operation: "story_choice_repair", requestedModel: "configured", returnedModel: "repair-observed", returnedRoute: "route-b", status: "completed", diagnosticCode: null, dispatchedAt: "2026-09-18T00:00:01.500Z", completedAt: "2026-09-18T00:00:02.000Z", latencyMs: 500, costMicrounits: 99 },
+        { jobId: "required-preflight", invocationOrdinal: 0, policy: "required", mode: "unknown", schemaVersion: null, schemaHash: null, operation: "preflight", requestedModel: "configured", returnedModel: null, returnedRoute: null, status: "reserved", diagnosticCode: "provider_route_unavailable", dispatchedAt: null, completedAt: null, latencyMs: null, costMicrounits: null }
+      ] };
+      if (text.includes("FROM generation_jobs")) return { rows: jobs };
+      if (text.includes("FROM generation_attempts")) return { rows: [
+        { jobId: "strict-valid", attemptNumber: 1, recoveryKind: "initial", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrorCount: 0, requestModel: "configured", responseModel: "attempt-model" },
+        { jobId: "strict-repaired", attemptNumber: 1, recoveryKind: "initial", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrorCount: 1, requestModel: "configured", responseModel: "first-model" },
+        { jobId: "strict-repaired", attemptNumber: 2, recoveryKind: "repair", completedAt: "2026-09-18T00:00:02.000Z", hasOutput: true, validationErrorCount: 0, requestModel: "configured", responseModel: "repair-model" }
+      ] };
+      return { rows: [] };
+    });
+
+    const report = await readTurnValidationReport({ query } as any, { limit: 50, since: null, format: "json" });
+    expect(report.metrics).toMatchObject({ jobsWithInitialResponse: 2, initialValid: 1, initialInvalid: 1, preflightUnavailable: 1, primaryCalls: 2, acceptedJobs: 2 });
+    expect(report.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: "strict-repaired", initialOutcome: "invalid", actualReturnedModel: "first-observed", actualReturnedRoute: "route-a", observedCostMicrounits: 42 }),
+      expect.objectContaining({ jobId: "required-preflight", preflightUnavailable: true, actualReturnedModel: "unknown", actualReturnedRoute: "unknown", observedCostMicrounits: "unknown" })
+    ]));
+    expect(report.cohorts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ policy: "required", effectiveMode: "json_schema", schemaVersion: "story-output-v2", schemaHash: "a".repeat(64), operation: "story_generation", requestedModel: "configured", returnedModel: "first-observed", returnedRoute: "route-a", contractProtocol: "unknown", operationClosureVersion: "1" })
+    ]));
+    expect(JSON.stringify(report)).not.toContain("repair-observed");
   });
 
   it("uses durable completion, output presence, and validation errors rather than response IDs or finish limits", async () => {
@@ -111,11 +150,11 @@ describe("turn validation report", () => {
     const query = vi.fn(async (text: string) => {
       if (text.includes("FROM generation_jobs")) return { rows: jobs };
       if (text.includes("FROM generation_attempts")) return { rows: [
-        { jobId: "null-id", attemptNumber: 1, recoveryKind: "initial", providerResponseId: null, completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrors: [], requestMetadata: { model: "frozen-default-model" }, responseMetadata: { outputLimited: false, modelInstanceId: "returned-null-id" } },
-        { jobId: "length", attemptNumber: 1, recoveryKind: "initial", providerResponseId: "response", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrors: [], responseMetadata: { outputLimited: true, modelInstanceId: "returned-length" } },
-        { jobId: "invalid", attemptNumber: 1, recoveryKind: "initial", providerResponseId: "response", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrors: ["canonical_facts missing"], responseMetadata: { outputLimited: false, modelInstanceId: "returned-invalid" } },
-        { jobId: "invalid", attemptNumber: 2, recoveryKind: "repair", providerResponseId: "response-repair", completedAt: "2026-09-18T00:00:02.000Z", hasOutput: true, validationErrors: [], responseMetadata: { outputLimited: false, modelInstanceId: "returned-repair" } },
-        { jobId: "incomplete", attemptNumber: 1, recoveryKind: "initial", providerResponseId: "response", completedAt: null, hasOutput: true, validationErrors: [], responseMetadata: { outputLimited: false, modelInstanceId: "returned\nMODEL_SECRET" } }
+        { jobId: "null-id", attemptNumber: 1, recoveryKind: "initial", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrorCount: 0, requestModel: "frozen-default-model", responseModel: "returned-null-id" },
+        { jobId: "length", attemptNumber: 1, recoveryKind: "initial", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrorCount: 0, requestModel: null, responseModel: "returned-length" },
+        { jobId: "invalid", attemptNumber: 1, recoveryKind: "initial", completedAt: "2026-09-18T00:00:01.000Z", hasOutput: true, validationErrorCount: 1, requestModel: null, responseModel: "returned-invalid" },
+        { jobId: "invalid", attemptNumber: 2, recoveryKind: "repair", completedAt: "2026-09-18T00:00:02.000Z", hasOutput: true, validationErrorCount: 0, requestModel: null, responseModel: "returned-repair" },
+        { jobId: "incomplete", attemptNumber: 1, recoveryKind: "initial", completedAt: null, hasOutput: true, validationErrorCount: 0, requestModel: null, responseModel: "returned\nMODEL_SECRET" }
       ] };
       return { rows: [] };
     });

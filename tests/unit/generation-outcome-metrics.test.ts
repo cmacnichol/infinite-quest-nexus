@@ -20,7 +20,15 @@ describe("generation validation outcome metrics", () => {
       initialInvalid: 1,
       initialUnknown: 0,
       repairResponses: 1,
-      validRepairResponses: 1
+      validRepairResponses: 1,
+      preflightUnavailable: 0,
+      missingPrimaryResponse: 0,
+      refusedResponses: 0,
+      transportFailures: 0,
+      primaryCalls: 2,
+      acceptedJobs: 1,
+      discardedJobs: 0,
+      cancelledJobs: 0
     });
   });
 
@@ -53,5 +61,46 @@ describe("generation validation outcome metrics", () => {
       duplicate,
       { ...duplicate, outcome: "invalid" }
     ])).toThrow("Conflicting observations for job a attempt 1");
+  });
+
+  it("keeps the earliest primary denominator while reporting response-contract outcomes separately", () => {
+    const result = summarizeValidationOutcomes(
+      [
+        { jobId: "strict-valid", status: "completed" },
+        { jobId: "strict-repaired", status: "completed" },
+        { jobId: "required-preflight", status: "failed" },
+        { jobId: "missing", status: "failed" },
+        { jobId: "refused", status: "failed" },
+        { jobId: "transport", status: "failed" },
+        { jobId: "discarded", status: "discarded" },
+        { jobId: "cancelled", status: "cancelled" }
+      ],
+      [
+        { jobId: "strict-valid", attemptNumber: 1, operation: "initial", outcome: "valid", primaryCall: true },
+        { jobId: "strict-repaired", attemptNumber: 1, operation: "initial", outcome: "invalid", primaryCall: true },
+        { jobId: "strict-repaired", attemptNumber: 2, operation: "repair", outcome: "valid", primaryCall: false },
+        { jobId: "required-preflight", attemptNumber: 0, operation: "preflight", outcome: "unknown", preflightUnavailable: true },
+        { jobId: "missing", attemptNumber: 1, operation: "initial", outcome: "unknown", primaryCall: true, responseState: "missing" },
+        { jobId: "refused", attemptNumber: 1, operation: "initial", outcome: "unknown", primaryCall: true, responseState: "refused" },
+        { jobId: "transport", attemptNumber: 1, operation: "initial", outcome: "unknown", primaryCall: true, responseState: "transport" }
+      ]
+    );
+
+    expect(result).toMatchObject({
+      jobs: 8,
+      jobsWithInitialResponse: 2,
+      initialValid: 1,
+      initialInvalid: 1,
+      initialUnknown: 3,
+      preflightUnavailable: 1,
+      missingPrimaryResponse: 1,
+      refusedResponses: 1,
+      transportFailures: 1,
+      primaryCalls: 5,
+      acceptedJobs: 2,
+      discardedJobs: 1,
+      cancelledJobs: 1,
+      validRepairResponses: 1
+    });
   });
 });
