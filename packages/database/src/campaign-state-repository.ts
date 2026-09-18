@@ -15,6 +15,8 @@ import { portableAcceptedTurnModelMetadata } from "../../contracts/src/campaign-
 import { storyContextBudgetTokensSchema } from "../../contracts/src/story-settings.js";
 import { z } from "zod";
 import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
+import { generationResponseFormatProjection } from "./generation-response-format-projection.js";
+import { projectGenerationResponseFormat } from "../../contracts/src/generation-response-format-projection.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import {
   campaignSyncSourceProjectionSchema,
@@ -1545,6 +1547,7 @@ type CampaignSyncRow = {
   pendingGenerationReplacementTurnId: string | null;
   pendingGenerationCreatedAt: Date | string | null;
   pendingGenerationUpdatedAt: Date | string | null;
+  pendingResponseFormat: unknown;
   recoveryId: string | null;
   recoveryStatus: "recoverable" | "failed" | "completed" | null;
   recoveryOperationKind: "append" | "replace_latest" | null;
@@ -1554,6 +1557,8 @@ type CampaignSyncRow = {
   recoveryReplacementTurnId: string | null;
   recoveryMetadata: Record<string, unknown> | null;
   recoveryReviewSummary: unknown;
+  recoveryResponseFormat: unknown;
+  recoveryErrorCode: string | null;
   recoveryResultIsRecent: boolean | null;
   latestTurnId: string | null;
   latestTurnNumber: number | null;
@@ -1589,14 +1594,17 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
                 pending.action AS "pendingGenerationAction", pending.operation_kind AS "pendingGenerationOperationKind",
                 pending.expected_turn_number AS "pendingGenerationExpectedTurnNumber",
                 pending.replacement_turn_id AS "pendingGenerationReplacementTurnId",
-                pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt",
+                 pending.created_at AS "pendingGenerationCreatedAt", pending.updated_at AS "pendingGenerationUpdatedAt",
+                 pending."responseFormat" AS "pendingResponseFormat",
                 recovery.id AS "recoveryId", recovery.status AS "recoveryStatus",
                 recovery.operation_kind AS "recoveryOperationKind",
                 recovery.expected_turn_number AS "recoveryExpectedTurnNumber", recovery.attempts AS "recoveryAttempts",
                 recovery.result_turn_id AS "recoveryResultTurnId",
                 recovery.replacement_turn_id AS "recoveryReplacementTurnId",
                 recovery.recovery_metadata AS "recoveryMetadata",
-                recovery."recoveryReviewSummary" AS "recoveryReviewSummary",
+                 recovery."recoveryReviewSummary" AS "recoveryReviewSummary",
+                 recovery."responseFormat" AS "recoveryResponseFormat",
+                 recovery.error_code AS "recoveryErrorCode",
                 latest_turn.id AS "latestTurnId", latest_turn.turn_number AS "latestTurnNumber",
                 (recovery.result_turn_id IS NOT NULL AND EXISTS (
                   SELECT 1 FROM (
@@ -1611,17 +1619,19 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
            JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
            LEFT JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
            LEFT JOIN LATERAL (
-             SELECT id, status, action, operation_kind, replacement_turn_id,
-                    expected_turn_number, created_at, updated_at
+              SELECT id, status, action, operation_kind, replacement_turn_id,
+                     expected_turn_number, created_at, updated_at,
+                     ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat"
                FROM generation_jobs
               WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
                 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')
               ORDER BY created_at DESC LIMIT 1
            ) pending ON true
            LEFT JOIN LATERAL (
-             SELECT id, status, operation_kind, expected_turn_number, attempts,
+              SELECT id, status, operation_kind, expected_turn_number, attempts, error_code,
                     result_turn_id, replacement_turn_id, recovery_metadata,
-                    ${generationReviewSummaryProjection("orchestration_private")} AS "recoveryReviewSummary"
+                     ${generationReviewSummaryProjection("orchestration_private")} AS "recoveryReviewSummary",
+                     ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat"
               FROM generation_jobs
               WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
                 AND status IN ('recoverable','failed','completed')
@@ -1699,7 +1709,8 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
           action: row.pendingGenerationAction || "",
           expectedTurnNumber: row.pendingGenerationExpectedTurnNumber,
           createdAt: row.pendingGenerationCreatedAt,
-          updatedAt: row.pendingGenerationUpdatedAt
+           updatedAt: row.pendingGenerationUpdatedAt
+           , responseFormat: projectGenerationResponseFormat(row.pendingResponseFormat)
         }
         : null;
       const pendingGeneration = pendingBase && row.pendingGenerationOperationKind === "append"
@@ -1722,7 +1733,8 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
           attempts: row.recoveryAttempts,
           ...publicGenerationError(row.recoveryStatus),
           diagnostic: projectSafeGenerationDiagnostic(objectValue(row.recoveryMetadata).diagnostic),
-          review: publicGenerationReview(row.recoveryReviewSummary, row.recoveryStatus),
+           review: publicGenerationReview(row.recoveryReviewSummary, row.recoveryStatus),
+           responseFormat: projectGenerationResponseFormat({ ...(typeof row.recoveryResponseFormat === "object" && row.recoveryResponseFormat !== null ? row.recoveryResponseFormat as Record<string, unknown> : {}), errorCode: row.recoveryErrorCode }),
           resultTurnId: row.recoveryResultTurnId
         }
         : null;

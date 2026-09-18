@@ -12,12 +12,16 @@ import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/
 import { characterFictionAuthority, sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson, readStoryEvidenceFromSource } from "../../packages/application/src/memory/generation-context.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
-import { generationExecutionProtocolIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
+import { generationExecutionProtocolIdentity, PreparedResponseContractError, serializeProviderRequest, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
+  callCampaignTextProvider,
   appendFactFormatRepairApplication,
+  bindCampaignResponseContract,
+  responseContractInvocationDetails,
   generationContextFingerprint,
   planGenerationPromptContext,
+  preparePrimaryReservation,
   semanticRepairScope,
   sentCanonicalFactIds,
   type GenerationExecutionCollaborators
@@ -178,6 +182,110 @@ function authorizeReviewRetry(job: GenerationExecutionPayload, checkpoint: Gener
 }
 
 describe("generation executor adapter", () => {
+  function contractDispatchFixture() {
+    const job = completeGenerationExecutionPayload();
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: { selectionHash: "a".repeat(64), contracts: {
+        "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+      } }
+    } as never;
+    const provider: any = { id: job.provider_profile_id, name: "Contract fixture", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const completed = vi.fn(async (_scope: unknown, id: string, response: unknown) => ({ id, status: "completed", response }));
+    const dependencies: any = { pool: {} as DatabasePool, responseContractScope: { jobId: job.id, ownerUserId: job.owner_user_id, workerId: "contract-fixture" },
+      repository: { reserveResponseContractInvocation: vi.fn(async (_scope: unknown, input: any) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+        markResponseContractInvocationDispatched: vi.fn(async (_scope: unknown, id: string) => ({ id, status: "dispatched" })), completeResponseContractInvocation: completed },
+      collaborators: { onProviderDispatch: vi.fn(), recordProfileCost: vi.fn(async () => undefined) } } as never;
+    return { job, provider, dependencies, completed };
+  }
+
+  it("rejects a new-mode provider result whose prepared request differs from its reservation", async () => {
+    const { job, provider, dependencies, completed } = contractDispatchFixture();
+    provider.execute = vi.fn(async () => ({ content: "{}", responseId: "result", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {}, preparedRequest: { body: "{\\\"tampered\\\":true}", payloadHash: sha256("{\\\"tampered\\\":true}") } }));
+    await expect(callCampaignTextProvider(dependencies, provider as never, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toMatchObject({ code: "response_contract_identity_mismatch" });
+    expect(provider.execute).toHaveBeenCalledOnce();
+    expect(completed).not.toHaveBeenCalled();
+  });
+
+  it("does not replace completed response provenance when a post-success cost write fails", async () => {
+    const { job, provider, dependencies, completed } = contractDispatchFixture();
+    provider.execute = vi.fn(async (request: any) => {
+      const preparedRequest = serializeProviderRequest({ ...provider, baseUrl: "" }, request);
+      return { content: "{}", responseId: "result", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {}, returnedModel: "returned", returnedProviderRoute: "route", preparedRequest };
+    });
+    dependencies.collaborators.recordProfileCost.mockRejectedValueOnce(new Error("cost write failed"));
+    await expect(callCampaignTextProvider(dependencies, provider as never, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toThrow("cost write failed");
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(completed).toHaveBeenCalledWith(expect.any(Object), expect.any(String), { returnedModel: "returned", returnedProviderRoute: "route", diagnosticCode: null });
+  });
+
+  it("persists bounded private partial prepared-response evidence before completing the failed invocation", async () => {
+    const { job, provider, dependencies, completed } = contractDispatchFixture();
+    const saveOrchestration = vi.fn(async (_scope: unknown, value: unknown) => { job.orchestration_private = value as never; return true; });
+    dependencies.repository.saveOrchestration = saveOrchestration;
+    provider.execute = vi.fn(async (request: any) => {
+      const prepared = serializeProviderRequest({ ...provider, baseUrl: "" }, request);
+      throw new PreparedResponseContractError(Object.assign(new Error("private transport"), { code: "provider_schema_invalid" }), prepared, {
+        responseId: "partial-id", partialContent: "private partial", returnedModel: "returned", returnedProviderRoute: "route", diagnosticCode: "provider_schema_invalid"
+      });
+    });
+    await expect(callCampaignTextProvider(dependencies, provider, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toBeInstanceOf(PreparedResponseContractError);
+    expect(saveOrchestration).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      preparedResponseFailures: [expect.objectContaining({ invocationId: "b".repeat(64), responseId: "partial-id", partialContent: "private partial", diagnosticCode: "provider_schema_invalid" })]
+    }));
+    expect(completed).toHaveBeenCalledOnce();
+  });
+  it("binds the frozen stream contract before reservation and preserves the legacy reservation body", () => {
+    const provider = { id: "provider", providerType: "openai_compatible", model: "model", contextWindowTokens: 100_000, maxOutputTokens: 100,
+      temperature: 0, requestTimeoutMs: 1_000, configuration: {} } as never;
+    const streamContract = { version: 1, mode: "json_object", operation: "story", streaming: true, forbidFormatFallback: true } as const;
+    const nonstreamContract = { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true } as const;
+    const frozenJob = completeGenerationExecutionPayload();
+    frozenJob.orchestration_private = { frozenResponseContracts: { contracts: {
+      "story:stream": streamContract, "story:nonstream": nonstreamContract
+    } } } as never;
+    const callback = vi.fn();
+    const dispatched = bindCampaignResponseContract(frozenJob, "story_generation", {
+      systemPrompt: "rules", input: "action", onChunk: callback
+    });
+    const reserved = preparePrimaryReservation(provider, dispatched, true);
+    const legacy = preparePrimaryReservation(provider, { systemPrompt: "rules", input: "action", onChunk: callback }, false);
+
+    expect(reserved.body).toContain('"stream":true');
+    expect(reserved.body).toContain('"response_format":{"type":"json_object"}');
+    expect(reserved.payloadHash).toBe(sha256(reserved.body));
+    expect(legacy.body).not.toContain('"stream":true');
+    expect(legacy.body).not.toContain('"stream_options"');
+    expect(() => bindCampaignResponseContract(frozenJob, "story_choice_repair", { systemPrompt: "rules", input: "repair" }))
+      .toThrow(/does not permit/u);
+    expect(bindCampaignResponseContract(frozenJob, "rpg_assessment", { systemPrompt: "rules", input: "assess" }).responseContract).toBeUndefined();
+  });
+  it("derives immutable ledger provenance from the frozen contract and exact prepared body", () => {
+    const job = completeGenerationExecutionPayload();
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: {
+        selectionHash: "a".repeat(64),
+        contracts: {
+          "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+        }
+      }
+    } as never;
+    expect(responseContractInvocationDetails(job, "story_generation", false, "b".repeat(64), {
+      id: "provider", model: "model"
+    } as never)).toEqual({
+      logicalAttemptId: claim.jobId,
+      invocationKey: "story:nonstream",
+      operation: "story_generation",
+      requestPayloadHash: "b".repeat(64),
+      request: {
+        version: 1, selectionHash: "a".repeat(64), invocationKey: "story:nonstream", mode: "json_object",
+        schemaVersion: null, schemaHash: null, requestedModel: "model", providerRoutingSlugs: [],
+        returnedModel: null, returnedProviderRoute: null, diagnosticCode: null
+      }
+    });
+  });
   it("records an applied fact-format repair exactly once and rejects a conflicting replay", () => {
     const application: FactFormatRepairApplication = {
       version: 1, jobId: claim.jobId, reviewId: "00000000-0000-4000-8000-000000000007", revision: 1,

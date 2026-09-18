@@ -13,7 +13,10 @@ import { createApiGenerationApplication } from "../helpers/runtime-application-f
 import { createWorkerGenerationApplication } from "../helpers/runtime-application-fixtures.js";
 import { createWorkerGenerationApplication as composeWorkerGenerationApplication } from "../../services/runtime/src/generation-worker-composition.js";
 import { createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
-import { reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
+import { createPostgresGenerationExecutionRepository, reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
+import { createGenerationWorkerApplication } from "../../packages/application/src/index.js";
+import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
+import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import { startNextGeneration } from "../../services/worker/src/worker.js";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
@@ -111,6 +114,45 @@ async function generationCommands(pool: DatabasePool) {
 
 async function enqueueGeneration(pool: DatabasePool, campaignId: string, request: Parameters<Awaited<ReturnType<typeof generationCommands>>["enqueueGeneration"]>[1]) {
   return (await generationCommands(pool)).enqueueGeneration(campaignId, request);
+}
+
+async function runGenerationJobAfterCommittedOrchestrationCheckpoint(
+  pool: DatabasePool,
+  workerId: string,
+  leaseSeconds: number,
+  credentialSecret: string,
+  matchesCheckpoint: (orchestration: Record<string, unknown>) => boolean,
+  afterCheckpoint: () => Promise<void>
+): Promise<{ checkpointed: boolean }> {
+  const repository = createPostgresGenerationExecutionRepository(pool);
+  let checkpointed = false;
+  const checkpointRepository = {
+    ...repository,
+    saveOrchestration: async (...args: Parameters<typeof repository.saveOrchestration>) => {
+      const saved = await repository.saveOrchestration(...args);
+      if (saved && !checkpointed && matchesCheckpoint(args[1] as Record<string, unknown>)) {
+        checkpointed = true;
+        await afterCheckpoint();
+      }
+      return saved;
+    }
+  };
+  const providers = workerProviderGraph(pool, credentialSecret);
+  const application = composeWorkerGenerationApplication(
+    pool,
+    createApiIllustrationApplication(pool, credentialSecret),
+    apiMemoryApplication(pool, credentialSecret),
+    providers.generation,
+    {
+      createRepository: () => checkpointRepository,
+      createCollaborators: createGenerationExecutionCollaborators,
+      createExecutor: createGenerationExecutor,
+      createApplication: createGenerationWorkerApplication
+    }
+  );
+  const started = await startNextGeneration(application, workerId, leaseSeconds);
+  if (started) await started.execution;
+  return { checkpointed };
 }
 
 async function enqueueLatestReplacement(pool: DatabasePool, campaignId: string, request: Parameters<Awaited<ReturnType<typeof generationCommands>>["enqueueLatestReplacement"]>[1]) {
@@ -703,29 +745,18 @@ integration("durable Story Engine integration", () => {
     const narration = "The checkpointed draft reaches Location Gamma exactly once.";
     const requestOffset = requests.length;
     const job = await queue(imported.campaignId, "Resume the checkpointed draft.");
-    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
-    const querySpy = vi.spyOn(pool, "query");
-    let checkpointed = false;
-    querySpy.mockImplementation((async (...args: any[]) => {
-      const statement = String(args[0]);
-      const parameters = Array.isArray(args[1]) ? args[1] : [];
-      const result = await originalQuery(...args);
-      if (!checkpointed && statement.includes("SET orchestration_private")
-          && String(parameters[3]).includes("validatedMainDraft")) {
-        checkpointed = true;
-        await originalQuery(
-          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
-          [job.id]
-        );
+    const checkpointStory = JSON.parse(validStory(narration));
+    checkpointStory.canonical_fact_updates = [];
+    replies.push({ content: JSON.stringify(checkpointStory) });
+    const firstRun = await runGenerationJobAfterCommittedOrchestrationCheckpoint(
+      pool, "checkpoint-worker-a", 30, credentialSecret,
+      (orchestration) => "validatedMainDraft" in orchestration,
+      async () => {
+        await pool.query("UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1", [job.id]);
       }
-      return result;
-    }) as any);
-    try {
-      const checkpointStory = JSON.parse(validStory(narration));
-      checkpointStory.canonical_fact_updates = [];
-      replies.push({ content: JSON.stringify(checkpointStory) });
-      await runGenerationJob(pool, "checkpoint-worker-a", 30, credentialSecret);
-      expect(checkpointed).toBe(true);
+    );
+    expect(firstRun.checkpointed).toBe(true);
+    {
       const checkpoint = await pool.query<{
         orchestration_private: { validatedMainDraft?: { draftHash?: string; requestPayloadHash?: string } };
       }>("SELECT orchestration_private FROM generation_jobs WHERE id = $1", [job.id]);
@@ -764,8 +795,6 @@ integration("durable Story Engine integration", () => {
         [imported.campaignId]
       );
       expect(artifacts.rows).toEqual([{ count: 2, distinct_turns: 1 }]);
-    } finally {
-      querySpy.mockRestore();
     }
   });
 
@@ -786,36 +815,22 @@ integration("durable Story Engine integration", () => {
     });
     const sourceFactId = state.canonicalFacts[0]!.id;
     const job = await queue(imported.campaignId, "Change the beacon.");
-    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
-    const querySpy = vi.spyOn(pool, "query");
-    let checkpointed = false;
-    querySpy.mockImplementation((async (...args: any[]) => {
-      const statement = String(args[0]);
-      const parameters = Array.isArray(args[1]) ? args[1] : [];
-      const result = await originalQuery(...args);
-      if (!checkpointed && statement.includes("SET orchestration_private")
-          && String(parameters[3]).includes("validatedMainDraft")) {
-        checkpointed = true;
-        await originalQuery(
-          "UPDATE generation_attempts SET request_metadata = '{\"sentFactIds\":[]}'::jsonb WHERE generation_job_id = $1",
-          [job.id]
-        );
-        await originalQuery(
-          "UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
-          [job.id]
-        );
+    const story = JSON.parse(validStory("The beacon goes dark over the harbor."));
+    story.canonical_facts = ["The original beacon is dark."];
+    story.canonical_fact_updates = [{
+      content: "The original beacon is dark.", supersedes_fact_ids: [sourceFactId]
+    }];
+    replies.push({ content: JSON.stringify(story) });
+    const firstRun = await runGenerationJobAfterCommittedOrchestrationCheckpoint(
+      pool, "fact-checkpoint-worker-a", 30, credentialSecret,
+      (orchestration) => "validatedMainDraft" in orchestration,
+      async () => {
+        await pool.query("UPDATE generation_attempts SET request_metadata = '{\"sentFactIds\":[]}'::jsonb WHERE generation_job_id = $1", [job.id]);
+        await pool.query("UPDATE generation_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1", [job.id]);
       }
-      return result;
-    }) as any);
-    try {
-      const story = JSON.parse(validStory("The beacon goes dark over the harbor."));
-      story.canonical_facts = ["The original beacon is dark."];
-      story.canonical_fact_updates = [{
-        content: "The original beacon is dark.", supersedes_fact_ids: [sourceFactId]
-      }];
-      replies.push({ content: JSON.stringify(story) });
-      await runGenerationJob(pool, "fact-checkpoint-worker-a", 30, credentialSecret);
-      expect(checkpointed).toBe(true);
+    );
+    expect(firstRun.checkpointed).toBe(true);
+    {
       const persisted = await pool.query<{
         orchestration_private: { validatedMainDraft: { sentFactIds: string[] } };
         request_metadata: { sentFactIds: string[] };
@@ -843,8 +858,6 @@ integration("durable Story Engine integration", () => {
       expect((await getCampaignRuntimeState(pool, imported.campaignId)).canonicalFacts).toEqual([
         { id: expect.any(String), content: "The original beacon is dark." }
       ]);
-    } finally {
-      querySpy.mockRestore();
     }
   });
 
@@ -886,37 +899,28 @@ integration("durable Story Engine integration", () => {
     const baseNarration = "The party reaches Location Gamma and opens the hall.";
     const requestOffset = requests.length;
     const job = await queue(imported.campaignId, "Reach Location Gamma.");
-    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
-    const querySpy = vi.spyOn(pool, "query");
-    let extensionFailurePersisted = false;
-    querySpy.mockImplementation((async (...args: any[]) => {
-      const statement = String(args[0]);
-      const parameters = Array.isArray(args[1]) ? args[1] : [];
-      const result = await originalQuery(...args);
-      if (!extensionFailurePersisted && statement.includes("SET orchestration_private")
-          && String(parameters[3]).includes("extensionError")) {
-        extensionFailurePersisted = true;
-      }
-      return result;
-    }) as any);
-    try {
-      const checkpointStory = JSON.parse(validStory(baseNarration));
-      checkpointStory.canonical_fact_updates = [];
-      const finalExtensionStory = JSON.parse(validStory(`${baseNarration}\n\nA lantern appears in the hall, guiding the party onward.`));
-      finalExtensionStory.canonical_fact_updates = [];
-      replies.push(
-        { content: JSON.stringify(checkpointStory) },
-        { content: JSON.stringify({
-          activated_trigger_ids: ["checkpoint-after-extension"],
-          reasons: { "checkpoint-after-extension": "The party reaches the hall." }
-        }) },
-        { content: "not valid extension JSON" },
-        { content: JSON.stringify(finalExtensionStory) },
-        { content: "", contentForRequest: eventCoverageReply },
-        { content: "", contentForRequest: eventCoverageReply }
-      );
-      await runGenerationJob(pool, "extension-worker-a", 30, credentialSecret);
-      expect(extensionFailurePersisted).toBe(true);
+    const checkpointStory = JSON.parse(validStory(baseNarration));
+    checkpointStory.canonical_fact_updates = [];
+    const finalExtensionStory = JSON.parse(validStory(`${baseNarration}\n\nA lantern appears in the hall, guiding the party onward.`));
+    finalExtensionStory.canonical_fact_updates = [];
+    replies.push(
+      { content: JSON.stringify(checkpointStory) },
+      { content: JSON.stringify({
+        activated_trigger_ids: ["checkpoint-after-extension"],
+        reasons: { "checkpoint-after-extension": "The party reaches the hall." }
+      }) },
+      { content: "not valid extension JSON" },
+      { content: JSON.stringify(finalExtensionStory) },
+      { content: "", contentForRequest: eventCoverageReply },
+      { content: "", contentForRequest: eventCoverageReply }
+    );
+    const firstRun = await runGenerationJobAfterCommittedOrchestrationCheckpoint(
+      pool, "extension-worker-a", 30, credentialSecret,
+      (orchestration) => "extensionError" in orchestration,
+      async () => undefined
+    );
+    expect(firstRun.checkpointed).toBe(true);
+    {
       const interrupted = await pool.query<{
         attempts: number; status: string;
         orchestration_private: { validatedMainDraft?: unknown; afterEvents?: unknown[]; extensionError?: string };
@@ -974,8 +978,6 @@ integration("durable Story Engine integration", () => {
         [imported.campaignId]
       );
       expect(artifacts.rows).toEqual([{ count: 2, distinct_turns: 1 }]);
-    } finally {
-      querySpy.mockRestore();
     }
   });
 

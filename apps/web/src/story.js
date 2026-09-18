@@ -43,6 +43,7 @@ import {
   formatChronicleRetrievalAudit,
   generationDiagnosticPresentation,
   generationRecoveryGuidance,
+  generationResponseFormatPresentation,
   generationReviewPresentation
 } from "@infinite-quest/client-core";
 
@@ -1575,8 +1576,14 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
   const discardButton = $("btnDiscardGenerationRecovery");
   const details = $("generationRecoveryDetails");
   const reviewPanel = $("generationReviewPanel");
+  const responseFormatPanel = $("generationResponseFormatPanel");
+  const responseFormatHeading = $("generationResponseFormatHeading");
+  const responseFormatDetails = $("generationResponseFormatDetails");
   const review = state.generationReview;
   const reviewView = review?.summary ? generationReviewPresentation(review.summary, null, review.detail) : null;
+  const responseFormat = generationResponseFormatPresentation(
+    state.generationRecovery?.responseFormat ?? state.pendingGeneration?.responseFormat
+  );
   state.generationRecoveryKind = kind;
   if (panel) {
     panel.dataset.jobId = jobId;
@@ -1594,6 +1601,16 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
       details.append(item);
     }
     details.classList.toggle("hidden", reviewView !== null || !details.childElementCount);
+  }
+  if (responseFormatPanel) responseFormatPanel.classList.toggle("hidden", responseFormat === null);
+  if (responseFormatHeading) responseFormatHeading.textContent = responseFormat?.heading || "";
+  if (responseFormatDetails) {
+    responseFormatDetails.replaceChildren();
+    for (const detail of responseFormat?.details || []) {
+      const item = document.createElement("li");
+      item.textContent = detail;
+      responseFormatDetails.append(item);
+    }
   }
   if (continueButton) continueButton.classList.toggle("hidden", reviewView !== null || kind === "result");
   if (retryButton) {
@@ -1641,6 +1658,10 @@ function hideGenerationRecovery() {
     details.replaceChildren();
     details.classList.add("hidden");
   }
+  const responseFormatPanel = $("generationResponseFormatPanel");
+  if (responseFormatPanel) responseFormatPanel.classList.add("hidden");
+  const responseFormatDetails = $("generationResponseFormatDetails");
+  if (responseFormatDetails) responseFormatDetails.replaceChildren();
   state.generationRecoveryKind = null;
   state.generationReview = null;
   state.generationReviewError = null;

@@ -236,6 +236,9 @@ importers:
       '@types/unzipper':
         specifier: 0.10.11
         version: 0.10.11
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
       linkedom:
         specifier: 0.18.13
         version: 0.18.13

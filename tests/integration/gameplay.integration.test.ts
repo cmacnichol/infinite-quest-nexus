@@ -517,8 +517,9 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
     const initialPayloadBytes = Buffer.byteLength(initialSyncResponse.body);
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
     // Measured against this deterministic 55-turn fixture with the current
-    // synchronized campaign and Chronicle configuration contract.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_466, unchangedPayloadBytes: 3_267 });
+    // synchronized campaign and Chronicle configuration contract. The bounded
+    // legacy response-format projection adds 287 bytes to both payloads.
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_753, unchangedPayloadBytes: 3_554 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });

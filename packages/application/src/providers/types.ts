@@ -4,6 +4,7 @@ import type {
   ProviderType
 } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
+import type { ModelParameterAdvertisement, TextResponseFormatPolicy } from "@infinite-quest/contracts";
 
 /** Resolved by Fastify or loaded from a claimed job; never accepted from a browser as authority. */
 export type ProviderRole = "text" | "image" | "embedding" | "intent";
@@ -48,6 +49,7 @@ export type SafeProviderConfigurationFields = Readonly<{
   embeddingMaxBatchTokens?: number;
   embeddingDimensions?: number;
   embeddingMaxRetries?: number;
+  textResponseFormatPolicy?: TextResponseFormatPolicy;
 }>;
 
 declare const safeProviderConfigurationBrand: unique symbol;
@@ -193,6 +195,7 @@ export type ProviderModel = Readonly<{
   id: string;
   name: string;
   contextWindowTokens?: number;
+  responseFormatAdvertisement?: ModelParameterAdvertisement;
 }>;
 
 export type ProviderModelInventory = Readonly<{
@@ -204,6 +207,8 @@ export type ProviderModelInventory = Readonly<{
 export type ProviderModelInventoryRequest = OwnerScope & Readonly<{
   providerProfileId: string;
   providerRole: ProviderRole;
+  /** Explicit operator/API discovery may replace cached metadata. */
+  refresh?: boolean;
 }>;
 
 /** Safe, unsaved provider metadata; transient credentials remain outside the application call. */

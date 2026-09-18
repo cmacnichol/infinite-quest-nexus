@@ -34,6 +34,8 @@ import {
   type TextProviderProfile
 } from "../../../packages/story-engine/src/index.js";
 import { resolveAuthoringContextWindowTokens } from "./source-authoring-budget.js";
+import type { ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
+import { capabilityRouteConfigHash, providerEndpointIdentity, type ProviderCapabilityCacheKey } from "./provider-capability-cache.js";
 
 export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = Readonly<{
   id: string;
@@ -116,6 +118,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   credentialSecret: string;
   transport: ProviderTransport;
   health: ProviderHealthPort;
+  responseFormatCapabilities?: ProviderResponseFormatCapabilities;
   leaseDurationMs?: number;
 }>): RuntimeProviderAdapter {
   const leaseDurationMs = options.leaseDurationMs ?? 60_000;
@@ -166,9 +169,21 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       maxOutputTokens: row.maxOutputTokens,
       temperature: row.temperature,
       requestTimeoutMs: row.requestTimeoutMs,
-      endpointIdentity: createHash("sha256").update(row.baseUrl.replace(/\/+$/, "")).digest("hex"),
+      endpointIdentity: providerEndpointIdentity(row.baseUrl),
       configuration: Object.freeze({ ...row.configuration })
     });
+  }
+
+  function capabilityKey(row: Awaited<ReturnType<typeof load>>, ownerUserId: string, model = row.defaultModel): ProviderCapabilityCacheKey {
+    return {
+      ownerUserId,
+      providerProfileId: row.providerProfileId,
+      providerType: row.providerType,
+      endpointIdentity: providerEndpointIdentity(row.baseUrl),
+      model,
+      routeConfigHash: capabilityRouteConfigHash(row.configuration),
+      adapterProtocol: "text-schema-adapter-v1"
+    };
   }
 
   const leases: ProviderRuntimeLeasePort = {
@@ -212,19 +227,34 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       }
       try {
         const profile = transportProfile(row);
-        const models = await (request.providerRole === "image"
+        const models = request.providerRole === "text" && options.responseFormatCapabilities
+          ? (await options.responseFormatCapabilities.discoverInventory(
+            capabilityKey(row, request.ownerUserId),
+            async () => ({
+              providerProfileId: request.providerProfileId,
+              providerRole: request.providerRole,
+              models: (await discoverModels(profile, options.transport)).map((value) => ({
+                id: value.id,
+                name: value.displayName,
+                ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {}),
+                ...(value.responseFormatAdvertisement ? { responseFormatAdvertisement: value.responseFormatAdvertisement } : {})
+              }))
+            }), request.refresh === true
+          )).models
+          : (await (request.providerRole === "image"
           ? discoverImageModels(profile, options.transport)
           : request.providerRole === "embedding"
             ? discoverEmbeddingModels(profile, options.transport)
-            : discoverModels(profile, options.transport));
+            : discoverModels(profile, options.transport)));
         await options.health.recordHealth({ ownerUserId: request.ownerUserId, providerProfileId: request.providerProfileId, outcome: "healthy" });
         return {
           providerProfileId: request.providerProfileId,
           providerRole: request.providerRole,
           models: models.map((value) => ({
             id: value.id,
-            name: value.displayName,
-            ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {})
+            name: "displayName" in value ? value.displayName : value.name,
+            ...(() => { const contextWindowTokens = "contextLength" in value ? value.contextLength : value.contextWindowTokens; return contextWindowTokens !== undefined && contextWindowTokens > 0 ? { contextWindowTokens } : {}; })(),
+            ...(request.providerRole === "text" && value.responseFormatAdvertisement ? { responseFormatAdvertisement: value.responseFormatAdvertisement } : {})
           }))
         };
       } catch (error) {
@@ -268,7 +298,8 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         models: models.map((value) => ({
           id: value.id,
           name: value.displayName,
-          ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {})
+          ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {}),
+          ...(candidate.providerRole === "text" && value.responseFormatAdvertisement ? { responseFormatAdvertisement: value.responseFormatAdvertisement } : {})
         }))
       };
     } catch {

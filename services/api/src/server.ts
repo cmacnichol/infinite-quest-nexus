@@ -773,14 +773,20 @@ export async function buildServer({
 
   app.get<{
     Params: { providerId: string };
-    Querystring: { providerRole?: string };
-  }>("/api/v1/providers/:providerId/models", async (request) => ({
-    models: await providers.models(
+    Querystring: { providerRole?: string; refresh?: string };
+  }>("/api/v1/providers/:providerId/models", async (request) => {
+    const query = z.object({
+      providerRole: z.literal("embedding").optional(),
+      refresh: z.enum(["true", "false"]).optional()
+    }).parse(request.query);
+    return { models: await providers.models(
       await initialOwnerId(pool),
       uuidSchema.parse(request.params.providerId),
-      z.object({ providerRole: z.literal("embedding").optional() }).parse(request.query).providerRole
+      query.providerRole,
+      query.refresh === "true"
     )
-  }));
+    };
+  });
 
   app.put<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/default", async (request) => (
     providers.setDefault(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))

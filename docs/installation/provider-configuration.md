@@ -15,6 +15,72 @@ Create separate profiles for **Story text**, **Chronicle embeddings**, and
 Direction jobs do not use a classifier. Never reuse an endpoint or key across
 roles merely because the provider brand is the same.
 
+## Structured output policy for Story text
+
+The **Structured output** control appears only on Story text profiles. It changes
+the policy for new jobs; it never changes an accepted turn or rewrites a pending
+job's frozen response selection.
+
+| Policy | What a new job does |
+| --- | --- |
+| Legacy JSON | Uses the historical JSON path. Existing profiles that have no saved policy remain physically unchanged when saved without a policy change. |
+| Use schema when verified | Uses a schema only when the server has current verification for the selected model and operation; otherwise it chooses the compatible JSON path before dispatch. |
+| Require verified schema | Stops a new job before dispatch unless the server has current verification for the selected model and operation. |
+
+The provider editor shows a server-owned advisory summary for the selected model:
+**verified**, **advertised**, **unsupported**, or **unknown**. An advertised
+model is not verified. Verification expires, and missing, stale, or failed
+metadata is treated as unknown. The editor shows only operation coverage and
+timestamps; it does not expose schemas, endpoint routing, credentials, or
+operator records.
+
+Some adapters cannot use the full schema because Story tracker objects allow
+open-ended values. Nexus reports that limitation as unsupported rather than
+altering tracker data. Configure a compatible profile or retain Legacy JSON.
+
+Profile-policy edits apply to future jobs. Because the profile configuration is
+part of the compatibility fingerprint, a pending job can require its prior
+compatible configuration to resume; discard and explicitly re-enqueue it when
+appropriate. Do not assume that a policy toggle guarantees a pending job will
+continue.
+
+### Operator verification records
+
+Model discovery is advisory. Its process-local cache expires after 24 hours;
+**Refresh endpoint** requests fresh discovery. Saving or editing a form cannot
+create verified schema support. Unsaved configuration changes leave capability
+status unknown until compatible server evidence is available.
+
+Runtime roles load an operator-reviewed JSON array from the optional
+`TEXT_SCHEMA_VERIFICATION_FILE` environment setting at startup. With no setting,
+there are no verified routes. Mount the same reviewed, read-only file into every
+API and worker role and restart those roles to reload it; compare their registry
+digests before enabling Required. A malformed configured file fails startup
+with a safe configuration error. The file is limited to 1 MiB and 1,000 records.
+
+Records bind the concrete model, hashed endpoint and routing configuration,
+operation, schema hash, adapter protocol and streaming mode. They carry canonical
+UTC verification/expiry timestamps and expire within at most 30 days. OpenRouter
+records pin provider routing slugs; Story additionally requires evidence that
+native arbitrary nested tracker objects survive unchanged. Advertisements and
+mutable preset aliases cannot supply this proof. The planned compatibility
+probe produces proposed records for review; it never installs them automatically.
+Keep API credentials in their existing secret configuration, outside this file.
+
+For outcome comparisons and the existing repair workflow, see
+[Turn validation reporting](../runbooks/turn-validation.md) and
+[Generation validation and recovery](../runbooks/deployment.md).
+## Structured response evidence limit
+
+For new Story text requests using `auto` or `required` structured responses,
+the fully serialized request body must be no more than 1,000,000 UTF-16
+characters. An oversized body is rejected before the worker reserves an
+invocation or calls the provider, so reduce included context or shorten the
+input before retrying. This evidence limit preserves the exact request body
+for recoverable provider failures; it does not change the provider context-token
+limit. Historical legacy requests keep their existing request path and are
+unaffected.
+
 ## Chronicle embedding capabilities
 
 The Chronicle embedding worker starts with the provider's runtime descriptor and applies only reviewed, bounded non-secret overrides. Campaign document/query prefixes may override model-aware defaults, but credentials stay inside the embedding-provider boundary and are never projected into retrieval configuration or telemetry.

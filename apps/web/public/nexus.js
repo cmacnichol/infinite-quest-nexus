@@ -62,8 +62,11 @@ let pendingDeleteTitle = "";
 let pendingDeleteResolve = null;
 let editingProviderId = "";
 let discoveredProfileModels = [];
+let discoveredProfileModelsIdentity = "";
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
+let responseFormatCapabilitySequence = 0;
+let responseFormatCapabilityProfile = null;
 const embeddingJobMonitors = new Map();
 let worldCoverJobPollSequence = 0;
 let illustrationRefinementPromptValue = "";
@@ -4155,6 +4158,7 @@ function renderProviderProfiles() {
 }
 
 function resetProviderForm() {
+  clearResponseFormatCapability();
   editingProviderId = "";
   elements.providerForm.reset();
   elements.providerName.value = nextAvailableProviderName("Local LM Studio");
@@ -4164,6 +4168,7 @@ function resetProviderForm() {
   elements.providerContextTokens.value = "32768";
   elements.providerOutputTokens.value = "4096";
   elements.providerTemperature.value = "0.8";
+  elements.providerResponseFormatPolicy.value = "legacy";
   elements.providerRequestTimeoutMinutes.value = "5";
   applySogniConfiguration(SOGNI_DEFAULT_CONFIGURATION);
   elements.providerAdvancedSettings.open = false;
@@ -4179,6 +4184,71 @@ function resetProviderForm() {
   elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
   elements.providerContextSource.className = "field-note";
   syncProviderRoleSettings();
+}
+
+function clearResponseFormatCapability() {
+  responseFormatCapabilitySequence += 1;
+  responseFormatCapabilityProfile = null;
+  if (!elements.providerResponseFormatCapability) return;
+  elements.providerResponseFormatCapability.textContent = "Schema compatibility is unknown until the server returns a capability summary.";
+  elements.providerResponseFormatCapability.className = "text-model-setting field-note";
+}
+
+function storedProfileMatchesResponseFormatIdentity() {
+  const profile = providers.find((item) => item.id === editingProviderId);
+  if (!profile) return false;
+  return profile.providerRole === elements.providerRole.value
+    && profile.providerType === elements.providerType.value
+    && profile.baseUrl === elements.providerBaseUrl.value
+    && (profile.defaultModel || "") === elements.providerDefaultModel.value
+    && Boolean(profile.configuration?.streaming || profile.configuration?.streamingSupport) === elements.providerStreaming.checked
+    && (profile.configuration?.textResponseFormatPolicy || "legacy") === elements.providerResponseFormatPolicy.value;
+}
+
+function responseFormatCapabilityIdentity() {
+  return [editingProviderId, elements.providerRole.value, elements.providerType.value, elements.providerBaseUrl.value.trim(), elements.providerDefaultModel.value.trim(), elements.providerStreaming.checked, elements.providerResponseFormatPolicy.value].join("\u001f");
+}
+
+function capabilityTime(value) {
+  const date = typeof value === "string" ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : null;
+}
+
+function safeResponseFormatReason(reason) {
+  if (reason === "schema_incompatible") return "The current tracker schema is incompatible with this adapter.";
+  if (reason === "discovery_unavailable") return "Server verification is unavailable.";
+  return "Server verification has not confirmed this capability.";
+}
+
+function renderResponseFormatCapability(capability, identity = responseFormatCapabilityIdentity()) {
+  if (identity !== responseFormatCapabilityIdentity() || !elements.providerResponseFormatCapability) return;
+  const status = elements.providerResponseFormatCapability;
+  const operations = Array.isArray(capability?.operations) ? capability.operations : [];
+  const now = Date.now();
+  const verified = operations.filter((operation) => operation?.status === "verified" && capabilityTime(operation.expiresAt) && new Date(operation.expiresAt).getTime() > now);
+  const unsupported = operations.find((operation) => operation?.status === "unsupported");
+  const advertised = operations.some((operation) => operation?.status === "advertised");
+  const advertisedAt = capabilityTime(capability?.advertisedAt);
+  if (verified.length && unsupported) {
+    const verifiedCoverage = verified.map((operation) => operation.operation === "continuity_review" ? "continuity review" : operation.operation).join(", ");
+    const unavailableOperation = unsupported.operation === "continuity_review" ? "continuity review" : unsupported.operation;
+    status.textContent = `Mixed schema coverage: verified for ${verifiedCoverage}; ${unavailableOperation} is unavailable. ${safeResponseFormatReason(unsupported.reason)}`;
+    status.className = "text-model-setting field-note warning";
+  } else if (verified.length) {
+    const coverage = verified.map((operation) => `${operation.operation === "continuity_review" ? "continuity review" : operation.operation}${operation.streaming ? " streaming" : ""}`).join(", ");
+    const expiresAt = capabilityTime(verified.map((operation) => operation.expiresAt).sort()[0]);
+    status.textContent = `Verified schema coverage: ${coverage}${advertisedAt ? `, discovered ${advertisedAt}` : ""}${expiresAt ? `, expires ${expiresAt}` : ""}. Server verification is required before schema use.`;
+    status.className = "text-model-setting field-note success";
+  } else if (unsupported) {
+    status.textContent = `Schema support is unavailable. ${safeResponseFormatReason(unsupported.reason)}`;
+    status.className = "text-model-setting field-note warning";
+  } else if (advertised) {
+    status.textContent = `Schema support is advertised${advertisedAt ? ` from ${advertisedAt}` : ""}, but is not verified. Required blocks a new job before dispatch.`;
+    status.className = "text-model-setting field-note warning";
+  } else {
+    status.textContent = "Schema compatibility is unknown. Required blocks a new job before dispatch until the server verifies it.";
+    status.className = "text-model-setting field-note warning";
+  }
 }
 
 function nextAvailableProviderName(baseName) {
@@ -4208,6 +4278,7 @@ function syncProviderRoleSettings(options = {}) {
     field.hidden = illustration;
     field.setAttribute("aria-hidden", String(illustration));
   }
+  if (illustration) clearResponseFormatCapability();
   elements.providerSogniSettings.classList.toggle("hidden", !sogni);
   elements.providerSogniSettings.setAttribute("aria-hidden", String(!sogni));
   for (const control of elements.providerSogniSettings.querySelectorAll("input, select")) control.disabled = !sogni;
@@ -4259,6 +4330,12 @@ function applySogniConfiguration(configuration = {}, providerType = elements.pro
 
 function providerConfigurationFromForm(existingConfig = {}) {
   const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
+  const hasExplicitResponseFormatPolicy = Object.prototype.hasOwnProperty.call(existingConfig, "textResponseFormatPolicy");
+  if (elements.providerRole.value === "text" && (elements.providerResponseFormatPolicy.value !== "legacy" || hasExplicitResponseFormatPolicy)) {
+    configuration.textResponseFormatPolicy = elements.providerResponseFormatPolicy.value;
+  } else {
+    delete configuration.textResponseFormatPolicy;
+  }
   const providerType = elements.providerType.value;
   if (providerType !== "sogni" && providerType !== "sogni_sdk") return configuration;
   const common = {
@@ -4298,6 +4375,7 @@ function providerConfigurationFromForm(existingConfig = {}) {
 }
 
 function beginProviderEdit(provider) {
+  clearResponseFormatCapability();
   editingProviderId = provider.id;
   elements.providerName.value = provider.name;
   elements.providerType.value = provider.providerType;
@@ -4308,6 +4386,7 @@ function beginProviderEdit(provider) {
   elements.providerContextTokens.value = String(provider.contextWindowTokens);
   elements.providerOutputTokens.value = String(provider.maxOutputTokens);
   elements.providerTemperature.value = String(provider.temperature);
+  elements.providerResponseFormatPolicy.value = provider.configuration?.textResponseFormatPolicy || "legacy";
   elements.providerRequestTimeoutMinutes.value = String(Number(provider.requestTimeoutMs || 300000) / 60000);
   applySogniConfiguration(provider.configuration, provider.providerType);
   elements.providerStreaming.checked = Boolean(provider.configuration?.streaming || provider.configuration?.streamingSupport);
@@ -4318,11 +4397,13 @@ function beginProviderEdit(provider) {
   elements.saveProvider.textContent = "Save changes";
   elements.cancelProviderEdit.classList.remove("hidden");
   discoveredProfileModels = [];
+  responseFormatCapabilityProfile = provider.responseFormatCapability || null;
   elements.providerModelPickerList.replaceChildren();
   elements.providerName.focus();
   openManagedModal(elements.providerDialog);
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
   syncProviderRoleSettings();
+  renderResponseFormatCapability(responseFormatCapabilityProfile);
 }
 
 async function loadProviders(preselectId = "") {
@@ -4399,6 +4480,9 @@ async function saveProvider(event) {
 }
 
 async function refreshProviderModelsFromForm() {
+  const sequence = ++responseFormatCapabilitySequence;
+  const identity = responseFormatCapabilityIdentity();
+  clearResponseFormatCapability();
   elements.refreshProviderModels.disabled = true;
   elements.refreshProviderModelDialog.disabled = true;
   providerMessage("Discovering models from this provider profile…");
@@ -4408,7 +4492,7 @@ async function refreshProviderModelsFromForm() {
     const useStoredProfile = editingProviderId && !elements.providerApiKey.value;
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
     const result = useStoredProfile
-      ? await api(`/api/v1/providers/${editingProviderId}/models`)
+      ? await api(`/api/v1/providers/${editingProviderId}/models?refresh=true`)
       : await api("/api/v1/providers/discover-models", {
         method: "POST",
         body: JSON.stringify({
@@ -4429,7 +4513,9 @@ async function refreshProviderModelsFromForm() {
           configuration: providerConfigurationFromForm(existingConfig)
         })
     });
+    if (sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
     discoveredProfileModels = result.models || [];
+    discoveredProfileModelsIdentity = identity;
     const orderedModels = [...discoveredProfileModels].sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName));
     const current = elements.providerDefaultModel.value.trim();
     const selected = orderedModels.find((model) => profileModelValue(model) === current || model.id === current)
@@ -4441,12 +4527,19 @@ async function refreshProviderModelsFromForm() {
       elements.providerDefaultModel.value = value;
       applySogniSdkModelOptions(selected);
     }
+    const responseFormatIdentityMatches = discoveredProfileModelsIdentity === responseFormatCapabilityIdentity() && storedProfileMatchesResponseFormatIdentity();
+    const selectedCapability = responseFormatIdentityMatches
+      ? selected?.responseFormatCapability || (responseFormatCapabilityProfile?.model === elements.providerDefaultModel.value ? responseFormatCapabilityProfile : null)
+      : null;
+    renderResponseFormatCapability(selectedCapability, identity);
     applyProfileModelContext();
     renderProviderModelPicker();
     elements.providerModelPickerStatus.textContent = `${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Active models are listed first.`;
     elements.providerModelPickerStatus.className = "status success";
     providerMessage(`${discoveredProfileModels.length} model entr${discoveredProfileModels.length === 1 ? "y" : "ies"} found. Select one from Default model and save the profile.`, "success");
   } catch (error) {
+    if (sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
+    clearResponseFormatCapability();
     providerMessage(error.message || String(error), "error");
     elements.providerModelPickerStatus.textContent = error.message || String(error);
     elements.providerModelPickerStatus.className = "status error";
@@ -4480,6 +4573,8 @@ function chooseProviderModel(value) {
     return;
   }
   elements.providerDefaultModel.value = value;
+  clearResponseFormatCapability();
+  if (discoveredProfileModelsIdentity === responseFormatCapabilityIdentity() && storedProfileMatchesResponseFormatIdentity()) renderResponseFormatCapability(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value)?.responseFormatCapability);
   applyProfileModelContext();
   applySogniSdkModelOptions(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value));
   elements.providerModelDialog.close();
@@ -4749,6 +4844,7 @@ elements.modelSelect.addEventListener("change", () => {
 });
 
 elements.providerType.addEventListener("change", () => {
+  clearResponseFormatCapability();
   const defaults = {
     lmstudio: DEFAULT_LM_STUDIO_BASE_URL,
     openrouter: "https://openrouter.ai/api/v1",
@@ -4778,8 +4874,13 @@ elements.providerSogniNetwork.addEventListener("change", applySogniWorkerAvailab
 
 elements.providerRole.addEventListener("change", () => {
   discoveredProfileModels = [];
+  clearResponseFormatCapability();
   syncProviderRoleSettings({ applySuggestedDefaults: !editingProviderId });
 });
+for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming, elements.providerResponseFormatPolicy]) {
+  control.addEventListener("input", clearResponseFormatCapability);
+  control.addEventListener("change", clearResponseFormatCapability);
+}
 
 elements.embeddingProvider.addEventListener("change", () => {
   const provider = providers.find((item) => item.id === elements.embeddingProvider.value);
@@ -6251,7 +6352,11 @@ elements.closeProviderModelDialog.addEventListener("click", () => elements.provi
 elements.refreshProviderModelDialog.addEventListener("click", refreshActiveModelPicker);
 elements.providerModelFilter.addEventListener("input", renderProviderModelPicker);
 elements.applyCustomProviderModel.addEventListener("click", applyCustomProviderModel);
-elements.providerDefaultModel.addEventListener("change", applyProfileModelContext);
+elements.providerDefaultModel.addEventListener("change", () => {
+  clearResponseFormatCapability();
+  applyProfileModelContext();
+  renderResponseFormatCapability(discoveredProfileModels.find((item) => profileModelValue(item) === elements.providerDefaultModel.value || item.id === elements.providerDefaultModel.value)?.responseFormatCapability);
+});
 elements.discoverModels.addEventListener("click", discoverProviderModels);
 elements.compression.addEventListener("change", () => {
   elements.compression.title = elements.compression.selectedOptions[0]?.title || "Choose how Chronicle fits history into the context budget.";

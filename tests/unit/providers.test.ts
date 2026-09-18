@@ -589,7 +589,7 @@ describe("text provider adapters", () => {
       models: [{ key: "model-key", display_name: "Model Name", loaded_instances: [{ id: "instance-7", config: { context_length: 196608 } }] }]
     }), { status: 200 }));
     const models = await discoverModels(profile, createTestProviderTransport(fetcher as typeof fetch));
-    expect(models).toEqual([{ id: "model-key", displayName: "Model Name", loaded: true, instanceId: "instance-7", contextLength: 196608 }]);
+    expect(models).toEqual([expect.objectContaining({ id: "model-key", displayName: "Model Name", loaded: true, instanceId: "instance-7", contextLength: 196608, responseFormatAdvertisement: expect.objectContaining({ supportedParameters: null }) })]);
   });
 
   it("returns inactive models alongside loaded instances", async () => {
@@ -601,9 +601,23 @@ describe("text provider adapters", () => {
     }), { status: 200 }));
     const models = await discoverModels(profile, createTestProviderTransport(fetcher as typeof fetch));
     expect(models).toEqual([
-      { id: "active-model", displayName: "Active Model", loaded: true, instanceId: "active-instance", contextLength: 65536 },
-      { id: "inactive-model", displayName: "Inactive Model", loaded: false, instanceId: "inactive-model", contextLength: 32768 }
+      expect.objectContaining({ id: "active-model", displayName: "Active Model", loaded: true, instanceId: "active-instance", contextLength: 65536, responseFormatAdvertisement: expect.objectContaining({ supportedParameters: null }) }),
+      expect.objectContaining({ id: "inactive-model", displayName: "Inactive Model", loaded: false, instanceId: "inactive-model", contextLength: 32768, responseFormatAdvertisement: expect.objectContaining({ supportedParameters: null }) })
     ]);
+  });
+
+  it.each([
+    ["both", ["response_format", "structured_outputs"], ["response_format", "structured_outputs"]],
+    ["response only", ["response_format"], ["response_format"]],
+    ["absent", undefined, null],
+    ["empty", [], []],
+    ["mixed malformed", ["response_format", 3], null],
+    ["over limit", Array.from({ length: 129 }, (_, index) => `parameter-${index}`), null]
+  ])("records %s response-format advertisement with a server observation time", async (_label, supported_parameters, expected) => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "schema-model", supported_parameters }] }), { status: 200 }));
+    const [model] = await discoverModels(profile, createTestProviderTransport(fetcher as typeof fetch));
+    expect(model?.responseFormatAdvertisement).toMatchObject({ supportedParameters: expected, discoveredAt: expect.any(String) });
+    expect(Number.isNaN(Date.parse(model!.responseFormatAdvertisement!.discoveredAt))).toBe(false);
   });
 
   it("detects LM Studio output exhaustion even when only token usage signals it", async () => {

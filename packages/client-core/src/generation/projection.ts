@@ -1,10 +1,12 @@
 import {
   projectSafeGenerationDiagnostic,
+  generationResponseFormatProjectionSchema,
   generationReviewDetailSchema,
   generationReviewSummarySchema,
   type GenerationResult,
   type GenerationStreamSnapshot,
   type SafeGenerationDiagnostic,
+  type GenerationResponseFormatProjection,
   type TurnSummary
 } from "@infinite-quest/contracts";
 import { ApiContractError, NexusApiError } from "../errors.js";
@@ -28,6 +30,12 @@ export type GenerationRecoveryGuidance = Readonly<{
 
 export type GenerationDiagnosticPresentation = GenerationRecoveryGuidance & Readonly<{
   details: readonly string[];
+}>;
+
+export type GenerationResponseFormatPresentation = Readonly<{
+  heading: string;
+  details: readonly string[];
+  retryable: boolean;
 }>;
 
 export type GenerationReviewPresentation =
@@ -189,6 +197,65 @@ export function generationDiagnosticPresentation(value: unknown): GenerationDiag
   };
 }
 
+/**
+ * Renders the finite saved job projection without treating a recorded
+ * invocation as the policy of every operation in the job.
+ */
+export function generationResponseFormatPresentation(value: unknown): GenerationResponseFormatPresentation | null {
+  const parsed = generationResponseFormatProjectionSchema.safeParse(value);
+  if (!parsed.success) return null;
+  const format = parsed.data;
+  const policyLabels: Readonly<Record<string, string>> = {
+    legacy: "Legacy",
+    auto: "Auto",
+    required: "Required",
+    unknown: "Unknown"
+  };
+  const heading = `Saved response format: ${policyLabels[format.savedPolicy] ?? "Unknown"}`;
+  const operation = format.operation === "story"
+    ? "story"
+    : format.operation === "choices"
+      ? "choices"
+      : format.operation === "continuity_review"
+        ? "continuity review"
+        : null;
+  const modeLabels: Readonly<Record<string, string>> = {
+    legacy: "Legacy JSON",
+    json_object: "JSON object",
+    json_schema: "Verified schema",
+    unavailable: "Unavailable",
+    unknown: "Unknown"
+  };
+  const mode = modeLabels[format.effectiveMode] ?? "Unknown";
+  const details = [
+    operation === null
+      ? `Effective mode: ${mode}.`
+      : `Effective mode: ${mode} for the saved ${operation} operation.`
+  ];
+  if (format.preflightDiagnostic === "unsupported_adapter") {
+    details.push("The saved provider adapter does not support response formats. Review the provider settings before starting a new generation.");
+  } else if (format.preflight === "unavailable") {
+    details.push("The saved response-format preflight is unavailable. Review the provider settings before starting a new generation.");
+  } else if (format.preflight === "identity_mismatch") {
+    details.push("The saved provider identity no longer matches this job. Review the provider settings before starting a new generation.");
+  } else if (format.diagnosticCode === "provider_schema_unsupported") {
+    details.push("The provider does not support the saved response schema. Review the provider settings before starting a new generation.");
+  } else if (format.diagnosticCode === "provider_schema_invalid") {
+    details.push("The saved response schema was rejected as invalid. Review the provider settings before starting a new generation.");
+  } else if (format.diagnosticCode === "provider_route_unavailable") {
+    details.push("The saved provider route is unavailable. Review the provider settings before starting a new generation.");
+  } else if (format.diagnosticCode === "provider_refusal") {
+    details.push("The provider refused the request under the saved response format. Review the provider settings before starting a new generation.");
+  }
+  details.push("Historical jobs keep their saved response-format selection.");
+  return {
+    heading,
+    details,
+    retryable: format.preflight !== "unavailable" && format.preflight !== "identity_mismatch"
+      && format.preflightDiagnostic === null && format.diagnosticCode === null
+  };
+}
+
 export function copyOperation(value: GenerationOperation): GenerationOperation {
   return value.operationKind === "append"
     ? { operationKind: "append", replacementTurnId: null }
@@ -211,7 +278,8 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         errorCode: snapshot.errorCode,
         errorMessage: snapshot.errorMessage,
         ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
-        ...(snapshot.review === undefined ? {} : { review: snapshot.review })
+        ...(snapshot.review === undefined ? {} : { review: snapshot.review }),
+        ...(snapshot.responseFormat === undefined ? {} : { responseFormat: snapshot.responseFormat })
       }
     : {
         id: snapshot.id,
@@ -227,7 +295,8 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         errorCode: snapshot.errorCode,
         errorMessage: snapshot.errorMessage,
         ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
-        ...(snapshot.review === undefined ? {} : { review: snapshot.review })
+        ...(snapshot.review === undefined ? {} : { review: snapshot.review }),
+        ...(snapshot.responseFormat === undefined ? {} : { responseFormat: snapshot.responseFormat })
       };
 }
 

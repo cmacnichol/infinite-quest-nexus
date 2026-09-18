@@ -2031,6 +2031,22 @@ integration("PostgreSQL campaign sync adapters", () => {
       errorCode: null,
       errorMessage: null,
       diagnostic: null,
+      review: undefined,
+      responseFormat: {
+        version: 1,
+        savedPolicy: "legacy",
+        effectiveMode: "legacy",
+        schemaVersion: null,
+        schemaHash: null,
+        operation: null,
+        streaming: null,
+        requestedModel: null,
+        returnedModel: null,
+        returnedRoute: null,
+        preflight: "unknown",
+        preflightDiagnostic: null,
+        diagnosticCode: null
+      },
       resultTurnId,
       operationKind: "append",
       replacementTurnId: null

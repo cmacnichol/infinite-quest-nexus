@@ -36,7 +36,29 @@ function isSameSnapshot(left: GenerationStreamSnapshot, right: GenerationStreamS
     && left.errorCode === right.errorCode
     && left.errorMessage === right.errorMessage
     && left.resultTurnId === right.resultTurnId
-    && isSameReview(supportedReview(left.review), supportedReview(right.review));
+    && isSameReview(supportedReview(left.review), supportedReview(right.review))
+    && isSameResponseFormat(left.responseFormat, right.responseFormat);
+}
+
+/** Compares the fixed browser-safe response-format projection without reading private job metadata. */
+function isSameResponseFormat(
+  left: GenerationStreamSnapshot["responseFormat"],
+  right: GenerationStreamSnapshot["responseFormat"]
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.version === right.version
+    && left.savedPolicy === right.savedPolicy
+    && left.effectiveMode === right.effectiveMode
+    && left.schemaVersion === right.schemaVersion
+    && left.schemaHash === right.schemaHash
+    && left.operation === right.operation
+    && left.streaming === right.streaming
+    && left.requestedModel === right.requestedModel
+    && left.returnedModel === right.returnedModel
+    && left.returnedRoute === right.returnedRoute
+    && left.preflight === right.preflight
+    && left.preflightDiagnostic === right.preflightDiagnostic
+    && left.diagnosticCode === right.diagnosticCode;
 }
 
 function isSameReview(left: GenerationReviewSummary | undefined, right: GenerationReviewSummary | undefined): boolean {

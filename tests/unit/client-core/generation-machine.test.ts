@@ -89,6 +89,51 @@ describe("generation machine", () => {
       .toMatchObject({ kind: "accepted", narrationChanged: true });
   });
 
+  it("accepts a same-rank status update when only the finite response-format projection changes", () => {
+    const machine = createGenerationMachine();
+    machine.observe(snapshot({
+      status: "generating",
+      responseFormat: {
+        version: 1,
+        savedPolicy: "required",
+        effectiveMode: "unknown",
+        schemaVersion: null,
+        schemaHash: null,
+        operation: "story",
+        streaming: true,
+        requestedModel: "saved-model",
+        returnedModel: null,
+        returnedRoute: null,
+        preflight: "pending",
+        preflightDiagnostic: null,
+        diagnosticCode: null
+      }
+    }));
+
+    expect(machine.observe(snapshot({
+      status: "generating",
+      responseFormat: {
+        version: 1,
+        savedPolicy: "required",
+        effectiveMode: "unavailable",
+        schemaVersion: null,
+        schemaHash: null,
+        operation: "story",
+        streaming: true,
+        requestedModel: "saved-model",
+        returnedModel: null,
+        returnedRoute: null,
+        preflight: "unavailable",
+        preflightDiagnostic: "unsupported_adapter",
+        diagnosticCode: null
+      }
+    }))).toMatchObject({
+      kind: "accepted",
+      narrationChanged: false,
+      snapshot: { responseFormat: { preflightDiagnostic: "unsupported_adapter" } }
+    });
+  });
+
   it("emits a narration change when the current narration is cleared", () => {
     const machine = createGenerationMachine();
     machine.observe(snapshot({ status: "generating", partialNarration: "The gate groans." }));

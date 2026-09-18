@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { generationResponseFormatProjectionSchema } from "./generation-response-format-projection.js";
 import {
   campaignBranchSchema,
   campaignRewindSchema,
@@ -215,7 +216,8 @@ const pendingGenerationBaseSchema = z.object({
   expectedTurnNumber: z.number().int().min(1),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema,
-  review: generationReviewTransportSchema.optional()
+  review: generationReviewTransportSchema.optional(),
+  responseFormat: generationResponseFormatProjectionSchema.optional()
 });
 
 const pendingGenerationSchema = z.discriminatedUnion("operationKind", [
@@ -238,7 +240,8 @@ const generationRecoveryBaseSchema = z.object({
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
   diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null),
   resultTurnId: z.uuid().nullable(),
-  review: generationReviewTransportSchema.optional()
+  review: generationReviewTransportSchema.optional(),
+  responseFormat: generationResponseFormatProjectionSchema.optional()
 });
 
 export const generationRecoverySchema = z.discriminatedUnion("operationKind", [

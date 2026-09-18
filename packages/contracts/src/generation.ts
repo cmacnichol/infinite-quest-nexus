@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { generationResponseFormatProjectionSchema } from "./generation-response-format-projection.js";
 export {
   canonicalFactUpdateSchema,
   storyTurnOutputHistoricalSchema,
@@ -434,6 +435,7 @@ export const generationJobStatusSchema = z.object({
   recoveryMetadata: z.record(z.string(), z.unknown()).optional(),
   /** Private at rest; repository supplies only the fixed public projection. */
   failureDiagnostic: generationFailureDiagnosticProjectionSchema.nullable().optional(),
+  responseFormat: generationResponseFormatProjectionSchema.optional(),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema,
   completedAt: apiTimestampSchema.nullable().optional(),
@@ -481,7 +483,7 @@ const generationStreamSnapshotBaseSchema = generationJobStatusSchema.pick({
   attempts: true,
   partialNarration: true,
   resultTurnId: true
-}).extend({ ...publicGenerationFailureFields, review: generationReviewTransportSchema.optional() });
+}).extend({ ...publicGenerationFailureFields, review: generationReviewTransportSchema.optional(), responseFormat: generationResponseFormatProjectionSchema.optional() });
 
 export const generationStreamSnapshotSchema = z.discriminatedUnion("operationKind", [
   generationStreamSnapshotBaseSchema.extend({

@@ -13,4 +13,6 @@ export * from "./scene-coverage.js";
 export * from "./continuity-review.js";
 export * from "./token-estimate.js";
 export * from "./providers.js";
+export * from "./provider-output-schema.js";
+export * from "./provider-response-format.js";
 export * from "./readable-campaign-export.js";

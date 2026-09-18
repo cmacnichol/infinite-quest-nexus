@@ -36,10 +36,13 @@ import {
   type RuntimeProviderExecutionPort
 } from "./provider-credential-transport-adapter.js";
 import type { SourceAuthoringModelInventory } from "./source-authoring-budget.js";
+import type { ProviderModelInventoryPort } from "../../../packages/application/src/providers/ports.js";
 import {
   generateTemplateWorld,
   worldGenerationFailureDiagnostic,
 } from "./provider-world-generation-adapter.js";
+import { createProviderResponseFormatCapabilities, type ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
+import type { SchemaVerification } from "@infinite-quest/contracts";
 
 export type ProviderApplicationTransaction = Readonly<{
   application: ProviderApplication;
@@ -66,6 +69,11 @@ export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Reado
   prompts: GenerationPromptPort;
   costs: GenerationCostPort;
   reads: Pick<ProviderCostPort, "getTurnCosts">;
+  /** Private runtime preflight collaborator; never projected to browser status. */
+  responseFormatCapabilities: ProviderResponseFormatCapabilities;
+  responseFormatInventory: ProviderModelInventoryPort;
+  /** Uses the enqueue transaction's client; this never borrows a second pool connection. */
+  loadQueuedTextProfile(client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string): ReturnType<RuntimeProviderExecutionPort["text"]>;
 }>;
 
 export type WorkerGenerationProviderCollaborators = ApiGenerationProviderCollaborators & Readonly<{
@@ -118,6 +126,7 @@ export type ApiProviderApplicationComposition = Readonly<{
   role: "api";
   application: ProviderApplication;
   runtime: RuntimeProviderAdapter;
+  responseFormatCapabilities: ProviderResponseFormatCapabilities;
   generation: ApiGenerationProviderCollaborators;
   illustration: IllustrationProviderCollaborators;
   chronicle: ChronicleProviderCollaborators;
@@ -129,6 +138,7 @@ export type ApiProviderApplicationComposition = Readonly<{
 
 export type WorkerProviderApplicationComposition = Readonly<{
   role: "worker";
+  responseFormatCapabilities: ProviderResponseFormatCapabilities;
   generation: WorkerGenerationProviderCollaborators;
   illustration: IllustrationProviderCollaborators;
   chronicle: ChronicleProviderCollaborators;
@@ -156,9 +166,18 @@ export function providerPromptProtocolVersion(snapshot: PromptSnapshotVersion["s
 
 function createInternals(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ) {
-  function bind(database: DatabaseClient | DatabasePool): ProviderApplicationTransaction {
+  const responseFormatCapabilities = createProviderResponseFormatCapabilities({
+    ...(options.schemaVerifications ? { records: options.schemaVerifications } : {}),
+    ...(options.schemaVerificationDigest ? { registryDigest: options.schemaVerificationDigest } : {}),
+    ...(options.clock ? { now: options.clock } : {})
+  });
+  function bind(
+    database: DatabaseClient | DatabasePool,
+    capabilities = responseFormatCapabilities,
+    onProfileMutation?: (providerProfileId: string) => void
+  ): ProviderApplicationTransaction {
     const client = database as DatabaseClient;
     const providerRepositories = createPostgresProviderRepositories(client);
     const prompts = createPromptRepository(client);
@@ -167,30 +186,56 @@ function createInternals(
       database: client,
       credentialSecret: options.credentialSecret,
       transport: options.transport,
-      health: providerRepositories.health
+      health: providerRepositories.health,
+      responseFormatCapabilities: capabilities
+    });
+    const rawApplication = createProviderApplication({
+      profiles: providerRepositories.profiles,
+      inventory: runtime.inventory,
+      health: providerRepositories.health,
+      resolution: providerRepositories.resolution,
+      prompts,
+      costs
+    });
+    const application = Object.freeze({
+      ...rawApplication,
+      updateProfile: async (command: Parameters<ProviderApplication["updateProfile"]>[0]) => {
+        const result = await rawApplication.updateProfile(command);
+        capabilities.invalidate(command.providerProfileId);
+        onProfileMutation?.(command.providerProfileId);
+        return result;
+      },
+      deleteProfile: async (command: Parameters<ProviderApplication["deleteProfile"]>[0]) => {
+        const result = await rawApplication.deleteProfile(command);
+        capabilities.invalidate(command.providerProfileId);
+        onProfileMutation?.(command.providerProfileId);
+        return result;
+      }
     });
     return {
       runtime,
-      application: createProviderApplication({
-        profiles: providerRepositories.profiles,
-        inventory: runtime.inventory,
-        health: providerRepositories.health,
-        resolution: providerRepositories.resolution,
-        prompts,
-        costs
-      })
+      application
     };
   }
 
   const base = bind(pool);
+  async function runProfileMutation<T>(
+    providerProfileId: string,
+    work: (binding: ProviderApplicationTransaction) => Promise<T>
+  ): Promise<T> {
+    const transactionCapabilities = responseFormatCapabilities.transactionLocal();
+    const result = await withTransaction(pool, async (client) => work(bind(client, transactionCapabilities)));
+    responseFormatCapabilities.invalidate(providerProfileId);
+    return result;
+  }
   const application: ProviderApplication = Object.freeze({
     ...base.application,
     createProfile: (command: Parameters<ProviderApplication["createProfile"]>[0]) =>
       withTransaction(pool, async (client) => bind(client).application.createProfile(command)),
     updateProfile: (command: Parameters<ProviderApplication["updateProfile"]>[0]) =>
-      withTransaction(pool, async (client) => bind(client).application.updateProfile(command)),
+      runProfileMutation(command.providerProfileId, (binding) => binding.application.updateProfile(command)),
     deleteProfile: (command: Parameters<ProviderApplication["deleteProfile"]>[0]) =>
-      withTransaction(pool, async (client) => bind(client).application.deleteProfile(command)),
+      runProfileMutation(command.providerProfileId, (binding) => binding.application.deleteProfile(command)),
     setDefaultProfile: (command: Parameters<ProviderApplication["setDefaultProfile"]>[0]) =>
       withTransaction(pool, async (client) => bind(client).application.setDefaultProfile(command)),
     savePromptOverride: (command: Parameters<ProviderApplication["savePromptOverride"]>[0]) =>
@@ -278,15 +323,30 @@ function createInternals(
   return {
     application,
     runtimeAdapter: base.runtime,
-    transaction: <T>(work: (binding: ProviderApplicationTransaction, client: DatabaseClient) => Promise<T>) =>
-      withTransaction(pool, async (client) => work(bind(client), client)),
-    generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs }),
+    responseFormatCapabilities,
+    transaction: async <T>(work: (binding: ProviderApplicationTransaction, client: DatabaseClient) => Promise<T>) => {
+      const invalidatedProfileIds = new Set<string>();
+      const transactionCapabilities = responseFormatCapabilities.transactionLocal();
+      const result = await withTransaction(pool, async (client) => work(
+        bind(client, transactionCapabilities, (providerProfileId) => invalidatedProfileIds.add(providerProfileId)),
+        client
+      ));
+      for (const providerProfileId of invalidatedProfileIds) responseFormatCapabilities.invalidate(providerProfileId);
+      return result;
+    },
+    generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory,
+      loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
+        bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model) }),
     workerGeneration: Object.freeze({
       ...runtime,
       prompts: generationPrompts,
       costs: generationCosts,
       reads: costs,
-      attributeCosts: costs
+      attributeCosts: costs,
+      responseFormatCapabilities,
+      responseFormatInventory: base.runtime.inventory,
+      loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
+        bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model)
     }),
     illustration: Object.freeze({ ...runtime, prompts: illustrationPrompts, costs: illustrationCosts }),
     chronicle: Object.freeze({ ...runtime, prompts: chroniclePrompts, costs: chronicleCosts }),
@@ -298,13 +358,14 @@ function createInternals(
 
 export function createApiProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ): ApiProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({
     role: "api",
     application: graph.application,
     runtime: graph.runtimeAdapter,
+    responseFormatCapabilities: graph.responseFormatCapabilities,
     generation: graph.generation,
     illustration: graph.illustration,
     chronicle: graph.chronicle,
@@ -317,11 +378,12 @@ export function createApiProviderApplicationComposition(
 
 export function createWorkerProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ): WorkerProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({
     role: "worker",
+    responseFormatCapabilities: graph.responseFormatCapabilities,
     generation: graph.workerGeneration,
     illustration: graph.illustration,
     chronicle: graph.chronicle,

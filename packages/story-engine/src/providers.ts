@@ -1,7 +1,9 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
+import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import { PreparedResponseContractError, classifyResponseFormatFailure } from "./provider-response-format.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
-import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
+import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, serializeProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
 import { resolveEffectiveContextWindowTokens } from "./context-budget.js";
 import { estimateStoryTokens } from "./token-estimate.js";
 import type { CanonicalProviderRequest, PreparedProviderRequest, ProviderOutputBudget } from "./provider-request.js";
@@ -64,6 +66,7 @@ export type ProviderRequest = {
   budgetOutput?: ProviderOutputBudget;
   /** Authoring calls account for every generation request themselves. */
   responseFormatFallback?: "allow" | "forbid";
+  responseContract?: PreparedResponseContract;
 };
 
 export type ProviderResult = {
@@ -72,6 +75,9 @@ export type ProviderResult = {
   finishReason: string;
   outputLimited: boolean;
   modelInstanceId: string;
+  /** Provider-observed identity, never substituted from the requested model. */
+  returnedModel?: string | null;
+  returnedProviderRoute?: string | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
@@ -93,6 +99,7 @@ export type ModelInventoryItem = {
   loaded: boolean;
   instanceId: string;
   contextLength: number;
+  responseFormatAdvertisement?: { supportedParameters: readonly string[] | null; discoveredAt: string };
   workerCount?: number;
   workerAvailability?: Array<{
     type: string;
@@ -769,7 +776,8 @@ async function checkedJson(
   profile?: TextProviderProfile,
   operation = "request",
   url = response.url,
-  limitBytes = MAX_PROVIDER_JSON_RESPONSE_BYTES
+  limitBytes = MAX_PROVIDER_JSON_RESPONSE_BYTES,
+  requireJson = false
 ): Promise<Record<string, any>> {
   let text = "";
   try {
@@ -781,11 +789,13 @@ async function checkedJson(
     throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
   }
   let data: Record<string, any> = {};
-  try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
+  let malformed = false;
+  try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { malformed = true; }
   if (!response.ok) {
     const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
     throw providerHttpError(response, `Provider request failed (${response.status}): ${message}`);
   }
+  if (requireJson && malformed) throw new Error("Provider returned malformed JSON for the prepared response contract.");
   return data;
 }
 
@@ -858,8 +868,9 @@ async function readSseStream(
   onChunk: (delta: string, accumulated: string) => void | Promise<void>,
   profile: TextProviderProfile,
   operation: string,
-  url: string
-): Promise<{ content: string; finalData: Record<string, any>; allData: Record<string, any>[] }> {
+  url: string,
+  strictResponseContract = false
+): Promise<{ content: string; finalData: Record<string, any>; allData: Record<string, any>[]; terminalSignal: boolean }> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Response body stream is not readable.");
   const decoder = new TextDecoder();
@@ -868,6 +879,7 @@ async function readSseStream(
   let finalData: Record<string, any> = {};
   const allData: Record<string, any>[] = [];
   let receivedBytes = 0;
+  let sawDone = false;
 
   try {
     while (true) {
@@ -887,7 +899,11 @@ async function readSseStream(
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.slice(5).trim());
         for (const dataStr of dataLines) {
-          if (!dataStr || dataStr === "[DONE]") continue;
+          if (!dataStr) continue;
+          if (dataStr === "[DONE]") {
+            sawDone = true;
+            continue;
+          }
           try {
             const parsed = JSON.parse(dataStr);
             allData.push(parsed);
@@ -914,17 +930,89 @@ async function readSseStream(
               await onChunk(delta, accumulated);
             }
           } catch {
-            // ignore malformed or non-json SSE event data
+            if (strictResponseContract) throw new Error("Provider returned malformed SSE data for the prepared response contract.");
+            // Legacy streams tolerate malformed or non-json SSE event data.
           }
         }
       }
     }
   } catch (error) {
-    throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
+    const failure = transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
+    Object.assign(failure, {
+      ...responseContractStreamEvidence(response, allData, finalData, accumulated),
+      partialContent: accumulated
+    });
+    throw failure;
   } finally {
     reader.releaseLock();
   }
-  return { content: accumulated, finalData, allData };
+  return { content: accumulated, finalData, allData, terminalSignal: sawDone || streamHasTerminalFinishReason(allData, finalData) };
+}
+
+type ResponseContractEvidence = {
+  responseId: string | null;
+  returnedModel: string | null;
+  returnedProviderRoute: string | null;
+  partialContent: string;
+  diagnosticCode: ReturnType<typeof classifyResponseFormatFailure>;
+};
+
+function safeResponseIdentity(value: unknown): string | null {
+  return typeof value === "string" && /^[a-zA-Z0-9_.:-]{1,200}$/.test(value) ? value : null;
+}
+
+function safeObservedIdentity(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 256
+    && !/[\u0000-\u001F\u007F-\u009F]/.test(value) ? value : null;
+}
+
+function responseContractEvidence(response?: Response, data?: Record<string, any>, partialContent = ""): ResponseContractEvidence {
+  const responseId = safeResponseIdentity(response?.headers.get("x-generation-id"))
+    ?? safeResponseIdentity(data?.id) ?? safeResponseIdentity(data?.response_id);
+  return {
+    responseId,
+    returnedModel: safeObservedIdentity(data?.model) ?? safeObservedIdentity(data?.model_instance_id),
+    returnedProviderRoute: safeObservedIdentity(data?.provider),
+    partialContent,
+    diagnosticCode: null
+  };
+}
+
+function responseContractStreamEvidence(response: Response, data: Record<string, any>[], finalData: Record<string, any>, partialContent: string): ResponseContractEvidence {
+  const first = (key: string) => data.map((item) => item[key]).find((value) => typeof value === "string" && value);
+  return {
+    ...responseContractEvidence(response, {
+      id: first("id") ?? finalData.id,
+      response_id: first("response_id") ?? finalData.response_id,
+      model: first("model") ?? finalData.model,
+      model_instance_id: first("model_instance_id") ?? finalData.model_instance_id,
+      provider: first("provider") ?? finalData.provider
+    }, partialContent)
+  };
+}
+
+function responseRefusal(data: Record<string, any> | undefined, allData: Record<string, any>[] = []): boolean {
+  const events = [data, ...allData];
+  const explicitRefusals = events.flatMap((item) => [
+    item?.refusal,
+    ...(Array.isArray(item?.choices) ? item.choices.flatMap((choice: any) => [choice?.message?.refusal, choice?.delta?.refusal]) : [])
+  ]);
+  if (explicitRefusals.some((value) => typeof value === "string" && value.trim().length > 0)) return true;
+  const values = events.flatMap((item) => [
+    item?.type, item?.refusal, item?.finish_reason, item?.status, item?.incomplete_details?.reason,
+    item?.error?.code, item?.error?.type,
+    ...(Array.isArray(item?.choices) ? item.choices.flatMap((choice: any) => [choice?.message?.refusal, choice?.delta?.refusal, choice?.finish_reason]) : [])
+  ]);
+  return values.some((value) => typeof value === "string" && /refusal|content_filter/i.test(value));
+}
+
+function structuredSseError(allData: Record<string, any>[]): Record<string, any> | null {
+  return allData.find((item) => item?.type === "error" || (item?.error && typeof item.error === "object")) ?? null;
+}
+
+function streamHasTerminalFinishReason(allData: Record<string, any>[], finalData: Record<string, any>): boolean {
+  return [finalData, ...allData].some((item) => item?.finish_reason !== null && item?.finish_reason !== undefined
+    || (Array.isArray(item?.choices) && item.choices.some((choice: any) => choice?.finish_reason !== null && choice?.finish_reason !== undefined)));
 }
 
 function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
@@ -950,7 +1038,7 @@ function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequ
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
     contextWindowTokens: effectiveContextWindowTokens,
     output: request.budgetOutput ?? { kind: "story_append" },
-    ...(responseFormat === undefined ? {} : { responseFormat })
+    ...(request.responseContract ? { responseContract: request.responseContract } : responseFormat === undefined ? {} : { responseFormat })
   });
 }
 
@@ -962,6 +1050,7 @@ function reportResponseHeaders(request: ProviderRequest, response: Response): vo
 }
 
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
+  if (request.responseContract) throw new Error("Native LM Studio cannot dispatch a prepared response contract.");
   const prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
@@ -985,6 +1074,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
       finishReason: String(finishValues.find(Boolean) || ""),
       outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
       modelInstanceId: String(finalData.model_instance_id || profile.model),
+      returnedModel: safeObservedIdentity(finalData.model_instance_id),
+      returnedProviderRoute: safeObservedIdentity(finalData.provider),
       usage: { inputTokens: Number(stats.input_tokens || 0), outputTokens, totalTokens: Number(stats.input_tokens || 0) + outputTokens },
       reportedCost: null,
       rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" },
@@ -1003,6 +1094,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
     finishReason: String(finishValues.find(Boolean) || ""),
     outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
     modelInstanceId: String(data.model_instance_id || profile.model),
+    returnedModel: safeObservedIdentity(data.model_instance_id),
+    returnedProviderRoute: safeObservedIdentity(data.provider),
     usage: { inputTokens: Number(data.stats?.input_tokens || 0), outputTokens, totalTokens: Number(data.stats?.input_tokens || 0) + outputTokens },
     reportedCost: null,
     rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" },
@@ -1011,14 +1104,20 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  let prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
+  let prepared = request.responseContract
+    ? checkedStoryRequest(profile, request)
+    : request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
+  let response: Response | undefined;
+  let evidence = responseContractEvidence();
   const send = async (preparedRequest: PreparedProviderRequest) => {
     const response = await sendPreparedProviderRequest(profile, preparedRequest, transport);
     reportResponseHeaders(request, response);
+    evidence = responseContractEvidence(response);
     return response;
   };
-  let response = await send(prepared);
+  try {
+  response = await send(prepared);
   if (!response.ok) {
     const clone = response.clone();
     const originalCancellation = response.body?.cancel();
@@ -1030,20 +1129,47 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     } finally {
       await originalCancellation?.catch(() => undefined);
     }
-    if (request.responseFormatFallback !== "forbid" && /response_format|json.?mode|structured.?output|grammar/i.test(text)) {
+    if (!request.responseContract && request.responseFormatFallback !== "forbid" && /response_format|json.?mode|structured.?output|grammar/i.test(text)) {
       prepared = request.canonicalBudgeting
         ? checkedStoryRequest(profile, request, false)
         : serializeLegacyProviderRequest(profile, request, { responseFormat: false });
       response = await send(prepared);
     } else {
-      let data: Record<string, any> = {};
-      try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
+      const parsed = text ? (() => { try { return JSON.parse(text); } catch { return {}; } })() : {};
+      evidence = { ...responseContractEvidence(response, parsed), diagnosticCode: classifyResponseFormatFailure(response.status, parsed) };
+      if (request.responseContract) {
+        const error = providerHttpError(response, `Provider request failed (${response.status}).`);
+        Object.assign(error, { responseFormatDiagnosticCode: evidence.diagnosticCode, ...evidence });
+        throw error;
+      }
+      const data = parsed as Record<string, any>;
       const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
       throw providerHttpError(response, `Provider request failed (${response.status}): ${message}`);
     }
   }
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
+    const streamed = await readSseStream(response, request.onChunk, profile, "story generation", url, Boolean(request.responseContract));
+    const { content, finalData, allData } = streamed;
+    evidence = responseContractStreamEvidence(response, allData, finalData, content);
+    const sseError = request.responseContract ? structuredSseError(allData) : null;
+    if (sseError) {
+      const error = new Error("Provider returned an SSE error event for the prepared response contract.");
+      Object.assign(error, {
+        ...evidence,
+        responseFormatDiagnosticCode: classifyResponseFormatFailure(200, sseError)
+      });
+      throw error;
+    }
+    if (request.responseContract && responseRefusal(finalData, allData)) {
+      const error = new Error("Provider refused the prepared response contract.");
+      Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal" });
+      throw error;
+    }
+    if (request.responseContract && !streamed.terminalSignal) {
+      const error = new Error("Provider stream ended before the prepared response contract completed.");
+      Object.assign(error, evidence);
+      throw error;
+    }
     const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
     const finishReason = String(allData.map((item) => item.choices?.[0]?.finish_reason).find(Boolean) || finalData.finish_reason || "");
     const responseId = String(allData.map((item) => item.id).find(Boolean) || finalData.id || "");
@@ -1054,6 +1180,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       finishReason,
       outputLimited: limitReason([finishReason]),
       modelInstanceId,
+      returnedModel: safeObservedIdentity(allData.map((item) => item.model).find(Boolean)) ?? safeObservedIdentity(finalData.model),
+      returnedProviderRoute: safeObservedIdentity(allData.map((item) => item.provider).find(Boolean)) ?? safeObservedIdentity(finalData.provider),
       usage: {
         inputTokens: Number(usageObj.prompt_tokens || 0),
         outputTokens: Number(usageObj.completion_tokens || 0),
@@ -1064,7 +1192,13 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
     };
   }
-  const data = await checkedJson(response, profile, "story generation", url);
+  const data = await checkedJson(response, profile, "story generation", url, MAX_PROVIDER_JSON_RESPONSE_BYTES, Boolean(request.responseContract));
+  evidence = responseContractEvidence(response, data);
+  if (request.responseContract && responseRefusal(data)) {
+    const error = new Error("Provider refused the prepared response contract.");
+    Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal" });
+    throw error;
+  }
   const choice = data.choices?.[0] || {};
   const contentValue = choice.message?.content;
   const content = typeof contentValue === "string" ? contentValue : Array.isArray(contentValue)
@@ -1076,6 +1210,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     finishReason,
     outputLimited: limitReason([finishReason]),
     modelInstanceId: String(data.model || profile.model),
+    returnedModel: safeObservedIdentity(data.model),
+    returnedProviderRoute: safeObservedIdentity(data.provider),
     usage: {
       inputTokens: Number(data.usage?.prompt_tokens || 0),
       outputTokens: Number(data.usage?.completion_tokens || 0),
@@ -1085,6 +1221,17 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     rawMetadata: { model: data.model || "", provider: data.provider || "" },
     preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
   };
+  } catch (error) {
+    if (!request.responseContract) throw error;
+    const source = error as Record<string, any>;
+    throw new PreparedResponseContractError(error, prepared, {
+      responseId: safeResponseIdentity(source.responseId) ?? evidence.responseId,
+      returnedModel: safeObservedIdentity(source.returnedModel) ?? evidence.returnedModel,
+      returnedProviderRoute: safeObservedIdentity(source.returnedProviderRoute) ?? evidence.returnedProviderRoute,
+      partialContent: typeof source.partialContent === "string" ? source.partialContent : evidence.partialContent,
+      diagnosticCode: source.responseFormatDiagnosticCode ?? source.diagnosticCode ?? evidence.diagnosticCode
+    });
+  }
 }
 
 export async function callTextProvider(
@@ -1302,22 +1449,31 @@ function inventoryRows(data: Record<string, any> | any[]): any[] {
   return Array.isArray(data) ? data : Array.isArray(data.models) ? data.models : Array.isArray(data.data) ? data.data : [];
 }
 
-function inventoryItems(models: any[]): ModelInventoryItem[] {
+function inventoryItems(models: any[], advertiseResponseFormat = false): ModelInventoryItem[] {
   return models.flatMap((model: any) => {
     const instances = Array.isArray(model.loaded_instances) ? model.loaded_instances : [];
+    const parameterValues = model?.supported_parameters;
+    const supportedParameters = Array.isArray(parameterValues)
+      && parameterValues.length <= 128
+      && parameterValues.every((value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 128)
+      ? [...new Set(parameterValues)]
+      : null;
+    // A successful text inventory always records what was observed. Null is
+    // unknown (absent/malformed); [] is the provider's explicit negative.
+    const responseFormatAdvertisement = { supportedParameters, discoveredAt: new Date().toISOString() };
     if (instances.length) return instances.map((instance: any) => ({
       id: String(model.key || model.id || instance.id || ""),
       displayName: String(model.display_name || model.name || model.key || model.id || ""),
       loaded: true,
       instanceId: String(instance.id || model.key || model.id || ""),
-      contextLength: Number(instance.config?.context_length || instance.context_length || model.max_context_length || 0)
+      contextLength: Number(instance.config?.context_length || instance.context_length || model.max_context_length || 0), ...(advertiseResponseFormat ? { responseFormatAdvertisement } : {})
     }));
     return [{
       id: String(model.id || model.key || ""),
       displayName: String(model.name || model.display_name || model.id || model.key || ""),
       loaded: Boolean(model.loaded),
       instanceId: String(model.instance_id || model.id || model.key || ""),
-      contextLength: Number(model.context_length || model.max_context_length || model.loaded_context_length || 0)
+      contextLength: Number(model.context_length || model.max_context_length || model.loaded_context_length || 0), ...(advertiseResponseFormat ? { responseFormatAdvertisement } : {})
     }];
   }).filter((model: ModelInventoryItem) => model.id);
 }
@@ -1556,7 +1712,7 @@ export async function discoverModels(
     : `${openAiRoot(profile.baseUrl)}/models`;
   const data = await checkedJson(await providerFetch(profile, "model discovery", url, { headers: headers(profile, url) }, transport), profile, "model discovery", url);
   const rows = inventoryRows(data);
-  const items = inventoryItems(rows);
+  const items = inventoryItems(rows, true);
   if (profile.providerType !== "openrouter") return items;
   const byId = new Map(rows.map((row: any) => [String(row.id || row.key || ""), row]));
   return items.map((item) => {

@@ -268,6 +268,7 @@ export function createCampaignStore(): CampaignStoreController {
       attempts: recovery.attempts,
       resultTurnId: recovery.resultTurnId,
       diagnostic: recovery.diagnostic ?? null,
+      responseFormat: recovery.responseFormat ?? null,
       review: reviewProjection(recovery.review),
       unsupportedReviewVersion: unsupportedReviewVersion(recovery.review),
       operation: operationOf(recovery)
@@ -311,6 +312,7 @@ export function createCampaignStore(): CampaignStoreController {
       attempts: null,
       resultTurnId: null,
       diagnostic: null,
+      responseFormat: pending.responseFormat ?? null,
       review: reviewProjection(pending.review),
       unsupportedReviewVersion: unsupportedReviewVersion(pending.review),
       operation: operationOf(pending)

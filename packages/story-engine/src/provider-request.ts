@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { ProviderRequest, TextProviderProfile } from "./providers.js";
 import { ContextBudgetError, assertOutputFeasible } from "./context-budget.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
+import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import { prepareResponseContract } from "./provider-response-format.js";
 
 export type ProviderRequestOperation = "story generation";
 
@@ -36,6 +38,7 @@ export type ProviderRequestSerializationOptions = Readonly<{
   operation?: ProviderRequestOperation;
   budgetAudit?: ProviderRequestBudgetAudit | null;
   responseFormat?: boolean;
+  responseContract?: PreparedResponseContract;
 }>;
 
 /** The legacy body serializer deliberately needs no endpoint or credential data. */
@@ -47,6 +50,10 @@ export type LegacyProviderRequestProfile = Readonly<Pick<
 export type ProviderOutputBudget =
   | Readonly<{
       kind: "story_append" | "story_replace";
+    }>
+  | Readonly<{
+      /** The reviewer returns findings, never a StoryTurnOutput replacement. */
+      kind: "continuity_review";
     }>
   | Readonly<{
       /** A repair may emit only the two unprotected choice fields. */
@@ -73,6 +80,7 @@ export type CheckedProviderRequestOptions = Readonly<{
   contextWindowTokens?: number;
   output: ProviderOutputBudget;
   responseFormat?: boolean;
+  responseContract?: PreparedResponseContract;
 }>;
 
 /** Conservative uncertainty for a serialized body when no compatible tokenizer is available. */
@@ -138,6 +146,21 @@ export function serializeProviderRequest(
   request: CanonicalProviderRequest,
   options: ProviderRequestSerializationOptions = {}
 ): PreparedProviderRequest {
+  if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) throw new Error("A prepared response contract cannot use legacy response-format options.");
+  if (options.responseContract && request.responseContract) throw new Error("A prepared response contract may be supplied only once.");
+  const responseContract = options.responseContract || request.responseContract
+    ? prepareResponseContract(options.responseContract ?? request.responseContract)
+    : null;
+  if (responseContract && responseContract.streaming !== Boolean(request.onChunk)) throw new Error("Prepared response contract streaming does not match the request.");
+  if (responseContract && profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
+    throw new Error("This provider adapter does not support prepared response contracts.");
+  }
+  if (responseContract?.mode === "json_schema" && profile.providerType === "openrouter" && !responseContract.providerRoutingSlugs.length) {
+    throw new Error("OpenRouter prepared response contracts require explicit provider routing.");
+  }
+  if (responseContract?.mode === "json_schema" && profile.providerType !== "openrouter" && responseContract.providerRoutingSlugs.length) {
+    throw new Error("Non-OpenRouter prepared response contracts cannot carry provider routing.");
+  }
   const isRecovery = Boolean(request.recoveryInput);
   const rejectedResponse = completeRejectedDraftContent(request);
   const payload = profile.providerType === "lmstudio"
@@ -162,7 +185,10 @@ export function serializeProviderRequest(
         ],
         temperature: isRecovery ? 0.2 : profile.temperature,
         max_tokens: profile.maxOutputTokens,
-        ...(options.responseFormat === false ? {} : { response_format: { type: "json_object" } }),
+        ...(responseContract?.mode === "json_schema" ? {
+          response_format: { type: "json_schema", json_schema: { name: responseContract.schemaName, strict: true, schema: responseContract.schema } },
+          ...(profile.providerType === "openrouter" ? { provider: { require_parameters: true, only: responseContract.providerRoutingSlugs } } : {})
+        } : responseContract?.mode === "json_object" ? { response_format: { type: "json_object" } } : options.responseFormat === false ? {} : { response_format: { type: "json_object" } }),
         ...(request.onChunk ? { stream: true, stream_options: { include_usage: true } } : {})
       };
   return prepare(payload, options);
@@ -180,6 +206,9 @@ function eventExtensionMinimum(output: Extract<ProviderOutputBudget, { kind: "ev
 }
 
 function outputSkeleton(output: ProviderOutputBudget): unknown {
+  if (output.kind === "continuity_review") {
+    return { version: "story-continuity-review-v1", verdict: "uncertain", findings: [] };
+  }
   if (output.kind === "story_choice_repair") {
     return { choices: ["x", "x", "x", "x"], custom_action_suggestion: "x" };
   }
@@ -220,7 +249,14 @@ export function serializeCheckedProviderRequest(
   request: CanonicalProviderRequest,
   options: CheckedProviderRequestOptions
 ): PreparedProviderRequest {
-  const serializationOptions = options.responseFormat === undefined ? {} : { responseFormat: options.responseFormat };
+  if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) {
+    throw new Error("A prepared response contract cannot use legacy response-format options.");
+  }
+  if (options.responseContract && request.responseContract) {
+    throw new Error("A prepared response contract may be supplied only once.");
+  }
+  const serializationOptions = options.responseContract ? { responseContract: options.responseContract }
+    : options.responseFormat === undefined ? {} : { responseFormat: options.responseFormat };
   let serializedRequest = request;
   let candidate = serializeProviderRequest(profile, serializedRequest, serializationOptions);
   let requestTokens = options.count(candidate.body);
