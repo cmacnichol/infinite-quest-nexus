@@ -190,7 +190,7 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
     }
     return {
       window: { since: options.since, limit: options.limit, reportedAt: new Date().toISOString() },
-      buildIdentity: process.env.GIT_SHA ?? process.env.BUILD_SHA ?? "unknown",
+      buildIdentity: reportLabel(process.env.NEXUS_BUILD_COMMIT ?? process.env.GIT_SHA ?? process.env.BUILD_SHA),
       metrics,
       outcomes: jobs.rows.map((row) => {
         const failureDiagnostic = projectGenerationFailureDiagnostic(row.failureDiagnostic);

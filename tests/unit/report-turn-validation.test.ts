@@ -1,8 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { generationExecutionProtocolIdentity, generationPolicyIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import { parseTurnValidationReportOptions, readTurnValidationReport } from "../../scripts/report-turn-validation.js";
+
+const buildIdentityEnvironmentKeys = ["NEXUS_BUILD_COMMIT", "GIT_SHA", "BUILD_SHA"] as const;
+type BuildIdentityEnvironmentKey = typeof buildIdentityEnvironmentKeys[number];
+const originalBuildIdentityEnvironment = Object.fromEntries(buildIdentityEnvironmentKeys.map((key) => [key, process.env[key]])) as Record<BuildIdentityEnvironmentKey, string | undefined>;
+
+function setBuildIdentityEnvironment(values: Partial<Record<BuildIdentityEnvironmentKey, string | undefined>>) {
+  for (const key of buildIdentityEnvironmentKeys) {
+    const value = values[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
 
 function frozenStoryMemoryPolicy(promptProtocol: "story-v14-continuity-context" | "story-v15-canonical-fact-format") {
   const policy = defaultStoryMemoryPolicy("r3");
@@ -26,6 +38,31 @@ function storyOnlyPolicy() {
 }
 
 describe("turn validation report", () => {
+  afterEach(() => setBuildIdentityEnvironment(originalBuildIdentityEnvironment));
+
+  it.each([
+    [{ NEXUS_BUILD_COMMIT: "deployed-commit", GIT_SHA: "legacy-git-sha", BUILD_SHA: "legacy-build-sha" }, "deployed-commit"],
+    [{ GIT_SHA: "legacy-git-sha", BUILD_SHA: "legacy-build-sha" }, "legacy-git-sha"],
+    [{ BUILD_SHA: "legacy-build-sha" }, "legacy-build-sha"],
+    [{}, "unknown"]
+  ] as const)("uses build identity %s", async (environment, expectedBuildIdentity) => {
+    setBuildIdentityEnvironment(environment);
+    const query = vi.fn(async () => ({ rows: [] }));
+
+    const report = await readTurnValidationReport({ query } as any, { limit: 50, since: null, format: "json" });
+
+    expect(report.buildIdentity).toBe(expectedBuildIdentity);
+  });
+
+  it("replaces an unsafe deployed build commit with unknown", async () => {
+    setBuildIdentityEnvironment({ NEXUS_BUILD_COMMIT: "deployed\nsecret", GIT_SHA: "legacy-git-sha" });
+    const query = vi.fn(async () => ({ rows: [] }));
+
+    const report = await readTurnValidationReport({ query } as any, { limit: 50, since: null, format: "json" });
+
+    expect(report.buildIdentity).toBe("unknown");
+  });
+
   it("rejects unsafe report limits and non-UTC since values", () => {
     expect(() => parseTurnValidationReportOptions(["--limit", "1001"])).toThrow("--limit must be between 1 and 1000");
     expect(() => parseTurnValidationReportOptions(["--since", "2026-09-18"])).toThrow("--since must be a UTC timestamp");
