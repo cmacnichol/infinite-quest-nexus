@@ -702,7 +702,7 @@ integration("T17 durable continuity review", () => {
     });
   });
 
-  it("uses the current second repair receipt after a full Retry replaces the first malformed candidate", async () => {
+  it("repairs the replacement primary after an explicit full Retry", async () => {
     const { job, application, campaignId } = await enqueue("enforce");
     malformedFactFormatting = true;
     reviewVerdict = "pass";
