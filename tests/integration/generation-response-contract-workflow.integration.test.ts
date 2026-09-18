@@ -7,9 +7,15 @@ import { generationRequestSchema } from "../../packages/contracts/src/generation
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
+import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
+import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
+import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
+import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { createProvider, apiProviderGraph } from "../helpers/provider-application-fixtures.js";
+import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { apiMemoryApplication } from "../helpers/memory-applications.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 
@@ -162,6 +168,61 @@ integration("response-contract composed generation workflow", () => {
     expect(row.rows[0]!.attemptCount).toBe(0);
     expect(completions).toHaveLength(callsBefore);
     expect(await authoritySnapshot(fixture.campaignId)).toEqual(before);
+  }, 60_000);
+
+  it("reclaims a saved auto selection with a new lease and dispatches its one durable primary invocation only once", async () => {
+    const fixture = await enqueue("auto");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `response-contract-selection-crash-a-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(fixture.job.id);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(
+      pool,
+      createApiIllustrationApplication(pool, providers.illustration),
+      apiMemoryApplication(pool, credentialSecret),
+      providers.generation
+    );
+    let interrupted = false;
+    const crashingRepository = {
+      ...repository,
+      async saveFrozenResponseContracts(
+        scope: Parameters<NonNullable<typeof repository.saveFrozenResponseContracts>>[0],
+        hash: Parameters<NonNullable<typeof repository.saveFrozenResponseContracts>>[1],
+        frozen: Parameters<NonNullable<typeof repository.saveFrozenResponseContracts>>[2]
+      ) {
+        const saved = await repository.saveFrozenResponseContracts!(scope, hash, frozen);
+        if (!interrupted && saved) {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [fixture.job.id]);
+          throw Object.assign(new Error("Injected termination after frozen response-contract selection"), { code: "generation_cancelled" });
+        }
+        return saved;
+      }
+    };
+    const callsBefore = completions.length;
+    await expect(createGenerationExecutor({ pool, repository: crashingRepository, collaborators })
+      .execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(false);
+    expect(completions).toHaveLength(callsBefore);
+    const crashed = await pool.query<{ attempts: number; orchestrationPrivate: Record<string, any> }>(
+      "SELECT attempts,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]
+    );
+    const frozen = crashed.rows[0]!.orchestrationPrivate.frozenResponseContracts;
+    expect(frozen).toMatchObject({ contracts: { "story:nonstream": { mode: "json_object" } } });
+
+    await expect(runGenerationJob(pool, `response-contract-selection-crash-b-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(true);
+    const reclaimed = await pool.query<{ attempts: number; status: string; resultTurnId: string | null; orchestrationPrivate: Record<string, any> }>(
+      "SELECT attempts,status,result_turn_id AS \"resultTurnId\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]
+    );
+    expect(reclaimed.rows[0]).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+    expect(reclaimed.rows[0]!.attempts).toBeGreaterThan(crashed.rows[0]!.attempts);
+    expect(reclaimed.rows[0]!.orchestrationPrivate.frozenResponseContracts).toEqual(frozen);
+    expect(reclaimed.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([
+      expect.objectContaining({ invocationKey: "story:nonstream", operation: "story_generation", status: "completed" })
+    ]);
+    expect(completions).toHaveLength(callsBefore + 1);
+    await expect(runGenerationJob(pool, `response-contract-selection-crash-c-${randomUUID()}`, 30, credentialSecret)).resolves.toBe(false);
+    expect(completions).toHaveLength(callsBefore + 1);
   }, 60_000);
 
   it("runs a legacy job through the composed provider without inventing a response-contract envelope", async () => {
