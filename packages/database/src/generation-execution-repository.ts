@@ -395,7 +395,7 @@ function hasValidEventCoverageRepair(value: unknown): boolean {
 }
 
 type GenerationReviewExecutionBinding = Pick<GenerationExecutionPayload,
-  "owner_user_id" | "campaign_id" | "world_id" | "expected_turn_number" | "operation_kind" | "replacement_turn_id" | "generation_base_identity" | "provider_profile_id" | "prompt_protocol_version"
+  "id" | "owner_user_id" | "campaign_id" | "world_id" | "expected_turn_number" | "operation_kind" | "replacement_turn_id" | "generation_base_identity" | "provider_profile_id" | "prompt_protocol_version"
 > & Readonly<{ world_version_id?: string | null }>;
 
 /** A parsed private review still must be bound to the locked job that resumes it. */
@@ -413,11 +413,21 @@ function generationReviewMatchesExecutionJob(review: GenerationReviewCheckpoint,
     && review.replacementTurnId === job.replacement_turn_id;
   if (!matchesJob || review.version !== 2) return matchesJob;
   const repair = review.factFormatRepair!;
+  const receipts = repair.status === "authorized"
+    ? review.decisionJournal.filter((entry) => entry.decision === "repair_format"
+      && entry.reviewId === review.reviewId && entry.revision === review.revision - 1)
+    : [];
+  const receipt = receipts.length === 1 ? receipts[0] : undefined;
   return repair.ownerUserId === job.owner_user_id
     && repair.campaignId === job.campaign_id
     && repair.worldVersionId === (job.world_version_id ?? null)
     && repair.promptProtocolVersion === job.prompt_protocol_version
-    && canonicalEvidenceJson(repair.baseIdentity) === canonicalEvidenceJson(job.generation_base_identity);
+    && canonicalEvidenceJson(repair.baseIdentity) === canonicalEvidenceJson(job.generation_base_identity)
+    && (repair.status !== "authorized" || (receipt !== undefined
+      && receipt.actorUserId === job.owner_user_id
+      && receipt.actionReceipt.jobId === job.id
+      && receipt.actionReceipt.operationKind === job.operation_kind
+      && receipt.actionReceipt.replacementTurnId === job.replacement_turn_id));
 }
 
 export type GenerationStreamingState = Record<string, unknown> & {
@@ -731,8 +741,9 @@ function assertAppliedFactFormatRepair(
 ): void {
   const draft = orchestration.validatedMainDraft;
   if (!draft?.factFormatRepair) return;
-  const receipt = checkpoint.decisionJournal.find((entry) => entry.decision === "repair_format"
+  const receipts = checkpoint.decisionJournal.filter((entry) => entry.decision === "repair_format"
     && entry.reviewId === draft.factFormatRepair!.reviewId && entry.revision === draft.factFormatRepair!.revision);
+  const receipt = receipts.length === 1 ? receipts[0] : undefined;
   const unavailable = (): never => { throw Object.assign(new Error("The applied fact-format repair cannot authorize this commit."), { code: "generation_review_acceptance_unavailable" }); };
   if (!receipt || receipt.decision !== "repair_format"
     || draft.factFormatRepair.revision !== receipt.revision
@@ -762,6 +773,10 @@ function assertAppliedFactFormatRepair(
     || receipt.offeredCandidate.provider.profileId !== job.provider_profile_id
     || receipt.offeredCandidate.protocol.version !== job.prompt_protocol_version
     || canonicalEvidenceJson(receipt.offeredCandidate.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
+    || receipt.actorUserId !== job.owner_user_id
+    || receipt.actionReceipt.jobId !== job.id
+    || receipt.actionReceipt.operationKind !== job.operation_kind
+    || receipt.actionReceipt.replacementTurnId !== job.replacement_turn_id
     || (orchestration.extension === undefined && canonicalEvidenceJson(finalStory) !== canonicalEvidenceJson(draft.story))) unavailable();
 }
 

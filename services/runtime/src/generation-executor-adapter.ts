@@ -1590,13 +1590,15 @@ async function executeLoadedGeneration(
       orchestration.semanticRepair,
       orchestration.generationReview
     );
-    const formatRepairReceipt = savedReview.success && savedReview.data.version === 2
+    const formatRepairReceipts = savedReview.success && savedReview.data.version === 2
       && savedReview.data.state === "decided" && savedReview.data.stage === "structure"
       && savedReview.data.candidateScope === "main" && savedReview.data.factFormatRepair?.status === "authorized"
-      ? savedReview.data.decisionJournal.find((entry) => entry.decision === "repair_format"
+      ? savedReview.data.decisionJournal.filter((entry) => entry.decision === "repair_format"
         && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1)
-      : undefined;
-    if (!validatedDraft && formatRepairReceipt && savedReview.success) {
+      : [];
+    const formatRepairReceipt = formatRepairReceipts.length === 1 ? formatRepairReceipts[0] : undefined;
+    if (!validatedDraft && savedReview.success && savedReview.data.version === 2
+      && savedReview.data.factFormatRepair?.status === "authorized") {
       const repair = savedReview.data.factFormatRepair!;
       const primary = orchestration.primaryResult;
       const incompatible = async (): Promise<true> => {
@@ -1608,10 +1610,19 @@ async function executeLoadedGeneration(
         }), "saving incompatible fact-format repair checkpoint");
         return true;
       };
+      if (formatRepairReceipts.length !== 1) {
+        await incompatible(); return true;
+      }
+      const receipt = formatRepairReceipts[0]!;
       if (!primary || !primary.rawOutputReference || primary.rawOutputReference !== repair.rawOutputReference
         || primary.requestPayloadHash !== repair.producingRequestHash
         || primary.response.responseId !== repair.sourceResponseId
-        || primary.providerConfigurationHash !== repair.providerConfigurationHash) {
+        || primary.providerConfigurationHash !== repair.providerConfigurationHash
+        || repair.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)
+        || receipt.actionReceipt.jobId !== job.id
+        || receipt.actionReceipt.operationKind !== job.operation_kind
+        || receipt.actionReceipt.replacementTurnId !== job.replacement_turn_id
+        || receipt.actorUserId !== job.owner_user_id) {
         await incompatible(); return true;
       }
       const plan = applyAuthorizedFactFormatRepair({
@@ -1637,7 +1648,7 @@ async function executeLoadedGeneration(
         originalInputHash: sha256(storyInput), requestBody: primary.requestBody,
         requestPayloadHash: primary.requestPayloadHash, draftHash: sha256(stableStringify(repaired.story)),
         producingAttempt: job.attempts, story: repaired.story, response: primary.response, sentFactIds: primary.sentFactIds,
-        factFormatRepair: { version: 1 as const, reviewId: savedReview.data.reviewId, revision: formatRepairReceipt.revision,
+        factFormatRepair: { version: 1 as const, reviewId: savedReview.data.reviewId, revision: receipt.revision,
           planHash: repair.planHash, rawOutputHash: repair.plan.rawOutputHash, resultHash: repair.plan.resultHash }
       };
       orchestration = await persistOrchestration(repository, scope, job, { generationReview: appliedReview, validatedMainDraft: draft });

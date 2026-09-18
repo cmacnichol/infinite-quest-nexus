@@ -286,13 +286,9 @@ integration("PostgreSQL generation review persistence", () => {
       "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [fixture.queued.id]
     )).rows[0]!.orchestration_private;
     const review = structuredClone(saved.generationReview);
-    const foreignCampaignId = crypto.randomUUID();
-    for (const candidate of [review.originalCandidate, review.gateCandidate, review.workingCandidate]) candidate.campaignId = foreignCampaignId;
-    review.factFormatRepair!.campaignId = foreignCampaignId;
     const receipt = review.decisionJournal[0]!;
     if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
-    receipt.offeredCandidate.campaignId = foreignCampaignId;
-    receipt.repair.campaignId = foreignCampaignId;
+    receipt.actionReceipt.jobId = crypto.randomUUID();
     expect(generationReviewCheckpointSchema.safeParse(review).success).toBe(true);
     await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ ...saved, generationReview: review })]);
     await expect(fixture.execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim })).resolves.toBeNull();
