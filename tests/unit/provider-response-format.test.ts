@@ -62,7 +62,7 @@ describe("response-format eligibility", () => {
     for (const change of [
       { operation: "choices" as const }, { streaming: true }, { schemaHash: "other" },
       { adapterProtocol: "other" as never }, { endpointIdentity: "other" }, { routeConfigHash: "other" },
-      { providerType: "openai_compatible" as const }
+      { providerType: "openai_compatible" as const }, { model: "other-model" }
     ]) expect(resolveResponseFormatEligibility({ ...input, ...change })).toMatchObject({ status: "advertised" });
     expect(resolveResponseFormatEligibility({ ...input, model: "openrouter/auto" })).toMatchObject({ status: "unknown", reason: "unresolved_model" });
     expect(resolveResponseFormatEligibility({ ...input, advertisement: { supportedParameters: [], discoveredAt: now } })).toMatchObject({ status: "unsupported", reason: "not_advertised" });
@@ -70,5 +70,16 @@ describe("response-format eligibility", () => {
     expect(resolveResponseFormatEligibility({ ...input, nativeOpenTrackerObjects: false })).toMatchObject({ status: "unsupported", reason: "schema_incompatible" });
     expect(resolveResponseFormatEligibility({ ...input, operation: "choices", nativeOpenTrackerObjects: false })).toMatchObject({ status: "advertised" });
     expect(selectResponseFormat(undefined, { status: "unknown", reason: "missing_metadata", verification: null })).toBe("legacy");
+  });
+
+  it("reports expired verification when the exact tuple has passed its expiry and ignores future evidence", () => {
+    const input = {
+      advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: now },
+      providerType: "openrouter" as const, endpointIdentity: "endpoint-hash", model: "openrouter/model",
+      routeConfigHash: "route-hash", adapterProtocol: "text-schema-adapter-v1" as const, operation: "story" as const,
+      schemaHash: "schema-hash", streaming: false, verifications: [record]
+    };
+    expect(resolveResponseFormatEligibility({ ...input, now: "2026-09-19T12:00:00.000Z" })).toMatchObject({ status: "advertised", reason: "expired" });
+    expect(resolveResponseFormatEligibility({ ...input, now: "2026-09-16T00:00:00.000Z" })).toMatchObject({ status: "advertised", reason: "expired" });
   });
 });

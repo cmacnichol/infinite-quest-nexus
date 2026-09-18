@@ -179,14 +179,15 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         providerRole,
         refresh
       });
+      const exposeTextResponseFormatMetadata = providerRole === "text";
       return inventory.models.map((model) => ({
         id: model.id,
         displayName: model.name,
         loaded: false,
         instanceId: model.id,
         contextLength: model.contextWindowTokens ?? 0,
-        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
-        ...(composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
+        ...(exposeTextResponseFormatMetadata && model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
+        ...(exposeTextResponseFormatMetadata && composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
       }));
     },
 
@@ -213,8 +214,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         loaded: false,
         instanceId: model.id,
         contextLength: model.contextWindowTokens ?? 0,
-        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
-        ...(composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
+        ...(input.providerRole === "text" && model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
+        ...(input.providerRole === "text" && composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
       }));
     },
 

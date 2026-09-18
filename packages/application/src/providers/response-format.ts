@@ -19,7 +19,8 @@ export function resolveResponseFormatEligibility(input: ResponseFormatEligibilit
     && verification.routeConfigHash === input.routeConfigHash && verification.adapterProtocol === input.adapterProtocol
     && verification.operation === input.operation && verification.schemaHash === input.schemaHash
     && verification.streaming === input.streaming && (input.operation !== "story" || verification.nativeOpenTrackerObjects));
-  const matching = matches.find((verification) => Date.parse(verification.expiresAt) > Date.parse(input.now));
+  const matching = matches.find((verification) => Date.parse(verification.verifiedAt) <= Date.parse(input.now)
+    && Date.parse(verification.expiresAt) > Date.parse(input.now));
   if (!matching) return { status: "advertised", reason: matches.length ? "expired" : "missing_verification", verification: null };
   return { status: "verified", reason: "verified", verification: matching };
 }

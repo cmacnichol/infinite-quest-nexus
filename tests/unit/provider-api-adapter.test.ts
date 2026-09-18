@@ -36,4 +36,20 @@ describe("provider API configuration boundary", () => {
     await value.adapter.create(owner, { ...input, configuration: { textResponseFormatPolicy: "auto", browserProof: true } } as never);
     expect(value.application.createProfile.mock.calls[0]?.[0].configuration).toEqual({ textResponseFormatPolicy: "auto" });
   });
+
+  it("does not expose text response-format metadata through image inventory or a text embedding fallback", async () => {
+    const value = adapter();
+    const metadata = { supportedParameters: ["response_format"], discoveredAt: "2026-09-18T00:00:00.000Z" };
+    const profile = { ...input, id, hasCredential: false, health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now" };
+    value.application.listModels.mockResolvedValue({ models: [{ id: "model", name: "Model", contextWindowTokens: 8192, responseFormatAdvertisement: { supportedParameters: ["response_format"], discoveredAt: "2026-09-18T00:00:00.000Z" } }] });
+    value.application.listProfiles.mockResolvedValue([{ ...profile, providerRole: "image" }]);
+    const image = await value.adapter.models(owner, id, "image");
+    expect(image[0]).not.toHaveProperty("responseFormatAdvertisement");
+    expect(image[0]).not.toHaveProperty("responseFormatRegistryDigest");
+
+    value.application.listProfiles.mockResolvedValue([profile]);
+    const embedding = await value.adapter.models(owner, id, "embedding");
+    expect(embedding[0]).not.toHaveProperty("responseFormatAdvertisement");
+    expect(embedding[0]).not.toHaveProperty("responseFormatRegistryDigest");
+  });
 });

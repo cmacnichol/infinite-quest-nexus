@@ -28,6 +28,13 @@ function file(value: unknown) {
   writeFileSync(path, JSON.stringify(value));
   return path;
 }
+function rawFile(value: string) {
+  const directory = mkdtempSync(join(tmpdir(), "schema-verification-"));
+  directories.push(directory);
+  const path = join(directory, "records.json");
+  writeFileSync(path, value);
+  return path;
+}
 function load(path: string | undefined) { return loadSchemaVerificationFile(path, { now: () => Date.parse(now) }); }
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 describe("schema verification file", () => {
@@ -53,6 +60,17 @@ describe("schema verification file", () => {
     const oversized = join(directory, "oversized.json"); writeFileSync(oversized, "[".padEnd(1_048_578, " "));
     expect(() => load(join(directory, "missing.json"))).toThrow("TEXT_SCHEMA_VERIFICATION_FILE is invalid.");
     expect(() => load(oversized)).toThrow("TEXT_SCHEMA_VERIFICATION_FILE is invalid.");
+  });
+  it("accepts exactly one MiB and 1,000 records, then rejects either bound when exceeded", () => {
+    const exactMiB = JSON.stringify([valid]);
+    expect(exactMiB.length).toBeLessThan(1_048_576);
+    expect(load(rawFile(`${exactMiB}${" ".repeat(1_048_576 - exactMiB.length)}`)).records).toHaveLength(1);
+    expect(load(file(Array.from({ length: 1_000 }, () => valid))).records).toHaveLength(1_000);
+    expect(() => load(file(Array.from({ length: 1_001 }, () => valid)))).toThrow("TEXT_SCHEMA_VERIFICATION_FILE is invalid.");
+    expect(() => load(rawFile(`${exactMiB}${" ".repeat(1_048_577 - exactMiB.length)}`))).toThrow("TEXT_SCHEMA_VERIFICATION_FILE is invalid.");
+  });
+  it("accepts an expiry exactly thirty days after verification", () => {
+    expect(load(file([{ ...valid, verifiedAt: "2026-08-19T12:00:00.000Z", expiresAt: "2026-09-18T12:00:00.000Z" }])).records).toHaveLength(1);
   });
   it("rejects OpenAI-compatible records that contain OpenRouter routing", () => expect(() => load(file([{ ...valid, providerType: "openai_compatible", providerRoutingSlugs: ["openai/gpt-4o"] }]))).toThrow("TEXT_SCHEMA_VERIFICATION_FILE is invalid."));
 });

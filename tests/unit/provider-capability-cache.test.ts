@@ -62,6 +62,35 @@ describe("provider capability cache", () => {
     await expect(cache.load(key, async () => ({ supportedParameters: ["structured_outputs"], discoveredAt: "fresh" }))).resolves.toMatchObject({ discoveredAt: "fresh" });
   });
 
+  it("partitions every capability tuple field, treats a new cache as a restart miss, and drops stale data after a failed refresh", async () => {
+    const cache = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
+    const load = vi.fn(async () => ({ supportedParameters: ["response_format"], discoveredAt: "first" }));
+    const tupleFields = ["ownerUserId", "providerProfileId", "providerType", "endpointIdentity", "model", "routeConfigHash", "adapterProtocol"] as const;
+    for (const field of tupleFields) await cache.load({ ...key, [field]: `${key[field]}-other` }, load);
+    expect(load).toHaveBeenCalledTimes(tupleFields.length);
+
+    await cache.load(key, load);
+    await expect(cache.load(key, async () => { throw new Error("refresh unavailable"); }, true)).rejects.toThrow("refresh unavailable");
+    await cache.load(key, load);
+    expect(load).toHaveBeenCalledTimes(tupleFields.length + 2);
+
+    const restarted = new ProviderCapabilityCache<{ supportedParameters: readonly string[]; discoveredAt: string }>({ now: () => 0 });
+    await restarted.load(key, load);
+    expect(load).toHaveBeenCalledTimes(tupleFields.length + 3);
+  });
+
+  it("evicts the least recently used entry after 1,000 entries", async () => {
+    const cache = new ProviderCapabilityCache<number>({ now: () => 0 });
+    const load = vi.fn(async () => load.mock.calls.length);
+    const entry = (model: string) => ({ ...key, model });
+    for (let index = 0; index < 1_000; index += 1) await cache.load(entry(`model-${index}`), load);
+    await cache.load(entry("model-0"), load);
+    await cache.load(entry("model-1000"), load);
+    await cache.load(entry("model-0"), load);
+    await cache.load(entry("model-1"), load);
+    expect(load).toHaveBeenCalledTimes(1_002);
+  });
+
   it("partitions only capability-relevant non-secret configuration", () => {
     expect(capabilityRouteConfigHash({ streaming: true, apiKey: "secret", ignored: "one" }))
       .toBe(capabilityRouteConfigHash({ streaming: true, credential: "other", ignored: "two" }));
