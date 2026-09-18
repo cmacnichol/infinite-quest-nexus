@@ -8,7 +8,7 @@ The configured file is bounded before allocation (1 MiB), contains at most 1,000
 
 ## Evidence
 
-- RED: `corepack pnpm exec vitest run tests/unit/provider-schema-verification.test.ts` exited 1 with 10 expected failures of the new strict boundary assertions (unbounded/extra fields, missing-file diagnostics, and invalid routing). The pre-existing implementation had not yet enforced those cases.
+- RED: `corepack pnpm exec vitest run tests/unit/provider-schema-verification.test.ts` exited 1 with 10 expected failures of the new strict boundary assertions (unbounded/extra fields, missing-file diagnostics, and invalid routing). The pre-existing implementation had not yet enforced those cases. A final operation-array regression also failed alone before the exact enum guard was added (1 failed, 18 passed).
 - GREEN: `corepack pnpm exec vitest run tests/unit/provider-schema-verification.test.ts` exited 0: 1 file, 19 tests passed.
 - Type check: `corepack pnpm exec tsc --ignoreConfig --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck --types node services/runtime/src/provider-schema-verification.ts` exited 0.
 - Whitespace: `git diff --check -- services/runtime/src/provider-schema-verification.ts tests/unit/provider-schema-verification.test.ts` exited 0.
