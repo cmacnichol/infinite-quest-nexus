@@ -1136,14 +1136,38 @@ export function mountStoryPlayerPage(
         reviewDecisionInFlight = true;
         reviewDecisionError = null;
         render();
-        const request = control.dataset.action === "keep-generation-review"
-          ? { reviewId: review.reviewId, revision: review.revision, decision: "keep" as const }
-          : control.dataset.action === "repair-format-generation-review"
-            ? review.version === 2 && review.canRepairFormat && review.formatRepair
-              ? { reviewId: review.reviewId, revision: review.revision, decision: "repair_format" as const, repairPlanHash: review.formatRepair.planHash } : null
-            : { reviewId: review.reviewId, revision: review.revision, decision: "retry" as const };
-        if (!request) return;
-        void generation.decideReview(request).then(async (saved) => {
+        void (async () => {
+          const current = await generation.readCurrentReview();
+          const stillCurrent = current !== null
+            && current.reviewId === review.reviewId
+            && current.revision === review.revision
+            && current.state === "pending";
+          if (!stillCurrent) {
+            reviewDecisionError = "The review changed. Reloaded status before sending a decision.";
+            const campaignId = projection.campaign?.id;
+            if (campaignId) {
+              try {
+                const sync = await composition.api.generation.syncStatus(campaignId);
+                if (!disposed && projection.campaign?.id === campaignId) composition.campaignStore.load(sync);
+              } catch {
+                // Preserve the explicit local uncertainty when refresh fails.
+              }
+            }
+            return;
+          }
+          const request = control.dataset.action === "keep-generation-review"
+            ? current.canKeep
+              ? { reviewId: current.reviewId, revision: current.revision, decision: "keep" as const } : null
+            : control.dataset.action === "repair-format-generation-review"
+              ? current.version === 2 && current.canRepairFormat && current.formatRepair
+                ? { reviewId: current.reviewId, revision: current.revision, decision: "repair_format" as const, repairPlanHash: current.formatRepair.planHash } : null
+              : control.dataset.action === "retry-generation-review" && current.canRetry
+                ? { reviewId: current.reviewId, revision: current.revision, decision: "retry" as const } : null;
+          if (!request) {
+            reviewDecisionError = "This review no longer offers that decision.";
+            return;
+          }
+          const saved = await generation.decideReview(request);
           if (!saved && !disposed) {
             reviewDecisionError = "Your decision could not be saved. The turn remains unchanged.";
             const campaignId = projection.campaign?.id;
@@ -1159,7 +1183,7 @@ export function mountStoryPlayerPage(
               }
             }
           }
-        }).finally(() => {
+        })().finally(() => {
           if (!disposed) { reviewDecisionInFlight = false; render(); }
         });
       });

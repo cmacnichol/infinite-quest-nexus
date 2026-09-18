@@ -1552,7 +1552,10 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
       if (keep) { keep.classList.toggle("hidden", !reviewView.canKeep); keep.disabled = state.generationReviewSubmitting; }
       if (retry) { retry.classList.toggle("hidden", !reviewView.canRetry); retry.disabled = state.generationReviewSubmitting; }
       if (repair) { repair.classList.toggle("hidden", !reviewView.canRepairFormat); repair.disabled = state.generationReviewSubmitting; repair.title = reviewView.repairDescription || ""; }
-      $("generationReviewStatus").textContent = state.generationReviewSubmitting ? "Saving your decision…" : state.generationReviewError || reviewView.retryFailure || "";
+      $("generationReviewStatus").textContent = state.generationReviewSubmitting
+        ? "Saving your decision…"
+        : state.generationReviewError || reviewView.retryFailure
+          || (reviewView.canRepairFormat ? `${reviewView.repairDescription} ${reviewView.retryDescription}` : "");
     }
   }
 }
@@ -1616,12 +1619,33 @@ async function decideGenerationReview(decision) {
     const run = state.generationRun || await composition.workflow.resume(state.campaignId);
     if (!run) throw new Error("The saved review is unavailable.");
     state.generationRun = run;
+    const current = await run.getReview();
+    const stillCurrent = current.reviewId === summary.reviewId
+      && current.revision === summary.revision
+      && current.state === "pending";
+    if (!stillCurrent) {
+      state.generationReview = {
+        summary: current.version === 2
+          ? { version: 2, reviewId: current.reviewId, revision: current.revision, state: current.state, stage: current.stage, candidateScope: current.candidateScope, reasons: current.reasons, canKeep: current.canKeep, canRetry: current.canRetry, canRepairFormat: current.canRepairFormat, formatRepair: current.formatRepair }
+          : { version: 1, reviewId: current.reviewId, revision: current.revision, state: current.state, stage: current.stage, candidateScope: current.candidateScope, reasons: current.reasons, canKeep: current.canKeep, canRetry: current.canRetry },
+        detail: current
+      };
+      state.generationReviewError = "The review changed. Reloaded status before sending a decision.";
+      return;
+    }
     const request = decision === "repair_format"
-      ? (summary.version === 2 && summary.canRepairFormat && summary.formatRepair
-        ? { reviewId: summary.reviewId, revision: summary.revision, decision, repairPlanHash: summary.formatRepair.planHash }
+      ? (current.version === 2 && current.canRepairFormat && current.formatRepair
+        ? { reviewId: current.reviewId, revision: current.revision, decision, repairPlanHash: current.formatRepair.planHash }
         : null)
-      : { reviewId: summary.reviewId, revision: summary.revision, decision };
-    if (!request) throw new Error("The format repair is no longer available.");
+      : decision === "keep" && current.canKeep
+        ? { reviewId: current.reviewId, revision: current.revision, decision }
+        : decision === "retry" && current.canRetry
+          ? { reviewId: current.reviewId, revision: current.revision, decision }
+          : null;
+    if (!request) {
+      state.generationReviewError = "This review no longer offers that decision.";
+      return;
+    }
     await run.decideReview(request);
     // A live review remains on the existing stream. A rehydrated review has no
     // watcher, so reload only in that case to read its later durable state.

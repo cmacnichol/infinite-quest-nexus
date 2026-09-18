@@ -117,4 +117,26 @@ describe("generation review public projection", () => {
       reasons: ["invalid_structure"], canKeep: false, canRetry: true
     }, undefined, malformed).message).toBe("The candidate does not meet the required story structure.");
   });
+
+  test("keeps format repair separate from a full replacement for an invalid v2 candidate", () => {
+    const presentation = generationReviewPresentation({
+      version: 2, reviewId, revision: 2, state: "pending", stage: "structure", candidateScope: "final",
+      reasons: ["invalid_structure"], canKeep: false, canRetry: true,
+      canRepairFormat: true,
+      formatRepair: {
+        planHash: "a".repeat(64),
+        changedFactCount: 2,
+        description: "Repair fact formatting and keep the narration unchanged."
+      }
+    });
+
+    expect(presentation).toMatchObject({
+      state: "review",
+      canKeep: false,
+      canRetry: true,
+      canRepairFormat: true,
+      repairDescription: "Repair fact formatting and keep the narration unchanged.",
+      retryDescription: "Retry replaces this candidate with a new generation."
+    });
+  });
 });

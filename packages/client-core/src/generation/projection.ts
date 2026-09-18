@@ -109,7 +109,9 @@ export function generationReviewPresentation(review: unknown, _diagnostic?: unkn
     keepDescription: summary.data.candidateScope === "main"
       ? "Keep this text and finish the turn; normal event content may still be added."
       : "Keep this saved turn exactly as reviewed.",
-    retryDescription: matchesDetail ? parsedDetail.data.retryDescription : "Retry this generation stage.",
+    retryDescription: summary.data.version === 2 && summary.data.canRepairFormat
+      ? "Retry replaces this candidate with a new generation."
+      : matchesDetail ? parsedDetail.data.retryDescription : "Retry this generation stage.",
     repairDescription: summary.data.version === 2 && summary.data.formatRepair !== null
       ? summary.data.formatRepair.description : null,
     repairPlanHash: summary.data.version === 2 && summary.data.formatRepair !== null

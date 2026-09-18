@@ -31,6 +31,13 @@ interface ReviewFixtureOptions {
   readonly structureReview?: boolean;
   readonly validationIssues?: readonly { field: "superseded_facts" | "canonical_fact_updates" | "canonical_facts"; code: "missing_array" | "expected_string_item" | "invalid_field_shape" }[];
   readonly malformedReviewDetail?: unknown;
+  readonly formatRepair?: boolean;
+  readonly ineligibleFormatRepair?: boolean;
+  readonly futureReview?: boolean;
+  readonly afterRepairContinuity?: boolean;
+  readonly decisionNetworkLost?: boolean;
+  readonly decisionDelayMs?: number;
+  readonly revokeKeepInCurrentDetail?: boolean;
 }
 
 async function installReviewApi(page: Page, canKeep = true, decisionFails = false, decisionCompletes = false, options: ReviewFixtureOptions = {}) {
@@ -38,19 +45,32 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
   const operationKind = options.replaceLatest ? "replace_latest" : "append";
   const replacementTurnId = options.replaceLatest ? fixture.turns.turns[0]!.id : null;
   const resultTurnNumber = options.replaceLatest ? 1 : 2;
-  const review = { version: 1, reviewId, revision: 1, state: "pending", stage: options.structureReview ? "structure" : "continuity", candidateScope: "final", reasons: [options.structureReview ? "invalid_structure" : canKeep ? "narrative_conflict" : "invalid_choices"], canKeep: options.structureReview ? false : canKeep, canRetry: true };
-  const candidateNarration = options.structureReview ? null : "The lighthouse bell answered across the harbor.";
-  const candidateChoices = options.structureReview ? [] : ["Follow the bell", "Wait at the quay"];
-  const detail = { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: options.structureReview ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0, ...(options.validationIssues ? { validationIssues: options.validationIssues } : {}) };
+  const review: Record<string, any> = options.futureReview
+    ? { version: 3 }
+    : options.formatRepair || options.ineligibleFormatRepair
+      ? {
+          version: 2 as const, reviewId, revision: 1, state: "pending" as const, stage: "structure" as const, candidateScope: "final" as const,
+          reasons: ["invalid_structure"] as const, canKeep: false, canRetry: true, canRepairFormat: options.formatRepair === true,
+          formatRepair: options.formatRepair ? {
+            planHash: "a".repeat(64), changedFactCount: 2,
+            description: "Repair fact formatting and keep the narration unchanged." as const
+          } : null
+        }
+      : { version: 1 as const, reviewId, revision: 1, state: "pending" as const, stage: options.structureReview ? "structure" as const : "continuity" as const, candidateScope: "final" as const, reasons: [options.structureReview ? "invalid_structure" as const : canKeep ? "narrative_conflict" as const : "invalid_choices" as const], canKeep: options.structureReview ? false : canKeep, canRetry: true };
+  const candidateNarration = options.structureReview && !options.formatRepair ? null : "The lighthouse bell answered across the harbor.";
+  const candidateChoices = options.structureReview && !options.formatRepair ? [] : ["Follow the bell", "Wait at the quay"];
+  const detail: Record<string, any> | null = options.futureReview ? null : { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: options.structureReview || options.formatRepair ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0, ...(options.revokeKeepInCurrentDetail ? { canKeep: false } : {}), ...(options.validationIssues ? { validationIssues: options.validationIssues } : {}) };
   const decisions: Record<string, unknown>[] = [];
   const writePaths: string[] = [];
   const sharedState = options.sharedState ?? { accepted: false };
   let terminalAction: "cancelled" | "discarded" | null = null;
   let reoffered = false;
+  let repairApplied = false;
   let reviewDetailRequests = 0;
   let settledReviewDetailRequests = 0;
+  let settledReviewDecisionRequests = 0;
   let resultRequests = 0;
-  const acceptedTurn = { ...fixture.turns.turns[0]!, id: "88888888-8888-4888-8888-888888888888", turnNumber: resultTurnNumber, narration: detail.narration!, choices: detail.choices };
+  const acceptedTurn = { ...fixture.turns.turns[0]!, id: "88888888-8888-4888-8888-888888888888", turnNumber: resultTurnNumber, narration: detail?.narration ?? "", choices: detail?.choices ?? [] };
   const completedSync = {
     ...fixture.syncStatus,
     campaign: { ...fixture.syncStatus.campaign, activeTurnNumber: resultTurnNumber },
@@ -62,12 +82,20 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
   page.on("pageerror", error => consoleErrors.push(error.message));
   page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
   const recovery = { id: jobId, status: "recoverable", operationKind, replacementTurnId, expectedTurnNumber: resultTurnNumber, attempts: 1, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", diagnostic: { code: "context_evidence_omitted", operation: "story_generation", action: "adjust_context" }, resultTurnId: null, review };
-  const snapshot = { ...recovery, campaignId: fixture.campaignId, action: "Listen for the bell.", requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit", partialNarration: detail.narration, createdAt: "2026-09-17T00:00:00.000Z", updatedAt: "2026-09-17T00:00:00.000Z" };
+  const snapshot = { ...recovery, campaignId: fixture.campaignId, action: "Listen for the bell.", requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit", partialNarration: detail?.narration ?? null, createdAt: "2026-09-17T00:00:00.000Z", updatedAt: "2026-09-17T00:00:00.000Z" };
   const pending = { id: jobId, status: "generating", operationKind, replacementTurnId, action: snapshot.action, expectedTurnNumber: resultTurnNumber, createdAt: snapshot.createdAt, updatedAt: snapshot.updatedAt };
   const generatingSnapshot = { ...snapshot, status: "generating", errorCode: null, errorMessage: null, review: undefined };
   const decidedReview = { ...review, revision: 2, state: "decided" };
   const reofferedReview = { ...review, reviewId: reofferedReviewId, revision: 3, state: "pending" };
   const reofferedDetail = { ...detail, ...reofferedReview };
+  const repairedContinuityReview = {
+    version: 2, reviewId: reofferedReviewId, revision: 3, state: "pending", stage: "continuity", candidateScope: "final",
+    reasons: ["narrative_conflict"], canKeep: true, canRetry: true, canRepairFormat: false, formatRepair: null
+  };
+  const repairedContinuityDetail = detail === null ? null : {
+    ...detail, ...repairedContinuityReview,
+    findings: [{ code: "narrative_conflict", message: "The candidate may conflict with established story continuity." }]
+  };
   const reofferedDecidedReview = { ...reofferedReview, revision: 4, state: "decided" };
   const queuedSnapshot = { ...snapshot, status: "queued", errorCode: null, errorMessage: null, review: decidedReview };
   const completedSnapshot = { ...snapshot, status: "completed", errorCode: null, errorMessage: null, review: undefined, resultTurnId: acceptedTurn.id };
@@ -86,8 +114,8 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
     action: snapshot.action,
     inputMode: "scene",
     inputModeSource: "explicit",
-    narration: detail.narration,
-    choices: detail.choices,
+    narration: detail?.narration ?? "",
+    choices: detail?.choices ?? [],
     customActionSuggestion: "",
     imagePrompt: "",
     chronicleRetrieval: null,
@@ -108,7 +136,8 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
   generationJobSnapshotSchema.parse(reofferedSnapshot);
   generationJobSnapshotSchema.parse(reofferedQueuedSnapshot);
   generationJobSnapshotSchema.parse(reofferedCompletedSnapshot);
-  if (options.malformedReviewDetail === undefined) generationReviewDetailSchema.parse(detail);
+  if (detail !== null && options.malformedReviewDetail === undefined) generationReviewDetailSchema.parse(detail);
+  if (repairedContinuityDetail !== null) generationReviewDetailSchema.parse(repairedContinuityDetail);
   await page.route("**/api/v1/**", async route => {
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method() !== "GET") writePaths.push(`${request.method()} ${path}`);
@@ -120,7 +149,7 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
     }] });
     if (request.method() === "GET" && path === "/api/v1/campaigns") return respond(fixture.campaigns);
     if (request.method() === "GET" && path === "/api/v1/worlds") return respond(fixture.worlds);
-    if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`) return respond(sharedState.accepted ? completedSync : terminalAction ? { ...fixture.syncStatus, pendingGeneration: null, generationRecovery: null } : options.liveStream ? { ...fixture.syncStatus, pendingGeneration: pending, generationRecovery: null } : { ...fixture.syncStatus, pendingGeneration: null, generationRecovery: recovery });
+    if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`) return respond(sharedState.accepted ? completedSync : terminalAction ? { ...fixture.syncStatus, pendingGeneration: null, generationRecovery: null } : options.liveStream ? { ...fixture.syncStatus, pendingGeneration: pending, generationRecovery: null } : { ...fixture.syncStatus, pendingGeneration: null, generationRecovery: repairApplied && options.afterRepairContinuity ? { ...recovery, review: repairedContinuityReview } : recovery });
     if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/turns`) return respond(sharedState.accepted ? completedSync.turns : fixture.turns);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/state`) return respond(fixture.runtimeState);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${fixture.campaignId}/state/inspection`) return respond(fixture.runtimeState);
@@ -153,12 +182,15 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
       if (options.delayReviewDetailMs) await new Promise<void>((resolve) => setTimeout(resolve, options.delayReviewDetailMs));
       settledReviewDetailRequests += 1;
       if (options.failReviewDetail) return respond({ error: "Review detail unavailable" }, 503);
-      return respond(reoffered ? reofferedDetail : (options.malformedReviewDetail ?? detail));
+      return respond(repairApplied && options.afterRepairContinuity ? repairedContinuityDetail : reoffered ? reofferedDetail : (options.malformedReviewDetail ?? detail));
     }
     if (request.method() === "POST" && path === `/api/v1/generation-jobs/${jobId}/review-decision`) {
       const decision = request.postDataJSON() as { decision?: string };
       decisions.push(decision);
+      if (options.decisionDelayMs) await new Promise<void>((resolve) => setTimeout(resolve, options.decisionDelayMs));
+      settledReviewDecisionRequests += 1;
       if (decision.decision === "retry") reoffered = true;
+      if (decision.decision === "repair_format") repairApplied = true;
       if (decisionFails) return respond({ error: "Decision unavailable" }, 503);
       if (options.decisionConflict) {
         sharedState.accepted = true;
@@ -167,24 +199,28 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
       if (options.conflictWhenAccepted && sharedState.accepted) return respond({ error: "generation_review_conflict", message: "This review was resolved in another tab." }, 409);
       if (decisionCompletes && !options.liveStream) sharedState.accepted = true;
       if (options.conflictWhenAccepted) sharedState.accepted = true;
+      if (options.decisionNetworkLost) {
+        sharedState.accepted = true;
+        return respond({ error: "Decision response unavailable" }, 503);
+      }
       return respond({ id: jobId, status: "queued", operationKind, replacementTurnId }, 202);
     }
     if (request.method() === "POST" && (path === `/api/v1/generation-jobs/${jobId}/discard` || path === `/api/v1/generation-jobs/${jobId}/cancel`)) {
       terminalAction = path.endsWith("/discard") ? "discarded" : "cancelled";
       return respond({ id: jobId, status: terminalAction, operationKind, replacementTurnId }, 202);
     }
-    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}/stream`) return route.fulfill({ status: 200, contentType: "text/event-stream", body: `data: ${JSON.stringify(snapshot)}\n\n` });
+    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}/stream`) return route.fulfill({ status: 200, contentType: "text/event-stream", body: `data: ${JSON.stringify(repairApplied && options.afterRepairContinuity ? { ...snapshot, review: repairedContinuityReview } : snapshot)}\n\n` });
     if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}/result`) {
       resultRequests += 1;
       if (options.failFirstResult && resultRequests === 1) return respond({ error: "Result temporarily unavailable" }, 503);
       sharedState.accepted = true;
       return respond(acceptedResult);
     }
-    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}`) return respond(sharedState.accepted ? completedSnapshot : snapshot);
+    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}`) return respond(sharedState.accepted ? completedSnapshot : repairApplied && options.afterRepairContinuity ? { ...snapshot, review: repairedContinuityReview } : snapshot);
     unexpectedFixtureRoutes.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "Missing review fixture route." }) });
   });
-  return { fixture, decisions, writePaths, consoleErrors, get reviewDetailRequests() { return reviewDetailRequests; }, get settledReviewDetailRequests() { return settledReviewDetailRequests; }, get resultRequests() { return resultRequests; }, generatingSnapshot, snapshot, queuedSnapshot, completedSnapshot, reofferedSnapshot, reofferedQueuedSnapshot, reofferedCompletedSnapshot };
+  return { fixture, decisions, writePaths, consoleErrors, get reviewDetailRequests() { return reviewDetailRequests; }, get settledReviewDetailRequests() { return settledReviewDetailRequests; }, get settledReviewDecisionRequests() { return settledReviewDecisionRequests; }, get resultRequests() { return resultRequests; }, generatingSnapshot, snapshot, queuedSnapshot, completedSnapshot, reofferedSnapshot, reofferedQueuedSnapshot, reofferedCompletedSnapshot };
 }
 
 async function streamedNarration(page: Page, surface: "legacy" | "web-next"): Promise<string> {
@@ -203,6 +239,23 @@ async function acceptedNarration(page: Page, surface: "legacy" | "web-next", tur
       .locator(".story-narration");
   await expect(locator.first()).toBeVisible();
   return (await locator.allTextContents()).map((text) => text.trim()).filter(Boolean).join(" ");
+}
+
+async function openReview(page: Page, surface: "legacy" | "web-next", campaignId: string): Promise<void> {
+  if (surface === "legacy") {
+    const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
+    await page.route("**/vendor/photoswipe/photoswipe.css", route => route.fulfill({ contentType: "text/css", body: "" }));
+    await page.route(`**/story/${campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+  }
+  await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${campaignId}` : `${webNextOrigin}/app/story/${campaignId}`);
+}
+
+function recoveryFor(page: Page, surface: "legacy" | "web-next") {
+  return page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+}
+
+async function captureRepairScenario(page: Page, surface: "legacy" | "web-next", scenario: string, width: number): Promise<void> {
+  await page.screenshot({ path: `docs/review/assets/turn-validation-success/${surface}-${scenario}-${width}.png`, fullPage: true });
 }
 
 async function installStagedReviewStream(page: Page, snapshots: { readonly generatingSnapshot: unknown; readonly snapshot: unknown; readonly queuedSnapshot: unknown; readonly completedSnapshot: unknown; readonly reofferedSnapshot: unknown; readonly reofferedQueuedSnapshot: unknown; readonly reofferedCompletedSnapshot: unknown }) {
@@ -636,6 +689,125 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(page.locator("body")).toContainText("The lighthouse bell answered across the harbor.");
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
   });
+}
+
+for (const surface of ["legacy", "web-next"] as const) {
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+  test(`${surface} ${viewport.width}x${viewport.height} repairs malformed fact formatting from a freshly fetched review without replacing narration`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, true, { formatRepair: true, decisionDelayMs: 400 });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    const recovery = recoveryFor(page, surface);
+    const repair = recovery.getByRole("button", { name: "Repair fact formatting", exact: true });
+    const retry = recovery.getByRole("button", { name: "Continue with retry", exact: true });
+    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
+    await expect(recovery).toContainText("Repair fact formatting and keep the narration unchanged.");
+    await expect(recovery).toContainText("Retry replaces this candidate with a new generation.");
+    await captureRepairScenario(page, surface, "repair-success", viewport.width);
+    await repair.click();
+    await expect(repair).toBeDisabled();
+    await expect(retry).toBeDisabled();
+    await expect.poll(() => api.reviewDetailRequests).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => api.decisions).toEqual([{
+      reviewId, revision: 1, decision: "repair_format", repairPlanHash: "a".repeat(64)
+    }]);
+    await expect.poll(() => api.settledReviewDecisionRequests).toBe(1);
+    await page.reload();
+    await expect(recovery).toBeHidden();
+    expect(await acceptedNarration(page, surface, 2)).toBe("The lighthouse bell answered across the harbor.");
+    expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+  });
+
+  test(`${surface} ${viewport.width}x${viewport.height} refreshes a stale repair revision without resubmitting it`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, false, { formatRepair: true, decisionConflict: true });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    await recoveryFor(page, surface).getByRole("button", { name: "Repair fact formatting", exact: true }).click();
+    await expect.poll(() => api.decisions).toHaveLength(1);
+    await expect.poll(() => api.reviewDetailRequests).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => api.settledReviewDecisionRequests).toBe(1);
+    await captureRepairScenario(page, surface, "stale-revision", viewport.width);
+    expect(api.decisions).toEqual([{ reviewId, revision: 1, decision: "repair_format", repairPlanHash: "a".repeat(64) }]);
+  });
+
+  test(`${surface} ${viewport.width}x${viewport.height} reconciles a lost repair decision response on reload without a second post`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, false, { formatRepair: true, decisionNetworkLost: true });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    await recoveryFor(page, surface).getByRole("button", { name: "Repair fact formatting", exact: true }).click();
+    await expect.poll(() => api.decisions).toHaveLength(1);
+    await expect.poll(() => api.settledReviewDecisionRequests).toBe(1);
+    await page.reload();
+    await expect(recoveryFor(page, surface)).toBeHidden();
+    await captureRepairScenario(page, surface, "network-reload", viewport.width);
+    expect(api.decisions).toHaveLength(1);
+  });
+
+  test(`${surface} ${viewport.width}x${viewport.height} makes a future review version inert`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, false, { futureReview: true });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    const recovery = recoveryFor(page, surface);
+    await expect(recovery).toContainText("needs a newer client");
+    await expect(recovery.getByRole("button", { name: "Repair fact formatting", exact: true })).toBeHidden();
+    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
+    await expect(recovery.getByRole("button", { name: "Continue with retry", exact: true })).toBeHidden();
+    await expect(surface === "legacy" ? page.locator("#btnRetryGeneration") : recovery.getByRole("button", { name: "Retry generation", exact: true })).toBeHidden();
+    await captureRepairScenario(page, surface, "future-version", viewport.width);
+    expect(api.decisions).toEqual([]);
+    expect(api.writePaths).toEqual([]);
+  });
+
+  test(`${surface} ${viewport.width}x${viewport.height} hides repair and Keep for an ineligible format review`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, false, { ineligibleFormatRepair: true });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    const recovery = recoveryFor(page, surface);
+    await expect(recovery.getByRole("button", { name: "Repair fact formatting", exact: true })).toBeHidden();
+    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeHidden();
+    await captureRepairScenario(page, surface, "ineligible", viewport.width);
+    expect(api.decisions).toEqual([]);
+  });
+
+  test(`${surface} ${viewport.width}x${viewport.height} keeps full Retry as a distinct replacement decision`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, false, { formatRepair: true });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    const recovery = recoveryFor(page, surface);
+    await expect(recovery).toContainText("Retry replaces this candidate with a new generation.");
+    await recovery.getByRole("button", { name: "Continue with retry", exact: true }).click();
+    await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
+    await captureRepairScenario(page, surface, "full-retry", viewport.width);
+  });
+
+  test(`${surface} ${viewport.width}x${viewport.height} preserves narration through a repair before the ordinary continuity follow-up`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, false, { formatRepair: true, afterRepairContinuity: true });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    await recoveryFor(page, surface).getByRole("button", { name: "Repair fact formatting", exact: true }).click();
+    await expect.poll(() => api.decisions).toHaveLength(1);
+    await expect.poll(() => api.settledReviewDecisionRequests).toBe(1);
+    await page.reload();
+    const recovery = recoveryFor(page, surface);
+    await expect(recovery).toContainText("candidate may conflict with established story continuity");
+    await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
+    await expect(recovery.getByRole("button", { name: "Repair fact formatting", exact: true })).toBeHidden();
+    await captureRepairScenario(page, surface, "continuity-rejection", viewport.width);
+  });
+
+  test(`${surface} ${viewport.width}x${viewport.height} never turns a revoked Keep capability into a replacement Retry`, async ({ page }) => {
+    const api = await installReviewApi(page, true, false, false, { revokeKeepInCurrentDetail: true });
+    await page.setViewportSize(viewport);
+    await openReview(page, surface, api.fixture.campaignId);
+    const recovery = recoveryFor(page, surface);
+    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeVisible();
+    await recovery.getByRole("button", { name: "Keep this turn", exact: true }).click();
+    await expect.poll(() => api.reviewDetailRequests).toBeGreaterThanOrEqual(2);
+    await expect(recovery).toContainText("no longer offers that decision");
+    expect(api.decisions).toEqual([]);
+    expect(api.writePaths).toEqual([]);
+  });
+  }
 }
 
 test("web-next web-awesome renders fenced pending-review Keep and Retry controls", async ({ page }) => {

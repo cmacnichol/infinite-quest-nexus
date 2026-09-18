@@ -30,6 +30,7 @@ export interface StoryGenerationController {
   submitAppend(submission: StoryGenerationSubmission): Promise<boolean>;
   submitReplacement(replacementTurnId: string, submission: StoryGenerationSubmission): Promise<boolean>;
   cancel(): Promise<boolean>;
+  readCurrentReview(): Promise<import("@infinite-quest/contracts").GenerationReviewDetail | null>;
   decideReview(request: import("@infinite-quest/contracts").GenerationReviewDecisionRequest): Promise<boolean>;
   retry(): Promise<boolean>;
   discard(): Promise<boolean>;
@@ -222,6 +223,16 @@ export function createStoryGenerationController(
       } catch (error) {
         if (isCurrent(entry)) dependencies.onError?.(error);
         return false;
+      }
+    },
+    async readCurrentReview() {
+      const entry = active;
+      if (!entry || !isCurrent(entry)) return null;
+      try {
+        return await entry.run.getReview();
+      } catch (error) {
+        if (isCurrent(entry)) dependencies.onError?.(error);
+        return null;
       }
     },
     async retry() {

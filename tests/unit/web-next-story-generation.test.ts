@@ -232,4 +232,18 @@ describe("StoryGenerationController", () => {
     await expect(controller.decideReview(decision)).resolves.toBe(true);
     expect(decideReview).toHaveBeenCalledWith(decision);
   });
+
+  it("reads the attached current review before a page constructs a decision receipt", async () => {
+    const currentReview = { version: 1, reviewId: "44444444-4444-4444-8444-444444444444", revision: 1 } as never;
+    const durableRun = { ...run(), getReview: vi.fn(async () => currentReview) };
+    const controller = createStoryGenerationController({
+      workflow: { submit: vi.fn(async () => durableRun), resume: vi.fn() },
+      campaignStore: { attachGeneration: vi.fn(() => ({ campaignId, jobId, apply: vi.fn(), loadReview: vi.fn(), decideReview: vi.fn(), retryResult: vi.fn() })) } as never,
+      idFactory: { create: () => "review-idempotency-key" },
+      currentCampaign: () => ({ id: campaignId, activeTurnNumber: 0 })
+    });
+
+    await controller.submitAppend({ action: "Open it.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit" });
+    await expect(controller.readCurrentReview()).resolves.toEqual(currentReview);
+  });
 });

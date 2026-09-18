@@ -132,9 +132,13 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
   section.dataset.storyRecovery = "";
   const review = generation.review;
   const detail = review?.detail.state === "loaded" ? review.detail.value : null;
-  const reviewView = review === null ? null : generationReviewPresentation(
-    review.summary, generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic, detail
-  );
+  const reviewView = review === null
+    ? generation.unsupportedReviewVersion === null
+      ? null
+      : generationReviewPresentation({ version: generation.unsupportedReviewVersion })
+    : generationReviewPresentation(
+        review.summary, generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic, detail
+      );
   if (reviewView !== null) {
     section.setAttribute("role", "status");
     section.setAttribute("aria-live", "polite");
