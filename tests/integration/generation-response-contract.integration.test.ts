@@ -80,6 +80,7 @@ integration("PostgreSQL response-contract persistence", () => {
     const audit = { version: 1 as const, selectionHash: frozen.selectionHash, invocationKey: "story:nonstream" as const, mode: "json_object" as const, schemaVersion: null, schemaHash: null, requestedModel: "contract-model", providerRoutingSlugs: [], returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
     const primary = await repository.reserveResponseContractInvocation!(scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: audit });
     expect(primary?.status).toBe("reserved");
+    await expect(repository.reserveResponseContractInvocation!(scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_recovery", requestPayloadHash: "d".repeat(64), request: { ...audit, returnedModel: "premature" } })).resolves.toBeNull();
     await expect(repository.reserveResponseContractInvocation!(scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: audit })).resolves.toEqual(primary);
     await expect(repository.reserveResponseContractInvocation!(scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: { ...audit, requestedModel: "tampered-model" } })).resolves.toBeNull();
     const extensionHash = "b".repeat(64);
@@ -91,6 +92,7 @@ integration("PostgreSQL response-contract persistence", () => {
     await expect(repository.markResponseContractInvocationDispatched!(scope, primary!.id, hash)).resolves.toBeNull();
     await expect(repository.markResponseContractInvocationDispatched!({ ...scope, workerId: "stale-worker" }, primary!.id, hash)).resolves.toBeNull();
     const response = { returnedModel: "contract-model", returnedProviderRoute: null, diagnosticCode: null } as const;
+    await expect(repository.completeResponseContractInvocation!(scope, primary!.id, { returnedModel: "", returnedProviderRoute: null, diagnosticCode: null } as never)).resolves.toBeNull();
     const completed = await repository.completeResponseContractInvocation!(scope, primary!.id, response);
     expect(completed?.status).toBe("completed");
     await expect(repository.completeResponseContractInvocation!(scope, primary!.id, response)).resolves.toEqual(completed);
