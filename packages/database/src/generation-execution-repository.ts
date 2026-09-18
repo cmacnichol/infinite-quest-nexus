@@ -126,6 +126,28 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
         throw new Error("Response-contract invocation ledger is inconsistent with its frozen contract.");
       }
     }
+    const completedFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperation[]) =>
+      typeof requestPayloadHash === "string" && ledger.some((entry) => entry.status === "completed"
+        && entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation));
+    const pendingFor = (requestPayloadHash: unknown) => typeof requestPayloadHash === "string" && ledger.some((entry) =>
+      entry.requestPayloadHash === requestPayloadHash && (entry.status === "reserved" || entry.status === "dispatched")
+    );
+    // New-mode checkpoint bodies are replay evidence, never independently
+    // trusted snapshots. The ledger also proves the frozen selection/key.
+    const primary = value.primaryResult;
+    if (primary && !completedFor(primary.requestPayloadHash, ["story_generation"])) {
+      throw new Error("Primary response checkpoint has no completed response-contract invocation.");
+    }
+    const reservation = value.primaryReservation;
+    if (reservation && ((reservation.status === "reserved" || reservation.status === "dispatched")
+      ? !pendingFor(reservation.requestPayloadHash)
+      : !completedFor(reservation.requestPayloadHash, ["story_generation"]))) {
+      throw new Error("Primary reservation does not match its response-contract invocation.");
+    }
+    const draft = value.validatedMainDraft;
+    if (draft && !completedFor(draft.requestPayloadHash, ["story_generation", "story_recovery", "scene_coverage_rewrite", "story_continuity_repair"])) {
+      throw new Error("Validated draft checkpoint has no completed response-contract invocation.");
+    }
   }
 }
 
@@ -1049,6 +1071,13 @@ async function commitAcceptedTurn(
     });
   }
   const storedJob = lease.rows[0]!;
+  try {
+    responseContractState(storedJob.id, storedJob.orchestration_private);
+  } catch {
+    throw Object.assign(new Error("The persisted response-contract replay evidence is invalid."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
   let reviewAcceptanceAudit: Record<string, unknown> | undefined;
   const storedReview = generationReviewCheckpointSchema.safeParse(storedJob.orchestration_private.generationReview);
   if (Object.hasOwn(storedJob.orchestration_private, "generationReview") && !storedReview.success) {

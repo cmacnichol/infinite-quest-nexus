@@ -1074,7 +1074,7 @@ export function appendFactFormatRepairApplication(
   return prior ?? [application];
 }
 
-async function callCampaignTextProvider(
+export async function callCampaignTextProvider(
   dependencies: GenerationExecutorDependencies,
   provider: GenerationTextProvider,
   job: GenerationExecutionPayload,
@@ -1136,12 +1136,6 @@ async function callCampaignTextProvider(
         canonicalBudgeting: true,
         effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job)
       });
-      const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
-        returnedModel: result.returnedModel ?? null,
-        returnedProviderRoute: result.returnedProviderRoute ?? null,
-        diagnosticCode: null
-      });
-      if (!completed || completed.status !== "completed") throw Object.assign(new Error("The response-contract completion lost its lease."), { code: "lease_lost" });
     } catch (error) {
       const preparedError = error instanceof PreparedResponseContractError ? error : undefined;
       const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
@@ -1152,6 +1146,20 @@ async function callCampaignTextProvider(
       if (!completed) throw Object.assign(new Error("The response-contract failure completion lost its lease."), { code: "lease_lost" });
       throw error;
     }
+    const returnedPrepared = result.preparedRequest;
+    if (!returnedPrepared || returnedPrepared.body !== checkedPrepared.body
+      || returnedPrepared.payloadHash !== checkedPrepared.payloadHash
+      || returnedPrepared.payloadHash !== sha256(returnedPrepared.body)) {
+      throw Object.assign(new Error("The provider result does not match the reserved response-contract request."), {
+        code: "response_contract_identity_mismatch"
+      });
+    }
+    const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
+      returnedModel: result.returnedModel ?? null,
+      returnedProviderRoute: result.returnedProviderRoute ?? null,
+      diagnosticCode: null
+    });
+    if (!completed || completed.status !== "completed") throw Object.assign(new Error("The response-contract completion lost its lease."), { code: "lease_lost" });
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool, provider, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
         generationJobId: job.id, category: "story", operation }, result
@@ -2020,7 +2028,12 @@ async function executeLoadedGeneration(
             savedChoiceRepair.base, savedChoiceRepair.repairResponseFormat,
             frozenContractForOperation(job, "story_choice_repair")))
             !== stableStringify({ body: savedChoiceRepair.repairRequestBody, payloadHash: savedChoiceRepair.repairRequestPayloadHash })
-          || (savedChoiceRepair.repairResponseContract !== undefined
+          || (job.orchestration_private?.frozenResponseContracts !== undefined
+            && (savedChoiceRepair.repairResponseContract === undefined
+              || stableStringify(savedChoiceRepair.repairResponseContract)
+                !== stableStringify(choiceRepairResponseContractIdentity(job))))
+          || (job.orchestration_private?.frozenResponseContracts === undefined
+            && savedChoiceRepair.repairResponseContract !== undefined
             && stableStringify(savedChoiceRepair.repairResponseContract)
               !== stableStringify(choiceRepairResponseContractIdentity(job)))
           || !sameFactIds(savedChoiceRepair.originalSentFactIds, sentCanonicalFactIds(savedChoiceRepair.originalRequestBody))) {

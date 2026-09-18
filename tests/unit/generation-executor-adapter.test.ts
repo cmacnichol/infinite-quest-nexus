@@ -12,9 +12,10 @@ import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/
 import { characterFictionAuthority, sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson, readStoryEvidenceFromSource } from "../../packages/application/src/memory/generation-context.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
-import { generationExecutionProtocolIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
+import { generationExecutionProtocolIdentity, serializeProviderRequest, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
+  callCampaignTextProvider,
   appendFactFormatRepairApplication,
   bindCampaignResponseContract,
   responseContractInvocationDetails,
@@ -181,6 +182,43 @@ function authorizeReviewRetry(job: GenerationExecutionPayload, checkpoint: Gener
 }
 
 describe("generation executor adapter", () => {
+  function contractDispatchFixture() {
+    const job = completeGenerationExecutionPayload();
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: { selectionHash: "a".repeat(64), contracts: {
+        "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+      } }
+    } as never;
+    const provider: any = { id: job.provider_profile_id, name: "Contract fixture", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const completed = vi.fn(async (_scope: unknown, id: string, response: unknown) => ({ id, status: "completed", response }));
+    const dependencies: any = { pool: {} as DatabasePool, responseContractScope: { jobId: job.id, ownerUserId: job.owner_user_id, workerId: "contract-fixture" },
+      repository: { reserveResponseContractInvocation: vi.fn(async (_scope: unknown, input: any) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+        markResponseContractInvocationDispatched: vi.fn(async (_scope: unknown, id: string) => ({ id, status: "dispatched" })), completeResponseContractInvocation: completed },
+      collaborators: { onProviderDispatch: vi.fn(), recordProfileCost: vi.fn(async () => undefined) } } as never;
+    return { job, provider, dependencies, completed };
+  }
+
+  it("rejects a new-mode provider result whose prepared request differs from its reservation", async () => {
+    const { job, provider, dependencies, completed } = contractDispatchFixture();
+    provider.execute = vi.fn(async () => ({ content: "{}", responseId: "result", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {}, preparedRequest: { body: "{\\\"tampered\\\":true}", payloadHash: sha256("{\\\"tampered\\\":true}") } }));
+    await expect(callCampaignTextProvider(dependencies, provider as never, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toMatchObject({ code: "response_contract_identity_mismatch" });
+    expect(provider.execute).toHaveBeenCalledOnce();
+    expect(completed).not.toHaveBeenCalled();
+  });
+
+  it("does not replace completed response provenance when a post-success cost write fails", async () => {
+    const { job, provider, dependencies, completed } = contractDispatchFixture();
+    provider.execute = vi.fn(async (request: any) => {
+      const preparedRequest = serializeProviderRequest({ ...provider, baseUrl: "" }, request);
+      return { content: "{}", responseId: "result", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {}, returnedModel: "returned", returnedProviderRoute: "route", preparedRequest };
+    });
+    dependencies.collaborators.recordProfileCost.mockRejectedValueOnce(new Error("cost write failed"));
+    await expect(callCampaignTextProvider(dependencies, provider as never, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toThrow("cost write failed");
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(completed).toHaveBeenCalledWith(expect.any(Object), expect.any(String), { returnedModel: "returned", returnedProviderRoute: "route", diagnosticCode: null });
+  });
   it("binds the frozen stream contract before reservation and preserves the legacy reservation body", () => {
     const provider = { id: "provider", providerType: "openai_compatible", model: "model", contextWindowTokens: 100_000, maxOutputTokens: 100,
       temperature: 0, requestTimeoutMs: 1_000, configuration: {} } as never;
