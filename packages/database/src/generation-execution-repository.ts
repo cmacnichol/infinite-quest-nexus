@@ -365,7 +365,17 @@ export type GenerationOrchestrationState = {
     consumedAttempt: number;
     repairRequestBody: string;
     repairRequestPayloadHash?: string;
-    repairResponseFormat: "json_object" | "none";
+    /** Legacy checkpoints use none/json_object. New frozen calls record the
+     * exact selected response contract below. */
+    repairResponseFormat: "json_object" | "json_schema" | "none";
+    repairResponseContract?: {
+      version: 1;
+      selectionHash: string;
+      invocationKey: "choices:nonstream";
+      mode: "json_object" | "json_schema";
+      schemaVersion: string | null;
+      schemaHash: string | null;
+    };
     fields?: Pick<StoryTurnOutput, "choices" | "custom_action_suggestion">;
     resultHash?: string;
     /** Prepared after an exhausted generic recovery; only an explicit retry may dispatch it. */
@@ -515,12 +525,27 @@ function hasValidChoiceRepair(value: unknown): boolean {
     && typeof repair.originalResponse === "object" && repair.originalResponse !== null
     && typeof repair.consumedAttempt === "number" && Number.isSafeInteger(repair.consumedAttempt) && repair.consumedAttempt > 0
     && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
-    && (repair.repairResponseFormat === "json_object" || repair.repairResponseFormat === "none")
+    && (repair.repairResponseFormat === "json_object" || repair.repairResponseFormat === "json_schema" || repair.repairResponseFormat === "none")
+    && (repair.repairResponseContract === undefined || hasValidChoiceRepairResponseContract(repair.repairResponseContract))
     && typeof repair.repairRequestPayloadHash === "string" && repair.repairRequestPayloadHash.length > 0
     && (repair.status === "pending" || repair.status === "dispatched" || repair.status === "validated")
     && (repair.authorizedReviewId === undefined || typeof repair.authorizedReviewId === "string")
     && (repair.authorizedRevision === undefined || (typeof repair.authorizedRevision === "number" && Number.isSafeInteger(repair.authorizedRevision) && repair.authorizedRevision > 0))
     && (repair.status !== "validated" || (typeof repair.repairRequestPayloadHash === "string" && typeof repair.resultHash === "string" && typeof repair.fields === "object" && repair.fields !== null));
+}
+
+function hasValidChoiceRepairResponseContract(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const contract = value as Record<string, unknown>;
+  const schemaFieldsValid = contract.mode === "json_schema"
+    ? typeof contract.schemaVersion === "string" && contract.schemaVersion.length > 0
+      && typeof contract.schemaHash === "string" && /^[a-f0-9]{64}$/u.test(contract.schemaHash)
+    : contract.schemaVersion === null && contract.schemaHash === null;
+  return contract.version === 1
+    && typeof contract.selectionHash === "string" && /^[a-f0-9]{64}$/u.test(contract.selectionHash)
+    && contract.invocationKey === "choices:nonstream"
+    && (contract.mode === "json_object" || contract.mode === "json_schema")
+    && schemaFieldsValid;
 }
 
 function hasValidEventCoverageRepair(value: unknown): boolean {

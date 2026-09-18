@@ -754,7 +754,7 @@ function choiceRepairPreparedRequest(
   provider: GenerationTextProvider,
   systemPrompt: string,
   base: Omit<StoryTurnOutput, "choices" | "custom_action_suggestion">,
-  responseFormat: "json_object" | "none",
+  responseFormat: "json_object" | "json_schema" | "none",
   responseContract?: ProviderRequest["responseContract"]
 ): Readonly<{ body: string; payloadHash: string }> {
   const prepared = serializeProviderRequest({ ...provider, baseUrl: "" }, {
@@ -764,6 +764,23 @@ function choiceRepairPreparedRequest(
     ...(responseContract ? { responseContract } : {})
   }, responseContract ? {} : { responseFormat: responseFormat === "json_object" });
   return { body: prepared.body, payloadHash: prepared.payloadHash };
+}
+
+/** The legacy response-format flag cannot describe a schema-mode wire body.
+ * New checkpoints therefore retain this selected-contract identity and replay
+ * it against the frozen contract instead of inferring it from current JSON. */
+function choiceRepairResponseContractIdentity(job: GenerationExecutionPayload) {
+  const frozen = job.orchestration_private?.frozenResponseContracts;
+  const contract = responseContractForOperation(job, "story_choice_repair", false);
+  if (!frozen || !contract) return undefined;
+  return {
+    version: 1 as const,
+    selectionHash: frozen.selectionHash,
+    invocationKey: "choices:nonstream" as const,
+    mode: contract.mode,
+    schemaVersion: contract.mode === "json_schema" ? contract.schemaVersion : null,
+    schemaHash: contract.mode === "json_schema" ? contract.schemaHash : null
+  };
 }
 
 function repairResponseFormat(body: string): "json_object" | "none" {
@@ -2003,6 +2020,9 @@ async function executeLoadedGeneration(
             savedChoiceRepair.base, savedChoiceRepair.repairResponseFormat,
             frozenContractForOperation(job, "story_choice_repair")))
             !== stableStringify({ body: savedChoiceRepair.repairRequestBody, payloadHash: savedChoiceRepair.repairRequestPayloadHash })
+          || (savedChoiceRepair.repairResponseContract !== undefined
+            && stableStringify(savedChoiceRepair.repairResponseContract)
+              !== stableStringify(choiceRepairResponseContractIdentity(job)))
           || !sameFactIds(savedChoiceRepair.originalSentFactIds, sentCanonicalFactIds(savedChoiceRepair.originalRequestBody))) {
           throw new Error("Choice repair checkpoint provenance is incompatible.");
         }
@@ -2481,7 +2501,9 @@ async function executeLoadedGeneration(
             input: buildStoryOnlyChoiceRepairInput(choiceOnly.base),
             budgetOutput: { kind: "story_choice_repair" as const }
           });
-          const initialRepairRequest = choiceRepairPreparedRequest(provider, storyOnlyChoiceRepairSystemPrompt!, choiceOnly.base, "json_object", repairRequest.responseContract);
+          const initialRepairRequest = choiceRepairPreparedRequest(provider, storyOnlyChoiceRepairSystemPrompt!, choiceOnly.base,
+            repairRequest.responseContract?.mode ?? "json_object", repairRequest.responseContract);
+          const repairResponseContract = choiceRepairResponseContractIdentity(job);
           const pendingCheckpoint = existing?.status === "pending" ? existing : null;
           const originalPrepared = pendingCheckpoint
             ? { body: pendingCheckpoint.originalRequestBody, payloadHash: pendingCheckpoint.originalRequestPayloadHash }
@@ -2496,7 +2518,9 @@ async function executeLoadedGeneration(
               originalSentFactIds: pendingCheckpoint?.originalSentFactIds || sentCanonicalFactIds(originalPrepared.body),
               originalResponse: pendingCheckpoint?.originalResponse || result, consumedAttempt: job.attempts,
               repairRequestBody: initialRepairRequest.body, repairRequestPayloadHash: initialRepairRequest.payloadHash,
-              repairResponseFormat: "json_object", status: "pending",
+              repairResponseFormat: repairRequest.responseContract?.mode ?? "json_object",
+              ...(repairResponseContract ? { repairResponseContract } : {}),
+              status: "pending",
               authorizedReviewId: pendingCheckpoint?.authorizedReviewId ?? choiceRetryReceipt!.reviewId,
               authorizedRevision: pendingCheckpoint?.authorizedRevision ?? choiceRetryReceipt!.revision
             }
@@ -2516,7 +2540,7 @@ async function executeLoadedGeneration(
               choiceRepair: {
                 ...orchestration.choiceRepair!, repairRequestBody: actualRepairRequest.body,
                 repairRequestPayloadHash: actualRepairRequest.payloadHash,
-                repairResponseFormat: repairRequest.responseContract ? "none" : repairResponseFormat(actualRepairRequest.body),
+                repairResponseFormat: repairRequest.responseContract?.mode ?? repairResponseFormat(actualRepairRequest.body),
                 fields, resultHash: sha256(stableStringify(fields)), status: "validated"
               }
             });
@@ -3100,30 +3124,32 @@ async function executeLoadedGeneration(
           const extensionSentFactIds = sentCanonicalFactIds(stableStringify({
             authoritative_context: promptContext
           }));
+          const extensionRequest = bindCampaignResponseContract(job, "event_extension", {
+            systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
+            input: extensionInput,
+            budgetOutput: {
+              kind: "event_extension",
+              protectedStory: {
+                narration: parsed.story.narration,
+                scratchpad: parsed.story.scratchpad,
+                continuitySummary: parsed.story.continuity_summary,
+                openThreads: parsed.story.open_threads
+              },
+              narrationCharacterLimit: 200_000
+            }
+          });
           const extensionResponse = await callCampaignTextProvider(
             ledgerDependencies,
             provider,
             job,
             "event_extension",
-            bindCampaignResponseContract(job, "event_extension", {
-              systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
-              input: extensionInput,
-              budgetOutput: {
-                kind: "event_extension",
-                protectedStory: {
-                  narration: parsed.story.narration,
-                  scratchpad: parsed.story.scratchpad,
-                  continuitySummary: parsed.story.continuity_summary,
-                  openThreads: parsed.story.open_threads
-                },
-                narrationCharacterLimit: 200_000
-              }
-            })
+            extensionRequest
           );
           if (extensionResponse.outputLimited) {
             throw new Error("The optional event extension reached its output limit.");
           }
           const extension = parseEventExtension(extensionResponse.content, parsed.story.narration);
+          const preparedExtension = preparedRequestForResult(extensionResponse, provider, extensionRequest);
           orchestration = await persistOrchestration(repository, scope, job, {
             extension: {
               story: extension,
@@ -3131,17 +3157,11 @@ async function executeLoadedGeneration(
               producingAttempt: job.attempts,
               producingOperation: "event_extension",
               validatedMainDraftHash: orchestration.validatedMainDraft?.draftHash || sha256(stableStringify(parsed.story)),
-              producingRequestPayloadHash: preparedRequestForResult(extensionResponse, provider, {
-                systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
-              }).payloadHash,
-              producingRequestBody: preparedRequestForResult(extensionResponse, provider, {
-                systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
-              }).body,
+              producingRequestPayloadHash: preparedExtension.payloadHash,
+              producingRequestBody: preparedExtension.body,
               providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
               response: extensionResponse,
-              sentFactIds: sentCanonicalFactIds(preparedRequestForResult(extensionResponse, provider, {
-                systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"), input: extensionInput
-              }).body)
+              sentFactIds: sentCanonicalFactIds(preparedExtension.body)
             },
             // A previous lease may have recorded a transient extension failure.
             // Successful completion on this lease supersedes that stage outcome.

@@ -829,10 +829,16 @@ export function createPostgresGenerationCommandRepository(
         const updated = await client.query<MutationRow>(
           `UPDATE generation_jobs SET status = $3, lease_owner = NULL, lease_expires_at = NULL,
               error_code = NULL, error_message = NULL,
-              orchestration_private = orchestration_private || jsonb_build_object('generationReview', $4::jsonb), updated_at = now()
+              orchestration_private = orchestration_private || jsonb_build_object('generationReview', $4::jsonb)
+                || CASE WHEN $5::boolean AND orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object(
+                  'logicalAttempt', COALESCE(orchestration_private->'logicalAttempt',
+                    '{"version":1,"semanticRepairsConsumed":0,"reviewsConsumed":0,"automaticRepairsConsumed":0,"choiceRepairsConsumed":0,"eventCoverageRepairsConsumed":0}'::jsonb)
+                    || jsonb_build_object('id', gen_random_uuid()::text)
+                ) ELSE '{}'::jsonb END,
+              updated_at = now()
             WHERE id = $1 AND owner_user_id = $2
             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
-          [scope.jobId, scope.ownerUserId, status, json(next)]
+          [scope.jobId, scope.ownerUserId, status, json(next), parsedRequest.decision === "retry"]
         );
         return reviewDecisionResult(mutationResult(updated.rows[0]!), true);
       });

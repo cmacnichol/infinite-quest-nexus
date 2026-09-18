@@ -21,6 +21,7 @@ describe("exact continuity review provider request", () => {
     expect(prepared.body).toContain(entry.content);
     expect(prepared.request).not.toHaveProperty("previousResponseId");
     expect(prepared.request.responseFormatFallback).toBe("forbid");
+    expect(prepared.request.budgetOutput).toBeUndefined();
   });
   it("rejects missing manifest entries, changed producing request and overflow before dispatch", () => {
     expect(() => prepare({ manifest: { ...manifest, entries: [] } })).toThrow();

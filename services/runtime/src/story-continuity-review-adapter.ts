@@ -90,8 +90,8 @@ export function prepareContinuityReview(input: Readonly<{
 
 ${CONTINUITY_REVIEW_CONTRACT}`,
     input: stableStringify({ protocol: "story-continuity-review-v1", producingRequestHash: input.producingRequestHash, manifestHash: manifest.manifestHash, ...projection }),
-    canonicalBudgeting: true, responseFormatFallback: "forbid", budgetOutput: { kind: "continuity_review" },
-    ...(input.responseContract ? { responseContract: input.responseContract } : {})
+    canonicalBudgeting: true, responseFormatFallback: "forbid",
+    ...(input.responseContract ? { responseContract: input.responseContract, budgetOutput: { kind: "continuity_review" as const } } : {})
   };
   const prepared = serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
   const requestTokens = estimateStoryTokens(prepared.body);
