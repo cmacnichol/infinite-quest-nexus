@@ -26,6 +26,7 @@ import {
 } from "../../../packages/contracts/src/memory.js";
 import {
   promptSnapshotSchema,
+  assertStoryPromptCompatibility,
   assertStoryMemoryPromptCompatibility,
   assertContinuityReviewPromptSnapshot,
   readPromptSnapshot,
@@ -41,7 +42,11 @@ import {
   storyLengthWordRange,
   type StoryLengthWordRange
 } from "../../../packages/contracts/src/story-settings.js";
-import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
+import {
+  composeStoryPromptSystemPrompt,
+  projectSafeGenerationContextDiagnostic,
+  projectSafeGenerationDiagnostic
+} from "../../../packages/contracts/src/story-prompt.js";
 import type { GenerationFailureDiagnostic } from "../../../packages/contracts/src/generation-review.js";
 import type {
   AcceptedGenerationCommitCollaborators,
@@ -1036,7 +1041,7 @@ async function executeLoadedGeneration(
     // overrides while executing or reclaiming a lease.
     promptSnapshot = frozenStoryMemoryPolicySnapshot
       ? assertStoryMemoryPromptCompatibility(job.prompt_snapshot)
-      : readPromptSnapshot(job.prompt_snapshot);
+      : assertStoryPromptCompatibility(job.prompt_snapshot);
     if (frozenStoryMemoryPolicySnapshot) {
       const proof = promptSnapshot.storyMemoryCompatibility;
       const expectedPrefix = `${frozenStoryMemoryPolicySnapshot.promptProtocol}|`;
@@ -1097,11 +1102,19 @@ async function executeLoadedGeneration(
   }
   const generationPolicy = parsedGenerationPolicy === null ? null : parsedGenerationPolicy.data;
   const hasFrozenStoryMemoryPolicy = frozenStoryMemoryPolicySnapshot !== null;
+  const frozenStoryPromptContractProtocol = hasFrozenStoryMemoryPolicy
+    ? undefined
+    : promptSnapshot.storyPromptCompatibility?.protocolIdentity;
+  const storySystemContractProtocol = frozenStoryPromptContractProtocol
+    && promptSnapshot.template("story_system").source !== "shipped"
+    ? frozenStoryPromptContractProtocol
+    : undefined;
   const storyOnlyChoiceRepairSystemPrompt = generationPolicy?.playMode === "story_only"
     ? composeStoryOnlyChoiceRepairSystemPrompt(
       generationPolicy.prompts.choiceRepairSystem,
       hasFrozenStoryMemoryPolicy,
-      frozenStoryMemoryPolicySnapshot?.promptProtocol
+      frozenStoryMemoryPolicySnapshot?.promptProtocol,
+      frozenStoryPromptContractProtocol
     )
     : null;
   const stages = generationStagePolicy(generationPolicy?.playMode ?? "legacy");
@@ -1112,7 +1125,11 @@ async function executeLoadedGeneration(
     const basePromptProtocol = providerPromptProtocolVersion(promptSnapshot.templates as PromptSnapshot);
     const legacyExecutionProtocol = generationPolicy
       ? generationExecutionProtocolIdentity(basePromptProtocol, generationPolicy) : basePromptProtocol;
-    expectedExecutionProtocol = hasFrozenStoryMemoryPolicy ? `story-memory-v1|${legacyExecutionProtocol}` : legacyExecutionProtocol;
+    expectedExecutionProtocol = hasFrozenStoryMemoryPolicy
+      ? `story-memory-v1|${legacyExecutionProtocol}`
+      : frozenStoryPromptContractProtocol
+        ? `story-prompt-v1|${frozenStoryPromptContractProtocol}|${legacyExecutionProtocol}`
+        : legacyExecutionProtocol;
   } catch {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id,
@@ -1243,11 +1260,14 @@ async function executeLoadedGeneration(
           baseStorySystemPrompt,
           generationPolicy,
           hasFrozenStoryMemoryPolicy,
-          frozenStoryMemoryPolicySnapshot?.promptProtocol
+          frozenStoryMemoryPolicySnapshot?.promptProtocol,
+          storySystemContractProtocol
         )
         : hasFrozenStoryMemoryPolicy
           ? composeStoryMemorySystemPrompt(baseStorySystemPrompt, "", frozenStoryMemoryPolicySnapshot.promptProtocol)
-          : baseStorySystemPrompt;
+          : storySystemContractProtocol
+            ? composeStoryPromptSystemPrompt(baseStorySystemPrompt, storySystemContractProtocol)
+            : baseStorySystemPrompt;
       const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
         + estimateStoryTokens((hasFrozenStoryMemoryPolicy ? buildStoryMemoryUserPrompt : buildStoryUserPrompt)(
           emptyPromptContext,

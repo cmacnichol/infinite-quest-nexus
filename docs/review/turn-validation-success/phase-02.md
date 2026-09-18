@@ -36,3 +36,15 @@ Phase 01's first-pass report baseline is 15 accepted and 34 rejected among 49 cl
 ## Remaining risks and review focus
 
 This patch clarifies the instruction and preserves protocol bytes; it does not relax strict validation, normalize malformed model output, alter retrieval, or add repair execution. Real provider compliance and any first-pass improvement remain unverified until the Phase 07 canary. Review the v15 exact-contract test and the executor's frozen-policy argument propagation, since those protect historical replay from receiving v16 bytes under a v15 identity.
+
+## Review correction addendum
+
+Change base: `1be74995`, after the original Phase 02 commit `52f2f604`. Review found that a new non-enrolled acknowledged `story_system` override bypassed the appended rule. This correction adds an optional `storyPromptCompatibility` proof to new non-enrolled v2 snapshots. It binds the acknowledged `story_system` hash to `story-v16-fact-wire-distinction|story-output-v2|current-continuity-v2`; execution appends the shared fact-wire contract only when that frozen proof exists and the story-system source is an override. Shipped default text already contains the contract and is not duplicated.
+
+The proof participates in `generation_jobs.prompt_protocol_version` as `story-prompt-v1|<frozen compatibility identity>|<template identity>`, so a new marked job does not share the old raw-template execution, chain, checkpoint, or context-cache identity. Retry recomputes the same identity from the frozen proof. Old non-enrolled snapshots have no marker, retain their raw identity and bytes, and receive no new appended text.
+
+The actual PostgreSQL provider-payload test now covers a non-enrolled acknowledged creative override for both Action and Story Direction, including Story Direction's choice-repair request. It also performs a real retry/reclaim of enrolled v15 and non-enrolled raw v15 jobs. The enrolled assertion uses literal historical text extracted from `9f5986ca`, with fixed SHA-256 `f7760dc26ce74011ebbad21530ab56f41a04ce19ad5bbe0bbf6607da9f6fc5ea`, rather than importing the current compatibility constant.
+
+- **RED:** the real PostgreSQL payload suite failed with the two non-enrolled missing-contract assertions before the repair; its historical fixture also intentionally failed until the verified fixed hash replaced its placeholder.
+- **GREEN:** focused prompt/executor units passed 134 tests; `corepack pnpm check` passed.
+- **GREEN, real PostgreSQL:** `story-context-payload.integration.test.ts` plus `story-memory-enrollment.integration.test.ts` passed 35 tests with 6 existing known-failure skips. No live provider or browser was used.

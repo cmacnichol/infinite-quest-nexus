@@ -1,5 +1,10 @@
 import type { GenerationPolicySnapshot, StoryOnlyPromptSnapshot } from "../../contracts/src/campaign-generation-policy.js";
-import { composeStoryMemorySystemPrompt, storyMemoryMandatoryContract } from "../../contracts/src/story-prompt.js";
+import {
+  composeStoryMemorySystemPrompt,
+  composeStoryPromptSystemPrompt,
+  storyMemoryMandatoryContract,
+  storyPromptMandatoryContract
+} from "../../contracts/src/story-prompt.js";
 import { sha256, stableStringify } from "../../domain/src/index.js";
 import type { StoryWithoutChoices } from "./story-only-output.js";
 
@@ -57,21 +62,24 @@ export function composeStoryOnlySystemPrompt(
   baseSystemPrompt: string,
   policy: Extract<GenerationPolicySnapshot, { playMode: "story_only" }>,
   hasFrozenStoryMemoryPolicy = false,
-  storyMemoryPromptProtocol?: string
+  storyMemoryPromptProtocol?: string,
+  storyPromptContractProtocol?: string
 ): string {
   verifyPromptSnapshot(policy.prompts);
-  return hasFrozenStoryMemoryPolicy
-    ? composeStoryMemorySystemPrompt(baseSystemPrompt, policy.prompts.systemSupplement, storyMemoryPromptProtocol)
-    : `${baseSystemPrompt}\n\n${policy.prompts.systemSupplement}`;
+  if (hasFrozenStoryMemoryPolicy) return composeStoryMemorySystemPrompt(baseSystemPrompt, policy.prompts.systemSupplement, storyMemoryPromptProtocol);
+  const composed = `${baseSystemPrompt}\n\n${policy.prompts.systemSupplement}`;
+  return storyPromptContractProtocol ? composeStoryPromptSystemPrompt(composed, storyPromptContractProtocol) : composed;
 }
 
 export function composeStoryOnlyChoiceRepairSystemPrompt(
   choiceRepairSystem: string,
   hasFrozenStoryMemoryPolicy: boolean,
-  storyMemoryPromptProtocol?: string
+  storyMemoryPromptProtocol?: string,
+  storyPromptContractProtocol?: string
 ): string {
-  return hasFrozenStoryMemoryPolicy
-    ? `${choiceRepairSystem}\n\n${storyMemoryMandatoryContract(storyMemoryPromptProtocol)}`
+  if (hasFrozenStoryMemoryPolicy) return `${choiceRepairSystem}\n\n${storyMemoryMandatoryContract(storyMemoryPromptProtocol)}`;
+  return storyPromptContractProtocol
+    ? `${choiceRepairSystem}\n\n${storyPromptMandatoryContract(storyPromptContractProtocol)}`
     : choiceRepairSystem;
 }
 

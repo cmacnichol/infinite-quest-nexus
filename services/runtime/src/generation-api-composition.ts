@@ -4,7 +4,7 @@ import {
   type GenerationCommandRepository
 } from "../../../packages/application/src/index.js";
 import { createPostgresGenerationCommandRepository } from "../../../packages/database/src/generation-repository.js";
-import { resolveStoryMemoryPromptSnapshot } from "../../../packages/database/src/prompt-repository.js";
+import { resolveStoryMemoryPromptSnapshot, resolveStoryPromptSnapshot } from "../../../packages/database/src/prompt-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { resolveStoryMemoryPolicySnapshot, type StoryMemoryOperatorConfig } from "../../../packages/database/src/story-memory-policy-repository.js";
 import type { ApiGenerationProviderCollaborators } from "./provider-application-composition.js";
@@ -34,7 +34,7 @@ export function createApiGenerationApplication(
     ? createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: async (client, ownerUserId, campaignId, storyMemoryPolicy) => storyMemoryPolicy
         ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }, storyMemoryPolicy.policy.continuityReview)
-        : (await providers.prompts.loadGenerationPromptSnapshot({ ownerUserId, campaignId })).snapshot,
+        : resolveStoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }),
       promptProtocolVersion: providers.promptTools.protocolVersion,
       resolveStoryMemoryPolicySnapshot: (client, scope) => resolveStoryMemoryPolicySnapshot(client, scope, {
          installedCapability: resolvedOperatorConfig.installedCapability,

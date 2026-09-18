@@ -139,10 +139,12 @@ function json(value: unknown): string {
 function executionProtocolIdentity(
   promptProtocol: string,
   generationPolicy: GenerationPolicySnapshot,
-  storyMemoryPolicy: StoryMemoryPolicySnapshot | null
+  storyMemoryPolicy: StoryMemoryPolicySnapshot | null,
+  storyPromptContractProtocol?: string
 ): string {
   const legacyIdentity = generationExecutionProtocolIdentity(promptProtocol, generationPolicy);
-  return storyMemoryPolicy ? `story-memory-v1|${legacyIdentity}` : legacyIdentity;
+  if (storyMemoryPolicy) return `story-memory-v1|${legacyIdentity}`;
+  return storyPromptContractProtocol ? `story-prompt-v1|${storyPromptContractProtocol}|${legacyIdentity}` : legacyIdentity;
 }
 
 function sqlState(error: unknown): string | null {
@@ -420,7 +422,7 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy),
+              request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy)]
           );
           return enqueueResult(inserted.rows[0]!, false);
@@ -572,7 +574,7 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy),
+               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy)]
           );
@@ -832,7 +834,8 @@ export function createPostgresGenerationCommandRepository(
             && executionProtocolIdentity(
               dependencies.promptProtocolVersion(promptSnapshot.templates as PromptSnapshot),
               generationPolicy === null ? { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" } : generationPolicy.data,
-              storedPolicy?.success ? storedPolicy.data : null
+              storedPolicy?.success ? storedPolicy.data : null,
+              promptSnapshot.storyPromptCompatibility?.protocolIdentity
             ) === job.promptProtocolVersion;
         } catch {
           protocolCompatible = false;

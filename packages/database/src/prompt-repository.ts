@@ -195,6 +195,24 @@ export async function resolveStoryMemoryPromptSnapshot(
   };
 }
 
+/** New non-enrolled jobs freeze the acknowledged story-system bytes together
+ * with the v16 fact-wire contract identity. Historical snapshots remain raw. */
+export async function resolveStoryPromptSnapshot(
+  database: DatabaseClient,
+  scope: PromptScope
+): Promise<PromptSnapshotV2> {
+  const templates = await resolveSnapshot(database, scope, true, "legacy");
+  return {
+    version: 2,
+    templates,
+    continuityReview: null,
+    storyPromptCompatibility: {
+      protocolIdentity: promptCompatibilityRequirement("story_system")!.protocolIdentity,
+      templateHash: templates.story_system.hash
+    }
+  };
+}
+
 function protocolVersion(snapshot: PromptSnapshot): string {
   const templateHashes = Object.fromEntries(RUNTIME_KEYS.map((key) => [key, snapshot[key].hash]));
   return `${STORY_PROMPT_PROTOCOL_VERSION}-${hash(storyPromptProtocolIdentity(templateHashes)).slice(0, 16)}`;

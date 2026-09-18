@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   buildPromptPreview,
   assertContinuityReviewPromptSnapshot,
+  assertStoryPromptCompatibility,
   assertStoryMemoryPromptCompatibility,
   PROMPT_TEMPLATE_CATALOG,
   CONTINUITY_REVIEW_PROMPT_CATALOG,
@@ -13,7 +14,7 @@ import {
   renderPromptTemplate,
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
-import { STORY_SYSTEM_PROMPT } from "../../packages/contracts/src/story-prompt.js";
+import { STORY_SYSTEM_PROMPT, storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { appendAuthoringContract } from "../../packages/domain/src/authoring-prompts.js";
@@ -24,7 +25,7 @@ import {
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
-import { createPromptRepository, resolveStoryMemoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
+import { createPromptRepository, resolveStoryMemoryPromptSnapshot, resolveStoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
 
 describe("Prompt Library catalog", () => {
   it("requires an intact frozen review and repair pair for enabled modes", () => {
@@ -267,6 +268,31 @@ describe("Prompt Library catalog", () => {
         compatibility_content_hash: hash
       }] })
     } as never, { ownerUserId, scope: "campaign", campaignId })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+  });
+
+  it("freezes acknowledged non-enrolled v16 story bytes with their fact-wire identity", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const content = "Keep the established creative voice.";
+    const hash = createHash("sha256").update(content).digest("hex");
+    const requirement = promptCompatibilityRequirement("story_system")!;
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{}] })
+      .mockResolvedValueOnce({ rows: [{
+        prompt_key: "story_system", content, campaign_id: null,
+        compatibility_required_shape_version: requirement.requiredShapeVersion,
+        compatibility_protocol_identity: requirement.protocolIdentity,
+        compatibility_content_hash: hash
+      }] });
+
+    const snapshot = await resolveStoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId });
+
+    expect(snapshot.storyPromptCompatibility).toEqual({ protocolIdentity: storyPromptCompatibilityIdentity(), templateHash: hash });
+    expect(assertStoryPromptCompatibility(snapshot).template("story_system").content).toBe(content);
+    expect(() => assertStoryPromptCompatibility({
+      ...snapshot,
+      templates: { ...snapshot.templates, story_system: { ...snapshot.templates.story_system, content: "Edited after enqueue.", hash: createHash("sha256").update("Edited after enqueue.").digest("hex") } }
+    })).toThrow("does not match captured content");
   });
 
   it.each(["story_system", "event_extension"] as const)("validates only the effective campaign %s override", async (key) => {

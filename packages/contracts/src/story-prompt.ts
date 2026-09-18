@@ -303,6 +303,18 @@ export function storyPromptCompatibilityIdentity(): string {
   return `${STORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_CONTEXT_POLICY_VERSION}`;
 }
 
+export function storyPromptMandatoryContract(protocolIdentity: string = storyPromptCompatibilityIdentity()): string {
+  if (protocolIdentity === storyPromptCompatibilityIdentity()) return STORY_FACT_DELTA_WIRE_CONTRACT;
+  throw new Error("Unsupported story mandatory contract protocol.");
+}
+
+export function composeStoryPromptSystemPrompt(
+  creativePrompt: string,
+  protocolIdentity: string = storyPromptCompatibilityIdentity()
+): string {
+  return `${creativePrompt}\n\n${storyPromptMandatoryContract(protocolIdentity)}`;
+}
+
 export function storyMemoryPromptCompatibilityIdentity(): string {
   return `${STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
 }

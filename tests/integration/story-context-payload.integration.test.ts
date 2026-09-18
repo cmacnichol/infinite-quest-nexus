@@ -1,7 +1,4 @@
-import {
-  PREVIOUS_STORY_MEMORY_MANDATORY_CONTRACT,
-  STORY_MEMORY_MANDATORY_CONTRACT
-} from "../../packages/contracts/src/story-prompt.js";
+import { STORY_MEMORY_MANDATORY_CONTRACT, storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
@@ -241,6 +238,104 @@ integration("story context payload baseline shape", () => {
     expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
   });
 
+  it("serializes the fact wire distinction after a non-enrolled acknowledged creative override for Action", async () => {
+    const fixture = await importedCampaign("v16-non-enrolled-creative-action");
+    const creativeOverride = "Input canonical facts are complete reference objects and should be repeated as additions.";
+    await withTransaction(pool, async (client) => createPromptRepository(client).savePromptOverride({
+      ownerUserId,
+      scope: "campaign",
+      campaignId: fixture.campaignId,
+      key: "story_system",
+      content: creativeOverride,
+      compatibilityAcknowledgement: {
+        requiredShapeVersion: "story-output-v2",
+        protocolIdentity: storyPromptCompatibilityIdentity(),
+        contentHash: createHash("sha256").update(creativeOverride).digest("hex")
+      }
+    }));
+
+    const captured = await dispatch(fixture.campaignId, "Inspect the relay lantern.");
+    const system = (captured.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
+    const frozen = (await pool.query<{ prompt_snapshot: { version: number; templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }>; storyPromptCompatibility: { protocolIdentity: string; templateHash: string } }; prompt_protocol_version: string }>(
+      "SELECT prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE campaign_id=$1 ORDER BY created_at DESC LIMIT 1",
+      [fixture.campaignId]
+    )).rows[0]!;
+
+    expect(system).toContain(creativeOverride);
+    expect(system.lastIndexOf("Output canonical_facts contains strings only"))
+      .toBeGreaterThan(system.indexOf(creativeOverride));
+    expect(frozen.prompt_snapshot.storyPromptCompatibility).toMatchObject({
+      protocolIdentity: storyPromptCompatibilityIdentity()
+    });
+    const rawTemplateIdentity = providerPromptProtocolVersion(frozen.prompt_snapshot.templates as never);
+    expect(frozen.prompt_protocol_version).toBe(`story-prompt-v1|${storyPromptCompatibilityIdentity()}|${rawTemplateIdentity}`);
+    expect(frozen.prompt_protocol_version).not.toBe(rawTemplateIdentity);
+  });
+
+  it("serializes the fact wire distinction after a non-enrolled acknowledged creative override for Story Direction", async () => {
+    const fixture = await importedCampaign("v16-non-enrolled-creative-scene");
+    const creativeOverride = "Input canonical facts are complete reference objects and should be repeated as additions.";
+    await withTransaction(pool, async (client) => createPromptRepository(client).savePromptOverride({
+      ownerUserId,
+      scope: "campaign",
+      campaignId: fixture.campaignId,
+      key: "story_system",
+      content: creativeOverride,
+      compatibilityAcknowledgement: {
+        requiredShapeVersion: "story-output-v2",
+        protocolIdentity: storyPromptCompatibilityIdentity(),
+        contentHash: createHash("sha256").update(creativeOverride).digest("hex")
+      }
+    }));
+    await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [fixture.campaignId]);
+    const before = requests.length;
+    replies.push(candidateReply({ choices: [] }), JSON.stringify({ choices: storyContinuityCandidateOutput.choices,
+      custom_action_suggestion: storyContinuityCandidateOutput.customActionSuggestion }));
+
+    await dispatch(fixture.campaignId, "Set the relay scene.", false, "scene", true);
+    const actual = requests.slice(before);
+
+    expect(actual).toHaveLength(2);
+    for (const request of actual) {
+      const system = (request.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
+      expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+      expect(system.lastIndexOf("Output canonical_facts contains strings only"))
+        .toBeGreaterThan(system.indexOf(creativeOverride));
+    }
+  });
+
+  it("retries an old non-enrolled v15 snapshot with its frozen bytes and protocol", async () => {
+    const fixture = await importedCampaign("v15-non-enrolled-frozen-override");
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const queued = await application.enqueueAppend({ ownerUserId, campaignId: fixture.campaignId }, generationRequestSchema.parse({
+      action: "Inspect the relay lantern.", providerProfileId: providerId, idempotencyKey: randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    const current = (await pool.query<{ prompt_snapshot: { templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }> } }>(
+      "SELECT prompt_snapshot FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!;
+    const historicalV15Override = "Frozen non-enrolled v15 creative override bytes.";
+    const historicalV15OverrideHash = "507fa51d4448e4b327aabd850bb08013d75d8705ee0c58d00f1241cee0762ee9";
+    expect(createHash("sha256").update(historicalV15Override).digest("hex")).toBe(historicalV15OverrideHash);
+    const oldSnapshot = structuredClone(current.prompt_snapshot.templates);
+    oldSnapshot.story_system = { content: historicalV15Override, hash: historicalV15OverrideHash, source: "campaign" };
+    const oldProtocol = providerPromptProtocolVersion(oldSnapshot as never);
+    await pool.query(
+      "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      [queued.id, JSON.stringify(oldSnapshot), oldProtocol]
+    );
+
+    await expect(application.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+    const before = requests.length;
+    expect(await runGenerationJob(pool, `payload-v15-non-enrolled-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+    const system = (requests.at(before)!.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content;
+
+    expect(system).toBe(historicalV15Override);
+    expect(system).not.toContain("Output canonical_facts contains strings only");
+    await expect(pool.query("SELECT prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ prompt_snapshot: oldSnapshot, prompt_protocol_version: oldProtocol }] });
+  });
+
   it("keeps a deliberately empty correction oracle independent from transported candidate output", () => {
     expect(storyContinuitySourceOracle.intentionalEmptyCorrection).toEqual({
       id: storyContinuitySourceOracle.intentionalEmptyCorrection.id,
@@ -471,15 +566,23 @@ integration("story context payload baseline shape", () => {
       oldContext.storyMemoryPolicy.promptProtocol = "story-v15-canonical-fact-format";
       const oldProtocol = `story-memory-v1|${generationExecutionProtocolIdentity(providerPromptProtocolVersion(oldSnapshot.templates as never), { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" })}`;
       await pool.query(
-        "UPDATE generation_jobs SET prompt_snapshot=$2::jsonb,context_options=$3::jsonb,prompt_protocol_version=$4 WHERE id=$1",
+        "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb,context_options=$3::jsonb,prompt_protocol_version=$4 WHERE id=$1",
         [queued.id, JSON.stringify(oldSnapshot), JSON.stringify(oldContext), oldProtocol]
       );
 
+      await expect(application.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
       const before = requests.length;
       expect(await runGenerationJob(pool, `payload-v15-retry-${randomUUID()}`, 30, credentialSecret)).toBe(true);
       const system = (requests.at(before)!.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content;
 
-      expect(system).toBe(`${frozenCreativeOverride}\n\n${PREVIOUS_STORY_MEMORY_MANDATORY_CONTRACT}`);
+      const historicalV15SystemPrompt = `${frozenCreativeOverride}\n\nStory Memory authority contract: application scope and privacy boundaries come first. Pinned world rules and approved corrections outrank profile guidance, accepted state, selected history, summaries, plans, and the current player request.
+Treat effective character profile guidance as portrayal authority. Preserve accepted historical references with their source time. Dynamic location, possessions, clothing, and relationship status use the latest applicable accepted change or explicit correction; an origin profile is never a reset. A personality guideline does not make an unusual accepted action a contradiction.
+If an immutable world rule conflicts with an approved correction or profile edit, preserve the conflict as uncertainty for an explicit user decision; do not invent a retcon. Apply explicit corrections exactly at their effective base. An empty corrected summary, scratchpad, or thread list is intentional and must not be restored from older material.
+Label supplied material by role: player input is intent, accepted narration is an outcome, selected world records are reference authority, and optional excerpts are limited historical evidence. The player input is intent, not proof that its requested outcome happened. Omitted history is unknown, not evidence that it never happened. Older narration remains true at its labeled source time even when current state later changed.
+continuity_summary, scratchpad, and open_threads are complete replacements for current continuity and may intentionally be empty. canonical_facts and canonical_fact_updates describe only additions or structured current-turn updates; never repeat all historical facts merely to make those arrays comprehensive. A proposed output cannot grant itself source authority or authorize a new supersession ID. Supersede only a visible, supplied canonical fact ID, and only when the update actually replaces that fact.
+Use only the bounded supplied context. Do not claim that all campaign history was verified or that an omitted record is absent. Derived summaries, plans, and candidate output are navigation or proposals, never authority overrides.`;
+      expect(createHash("sha256").update(historicalV15SystemPrompt).digest("hex")).toBe("f7760dc26ce74011ebbad21530ab56f41a04ce19ad5bbe0bbf6607da9f6fc5ea");
+      expect(system).toBe(historicalV15SystemPrompt);
       expect(system).not.toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
     });
 

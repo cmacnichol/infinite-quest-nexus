@@ -58,3 +58,15 @@ The wider command also included `tests/integration/story-memory-compatibility.in
 ## Remaining risks
 
 The prompt instructs correct shape but cannot establish live model compliance. It leaves strict rejection, existing malformed-output normalization behavior, retrieval, and repair policy untouched. Phase 07 needs a real canary comparison between frozen v15 and v16 cohorts before any success-rate claim. Reviewers should focus on the old-contract literal and the runtime propagation of the frozen protocol into every composition path.
+
+## Review correction addendum
+
+Review found a non-enrolled acknowledged `story_system` override path that retained its creative text but bypassed the fact-wire contract. This correction is based on `1be74995` after original Phase 02 commit `52f2f604`. New non-enrolled jobs now receive a frozen v2 `storyPromptCompatibility` proof that binds the acknowledged `story_system` hash to `story-v16-fact-wire-distinction|story-output-v2|current-continuity-v2`.
+
+The executor applies the shared wire contract only for a marked non-shipped story-system override. It applies it after the Story Direction supplement and to Story Direction choice repair. Shipped defaults already carry the text. The marker also contributes `story-prompt-v1|<compatibility identity>|<template identity>` to the stored execution protocol, separating new marked work from old raw snapshots for retry, chain/checkpoint, and context-cache compatibility. Old non-enrolled snapshots have no marker and preserve raw bytes and identities.
+
+The updated PostgreSQL integration suite serializes actual Action and Story Direction override requests, including repair; it proves a real retry/reclaim for enrolled and non-enrolled v15 snapshots. The enrolled v15 request is compared to literal `9f5986ca` historical bytes and the independently fixed system SHA-256 `f7760dc26ce74011ebbad21530ab56f41a04ce19ad5bbe0bbf6607da9f6fc5ea`, never the current compatibility constant.
+
+- RED: real PostgreSQL payload test had two missing-contract failures before the production correction; the new historical fixture also established its fixed-hash assertion from a placeholder failure.
+- GREEN: 134 focused unit tests; `corepack pnpm check` passed.
+- GREEN: isolated Docker PostgreSQL payload plus enrollment suites passed 35 tests with 6 existing known-failure skips.
