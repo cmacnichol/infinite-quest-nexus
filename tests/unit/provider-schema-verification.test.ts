@@ -44,7 +44,7 @@ describe("schema verification file", () => {
   it("loads expired records so the resolver can report expiry", () => expect(load(file([{ ...valid, expiresAt: "2026-09-18T11:59:59.999Z" }])).records[0]?.expiresAt).toBe("2026-09-18T11:59:59.999Z"));
   it("allows empty routing only for OpenAI-compatible records", () => expect(load(file([{ ...valid, providerType: "openai_compatible", providerRoutingSlugs: [] }])).records[0]?.providerRoutingSlugs).toEqual([]));
   it.each([
-    { ...valid, ignored: "untrusted" }, { ...valid, endpointIdentity: "endpoint" }, { ...valid, endpointIdentity: [digest] }, { ...valid, routeConfigHash: "route" }, { ...valid, schemaHash: "schema" },
+    { ...valid, ignored: "untrusted" }, { ...valid, endpointIdentity: "endpoint" }, { ...valid, endpointIdentity: [digest] }, { ...valid, operation: ["story"] }, { ...valid, routeConfigHash: "route" }, { ...valid, schemaHash: "schema" },
     { ...valid, model: " ".repeat(257) }, { ...valid, model: "provider/auto" }, { ...valid, providerRoutingSlugs: [] }, { ...valid, providerRoutingSlugs: ["not a route"] },
     { ...valid, verifiedAt: "2026-09-18T12:00:00.001Z" }, { ...valid, expiresAt: "2026-11-19T12:00:00.000Z" }, { ...valid, expiresAt: "not-a-date" }
   ])("rejects malformed or unsafe records", (value) => expect(() => load(file([value]))).toThrow("TEXT_SCHEMA_VERIFICATION_FILE is invalid."));
