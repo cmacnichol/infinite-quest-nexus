@@ -107,6 +107,34 @@ describe("prepared response-contract transport", () => {
     expect(error.message).not.toContain("private");
   });
 
+  it.each(["json_object", "json_schema"] as const)("retains prepared evidence after an initial send timeout for %s", async (mode) => {
+    const fetcher = vi.fn(async () => { throw new Error("connect timeout private detail"); });
+    let error: any;
+    try {
+      await callTextProvider(profile, { systemPrompt: "private", input: "private", responseContract: contract(mode) } as never, transport(fetcher as typeof fetch));
+    } catch (caught) { error = caught; }
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(error).toMatchObject({ responseId: null, returnedModel: null, returnedProviderRoute: null, partialContent: "", preparedRequest: { body: expect.any(String), payloadHash: expect.any(String) } });
+    expect(providerTransportErrorDetails(error)).toMatchObject({ timedOut: true, operation: "story generation" });
+    expect(error.message).not.toContain("private detail");
+  });
+
+  it.each(["json_object", "json_schema"] as const)("retains complete length-finished output and null observed identities for %s", async (mode) => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ id: "complete-id", choices: [{ message: { content: "{}" }, finish_reason: "length" }], usage: {} }), { status: 200 }));
+    const result = await callTextProvider(profile, { systemPrompt: "complete", input: "complete", responseContract: contract(mode) } as never, transport(fetcher as typeof fetch));
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ content: "{}", finishReason: "length", outputLimited: true, responseId: "complete-id", returnedModel: null, returnedProviderRoute: null });
+  });
+
+  it.each(["json_object", "json_schema"] as const)("uses earlier SSE model and route observations for successful %s streams", async (mode) => {
+    const response = new Response(sse([
+      `data: ${JSON.stringify({ id: "stream-success", model: "early-model", provider: "early-route", choices: [{ delta: { content: "{}" } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`
+    ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const result = await callTextProvider(profile, { systemPrompt: "stream", input: "stream", onChunk: () => undefined, responseContract: contract(mode, true) } as never, transport(vi.fn(async () => response) as typeof fetch));
+    expect(result).toMatchObject({ content: "{}", responseId: "stream-success", returnedModel: "early-model", returnedProviderRoute: "early-route" });
+  });
+
   it.each(["json_object", "json_schema"] as const)("preserves provider transport details when a response body fails for %s", async (mode) => {
     const response = new Response(sse([], new Error("body timeout private detail")), { status: 200, headers: { "x-generation-id": "body-id" } });
     const { error, fetcher } = await failure(mode, response);
