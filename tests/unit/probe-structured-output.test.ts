@@ -157,14 +157,33 @@ it("rejects stale price evidence and refuses execution before runtime loading wh
   expect(loadLiveRuntime).not.toHaveBeenCalled();
 });
 
-it("rejects unknown, duplicate, missing, and below-cap execute guards before loading runtime", async () => {
+it("rejects unknown, duplicate, and missing execute guards before loading runtime", async () => {
   const loadLiveRuntime = vi.fn();
   for (const args of [
     ["--unknown"],
     ["--price-observed-at", options.priceObservedAt, "--price-observed-at", options.priceObservedAt],
-    ["--execute", "--model", options.model],
-    ["--execute", "--model", options.model, "--route", options.route, "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken), "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "12", "--max-output-tokens", "2048", "--max-input-tokens", "1"]
+    ["--execute", "--model", options.model]
   ]) await expect(probeCli(args, { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow();
+  expect(loadLiveRuntime).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["--max-input-tokens", "163839"],
+  ["--max-cost-usd", "0.540917"],
+  ["--accept-max-cost-usd", "0.540917"]
+])("rejects a fully specified below-ceiling %s before loading runtime", async (changedFlag, changedValue) => {
+  const report = join(tmpdir(), `iq-probe-guard-${Date.now()}-${Math.random()}.json`);
+  const loadLiveRuntime = vi.fn();
+  const args = [
+    "--execute", "--model", options.model, "--route", options.route,
+    "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken),
+    "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "12", "--max-output-tokens", "2048",
+    "--max-input-tokens", "163840", "--max-cost-usd", "0.540918", "--accept-max-cost-usd", "0.540918",
+    "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
+  ];
+  args[args.indexOf(changedFlag) + 1] = changedValue;
+  await expect(probeCli(args, { loadLiveRuntime, now: () => new Date(options.priceObservedAt) }))
+    .rejects.toThrow("Execution ceilings do not cover the prepared conservative bound exactly.");
   expect(loadLiveRuntime).not.toHaveBeenCalled();
 });
 
