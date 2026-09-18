@@ -44,6 +44,32 @@ compatible configuration to resume; discard and explicitly re-enqueue it when
 appropriate. Do not assume that a policy toggle guarantees a pending job will
 continue.
 
+### Operator verification records
+
+Model discovery is advisory. Its process-local cache expires after 24 hours;
+**Refresh endpoint** requests fresh discovery. Saving or editing a form cannot
+create verified schema support. Unsaved configuration changes leave capability
+status unknown until compatible server evidence is available.
+
+Runtime roles load an operator-reviewed JSON array from the optional
+`TEXT_SCHEMA_VERIFICATION_FILE` environment setting at startup. With no setting,
+there are no verified routes. Mount the same reviewed, read-only file into every
+API and worker role and restart those roles to reload it; compare their registry
+digests before enabling Required. A malformed configured file fails startup
+with a safe configuration error. The file is limited to 1 MiB and 1,000 records.
+
+Records bind the concrete model, hashed endpoint and routing configuration,
+operation, schema hash, adapter protocol and streaming mode. They carry canonical
+UTC verification/expiry timestamps and expire within at most 30 days. OpenRouter
+records pin provider routing slugs; Story additionally requires evidence that
+native arbitrary nested tracker objects survive unchanged. Advertisements and
+mutable preset aliases cannot supply this proof. The planned compatibility
+probe produces proposed records for review; it never installs them automatically.
+Keep API credentials in their existing secret configuration, outside this file.
+
+For outcome comparisons and the existing repair workflow, see
+[Turn validation reporting](../runbooks/turn-validation.md) and
+[Generation validation and recovery](../runbooks/deployment.md).
 ## Structured response evidence limit
 
 For new Story text requests using `auto` or `required` structured responses,
