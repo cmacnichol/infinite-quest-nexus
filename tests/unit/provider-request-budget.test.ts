@@ -99,6 +99,20 @@ describe("provider request serialization", () => {
     )).rejects.toThrow("tampered");
     expect(fetcher).not.toHaveBeenCalled();
   });
+  it("sends a strict contract once and retains bounded private evidence on a schema failure", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ error: { code: "invalid_schema", message: "private provider text" } }), { status: 400 }));
+    const storySchema = getProviderOutputSchema("story");
+    const responseContract = {
+      version: 1, mode: "json_schema", operation: "story", streaming: false,
+      schemaVersion: storySchema.version, schemaHash: storySchema.schemaHash, schemaName: storySchema.name, schema: storySchema.schema,
+      providerRoutingSlugs: ["provider/region"], routeConfigHash: "b".repeat(64), adapterProtocol: "text-schema-adapter-v1", forbidFormatFallback: true
+    } as const;
+    let error: any;
+    try { await callTextProvider({ ...profile, providerType: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }, { systemPrompt: "rules", input: "action", responseContract } as never, createTestProviderTransport(fetcher as typeof fetch)); } catch (caught) { error = caught; }
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(error).toMatchObject({ diagnosticCode: "provider_schema_invalid", preparedRequest: { body: expect.stringContaining("json_schema"), payloadHash: expect.any(String) }, partialContent: "" });
+    expect(error.message).not.toContain("private provider text");
+  });
   it("measures the compact Story Direction choice repair wire body and rejects an oversized protected base before transport", () => {
     const base = {
       narration: "The gate closes behind you.", scratchpad: "", tracker_updates: [], image_prompt: "",

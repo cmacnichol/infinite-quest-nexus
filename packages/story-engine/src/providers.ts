@@ -1,5 +1,6 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
 import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import { PreparedResponseContractError, classifyResponseFormatFailure } from "./provider-response-format.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
 import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, serializeProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
@@ -926,7 +927,9 @@ async function readSseStream(
       }
     }
   } catch (error) {
-    throw transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
+    const failure = transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
+    Object.assign(failure, { partialContent: accumulated });
+    throw failure;
   } finally {
     reader.releaseLock();
   }
@@ -1049,14 +1052,23 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
         : serializeLegacyProviderRequest(profile, request, { responseFormat: false });
       response = await send(prepared);
     } else {
-      let data: Record<string, any> = {};
-      try { data = text ? JSON.parse(text) as Record<string, any> : {}; } catch { /* response error below includes preview */ }
+      const parsed = text ? (() => { try { return JSON.parse(text); } catch { return {}; } })() : {};
+      if (request.responseContract) {
+        throw new PreparedResponseContractError(providerHttpError(response, `Provider request failed (${response.status}).`), prepared, { diagnosticCode: classifyResponseFormatFailure(response.status, parsed) });
+      }
+      const data = parsed as Record<string, any>;
       const message = String(data.error?.message || data.error || text || response.statusText).slice(0, 2000);
       throw providerHttpError(response, `Provider request failed (${response.status}): ${message}`);
     }
   }
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
-    const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
+    let streamed;
+    try { streamed = await readSseStream(response, request.onChunk, profile, "story generation", url); }
+    catch (error) {
+      if (request.responseContract) throw new PreparedResponseContractError(error, prepared, { partialContent: typeof (error as any)?.partialContent === "string" ? (error as any).partialContent : "" });
+      throw error;
+    }
+    const { content, finalData, allData } = streamed;
     const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
     const finishReason = String(allData.map((item) => item.choices?.[0]?.finish_reason).find(Boolean) || finalData.finish_reason || "");
     const responseId = String(allData.map((item) => item.id).find(Boolean) || finalData.id || "");
