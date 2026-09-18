@@ -4,6 +4,15 @@ import type { GenerationFailureDiagnostic } from "../../contracts/src/generation
 import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
+import {
+  readFrozenResponseContracts,
+  readQueuedResponsePolicy,
+  readAttemptResponseContractAudit,
+  type AttemptResponseContractAudit,
+  type FrozenResponseContracts,
+  type QueuedResponsePolicy,
+  type ResponseInvocationKey
+} from "../../contracts/src/generation-response-contract.js";
 import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
 import type {
@@ -80,6 +89,57 @@ function json(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
+function responseContractInvocations(value: unknown): readonly ResponseContractInvocationAudit[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 4) throw new Error("Response-contract invocation ledger is invalid.");
+  const ids = new Set<string>();
+  return value.map((candidate) => {
+    const item = candidate as ResponseContractInvocationAudit;
+    if (!item || item.version !== 1 || typeof item.id !== "string" || !item.logicalAttemptId || !item.invocationKey
+      || !["reserved", "dispatched", "completed"].includes(item.status) || ids.has(item.id)) throw new Error("Response-contract invocation ledger is invalid.");
+    ids.add(item.id);
+    readAttemptResponseContractAudit(item.request);
+    if (item.response !== null && (typeof item.response !== "object" || item.status !== "completed")) throw new Error("Response-contract invocation ledger is invalid.");
+    return item;
+  });
+}
+
+function responseContractState(value: GenerationOrchestrationState): void {
+  readQueuedResponsePolicy(value.queuedResponsePolicy);
+  readFrozenResponseContracts(value.frozenResponseContracts);
+  responseContractInvocations(value.responseContractInvocations);
+}
+
+async function updateResponseContractInvocation(
+  pool: DatabasePool,
+  scope: GenerationLeaseScope,
+  invocationId: string,
+  nextStatus: "dispatched" | "completed",
+  response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">
+): Promise<ResponseContractInvocationAudit | null> {
+  return withTransaction(pool, async (client) => {
+    const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
+      `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
+        WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating') AND lease_expires_at > now() FOR UPDATE`,
+      [scope.jobId, scope.ownerUserId, scope.workerId]
+    );
+    const row = result.rows[0]; if (!row) return null;
+    const ledger = [...(responseContractInvocations(row.orchestrationPrivate.responseContractInvocations) ?? [])];
+    const index = ledger.findIndex((item) => item.id === invocationId);
+    if (index < 0) return null;
+    const existing = ledger[index]!;
+    if (existing.status === "completed") return existing;
+    if (nextStatus === "completed" && existing.status !== "dispatched") return null;
+    const at = new Date().toISOString();
+    const updated: ResponseContractInvocationAudit = nextStatus === "dispatched"
+      ? { ...existing, status: "dispatched", dispatchedAt: existing.dispatchedAt ?? at }
+      : { ...existing, status: "completed", completedAt: at, response: { returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null } };
+    ledger[index] = updated;
+    await client.query(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND lease_expires_at > now()`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
+    return updated;
+  });
+}
+
 export type GenerationLeaseScope = Readonly<{
   jobId: string;
   ownerUserId: string;
@@ -137,6 +197,10 @@ export type FactFormatRepairApplication = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** Absent is the exact historical job shape; present values are server-owned and versioned. */
+  queuedResponsePolicy?: QueuedResponsePolicy;
+  frozenResponseContracts?: FrozenResponseContracts;
+  responseContractInvocations?: readonly ResponseContractInvocationAudit[];
   /** Safe, last-known failure classification; attempts remain the historical ledger. */
   lastFailureDiagnostic?: GenerationFailureDiagnostic;
   /** A primary request was durably reserved; a lease reclaim cannot treat it as an unseen request. */
@@ -279,6 +343,19 @@ export type GenerationOrchestrationState = {
   } | undefined;
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
+
+export type ResponseContractInvocationAudit = Readonly<{
+  version: 1;
+  id: string;
+  logicalAttemptId: string;
+  invocationKey: ResponseInvocationKey;
+  request: AttemptResponseContractAudit;
+  status: "reserved" | "dispatched" | "completed";
+  reservedAt: string;
+  dispatchedAt: string | null;
+  completedAt: string | null;
+  response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> | null;
+}>;
 
 function hasValidFactFormatRepairApplications(value: unknown): boolean {
   if (value === undefined) return true;
@@ -650,6 +727,14 @@ export type GenerationExecutionRepository = Readonly<{
   /** Returns a repaired validating job to the normal assessment entrypoint. */
   restartAfterSemanticRepair?(scope: GenerationLeaseScope): Promise<boolean>;
   saveOrchestration(scope: GenerationLeaseScope, value: GenerationOrchestrationState): Promise<boolean>;
+  /** Writes the first complete preflight selection once; lease reclaimers observe the winner. */
+  saveFrozenResponseContracts?(scope: GenerationLeaseScope, expectedQueuedPolicyHash: string, value: FrozenResponseContracts): Promise<FrozenResponseContracts | null>;
+  /** Private bounded operation ledger. This is distinct from generation_attempts and worker claim counts. */
+  reserveResponseContractInvocation?(scope: GenerationLeaseScope, input: Readonly<{
+    logicalAttemptId: string; invocationKey: ResponseInvocationKey; request: AttemptResponseContractAudit;
+  }>): Promise<ResponseContractInvocationAudit | null>;
+  markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string): Promise<ResponseContractInvocationAudit | null>;
+  completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">): Promise<ResponseContractInvocationAudit | null>;
   /** Atomically publishes a pending review and releases the worker lease. */
   pauseForReview(scope: GenerationLeaseScope, checkpoint: GenerationReviewCheckpoint): Promise<boolean>;
   savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;
@@ -1393,9 +1478,11 @@ export function createPostgresGenerationExecutionRepository(
       );
       const row = result.rows[0];
       if (!row) return null;
+      let responseContractValid = true;
+      try { responseContractState(row.orchestration_private); } catch { responseContractValid = false; }
       const storedReview = row.orchestration_private?.generationReview === undefined
         ? undefined : generationReviewCheckpointSchema.safeParse(row.orchestration_private.generationReview);
-      if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
+      if (!responseContractValid || (row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
           || (storedReview !== undefined && (!storedReview.success
             || !generationReviewMatchesExecutionJob(storedReview.data, row)
             || !appliedFactFormatRepairMatchesExecutionJob(storedReview.data, row.orchestration_private, row)
@@ -1543,7 +1630,11 @@ export function createPostgresGenerationExecutionRepository(
               CASE WHEN $4::jsonb ? 'generationReview' THEN $4::jsonb
                    WHEN orchestration_private ? 'generationReview' THEN ($4::jsonb || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
                    ELSE $4::jsonb
-               END,
+               END || jsonb_strip_nulls(jsonb_build_object(
+                 'queuedResponsePolicy', CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN orchestration_private->'queuedResponsePolicy' END,
+                 'frozenResponseContracts', CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN orchestration_private->'frozenResponseContracts' END,
+                 'responseContractInvocations', CASE WHEN orchestration_private ? 'responseContractInvocations' THEN orchestration_private->'responseContractInvocations' END
+               )),
             recovery_metadata = CASE WHEN $5::jsonb IS NULL THEN recovery_metadata ELSE recovery_metadata || jsonb_build_object('diagnostic',$5::jsonb) END,
             updated_at = now()
           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
@@ -1552,6 +1643,64 @@ export function createPostgresGenerationExecutionRepository(
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, json(value), safeContextDiagnostic ? json(safeContextDiagnostic) : null]
       ));
+    },
+
+    async saveFrozenResponseContracts(scope, expectedQueuedPolicyHash, value) {
+      const parsed = readFrozenResponseContracts(value);
+      if (!parsed) throw new Error("Frozen response contracts are required.");
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
+          `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
+            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status='assessing' AND lease_expires_at > now() FOR UPDATE`,
+          [scope.jobId, scope.ownerUserId, scope.workerId]
+        );
+        const row = result.rows[0];
+        if (!row) return null;
+        const stored = row.orchestrationPrivate;
+        const queued = readQueuedResponsePolicy(stored.queuedResponsePolicy);
+        if (!queued || queued.providerConfigurationHash !== expectedQueuedPolicyHash || JSON.stringify(queued) !== JSON.stringify(parsed.queuedPolicy)) return null;
+        const existing = readFrozenResponseContracts(stored.frozenResponseContracts);
+        if (existing) return existing;
+        await client.query(
+          `UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('frozenResponseContracts',$4::jsonb), updated_at=now()
+            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status='assessing' AND lease_expires_at > now()`,
+          [scope.jobId, scope.ownerUserId, scope.workerId, json(parsed)]
+        );
+        return parsed;
+      });
+    },
+
+    async reserveResponseContractInvocation(scope, input) {
+      readAttemptResponseContractAudit(input.request);
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
+          `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
+            WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating') AND lease_expires_at > now() FOR UPDATE`,
+          [scope.jobId, scope.ownerUserId, scope.workerId]
+        );
+        const row = result.rows[0]; if (!row) return null;
+        const frozen = readFrozenResponseContracts(row.orchestrationPrivate.frozenResponseContracts);
+        if (!frozen || frozen.selectionHash !== input.request.selectionHash || !frozen.queuedPolicy.invocationKeys.includes(input.invocationKey)) return null;
+        const ledger = [...(responseContractInvocations(row.orchestrationPrivate.responseContractInvocations) ?? [])];
+        // Claim attempts are leases, not provider-authorized work. Only the persisted logical-attempt identity changes an operation id.
+        const id = sha256Hex(JSON.stringify({ version: 1, jobId: scope.jobId, invocationKey: input.invocationKey, logicalAttemptId: input.logicalAttemptId }));
+        const existing = ledger.find((item) => item.id === id || (item.logicalAttemptId === input.logicalAttemptId && item.invocationKey === input.invocationKey));
+        if (existing) return existing;
+        if (ledger.length >= frozen.queuedPolicy.invocationKeys.length) return null;
+        const entry: ResponseContractInvocationAudit = { version: 1, id, logicalAttemptId: input.logicalAttemptId, invocationKey: input.invocationKey,
+          request: input.request, status: "reserved", reservedAt: new Date().toISOString(), dispatchedAt: null, completedAt: null, response: null };
+        ledger.push(entry);
+        await client.query(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND lease_expires_at > now()`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
+        return entry;
+      });
+    },
+
+    async markResponseContractInvocationDispatched(scope, invocationId) {
+      return updateResponseContractInvocation(pool, scope, invocationId, "dispatched");
+    },
+
+    async completeResponseContractInvocation(scope, invocationId, response) {
+      return updateResponseContractInvocation(pool, scope, invocationId, "completed", response);
     },
 
     async pauseForReview(scope, checkpoint) {

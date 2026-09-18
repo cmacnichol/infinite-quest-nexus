@@ -5,6 +5,7 @@ import type {
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../contracts/src/index.js";
+import { readQueuedResponsePolicy, type QueuedResponsePolicy } from "../../contracts/src/generation-response-contract.js";
 import {
   GenerationApplicationError,
   type GenerationCommandRepository,
@@ -126,6 +127,11 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
   resolveStoryMemoryPolicySnapshot?: (client: DatabaseClient, scope: Readonly<{
     ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string; modelContextWindowTokens?: number;
   }>) => Promise<StoryMemoryPolicySnapshot | null>;
+  /** Trusted, local-only queue metadata. It is deliberately not a browser request field. */
+  resolveQueuedResponsePolicy?: (scope: Readonly<{
+    ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string;
+    operationKind: OperationKind; generationPolicy: GenerationPolicySnapshot;
+  }>) => QueuedResponsePolicy | undefined;
   readTurnReportedCosts: (
     ownerUserId: string,
     campaignId: string,
@@ -383,6 +389,10 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
+        const queuedResponsePolicy = readQueuedResponsePolicy(dependencies.resolveQueuedResponsePolicy?.({
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
+          operationKind: "append", generationPolicy
+        }));
         const storyLengthProfile = request.storyLengthProfileOverride
           ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
@@ -424,7 +434,7 @@ export function createPostgresGenerationCommandRepository(
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
-              json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy)]
+              json({ requestFingerprint, ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}) }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy)]
           );
           return enqueueResult(inserted.rows[0]!, false);
         } catch (error) {
@@ -504,6 +514,10 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
+        const queuedResponsePolicy = readQueuedResponsePolicy(dependencies.resolveQueuedResponsePolicy?.({
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
+          operationKind: "replace_latest", generationPolicy
+        }));
         const baseTurnNumber = campaign.active_turn_number - 1;
         let baseState: Record<string, unknown> = {};
         let baseScratchpadSafeForPrompt = false;
@@ -576,7 +590,7 @@ export function createPostgresGenerationCommandRepository(
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
                request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
-              json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
+              json({ requestFingerprint, ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}) }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy)]
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
