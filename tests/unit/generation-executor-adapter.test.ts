@@ -852,6 +852,68 @@ describe("generation executor adapter", () => {
     expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "generation_checkpoint_incompatible" }));
   });
 
+  it("rejects an authorized legacy format repair after its provider configuration changes before an applied write or primary redispatch", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    // This intentionally has no storyMemoryPolicy snapshot: legacy jobs still fence provider configuration.
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, review) => { job.orchestration_private = { ...job.orchestration_private, generationReview: review }; return true; }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const malformed = JSON.stringify({
+      narration: "The observatory door opens onto a silent moonlit archive.", choices: ["Enter.", "Wait.", "Study.", "Call."],
+      custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "A moonlit observatory.",
+      continuity_summary: "The archive is open.", canonical_facts: [{ id: "new-label", content: "The archive is open." }],
+      superseded_facts: [], canonical_fact_updates: [], open_threads: []
+    });
+    const provider = {
+      id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000,
+      configuration: { revision: "offered" },
+      execute: vi.fn(async () => ({ content: malformed, responseId: "repair-source", finishReason: "stop", outputLimited: false,
+        modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {} }))
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: { currentContinuity: { canonicalFacts: [] }, chronicle: [] }, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
+      promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+
+    await expect(executor.execute({ workerId: "repair-provider-offer", leaseSeconds: 30, claim })).resolves.toBe(true);
+    const offered = job.orchestration_private.generationReview!;
+    const repair = offered.factFormatRepair;
+    expect(repair).toMatchObject({ status: "offered" });
+    if (!repair) throw new Error("Expected a repair offer.");
+    const receipt = {
+      reviewId: offered.reviewId, revision: offered.revision, actorUserId: job.owner_user_id, decision: "repair_format" as const,
+      decidedAt: "2026-09-18T00:00:00.000Z", candidateScope: offered.candidateScope, candidateHash: offered.gateCandidate.storyHash,
+      findingsHash: sha256(canonicalEvidenceJson(offered.reasons)), nextStage: "structure" as const,
+      offeredCandidate: offered.gateCandidate, offeredReasons: offered.reasons,
+      actionReceipt: { jobId: job.id, status: "queued" as const, operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id },
+      planHash: repair.planHash, repair
+    };
+    job.orchestration_private = {
+      ...job.orchestration_private,
+      generationReview: { ...offered, state: "decided", revision: offered.revision + 1,
+        factFormatRepair: { ...repair, status: "authorized" }, decisionJournal: [...offered.decisionJournal, receipt] }
+    } as GenerationExecutionPayload["orchestration_private"];
+    job.attempts = 2;
+    provider.configuration = { revision: "changed" };
+
+    await expect(executor.execute({ workerId: "repair-provider-changed", leaseSeconds: 30, claim: { ...claim, attempts: 2 } })).resolves.toBe(true);
+    expect(provider.execute).toHaveBeenCalledOnce();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "generation_checkpoint_incompatible" }));
+    expect(repository.saveOrchestration).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      generationReview: expect.objectContaining({ factFormatRepair: expect.objectContaining({ status: "applied" }) })
+    }));
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["Action", "action", "action", "explicit"],
     ["Scene", "scene", "scene", "explicit"],

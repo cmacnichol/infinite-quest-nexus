@@ -797,8 +797,9 @@ function compatibleValidatedMainDraft(
   }
   if (value.factFormatRepair) {
     const review = generationReviewCheckpointSchema.safeParse(generationReview);
-    const receipt = review.success ? review.data.decisionJournal.find((entry) => entry.decision === "repair_format"
-      && entry.reviewId === value.factFormatRepair!.reviewId && entry.revision === value.factFormatRepair!.revision) : undefined;
+    const receipts = review.success ? review.data.decisionJournal.filter((entry) => entry.decision === "repair_format"
+      && entry.reviewId === value.factFormatRepair!.reviewId && entry.revision === value.factFormatRepair!.revision) : [];
+    const receipt = receipts.length === 1 ? receipts[0] : undefined;
     if (!review.success || !receipt || receipt.decision !== "repair_format") {
       throw Object.assign(new Error("The applied fact-format repair has no compatible review receipt."), { code: "generation_checkpoint_incompatible" });
     }
@@ -809,7 +810,13 @@ function compatibleValidatedMainDraft(
       || value.requestPayloadHash !== repair.producingRequestHash
       || value.response.responseId !== repair.sourceResponseId
       || sha256(value.response.content) !== repair.plan.rawOutputHash
-      || canonicalEvidenceJson(parsedStory.data) !== canonicalEvidenceJson(repair.plan.story)) {
+      || canonicalEvidenceJson(parsedStory.data) !== canonicalEvidenceJson(repair.plan.story)
+      || value.providerConfigurationHash !== repair.providerConfigurationHash
+      || repair.providerConfigurationHash !== effectiveProviderConfigurationHash(provider, job)
+      || receipt.actorUserId !== job.owner_user_id
+      || receipt.actionReceipt.jobId !== job.id
+      || receipt.actionReceipt.operationKind !== job.operation_kind
+      || receipt.actionReceipt.replacementTurnId !== job.replacement_turn_id) {
       throw Object.assign(new Error("The applied fact-format repair provenance is incompatible."), {
         code: "generation_checkpoint_incompatible"
       });

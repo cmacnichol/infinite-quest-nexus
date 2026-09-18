@@ -430,6 +430,25 @@ function generationReviewMatchesExecutionJob(review: GenerationReviewCheckpoint,
       && receipt.actionReceipt.replacementTurnId === job.replacement_turn_id));
 }
 
+/** An applied repair may survive later review revisions, so its receipt identity lives on the saved draft. */
+function appliedFactFormatRepairMatchesExecutionJob(
+  review: GenerationReviewCheckpoint,
+  orchestration: GenerationOrchestrationState,
+  job: GenerationReviewExecutionBinding
+): boolean {
+  if (review.version !== 2 || review.factFormatRepair?.status !== "applied") return true;
+  const repair = orchestration.validatedMainDraft?.factFormatRepair;
+  if (!repair) return false;
+  const receipts = review.decisionJournal.filter((entry) => entry.decision === "repair_format"
+    && entry.reviewId === repair.reviewId && entry.revision === repair.revision);
+  const receipt = receipts.length === 1 ? receipts[0] : undefined;
+  return receipt !== undefined
+    && receipt.actorUserId === job.owner_user_id
+    && receipt.actionReceipt.jobId === job.id
+    && receipt.actionReceipt.operationKind === job.operation_kind
+    && receipt.actionReceipt.replacementTurnId === job.replacement_turn_id;
+}
+
 export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
 };
@@ -754,6 +773,7 @@ function assertAppliedFactFormatRepair(
     || draft.response.responseId !== receipt.repair.sourceResponseId
     || sha256Hex(draft.response.content) !== receipt.repair.plan.rawOutputHash
     || canonicalEvidenceJson(draft.story) !== canonicalEvidenceJson(receipt.repair.plan.story)
+    || draft.providerConfigurationHash !== receipt.repair.providerConfigurationHash
     || !generationReviewMatchesExecutionJob(checkpoint, job)
     || draft.ownerUserId !== job.owner_user_id
     || draft.campaignId !== job.campaign_id
@@ -1302,7 +1322,9 @@ export function createPostgresGenerationExecutionRepository(
       const storedReview = row.orchestration_private?.generationReview === undefined
         ? undefined : generationReviewCheckpointSchema.safeParse(row.orchestration_private.generationReview);
       if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
-          || (storedReview !== undefined && (!storedReview.success || !generationReviewMatchesExecutionJob(storedReview.data, row)))
+          || (storedReview !== undefined && (!storedReview.success
+            || !generationReviewMatchesExecutionJob(storedReview.data, row)
+            || !appliedFactFormatRepairMatchesExecutionJob(storedReview.data, row.orchestration_private, row)))
           || !hasValidLogicalAttempt(row.orchestration_private?.logicalAttempt)
           || !hasValidPrimaryReservation(row.orchestration_private?.primaryReservation)
           || !hasValidPrimaryResult(row.orchestration_private?.primaryResult)
