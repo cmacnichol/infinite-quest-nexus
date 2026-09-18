@@ -93,6 +93,7 @@ export type ModelInventoryItem = {
   loaded: boolean;
   instanceId: string;
   contextLength: number;
+  responseFormatAdvertisement?: { supportedParameters: readonly string[] | null; discoveredAt: string };
   workerCount?: number;
   workerAvailability?: Array<{
     type: string;
@@ -1305,19 +1306,24 @@ function inventoryRows(data: Record<string, any> | any[]): any[] {
 function inventoryItems(models: any[]): ModelInventoryItem[] {
   return models.flatMap((model: any) => {
     const instances = Array.isArray(model.loaded_instances) ? model.loaded_instances : [];
+    const parameterValues = model?.supported_parameters;
+    const supportedParameters = Array.isArray(parameterValues)
+      ? [...new Set(parameterValues.filter((value: unknown): value is string => typeof value === "string" && value.length <= 128))].slice(0, 128)
+      : null;
+    const responseFormatAdvertisement = Array.isArray(parameterValues) ? { supportedParameters, discoveredAt: new Date().toISOString() } : undefined;
     if (instances.length) return instances.map((instance: any) => ({
       id: String(model.key || model.id || instance.id || ""),
       displayName: String(model.display_name || model.name || model.key || model.id || ""),
       loaded: true,
       instanceId: String(instance.id || model.key || model.id || ""),
-      contextLength: Number(instance.config?.context_length || instance.context_length || model.max_context_length || 0)
+      contextLength: Number(instance.config?.context_length || instance.context_length || model.max_context_length || 0), ...(responseFormatAdvertisement ? { responseFormatAdvertisement } : {})
     }));
     return [{
       id: String(model.id || model.key || ""),
       displayName: String(model.name || model.display_name || model.id || model.key || ""),
       loaded: Boolean(model.loaded),
       instanceId: String(model.instance_id || model.id || model.key || ""),
-      contextLength: Number(model.context_length || model.max_context_length || model.loaded_context_length || 0)
+      contextLength: Number(model.context_length || model.max_context_length || model.loaded_context_length || 0), ...(responseFormatAdvertisement ? { responseFormatAdvertisement } : {})
     }];
   }).filter((model: ModelInventoryItem) => model.id);
 }

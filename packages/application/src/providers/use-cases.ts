@@ -63,6 +63,7 @@ function isSafeConfigurationEntry(key: string, value: unknown): boolean {
   if (key === "network") return value === "fast" || value === "relaxed";
   if (key === "tokenType") return value === "auto" || value === "sogni" || value === "spark";
   if (key === "contentFilter") return value === "enabled" || value === "disabled";
+  if (key === "textResponseFormatPolicy") return value === "legacy" || value === "auto" || value === "required";
   if (key === "defaultOutputFormat") return value === "png" || value === "jpeg" || value === "webp";
   if (key === "defaultQuality") {
     return value === "auto" || value === "low" || value === "medium" || value === "high";
@@ -79,6 +80,14 @@ export function toSafeProviderConfiguration(configuration: unknown): SafeProvide
     Object.entries(source).filter(([key, value]) => isSafeConfigurationEntry(key, value)),
   ) as SafeProviderConfigurationFields;
   return Object.freeze(safeFields) as SafeProviderConfiguration;
+}
+
+function assertResponseFormatPolicy(configuration: unknown): void {
+  if (!configuration || typeof configuration !== "object" || Array.isArray(configuration)) return;
+  const value = (configuration as Record<string, unknown>).textResponseFormatPolicy;
+  if (value !== undefined && value !== "legacy" && value !== "auto" && value !== "required") {
+    throw Object.assign(new Error("textResponseFormatPolicy must be legacy, auto, or required."), { statusCode: 400 });
+  }
 }
 
 function immutablePromptSnapshot(version: PromptSnapshotVersion): PromptSnapshotVersion {
@@ -99,14 +108,16 @@ export function createProviderApplication(
 ): ProviderApplication {
   return {
     listProfiles: (scope) => dependencies.profiles.listProfiles(scope),
-    createProfile: async (command) => ({
-      profile: await dependencies.profiles.createProfile(command),
+    createProfile: async (command) => {
+      assertResponseFormatPolicy(command.configuration);
+      return ({ profile: await dependencies.profiles.createProfile(command),
       configurationProjection: {
         kind: "same_request_echo",
         configuration: freezeConfiguration(command.configuration)
-      }
-    }),
+      } });
+    },
     updateProfile: async (command) => {
+      assertResponseFormatPolicy(command.changes.configuration);
       const profile = await dependencies.profiles.updateProfile(command);
       return {
         profile,
@@ -121,7 +132,7 @@ export function createProviderApplication(
     deleteProfile: (command) => dependencies.profiles.deleteProfile(command),
     setDefaultProfile: (command) => dependencies.profiles.setDefaultProfile(command),
     listModels: (request) => dependencies.inventory.listModels(request),
-    discoverCandidateModels: (candidate) => dependencies.inventory.discoverCandidateModels(candidate),
+    discoverCandidateModels: (candidate) => { assertResponseFormatPolicy(candidate.configuration); return dependencies.inventory.discoverCandidateModels(candidate); },
     recordHealth: (record) => dependencies.health.recordHealth(record),
     resolveDirect: (request) => dependencies.resolution.resolveDirect(request),
     resolveEmbedding: (request) => dependencies.resolution.resolveEmbedding(request),

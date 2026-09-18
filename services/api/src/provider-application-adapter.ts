@@ -179,7 +179,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         displayName: model.name,
         loaded: false,
         instanceId: model.id,
-        contextLength: model.contextWindowTokens ?? 0
+        contextLength: model.contextWindowTokens ?? 0,
+        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {})
       }));
     },
 
@@ -204,7 +205,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         displayName: model.name,
         loaded: false,
         instanceId: model.id,
-        contextLength: model.contextWindowTokens ?? 0
+        contextLength: model.contextWindowTokens ?? 0,
+        ...(model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {})
       }));
     },
 

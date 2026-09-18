@@ -224,7 +224,8 @@ export function createRuntimeProviderAdapter(options: Readonly<{
           models: models.map((value) => ({
             id: value.id,
             name: value.displayName,
-            ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {})
+            ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {}),
+            ...(request.providerRole === "text" && value.responseFormatAdvertisement ? { responseFormatAdvertisement: value.responseFormatAdvertisement } : {})
           }))
         };
       } catch (error) {
@@ -268,7 +269,8 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         models: models.map((value) => ({
           id: value.id,
           name: value.displayName,
-          ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {})
+          ...(value.contextLength > 0 ? { contextWindowTokens: value.contextLength } : {}),
+          ...(candidate.providerRole === "text" && value.responseFormatAdvertisement ? { responseFormatAdvertisement: value.responseFormatAdvertisement } : {})
         }))
       };
     } catch {
