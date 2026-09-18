@@ -41,6 +41,9 @@ integration("strict response-contract operation workflow", () => {
   let endpointIdentity = "";
   const requests: string[] = [];
   let reviewCalls = 0;
+  let primaryHasDuplicateChoices = true;
+  let eventCoverageSequence: boolean[] = [];
+  let sceneCoverageSequence: boolean[] = [];
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 6);
@@ -72,11 +75,20 @@ integration("strict response-contract operation workflow", () => {
         const parsed = JSON.parse(body) as { messages: Array<{ content: string }> };
         const input = JSON.parse(parsed.messages[1]!.content) as Record<string, unknown>;
         const evidence = Array.isArray(input.evidence) ? input.evidence[0] as { id: string; content: string } | undefined : undefined;
-        const content = input.protocol === "story-continuity-review-v1"
+        const system = parsed.messages[0]?.content || "";
+        const content = (input.phase === "before" || input.phase === "after") && Array.isArray(input.triggers)
+          ? JSON.stringify({ activated_trigger_ids: input.triggers.map((trigger: { id: string }) => trigger.id), reasons: {} })
+          : input.task === "Determine whether the narration includes all concrete required beats without contradiction."
+            ? JSON.stringify((() => { const covered = sceneCoverageSequence.shift() ?? true; return { covered, missing_required_beats: covered ? [] : ["The requested scene beat is absent."], contradictions: [] }; })())
+            : system.includes("validate whether generated fiction") && Array.isArray(input.required_events)
+              ? JSON.stringify((() => { const covered = eventCoverageSequence.shift() ?? true; return { event_results: input.required_events.map((event: { event_id: string }) => ({ event_id: event.event_id, covered, missing_required_beats: covered ? [] : ["The bell must ring."], contradictions: [] })) }; })())
+          : system.includes("complete an already validated adventure turn") || body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat")
+            ? story(["Continue.", "Wait.", "Listen.", "Leave."]).replace("Mira waits at the observatory.", "Mira waits at the observatory.\n\nThe bell rings as the keeper arrives.")
+          : input.protocol === "story-continuity-review-v1"
           ? JSON.stringify({ version: "story-continuity-review-v1", verdict: reviewCalls++ === 0 ? "conflict" : "pass", findings: reviewCalls === 1 ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: evidence?.id ?? "missing", quote: evidence?.content.slice(0, 20) ?? "missing" }, output: { path: "/narration", start: 0, end: 4, quote: "Mira" }, explanation: "Fixture conflict." }] : [] })
           : input.protocol === "story-continuity-repair-v1" ? story(["Continue.", "Wait.", "Listen.", "Leave."])
             : body.includes("final_narration") ? JSON.stringify({ choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." })
-              : story();
+              : story(primaryHasDuplicateChoices ? undefined : ["Continue.", "Wait.", "Listen.", "Leave."]);
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ id: randomUUID(), model, provider: "strict-route", choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } }));
       });
@@ -90,7 +102,7 @@ integration("strict response-contract operation workflow", () => {
   });
 
   afterAll(async () => { await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done())); await (server as Server & { transport?: { close(): Promise<void> } }).transport?.close(); await pool.end(); });
-  afterEach(() => { requests.length = 0; reviewCalls = 0; });
+  afterEach(() => { requests.length = 0; reviewCalls = 0; primaryHasDuplicateChoices = true; eventCoverageSequence = []; sceneCoverageSequence = []; });
 
   function records() {
     return (["story", "choices", "continuity_review"] as const).map((operation) => ({
@@ -197,5 +209,74 @@ integration("strict response-contract operation workflow", () => {
     expect(requests).toHaveLength(beforeReclaim);
     const result = await pool.query<{ status: string; errorCode: string | null }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [fixture.job.id]);
     expect(result.rows[0]).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+  }, 60_000);
+
+  it("uses the strict story contract for an event extension after the exempt event assessment", async () => {
+    const fixture = await enqueue();
+    primaryHasDuplicateChoices = false;
+    reviewCalls = 1;
+    eventCoverageSequence = [true, true];
+    const triggerId = randomUUID();
+    await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [fixture.campaignId, JSON.stringify([{ id: triggerId, label: "Keeper arrival", timing: "after", condition: "Mira waits.", effect: "The bell rings as the keeper arrives.", addTextAfter: true, triggeredCount: 0, lastTriggeredTurn: null, lastTriggeredAt: null }])]);
+    const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest, clock: () => verificationNow });
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, workerGraph.illustration), apiMemoryApplication(pool, credentialSecret), workerGraph.generation);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `strict-extension-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+    expect(await fixture.application.getJob({ ownerUserId, jobId: fixture.job.id })).toMatchObject({ status: "completed" });
+    const saved = (await pool.query<{ orchestrationPrivate: Record<string, any> }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id])).rows[0]!.orchestrationPrivate;
+    const invocations = saved.responseContractInvocations as Array<{ operation: string; requestPayloadHash: string }>;
+    expect(invocations.map((entry) => entry.operation)).toEqual(["story_generation", "event_extension", "story_continuity_review"]);
+    const extensionIndex = invocations.findIndex((entry) => entry.operation === "event_extension");
+    const extensionBody = requests.find((body) => JSON.parse(body).messages[0].content.includes("complete an already validated adventure turn"));
+    expect(extensionBody).toBeDefined();
+    const wire = JSON.parse(extensionBody!);
+    const schema = getProviderOutputSchema("story");
+    expect(wire).toMatchObject({ model, response_format: { type: "json_schema", json_schema: { name: schema.name, strict: true, schema: schema.schema } }, provider: { require_parameters: true, only: ["strict-route"] } });
+    expect(invocations[extensionIndex]!.requestPayloadHash).toBe(createHash("sha256").update(extensionBody!).digest("hex"));
+  }, 60_000);
+
+  it("uses one strict scene rewrite and does not redispatch it after a response-captured crash", async () => {
+    const fixture = await enqueue();
+    primaryHasDuplicateChoices = false;
+    reviewCalls = 1;
+    sceneCoverageSequence = [false, false];
+    const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest, clock: () => verificationNow });
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, workerGraph.illustration), apiMemoryApplication(pool, credentialSecret), workerGraph.generation);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const initialWorker = `strict-scene-gate-${randomUUID()}`;
+    const initialClaim = await repository.claimNext({ workerId: initialWorker, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: initialClaim!, workerId: initialWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    const gate = await fixture.application.getReview({ ownerUserId, jobId: fixture.job.id });
+    expect(gate).toMatchObject({ stage: "scene_coverage", state: "pending" });
+    await fixture.application.decideReview({ ownerUserId, jobId: fixture.job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+    let interrupted = false;
+    const crashingRepository = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const repair = (value as { sceneCoverageRepair?: { status?: string } }).sceneCoverageRepair;
+      if (!interrupted && repair?.status === "validated") {
+        interrupted = true;
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [fixture.job.id]);
+        throw Object.assign(new Error("Injected termination after strict scene rewrite response."), { code: "generation_cancelled" });
+      }
+      return repository.saveOrchestration(scope, value);
+    } };
+    const rewriteWorker = `strict-scene-rewrite-${randomUUID()}`;
+    const rewriteClaim = await repository.claimNext({ workerId: rewriteWorker, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository: crashingRepository, collaborators }).execute({ claim: rewriteClaim!, workerId: rewriteWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    expect(interrupted).toBe(true);
+    const rewriteBodies = requests.filter((body) => body.includes("Rewrite the complete story JSON so the narration visibly dramatizes every required scene beat"));
+    expect(rewriteBodies).toHaveLength(1);
+    const strictRewrite = JSON.parse(rewriteBodies[0]!);
+    const schema = getProviderOutputSchema("story");
+    expect(strictRewrite).toMatchObject({ model, response_format: { type: "json_schema", json_schema: { name: schema.name, strict: true, schema: schema.schema } }, provider: { require_parameters: true, only: ["strict-route"] } });
+    const beforeReclaim = requests.length;
+    const reclaimWorker = `strict-scene-reclaim-${randomUUID()}`;
+    const reclaim = await repository.claimNext({ workerId: reclaimWorker, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: reclaim!, workerId: reclaimWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    expect(requests).toHaveLength(beforeReclaim);
+    const saved = (await pool.query<{ orchestrationPrivate: Record<string, any> }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id])).rows[0]!.orchestrationPrivate;
+    const invocation = (saved.responseContractInvocations as Array<{ operation: string; requestPayloadHash: string }>).find((entry) => entry.operation === "scene_coverage_rewrite");
+    expect(invocation?.requestPayloadHash).toBe(createHash("sha256").update(rewriteBodies[0]!).digest("hex"));
   }, 60_000);
 });
