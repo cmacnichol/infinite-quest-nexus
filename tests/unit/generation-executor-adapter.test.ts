@@ -3,7 +3,7 @@ import type {
   ClaimedGeneration,
   IllustrationGenerationTransactionPort
 } from "../../packages/application/src/index.js";
-import type { GenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import type { FactFormatRepairApplication, GenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import type { GenerationExecutionPayload } from "../../packages/database/src/generation-execution-repository.js";
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
@@ -15,6 +15,7 @@ import { ContextBudgetError } from "../../packages/story-engine/src/context-budg
 import { generationExecutionProtocolIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
+  appendFactFormatRepairApplication,
   generationContextFingerprint,
   planGenerationPromptContext,
   semanticRepairScope,
@@ -177,6 +178,20 @@ function authorizeReviewRetry(job: GenerationExecutionPayload, checkpoint: Gener
 }
 
 describe("generation executor adapter", () => {
+  it("records an applied fact-format repair exactly once and rejects a conflicting replay", () => {
+    const application: FactFormatRepairApplication = {
+      version: 1, jobId: claim.jobId, reviewId: "00000000-0000-4000-8000-000000000007", revision: 1,
+      planHash: "a".repeat(64), sourceResponseId: "repair-response", rawOutputReference: "generation-primary:1:1",
+      producingRequestHash: "b".repeat(64), rawOutputHash: "c".repeat(64), resultHash: "d".repeat(64),
+      providerConfigurationHash: "e".repeat(64)
+    };
+    const first = appendFactFormatRepairApplication([], application);
+    expect(appendFactFormatRepairApplication(first, application)).toEqual(first);
+    expect(() => appendFactFormatRepairApplication(first, {
+      ...application, planHash: "f".repeat(64)
+    })).toThrow(/conflicts with its receipt/u);
+  });
+
   it("prepares a final continuity offer that preserves the reviewed candidate and its retry stage", () => {
     const job = completeGenerationExecutionPayload();
     const story = storyTurnOutputSchema.parse({

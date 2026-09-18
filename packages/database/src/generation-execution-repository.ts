@@ -121,6 +121,21 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
   } | undefined;
 }>;
 
+/** Immutable record of each user-authorized fact-format repair application. */
+export type FactFormatRepairApplication = Readonly<{
+  version: 1;
+  jobId: string;
+  reviewId: string;
+  revision: number;
+  planHash: string;
+  sourceResponseId: string | null;
+  rawOutputReference: string;
+  producingRequestHash: string;
+  rawOutputHash: string;
+  resultHash: string;
+  providerConfigurationHash: string;
+}>;
+
 export type GenerationOrchestrationState = {
   /** Safe, last-known failure classification; attempts remain the historical ledger. */
   lastFailureDiagnostic?: GenerationFailureDiagnostic;
@@ -185,6 +200,8 @@ export type GenerationOrchestrationState = {
   continuityReview?: ContinuityReviewCheckpoint | undefined;
   /** Private, immutable candidate and decision evidence for a user review gate. */
   generationReview?: GenerationReviewCheckpoint | undefined;
+  /** Append-only application history; a Retry may replace the current draft but never this evidence. */
+  factFormatRepairApplications?: readonly FactFormatRepairApplication[];
   contextDiagnostic?: SafeGenerationDiagnostic;
   sourceEvidenceManifest?: GenerationEvidenceManifest;
   roll?: PrivateRollResolution | null;
@@ -262,6 +279,28 @@ export type GenerationOrchestrationState = {
   } | undefined;
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
+
+function hasValidFactFormatRepairApplications(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > 16) return false;
+  const keys = new Set<string>();
+  return value.every((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const application = entry as Record<string, unknown>;
+    const key = `${application.jobId}:${application.reviewId}:${application.revision}`;
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return application.version === 1
+      && typeof application.jobId === "string" && application.jobId.length > 0
+      && typeof application.reviewId === "string" && application.reviewId.length > 0
+      && typeof application.revision === "number" && Number.isSafeInteger(application.revision) && application.revision > 0
+      && typeof application.planHash === "string" && /^[a-f0-9]{64}$/u.test(application.planHash)
+      && (application.sourceResponseId === null || typeof application.sourceResponseId === "string")
+      && typeof application.rawOutputReference === "string" && application.rawOutputReference.length > 0
+      && ["producingRequestHash", "rawOutputHash", "resultHash", "providerConfigurationHash"]
+        .every((key) => typeof application[key] === "string" && /^[a-f0-9]{64}$/u.test(application[key] as string));
+  });
+}
 
 function hasValidAutomaticRepair(value: unknown): boolean {
   if (value === undefined) return true;
@@ -447,6 +486,41 @@ function appliedFactFormatRepairMatchesExecutionJob(
     && receipt.actionReceipt.jobId === job.id
     && receipt.actionReceipt.operationKind === job.operation_kind
     && receipt.actionReceipt.replacementTurnId === job.replacement_turn_id;
+}
+
+function factFormatRepairApplicationsMatchExecutionJob(
+  review: GenerationReviewCheckpoint,
+  orchestration: GenerationOrchestrationState,
+  job: GenerationReviewExecutionBinding
+): boolean {
+  const applications = orchestration.factFormatRepairApplications;
+  if (!hasValidFactFormatRepairApplications(applications)) return false;
+  const applicationMatchesReceipt = (application: FactFormatRepairApplication): boolean => {
+    const receipts = review.decisionJournal.filter((entry): entry is Extract<GenerationReviewCheckpoint["decisionJournal"][number], { decision: "repair_format" }> => entry.decision === "repair_format"
+      && entry.reviewId === application.reviewId && entry.revision === application.revision
+      && entry.planHash === application.planHash);
+    const receipt = receipts.length === 1 ? receipts[0] : undefined;
+    return receipt !== undefined
+      && application.jobId === job.id
+      && receipt.actorUserId === job.owner_user_id
+      && receipt.actionReceipt.jobId === job.id
+      && receipt.actionReceipt.operationKind === job.operation_kind
+      && receipt.actionReceipt.replacementTurnId === job.replacement_turn_id
+      && application.sourceResponseId === receipt.repair.sourceResponseId
+      && application.rawOutputReference === receipt.repair.rawOutputReference
+      && application.producingRequestHash === receipt.repair.producingRequestHash
+      && application.rawOutputHash === receipt.repair.plan.rawOutputHash
+      && application.resultHash === receipt.repair.plan.resultHash
+      && application.providerConfigurationHash === receipt.repair.providerConfigurationHash;
+  };
+  if (!(applications ?? []).every(applicationMatchesReceipt)) return false;
+  const applied = orchestration.validatedMainDraft?.factFormatRepair;
+  if (!applied) return true;
+  const matches = (applications ?? []).filter((application) => application.jobId === job.id
+    && application.reviewId === applied.reviewId && application.revision === applied.revision
+    && application.planHash === applied.planHash && application.rawOutputHash === applied.rawOutputHash
+    && application.resultHash === applied.resultHash);
+  return matches.length === 1;
 }
 
 export type GenerationStreamingState = Record<string, unknown> & {
@@ -1324,7 +1398,9 @@ export function createPostgresGenerationExecutionRepository(
       if ((row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
           || (storedReview !== undefined && (!storedReview.success
             || !generationReviewMatchesExecutionJob(storedReview.data, row)
-            || !appliedFactFormatRepairMatchesExecutionJob(storedReview.data, row.orchestration_private, row)))
+            || !appliedFactFormatRepairMatchesExecutionJob(storedReview.data, row.orchestration_private, row)
+            || !factFormatRepairApplicationsMatchExecutionJob(storedReview.data, row.orchestration_private, row)))
+          || !hasValidFactFormatRepairApplications(row.orchestration_private?.factFormatRepairApplications)
           || !hasValidLogicalAttempt(row.orchestration_private?.logicalAttempt)
           || !hasValidPrimaryReservation(row.orchestration_private?.primaryReservation)
           || !hasValidPrimaryResult(row.orchestration_private?.primaryResult)

@@ -368,7 +368,15 @@ integration("PostgreSQL generation review persistence", () => {
             planHash: receipt.repair.planHash, rawOutputHash: receipt.repair.plan.rawOutputHash,
             resultHash: receipt.repair.plan.resultHash
           }
-        }
+        },
+        factFormatRepairApplications: [{
+          version: 1 as const, jobId: fixture.queued.id, reviewId: receipt.reviewId, revision: receipt.revision,
+          planHash: receipt.repair.planHash, sourceResponseId: receipt.repair.sourceResponseId,
+          rawOutputReference: receipt.repair.rawOutputReference,
+          producingRequestHash: receipt.repair.producingRequestHash,
+          rawOutputHash: receipt.repair.plan.rawOutputHash, resultHash: receipt.repair.plan.resultHash,
+          providerConfigurationHash: receipt.repair.providerConfigurationHash
+        }]
       };
       await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify(applied)]);
       await expect(fixture.execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim }), `${name} positive control`)

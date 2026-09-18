@@ -55,7 +55,8 @@ import type {
   GenerationExecutionRepository,
   GenerationLeaseScope,
   GenerationOrchestrationState,
-  GenerationStreamingState
+  GenerationStreamingState,
+  FactFormatRepairApplication
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import {
@@ -909,6 +910,22 @@ async function persistOrchestration(
   return merged;
 }
 
+export function appendFactFormatRepairApplication(
+  prior: readonly FactFormatRepairApplication[] | undefined,
+  application: FactFormatRepairApplication
+): readonly FactFormatRepairApplication[] {
+  const sameKey = (entry: FactFormatRepairApplication) => entry.jobId === application.jobId
+    && entry.reviewId === application.reviewId && entry.revision === application.revision;
+  const existing = (prior ?? []).find(sameKey);
+  if (!existing) return [...(prior ?? []), application];
+  if (stableStringify(existing) !== stableStringify(application)) {
+    throw Object.assign(new Error("The saved fact-format application conflicts with its receipt."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  return prior ?? [application];
+}
+
 async function callCampaignTextProvider(
   dependencies: GenerationExecutorDependencies,
   provider: GenerationTextProvider,
@@ -1656,6 +1673,19 @@ async function executeLoadedGeneration(
       const appliedReview = generationReviewCheckpointSchema.parse({
         ...savedReview.data, factFormatRepair: { ...repair, status: "applied", failureCode: null }
       });
+      const applications = appendFactFormatRepairApplication(orchestration.factFormatRepairApplications, {
+        version: 1,
+        jobId: job.id,
+        reviewId: savedReview.data.reviewId,
+        revision: receipt.revision,
+        planHash: repair.planHash,
+        sourceResponseId: repair.sourceResponseId,
+        rawOutputReference: repair.rawOutputReference,
+        producingRequestHash: repair.producingRequestHash,
+        rawOutputHash: repair.plan.rawOutputHash,
+        resultHash: repair.plan.resultHash,
+        providerConfigurationHash: repair.providerConfigurationHash
+      });
       const draft = {
         version: 2 as const, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
         worldVersionId: job.world_version_id || null, baseIdentity: job.generation_base_identity,
@@ -1669,7 +1699,11 @@ async function executeLoadedGeneration(
         factFormatRepair: { version: 1 as const, reviewId: savedReview.data.reviewId, revision: receipt.revision,
           planHash: repair.planHash, rawOutputHash: repair.plan.rawOutputHash, resultHash: repair.plan.resultHash }
       };
-      orchestration = await persistOrchestration(repository, scope, job, { generationReview: appliedReview, validatedMainDraft: draft });
+      orchestration = await persistOrchestration(repository, scope, job, {
+        generationReview: appliedReview,
+        validatedMainDraft: draft,
+        factFormatRepairApplications: applications
+      });
       validatedDraft = compatibleValidatedMainDraft(orchestration.validatedMainDraft, job, provider, storyInput, orchestration.semanticRepair, orchestration.generationReview);
       if (!validatedDraft) { await incompatible(); return true; }
     }
