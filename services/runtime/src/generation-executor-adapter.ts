@@ -469,6 +469,24 @@ function emptyOutputFailureDiagnostic(attemptNumber: number): GenerationFailureD
   };
 }
 
+function rejectedCandidateFailureDiagnostic(
+  reason: "invalid_structure" | "output_incomplete" | "mechanics_contamination" | "invalid_choices",
+  attemptNumber: number
+): GenerationFailureDiagnostic {
+  const code = reason === "output_incomplete" ? "output_limit"
+    : reason === "mechanics_contamination" ? "mechanics_leak"
+    : "invalid_schema";
+  return {
+    version: 1,
+    category: reason === "output_incomplete" ? "output_incomplete"
+      : reason === "mechanics_contamination" ? "mechanics" : "format",
+    code,
+    phase: "story_validation",
+    attemptNumber,
+    occurredAt: new Date().toISOString()
+  };
+}
+
 function assertActiveGenerationUpdate(changed: boolean, action: string): void {
   if (!changed) {
     throw Object.assign(new Error(`Generation was cancelled or its lease was lost while ${action}.`), {
@@ -987,8 +1005,11 @@ async function executeLoadedGeneration(
     jobAttempt: job.attempts,
     workerId
   };
-  const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) =>
-    runTurnGenerationPhase(diagnosticContext, phaseName, generationStartedAt, operation);
+  let activePhase: TurnGenerationPhase = "orchestration_loading";
+  const phase = <T>(phaseName: TurnGenerationPhase, operation: () => Promise<T>) => {
+    activePhase = phaseName;
+    return runTurnGenerationPhase(diagnosticContext, phaseName, generationStartedAt, operation);
+  };
   const frozenStoryMemoryPolicy = job.context_options && typeof job.context_options === "object" && "storyMemoryPolicy" in job.context_options
     ? storyMemoryPolicySnapshotSchema.safeParse((job.context_options as Record<string, unknown>).storyMemoryPolicy)
     : null;
@@ -1950,9 +1971,12 @@ async function executeLoadedGeneration(
           decisionJournal: savedReview.data.decisionJournal,
           revision: savedReview.data.revision + 1
         } : {}) });
-      if (!result.content.trim()) {
+      const diagnostic = !result.content.trim()
+        ? emptyOutputFailureDiagnostic(initialAttemptNumber)
+        : rejectedCandidateFailureDiagnostic(reason, initialAttemptNumber);
+      if (diagnostic) {
         orchestration = await persistOrchestration(repository, scope, job, {
-          lastFailureDiagnostic: emptyOutputFailureDiagnostic(initialAttemptNumber)
+          lastFailureDiagnostic: diagnostic
         });
       }
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected primary candidate for review");
@@ -3358,7 +3382,7 @@ async function executeLoadedGeneration(
       errorCode: PUBLIC_GENERATION_FAILURE_CODE,
       errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
       recoveryMetadata: transportError ? { transportError } : {},
-      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, "story_generation")
+      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, activePhase)
     });
     if (failed) {
       logger.error({

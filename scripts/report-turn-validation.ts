@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { summarizeValidationOutcomes, type JobOutcome, type ValidationObservation } from "../packages/application/src/generation/outcome-metrics.js";
+import { projectGenerationFailureDiagnostic } from "../packages/contracts/src/generation-review.js";
 
 export type TurnValidationReportOptions = Readonly<{
   limit: number;
@@ -8,8 +9,13 @@ export type TurnValidationReportOptions = Readonly<{
 }>;
 
 type QueryClient = Readonly<{ query<T = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<{ rows: T[] }> }>;
-type JobRow = Readonly<{ id: string; status: JobOutcome["status"]; createdAt: string; promptProtocol: string | null; requestedModel: string; contextOptions: Record<string, unknown> | null; generationPolicy: Record<string, unknown> | null }>;
-type AttemptRow = Readonly<{ jobId: string; attemptNumber: number; recoveryKind: string; providerResponseId: string | null; validationErrors: unknown; responseMetadata: Record<string, unknown> | null }>;
+type JobRow = Readonly<{ id: string; status: JobOutcome["status"]; createdAt: string; promptProtocol: string | null; requestedModel: string; errorCode: string | null; failureDiagnostic: unknown; contextOptions: Record<string, unknown> | null; generationPolicy: Record<string, unknown> | null }>;
+type AttemptRow = Readonly<{ jobId: string; attemptNumber: number; recoveryKind: string; providerResponseId: string | null; completedAt: string | null; hasOutput: boolean; validationErrors: unknown; requestMetadata: Record<string, unknown> | null; responseMetadata: Record<string, unknown> | null }>;
+
+function reportLabel(value: unknown): string {
+  const label = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/u.test(label) ? label : "unknown";
+}
 
 export function parseTurnValidationReportOptions(args: readonly string[]): TurnValidationReportOptions {
   const value = (name: string) => {
@@ -31,26 +37,29 @@ export function parseTurnValidationReportOptions(args: readonly string[]): TurnV
 
 function observationFrom(row: AttemptRow): ValidationObservation {
   const errors = Array.isArray(row.validationErrors) ? row.validationErrors : null;
-  const outputLimited = row.responseMetadata?.outputLimited === true;
   return {
     jobId: row.jobId,
     attemptNumber: row.attemptNumber,
     operation: row.recoveryKind === "initial" ? "initial" : "repair",
-    outcome: !row.providerResponseId || !errors || outputLimited ? "unknown" : errors.length ? "invalid" : "valid"
+    outcome: !row.completedAt || !row.hasOutput || !errors ? "unknown" : errors.length ? "invalid" : "valid"
   };
 }
 
-function cohort(row: JobRow): Record<string, string> {
+function cohort(row: JobRow, configuredModel: string): Record<string, string> {
   const policy = row.generationPolicy ?? {};
   const context = row.contextOptions ?? {};
   const budget = typeof context.budgetTokens === "number" ? context.budgetTokens : null;
+  const memoryPolicy = typeof context.storyMemoryPolicy === "object" && context.storyMemoryPolicy !== null
+    ? context.storyMemoryPolicy as Record<string, unknown>
+    : null;
+  const policyMetadata = memoryPolicy && typeof memoryPolicy.policy === "object" && memoryPolicy.policy !== null
+    ? memoryPolicy.policy as Record<string, unknown>
+    : null;
   return {
-    promptProtocol: row.promptProtocol ?? "unknown",
-    configuredModel: row.requestedModel || "unknown",
-    playMode: typeof policy.playMode === "string" ? policy.playMode : "unknown",
-    reviewMode: typeof context.storyMemoryPolicy === "object" && context.storyMemoryPolicy !== null
-      && typeof (context.storyMemoryPolicy as Record<string, unknown>).policy === "object"
-      ? String(((context.storyMemoryPolicy as Record<string, unknown>).policy as Record<string, unknown>).continuityReview ?? "unknown") : "unknown",
+    promptProtocol: reportLabel(row.promptProtocol),
+    configuredModel,
+    playMode: reportLabel(policy.playMode),
+    reviewMode: reportLabel(policyMetadata?.continuityReview),
     contextBucket: budget === null ? "unknown" : budget < 32_000 ? "under-32k" : budget < 128_000 ? "32k-127k" : "128k-plus"
   };
 }
@@ -60,6 +69,7 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
   try {
     const jobs = await client.query<JobRow>(
       `SELECT id, status, created_at AS "createdAt", prompt_protocol_version AS "promptProtocol", requested_model AS "requestedModel",
+              error_code AS "errorCode", orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
               context_options AS "contextOptions", generation_policy AS "generationPolicy"
          FROM generation_jobs
         WHERE ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
@@ -69,20 +79,59 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
     const ids = jobs.rows.map((row) => row.id);
     const attempts = ids.length === 0 ? { rows: [] as AttemptRow[] } : await client.query<AttemptRow>(
       `SELECT generation_job_id AS "jobId", attempt_number AS "attemptNumber", recovery_kind AS "recoveryKind",
-              provider_response_id AS "providerResponseId", validation_errors AS "validationErrors", response_metadata AS "responseMetadata"
+              provider_response_id AS "providerResponseId", completed_at AS "completedAt",
+              (raw_output IS NOT NULL AND length(raw_output) > 0) AS "hasOutput",
+              validation_errors AS "validationErrors", request_metadata AS "requestMetadata", response_metadata AS "responseMetadata"
          FROM generation_attempts WHERE generation_job_id = ANY($1::uuid[]) ORDER BY generation_job_id, attempt_number`, [ids]
     );
     const metrics = summarizeValidationOutcomes(jobs.rows.map((row) => ({ jobId: row.id, status: row.status })), attempts.rows.map(observationFrom));
     const actualModels = new Map<string, string>();
+    const frozenInitialModels = new Map<string, { attemptNumber: number; model: string }>();
     for (const attempt of attempts.rows) {
       const model = attempt.responseMetadata?.modelInstanceId;
       if (!actualModels.has(attempt.jobId) && typeof model === "string" && model.trim()) actualModels.set(attempt.jobId, model);
+      const initialModel = attempt.requestMetadata?.model;
+      const priorInitial = frozenInitialModels.get(attempt.jobId);
+      if (attempt.recoveryKind === "initial" && typeof initialModel === "string" && initialModel.trim()
+          && (!priorInitial || attempt.attemptNumber < priorInitial.attemptNumber)) {
+        frozenInitialModels.set(attempt.jobId, { attemptNumber: attempt.attemptNumber, model: initialModel });
+      }
+    }
+    const observations = attempts.rows.map(observationFrom);
+    const initialByJob = new Map<string, ValidationObservation>();
+    for (const observation of observations) if (observation.operation === "initial"
+      && (!initialByJob.has(observation.jobId) || observation.attemptNumber < initialByJob.get(observation.jobId)!.attemptNumber)) initialByJob.set(observation.jobId, observation);
+    const cohortGroups = new Map<string, { labels: Record<string, string>; jobs: JobOutcome[]; observations: ValidationObservation[] }>();
+    for (const job of jobs.rows) {
+      const requestedModel = reportLabel(job.requestedModel);
+      const configuredModel = requestedModel === "unknown"
+        ? reportLabel(frozenInitialModels.get(job.id)?.model)
+        : requestedModel;
+      const labels = cohort(job, configuredModel);
+      const key = JSON.stringify(labels);
+      const group = cohortGroups.get(key) ?? { labels, jobs: [], observations: [] };
+      group.jobs.push({ jobId: job.id, status: job.status });
+      group.observations.push(...observations.filter((observation) => observation.jobId === job.id));
+      cohortGroups.set(key, group);
     }
     return {
       window: { since: options.since, limit: options.limit, reportedAt: new Date().toISOString() },
       buildIdentity: process.env.GIT_SHA ?? process.env.BUILD_SHA ?? "unknown",
       metrics,
-      cohorts: jobs.rows.map((row) => ({ jobId: row.id, ...cohort(row), actualReturnedModel: actualModels.get(row.id) ?? "unknown" }))
+      outcomes: jobs.rows.map((row) => {
+        const failureDiagnostic = projectGenerationFailureDiagnostic(row.failureDiagnostic);
+        const requestedModel = reportLabel(row.requestedModel);
+        const configuredModel = requestedModel === "unknown"
+          ? reportLabel(frozenInitialModels.get(row.id)?.model)
+          : requestedModel;
+        return { jobId: row.id, finalStatus: row.status,
+        initialOutcome: initialByJob.get(row.id)?.outcome ?? "unknown",
+        finalErrorCode: failureDiagnostic?.code ?? (row.errorCode ? "generation_failed" : "unknown"),
+        failureDiagnostic,
+        configuredModel, actualReturnedModel: reportLabel(actualModels.get(row.id)) };
+      }),
+      cohorts: [...cohortGroups.values()].map((group) => ({ ...group.labels,
+        metrics: summarizeValidationOutcomes(group.jobs, group.observations) }))
     };
   } finally {
     await client.query("ROLLBACK");
@@ -99,6 +148,10 @@ function markdown(report: Awaited<ReturnType<typeof readTurnValidationReport>>):
 
 export async function main(): Promise<void> {
   const options = parseTurnValidationReportOptions(process.argv.slice(2));
+  // Runtime configuration historically falls back to argv[2] for service
+  // entrypoints. This standalone CLI owns that value so report flags cannot
+  // be misread as a service role.
+  process.env.APP_ROLE ??= "all";
   const [{ loadRuntimeConfig }, { createDatabasePool }] = await Promise.all([
     import("../packages/database/src/config.js"), import("../packages/database/src/pool.js")
   ]);

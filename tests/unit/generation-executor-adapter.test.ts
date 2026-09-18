@@ -656,11 +656,41 @@ describe("generation executor adapter", () => {
     }));
   });
 
+  it("records a fatal diagnostic against the phase that actually failed", async () => {
+    const job = completeGenerationExecutionPayload();
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+      recordAttempt: vi.fn(async () => { throw Object.assign(new Error("persisted validation attempt failed"), { code: "invalid_schema" }); }),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "unexpected" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Validation phase provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content: JSON.stringify({ narration: "The moonlit observatory opens.", choices: ["Enter.", "Wait.", "Study.", "Call."], custom_action_suggestion: "Study the lens.", scratchpad: "", tracker_updates: [], image_prompt: "A moonlit observatory.", continuity_summary: "The observatory opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), responseId: "validation-phase", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {} }))
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "validation-phase", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(repository.markFailed).toHaveBeenCalledWith(expect.objectContaining({
+      lastFailureDiagnostic: expect.objectContaining({ category: "format", code: "invalid_schema", phase: "story_validation", attemptNumber: 1 })
+    }));
+  });
+
   it.each([
-    { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation"], errorCode: "invalid_json", expectedStage: "structure", expectedReason: "invalid_structure" },
-    { label: "output-limited partial JSON", content: "{\"narration\":\"The observatory", outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit", expectedStage: "structure", expectedReason: "output_incomplete" },
-    { label: "output-limited duplicate choices", content: JSON.stringify({ narration: "The observatory door opens.", choices: ["Wait.", " WAIT. ", "Look.", "Listen."], custom_action_suggestion: "Study.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "The door opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit", expectedStage: "choices", expectedReason: "invalid_choices" }
-  ])("keeps Story Direction $label recoverable without mechanical follow-up dispatch", async ({ content, outputLimited, expectedOperations, errorCode, expectedStage, expectedReason }) => {
+    { label: "malformed JSON", content: "{not-valid-json", outputLimited: false, expectedOperations: ["story_generation"], errorCode: "invalid_json", expectedStage: "structure", expectedReason: "invalid_structure", failureCategory: "format", failureCode: "invalid_schema" },
+    { label: "schema-invalid JSON", content: JSON.stringify({ narration: "The observatory door opens." }), outputLimited: false, expectedOperations: ["story_generation"], errorCode: "invalid_schema", expectedStage: "structure", expectedReason: "invalid_structure", failureCategory: "format", failureCode: "invalid_schema" },
+    { label: "mechanics-contaminated JSON", content: JSON.stringify({ narration: "Test Character rolls a 17 and opens the observatory.", choices: ["Enter.", "Wait.", "Study.", "Call."], custom_action_suggestion: "Study the lens.", scratchpad: "", tracker_updates: [], image_prompt: "A moonlit observatory.", continuity_summary: "The observatory opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), outputLimited: false, expectedOperations: ["story_generation"], errorCode: "mechanics_leak", expectedStage: "structure", expectedReason: "mechanics_contamination", failureCategory: "mechanics", failureCode: "mechanics_leak" },
+    { label: "output-limited partial JSON", content: "{\"narration\":\"The observatory", outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit", expectedStage: "structure", expectedReason: "output_incomplete", failureCategory: "output_incomplete", failureCode: "output_limit" },
+    { label: "output-limited duplicate choices", content: JSON.stringify({ narration: "The observatory door opens.", choices: ["Wait.", " WAIT. ", "Look.", "Listen."], custom_action_suggestion: "Study.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "The door opens.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), outputLimited: true, expectedOperations: ["story_generation"], errorCode: "output_limit", expectedStage: "choices", expectedReason: "invalid_choices", failureCategory: "format", failureCode: "invalid_schema" }
+  ])("keeps Story Direction $label recoverable without mechanical follow-up dispatch", async ({ content, outputLimited, expectedOperations, errorCode, expectedStage, expectedReason, failureCategory, failureCode }) => {
     const job = completeGenerationExecutionPayload();
     job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
     const policy = {
@@ -710,6 +740,10 @@ describe("generation executor adapter", () => {
     expect(repository.pauseForReview).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       state: "pending", stage: expectedStage, candidateScope: "main",
       reasons: [expectedReason]
+    }));
+    expect(repository.saveOrchestration).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      lastFailureDiagnostic: expect.objectContaining({ version: 1, category: failureCategory, code: failureCode,
+        phase: "story_validation", attemptNumber: 1 })
     }));
   });
 

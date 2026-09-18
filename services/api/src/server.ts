@@ -45,7 +45,7 @@ import {
   providerProfileUpdateSchema,
   providerTextRequestSchema
 } from "../../../packages/contracts/src/generation.js";
-import { generationReviewDecisionRequestSchema, projectGenerationFailureDiagnostic } from "../../../packages/contracts/src/generation-review.js";
+import { generationFailureDiagnosticProjectionSchema, generationReviewDecisionRequestSchema } from "../../../packages/contracts/src/generation-review.js";
 import { projectGenerationReviewDetailResponse, projectGenerationReviewSnapshot } from "./generation-review-projection.js";
 import { projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
 import { storyMemorySettingsUpdateSchema } from "../../../packages/contracts/src/story-memory-policy.js";
@@ -353,7 +353,8 @@ function generationPublicFailureDiagnostic(value: unknown) {
   const candidate = typeof value === "object" && value !== null && "failureDiagnostic" in value
     ? (value as { failureDiagnostic?: unknown }).failureDiagnostic
     : null;
-  return projectGenerationFailureDiagnostic(candidate);
+  const parsed = generationFailureDiagnosticProjectionSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
 }
 
 function generationSnapshot(value: unknown) {

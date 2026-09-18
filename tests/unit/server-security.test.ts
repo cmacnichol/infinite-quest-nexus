@@ -1226,6 +1226,10 @@ describe("API server security and CORS headers", () => {
               errorCode: "provider_transport_error",
               errorMessage: rawFailure,
               recoveryMetadata: {},
+              failureDiagnostic: {
+                version: 1, category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation",
+                attemptNumber: 1, occurredAt: "2026-09-18T00:00:00.000Z", privateMessage: rawFailure
+              },
               createdAt: new Date(),
               updatedAt: new Date(),
               completedAt: new Date(),
@@ -1240,6 +1244,13 @@ describe("API server security and CORS headers", () => {
     const app = await buildServer(serverOptions({ config: makeConfig(), pool: mockPool }));
 
     try {
+      const snapshot = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}` });
+      expect(snapshot.statusCode).toBe(200);
+      expect(snapshot.json()).toMatchObject({
+        failureDiagnostic: { code: "provider_request_timeout", message: "The provider request timed out." }
+      });
+      expect(snapshot.body).not.toContain(rawFailure);
+
       const response = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
 
       expect(response.statusCode).toBe(200);
@@ -1253,7 +1264,8 @@ describe("API server security and CORS headers", () => {
         status: "cancelled",
         partialNarration: fixturePartialNarration,
         errorCode: "generation_failed",
-        errorMessage: "Generation could not be completed."
+        errorMessage: "Generation could not be completed.",
+        failureDiagnostic: { code: "provider_request_timeout", message: "The provider request timed out." }
       });
       expect(snapshotPayload).not.toHaveProperty("partialOutput");
       expect(response.body).not.toContain(rawFailure);
