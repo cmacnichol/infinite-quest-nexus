@@ -1,7 +1,8 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
+import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
-import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
+import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, serializeProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
 import { resolveEffectiveContextWindowTokens } from "./context-budget.js";
 import { estimateStoryTokens } from "./token-estimate.js";
 import type { CanonicalProviderRequest, PreparedProviderRequest, ProviderOutputBudget } from "./provider-request.js";
@@ -64,6 +65,7 @@ export type ProviderRequest = {
   budgetOutput?: ProviderOutputBudget;
   /** Authoring calls account for every generation request themselves. */
   responseFormatFallback?: "allow" | "forbid";
+  responseContract?: PreparedResponseContract;
 };
 
 export type ProviderResult = {
@@ -72,6 +74,9 @@ export type ProviderResult = {
   finishReason: string;
   outputLimited: boolean;
   modelInstanceId: string;
+  /** Provider-observed identity, never substituted from the requested model. */
+  returnedModel?: string | null;
+  returnedProviderRoute?: string | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
@@ -951,7 +956,7 @@ function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequ
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
     contextWindowTokens: effectiveContextWindowTokens,
     output: request.budgetOutput ?? { kind: "story_append" },
-    ...(responseFormat === undefined ? {} : { responseFormat })
+    ...(request.responseContract ? { responseContract: request.responseContract } : responseFormat === undefined ? {} : { responseFormat })
   });
 }
 
@@ -963,6 +968,7 @@ function reportResponseHeaders(request: ProviderRequest, response: Response): vo
 }
 
 async function callLmStudio(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
+  if (request.responseContract) throw new Error("Native LM Studio cannot dispatch a prepared response contract.");
   const prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
@@ -986,6 +992,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
       finishReason: String(finishValues.find(Boolean) || ""),
       outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
       modelInstanceId: String(finalData.model_instance_id || profile.model),
+      returnedModel: typeof finalData.model_instance_id === "string" && finalData.model_instance_id ? finalData.model_instance_id : null,
+      returnedProviderRoute: typeof finalData.provider === "string" && finalData.provider ? finalData.provider : null,
       usage: { inputTokens: Number(stats.input_tokens || 0), outputTokens, totalTokens: Number(stats.input_tokens || 0) + outputTokens },
       reportedCost: null,
       rawMetadata: { status: finalData.status || "", modelInstanceId: finalData.model_instance_id || "" },
@@ -1004,6 +1012,8 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
     finishReason: String(finishValues.find(Boolean) || ""),
     outputLimited: limitReason(finishValues) || (outputTokens > 0 && outputTokens >= profile.maxOutputTokens),
     modelInstanceId: String(data.model_instance_id || profile.model),
+    returnedModel: typeof data.model_instance_id === "string" && data.model_instance_id ? data.model_instance_id : null,
+    returnedProviderRoute: typeof data.provider === "string" && data.provider ? data.provider : null,
     usage: { inputTokens: Number(data.stats?.input_tokens || 0), outputTokens, totalTokens: Number(data.stats?.input_tokens || 0) + outputTokens },
     reportedCost: null,
     rawMetadata: { status: data.status || "", modelInstanceId: data.model_instance_id || "" },
@@ -1012,7 +1022,9 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  let prepared = request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
+  let prepared = request.responseContract
+    ? serializeProviderRequest(profile, canonicalRequest(request), { responseContract: request.responseContract })
+    : request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
   const send = async (preparedRequest: PreparedProviderRequest) => {
     const response = await sendPreparedProviderRequest(profile, preparedRequest, transport);
@@ -1031,7 +1043,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     } finally {
       await originalCancellation?.catch(() => undefined);
     }
-    if (request.responseFormatFallback !== "forbid" && /response_format|json.?mode|structured.?output|grammar/i.test(text)) {
+    if (!request.responseContract && request.responseFormatFallback !== "forbid" && /response_format|json.?mode|structured.?output|grammar/i.test(text)) {
       prepared = request.canonicalBudgeting
         ? checkedStoryRequest(profile, request, false)
         : serializeLegacyProviderRequest(profile, request, { responseFormat: false });
@@ -1055,6 +1067,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       finishReason,
       outputLimited: limitReason([finishReason]),
       modelInstanceId,
+      returnedModel: typeof allData.map((item) => item.model).find(Boolean) === "string" ? String(allData.map((item) => item.model).find(Boolean)) : typeof finalData.model === "string" && finalData.model ? finalData.model : null,
+      returnedProviderRoute: typeof allData.map((item) => item.provider).find(Boolean) === "string" ? String(allData.map((item) => item.provider).find(Boolean)) : typeof finalData.provider === "string" && finalData.provider ? finalData.provider : null,
       usage: {
         inputTokens: Number(usageObj.prompt_tokens || 0),
         outputTokens: Number(usageObj.completion_tokens || 0),
@@ -1077,6 +1091,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     finishReason,
     outputLimited: limitReason([finishReason]),
     modelInstanceId: String(data.model || profile.model),
+    returnedModel: typeof data.model === "string" && data.model ? data.model : null,
+    returnedProviderRoute: typeof data.provider === "string" && data.provider ? data.provider : null,
     usage: {
       inputTokens: Number(data.usage?.prompt_tokens || 0),
       outputTokens: Number(data.usage?.completion_tokens || 0),

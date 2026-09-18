@@ -44,6 +44,29 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 }
 
 describe("provider request serialization", () => {
+  it("serializes a prepared strict OpenRouter contract into the exact dispatched body", async () => {
+    const openRouter = { ...profile, providerType: "openrouter" as const, baseUrl: "https://openrouter.ai/api/v1" };
+    const responseContract = {
+      version: 1, mode: "json_schema", operation: "story", streaming: false,
+      schemaVersion: "story-native-v1", schemaHash: "a".repeat(64), schemaName: "story",
+      schema: { type: "object", properties: { narration: { type: "string" } }, required: ["narration"], additionalProperties: false },
+      providerRoutingSlugs: ["provider/region"], routeConfigHash: "b".repeat(64),
+      adapterProtocol: "text-schema-adapter-v1", forbidFormatFallback: true
+    } as const;
+    const prepared = serializeProviderRequest(openRouter, {
+      systemPrompt: "rules", input: "action", responseContract
+    } as never);
+    const sent: string[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      sent.push(String(init?.body));
+      return new Response(JSON.stringify({ id: "actual", model: "actual/model", choices: [{ message: { content: "{}" }, finish_reason: "stop" }], usage: {} }), { status: 200 });
+    });
+    await callTextProvider(openRouter, { systemPrompt: "rules", input: "action", responseContract } as never, createTestProviderTransport(fetcher as typeof fetch));
+    const body = JSON.parse(prepared.body);
+    expect(body.response_format).toEqual({ type: "json_schema", json_schema: { name: "story", strict: true, schema: responseContract.schema } });
+    expect(body.provider).toEqual({ require_parameters: true, only: ["provider/region"] });
+    expect(sent).toEqual([prepared.body]);
+  });
   it("measures the compact Story Direction choice repair wire body and rejects an oversized protected base before transport", () => {
     const base = {
       narration: "The gate closes behind you.", scratchpad: "", tracker_updates: [], image_prompt: "",
