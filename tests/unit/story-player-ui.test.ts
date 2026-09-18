@@ -37,6 +37,7 @@ async function bootLegacyStory({
   illustrationSegments = [],
   classifyTurnInput,
   workflow = { resume: async () => null },
+  failedTurnPrompts,
   updateCampaignState = vi.fn().mockResolvedValue({})
 }: {
   turns: Array<Record<string, unknown>>;
@@ -53,6 +54,7 @@ async function bootLegacyStory({
   illustrationSegments?: Array<Record<string, unknown>>;
   classifyTurnInput?: ReturnType<typeof vi.fn>;
   workflow?: Record<string, unknown>;
+  failedTurnPrompts?: Record<string, unknown>;
   updateCampaignState?: ReturnType<typeof vi.fn>;
 }) {
   const { document, window } = parseHTML(storyHtml);
@@ -111,6 +113,7 @@ async function bootLegacyStory({
       imageJobs: async () => ({ jobs: [] })
     },
     workflow,
+    ...(failedTurnPrompts ? { failedTurnPrompts } : {}),
     pendingSubmissions: { clear: () => undefined },
     idFactory: { create: () => "submission-101" },
     clock: { now: () => 1 }
@@ -366,6 +369,35 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await vi.waitFor(() => expect(action.value).toBe("Return the lantern to its keeper."));
       expect(workflow.submit).toHaveBeenCalledTimes(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("keeps a rejected local append out of an already-active generation's retained prompt", async () => {
+    const saved: unknown[] = [];
+    const activeConflict = Object.assign(new Error("A turn is already generating."), {
+      statusCode: 409,
+      domainCode: "active_generation_exists",
+      details: { pendingGeneration: { id: "existing-job", action: "Authoritative active prompt.", operationKind: "append", expectedTurnNumber: 2 } }
+    });
+    const workflow = {
+      submit: vi.fn(async () => { throw activeConflict; }),
+      resume: vi.fn(async () => ({
+        jobId: "existing-job",
+        async *watch() { yield { type: "settled" as const, outcome: "failed" as const, error: new Error("provider stopped") }; }
+      }))
+    };
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 1), workflow,
+        failedTurnPrompts: { save: (prompt: unknown) => saved.push(prompt), load: () => null, clear: () => undefined }
+      });
+      const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+      action.value = "Keep this local prompt.";
+      document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(workflow.resume).toHaveBeenCalledOnce());
+
+      expect(saved).toEqual([]);
+      expect(action.value).toBe("Keep this local prompt.");
     } finally { vi.unstubAllGlobals(); }
   });
 
@@ -836,7 +868,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("orchestrates turn generation through the shared workflow with progress, recovery, and retry", () => {
     expect(storyScript).toContain('async function runGeneration(action, options = {})');
     expect(storyScript).toContain('idempotencyKey: options.idempotencyKey || composition.idFactory.create()');
-    expect(storyScript).toContain('const conflict = await resumeActiveGenerationConflict(error, state.campaignId, composition.workflow);');
+    expect(storyScript).toContain('const conflict = await resumeActiveGenerationConflict(error, submissionCampaignId, composition.workflow);');
     expect(storyScript).toContain('toast(conflict.message)');
     expect(storyScript).toContain('run = conflict.run;');
     expect(storyScript).not.toContain('async function enqueueGenerationSubmission(submission)');

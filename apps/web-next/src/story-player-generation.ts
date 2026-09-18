@@ -174,6 +174,8 @@ export function createStoryGenerationController(
           expectedTurnNumber: appendExpectedTurnNumber(campaign),
           request: submissionRequest(submission)
         });
+        if (dependencies.currentCampaign()?.id !== campaign.id
+          || dependencies.currentCampaign()?.activeTurnNumber !== campaign.activeTurnNumber) return false;
         dependencies.onSubmitted?.(run, submission);
         return attach(run);
       } catch (error) {

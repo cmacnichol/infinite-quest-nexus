@@ -7,7 +7,7 @@ import {
   type CampaignProjection,
   type StoryTurnInputMode
 } from "@infinite-quest/client-core";
-import { createStoryMemoryApi } from "@infinite-quest/client-web";
+import { createStoryMemoryApi, type RetainedAppendPrompt } from "@infinite-quest/client-web";
 import type {
   AcceptedTurnCorrectionView,
   CampaignCharacterProfileUpdate,
@@ -194,7 +194,7 @@ export function mountStoryPlayerPage(
   let inspectionRequestToken = 0;
   let autoSubmitTurnChoices = false;
   let submittedDraft: string | null = null;
-  let retainedAppendDraft: Readonly<{ campaignId: string; expectedTurnNumber: number; action: string }> | null = null;
+  let retainedAppendDraft: RetainedAppendPrompt | null = null;
   let composerDraftEditRevision = 0;
   let programmaticFollowTarget: ViewportPosition | null = null;
   let illustrationRequestKey: string | null = null;
@@ -233,7 +233,7 @@ export function mountStoryPlayerPage(
     },
     onSubmitted(run, submission) {
       const campaign = projection.campaign;
-      if (run.operationKind === "append" && campaign !== null) {
+      if (run.operationKind === "append" && campaign !== null && run.campaignId === campaign.id) {
         retainAppendDraft(campaign.id, campaign.activeTurnNumber + 1, run.jobId, submission.action, submission.requestedInputMode);
       }
     },
@@ -513,7 +513,11 @@ export function mountStoryPlayerPage(
       || ui.get().draft.trim()) return;
     submittedDraft = null;
     retainedAppendDraft = null;
-    ui.setRequestedInputMode(retained.requestedInputMode);
+    ui.setRequestedInputMode(
+      composerCampaign()?.turnControlStyle === "flexible_action"
+        ? retained.requestedInputMode
+        : turnInputModeForControlStyle(composerCampaign()?.turnControlStyle)
+    );
     ui.restoreComposerDraft(retained.action);
   };
   const captureHydratedAppendDraft = (sync: import("@infinite-quest/contracts").CampaignSyncStatus): void => {
@@ -531,7 +535,7 @@ export function mountStoryPlayerPage(
       stored = null;
     }
     if (sync.pendingGeneration?.operationKind === "append" && stored?.operationKind === "append" && stored.jobId === sync.pendingGeneration.id && stored.expectedTurnNumber === generation.expectedTurnNumber) {
-      retainAppendDraft(sync.campaign.id, generation.expectedTurnNumber, stored.jobId, stored.request.action, stored.request.requestedInputMode);
+      retainAppendDraft(sync.campaign.id, generation.expectedTurnNumber, stored.jobId, stored.request.action, stored.request.resolvedInputMode);
     }
   };
   const isUnrecoverableAppendFailure = (): boolean => {

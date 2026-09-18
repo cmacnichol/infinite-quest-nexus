@@ -1346,6 +1346,7 @@ function captureHydratedAppendDraft(syncData) {
 
 async function runGeneration(action, options = {}) {
   if (!state.campaignLoaded) return;
+  const submissionCampaignId = state.campaignId;
   showBusy("Queueing turn with the Story Engine…");
   state.abortController = new AbortController();
   const progressEl = $("generationProgress");
@@ -1386,29 +1387,40 @@ async function runGeneration(action, options = {}) {
       ...(operationKind === "replace_latest" ? { expectedCurrentTurnNumber: expectedTurnNumber } : {})
     };
     let run;
+    let attachedConflict = false;
+    let conflictPendingGeneration = null;
     try {
       run = await composition.workflow.submit(
-        state.campaignId,
+        submissionCampaignId,
         generationSubmissionInput(submission, request)
       );
     } catch (error) {
-      const conflict = await resumeActiveGenerationConflict(error, state.campaignId, composition.workflow);
+      const conflict = await resumeActiveGenerationConflict(error, submissionCampaignId, composition.workflow);
       if (!conflict) throw error;
       toast(conflict.message);
       recordActivity("system", "Attached to active generation", `jobId=${conflict.pendingGeneration.id || "unknown"}`);
       run = conflict.run;
-      state.pendingGeneration = conflict.pendingGeneration;
+      attachedConflict = true;
+      conflictPendingGeneration = conflict.pendingGeneration;
     }
+    if (state.campaignId !== submissionCampaignId
+      || (operationKind === "append" && appendExpectedTurnNumber(state.campaign) !== expectedTurnNumber)) return;
     resetStoryLengthOverrideControls();
     options.onAttached?.();
     state.generationRun = run;
-    if (operationKind === "append") {
-      retainAppendDraft(state.campaignId, expectedTurnNumber, run.jobId, action, submission.requestedInputMode);
+    if (operationKind === "append" && !attachedConflict) {
+      retainAppendDraft(submissionCampaignId, expectedTurnNumber, run.jobId, action, submission.requestedInputMode);
+    } else if (operationKind === "append") {
+      // The conflicting job belongs to another local submission. Keep this
+      // draft local, but never associate it with that authoritative job.
+      restoreRetainedAppendDraft();
     }
-    state.pendingGeneration = state.pendingGeneration?.id === run.jobId
+    state.pendingGeneration = attachedConflict
+      ? conflictPendingGeneration
+      : state.pendingGeneration?.id === run.jobId
       ? state.pendingGeneration
       : { id: run.jobId, action, operationKind, expectedTurnNumber };
-    completeButLoading = await observeGenerationRun(run, action) === "result_unavailable";
+    completeButLoading = await observeGenerationRun(run, attachedConflict ? (conflictPendingGeneration?.action || "") : action) === "result_unavailable";
   } catch (err) {
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();

@@ -107,6 +107,26 @@ describe("StoryGenerationController", () => {
     expect(submitted).toHaveBeenCalledWith(appendRun, submission);
   });
 
+  it("does not report a submitted append after its campaign changes while enqueue is pending", async () => {
+    const pending = deferred<GenerationRun>();
+    const submitted = vi.fn();
+    let current = { id: campaignId, activeTurnNumber: 1 };
+    const controller = createStoryGenerationController({
+      workflow: { submit: vi.fn(() => pending.promise), resume: vi.fn() },
+      campaignStore: { attachGeneration: vi.fn(() => ({ campaignId, jobId, apply: vi.fn(), retryResult: vi.fn() })) } as never,
+      idFactory: { create: () => "campaign-fence-key" },
+      currentCampaign: () => current,
+      onSubmitted: submitted
+    });
+
+    const submittedAppend = controller.submitAppend({ action: "Keep this local.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit" });
+    current = { id: "99999999-9999-4999-8999-999999999999", activeTurnNumber: 4 };
+    pending.resolve(run());
+
+    await expect(submittedAppend).resolves.toBe(false);
+    expect(submitted).not.toHaveBeenCalled();
+  });
+
   it("serializes a requested per-turn length override into the durable replacement request", async () => {
     const submitted: GenerationSubmissionInput[] = [];
     const replacementTurnId = "33333333-3333-4333-8333-333333333333";

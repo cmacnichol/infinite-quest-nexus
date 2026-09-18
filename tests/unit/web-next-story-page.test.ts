@@ -1034,6 +1034,37 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("restores a retained scene prompt as an action when the current campaign policy no longer permits scenes", async () => {
+    const page = fixture();
+    const loaded = sync({
+      campaign: { ...sync().campaign, activeTurnNumber: 1, turnControlStyle: "action_only" },
+      activeTurnNumber: 1,
+      generationRecovery: {
+        id: "55555555-5555-4555-8555-555555555555", status: "failed", expectedTurnNumber: 2, attempts: 2,
+        errorCode: "generation_failed", errorMessage: "Story generation could not be completed.", resultTurnId: null,
+        operationKind: "append", replacementTurnId: null
+      },
+      turns: turnWindow([1])
+    });
+    const base = composition({
+      list: vi.fn().mockResolvedValue({ campaigns: [campaignSummary({ activeTurnNumber: 1, turnControlStyle: "action_only" })] }),
+      syncStatus: vi.fn().mockResolvedValue(loaded)
+    });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, {
+      ...base,
+      failedTurnPrompts: {
+        load: vi.fn(() => ({ campaignId, expectedTurnNumber: 2, generationId: "55555555-5555-4555-8555-555555555555", requestedInputMode: "scene" as const, action: "Return the lantern to its keeper." })),
+        save: vi.fn(), clear: vi.fn()
+      }
+    } as StoryPlayerComposition);
+    await settle();
+
+    expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value).toBe("Return the lantern to its keeper.");
+    expect(page.document.querySelector("[data-input-mode='action']")?.getAttribute("aria-checked")).toBe("true");
+    expect(page.document.querySelector("[data-input-mode='scene']")).toBeNull();
+    mounted.dispose();
+  });
+
   it("does not overwrite a newer composer draft when a recovered append becomes failed", async () => {
     const page = fixture();
     const campaignStore = createCampaignStore();
