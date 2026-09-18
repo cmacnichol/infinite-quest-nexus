@@ -62,6 +62,7 @@ integration("T17 durable continuity review", () => {
   let needsChoiceRepair = false;
   let invalidChoiceRepair = false;
   let invalidPrimary = false;
+  let malformedFactFormatting = false;
   let semanticRepairNeedsChoiceRepair = false;
   let extensionConflict = false;
   let invalidSemanticRepair = false;
@@ -101,6 +102,7 @@ integration("T17 durable continuity review", () => {
         : { choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." });
       if (invalidPrimary) return JSON.stringify({ narration: "Mira waits at the observatory." });
       const story = JSON.parse(reply("Mira waits at the observatory."));
+      if (malformedFactFormatting) story.canonical_facts = [{ id: "keeper-arrival", content: "The keeper has arrived." }];
       if (needsChoiceRepair) story.choices = ["Wait.", "Wait.", "Listen.", "Leave."];
       return JSON.stringify(story);
     }
@@ -164,6 +166,7 @@ integration("T17 durable continuity review", () => {
     needsChoiceRepair = false;
     invalidChoiceRepair = false;
     invalidPrimary = false;
+    malformedFactFormatting = false;
     semanticRepairNeedsChoiceRepair = false;
     extensionConflict = false;
     invalidSemanticRepair = false;
@@ -218,6 +221,34 @@ integration("T17 durable continuity review", () => {
       else process.env.DATABASE_URL = previousDatabaseUrl;
     }
   }
+
+  it("repairs malformed fact formatting once from the retained primary response", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    const acceptedBefore = (await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+    )).rows[0]!.count;
+    await runGenerationJob(pool, `format-offer-${randomUUID()}`, 30, credentialSecret);
+    const offered = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(offered).toMatchObject({ version: 2, stage: "structure", canRepairFormat: true });
+    const planHash = offered.version === 2 ? offered.formatRepair?.planHash : null;
+    expect(planHash).toEqual(expect.any(String));
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offered.reviewId, revision: offered.revision, decision: "repair_format", repairPlanHash: planHash!
+    });
+    await runGenerationJob(pool, `format-apply-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(1);
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: acceptedBefore + 1 }] });
+    const saved = (await pool.query<{ orchestration_private: Record<string, unknown> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    expect(saved.validatedMainDraft).toMatchObject({ factFormatRepair: { planHash } });
+  });
 
   it("pauses invalid Story Direction choices until one retry repairs the retained narration", async () => {
     const { job, application, campaignId } = await enqueue("enforce", true);

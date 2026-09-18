@@ -52,7 +52,13 @@ export function prepareFactFormatRepair(rawOutput: string, requestBody: string):
 /** Replays a saved offer against the same immutable source and rejects tampering. */
 export function applyAuthorizedFactFormatRepair(input: Readonly<{ checkpoint: GenerationReviewCheckpoint; rawOutput: string; requestBody: string }>): FactFormatRepairPlan | null {
   const repair = input.checkpoint.version === 2 ? input.checkpoint.factFormatRepair : undefined;
-  const receipt = input.checkpoint.decisionJournal.find((entry) => entry.decision === "repair_format");
+  const receipt = input.checkpoint.decisionJournal.find((entry) => entry.decision === "repair_format"
+    && entry.reviewId === input.checkpoint.reviewId
+    && entry.revision === input.checkpoint.revision - 1
+    && entry.planHash === repair?.planHash
+    && entry.repair.rawOutputReference === repair?.rawOutputReference
+    && entry.repair.producingRequestHash === repair?.producingRequestHash
+    && entry.repair.sourceResponseId === repair?.sourceResponseId);
   if (!repair || repair.status !== "authorized" || !receipt || receipt.decision !== "repair_format"
     || sha256(input.rawOutput) !== repair.plan.rawOutputHash || sha256(input.requestBody) !== repair.producingRequestHash) return null;
   const recalculated = prepareFactFormatRepair(input.rawOutput, input.requestBody);
