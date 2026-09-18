@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createApiProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import { createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import { createQueuedResponsePolicyResolver } from "../../services/runtime/src/generation-api-composition.js";
+import { resolveGenerationResponseContracts } from "../../services/runtime/src/generation-response-contract.js";
+import { readFrozenResponseContracts, readQueuedResponsePolicy } from "../../packages/contracts/src/generation-response-contract.js";
+import { createHash } from "node:crypto";
 
 const ownerUserId = "00000000-0000-4000-8000-000000000001";
 const providerProfileId = "00000000-0000-4000-8000-000000000002";
@@ -61,6 +66,34 @@ function listModels(composition: ReturnType<typeof createApiProviderApplicationC
 }
 
 describe("provider application composition capability cache transactions", () => {
+  it("uses the canonical empty registry digest through API queue and worker frozen-contract parsing", async () => {
+    const row = { ...profile("story-model"), configuration: { textResponseFormatPolicy: "auto" } };
+    const client = { query: vi.fn(async (sql: string) => {
+      if (sql.includes("FROM provider_profiles")) return { rows: [row], rowCount: 1 };
+      throw new Error(`Unexpected client query: ${sql}`);
+    }) };
+    const pool = { connect: vi.fn(), query: vi.fn() };
+    const options = { credentialSecret: "test-secret", transport: { fetch: vi.fn(), validateSdkEndpoint: vi.fn(), close: vi.fn() } };
+    const api = createApiProviderApplicationComposition(pool as never, options);
+    const worker = createWorkerProviderApplicationComposition(pool as never, options);
+    const digest = createHash("sha256").update("").digest("hex");
+    expect(api.responseFormatCapabilities.registryDigest).toBe(digest);
+    expect(worker.responseFormatCapabilities.registryDigest).toBe(digest);
+    const queued = await createQueuedResponsePolicyResolver(api.generation)(client as never, {
+      ownerUserId, campaignId: "campaign", providerProfileId, requestedModel: "story-model", operationKind: "append",
+      generationPolicy: { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" }, storyMemoryPolicy: null
+    });
+    const policy = readQueuedResponsePolicy(queued);
+    expect(policy).toBeDefined();
+    const frozen = resolveGenerationResponseContracts({
+      queuedPolicy: policy!, profile: { id: policy!.providerProfileId, providerType: "openai_compatible", model: policy!.model,
+        endpointIdentity: createHash("sha256").update("https://provider.example/v1").digest("hex"), configurationHash: policy!.providerConfigurationHash },
+      registryDigest: worker.responseFormatCapabilities.registryDigest,
+      eligible: () => ({ status: "unknown", reason: "discovery_unavailable", verification: null }), selectedAt: "2026-09-18T00:00:00.000Z"
+    });
+    expect(readFrozenResponseContracts(frozen)).toMatchObject({ queuedPolicy: { verificationRegistryHash: digest } });
+  });
+
   it("keeps an exported application update's global inventory stale until commit then rediscovers", async () => {
     const control = controlledPool();
     const fetch = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: control.inventoryVersion(), name: "Model", context_length: 16_384 }] }), { headers: { "content-type": "application/json" } }));
@@ -97,6 +130,7 @@ describe("provider application composition capability cache transactions", () =>
       credentialSecret: "test-secret", transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() }, schemaVerifications: [verification], schemaVerificationDigest: "registry-v1"
     });
 
+    expect(composition.responseFormatCapabilities.registryDigest).toBe("registry-v1");
     await listModels(composition);
     control.setInventoryVersion("new");
     const transaction = composition.transaction(async (binding) => {
