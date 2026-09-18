@@ -189,4 +189,40 @@ integration("prompt-memory remediation composed workflow", () => {
     expect(replayRequest).toContain(expectedFact);
     expect(replayRequest).toContain(preservedThread);
   });
+
+  it.each([
+    ["metadata-bearing fact wrapper", (value: Record<string, unknown>) => { value.canonical_facts = [{ content: "The beacon is lit.", supersedes_fact_ids: [] }]; }],
+    ["missing complete scratchpad", (value: Record<string, unknown>) => { delete value.scratchpad; }],
+    ["mechanics-bearing fact wrapper", (value: Record<string, unknown>) => { value.canonical_facts = [{ content: "The d20 roll is 18." }]; }],
+    ["unsupplied structured supersession", (value: Record<string, unknown>) => { value.canonical_fact_updates = [{ content: "The beacon is lit.", supersedes_fact_ids: ["11111111-1111-4111-8111-111111111111"] }]; }]
+  ])("rejects %s without mutating accepted authority", async (_label, corrupt) => {
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Normalization rejection ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "normalization-rejection.story", story: fixture }));
+    const ownerUserId = await initialOwnerId(pool);
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const before = await pool.query<{ turns: number; facts: number; memories: number; state: unknown }>(
+      `SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts,
+              (SELECT count(*)::int FROM chronicle_memories WHERE campaign_id=$1) AS memories,
+              (SELECT to_jsonb(campaign_state) FROM campaign_state WHERE campaign_id=$1) AS state`, [imported.campaignId]
+    );
+    const output = JSON.parse(story("The beacon is lit.", "The beacon is lit."));
+    corrupt(output);
+    const beforeDispatches = requests.filter((request) => Array.isArray(request.messages)).length;
+    replies.push(JSON.stringify(output));
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Light the beacon.", providerProfileId: providerId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(await runGenerationJob(pool, `normalization-reject-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    expect(requests.filter((request) => Array.isArray(request.messages))).toHaveLength(beforeDispatches + 1);
+    await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: expect.stringMatching(/^(recoverable|failed)$/u) });
+    await expect(pool.query<{ turns: number; facts: number; memories: number; state: unknown }>(
+      `SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts,
+              (SELECT count(*)::int FROM chronicle_memories WHERE campaign_id=$1) AS memories,
+              (SELECT to_jsonb(campaign_state) FROM campaign_state WHERE campaign_id=$1) AS state`, [imported.campaignId]
+    )).resolves.toEqual(before);
+  });
 });
