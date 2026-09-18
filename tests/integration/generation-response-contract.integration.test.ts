@@ -272,6 +272,23 @@ integration("PostgreSQL response-contract persistence", () => {
       .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
   });
 
+  it("rejects a tampered completed producing binding before a new-mode replay can dispatch", async () => {
+    const imported = await campaign();
+    const queued = await commands(true).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Reject a tampered retained candidate.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id);
+    const logicalAttemptId = crypto.randomUUID(); const frozen = selection();
+    const initial = { ...fixture.payload.orchestration_private, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } };
+    await fixture.repository.saveOrchestration(fixture.scope, initial);
+    await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyHash(policy()), frozen);
+    const requestBody = "{}"; const requestPayloadHash = sha256Hex(requestBody);
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, { logicalAttemptId, invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash, request: audit(frozen) });
+    await fixture.repository.markResponseContractInvocationDispatched!(fixture.scope, reserved!.id, requestPayloadHash);
+    await fixture.repository.completeResponseContractInvocation!(fixture.scope, reserved!.id, { returnedModel: null, returnedProviderRoute: null, diagnosticCode: null });
+    await pool.query(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('primaryResult',jsonb_build_object('version',1,'requestBody',$2::text,'requestPayloadHash',$3::text,'response',jsonb_build_object('content','{}','responseId','tampered','finishReason','stop','outputLimited',false,'modelInstanceId','m','usage',jsonb_build_object('inputTokens',0,'outputTokens',0,'totalTokens',0),'reportedCost',null,'rawMetadata',jsonb_build_object()),'sentFactIds','[]'::jsonb,'providerConfigurationHash',$4::text,'contextFingerprint','x','contextDiagnostics','{}'::jsonb,'chronicleRetrieval',jsonb_build_object())) WHERE id=$1`, [queued.id, requestBody, "f".repeat(64), hash]);
+    await expect(fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id])).resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+  });
+
   it("fails closed on malformed private versions without mutating authoritative campaign rows", async () => {
     const imported = await campaign();
     const queued = await commands(true).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Reject unknown durable envelope.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
