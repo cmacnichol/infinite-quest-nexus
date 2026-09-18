@@ -263,7 +263,19 @@ for (const surface of ["legacy", "web-next"] as const) {
     await page.goto(url);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
     const preview = page.locator(surface === "legacy" ? "#streamingPreviewCard" : "[data-story-generation-preview]");
+    const acceptedTurns = surface === "legacy"
+      ? page.locator("#storyContainer [id^='scene-']")
+      : page.getByRole("heading", { name: /^Turn \d+$/u });
+    const activeTurn = surface === "legacy"
+      ? page.locator("#turnPill")
+      : page.getByRole("region", { name: "Story controls", exact: true }).getByText("Active turn 1", { exact: true });
+    const turnTwo = surface === "legacy"
+      ? page.locator("#scene-2")
+      : page.getByRole("heading", { name: "Turn 2", exact: true });
     const acceptedBeforeDecision = await acceptedNarration(page, surface, 1);
+    await expect(acceptedTurns).toHaveCount(1);
+    await expect(activeTurn).toHaveText(surface === "legacy" ? "Turn 1" : "Active turn 1");
+    await expect(turnTwo).toHaveCount(0);
     await expect(recovery).toContainText("invalid structure");
     await expect(recovery).not.toContainText("Context evidence was omitted");
     await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toHaveCount(0);
@@ -284,6 +296,9 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(preview).toBeHidden();
     expect(await streamedNarration(page, surface)).toBe("");
     expect(await acceptedNarration(page, surface, 1)).toBe(acceptedBeforeDecision);
+    await expect(acceptedTurns).toHaveCount(1);
+    await expect(activeTurn).toHaveText(surface === "legacy" ? "Turn 1" : "Active turn 1");
+    await expect(turnTwo).toHaveCount(0);
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
   });
 
