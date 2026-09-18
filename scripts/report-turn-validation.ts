@@ -225,11 +225,11 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
     const jobs = await client.query<JobRow>(
       `SELECT id, status, created_at AS "createdAt", CASE WHEN length(prompt_protocol_version) BETWEEN 1 AND 512 THEN prompt_protocol_version END AS "promptProtocol", CASE WHEN length(requested_model) BETWEEN 1 AND 512 THEN requested_model END AS "requestedModel",
               error_code AS "errorCode",
-               jsonb_strip_nulls(jsonb_build_object('version', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,version}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{lastFailureDiagnostic,version}' END,
+               jsonb_strip_nulls(jsonb_build_object('version', CASE WHEN jsonb_typeof(orchestration_private #> '{lastFailureDiagnostic,version}') = 'number' AND length(orchestration_private #>> '{lastFailureDiagnostic,version}') BETWEEN 1 AND 16 THEN orchestration_private #> '{lastFailureDiagnostic,version}' END,
                  'category', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,category}') BETWEEN 1 AND 80 THEN orchestration_private #>> '{lastFailureDiagnostic,category}' END,
                  'code', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,code}') BETWEEN 1 AND 80 THEN orchestration_private #>> '{lastFailureDiagnostic,code}' END,
                  'phase', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,phase}') BETWEEN 1 AND 120 THEN orchestration_private #>> '{lastFailureDiagnostic,phase}' END,
-                 'attemptNumber', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,attemptNumber}') BETWEEN 1 AND 16 THEN orchestration_private #>> '{lastFailureDiagnostic,attemptNumber}' END,
+                 'attemptNumber', CASE WHEN jsonb_typeof(orchestration_private #> '{lastFailureDiagnostic,attemptNumber}') = 'number' AND length(orchestration_private #>> '{lastFailureDiagnostic,attemptNumber}') BETWEEN 1 AND 16 THEN orchestration_private #> '{lastFailureDiagnostic,attemptNumber}' END,
                  'occurredAt', CASE WHEN length(orchestration_private #>> '{lastFailureDiagnostic,occurredAt}') BETWEEN 1 AND 64 THEN orchestration_private #>> '{lastFailureDiagnostic,occurredAt}' END)) AS "failureDiagnostic",
                (orchestration_private ? 'queuedResponsePolicy') AS "queuedPolicyPresent",
                jsonb_typeof(orchestration_private #> '{queuedResponsePolicy,version}') AS "queuedPolicyVersionType",
