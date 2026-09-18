@@ -34,3 +34,12 @@ The historical fixed-50 context was used only to reproduce the shape: v14 had 34
 - RED: realistic v14/v15 composite fixtures failed because the old label filter returned `unknown` and no distinguishing identity hash.
 - GREEN: `corepack pnpm exec vitest run tests/unit/report-turn-validation.test.ts` passed 3/3; it proves two frozen versions remain distinct, legacy labels are retained, malformed values are unknown, and raw composite strings never appear in report JSON.
 - CLI: the bounded `--limit 1 --format json` report ran against the isolated database and emitted the retained legacy route label plus its opaque execution hash.
+
+## Follow-up addendum: non-enrolled Story Direction and v16 marker identities
+
+Non-enrolled Story Direction jobs have a legacy execution identity of `prompt-library-v1-<16hex>|<generation-policy-hash>`. The report now accepts that form only when the stored `generation_policy` passes its frozen schema and recomputes the exact policy hash. A bare prompt-library identity remains valid for legacy/no-policy work. Mismatched policy hashes remain `unknown`.
+
+New Phase 02 non-enrolled jobs use `story-prompt-v1|<story-v16 compatibility identity>|<legacy execution identity>`. The report selects only `prompt_snapshot->'storyPromptCompatibility'`, validates its protocol and template-hash metadata, and validates the embedded legacy execution identity. Valid marked rows display the generic `story-v16-fact-wire-distinction` label plus the hash of the full execution string. It never selects template content or exposes either complete execution identity.
+
+- RED: production identity helpers constructed old Story Direction and Phase 02 marked v16 identities that the prior reporter reduced to `unknown`.
+- GREEN: `corepack pnpm exec vitest run tests/unit/report-turn-validation.test.ts` passed 4/4, including valid old/marked identities and mismatched policy-hash, marker, and proof cases. `npx tsc --noEmit --pretty false` passed.

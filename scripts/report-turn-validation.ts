@@ -1,8 +1,11 @@
 import { fileURLToPath } from "node:url";
+import { generationPolicySnapshotSchema } from "../packages/contracts/src/campaign-generation-policy.js";
 import { sha256Hex } from "../packages/contracts/src/hash.js";
 import { summarizeValidationOutcomes, type JobOutcome, type ValidationObservation } from "../packages/application/src/generation/outcome-metrics.js";
 import { projectGenerationFailureDiagnostic } from "../packages/contracts/src/generation-review.js";
 import { storyMemoryPolicySnapshotSchema } from "../packages/contracts/src/story-memory-policy.js";
+import { storyPromptCompatibilityIdentity } from "../packages/contracts/src/story-prompt.js";
+import { generationExecutionProtocolIdentity } from "../packages/story-engine/src/index.js";
 
 export type TurnValidationReportOptions = Readonly<{
   limit: number;
@@ -11,7 +14,7 @@ export type TurnValidationReportOptions = Readonly<{
 }>;
 
 type QueryClient = Readonly<{ query<T = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<{ rows: T[] }> }>;
-type JobRow = Readonly<{ id: string; status: JobOutcome["status"]; createdAt: string; promptProtocol: string | null; requestedModel: string; errorCode: string | null; failureDiagnostic: unknown; contextOptions: Record<string, unknown> | null; generationPolicy: Record<string, unknown> | null }>;
+type JobRow = Readonly<{ id: string; status: JobOutcome["status"]; createdAt: string; promptProtocol: string | null; requestedModel: string; errorCode: string | null; failureDiagnostic: unknown; contextOptions: Record<string, unknown> | null; generationPolicy: Record<string, unknown> | null; storyPromptCompatibility: unknown }>;
 type AttemptRow = Readonly<{ jobId: string; attemptNumber: number; recoveryKind: string; providerResponseId: string | null; completedAt: string | null; hasOutput: boolean; validationErrors: unknown; requestMetadata: Record<string, unknown> | null; responseMetadata: Record<string, unknown> | null }>;
 
 function reportLabel(value: unknown): string {
@@ -27,8 +30,35 @@ type CohortLabels = Readonly<ProtocolCohortIdentity & {
   contextBucket: string;
 }>;
 
-function protocolCohortIdentity(executionProtocol: unknown, storyMemoryPolicy: unknown): ProtocolCohortIdentity {
-  const identity = typeof executionProtocol === "string" ? executionProtocol.trim() : "";
+function legacyPromptLibraryLabel(executionProtocol: string, generationPolicy: unknown): string | null {
+  const match = /^(prompt-library-v1-[a-f0-9]{16})(?:\|([a-f0-9]{64}))?$/u.exec(executionProtocol);
+  if (!match) return null;
+  if (generationPolicy === null || generationPolicy === undefined) return match[2] ? null : match[1]!;
+  const policy = generationPolicySnapshotSchema.safeParse(generationPolicy);
+  if (!policy.success) return null;
+  try {
+    return generationExecutionProtocolIdentity(match[1]!, policy.data) === executionProtocol ? match[1]! : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasStoryPromptCompatibilityProof(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proof = value as Record<string, unknown>;
+  return Object.keys(proof).length === 2
+    && proof.protocolIdentity === storyPromptCompatibilityIdentity()
+    && typeof proof.templateHash === "string"
+    && /^[a-f0-9]{64}$/u.test(proof.templateHash);
+}
+
+function protocolCohortIdentity(
+  executionProtocol: unknown,
+  storyMemoryPolicy: unknown,
+  generationPolicy: unknown,
+  storyPromptCompatibility: unknown
+): ProtocolCohortIdentity {
+  const identity = typeof executionProtocol === "string" ? executionProtocol : "";
   if (!identity || identity.length > 512) return { promptProtocol: "unknown", executionProtocolHash: "unknown" };
   const frozenMemoryPolicy = storyMemoryPolicySnapshotSchema.safeParse(storyMemoryPolicy);
   if (frozenMemoryPolicy.success) {
@@ -40,9 +70,17 @@ function protocolCohortIdentity(executionProtocol: unknown, storyMemoryPolicy: u
       executionProtocolHash: sha256Hex(identity)
     };
   }
-  if (/^prompt-library-v1-[a-f0-9]{16}$/u.test(identity)) {
-    return { promptProtocol: identity, executionProtocolHash: sha256Hex(identity) };
+  const storyPromptPrefix = `story-prompt-v1|${storyPromptCompatibilityIdentity()}|`;
+  if (identity.startsWith(storyPromptPrefix)) {
+    const legacyLabel = hasStoryPromptCompatibilityProof(storyPromptCompatibility)
+      ? legacyPromptLibraryLabel(identity.slice(storyPromptPrefix.length), generationPolicy)
+      : null;
+    return legacyLabel
+      ? { promptProtocol: "story-v16-fact-wire-distinction", executionProtocolHash: sha256Hex(identity) }
+      : { promptProtocol: "unknown", executionProtocolHash: "unknown" };
   }
+  const legacyLabel = legacyPromptLibraryLabel(identity, generationPolicy);
+  if (legacyLabel) return { promptProtocol: legacyLabel, executionProtocolHash: sha256Hex(identity) };
   return { promptProtocol: "unknown", executionProtocolHash: "unknown" };
 }
 
@@ -99,7 +137,8 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
     const jobs = await client.query<JobRow>(
       `SELECT id, status, created_at AS "createdAt", prompt_protocol_version AS "promptProtocol", requested_model AS "requestedModel",
               error_code AS "errorCode", orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
-              context_options AS "contextOptions", generation_policy AS "generationPolicy"
+              context_options AS "contextOptions", generation_policy AS "generationPolicy",
+              prompt_snapshot->'storyPromptCompatibility' AS "storyPromptCompatibility"
          FROM generation_jobs
         WHERE ($1::timestamptz IS NULL OR created_at >= $1::timestamptz)
         ORDER BY created_at DESC LIMIT $2`,
@@ -131,7 +170,12 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
     for (const observation of observations) if (observation.operation === "initial"
       && (!initialByJob.has(observation.jobId) || observation.attemptNumber < initialByJob.get(observation.jobId)!.attemptNumber)) initialByJob.set(observation.jobId, observation);
     const cohortGroups = new Map<string, { labels: CohortLabels; jobs: JobOutcome[]; observations: ValidationObservation[] }>();
-    const protocolByJob = new Map(jobs.rows.map((job) => [job.id, protocolCohortIdentity(job.promptProtocol, job.contextOptions?.storyMemoryPolicy)]));
+    const protocolByJob = new Map(jobs.rows.map((job) => [job.id, protocolCohortIdentity(
+      job.promptProtocol,
+      job.contextOptions?.storyMemoryPolicy,
+      job.generationPolicy,
+      job.storyPromptCompatibility
+    )]));
     for (const job of jobs.rows) {
       const requestedModel = reportLabel(job.requestedModel);
       const configuredModel = requestedModel === "unknown"

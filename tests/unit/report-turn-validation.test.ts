@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
+import { storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { generationExecutionProtocolIdentity, generationPolicyIdentity, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import { parseTurnValidationReportOptions, readTurnValidationReport } from "../../scripts/report-turn-validation.js";
 
 function frozenStoryMemoryPolicy(promptProtocol: "story-v14-continuity-context" | "story-v15-canonical-fact-format") {
@@ -10,6 +12,16 @@ function frozenStoryMemoryPolicy(promptProtocol: "story-v14-continuity-context" 
     contextProtocol: "current-continuity-v3",
     promptProtocol,
     providerConfigurationFingerprint: "a".repeat(64)
+  };
+}
+
+function storyOnlyPolicy() {
+  return {
+    version: 1 as const,
+    playMode: "story_only" as const,
+    turnControlStyle: "flexible_scene" as const,
+    protocolVersion: "story-only-v1" as const,
+    prompts: storyOnlyPromptSnapshot()
   };
 }
 
@@ -41,6 +53,8 @@ describe("turn validation report", () => {
     const enrolledV14 = "story-memory-v1|prompt-library-v1-5d636b749d679ddc|legacy";
     const enrolledV15 = "story-memory-v1|prompt-library-v1-dc1b588a0a37f571|legacy";
     const malformedComposite = "story-memory-v1|MODEL_SECRET";
+    const nonEnrolledStoryOnlyPolicy = storyOnlyPolicy();
+    const oldStoryOnlyProtocol = generationExecutionProtocolIdentity("prompt-library-v1-dc1b588a0a37f571", nonEnrolledStoryOnlyPolicy);
     const jobs = [
       { id: "null-id", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: enrolledV14,
         requestedModel: "", errorCode: null, failureDiagnostic: null, contextOptions: { storyMemoryPolicy: frozenStoryMemoryPolicy("story-v14-continuity-context") }, generationPolicy: null },
@@ -49,11 +63,11 @@ describe("turn validation report", () => {
           version: 1, category: "output_incomplete", code: "output_limit", phase: "story_validation", attemptNumber: 1,
           occurredAt: "2026-09-18T00:00:02.000Z", privateMessage: "provider body was cut off"
         }, contextOptions: { storyMemoryPolicy: frozenStoryMemoryPolicy("story-v15-canonical-fact-format") }, generationPolicy: null },
-      { id: "invalid", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: "prompt-library-v1-dc1b588a0a37f571",
+      { id: "invalid", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: oldStoryOnlyProtocol,
         requestedModel: "configured-repair", errorCode: "generation_failed", failureDiagnostic: {
           version: 1, category: "format", code: "invalid_schema", phase: "story_validation", attemptNumber: 1,
           occurredAt: "2026-09-18T00:00:02.000Z", privateMessage: "raw parser detail"
-        }, contextOptions: { budgetTokens: 64_000 }, generationPolicy: { playMode: "story_only" } },
+        }, contextOptions: { budgetTokens: 64_000 }, generationPolicy: nonEnrolledStoryOnlyPolicy },
       { id: "incomplete", status: "discarded", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: malformedComposite,
         requestedModel: "configured\nMODEL_SECRET", errorCode: "MODEL_SECRET=raw_provider_code", failureDiagnostic: null, contextOptions: { storyMemoryPolicy: { policy: null } }, generationPolicy: null }
     ];
@@ -94,5 +108,46 @@ describe("turn validation report", () => {
     expect(JSON.stringify(report)).not.toContain("MODEL_SECRET");
     expect(JSON.stringify(report)).not.toContain(enrolledV14);
     expect(JSON.stringify(report)).not.toContain(enrolledV15);
+    expect(JSON.stringify(report)).not.toContain(oldStoryOnlyProtocol);
+  });
+
+  it("labels only validated old and marked non-enrolled execution identities", async () => {
+    const baseIdentity = "prompt-library-v1-5d636b749d679ddc";
+    const policy = storyOnlyPolicy();
+    const oldStoryDirectionIdentity = generationExecutionProtocolIdentity(baseIdentity, policy);
+    const markedIdentity = `story-prompt-v1|${storyPromptCompatibilityIdentity()}|${oldStoryDirectionIdentity}`;
+    const mismatchedPolicyHash = `${baseIdentity}|${"b".repeat(64)}`;
+    const malformedMarker = `story-prompt-v1|story-v16-fact-wire-distinction|story-output-v2|current-continuity-v3|${oldStoryDirectionIdentity}`;
+    const validProof = { protocolIdentity: storyPromptCompatibilityIdentity(), templateHash: "a".repeat(64) };
+    const jobs = [
+      { id: "old", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: oldStoryDirectionIdentity,
+        requestedModel: "configured", errorCode: null, failureDiagnostic: null, contextOptions: null, generationPolicy: policy, storyPromptCompatibility: null },
+      { id: "marked", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: markedIdentity,
+        requestedModel: "configured", errorCode: null, failureDiagnostic: null, contextOptions: null, generationPolicy: policy, storyPromptCompatibility: validProof },
+      { id: "bad-policy-hash", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: mismatchedPolicyHash,
+        requestedModel: "configured", errorCode: null, failureDiagnostic: null, contextOptions: null, generationPolicy: policy, storyPromptCompatibility: null },
+      { id: "bad-marker", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: malformedMarker,
+        requestedModel: "configured", errorCode: null, failureDiagnostic: null, contextOptions: null, generationPolicy: policy, storyPromptCompatibility: validProof },
+      { id: "bad-proof", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: markedIdentity,
+        requestedModel: "configured", errorCode: null, failureDiagnostic: null, contextOptions: null, generationPolicy: policy,
+        storyPromptCompatibility: { ...validProof, templateHash: "bad" } },
+      { id: "bad-whitespace", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: ` ${oldStoryDirectionIdentity}`,
+        requestedModel: "configured", errorCode: null, failureDiagnostic: null, contextOptions: null, generationPolicy: policy, storyPromptCompatibility: null }
+    ];
+    const query = vi.fn(async (text: string) => text.includes("FROM generation_jobs") ? { rows: jobs } : { rows: [] });
+
+    const report = await readTurnValidationReport({ query } as any, { limit: 50, since: null, format: "json" });
+    expect(report.outcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: "old", promptProtocol: baseIdentity, executionProtocolHash: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      expect.objectContaining({ jobId: "marked", promptProtocol: "story-v16-fact-wire-distinction", executionProtocolHash: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      expect.objectContaining({ jobId: "bad-policy-hash", promptProtocol: "unknown", executionProtocolHash: "unknown" }),
+      expect.objectContaining({ jobId: "bad-marker", promptProtocol: "unknown", executionProtocolHash: "unknown" }),
+      expect.objectContaining({ jobId: "bad-proof", promptProtocol: "unknown", executionProtocolHash: "unknown" }),
+      expect.objectContaining({ jobId: "bad-whitespace", promptProtocol: "unknown", executionProtocolHash: "unknown" })
+    ]));
+    expect(generationPolicyIdentity(policy)).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(report)).not.toContain(oldStoryDirectionIdentity);
+    expect(JSON.stringify(report)).not.toContain(markedIdentity);
+    expect(JSON.stringify(report)).not.toContain(mismatchedPolicyHash);
   });
 });
