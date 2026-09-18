@@ -1,0 +1,125 @@
+{
+  "mode": "offline_preparation",
+  "model": "deepseek/deepseek-v3.2-exp",
+  "route": "novita/fp8",
+  "requestCount": 12,
+  "endpointIdentity": "76ef4ad6f0c8a4ae66efb13875c107cee40c78997a212353d379acfbb2f45591",
+  "routeConfigHash": "cf893ac1d3c41823f4792d2a13a607f9be2e5e980516a70e56d856d5946b373f",
+  "largestBodyByteCount": 3088,
+  "preparedInputTokenEstimate": 1030,
+  "preparedInputTokenEstimateKind": "application_estimate_not_billing_bound",
+  "conservativeInputTokenCeiling": 163840,
+  "outputTokenCeiling": 2048,
+  "maxInferenceCostUsd": 0.540918,
+  "priceObservedAt": "2026-09-18T18:52:22.331Z",
+  "schemas": [
+    {
+      "operation": "story",
+      "streaming": false,
+      "schemaName": "infinite_quest_story_native_v1",
+      "schemaVersion": "story-native-v1",
+      "schemaHash": "10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7",
+      "payloadHash": "3952a7bbeb6e0df1e80c0100952c59445c29f0e9ecae9cfa9fc699edda58a997",
+      "bodyByteCount": 3034
+    },
+    {
+      "operation": "story",
+      "streaming": true,
+      "schemaName": "infinite_quest_story_native_v1",
+      "schemaVersion": "story-native-v1",
+      "schemaHash": "10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7",
+      "payloadHash": "a801302efb09f45ac3a3eb261d560fbd44de155ee3efb08312ebe5b0834cd87f",
+      "bodyByteCount": 3088
+    },
+    {
+      "operation": "choices",
+      "streaming": false,
+      "schemaName": "infinite_quest_choices_v1",
+      "schemaVersion": "choices-v1",
+      "schemaHash": "52c734ad617562bce2ee04cd1a9e741e90f5a5c89d20cfc23fe14abb6c4281af",
+      "payloadHash": "f0a8ffbdeaa9a4bf88dd463b27e45b1196c7416dc214c4b1c0041959a4ea49eb",
+      "bodyByteCount": 1031
+    },
+    {
+      "operation": "choices",
+      "streaming": true,
+      "schemaName": "infinite_quest_choices_v1",
+      "schemaVersion": "choices-v1",
+      "schemaHash": "52c734ad617562bce2ee04cd1a9e741e90f5a5c89d20cfc23fe14abb6c4281af",
+      "payloadHash": "76606b9346a03df58b3d0f2778e5f944bbc26c4a80fdc8d915e96173e8e6f4d6",
+      "bodyByteCount": 1085
+    },
+    {
+      "operation": "continuity_review",
+      "streaming": false,
+      "schemaName": "infinite_quest_continuity_review_v1",
+      "schemaVersion": "continuity-review-v1",
+      "schemaHash": "04be7bbeb5a12747155231aa60728920ab16dd86892fb41ff3dcad1048501f7e",
+      "payloadHash": "edf213d0a9cc16130ee8629175ef02591de31a1d349a7d5d81465bdf2e441980",
+      "bodyByteCount": 3026
+    },
+    {
+      "operation": "continuity_review",
+      "streaming": true,
+      "schemaName": "infinite_quest_continuity_review_v1",
+      "schemaVersion": "continuity-review-v1",
+      "schemaHash": "04be7bbeb5a12747155231aa60728920ab16dd86892fb41ff3dcad1048501f7e",
+      "payloadHash": "5bfd3f2578470c616fb7670740309dbb380fdef0b962e083b72ab6ac8e3f0240",
+      "bodyByteCount": 3080
+    },
+    {
+      "operation": "story",
+      "streaming": false,
+      "schemaName": "infinite_quest_story_native_v1",
+      "schemaVersion": "story-native-v1",
+      "schemaHash": "10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7",
+      "payloadHash": "446b1a71df60bda93ddcf7fffa4e5318dd56252f57a4044c8d46efbb208448d9",
+      "bodyByteCount": 2966
+    },
+    {
+      "operation": "story",
+      "streaming": true,
+      "schemaName": "infinite_quest_story_native_v1",
+      "schemaVersion": "story-native-v1",
+      "schemaHash": "10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7",
+      "payloadHash": "c01afb146923515c4e1606de878a48cfe9eaa81b3356bd09abf78b1cbeba9acb",
+      "bodyByteCount": 3020
+    },
+    {
+      "operation": "choices",
+      "streaming": false,
+      "schemaName": "infinite_quest_choices_v1",
+      "schemaVersion": "choices-v1",
+      "schemaHash": "52c734ad617562bce2ee04cd1a9e741e90f5a5c89d20cfc23fe14abb6c4281af",
+      "payloadHash": "cb7076d7f523a8c49abdb32251635b5b3a16a649ac7129fa91a041d28cc45eb3",
+      "bodyByteCount": 1031
+    },
+    {
+      "operation": "choices",
+      "streaming": true,
+      "schemaName": "infinite_quest_choices_v1",
+      "schemaVersion": "choices-v1",
+      "schemaHash": "52c734ad617562bce2ee04cd1a9e741e90f5a5c89d20cfc23fe14abb6c4281af",
+      "payloadHash": "11048e1fa85089738e6454a3c75c0754a35f16d2156d2fd545f8398783157806",
+      "bodyByteCount": 1085
+    },
+    {
+      "operation": "continuity_review",
+      "streaming": false,
+      "schemaName": "infinite_quest_continuity_review_v1",
+      "schemaVersion": "continuity-review-v1",
+      "schemaHash": "04be7bbeb5a12747155231aa60728920ab16dd86892fb41ff3dcad1048501f7e",
+      "payloadHash": "b777e57b3c70aaeb89f60aefe35374dc7f26dfbb5a5a12e392d81fd7181c6db2",
+      "bodyByteCount": 3026
+    },
+    {
+      "operation": "continuity_review",
+      "streaming": true,
+      "schemaName": "infinite_quest_continuity_review_v1",
+      "schemaVersion": "continuity-review-v1",
+      "schemaHash": "04be7bbeb5a12747155231aa60728920ab16dd86892fb41ff3dcad1048501f7e",
+      "payloadHash": "1f10a6fc27a22b694100073a0b4093644201b0c44d1d98ef9e55d1419c57ddee",
+      "bodyByteCount": 3080
+    }
+  ]
+}
