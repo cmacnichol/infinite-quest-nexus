@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
-import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
+import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { factFormatRepairHash, generationRequestSchema, sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -293,9 +293,8 @@ integration("PostgreSQL generation review persistence", () => {
     if (receipt.decision !== "repair_format") throw new Error("Expected repair receipt.");
     receipt.offeredCandidate.campaignId = foreignCampaignId;
     receipt.repair.campaignId = foreignCampaignId;
-    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
-      fixture.queued.id, JSON.stringify({ ...saved, generationReview: review })
-    ]);
+    expect(generationReviewCheckpointSchema.safeParse(review).success).toBe(true);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [fixture.queued.id, JSON.stringify({ ...saved, generationReview: review })]);
     await expect(fixture.execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim })).resolves.toBeNull();
     await expect(pool.query<{ status: string; error_code: string; acceptedTurns: number }>(
       `SELECT status,error_code,
