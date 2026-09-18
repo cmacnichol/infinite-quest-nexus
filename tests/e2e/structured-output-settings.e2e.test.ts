@@ -25,6 +25,10 @@ function requiredAt<T>(values: readonly T[], index: number, label: string): T {
   return value;
 }
 
+function relevantRuntimeErrors(errors: readonly string[]) {
+  return errors.filter((error) => error !== "Failed to load resource: the server responded with a status of 404 (Not Found)");
+}
+
 const capability = (status: "verified" | "advertised" | "unsupported" | "unknown", expiresInMs = 60_000) => ({
   version: 1,
   model: "safe-model",
@@ -34,6 +38,11 @@ const capability = (status: "verified" | "advertised" | "unsupported" | "unknown
 });
 
 async function installProviderApi(page: Page) {
+  const runtimeErrors: string[] = [];
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") runtimeErrors.push(message.text());
+  });
   const providers: Provider[] = [{
     id: "text-a", name: "Text A", providerType: "openrouter", providerRole: "text", baseUrl: "https://provider.invalid", defaultModel: "safe-model", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0.8, requestTimeoutMs: 300000, configuration: {}, enabled: true, isDefault: true
   }];
@@ -57,7 +66,7 @@ async function installProviderApi(page: Page) {
     return route.fulfill({ contentType: "application/json", body: JSON.stringify({}) });
   });
   return {
-    providers, writes,
+    providers, writes, runtimeErrors,
     setModelCapability: (value: ReturnType<typeof capability>) => { modelCapability = value; },
     holdNextModelDiscovery: async () => page.route("**/api/v1/providers/text-a/models", async (route) => { heldModelRoute = route; await page.unroute("**/api/v1/providers/text-a/models"); }),
     resolveHeldModelDiscovery: async () => { const route = heldModelRoute; heldModelRoute = null; if (route) await route.fulfill({ contentType: "application/json", body: JSON.stringify({ models: [{ id: "safe-model", displayName: "Safe model", loaded: true, instanceId: "safe-model", contextLength: 32768, responseFormatCapability: modelCapability }] }) }); }
@@ -97,6 +106,7 @@ test("Nexus saves explicit policy choices while retaining an absent legacy polic
   await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
   await expect.poll(() => api.writes.length).toBe(4);
   expect((requiredAt(api.writes, 3, "explicit legacy provider save").configuration as Record<string, unknown>).textResponseFormatPolicy).toBe("legacy");
+  expect(relevantRuntimeErrors(api.runtimeErrors)).toEqual([]);
 });
 
 test("Nexus displays only server capability state and hides policy controls for illustrations", async ({ page }) => {
@@ -110,6 +120,7 @@ test("Nexus displays only server capability state and hides policy controls for 
   await expect(page.locator("#providerResponseFormatPolicy")).toBeHidden();
   await page.screenshot({ path: `${screenshots}/settings-mobile-illustration.png`, fullPage: true });
   expect(requiredAt(api.providers, 0, "fixture provider").responseFormatCapability).toBeUndefined();
+  expect(relevantRuntimeErrors(api.runtimeErrors)).toEqual([]);
 });
 
 test("Nexus fences discovery to the current model configuration and presents finite server statuses", async ({ page }) => {
@@ -142,4 +153,5 @@ test("Nexus fences discovery to the current model configuration and presents fin
   await page.locator("#providerResponseFormatPolicy").selectOption("auto");
   await api.resolveHeldModelDiscovery();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
+  expect(relevantRuntimeErrors(api.runtimeErrors)).toEqual([]);
 });

@@ -62,6 +62,7 @@ let pendingDeleteTitle = "";
 let pendingDeleteResolve = null;
 let editingProviderId = "";
 let discoveredProfileModels = [];
+let discoveredProfileModelsIdentity = "";
 let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
 let responseFormatCapabilitySequence = 0;
@@ -4193,6 +4194,17 @@ function clearResponseFormatCapability() {
   elements.providerResponseFormatCapability.className = "text-model-setting field-note";
 }
 
+function storedProfileMatchesResponseFormatIdentity() {
+  const profile = providers.find((item) => item.id === editingProviderId);
+  if (!profile) return false;
+  return profile.providerRole === elements.providerRole.value
+    && profile.providerType === elements.providerType.value
+    && profile.baseUrl === elements.providerBaseUrl.value
+    && (profile.defaultModel || "") === elements.providerDefaultModel.value
+    && Boolean(profile.configuration?.streaming || profile.configuration?.streamingSupport) === elements.providerStreaming.checked
+    && (profile.configuration?.textResponseFormatPolicy || "legacy") === elements.providerResponseFormatPolicy.value;
+}
+
 function responseFormatCapabilityIdentity() {
   return [editingProviderId, elements.providerRole.value, elements.providerType.value, elements.providerBaseUrl.value.trim(), elements.providerDefaultModel.value.trim(), elements.providerStreaming.checked, elements.providerResponseFormatPolicy.value].join("\u001f");
 }
@@ -4480,7 +4492,7 @@ async function refreshProviderModelsFromForm() {
     const useStoredProfile = editingProviderId && !elements.providerApiKey.value;
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
     const result = useStoredProfile
-      ? await api(`/api/v1/providers/${editingProviderId}/models`)
+      ? await api(`/api/v1/providers/${editingProviderId}/models?refresh=true`)
       : await api("/api/v1/providers/discover-models", {
         method: "POST",
         body: JSON.stringify({
@@ -4503,6 +4515,7 @@ async function refreshProviderModelsFromForm() {
     });
     if (sequence !== responseFormatCapabilitySequence - 1 || identity !== responseFormatCapabilityIdentity()) return;
     discoveredProfileModels = result.models || [];
+    discoveredProfileModelsIdentity = identity;
     const orderedModels = [...discoveredProfileModels].sort((left, right) => Number(right.loaded) - Number(left.loaded) || left.displayName.localeCompare(right.displayName));
     const current = elements.providerDefaultModel.value.trim();
     const selected = orderedModels.find((model) => profileModelValue(model) === current || model.id === current)
@@ -4514,8 +4527,10 @@ async function refreshProviderModelsFromForm() {
       elements.providerDefaultModel.value = value;
       applySogniSdkModelOptions(selected);
     }
-    const selectedCapability = selected?.responseFormatCapability
-      || (responseFormatCapabilityProfile?.model === elements.providerDefaultModel.value ? responseFormatCapabilityProfile : null);
+    const responseFormatIdentityMatches = discoveredProfileModelsIdentity === responseFormatCapabilityIdentity() && storedProfileMatchesResponseFormatIdentity();
+    const selectedCapability = responseFormatIdentityMatches
+      ? selected?.responseFormatCapability || (responseFormatCapabilityProfile?.model === elements.providerDefaultModel.value ? responseFormatCapabilityProfile : null)
+      : null;
     renderResponseFormatCapability(selectedCapability, identity);
     applyProfileModelContext();
     renderProviderModelPicker();
@@ -4559,7 +4574,7 @@ function chooseProviderModel(value) {
   }
   elements.providerDefaultModel.value = value;
   clearResponseFormatCapability();
-  renderResponseFormatCapability(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value)?.responseFormatCapability);
+  if (discoveredProfileModelsIdentity === responseFormatCapabilityIdentity() && storedProfileMatchesResponseFormatIdentity()) renderResponseFormatCapability(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value)?.responseFormatCapability);
   applyProfileModelContext();
   applySogniSdkModelOptions(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value));
   elements.providerModelDialog.close();
