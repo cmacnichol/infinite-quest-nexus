@@ -6,6 +6,9 @@ import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from
 import { canonicalEvidenceJson, isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
 export { planGenerationPromptContext } from "./generation-context-planner.js";
+import {
+  responseContractPreparedFailureRequestBodyCharacterLimit
+} from "../../../packages/database/src/generation-execution-repository.js";
 import type {
   GenerationExecutor,
   IllustrationGenerationTransactionPort,
@@ -299,6 +302,7 @@ const SAFE_DIAGNOSTIC_ERROR_CODES = new Set([
   "response_contract_unavailable",
   "response_contract_unsupported_adapter",
   "response_contract_identity_mismatch",
+  "response_contract_request_evidence_too_large",
   "generation_cancelled",
   "invalid_json",
   "invalid_schema",
@@ -449,6 +453,7 @@ const RECOVERABLE_INTEGRITY_ERROR_CODES = new Set([
   "response_contract_unavailable",
   "response_contract_unsupported_adapter",
   "response_contract_identity_mismatch",
+  "response_contract_request_evidence_too_large",
   "generation_checkpoint_incompatible"
 ]);
 
@@ -483,6 +488,16 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
       countMode: "estimated",
       estimatorVersion: "story-token-estimate-v1"
     })
+    : errorCode === "response_contract_request_evidence_too_large"
+      ? projectSafeGenerationDiagnostic({
+        code: "context_budget_exceeded", operation: "story_generation", action: "adjust_context",
+        scope: "provider_request", reasonCodes: ["request_limit"],
+        requiredCharacters: typeof (error as { requiredCharacters?: unknown }).requiredCharacters === "number"
+          ? (error as { requiredCharacters: number }).requiredCharacters
+          : undefined,
+        availableCharacters: responseContractPreparedFailureRequestBodyCharacterLimit,
+        countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
+      })
     : errorCode === "authoritative_context_invalid"
       ? projectSafeGenerationDiagnostic({ code: errorCode, operation: "story_generation", action: "repair_authority",
         ...((error as { field?: unknown }).field === "canonical_facts" ? { field: "canonical_facts" } : {}) })
@@ -498,7 +513,9 @@ function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
     errorCode: RECOVERABLE_INTEGRITY_ERROR_CODES.has(errorCode || "")
       ? errorCode!
       : "context_budget_exceeded",
-    errorMessage: "Generation context could not be safely prepared.",
+    errorMessage: errorCode === "response_contract_request_evidence_too_large"
+      ? "The prepared provider request exceeds the durable evidence limit. Reduce included context or shorten the input before retrying."
+      : "Generation context could not be safely prepared.",
     recoveryMetadata: {
       retryable: true,
       ...(scope ? { budgetScope: scope } : {}),
@@ -1107,6 +1124,16 @@ export async function callCampaignTextProvider(
   ) : undefined;
   if (invocation) {
     const checkedPrepared = prepared!;
+    if (checkedPrepared.body.length > responseContractPreparedFailureRequestBodyCharacterLimit) {
+      throw Object.assign(new Error(
+        "The prepared provider request exceeds the durable evidence limit. Reduce included context or shorten the input before retrying."
+      ), {
+        code: "response_contract_request_evidence_too_large",
+        scope: "provider_request",
+        requiredCharacters: checkedPrepared.body.length,
+        availableCharacters: responseContractPreparedFailureRequestBodyCharacterLimit
+      });
+    }
     if (!scope || !dependencies.repository.reserveResponseContractInvocation
       || !dependencies.repository.markResponseContractInvocationDispatched
       || !dependencies.repository.completeResponseContractInvocation) {

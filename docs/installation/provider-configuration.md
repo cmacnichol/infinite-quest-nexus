@@ -15,6 +15,17 @@ Create separate profiles for **Story text**, **Chronicle embeddings**, and
 Direction jobs do not use a classifier. Never reuse an endpoint or key across
 roles merely because the provider brand is the same.
 
+## Structured response evidence limit
+
+For new Story text requests using `auto` or `required` structured responses,
+the fully serialized request body must be no more than 1,000,000 UTF-16
+characters. An oversized body is rejected before the worker reserves an
+invocation or calls the provider, so reduce included context or shorten the
+input before retrying. This evidence limit preserves the exact request body
+for recoverable provider failures; it does not change the provider context-token
+limit. Historical legacy requests keep their existing request path and are
+unaffected.
+
 ## Chronicle embedding capabilities
 
 The Chronicle embedding worker starts with the provider's runtime descriptor and applies only reviewed, bounded non-secret overrides. Campaign document/query prefixes may override model-aware defaults, but credentials stay inside the embedding-provider boundary and are never projected into retrieval configuration or telemetry.

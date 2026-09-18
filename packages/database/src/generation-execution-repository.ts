@@ -98,6 +98,15 @@ function json(value: unknown): string {
 /** v1 permits every currently authorized operation plus explicit retries without growing unbounded. */
 const responseContractInvocationLedgerLimit = 24;
 
+/**
+ * Exact provider-request evidence is persisted for every new response-contract
+ * failure. This is a UTF-16 character ceiling, matching JavaScript string
+ * length and the repository validation applied after PostgreSQL retrieval; it
+ * is deliberately not a UTF-8 byte transport limit. Historical requests do
+ * not use this new evidence path.
+ */
+export const responseContractPreparedFailureRequestBodyCharacterLimit = 1_000_000;
+
 type PreparedResponseFailureEvidence = NonNullable<GenerationOrchestrationState["preparedResponseFailures"]>[number];
 
 function preparedResponseFailures(value: unknown, ledger: readonly ResponseContractInvocationAudit[] | undefined): readonly PreparedResponseFailureEvidence[] | undefined {
@@ -108,7 +117,7 @@ function preparedResponseFailures(value: unknown, ledger: readonly ResponseContr
     if (!entry || typeof entry !== "object") throw new Error("Prepared response failure evidence is invalid.");
     const item = entry as PreparedResponseFailureEvidence;
     if (item.version !== 1 || typeof item.invocationId !== "string" || ids.has(item.invocationId)
-      || typeof item.requestBody !== "string" || item.requestBody.length > 1_000_000
+      || typeof item.requestBody !== "string" || item.requestBody.length > responseContractPreparedFailureRequestBodyCharacterLimit
       || typeof item.requestPayloadHash !== "string" || item.requestPayloadHash !== sha256Hex(item.requestBody)
       || !(item.responseId === null || typeof item.responseId === "string" && item.responseId.length <= 256)
       || typeof item.partialContent !== "string" || item.partialContent.length > 1_000_000 || typeof item.partialContentTruncated !== "boolean"
