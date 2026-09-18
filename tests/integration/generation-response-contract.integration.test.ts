@@ -264,7 +264,12 @@ integration("PostgreSQL response-contract persistence", () => {
     expect(await fixture.repository.saveOrchestration(fixture.scope, { ...initial, preparedResponseFailures: [{ ...failure, partialContent: "tampered" }] } as never)).toBe(true);
     const reloaded = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
     expect(reloaded?.orchestration_private.preparedResponseFailures).toEqual([failure]);
-    await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id=$1", [queued.id]);
+    await pool.query(`UPDATE generation_jobs
+      SET orchestration_private=jsonb_set(orchestration_private, '{preparedResponseFailures,0,diagnosticCode}', '"not_a_finite_response_format_code"'::jsonb)
+      WHERE id=$1`, [queued.id]);
+    await expect(fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
   });
 
   it("fails closed on malformed private versions without mutating authoritative campaign rows", async () => {
