@@ -193,10 +193,29 @@ function createRun(
     try {
       const refreshed = await dependencies.api.syncStatus(campaignId);
       const recovery = refreshed.generationRecovery;
-      if (recovery?.id === jobId && recovery.status === "recoverable") {
+      if (recovery?.id === jobId
+        && recovery.status === "recoverable"
+        && recovery.operationKind === operation.operationKind
+        && recovery.replacementTurnId === operation.replacementTurnId) {
         if (recovery.review !== undefined) {
           reviewRequiresDecision = true;
-          return snapshot ? { ...snapshot, review: recovery.review } : null;
+          if (snapshot) return { ...snapshot, review: recovery.review };
+          return generationStreamSnapshotSchema.parse({
+            id: recovery.id,
+            campaignId,
+            expectedTurnNumber: recovery.expectedTurnNumber,
+            status: recovery.status,
+            action: "",
+            operationKind: recovery.operationKind,
+            replacementTurnId: recovery.replacementTurnId,
+            attempts: recovery.attempts,
+            partialNarration: null,
+            errorCode: recovery.errorCode,
+            errorMessage: recovery.errorMessage,
+            diagnostic: recovery.diagnostic ?? null,
+            resultTurnId: recovery.resultTurnId,
+            review: recovery.review
+          });
         }
         return snapshot;
       }
@@ -218,7 +237,7 @@ function createRun(
         return;
       }
       if (retryFirst) {
-        const retry = await retryOrUnrecoverable(latestSnapshot);
+        const retry = await retryOrUnrecoverable(latestSnapshot ?? undefined);
         if (retry.reviewSnapshot) yield { type: "status", snapshot: retry.reviewSnapshot };
         if (retry.error) {
           yield { type: "settled", outcome: "unrecoverable", error: retry.error };

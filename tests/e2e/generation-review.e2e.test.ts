@@ -37,7 +37,9 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
   const replacementTurnId = options.replaceLatest ? fixture.turns.turns[0]!.id : null;
   const resultTurnNumber = options.replaceLatest ? 1 : 2;
   const review = { version: 1, reviewId, revision: 1, state: "pending", stage: options.structureReview ? "structure" : "continuity", candidateScope: "final", reasons: [options.structureReview ? "invalid_structure" : canKeep ? "narrative_conflict" : "invalid_choices"], canKeep: options.structureReview ? false : canKeep, canRetry: true };
-  const detail = { ...review, narration: "The lighthouse bell answered across the harbor.", choices: ["Follow the bell", "Wait at the quay"], findings: [{ code: review.reasons[0], message: options.structureReview ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0 };
+  const candidateNarration = options.structureReview ? null : "The lighthouse bell answered across the harbor.";
+  const candidateChoices = options.structureReview ? [] : ["Follow the bell", "Wait at the quay"];
+  const detail = { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: options.structureReview ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0 };
   const decisions: Record<string, unknown>[] = [];
   const writePaths: string[] = [];
   const sharedState = options.sharedState ?? { accepted: false };
@@ -187,14 +189,18 @@ async function streamedNarration(page: Page, surface: "legacy" | "web-next"): Pr
   const locator = page.locator(surface === "legacy"
     ? "#streamingPreviewCard .streaming-narration"
     : "[data-story-generation-preview] .story-narration");
-  return (await locator.textContent())?.trim() ?? "";
+  if (await locator.count() === 0) return "";
+  return (await locator.allTextContents()).map((text) => text.trim()).filter(Boolean).join(" ");
 }
 
 async function acceptedNarration(page: Page, surface: "legacy" | "web-next", turnNumber: number): Promise<string> {
-  const locator = page.locator(surface === "legacy"
-    ? `#scene-${turnNumber} .scene-narration .narration`
-    : "[data-story-reader] .story-narration").last();
-  return (await locator.textContent())?.trim() ?? "";
+  const locator = surface === "legacy"
+    ? page.locator(`#scene-${turnNumber} .scene-narration .narration`)
+    : page.locator("[data-story-reader] .story-leaf")
+      .filter({ has: page.getByRole("heading", { name: `Turn ${turnNumber}`, exact: true }) })
+      .locator(".story-narration");
+  await expect(locator.first()).toBeVisible();
+  return (await locator.allTextContents()).map((text) => text.trim()).filter(Boolean).join(" ");
 }
 
 async function installStagedReviewStream(page: Page, snapshots: { readonly generatingSnapshot: unknown; readonly snapshot: unknown; readonly queuedSnapshot: unknown; readonly completedSnapshot: unknown; readonly reofferedSnapshot: unknown; readonly reofferedQueuedSnapshot: unknown; readonly reofferedCompletedSnapshot: unknown }) {
@@ -256,15 +262,28 @@ for (const surface of ["legacy", "web-next"] as const) {
     const url = surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`;
     await page.goto(url);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+    const preview = page.locator(surface === "legacy" ? "#streamingPreviewCard" : "[data-story-generation-preview]");
+    const acceptedBeforeDecision = await acceptedNarration(page, surface, 1);
     await expect(recovery).toContainText("invalid structure");
     await expect(recovery).not.toContainText("Context evidence was omitted");
     await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toHaveCount(0);
+    await expect(preview).toBeHidden();
+    expect(await streamedNarration(page, surface)).toBe("");
     await page.reload();
     await expect(recovery).toContainText("invalid structure");
+    await expect(preview).toBeHidden();
+    expect(await streamedNarration(page, surface)).toBe("");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.screenshot({ path: `docs/review/assets/generation-format-recovery/${surface}-structure-review-1440.png`, fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: `docs/review/assets/generation-format-recovery/${surface}-structure-review-390.png`, fullPage: true });
     const retry = surface === "legacy" ? page.locator("#btnRetryGenerationReview") : recovery.getByRole("button", { name: "Continue with retry", exact: true });
     await retry.click();
     await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+    await expect(preview).toBeHidden();
+    expect(await streamedNarration(page, surface)).toBe("");
+    expect(await acceptedNarration(page, surface, 1)).toBe(acceptedBeforeDecision);
     expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
   });
 

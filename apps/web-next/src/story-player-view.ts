@@ -225,6 +225,11 @@ function generationLabel(projection: Readonly<CampaignProjection>): string {
     ? "Story generation needs attention" : "Story Engine generating";
 }
 
+function shouldRenderStreamingPreview(generation: CampaignProjection["generation"]): generation is NonNullable<CampaignProjection["generation"]> {
+  return generation !== null
+    && !(generation.origin === "hydrated_recovery" && generation.review?.summary.stage === "structure");
+}
+
 function viewingLabel(turnNumber: number | null, activeTurnNumber: number): string {
   if (turnNumber === null) return "No accepted turns yet";
   return turnNumber === activeTurnNumber ? "Viewing latest turn" : `Viewing turn ${turnNumber} of ${activeTurnNumber}`;
@@ -515,7 +520,7 @@ function campaignReader(document: Document, state: StoryPlayerViewState): HTMLEl
     } else {
       reader.append(renderStoryTurn(document, selectedTurn, projection.turns, projection.generation !== null, projection.nextTurnsCursor !== null));
     }
-    if (projection.generation !== null) {
+    if (shouldRenderStreamingPreview(projection.generation)) {
       const preview = element(document, "article", "story-leaf story-generation-preview");
       preview.dataset.storyGenerationPreview = "";
       preview.dataset.generationFollowing = String(state.ui.generationFollowing);
@@ -583,7 +588,7 @@ export function renderStoryContent(document: Document, state: StoryPlayerViewSta
     } else {
       content.push(renderStoryTurn(document, selectedTurn, state.projection.turns, state.projection.generation !== null, state.projection.nextTurnsCursor !== null, true, "quiet-leaf"));
     }
-    if (state.projection.generation !== null) {
+    if (shouldRenderStreamingPreview(state.projection.generation)) {
       const preview = element(document, "article", "story-leaf story-generation-preview");
       preview.dataset.storyGenerationPreview = "";
       preview.dataset.generationFollowing = String(state.ui.generationFollowing);

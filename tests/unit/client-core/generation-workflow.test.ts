@@ -347,6 +347,50 @@ describe("generation workflow", () => {
     expect(events.at(-1)).toMatchObject({ type: "settled", outcome: "unrecoverable" });
   });
 
+  it("emits the authoritative review snapshot when manual retry receives a review conflict before streaming", async () => {
+    const decisions: GenerationReviewDecisionRequest[] = [];
+    const client = api({
+      syncStatus: async () => ({
+        pendingGeneration: null,
+        generationRecovery: {
+          ...snapshot({ status: "recoverable", review: reviewSummary() }),
+          errorCode: "generation_failed",
+          errorMessage: "Generation could not be completed."
+        }
+      } as unknown as CampaignSyncStatus),
+      retry: async () => {
+        client.retries += 1;
+        throw Object.assign(new Error("review required"), { statusCode: 409, details: { code: "generation_review_required" } });
+      },
+      decideReview: async (_id, request) => {
+        decisions.push(request);
+        return actionResponse("queued");
+      }
+    });
+    const workflow = createGenerationWorkflow({
+      api: client,
+      source: sourceFromSessions([]),
+      clock: { now: () => 1_000 },
+      pendingSubmissions: store()
+    });
+    const run = await workflow.submit(campaignId, submission());
+
+    const events = await collect(run.retryGeneration(signal()));
+
+    expect(client.retries).toBe(1);
+    expect(decisions).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "status",
+      snapshot: expect.objectContaining({
+        id: jobId,
+        campaignId,
+        status: "recoverable",
+        review: reviewSummary()
+      })
+    }));
+    expect(events.at(-1)).toMatchObject({ type: "settled", outcome: "unrecoverable" });
+  });
+
   it("retains a live pending review across a reconnect frame that omits its summary", async () => {
     const client = api({ syncStatus: async () => legacyRecovery(), retry: async () => { client.retries += 1; return actionResponse("queued"); } });
     const source = sourceFromSessions([[
