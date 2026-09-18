@@ -1,5 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { parseTurnValidationReportOptions, readTurnValidationReport } from "../../scripts/report-turn-validation.js";
+
+function frozenStoryMemoryPolicy(promptProtocol: "story-v14-continuity-context" | "story-v15-canonical-fact-format") {
+  const policy = defaultStoryMemoryPolicy("r3");
+  return {
+    policy,
+    policyHash: storyMemoryPolicyHash(policy),
+    contextProtocol: "current-continuity-v3",
+    promptProtocol,
+    providerConfigurationFingerprint: "a".repeat(64)
+  };
+}
 
 describe("turn validation report", () => {
   it("rejects unsafe report limits and non-UTC since values", () => {
@@ -26,20 +38,23 @@ describe("turn validation report", () => {
   });
 
   it("uses durable completion, output presence, and validation errors rather than response IDs or finish limits", async () => {
+    const enrolledV14 = "story-memory-v1|prompt-library-v1-5d636b749d679ddc|legacy";
+    const enrolledV15 = "story-memory-v1|prompt-library-v1-dc1b588a0a37f571|legacy";
+    const malformedComposite = "story-memory-v1|MODEL_SECRET";
     const jobs = [
-      { id: "null-id", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: "story-v1",
-        requestedModel: "", errorCode: null, failureDiagnostic: null, contextOptions: null, generationPolicy: null },
-      { id: "length", status: "recoverable", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: "story-v1",
+      { id: "null-id", status: "completed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: enrolledV14,
+        requestedModel: "", errorCode: null, failureDiagnostic: null, contextOptions: { storyMemoryPolicy: frozenStoryMemoryPolicy("story-v14-continuity-context") }, generationPolicy: null },
+      { id: "length", status: "recoverable", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: enrolledV15,
         requestedModel: "configured", errorCode: "generation_failed", failureDiagnostic: {
           version: 1, category: "output_incomplete", code: "output_limit", phase: "story_validation", attemptNumber: 1,
           occurredAt: "2026-09-18T00:00:02.000Z", privateMessage: "provider body was cut off"
-        }, contextOptions: null, generationPolicy: null },
-      { id: "invalid", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: "story-v2",
+        }, contextOptions: { storyMemoryPolicy: frozenStoryMemoryPolicy("story-v15-canonical-fact-format") }, generationPolicy: null },
+      { id: "invalid", status: "failed", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: "prompt-library-v1-dc1b588a0a37f571",
         requestedModel: "configured-repair", errorCode: "generation_failed", failureDiagnostic: {
           version: 1, category: "format", code: "invalid_schema", phase: "story_validation", attemptNumber: 1,
           occurredAt: "2026-09-18T00:00:02.000Z", privateMessage: "raw parser detail"
         }, contextOptions: { budgetTokens: 64_000 }, generationPolicy: { playMode: "story_only" } },
-      { id: "incomplete", status: "discarded", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: "protocol\nMODEL_SECRET",
+      { id: "incomplete", status: "discarded", createdAt: "2026-09-18T00:00:00.000Z", promptProtocol: malformedComposite,
         requestedModel: "configured\nMODEL_SECRET", errorCode: "MODEL_SECRET=raw_provider_code", failureDiagnostic: null, contextOptions: { storyMemoryPolicy: { policy: null } }, generationPolicy: null }
     ];
     const query = vi.fn(async (text: string) => {
@@ -66,10 +81,18 @@ describe("turn validation report", () => {
         configuredModel: "unknown", actualReturnedModel: "unknown" })
     ]));
     expect(report.cohorts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ configuredModel: "frozen-default-model", promptProtocol: "story-v1", metrics: expect.objectContaining({ jobs: 1, initialValid: 1 }) }),
-      expect.objectContaining({ configuredModel: "configured-repair", promptProtocol: "story-v2", playMode: "story_only", contextBucket: "32k-127k",
+      expect.objectContaining({ configuredModel: "frozen-default-model", promptProtocol: "story-v14-continuity-context", executionProtocolHash: expect.stringMatching(/^[a-f0-9]{64}$/), metrics: expect.objectContaining({ jobs: 1, initialValid: 1 }) }),
+      expect.objectContaining({ configuredModel: "configured", promptProtocol: "story-v15-canonical-fact-format", executionProtocolHash: expect.stringMatching(/^[a-f0-9]{64}$/), metrics: expect.objectContaining({ jobs: 1, initialValid: 1 }) }),
+      expect.objectContaining({ configuredModel: "configured-repair", promptProtocol: "prompt-library-v1-dc1b588a0a37f571", playMode: "story_only", contextBucket: "32k-127k",
         metrics: expect.objectContaining({ jobs: 1, initialInvalid: 1, validRepairResponses: 1 }) })
     ]));
+    const cohorts = report.cohorts as unknown as Array<{ promptProtocol: string; executionProtocolHash: string }>;
+    const v14 = cohorts.find((cohort) => cohort.promptProtocol === "story-v14-continuity-context")!;
+    const v15 = cohorts.find((cohort) => cohort.promptProtocol === "story-v15-canonical-fact-format")!;
+    expect(v14.executionProtocolHash).not.toBe(v15.executionProtocolHash);
+    expect(cohorts).toEqual(expect.arrayContaining([expect.objectContaining({ promptProtocol: "unknown", executionProtocolHash: "unknown" })]));
     expect(JSON.stringify(report)).not.toContain("MODEL_SECRET");
+    expect(JSON.stringify(report)).not.toContain(enrolledV14);
+    expect(JSON.stringify(report)).not.toContain(enrolledV15);
   });
 });

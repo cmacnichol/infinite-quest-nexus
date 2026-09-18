@@ -24,3 +24,13 @@ Cancellation and discard preserve the private diagnostic because their updates d
 The failure diagnostic is a last-known reporting signal, not an attempt ledger; `generation_attempts` remains the immutable historical source. The report intentionally reduces absent or malformed historical metadata to `unknown` and does not infer it. No claim of live success-rate improvement is made.
 
 Phase 02 may rely on the report's frozen prompt/model/cohort labels and the preserved safe failure category. It must not change the metric denominator rules.
+
+## Follow-up addendum: frozen Story Memory cohort identity
+
+An actual fixed historical cohort showed that enrolled jobs store a composite execution identity such as `story-memory-v1|...`; treating that complete value as a display label collapsed valid cohorts to `unknown`. The report now reads `context_options.storyMemoryPolicy` only when it passes the frozen snapshot schema, exposes its human-readable `promptProtocol`, and adds `executionProtocolHash`, a SHA-256 hash of the complete validated composite identity. The hash keeps otherwise identical prompt versions distinguishable without returning the composite value. Legacy `prompt-library-v1-<hash>` identities remain safe labels with their opaque hash. Missing or malformed snapshots and identities remain `unknown`.
+
+The historical fixed-50 context was used only to reproduce the shape: v14 had 34 jobs (5 valid, 29 invalid), and v15 had 4 jobs (2 valid, 1 invalid, 1 unknown). These values are not encoded in report behavior or tests.
+
+- RED: realistic v14/v15 composite fixtures failed because the old label filter returned `unknown` and no distinguishing identity hash.
+- GREEN: `corepack pnpm exec vitest run tests/unit/report-turn-validation.test.ts` passed 3/3; it proves two frozen versions remain distinct, legacy labels are retained, malformed values are unknown, and raw composite strings never appear in report JSON.
+- CLI: the bounded `--limit 1 --format json` report ran against the isolated database and emitted the retained legacy route label plus its opaque execution hash.

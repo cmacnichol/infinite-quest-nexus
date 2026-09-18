@@ -1,6 +1,8 @@
 import { fileURLToPath } from "node:url";
+import { sha256Hex } from "../packages/contracts/src/hash.js";
 import { summarizeValidationOutcomes, type JobOutcome, type ValidationObservation } from "../packages/application/src/generation/outcome-metrics.js";
 import { projectGenerationFailureDiagnostic } from "../packages/contracts/src/generation-review.js";
+import { storyMemoryPolicySnapshotSchema } from "../packages/contracts/src/story-memory-policy.js";
 
 export type TurnValidationReportOptions = Readonly<{
   limit: number;
@@ -15,6 +17,33 @@ type AttemptRow = Readonly<{ jobId: string; attemptNumber: number; recoveryKind:
 function reportLabel(value: unknown): string {
   const label = typeof value === "string" ? value.trim() : "";
   return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/u.test(label) ? label : "unknown";
+}
+
+type ProtocolCohortIdentity = Readonly<{ promptProtocol: string; executionProtocolHash: string }>;
+type CohortLabels = Readonly<ProtocolCohortIdentity & {
+  configuredModel: string;
+  playMode: string;
+  reviewMode: string;
+  contextBucket: string;
+}>;
+
+function protocolCohortIdentity(executionProtocol: unknown, storyMemoryPolicy: unknown): ProtocolCohortIdentity {
+  const identity = typeof executionProtocol === "string" ? executionProtocol.trim() : "";
+  if (!identity || identity.length > 512) return { promptProtocol: "unknown", executionProtocolHash: "unknown" };
+  const frozenMemoryPolicy = storyMemoryPolicySnapshotSchema.safeParse(storyMemoryPolicy);
+  if (frozenMemoryPolicy.success) {
+    if (!/^story-memory-v1\|[A-Za-z0-9._|-]{1,500}$/u.test(identity)) {
+      return { promptProtocol: "unknown", executionProtocolHash: "unknown" };
+    }
+    return {
+      promptProtocol: reportLabel(frozenMemoryPolicy.data.promptProtocol),
+      executionProtocolHash: sha256Hex(identity)
+    };
+  }
+  if (/^prompt-library-v1-[a-f0-9]{16}$/u.test(identity)) {
+    return { promptProtocol: identity, executionProtocolHash: sha256Hex(identity) };
+  }
+  return { promptProtocol: "unknown", executionProtocolHash: "unknown" };
 }
 
 export function parseTurnValidationReportOptions(args: readonly string[]): TurnValidationReportOptions {
@@ -45,7 +74,7 @@ function observationFrom(row: AttemptRow): ValidationObservation {
   };
 }
 
-function cohort(row: JobRow, configuredModel: string): Record<string, string> {
+function cohort(row: JobRow, configuredModel: string, protocol: ProtocolCohortIdentity): CohortLabels {
   const policy = row.generationPolicy ?? {};
   const context = row.contextOptions ?? {};
   const budget = typeof context.budgetTokens === "number" ? context.budgetTokens : null;
@@ -56,7 +85,7 @@ function cohort(row: JobRow, configuredModel: string): Record<string, string> {
     ? memoryPolicy.policy as Record<string, unknown>
     : null;
   return {
-    promptProtocol: reportLabel(row.promptProtocol),
+    ...protocol,
     configuredModel,
     playMode: reportLabel(policy.playMode),
     reviewMode: reportLabel(policyMetadata?.continuityReview),
@@ -101,13 +130,14 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
     const initialByJob = new Map<string, ValidationObservation>();
     for (const observation of observations) if (observation.operation === "initial"
       && (!initialByJob.has(observation.jobId) || observation.attemptNumber < initialByJob.get(observation.jobId)!.attemptNumber)) initialByJob.set(observation.jobId, observation);
-    const cohortGroups = new Map<string, { labels: Record<string, string>; jobs: JobOutcome[]; observations: ValidationObservation[] }>();
+    const cohortGroups = new Map<string, { labels: CohortLabels; jobs: JobOutcome[]; observations: ValidationObservation[] }>();
+    const protocolByJob = new Map(jobs.rows.map((job) => [job.id, protocolCohortIdentity(job.promptProtocol, job.contextOptions?.storyMemoryPolicy)]));
     for (const job of jobs.rows) {
       const requestedModel = reportLabel(job.requestedModel);
       const configuredModel = requestedModel === "unknown"
         ? reportLabel(frozenInitialModels.get(job.id)?.model)
         : requestedModel;
-      const labels = cohort(job, configuredModel);
+      const labels = cohort(job, configuredModel, protocolByJob.get(job.id)!);
       const key = JSON.stringify(labels);
       const group = cohortGroups.get(key) ?? { labels, jobs: [], observations: [] };
       group.jobs.push({ jobId: job.id, status: job.status });
@@ -124,11 +154,12 @@ export async function readTurnValidationReport(client: QueryClient, options: Tur
         const configuredModel = requestedModel === "unknown"
           ? reportLabel(frozenInitialModels.get(row.id)?.model)
           : requestedModel;
+        const protocol = protocolByJob.get(row.id)!;
         return { jobId: row.id, finalStatus: row.status,
         initialOutcome: initialByJob.get(row.id)?.outcome ?? "unknown",
         finalErrorCode: failureDiagnostic?.code ?? (row.errorCode ? "generation_failed" : "unknown"),
         failureDiagnostic,
-        configuredModel, actualReturnedModel: reportLabel(actualModels.get(row.id)) };
+        configuredModel, actualReturnedModel: reportLabel(actualModels.get(row.id)), ...protocol };
       }),
       cohorts: [...cohortGroups.values()].map((group) => ({ ...group.labels,
         metrics: summarizeValidationOutcomes(group.jobs, group.observations) }))
