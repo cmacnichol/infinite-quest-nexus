@@ -71,6 +71,10 @@ Use structured logs with correlation IDs for campaign, generation job, model req
 
 Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
 
+### Recoverable generation reviews
+
+Current malformed main output pauses for an explicit review; it does not dispatch an automatic schema or mechanics rewrite. A user may choose full Retry, which starts the existing replacement workflow, or a version-2 fact-format repair only when the stored offer binds the original response, producing request, and repair plan. Historical automatic-repair checkpoints remain readable for audit and safe resume compatibility, but operators must not create or reinterpret them as current automatic work. Preserve the original provider response and request evidence while a review is pending; do not replace them during recovery.
+
 ### Story context integrity upgrade and rollback
 
 Use this sequence for the story-context integrity protocol. It is an operator
