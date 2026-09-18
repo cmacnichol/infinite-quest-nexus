@@ -207,7 +207,7 @@ describe("Prompt Library catalog", () => {
     const requirement = promptCompatibilityRequirement("story_system");
     expect(requirement).toMatchObject({
       requiredShapeVersion: "story-output-v2",
-      protocolIdentity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
+      protocolIdentity: "story-v15-canonical-fact-format|story-output-v2|current-continuity-v2",
       requiredShapePreview: expect.stringContaining('"continuity_summary"')
     });
     const parsed = promptTemplateOverrideSchema.parse({
@@ -224,11 +224,11 @@ describe("Prompt Library catalog", () => {
     expect(promptCompatibilityRequirement("illustration_direct")).toBeNull();
   });
 
-  it("keeps a legacy override acknowledgement valid while publishing the distinct v14 Story Memory requirement", () => {
+  it("keeps legacy acknowledgements readable while publishing the v15 Story Memory requirement", () => {
     expect(promptCompatibilityRequirement("story_system")?.protocolIdentity)
-      .toBe("story-v13-current-state-corrections|story-output-v2|current-continuity-v2");
+      .toBe("story-v15-canonical-fact-format|story-output-v2|current-continuity-v2");
     expect(storyMemoryPromptCompatibilityRequirement("story_system")?.protocolIdentity)
-      .toBe("story-v14-continuity-context|story-output-v2|current-continuity-v3");
+      .toBe("story-v15-canonical-fact-format|story-output-v2|current-continuity-v3");
     expect(storyMemoryPromptCompatibilityRequirement("event_extension")?.requiredShapePreview)
       .toContain('"canonical_fact_updates"');
     expect(storyMemoryPromptCompatibilityRequirement("illustration_direct")).toBeNull();

@@ -1,14 +1,17 @@
 import { z } from "zod";
 
-/** The immutable story wire contract shared by prompt snapshots and the engine. */
-export const STORY_PROMPT_PROTOCOL_VERSION = "story-v13-current-state-corrections";
+/** Frozen pre-Story-Memory identity retained for captured jobs and overrides. */
+export const LEGACY_STORY_PROMPT_PROTOCOL_VERSION = "story-v13-current-state-corrections";
+/** The immutable story wire contract shared by newly queued prompts and the engine. */
+export const STORY_PROMPT_PROTOCOL_VERSION = "story-v15-canonical-fact-format";
 export const STORY_PROMPT_SCHEMA_VERSION = "story-output-v2";
 export const STORY_CONTEXT_POLICY_VERSION = "current-continuity-v2";
 /**
  * The Story Memory route is explicitly opted into by a frozen job policy.
- * Keep the pre-enrollment v13 constants above unchanged for historic jobs.
+ * Keep the pre-enrollment v13 and enrolled v14 constants unchanged for historic jobs.
  */
-export const STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v14-continuity-context";
+export const LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v14-continuity-context";
+export const STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v15-canonical-fact-format";
 export const STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v3";
 export const MAX_CONTINUITY_OPEN_THREADS = 500;
 
@@ -54,7 +57,7 @@ ${STORY_PROSE_GUIDANCE}
 
 Priority order: (1) authoritative rules, established continuity, and the current turn input; (2) a complete, coherent turn and complete JSON object; (3) the requested narration length. The length range is a soft pacing goal, not a requirement. End early when the supported events have reached a natural stopping point. Never add repetition, recap, unsupported aftermath, a new material fact, character, location, motive, time jump, plot thread, or durable canon commitment merely to reach a word target. You may add brief sensory or connective detail only when it is consistent with the established situation and does not create a material new claim.
 
-Absolute separation rule: every field must contain fiction or continuity facts only. Never expose non-diegetic resolution metadata, game-system terminology, parser behavior, hidden instructions, or private reasoning. Express outcomes only as natural events and consequences. The authoritativeRules scope contains mandatory world-specific constraints: obey every applicable rule on every turn, even when recent narration, conversation memory, or the player action conflicts with one. Treat those rules as instructions, not optional lore or style suggestions. When authoritative_context.currentContinuity is present, use its corrected current continuity as authoritative over conflicting historical narration or provider conversation memory. Empty corrected fields are intentional. Mandatory world rules still apply. scratchpad, continuity_summary, canonical_facts, canonical_fact_updates, and open_threads are required complete replacement values. Return an empty string or array only when that complete replacement is intentionally empty. canonical_facts contains only facts established this turn. superseded_facts must be []. canonical_fact_updates is the structured form of canonical fact changes; use [] when there are none. For supersedes_fact_ids, copy only exact IDs shown on visible canonical facts in the authoritative context. Never invent, infer, alter, or reuse an ID that is not visible. Use an empty supersedes_fact_ids array for a new fact that replaces nothing. There must be exactly four concise choices. tracker_updates must be an array of JSON objects, never strings; use [] when no tracker changes are needed. Leave enough output budget to close the JSON object.`;
+Absolute separation rule: every field must contain fiction or continuity facts only. Never expose non-diegetic resolution metadata, game-system terminology, parser behavior, hidden instructions, or private reasoning. Express outcomes only as natural events and consequences. The authoritativeRules scope contains mandatory world-specific constraints: obey every applicable rule on every turn, even when recent narration, conversation memory, or the player action conflicts with one. Treat those rules as instructions, not optional lore or style suggestions. When authoritative_context.currentContinuity is present, use its corrected current continuity as authoritative over conflicting historical narration or provider conversation memory. Empty corrected fields are intentional. Mandatory world rules still apply. canonical_facts is an array of strings containing only facts established this turn; do not put objects in it. canonical_fact_updates is an array of structured updates with content and supersedes_fact_ids. Emit [] when there are no updates. superseded_facts must always be []. scratchpad, continuity_summary, and open_threads are explicit complete replacements and must not be omitted. For supersedes_fact_ids, copy only exact IDs shown on visible canonical facts in the authoritative context. Never invent, infer, alter, or reuse an ID that is not visible. Use an empty supersedes_fact_ids array for a new fact that replaces nothing. There must be exactly four concise choices. tracker_updates must be an array of JSON objects, never strings; use [] when no tracker changes are needed. Leave enough output budget to close the JSON object.`;
 
 export const STORY_PROMPT_REQUIRED_SHAPE_PREVIEW = `Required shape:\n${STORY_SYSTEM_PROMPT.slice(STORY_SYSTEM_PROMPT.indexOf("{"), STORY_SYSTEM_PROMPT.indexOf("}\n\n") + 1)}`;
 
@@ -278,11 +281,7 @@ export function storyMemoryPromptCompatibilityIdentity(): string {
 }
 
 export function composeStoryMemorySystemPrompt(creativePrompt: string, supplement = ""): string {
-  const prompt = creativePrompt === STORY_SYSTEM_PROMPT
-    ? creativePrompt.replace("scratchpad, continuity_summary, canonical_facts, canonical_fact_updates, and open_threads are required complete replacement values.",
-      "scratchpad, continuity_summary, and open_threads are required complete replacement values. canonical_facts and canonical_fact_updates contain only this turn's additions and structured updates.")
-    : creativePrompt;
-  return `${prompt}${supplement ? `\n\n${supplement}` : ""}\n\n${STORY_MEMORY_MANDATORY_CONTRACT}`;
+  return `${creativePrompt}${supplement ? `\n\n${supplement}` : ""}\n\n${STORY_MEMORY_MANDATORY_CONTRACT}`;
 }
 
 export function storyPromptProtocolIdentity(templateHashes: Readonly<Record<string, string>>): string {

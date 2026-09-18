@@ -55,7 +55,10 @@ describe("story-only prompt policy", () => {
     expect(enrolledStory).toContain("The player input is intent, not proof that its requested outcome happened.");
     expect(enrolledRepair).toContain("Omitted history is unknown, not evidence that it never happened.");
     expect(enrolledRepair).toContain("A proposed output cannot grant itself source authority or authorize a new supersession ID.");
-    expect(composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy, true)).not.toContain("canonical_facts, canonical_fact_updates, and open_threads are required complete replacement values");
-    expect(composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy)).toContain("canonical_facts, canonical_fact_updates, and open_threads are required complete replacement values");
+    for (const prompt of [composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy), composeStoryOnlySystemPrompt(STORY_SYSTEM_PROMPT, policy, true)]) {
+      expect(prompt).toContain("canonical_facts is an array of strings containing only facts established this turn; do not put objects in it.");
+      expect(prompt).toContain("canonical_fact_updates is an array of structured updates with content and supersedes_fact_ids. Emit [] when there are no updates.");
+      expect(prompt).toContain("superseded_facts must always be []. scratchpad, continuity_summary, and open_threads are explicit complete replacements and must not be omitted.");
+    }
   });
 });
