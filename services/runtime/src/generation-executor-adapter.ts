@@ -977,6 +977,15 @@ async function executeLoadedGeneration(
     promptSnapshot = frozenStoryMemoryPolicySnapshot
       ? assertStoryMemoryPromptCompatibility(job.prompt_snapshot)
       : readPromptSnapshot(job.prompt_snapshot);
+    if (frozenStoryMemoryPolicySnapshot) {
+      const proof = promptSnapshot.storyMemoryCompatibility;
+      const expectedPrefix = `${frozenStoryMemoryPolicySnapshot.promptProtocol}|`;
+      // Pre-proof v14 shipped snapshots are the only compatible proof-less form.
+      if ((proof && !proof.protocolIdentity.startsWith(expectedPrefix))
+        || (!proof && frozenStoryMemoryPolicySnapshot.promptProtocol !== "story-v14-continuity-context")) {
+        throw new Error("Frozen Story Memory policy and prompt acknowledgement disagree.");
+      }
+    }
     if (frozenStoryMemoryPolicySnapshot) assertContinuityReviewPromptSnapshot(promptSnapshot, reviewMode);
     // Every downstream prompt use reads the one normalized frozen envelope.
     job = { ...job, prompt_snapshot: promptSnapshot.templates as PromptSnapshot };

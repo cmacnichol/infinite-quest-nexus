@@ -145,4 +145,30 @@ integration("prompt-memory remediation composed workflow", () => {
     await expect(pool.query<{ attempts: string }>("SELECT count(*)::text AS attempts FROM generation_attempts WHERE generation_job_id=$1", [finalJob.id]))
       .resolves.toMatchObject({ rows: [{ attempts: "1" }] });
   });
+
+  it.each([
+    ["omitted no-op arrays", (value: Record<string, unknown>) => { delete value.superseded_facts; delete value.canonical_fact_updates; }],
+    ["content-only fact wrapper", (value: Record<string, unknown>) => { value.canonical_facts = [{ content: "The format beacon is lit." }]; }]
+  ])("accepts %s once, preserves raw evidence, and replays accepted authority", async (_label, format) => {
+    const fixture = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    fixture.world.title = `Normalization composed ${crypto.randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "normalization.story", story: fixture }));
+    const ownerUserId = await initialOwnerId(pool);
+    const application = createApiGenerationApplication(pool, credentialSecret);
+    const output = JSON.parse(story("The format beacon is lit above the gate.", "The format beacon is lit."));
+    format(output);
+    const beforeRequests = requests.length;
+    replies.push(JSON.stringify(output));
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Light the format beacon.", providerProfileId: providerId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(await runGenerationJob(pool, `normalization-worker-${crypto.randomUUID()}`, 30, credentialSecret)).toBe(true);
+    expect(requests).toHaveLength(beforeRequests + 1);
+    await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: "completed" });
+    await expect(pool.query<{ content: string }>("SELECT content FROM canonical_facts WHERE campaign_id=$1 ORDER BY created_at DESC LIMIT 1", [imported.campaignId]))
+      .resolves.toMatchObject({ rows: [{ content: "The format beacon is lit." }] });
+    await expect(pool.query<{ raw: string }>("SELECT raw_output AS raw FROM generation_attempts WHERE generation_job_id=$1", [job.id]))
+      .resolves.toMatchObject({ rows: [expect.objectContaining({ raw: expect.stringContaining("canonical_facts") })] });
+  });
 });

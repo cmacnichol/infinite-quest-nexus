@@ -1570,6 +1570,46 @@ describe("generation executor adapter", () => {
       }
     } as never;
     job.prompt_protocol_version = "story-memory-v1|story-v14-continuity-context|story-output-v2|current-continuity-v3";
+    const templates = validPromptSnapshot();
+    job.prompt_snapshot = {
+      version: 2, templates, continuityReview: null,
+      storyMemoryCompatibility: {
+        protocolIdentity: "story-v15-canonical-fact-format|story-output-v2|current-continuity-v3",
+        templateHashes: { story_system: templates.story_system.hash, event_extension: templates.event_extension.hash }
+      }
+    } as never;
+    const repository = { ...guardedRepository(), loadExecutionPayload: vi.fn(async () => job), markRecoverable: vi.fn(async () => true) };
+    const collaborators = rejectedCollaborators();
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
+
+    expect(collaborators.loadTextExecution).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({
+      recoveryMetadata: expect.objectContaining({ diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } })
+    }));
+  });
+
+  it("does not dispatch a v15 Story Memory policy with a captured v14 acknowledgement", async () => {
+    const policy = defaultStoryMemoryPolicy("r2");
+    const job = completeGenerationExecutionPayload();
+    job.context_options = {
+      ...job.context_options,
+      storyMemoryPolicy: {
+        policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v3",
+        promptProtocol: "story-v15-canonical-fact-format", providerConfigurationFingerprint: "a".repeat(64)
+      }
+    } as never;
+    const templates = validPromptSnapshot();
+    job.prompt_snapshot = {
+      version: 2, templates, continuityReview: null,
+      storyMemoryCompatibility: {
+        protocolIdentity: "story-v14-continuity-context|story-output-v2|current-continuity-v3",
+        templateHashes: { story_system: templates.story_system.hash, event_extension: templates.event_extension.hash }
+      }
+    } as never;
     const repository = { ...guardedRepository(), loadExecutionPayload: vi.fn(async () => job), markRecoverable: vi.fn(async () => true) };
     const collaborators = rejectedCollaborators();
 
