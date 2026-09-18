@@ -1,6 +1,12 @@
-import { STORY_MEMORY_MANDATORY_CONTRACT } from "../../packages/contracts/src/story-prompt.js";
+import {
+  PREVIOUS_STORY_MEMORY_MANDATORY_CONTRACT,
+  STORY_MEMORY_MANDATORY_CONTRACT
+} from "../../packages/contracts/src/story-prompt.js";
+import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
+import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
+import { generationExecutionProtocolIdentity } from "../../packages/story-engine/src/story-only-prompt.js";
 import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -10,7 +16,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
-import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
+import { storyMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
@@ -225,6 +232,15 @@ integration("story context payload baseline shape", () => {
     expect(captured.body).not.toContain("buildContextPreview");
   });
 
+  it("serializes the fact wire distinction in the default Action system message", async () => {
+    const fixture = await importedCampaign("v16-default-action");
+    const captured = await dispatch(fixture.campaignId, "Inspect the relay lantern.");
+    const system = (captured.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content;
+
+    expect(system).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+    expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+  });
+
   it("keeps a deliberately empty correction oracle independent from transported candidate output", () => {
     expect(storyContinuitySourceOracle.intentionalEmptyCorrection).toEqual({
       id: storyContinuitySourceOracle.intentionalEmptyCorrection.id,
@@ -433,6 +449,65 @@ integration("story context payload baseline shape", () => {
   const dispatchR1 = (campaignId: string, action: string) => dispatch(campaignId, action, true);
 
   describe("enrolled R1 actual provider-payload regressions", () => {
+    it("serializes the frozen v15 creative override and mandatory contract unchanged on retry", async () => {
+      const fixture = await enrolledCampaign("v15-frozen-creative-override");
+      const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r1", enforceEnabled: false });
+      const queued = await application.enqueueAppend({ ownerUserId, campaignId: fixture.campaignId }, generationRequestSchema.parse({
+        action: "Inspect the relay lantern.", providerProfileId: providerId, idempotencyKey: randomUUID(),
+        context: { budgetTokens: 1_000_000, compression: "full", recentTurns: 8 }
+      }));
+      const current = (await pool.query<{ prompt_snapshot: { templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }>; storyMemoryCompatibility: { protocolIdentity: string; templateHashes: Record<string, string> } }; context_options: { storyMemoryPolicy: { promptProtocol: string } } }>(
+        "SELECT prompt_snapshot,context_options FROM generation_jobs WHERE id=$1", [queued.id]
+      )).rows[0]!;
+      const frozenCreativeOverride = "Frozen v15 creative override bytes.";
+      const frozenHash = createHash("sha256").update(frozenCreativeOverride).digest("hex");
+      const oldSnapshot = structuredClone(current.prompt_snapshot);
+      oldSnapshot.templates.story_system = { content: frozenCreativeOverride, hash: frozenHash, source: "campaign" };
+      oldSnapshot.storyMemoryCompatibility = {
+        protocolIdentity: "story-v15-canonical-fact-format|story-output-v2|current-continuity-v3",
+        templateHashes: { ...oldSnapshot.storyMemoryCompatibility.templateHashes, story_system: frozenHash }
+      };
+      const oldContext = structuredClone(current.context_options);
+      oldContext.storyMemoryPolicy.promptProtocol = "story-v15-canonical-fact-format";
+      const oldProtocol = `story-memory-v1|${generationExecutionProtocolIdentity(providerPromptProtocolVersion(oldSnapshot.templates as never), { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" })}`;
+      await pool.query(
+        "UPDATE generation_jobs SET prompt_snapshot=$2::jsonb,context_options=$3::jsonb,prompt_protocol_version=$4 WHERE id=$1",
+        [queued.id, JSON.stringify(oldSnapshot), JSON.stringify(oldContext), oldProtocol]
+      );
+
+      const before = requests.length;
+      expect(await runGenerationJob(pool, `payload-v15-retry-${randomUUID()}`, 30, credentialSecret)).toBe(true);
+      const system = (requests.at(before)!.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content;
+
+      expect(system).toBe(`${frozenCreativeOverride}\n\n${PREVIOUS_STORY_MEMORY_MANDATORY_CONTRACT}`);
+      expect(system).not.toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+    });
+
+    it("serializes the fact wire distinction after an acknowledged creative override", async () => {
+      const fixture = await enrolledCampaign("v16-creative-override");
+      const creativeOverride = "Input canonical facts are complete reference objects and should be repeated as additions.";
+      await withTransaction(pool, async (client) => createPromptRepository(client).savePromptOverride({
+        ownerUserId,
+        scope: "campaign",
+        campaignId: fixture.campaignId,
+        key: "story_system",
+        content: creativeOverride,
+        compatibilityAcknowledgement: {
+          requiredShapeVersion: "story-output-v2",
+          protocolIdentity: storyMemoryPromptCompatibilityIdentity(),
+          contentHash: createHash("sha256").update(creativeOverride).digest("hex")
+        }
+      }));
+
+      const captured = await dispatchR1(fixture.campaignId, "Inspect the relay lantern.");
+      const system = (captured.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
+
+      expect(system).toContain(creativeOverride);
+      expect(system).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+      expect(system.lastIndexOf("Output canonical_facts contains strings only"))
+        .toBeGreaterThan(system.indexOf(creativeOverride));
+    });
+
     it("runs enrolled Story Direction choice repair with the mandatory contract on both actual requests", async () => {
       const fixture = await enrolledCampaign("r1-scene-repair");
       await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [fixture.campaignId]);
@@ -445,6 +520,8 @@ integration("story context payload baseline shape", () => {
       for (const request of actual) {
         const messages = request.parsed.messages as { role: string; content: string }[];
         expect(messages.find((message) => message.role === "system")?.content).toContain(STORY_MEMORY_MANDATORY_CONTRACT);
+        expect(messages.find((message) => message.role === "system")?.content).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+        expect(messages.find((message) => message.role === "system")?.content).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
         expect(request.body).not.toContain("are facts that happen in this turn");
       }
       expect((await pool.query("SELECT narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [fixture.campaignId])).rows[0]!.narration)

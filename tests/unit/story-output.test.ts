@@ -310,7 +310,7 @@ describe("story output integrity", () => {
   });
 
   it("privately requests readable narration paragraphs with a versioned protocol", () => {
-    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v15-canonical-fact-format");
+    expect(STORY_PROMPT_PROTOCOL_VERSION).toBe("story-v16-fact-wire-distinction");
     expect(STORY_SYSTEM_PROMPT).toContain("paragraphs separated by two newline characters");
     expect(STORY_SYSTEM_PROMPT).toContain("change of speaker, scene transition, or meaningful shift in focus");
     expect(STORY_SYSTEM_PROMPT).toContain("The length range is a soft pacing goal, not a requirement.");
@@ -321,7 +321,7 @@ describe("story output integrity", () => {
     const enrolled = buildStoryMemoryUserPrompt({}, "I ask the keeper to open the gate.");
     const enrolledPayload = JSON.parse(enrolled) as { instructions: string[] };
 
-    expect(STORY_MEMORY_PROMPT_PROTOCOL_VERSION).toBe("story-v15-canonical-fact-format");
+    expect(STORY_MEMORY_PROMPT_PROTOCOL_VERSION).toBe("story-v16-fact-wire-distinction");
     expect(legacy).not.toContain("The player input is intent, not proof that its requested outcome happened.");
     expect(enrolledPayload.instructions).toContain("The player input is intent, not proof that its requested outcome happened.");
     expect(enrolledPayload.instructions).toContain("Omitted history is unknown, not evidence that it never happened.");
@@ -329,6 +329,14 @@ describe("story output integrity", () => {
     const scene = buildStoryMemoryUserPrompt({}, "The keeper opens the gate.", false, [], undefined, "scene");
     expect(scene).not.toContain("are facts that happen in this turn");
     expect(scene).toContain("requested scene direction");
+  });
+
+  it("makes the default system prompt distinguish input fact records from fact additions", () => {
+    expect(STORY_SYSTEM_PROMPT).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+    expect(STORY_SYSTEM_PROMPT).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+    expect(STORY_SYSTEM_PROMPT).toContain("Use canonical_fact_updates only for explicit fact updates");
+    expect(STORY_SYSTEM_PROMPT).toContain("Use [] for superseded_facts.");
+    expect(STORY_SYSTEM_PROMPT).toContain("Return scratchpad, continuity_summary, and open_threads as complete current replacements");
   });
 
   it("extracts partial narration safely from incomplete streaming JSON", () => {

@@ -158,6 +158,41 @@ integration("Story Memory enrollment", () => {
     await expect(commands().retry({ ownerUserId, jobId: queued.id })).rejects.toMatchObject({ details: { reason: "retry_protocol_incompatible" } });
     await expect(pool.query("SELECT status FROM generation_jobs WHERE id=$1", [queued.id])).resolves.toMatchObject({ rows: [{ status: "recoverable" }] });
   });
+  it("freezes the v16 fact wire contract for new work while retrying a v15 snapshot unchanged", async () => {
+    const imported = await importCampaign("v16 frozen fact wire");
+    const owned = { ownerUserId, campaignId: imported.campaignId };
+    await saveStoryMemoryEnrollment(pool, owned, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
+    const queued = await commands().enqueueAppend(owned, append());
+    const current = (await pool.query<{ prompt_snapshot: { templates: Record<string, { content: string; hash: string; source: "shipped" | "application" | "campaign" }>; storyMemoryCompatibility: { protocolIdentity: string; templateHashes: Record<string, string> } }; context_options: { storyMemoryPolicy: { promptProtocol: string } }; prompt_protocol_version: string }>(
+      "SELECT prompt_snapshot,context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!;
+    expect(current.context_options.storyMemoryPolicy.promptProtocol).toBe("story-v16-fact-wire-distinction");
+    expect(current.prompt_snapshot.storyMemoryCompatibility.protocolIdentity).toBe("story-v16-fact-wire-distinction|story-output-v2|current-continuity-v3");
+    expect(current.prompt_snapshot.templates.story_system!.content).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+
+    const oldCreativeOverride = "Frozen v15 creative prompt bytes.";
+    const oldHash = createHash("sha256").update(oldCreativeOverride).digest("hex");
+    const oldSnapshot = structuredClone(current.prompt_snapshot);
+    oldSnapshot.templates.story_system = { content: oldCreativeOverride, hash: oldHash, source: "campaign" };
+    oldSnapshot.storyMemoryCompatibility = {
+      protocolIdentity: "story-v15-canonical-fact-format|story-output-v2|current-continuity-v3",
+      templateHashes: { ...oldSnapshot.storyMemoryCompatibility.templateHashes, story_system: oldHash }
+    };
+    const oldContext = structuredClone(current.context_options);
+    oldContext.storyMemoryPolicy.promptProtocol = "story-v15-canonical-fact-format";
+    const oldProtocol = `story-memory-v1|${generationExecutionProtocolIdentity(providerPromptProtocolVersion(oldSnapshot.templates as never), { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" })}`;
+    await pool.query(
+      "UPDATE generation_jobs SET status='recoverable',prompt_snapshot=$2::jsonb,context_options=$3::jsonb,prompt_protocol_version=$4 WHERE id=$1",
+      [queued.id, JSON.stringify(oldSnapshot), JSON.stringify(oldContext), oldProtocol]
+    );
+    const frozenBeforeRetry = (await pool.query<{ prompt_snapshot: unknown; context_options: unknown; prompt_protocol_version: string }>(
+      "SELECT prompt_snapshot,context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!;
+
+    await expect(commands().retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+    await expect(pool.query("SELECT prompt_snapshot,context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [frozenBeforeRetry] });
+  });
   it("rejects an unacknowledged custom override, then freezes its current proof independently of later edits", async () => {
     const imported = await importCampaign("prompt acknowledgement");
     const owned = { ownerUserId, campaignId: imported.campaignId };

@@ -1098,7 +1098,11 @@ async function executeLoadedGeneration(
   const generationPolicy = parsedGenerationPolicy === null ? null : parsedGenerationPolicy.data;
   const hasFrozenStoryMemoryPolicy = frozenStoryMemoryPolicySnapshot !== null;
   const storyOnlyChoiceRepairSystemPrompt = generationPolicy?.playMode === "story_only"
-    ? composeStoryOnlyChoiceRepairSystemPrompt(generationPolicy.prompts.choiceRepairSystem, hasFrozenStoryMemoryPolicy)
+    ? composeStoryOnlyChoiceRepairSystemPrompt(
+      generationPolicy.prompts.choiceRepairSystem,
+      hasFrozenStoryMemoryPolicy,
+      frozenStoryMemoryPolicySnapshot?.promptProtocol
+    )
     : null;
   const stages = generationStagePolicy(generationPolicy?.playMode ?? "legacy");
   let frozenGenerationPolicyIdentity: string | null = null;
@@ -1235,9 +1239,14 @@ async function executeLoadedGeneration(
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
       const storySystemPrompt = generationPolicy?.playMode === "story_only"
-        ? composeStoryOnlySystemPrompt(baseStorySystemPrompt, generationPolicy, hasFrozenStoryMemoryPolicy)
+        ? composeStoryOnlySystemPrompt(
+          baseStorySystemPrompt,
+          generationPolicy,
+          hasFrozenStoryMemoryPolicy,
+          frozenStoryMemoryPolicySnapshot?.promptProtocol
+        )
         : hasFrozenStoryMemoryPolicy
-          ? composeStoryMemorySystemPrompt(baseStorySystemPrompt)
+          ? composeStoryMemorySystemPrompt(baseStorySystemPrompt, "", frozenStoryMemoryPolicySnapshot.promptProtocol)
           : baseStorySystemPrompt;
       const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
         + estimateStoryTokens((hasFrozenStoryMemoryPolicy ? buildStoryMemoryUserPrompt : buildStoryUserPrompt)(
