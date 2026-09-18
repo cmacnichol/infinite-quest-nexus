@@ -59,7 +59,9 @@ function completedResult(): GenerationResult {
   return { id: jobId, status: "completed" } as GenerationResult;
 }
 
-function reviewDetail(overrides: Partial<GenerationReviewDetail> = {}): GenerationReviewDetail {
+type V1ReviewDetail = Extract<GenerationReviewDetail, { version: 1 }>;
+
+function reviewDetail(overrides: Partial<V1ReviewDetail> = {}): V1ReviewDetail {
   return {
     version: 1,
     reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -77,10 +79,10 @@ function reviewDetail(overrides: Partial<GenerationReviewDetail> = {}): Generati
     retryFailure: null,
     omittedFindingCount: 0,
     ...overrides
-  };
+  } as V1ReviewDetail;
 }
 
-function reviewSummary(overrides: Partial<GenerationReviewDetail> = {}) {
+function reviewSummary(overrides: Partial<V1ReviewDetail> = {}) {
   const detail = reviewDetail(overrides);
   return {
     version: detail.version,

@@ -1,5 +1,5 @@
-import { canonicalFactUpdateSchema, type StoryTurnOutput } from "../../contracts/src/generation.js";
-import { sha256, stableStringify } from "../../domain/src/text.js";
+import { canonicalFactUpdateSchema, factFormatRepairHash, factFormatRepairStableJson, type StoryTurnOutput } from "../../contracts/src/index.js";
+import { sha256 } from "../../domain/src/text.js";
 import { containsMechanicsLanguage, extractJsonObject, parseStoryOutput } from "./output.js";
 
 export type VisibleRepairFact = Readonly<{ id: string; content: string }>;
@@ -93,7 +93,7 @@ const PROTECTED_STORY_FIELDS = [
 
 function preservesProtectedFields(source: Record<string, unknown>, story: StoryTurnOutput): boolean {
   return PROTECTED_STORY_FIELDS.every((field) => source[field] === undefined
-    || stableStringify(source[field]) === stableStringify(story[field]));
+    || factFormatRepairStableJson(source[field]) === factFormatRepairStableJson(story[field]));
 }
 
 function result(reason: FactFormatRepairReason): FactFormatRepairResult {
@@ -220,9 +220,9 @@ export function planFactFormatRepair(input: Readonly<{
     plan: {
       version: 1,
       rawOutputHash: sha256(input.rawOutput),
-      visibleFactsHash: sha256(stableStringify(input.visibleFacts)),
-      protectedFieldsHash: sha256(stableStringify(protectedSource)),
-      resultHash: sha256(stableStringify(story)),
+      visibleFactsHash: factFormatRepairHash(input.visibleFacts),
+      protectedFieldsHash: factFormatRepairHash(protectedSource),
+      resultHash: factFormatRepairHash(story),
       story,
       changes
     }

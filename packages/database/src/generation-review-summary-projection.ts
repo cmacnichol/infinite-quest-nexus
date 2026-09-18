@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { generationReviewSummarySchema, generationReviewV1SummarySchema, type GenerationReviewSummary } from "../../contracts/src/generation-review.js";
+import { generationReviewSummarySchema, generationReviewTransportSchema, generationReviewV1SummarySchema, type GenerationReviewSummary, type GenerationReviewTransport } from "../../contracts/src/generation-review.js";
 import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
 
 const generationReviewSummaryEvidenceV1Schema = generationReviewV1SummarySchema.omit({ canKeep: true, canRetry: true }).extend({
@@ -9,7 +9,8 @@ const generationReviewSummaryEvidenceV1Schema = generationReviewV1SummarySchema.
   }),
   candidatePresent: z.boolean(),
   repairPlanHash: z.string().regex(/^[a-f0-9]{64}$/u).nullable().optional(),
-  repairChangedFactCount: z.number().int().min(1).max(100).nullable().optional()
+  repairChangedFactCount: z.number().int().min(1).max(100).nullable().optional(),
+  repairStatus: z.enum(["offered", "authorized", "applied", "failed"]).nullable().optional()
 }).strict();
 const generationReviewSummaryEvidenceSchema = z.union([
   generationReviewSummaryEvidenceV1Schema,
@@ -46,11 +47,14 @@ export function generationReviewSummaryProjection(privateColumn: string): string
     'candidatePresent', COALESCE(jsonb_typeof(${field("gateCandidate,story")}) = 'object', false)
     , 'repairPlanHash', ${text("factFormatRepair,planHash")}
     , 'repairChangedFactCount', CASE WHEN ${text("factFormatRepair,planHash")} IS NULL THEN NULL ELSE jsonb_array_length(COALESCE(${field("factFormatRepair,plan,changes")}, '[]'::jsonb)) END
+    , 'repairStatus', ${text("factFormatRepair,status")}
   ) END`;
 }
 
 /** Calculates public action availability with the same policy used by decisions. */
-export function projectBoundedGenerationReviewSummary(value: unknown, status: unknown): GenerationReviewSummary | undefined {
+export function projectBoundedGenerationReviewSummary(value: unknown, status: unknown): GenerationReviewTransport | undefined {
+  const transport = generationReviewTransportSchema.safeParse(value);
+  if (transport.success && transport.data.version > 2) return transport.data;
   const parsed = generationReviewSummaryEvidenceSchema.safeParse(value);
   if (!parsed.success) return undefined;
   const pending = status === "recoverable" && parsed.data.state === "pending";
@@ -70,9 +74,10 @@ export function projectBoundedGenerationReviewSummary(value: unknown, status: un
     }),
     canRetry: pending && parsed.data.eligibility.retryAvailable
   };
+  const repairOffered = pending && parsed.data.repairStatus === "offered";
   return parsed.data.version === 2
     ? generationReviewSummarySchema.parse({ ...base, version: 2,
-      canRepairFormat: pending, formatRepair: pending ? {
+      canRepairFormat: repairOffered, formatRepair: repairOffered ? {
         planHash: parsed.data.repairPlanHash, changedFactCount: parsed.data.repairChangedFactCount,
         description: "Repair fact formatting and keep the narration unchanged."
       } : null })

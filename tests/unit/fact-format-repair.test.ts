@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { planFactFormatRepair } from "../../packages/story-engine/src/fact-format-repair.js";
+import { factFormatRepairHash, factFormatRepairStableJson } from "../../packages/contracts/src/fact-format-repair-hash.js";
+import { sha256, stableStringify } from "../../packages/domain/src/text.js";
 import {
   makeSyntheticStory,
   rawSyntheticStory,
@@ -20,6 +22,11 @@ function eligible(rawOutput: string, visible = visibleFacts) {
 }
 
 describe("fact format repair planner", () => {
+  it("keeps the planner's locale-key serialization distinct from review receipt canonical JSON", () => {
+    const tracker = { z: 1, "ä": 2, a: 3 };
+    expect(factFormatRepairStableJson(tracker)).toBe(stableStringify(tracker));
+    expect(factFormatRepairHash(tracker)).toBe(sha256(stableStringify(tracker)));
+  });
   it("plans an inert UUID label as a new string addition without changing protected fiction", () => {
     const original = makeSyntheticStory();
     const rawOutput = rawSyntheticStory({ canonical_facts: [{ id: "33333333-3333-4333-8333-333333333333", content: "The beacon is lit." }] });

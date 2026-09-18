@@ -40,7 +40,7 @@ function turn(turnNumber: number, id = turnNumber === 1 ? turnOneId : turnTwoId)
     acceptedAt: "2026-08-03T12:00:00.000Z",
     chronicleRetrieval: null,
     reportedCost: null
-  };
+  } as TurnSummary;
 }
 
 function sync(overrides: Partial<CampaignSyncStatus> = {}): CampaignSyncStatus {
@@ -145,17 +145,19 @@ function run(id = campaignId): GenerationRun {
   };
 }
 
-function reviewDetail(overrides: Partial<GenerationReviewDetail> = {}): GenerationReviewDetail {
+type V1ReviewDetail = Extract<GenerationReviewDetail, { version: 1 }>;
+
+function reviewDetail(overrides: Partial<V1ReviewDetail> = {}): V1ReviewDetail {
   return {
     version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
     stage: "continuity", candidateScope: "final", reasons: ["narrative_conflict"], canKeep: true, canRetry: true,
     narration: "The preserved gate text.", choices: ["Enter"], findings: [{ code: "narrative_conflict", message: "Possible chronology conflict." }],
     retryDescription: "Retry the continuity stage.", retryFailure: null, omittedFindingCount: 0,
     ...overrides
-  };
+  } as V1ReviewDetail;
 }
 
-function reviewSummary(overrides: Partial<GenerationReviewDetail> = {}) {
+function reviewSummary(overrides: Partial<V1ReviewDetail> = {}) {
   const detail = reviewDetail(overrides);
   return {
     version: detail.version, reviewId: detail.reviewId, revision: detail.revision, state: detail.state,

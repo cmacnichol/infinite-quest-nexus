@@ -6,7 +6,7 @@ import { createPostgresGenerationCommandRepository } from "../../packages/databa
 import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
 import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
-import { generationRequestSchema, sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
+import { factFormatRepairHash, generationRequestSchema, sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
@@ -78,7 +78,7 @@ integration("PostgreSQL generation review persistence", () => {
     });
     const reasons: GenerationReviewCheckpoint["reasons"] = eligible ? ["scene_beats_missing"] : ["invalid_structure"];
     const candidate = {
-      scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: null,
+      scope: "main" as const, story, storyHash: sha256Hex(canonicalEvidenceJson(story)), rawOutputReference: repair ? `generation-primary:${queued.id}:1` : null,
       producingRequestHash: "a".repeat(64), producingResponseId: "review-response", sentFactIds: [], ownerUserId, campaignId: imported.campaignId,
       worldId: world.rows[0]!.worldId, worldVersionId: payload.world_version_id ?? null, baseTurnNumber: payload.generation_base_identity.baseTurnNumber,
       expectedTurnNumber: payload.expected_turn_number, policy: {}, policyHash: "b".repeat(64), baseIdentity: payload.generation_base_identity,
@@ -92,15 +92,18 @@ integration("PostgreSQL generation review persistence", () => {
       eligibility: { complete: true, structurallyValid: eligible, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
       originalCandidate: candidate, gateCandidate: candidate, workingCandidate: candidate,
       originalFindings: reasons, originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: [],
-      ...(repair ? { factFormatRepair: {
-        planHash: "e".repeat(64), rawOutputReference: `generation-primary:${queued.id}:1`, sourceResponseId: null,
-        plan: { version: 1 as const, rawOutputHash: "f".repeat(64), visibleFactsHash: "1".repeat(64), protectedFieldsHash: "2".repeat(64),
-          resultHash: "3".repeat(64), story, changes: [{ sourceIndex: 0, kind: "id_label_to_addition" as const }] },
+      ...(repair ? { factFormatRepair: (() => {
+        const plan = { version: 1 as const, rawOutputHash: "f".repeat(64), visibleFactsHash: "1".repeat(64), protectedFieldsHash: "2".repeat(64),
+          resultHash: factFormatRepairHash(story), story, changes: [{ sourceIndex: 0, kind: "id_label_to_addition" as const }] };
+        return {
+        planHash: sha256Hex(canonicalEvidenceJson(plan)), rawOutputReference: candidate.rawOutputReference!, sourceResponseId: candidate.producingResponseId,
+        plan,
         producingRequestHash: candidate.producingRequestHash, ownerUserId, campaignId: imported.campaignId,
         worldVersionId: candidate.worldVersionId, baseIdentity: candidate.baseIdentity,
         providerConfigurationHash: candidate.provider.configurationHash, promptProtocolVersion: candidate.protocol.version,
         status: "offered" as const, failureCode: null
-      } } : {})
+        };
+      })() } : {})
     } satisfies GenerationReviewCheckpoint;
     const scope = { jobId: queued.id, ownerUserId, workerId };
     if (pause) expect(await execution.pauseForReview(scope, checkpoint)).toBe(true);
@@ -239,7 +242,12 @@ integration("PostgreSQL generation review persistence", () => {
   it("serializes a plan-bound format repair receipt without reinterpreting Retry", async () => {
     const fixture = await pendingReview({ repair: true });
     const repository = commands(); const scope = { ownerUserId, jobId: fixture.queued.id };
-    const request = { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "repair_format" as const, repairPlanHash: "e".repeat(64) };
+    const request = { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "repair_format" as const, repairPlanHash: fixture.checkpoint.factFormatRepair!.planHash };
+    await expect(repository.getReview(scope)).resolves.toMatchObject({
+      version: 2, canRepairFormat: true,
+      formatRepair: { planHash: fixture.checkpoint.factFormatRepair!.planHash, changedFactCount: 1,
+        description: "Repair fact formatting and keep the narration unchanged." }
+    });
     const results = await Promise.allSettled([repository.decideReview(scope, request), repository.decideReview(scope, request)]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
     await expect(repository.decideReview(scope, { ...request, repairPlanHash: "0".repeat(64) })).rejects.toMatchObject({ kind: "conflict" });

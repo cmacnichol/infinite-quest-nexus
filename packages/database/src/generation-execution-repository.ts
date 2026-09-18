@@ -110,6 +110,15 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
   story: StoryTurnOutput;
   response: ProviderResult;
   sentFactIds: readonly string[];
+  /** Explicit user-authorized representation repair provenance; never provider output. */
+  factFormatRepair?: {
+    version: 1;
+    reviewId: string;
+    revision: number;
+    planHash: string;
+    rawOutputHash: string;
+    resultHash: string;
+  } | undefined;
 }>;
 
 export type GenerationOrchestrationState = {
@@ -137,6 +146,7 @@ export type GenerationOrchestrationState = {
     contextFingerprint: string;
     contextDiagnostics: Record<string, unknown>;
     chronicleRetrieval: ChronicleRetrievalAudit;
+    rawOutputReference?: string;
   } | undefined;
   /** Versioned counters belong to the logical user attempt, never the worker lease. */
   logicalAttempt?: {
@@ -277,7 +287,8 @@ function hasValidPrimaryResult(value: unknown): boolean {
     && typeof result.providerConfigurationHash === "string" && result.providerConfigurationHash.length > 0
     && typeof result.contextFingerprint === "string" && result.contextFingerprint.length > 0
     && typeof result.contextDiagnostics === "object" && result.contextDiagnostics !== null
-    && typeof result.chronicleRetrieval === "object" && result.chronicleRetrieval !== null;
+    && typeof result.chronicleRetrieval === "object" && result.chronicleRetrieval !== null
+    && (result.rawOutputReference === undefined || (typeof result.rawOutputReference === "string" && result.rawOutputReference.length > 0));
 }
 
 function hasValidPrimaryReservation(value: unknown): boolean {
@@ -685,6 +696,31 @@ function assertActiveMainKeepPreservation(
     || !finalStory.narration.startsWith(mainStory.narration)) unavailable();
 }
 
+/** Commit-time fence for a user-authorized format repair of the original primary response. */
+function assertAppliedFactFormatRepair(
+  checkpoint: GenerationReviewCheckpoint,
+  orchestration: GenerationOrchestrationState,
+  finalStory: StoryTurnOutput
+): void {
+  if (checkpoint.version !== 2 || checkpoint.factFormatRepair?.status !== "applied") return;
+  const repair = checkpoint.factFormatRepair;
+  const draft = orchestration.validatedMainDraft;
+  const receipt = checkpoint.decisionJournal.find((entry) => entry.decision === "repair_format"
+    && entry.reviewId === checkpoint.reviewId && entry.revision === checkpoint.revision - 1);
+  const unavailable = (): never => { throw Object.assign(new Error("The applied fact-format repair cannot authorize this commit."), { code: "generation_review_acceptance_unavailable" }); };
+  if (!draft?.factFormatRepair || !receipt || receipt.decision !== "repair_format"
+    || draft.factFormatRepair.reviewId !== checkpoint.reviewId
+    || draft.factFormatRepair.revision !== receipt.revision
+    || draft.factFormatRepair.planHash !== repair.planHash
+    || draft.factFormatRepair.rawOutputHash !== repair.plan.rawOutputHash
+    || draft.factFormatRepair.resultHash !== repair.plan.resultHash
+    || draft.requestPayloadHash !== repair.producingRequestHash
+    || draft.response.responseId !== repair.sourceResponseId
+    || sha256Hex(draft.response.content) !== repair.plan.rawOutputHash
+    || canonicalEvidenceJson(draft.story) !== canonicalEvidenceJson(repair.plan.story)
+    || (orchestration.extension === undefined && canonicalEvidenceJson(finalStory) !== canonicalEvidenceJson(draft.story))) unavailable();
+}
+
 async function commitAcceptedTurn(
   client: DatabaseClient,
   input: AcceptedGenerationCommit
@@ -718,7 +754,10 @@ async function commitAcceptedTurn(
       code: "generation_review_acceptance_unavailable"
     });
   }
-  if (storedReview.success) assertActiveMainKeepPreservation(storedReview.data, storedJob.orchestration_private, story);
+  if (storedReview.success) {
+    assertActiveMainKeepPreservation(storedReview.data, storedJob.orchestration_private, story);
+    assertAppliedFactFormatRepair(storedReview.data, storedJob.orchestration_private, story);
+  }
   if (storedJob.context_options?.storyMemoryPolicy) {
     const policy = storyMemoryPolicySnapshotSchema.parse(storedJob.context_options.storyMemoryPolicy);
     if (policy.policy.continuityReview !== "off") {

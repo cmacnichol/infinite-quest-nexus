@@ -5,9 +5,12 @@ import {
   generationReviewReasonCodeSchema,
   projectGenerationValidationIssues,
   projectGenerationReviewDetail,
-  projectGenerationReviewSummary
+  projectGenerationReviewSummary,
+  factFormatRepairHash,
+  sha256Hex
 } from "../../packages/contracts/src/index.js";
 import { generationReviewCandidateSchema, generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../packages/application/src/generation/review-checkpoint.js";
+import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 
 const review = {
   version: 1,
@@ -222,7 +225,7 @@ describe("generation review contracts", () => {
       provider: { type: "lmstudio", profileId: null, configurationHash: "c".repeat(64) },
       resumeDependencies: { generationContext: {}, producingProviderResult: {}, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     });
-    const main = candidate("main", "a".repeat(64));
+    const main = { ...candidate("main", "a".repeat(64)), producingRequestHash: "6".repeat(64) };
     const final = candidate("final", "d".repeat(64));
     const originalFindings = ["scene_beats_missing"] as const;
     const offeredReasons = ["scene_beats_missing"] as const;
@@ -247,22 +250,24 @@ describe("generation review contracts", () => {
     expect(generationReviewCheckpointSchema.safeParse({
       ...checkpoint,
       version: 2,
-      factFormatRepair: {
-        planHash: "1".repeat(64), rawOutputReference: "generation-primary:repair:1", sourceResponseId: null,
-        plan: {
+      factFormatRepair: (() => {
+        const story = {
+          narration: "The beacon burns.", choices: ["Wait", "Watch", "Leave", "Listen"], custom_action_suggestion: "Wait",
+          scratchpad: "", tracker_updates: [], image_prompt: "A beacon.", continuity_summary: "The beacon burns.",
+          canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
+        };
+        const plan = {
           version: 1, rawOutputHash: "2".repeat(64), visibleFactsHash: "3".repeat(64),
-          protectedFieldsHash: "4".repeat(64), resultHash: "5".repeat(64),
-          story: {
-            narration: "The beacon burns.", choices: ["Wait", "Watch", "Leave", "Listen"], custom_action_suggestion: "Wait",
-            scratchpad: "", tracker_updates: [], image_prompt: "A beacon.", continuity_summary: "The beacon burns.",
-            canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: []
-          }, changes: []
-        },
-        producingRequestHash: "6".repeat(64), ownerUserId: main.ownerUserId, campaignId: main.campaignId,
+          protectedFieldsHash: "4".repeat(64), resultHash: factFormatRepairHash(story), story, changes: []
+        };
+        return {
+        planHash: sha256Hex(canonicalEvidenceJson(plan)), rawOutputReference: main.rawOutputReference!, sourceResponseId: main.producingResponseId,
+        plan, producingRequestHash: main.producingRequestHash!, ownerUserId: main.ownerUserId, campaignId: main.campaignId,
         worldVersionId: main.worldVersionId, baseIdentity: main.baseIdentity,
         providerConfigurationHash: main.provider.configurationHash, promptProtocolVersion: main.protocol.version,
         status: "offered", failureCode: null
-      }
+        };
+      })()
     }).success).toBe(true);
     expect(generationReviewCheckpointSchema.safeParse({ ...checkpoint, originalFindingsHash: "9".repeat(64) }).success).toBe(false);
   });

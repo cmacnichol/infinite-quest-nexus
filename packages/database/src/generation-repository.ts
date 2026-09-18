@@ -713,7 +713,19 @@ export function createPostgresGenerationCommandRepository(
         review: {
           ...checkpoint.data,
           canKeep: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpointCanKeep(checkpoint.data),
-          canRetry: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable
+          canRetry: row.status === "recoverable" && checkpoint.data.state === "pending" && checkpoint.data.eligibility.retryAvailable,
+          ...(checkpoint.data.version === 2 ? (() => {
+            const repair = checkpoint.data.factFormatRepair!;
+            const offered = row.status === "recoverable" && checkpoint.data.state === "pending" && repair.status === "offered";
+            return {
+              canRepairFormat: offered,
+              formatRepair: offered ? {
+                planHash: repair.planHash,
+                changedFactCount: repair.plan.changes.length,
+                description: "Repair fact formatting and keep the narration unchanged."
+              } : null
+            };
+          })() : {})
         },
         candidate: checkpoint.data.gateCandidate.story
           ? { narration: checkpoint.data.gateCandidate.story.narration, choices: checkpoint.data.gateCandidate.story.choices }

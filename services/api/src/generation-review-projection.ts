@@ -1,9 +1,10 @@
 import {
   generationReviewDetailSchema,
   projectGenerationReviewSummary,
+  generationReviewTransportSchema,
   type GenerationReviewDetail,
   type GenerationReviewReasonCode,
-  type GenerationReviewSummary
+  type GenerationReviewTransport
 } from "../../../packages/contracts/src/generation-review.js";
 
 const reasonMessages: Record<GenerationReviewReasonCode, string> = {
@@ -33,12 +34,15 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 /** Returns the only review checkpoint fields permitted in polling, SSE, and sync. */
-export function projectGenerationReviewSnapshot(value: unknown): Readonly<{ review?: GenerationReviewSummary }> {
+export function projectGenerationReviewSnapshot(value: unknown): Readonly<{ review?: GenerationReviewTransport }> {
   const source = record(value);
   const metadata = record(source?.recoveryMetadata);
   const candidate = source?.review ?? metadata?.generationReview;
   try {
-    return candidate === undefined ? {} : { review: projectGenerationReviewSummary(candidate) };
+    if (candidate === undefined) return {};
+    const transport = generationReviewTransportSchema.safeParse(candidate);
+    if (transport.success && transport.data.version > 2) return { review: transport.data };
+    return { review: projectGenerationReviewSummary(candidate) };
   } catch {
     return {};
   }

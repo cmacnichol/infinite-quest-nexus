@@ -1,4 +1,4 @@
-import { generationReviewReasonCodeSchema, generationReviewStageSchema, sha256Hex, storyTurnOutputSchema, z, type GenerationReviewReasonCode } from "@infinite-quest/contracts";
+import { factFormatRepairHash, generationReviewReasonCodeSchema, generationReviewStageSchema, sha256Hex, storyTurnOutputSchema, z, type GenerationReviewReasonCode } from "@infinite-quest/contracts";
 import { canonicalEvidenceJson, generationBaseIdentitySchema } from "../memory/generation-context.js";
 
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -98,6 +98,16 @@ export const generationReviewCheckpointSchema = z.strictObject({
     || repair.providerConfigurationHash !== binding.provider.configurationHash || repair.promptProtocolVersion !== binding.protocol.version)) {
     context.addIssue({ code: "custom", message: "Repair authority must share the frozen review binding." });
   }
+  if (repair && (repair.planHash !== sha256Hex(canonicalEvidenceJson(repair.plan))
+    || repair.plan.resultHash !== factFormatRepairHash(repair.plan.story))) {
+    context.addIssue({ code: "custom", message: "Repair plan hashes must bind the exact frozen plan and result." });
+  }
+  const source = checkpoint.originalCandidate;
+  if (repair && (repair.rawOutputReference !== source.rawOutputReference
+    || repair.producingRequestHash !== source.producingRequestHash
+    || repair.sourceResponseId !== source.producingResponseId)) {
+    context.addIssue({ code: "custom", message: "Repair authority must bind the immutable original source." });
+  }
   for (const candidate of [checkpoint.originalCandidate, checkpoint.gateCandidate, checkpoint.workingCandidate]) {
     if (candidate.ownerUserId !== binding.ownerUserId || candidate.campaignId !== binding.campaignId || candidate.worldId !== binding.worldId
       || candidate.worldVersionId !== binding.worldVersionId || candidate.baseTurnNumber !== binding.baseTurnNumber
@@ -126,7 +136,10 @@ export const generationReviewCheckpointSchema = z.strictObject({
       break;
     }
     if (entry.decision === "repair_format") {
-      if (checkpoint.version !== 2 || !repair || entry.planHash !== repair.planHash) {
+      if (checkpoint.version !== 2 || !repair || entry.planHash !== repair.planHash
+        || entry.offeredCandidate.rawOutputReference !== repair.rawOutputReference
+        || entry.offeredCandidate.producingRequestHash !== repair.producingRequestHash
+        || entry.offeredCandidate.producingResponseId !== repair.sourceResponseId) {
         context.addIssue({ code: "custom", path: ["decisionJournal"], message: "Repair receipt must bind the frozen v2 plan." });
         break;
       }

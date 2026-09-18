@@ -1,6 +1,7 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
+import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson, isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
@@ -748,7 +749,8 @@ function compatibleValidatedMainDraft(
   job: GenerationExecutionPayload,
   provider: GenerationTextProvider,
   storyInput: string,
-  semanticRepair?: GenerationOrchestrationState["semanticRepair"]
+  semanticRepair?: GenerationOrchestrationState["semanticRepair"],
+  generationReview?: GenerationOrchestrationState["generationReview"]
 ) {
   if (!value) return null;
   const validResponse = value.response && typeof value.response.content === "string"
@@ -792,6 +794,26 @@ function compatibleValidatedMainDraft(
   }
   if (!repairedRequest && value.requestPayloadHash !== sha256(value.requestBody)) {
     throw Object.assign(new Error("The persisted repaired draft request is incompatible."), { code: "generation_checkpoint_incompatible" });
+  }
+  if (value.factFormatRepair) {
+    const review = generationReviewCheckpointSchema.safeParse(generationReview);
+    if (!review.success || review.data.version !== 2) {
+      throw Object.assign(new Error("The applied fact-format repair has no compatible review receipt."), { code: "generation_checkpoint_incompatible" });
+    }
+    const repair = review.data.factFormatRepair;
+    if (!repair || repair.status !== "applied"
+      || value.factFormatRepair.reviewId !== review.data.reviewId
+      || value.factFormatRepair.planHash !== repair.planHash
+      || value.factFormatRepair.rawOutputHash !== repair.plan.rawOutputHash
+      || value.factFormatRepair.resultHash !== repair.plan.resultHash
+      || value.requestPayloadHash !== repair.producingRequestHash
+      || value.response.responseId !== repair.sourceResponseId
+      || sha256(value.response.content) !== repair.plan.rawOutputHash
+      || canonicalEvidenceJson(parsedStory.data) !== canonicalEvidenceJson(repair.plan.story)) {
+      throw Object.assign(new Error("The applied fact-format repair provenance is incompatible."), {
+        code: "generation_checkpoint_incompatible"
+      });
+    }
   }
   if (!sameFactIds(value.sentFactIds, sentCanonicalFactIds(value.requestBody))) {
     throw Object.assign(new Error("The persisted validated draft fact visibility does not match its producing request."), {
@@ -1543,13 +1565,63 @@ async function executeLoadedGeneration(
       orchestration = await persistOrchestration(repository, scope, job, { contextDiagnostic: orchestration.contextDiagnostic, ...(sourceManifest ? { sourceEvidenceManifest: sourceManifest } : {}) });
     }
     const plannedSentFactIds = sentCanonicalFactIds(storyInput);
-    const validatedDraft = compatibleValidatedMainDraft(
+    let validatedDraft = compatibleValidatedMainDraft(
       orchestration.validatedMainDraft,
       job,
       provider,
       storyInput,
-      orchestration.semanticRepair
+      orchestration.semanticRepair,
+      orchestration.generationReview
     );
+    const formatRepairReceipt = savedReview.success && savedReview.data.version === 2
+      && savedReview.data.state === "decided" && savedReview.data.stage === "structure"
+      && savedReview.data.candidateScope === "main" && savedReview.data.factFormatRepair?.status === "authorized"
+      ? savedReview.data.decisionJournal.find((entry) => entry.decision === "repair_format"
+        && entry.reviewId === savedReview.data.reviewId && entry.revision === savedReview.data.revision - 1)
+      : undefined;
+    if (!validatedDraft && formatRepairReceipt && savedReview.success) {
+      const repair = savedReview.data.factFormatRepair!;
+      const primary = orchestration.primaryResult;
+      const incompatible = async (): Promise<true> => {
+        assertActiveGenerationUpdate(await repository.markRecoverable({
+          ...scope, providerResponseId: null, providerFinishReason: null,
+          errorCode: "generation_checkpoint_incompatible",
+          errorMessage: "The authorized fact-format repair no longer matches its original response.",
+          recoveryMetadata: { retryable: true, stage: "structure", reason: "fact_format_repair_incompatible" }
+        }), "saving incompatible fact-format repair checkpoint");
+        return true;
+      };
+      if (!primary || !primary.rawOutputReference || primary.rawOutputReference !== repair.rawOutputReference
+        || primary.requestPayloadHash !== repair.producingRequestHash
+        || primary.response.responseId !== repair.sourceResponseId
+        || primary.providerConfigurationHash !== repair.providerConfigurationHash) {
+        await incompatible(); return true;
+      }
+      const plan = applyAuthorizedFactFormatRepair({ checkpoint: savedReview.data, rawOutput: primary.response.content, requestBody: primary.requestBody });
+      const repaired = plan ? parseStoryOutput(JSON.stringify(plan.story), storyMemoryDefaults) : null;
+      if (!plan || plan.resultHash !== repair.plan.resultHash || !repaired?.ok || mechanicsLeakFields(repaired.story).length) {
+        await incompatible(); return true;
+      }
+      const appliedReview = generationReviewCheckpointSchema.parse({
+        ...savedReview.data, factFormatRepair: { ...repair, status: "applied", failureCode: null }
+      });
+      const draft = {
+        version: 2 as const, ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+        worldVersionId: job.world_version_id || null, baseIdentity: job.generation_base_identity,
+        promptProtocolVersion: job.prompt_protocol_version,
+        ...(frozenGenerationPolicyIdentity ? { generationPolicyIdentity: frozenGenerationPolicyIdentity } : {}),
+        providerId: provider.id, providerModel: provider.model,
+        providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), action: job.action,
+        originalInputHash: sha256(storyInput), requestBody: primary.requestBody,
+        requestPayloadHash: primary.requestPayloadHash, draftHash: sha256(stableStringify(repaired.story)),
+        producingAttempt: job.attempts, story: repaired.story, response: primary.response, sentFactIds: primary.sentFactIds,
+        factFormatRepair: { version: 1 as const, reviewId: savedReview.data.reviewId, revision: formatRepairReceipt.revision,
+          planHash: repair.planHash, rawOutputHash: repair.plan.rawOutputHash, resultHash: repair.plan.resultHash }
+      };
+      orchestration = await persistOrchestration(repository, scope, job, { generationReview: appliedReview, validatedMainDraft: draft });
+      validatedDraft = compatibleValidatedMainDraft(orchestration.validatedMainDraft, job, provider, storyInput, orchestration.semanticRepair, orchestration.generationReview);
+      if (!validatedDraft) { await incompatible(); return true; }
+    }
     if (stages.allowSceneCoverage && !compatibleEventCoverageRepair(
       orchestration.eventCoverageRepair,
       validatedDraft,
@@ -1886,6 +1958,7 @@ async function executeLoadedGeneration(
         primaryResult: {
           version: 1, requestBody: preparedPrimary.body, requestPayloadHash: preparedPrimary.payloadHash,
           response: result, sentFactIds: sentCanonicalFactIds(preparedPrimary.body),
+          rawOutputReference: `generation-primary:${job.id}:${job.attempts}`,
           providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
           contextFingerprint, contextDiagnostics, chronicleRetrieval
         }
@@ -1965,7 +2038,7 @@ async function executeLoadedGeneration(
       const primary = orchestration.primaryResult;
       const candidate: GenerationReviewCandidate = {
         scope: "main", story: null, storyHash: sha256(canonicalEvidenceJson(null)),
-        rawOutputReference: `generation-primary:${job.id}:${job.attempts}`,
+        rawOutputReference: primary?.rawOutputReference ?? `generation-primary:${job.id}:${job.attempts}`,
         producingRequestHash: primary?.requestPayloadHash ?? null,
         producingResponseId: result.responseId || null,
         sentFactIds: [...(primary?.sentFactIds ?? [])],
@@ -1987,6 +2060,8 @@ async function executeLoadedGeneration(
           replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
         }
       };
+      const offeredRepair = stage === "structure" && reason === "invalid_structure" && !result.outputLimited && primary?.rawOutputReference
+        ? prepareFactFormatRepair(result.content, primary.requestBody) : null;
       const gate = prepareGenerationReview({
         candidate,
         stage,
@@ -1999,7 +2074,14 @@ async function executeLoadedGeneration(
           originalFindings: savedReview.data.originalFindings,
           decisionJournal: savedReview.data.decisionJournal,
           revision: savedReview.data.revision + 1
-        } : {}) });
+        } : {}),
+        ...(offeredRepair ? { factFormatRepair: {
+          plan: { ...offeredRepair.plan, changes: [...offeredRepair.plan.changes] }, planHash: offeredRepair.planHash, sourceResponseId: result.responseId || null,
+          rawOutputReference: candidate.rawOutputReference!, producingRequestHash: primary!.requestPayloadHash,
+          ownerUserId: job.owner_user_id, campaignId: job.campaign_id, worldVersionId: job.world_version_id || null,
+          baseIdentity: job.generation_base_identity, providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
+          promptProtocolVersion: job.prompt_protocol_version, status: "offered" as const, failureCode: null
+        } } : {}) });
       const diagnostic = !result.content.trim()
         ? emptyOutputFailureDiagnostic(initialAttemptNumber)
         : rejectedCandidateFailureDiagnostic(reason, initialAttemptNumber);

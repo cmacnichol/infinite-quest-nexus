@@ -92,7 +92,7 @@ export const generationReviewSummarySchema = z.union([generationReviewV1SummaryS
 /** A future review version is deliberately reduced to its version marker. */
 export const generationReviewTransportSchema = z.union([
   generationReviewSummarySchema,
-  z.object({ version: z.number().int().safe().positive() }).passthrough().transform(({ version }) => ({ version }))
+  z.object({ version: z.number().int().safe().gt(2) }).passthrough().transform(({ version }) => ({ version }))
 ]);
 
 export const generationReviewFindingSchema = z.strictObject({
@@ -236,25 +236,10 @@ export type GenerationReviewDecisionRequest = Readonly<z.infer<typeof generation
  * stored future/older record cannot be mistaken for an authority grant. The
  * runtime schemas above remain strict for each known version.
  */
-export type GenerationReviewSummary = Readonly<Omit<z.infer<typeof generationReviewV1SummarySchema>, "version"> & {
-  version: 1 | 2;
-  canRepairFormat?: boolean;
-  formatRepair?: z.infer<typeof formatRepairOfferSchema> | null;
-}>;
+export type GenerationReviewSummary = Readonly<z.infer<typeof generationReviewV1SummarySchema> | z.infer<typeof generationReviewV2SummarySchema>>;
 export type GenerationReviewTransport = Readonly<z.infer<typeof generationReviewTransportSchema>>;
 export type GenerationReviewFinding = Readonly<z.infer<typeof generationReviewFindingSchema>>;
 export type GenerationValidationIssueField = z.infer<typeof generationValidationIssueFieldSchema>;
 export type GenerationValidationIssueCode = z.infer<typeof generationValidationIssueCodeSchema>;
 export type GenerationValidationIssue = Readonly<z.infer<typeof generationValidationIssueSchema>>;
-export type GenerationReviewDetail = Readonly<Omit<z.infer<typeof generationReviewV1SummarySchema>, "version"> & {
-  version: 1 | 2;
-  canRepairFormat?: boolean;
-  formatRepair?: z.infer<typeof formatRepairOfferSchema> | null;
-  narration: string | null;
-  choices: string[];
-  findings: GenerationReviewFinding[];
-  retryDescription: string;
-  retryFailure: string | null;
-  omittedFindingCount: number;
-  validationIssues?: GenerationValidationIssue[] | undefined;
-}>;
+export type GenerationReviewDetail = Readonly<z.infer<typeof generationReviewDetailSchema>>;
