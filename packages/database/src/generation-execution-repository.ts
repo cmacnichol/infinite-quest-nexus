@@ -153,6 +153,7 @@ async function updateResponseContractInvocation(
   scope: GenerationLeaseScope,
   invocationId: string,
   nextStatus: "dispatched" | "completed",
+  expectedRequestPayloadHash?: string,
   response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">
 ): Promise<ResponseContractInvocationAudit | null> {
   return withTransaction(pool, async (client) => {
@@ -166,11 +167,12 @@ async function updateResponseContractInvocation(
     const index = ledger.findIndex((item) => item.id === invocationId);
     if (index < 0) return null;
     const existing = ledger[index]!;
+    if (nextStatus === "dispatched" && existing.requestPayloadHash !== expectedRequestPayloadHash) return null;
     if (existing.status === "completed") {
       if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null })) return existing;
       return null;
     }
-    if (nextStatus === "dispatched" && existing.status !== "reserved") return existing;
+    if (nextStatus === "dispatched" && existing.status !== "reserved") return null;
     if (nextStatus === "completed" && existing.status !== "dispatched") return null;
     const at = new Date().toISOString();
     const updated: ResponseContractInvocationAudit = nextStatus === "dispatched"
@@ -766,7 +768,8 @@ export type GenerationExecutionRepository = Readonly<{
     logicalAttemptId: string; invocationKey: ResponseInvocationKey; operation: ResponseContractOperation;
     requestPayloadHash: string; request: AttemptResponseContractAudit;
   }>): Promise<ResponseContractInvocationAudit | null>;
-  markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string): Promise<ResponseContractInvocationAudit | null>;
+  /** Consumes a reservation once only when its prepared request hash still matches. */
+  markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string, expectedRequestPayloadHash: string): Promise<ResponseContractInvocationAudit | null>;
   completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">): Promise<ResponseContractInvocationAudit | null>;
   /** Atomically publishes a pending review and releases the worker lease. */
   pauseForReview(scope: GenerationLeaseScope, checkpoint: GenerationReviewCheckpoint): Promise<boolean>;
@@ -1743,12 +1746,12 @@ export function createPostgresGenerationExecutionRepository(
       });
     },
 
-    async markResponseContractInvocationDispatched(scope, invocationId) {
-      return updateResponseContractInvocation(pool, scope, invocationId, "dispatched");
+    async markResponseContractInvocationDispatched(scope, invocationId, expectedRequestPayloadHash) {
+      return updateResponseContractInvocation(pool, scope, invocationId, "dispatched", expectedRequestPayloadHash);
     },
 
     async completeResponseContractInvocation(scope, invocationId, response) {
-      return updateResponseContractInvocation(pool, scope, invocationId, "completed", response);
+      return updateResponseContractInvocation(pool, scope, invocationId, "completed", undefined, response);
     },
 
     async pauseForReview(scope, checkpoint) {

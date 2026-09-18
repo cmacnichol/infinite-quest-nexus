@@ -83,10 +83,10 @@ integration("PostgreSQL response-contract persistence", () => {
     const extension = await repository.reserveResponseContractInvocation!(scope, { logicalAttemptId: logicalAttemptId!, invocationKey: "story:nonstream", operation: "event_extension", requestPayloadHash: extensionHash, request: audit });
     expect(extension?.id).not.toBe(primary?.id);
     await expect(repository.reserveResponseContractInvocation!(scope, { logicalAttemptId: crypto.randomUUID(), invocationKey: "story:nonstream", operation: "story_generation", requestPayloadHash: hash, request: audit })).resolves.toBeNull();
-    const dispatched = await repository.markResponseContractInvocationDispatched!(scope, primary!.id);
+    const dispatched = await repository.markResponseContractInvocationDispatched!(scope, primary!.id, hash);
     expect(dispatched?.status).toBe("dispatched");
-    await expect(repository.markResponseContractInvocationDispatched!(scope, primary!.id)).resolves.toEqual(dispatched);
-    await expect(repository.markResponseContractInvocationDispatched!({ ...scope, workerId: "stale-worker" }, primary!.id)).resolves.toBeNull();
+    await expect(repository.markResponseContractInvocationDispatched!(scope, primary!.id, hash)).resolves.toBeNull();
+    await expect(repository.markResponseContractInvocationDispatched!({ ...scope, workerId: "stale-worker" }, primary!.id, hash)).resolves.toBeNull();
     const response = { returnedModel: "contract-model", returnedProviderRoute: null, diagnosticCode: null } as const;
     const completed = await repository.completeResponseContractInvocation!(scope, primary!.id, response);
     expect(completed?.status).toBe("completed");
