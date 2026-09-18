@@ -7,11 +7,16 @@ import { sha256Hex } from "../../contracts/src/hash.js";
 import {
   readFrozenResponseContracts,
   readQueuedResponsePolicy,
+  queuedResponsePolicyHash,
   readAttemptResponseContractAudit,
+  readResponseContractInvocationAudit,
+  responseContractInvocationAuditId,
   type AttemptResponseContractAudit,
   type FrozenResponseContracts,
   type QueuedResponsePolicy,
-  type ResponseInvocationKey
+  type ResponseInvocationKey,
+  type ResponseContractInvocationAudit,
+  type ResponseContractOperation
 } from "../../contracts/src/generation-response-contract.js";
 import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
@@ -89,17 +94,17 @@ function json(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
+/** v1 permits every currently authorized operation plus explicit retries without growing unbounded. */
+const responseContractInvocationLedgerLimit = 24;
+
 function responseContractInvocations(value: unknown): readonly ResponseContractInvocationAudit[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 4) throw new Error("Response-contract invocation ledger is invalid.");
+  if (!Array.isArray(value) || value.length > responseContractInvocationLedgerLimit) throw new Error("Response-contract invocation ledger is invalid.");
   const ids = new Set<string>();
   return value.map((candidate) => {
-    const item = candidate as ResponseContractInvocationAudit;
-    if (!item || item.version !== 1 || typeof item.id !== "string" || !item.logicalAttemptId || !item.invocationKey
-      || !["reserved", "dispatched", "completed"].includes(item.status) || ids.has(item.id)) throw new Error("Response-contract invocation ledger is invalid.");
+    const item = readResponseContractInvocationAudit(candidate);
+    if (ids.has(item.id)) throw new Error("Response-contract invocation ledger is invalid.");
     ids.add(item.id);
-    readAttemptResponseContractAudit(item.request);
-    if (item.response !== null && (typeof item.response !== "object" || item.status !== "completed")) throw new Error("Response-contract invocation ledger is invalid.");
     return item;
   });
 }
@@ -108,6 +113,25 @@ function responseContractState(value: GenerationOrchestrationState): void {
   readQueuedResponsePolicy(value.queuedResponsePolicy);
   readFrozenResponseContracts(value.frozenResponseContracts);
   responseContractInvocations(value.responseContractInvocations);
+}
+
+function operationMatchesInvocation(operation: ResponseContractOperation, invocationKey: ResponseInvocationKey): boolean {
+  if (operation === "story_choice_repair") return invocationKey === "choices:nonstream";
+  if (operation === "story_continuity_review") return invocationKey === "continuity_review:nonstream";
+  return invocationKey === "story:nonstream" || (operation === "story_generation" && invocationKey === "story:stream");
+}
+
+function auditMatchesFrozenInvocation(
+  frozen: FrozenResponseContracts,
+  invocationKey: ResponseInvocationKey,
+  audit: AttemptResponseContractAudit
+): boolean {
+  const contract = frozen.contracts[invocationKey];
+  if (!contract || audit.selectionHash !== frozen.selectionHash || audit.invocationKey !== invocationKey
+    || audit.requestedModel !== frozen.queuedPolicy.model || audit.mode !== contract.mode) return false;
+  if (contract.mode === "json_object") return audit.schemaVersion === null && audit.schemaHash === null && audit.providerRoutingSlugs.length === 0;
+  return audit.schemaVersion === contract.schemaVersion && audit.schemaHash === contract.schemaHash
+    && JSON.stringify(audit.providerRoutingSlugs) === JSON.stringify(contract.providerRoutingSlugs);
 }
 
 async function updateResponseContractInvocation(
@@ -128,14 +152,19 @@ async function updateResponseContractInvocation(
     const index = ledger.findIndex((item) => item.id === invocationId);
     if (index < 0) return null;
     const existing = ledger[index]!;
-    if (existing.status === "completed") return existing;
+    if (existing.status === "completed") {
+      if (nextStatus === "completed" && JSON.stringify(existing.response) === JSON.stringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null })) return existing;
+      return null;
+    }
+    if (nextStatus === "dispatched" && existing.status !== "reserved") return existing;
     if (nextStatus === "completed" && existing.status !== "dispatched") return null;
     const at = new Date().toISOString();
     const updated: ResponseContractInvocationAudit = nextStatus === "dispatched"
       ? { ...existing, status: "dispatched", dispatchedAt: existing.dispatchedAt ?? at }
       : { ...existing, status: "completed", completedAt: at, response: { returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null } };
     ledger[index] = updated;
-    await client.query(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND lease_expires_at > now()`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
+    const write = await client.query<{ id: string }>(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating','validating') AND lease_expires_at > now() RETURNING id`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
+    if (!write.rows[0]) return null;
     return updated;
   });
 }
@@ -344,18 +373,7 @@ export type GenerationOrchestrationState = {
   validatedMainDraft?: GenerationValidatedMainDraftCheckpoint;
 };
 
-export type ResponseContractInvocationAudit = Readonly<{
-  version: 1;
-  id: string;
-  logicalAttemptId: string;
-  invocationKey: ResponseInvocationKey;
-  request: AttemptResponseContractAudit;
-  status: "reserved" | "dispatched" | "completed";
-  reservedAt: string;
-  dispatchedAt: string | null;
-  completedAt: string | null;
-  response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> | null;
-}>;
+export type { ResponseContractInvocationAudit } from "../../contracts/src/generation-response-contract.js";
 
 function hasValidFactFormatRepairApplications(value: unknown): boolean {
   if (value === undefined) return true;
@@ -731,7 +749,8 @@ export type GenerationExecutionRepository = Readonly<{
   saveFrozenResponseContracts?(scope: GenerationLeaseScope, expectedQueuedPolicyHash: string, value: FrozenResponseContracts): Promise<FrozenResponseContracts | null>;
   /** Private bounded operation ledger. This is distinct from generation_attempts and worker claim counts. */
   reserveResponseContractInvocation?(scope: GenerationLeaseScope, input: Readonly<{
-    logicalAttemptId: string; invocationKey: ResponseInvocationKey; request: AttemptResponseContractAudit;
+    logicalAttemptId: string; invocationKey: ResponseInvocationKey; operation: ResponseContractOperation;
+    requestPayloadHash: string; request: AttemptResponseContractAudit;
   }>): Promise<ResponseContractInvocationAudit | null>;
   markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string): Promise<ResponseContractInvocationAudit | null>;
   completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">): Promise<ResponseContractInvocationAudit | null>;
@@ -1627,9 +1646,9 @@ export function createPostgresGenerationExecutionRepository(
       const safeContextDiagnostic = projectSafeGenerationDiagnostic(value.contextDiagnostic);
       return changed(await pool.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =
-              CASE WHEN $4::jsonb ? 'generationReview' THEN $4::jsonb
-                   WHEN orchestration_private ? 'generationReview' THEN ($4::jsonb || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
-                   ELSE $4::jsonb
+              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations')
+                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
+                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations')
                END
                || CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object('queuedResponsePolicy', orchestration_private->'queuedResponsePolicy') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN jsonb_build_object('frozenResponseContracts', orchestration_private->'frozenResponseContracts') ELSE '{}'::jsonb END
@@ -1657,7 +1676,8 @@ export function createPostgresGenerationExecutionRepository(
         if (!row) return null;
         const stored = row.orchestrationPrivate;
         const queued = readQueuedResponsePolicy(stored.queuedResponsePolicy);
-        if (!queued || queued.providerConfigurationHash !== expectedQueuedPolicyHash || JSON.stringify(queued) !== JSON.stringify(parsed.queuedPolicy)) return null;
+        if (!queued || queuedResponsePolicyHash(queued) !== expectedQueuedPolicyHash
+          || queuedResponsePolicyHash(parsed.queuedPolicy) !== expectedQueuedPolicyHash) return null;
         const existing = readFrozenResponseContracts(stored.frozenResponseContracts);
         if (existing) return existing;
         await client.query(
@@ -1679,17 +1699,30 @@ export function createPostgresGenerationExecutionRepository(
         );
         const row = result.rows[0]; if (!row) return null;
         const frozen = readFrozenResponseContracts(row.orchestrationPrivate.frozenResponseContracts);
-        if (!frozen || frozen.selectionHash !== input.request.selectionHash || !frozen.queuedPolicy.invocationKeys.includes(input.invocationKey)) return null;
+        const logicalAttempt = row.orchestrationPrivate.logicalAttempt;
+        if (!logicalAttempt || !hasValidLogicalAttempt(logicalAttempt)
+          || input.logicalAttemptId !== logicalAttempt.id
+          || !frozen || frozen.selectionHash !== input.request.selectionHash
+          || !frozen.queuedPolicy.invocationKeys.includes(input.invocationKey)
+          || !operationMatchesInvocation(input.operation, input.invocationKey)
+          || !auditMatchesFrozenInvocation(frozen, input.invocationKey, input.request)) return null;
         const ledger = [...(responseContractInvocations(row.orchestrationPrivate.responseContractInvocations) ?? [])];
         // Claim attempts are leases, not provider-authorized work. Only the persisted logical-attempt identity changes an operation id.
-        const id = sha256Hex(JSON.stringify({ version: 1, jobId: scope.jobId, invocationKey: input.invocationKey, logicalAttemptId: input.logicalAttemptId }));
-        const existing = ledger.find((item) => item.id === id || (item.logicalAttemptId === input.logicalAttemptId && item.invocationKey === input.invocationKey));
-        if (existing) return existing;
-        if (ledger.length >= frozen.queuedPolicy.invocationKeys.length) return null;
-        const entry: ResponseContractInvocationAudit = { version: 1, id, logicalAttemptId: input.logicalAttemptId, invocationKey: input.invocationKey,
-          request: input.request, status: "reserved", reservedAt: new Date().toISOString(), dispatchedAt: null, completedAt: null, response: null };
+        const id = responseContractInvocationAuditId(scope.jobId, input.logicalAttemptId, input.invocationKey, input.operation, input.requestPayloadHash);
+        const existing = ledger.find((item) => item.id === id);
+        if (existing) {
+          if (existing.logicalAttemptId !== input.logicalAttemptId || existing.invocationKey !== input.invocationKey
+            || existing.operation !== input.operation || existing.requestPayloadHash !== input.requestPayloadHash
+            || JSON.stringify(existing.request) !== JSON.stringify(input.request)) return null;
+          return existing;
+        }
+        if (ledger.length >= responseContractInvocationLedgerLimit) return null;
+        const entry = readResponseContractInvocationAudit({ version: 1, id, logicalAttemptId: input.logicalAttemptId, invocationKey: input.invocationKey,
+          operation: input.operation, requestPayloadHash: input.requestPayloadHash, request: input.request,
+          status: "reserved", reservedAt: new Date().toISOString(), dispatchedAt: null, completedAt: null, response: null });
         ledger.push(entry);
-        await client.query(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND lease_expires_at > now()`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
+        const write = await client.query<{ id: string }>(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating','validating') AND lease_expires_at > now() RETURNING id`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
+        if (!write.rows[0]) return null;
         return entry;
       });
     },
