@@ -77,7 +77,7 @@ integration("PostgreSQL response-contract persistence", () => {
       provider: { type: "openai_compatible" as const, profileId: providerProfileId, configurationHash: "d".repeat(64) },
       resumeDependencies: { generationContext: {}, producingProviderResult: null, stageState: {}, frozenCommitInputs: {}, replacementTarget: null }
     };
-    const reasons = ["invalid_structure"];
+    const reasons: GenerationReviewCheckpoint["reasons"] = ["invalid_structure"];
     return {
       version: 1, reviewId: crypto.randomUUID(), revision: 1, state: "pending", stage: "structure", candidateScope: "main",
       reasons, operationKind: "append", replacementTurnId: null,
