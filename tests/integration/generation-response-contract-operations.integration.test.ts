@@ -111,7 +111,7 @@ integration("strict response-contract operation workflow", () => {
     const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest, clock: () => verificationNow });
     const application = createApiGenerationApplication(pool, apiGraph.generation, undefined, { installedCapability: "r3", enforceEnabled: true });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Wait at the observatory.", requestedInputMode: "scene", resolvedInputMode: "scene", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 } }));
-    return { job, campaignId: imported.campaignId };
+    return { application, job, campaignId: imported.campaignId };
   }
 
   it("uses verified strict schemas for primary, choice repair, continuity review, and semantic repair", async () => {
@@ -122,11 +122,31 @@ integration("strict response-contract operation workflow", () => {
     const workerId = `strict-operations-${randomUUID()}`;
     const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
     await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+    const choiceReview = await fixture.application.getReview({ ownerUserId, jobId: fixture.job.id });
+    expect(choiceReview).toMatchObject({ stage: "choices", state: "pending" });
+    await fixture.application.decideReview({ ownerUserId, jobId: fixture.job.id }, {
+      reviewId: choiceReview.reviewId, revision: choiceReview.revision, decision: "retry"
+    });
+    const repairWorkerId = `strict-operations-repair-${randomUUID()}`;
+    const repairClaim = await repository.claimNext({ workerId: repairWorkerId, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: repairClaim!, workerId: repairWorkerId, leaseSeconds: 30 })).resolves.toBe(true);
+    const continuityReview = await fixture.application.getReview({ ownerUserId, jobId: fixture.job.id });
+    expect(continuityReview).toMatchObject({ stage: "continuity", state: "pending" });
+    await fixture.application.decideReview({ ownerUserId, jobId: fixture.job.id }, {
+      reviewId: continuityReview.reviewId, revision: continuityReview.revision, decision: "retry"
+    });
+    const semanticWorkerId = `strict-operations-semantic-${randomUUID()}`;
+    const semanticClaim = await repository.claimNext({ workerId: semanticWorkerId, leaseSeconds: 30 });
+    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: semanticClaim!, workerId: semanticWorkerId, leaseSeconds: 30 })).resolves.toBe(true);
     const row = await pool.query<{ status: string; generationPolicy: { playMode: string }; orchestrationPrivate: Record<string, any> }>("SELECT status,generation_policy AS \"generationPolicy\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [fixture.job.id]);
     expect(row.rows[0]?.status).toBe("completed");
     expect(row.rows[0]!.generationPolicy.playMode).toBe("story_only");
     expect(row.rows[0]!.orchestrationPrivate.queuedResponsePolicy.invocationKeys).toEqual(["story:nonstream", "choices:nonstream", "continuity_review:nonstream"]);
     const invocations = row.rows[0]!.orchestrationPrivate.responseContractInvocations as Array<{ operation: string; requestPayloadHash: string }>;
+    expect(row.rows[0]!.orchestrationPrivate.generationReview?.decisionJournal).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reviewId: choiceReview.reviewId, revision: choiceReview.revision, decision: "retry" }),
+      expect.objectContaining({ reviewId: continuityReview.reviewId, revision: continuityReview.revision, decision: "retry" })
+    ]));
     const expectedOperations = ["story_generation", "story_choice_repair", "story_continuity_review", "story_continuity_repair", "story_continuity_review"];
     expect(invocations.map((entry) => entry.operation)).toEqual(expectedOperations);
     const expectedSchemas = ["story", "choices", "continuity_review", "story", "continuity_review"] as const;
