@@ -1518,7 +1518,7 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
   }
   if (details) {
     details.replaceChildren();
-    for (const detail of presentation?.details || []) {
+    for (const detail of reviewView ? [] : presentation?.details || []) {
       const item = document.createElement("li");
       item.textContent = detail;
       details.append(item);

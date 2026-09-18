@@ -195,7 +195,7 @@ function createRun(
       if (recovery?.id === jobId && recovery.status === "recoverable") {
         if (recovery.review !== undefined) {
           reviewRequiresDecision = true;
-          return snapshot ? { ...snapshot, review: recovery.review } : recovery;
+          return snapshot ? { ...snapshot, review: recovery.review } : null;
         }
         return snapshot;
       }
@@ -268,7 +268,7 @@ function createRun(
             const parsed = generationStreamSnapshotSchema.safeParse(sourceEvent.snapshot);
             if (!parsed.success) throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause: parsed.error });
             const reconciled = parsed.data.status === "recoverable"
-              ? await reconcileRecoverableReview(parsed.data)
+              ? await reconcileRecoverableReview(parsed.data) ?? parsed.data
               : parsed.data;
             let observation = await observeSnapshot(reconciled);
             // A new watcher must settle even if this run already observed the terminal snapshot.

@@ -28,6 +28,7 @@ interface ReviewFixtureOptions {
   readonly sharedState?: { accepted: boolean };
   readonly conflictWhenAccepted?: boolean;
   readonly replaceLatest?: boolean;
+  readonly structureReview?: boolean;
 }
 
 async function installReviewApi(page: Page, canKeep = true, decisionFails = false, decisionCompletes = false, options: ReviewFixtureOptions = {}) {
@@ -35,8 +36,8 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
   const operationKind = options.replaceLatest ? "replace_latest" : "append";
   const replacementTurnId = options.replaceLatest ? fixture.turns.turns[0]!.id : null;
   const resultTurnNumber = options.replaceLatest ? 1 : 2;
-  const review = { version: 1, reviewId, revision: 1, state: "pending", stage: "continuity", candidateScope: "final", reasons: [canKeep ? "narrative_conflict" : "invalid_choices"], canKeep, canRetry: true };
-  const detail = { ...review, narration: "The lighthouse bell answered across the harbor.", choices: ["Follow the bell", "Wait at the quay"], findings: [{ code: review.reasons[0], message: canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0 };
+  const review = { version: 1, reviewId, revision: 1, state: "pending", stage: options.structureReview ? "structure" : "continuity", candidateScope: "final", reasons: [options.structureReview ? "invalid_structure" : canKeep ? "narrative_conflict" : "invalid_choices"], canKeep: options.structureReview ? false : canKeep, canRetry: true };
+  const detail = { ...review, narration: "The lighthouse bell answered across the harbor.", choices: ["Follow the bell", "Wait at the quay"], findings: [{ code: review.reasons[0], message: options.structureReview ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0 };
   const decisions: Record<string, unknown>[] = [];
   const writePaths: string[] = [];
   const sharedState = options.sharedState ?? { accepted: false };
@@ -245,6 +246,28 @@ async function installStagedReviewStream(page: Page, snapshots: { readonly gener
 }
 
 for (const surface of ["legacy", "web-next"] as const) {
+  test(`${surface} reloads a structure review ahead of context advice and posts only its explicit Retry decision`, async ({ page }) => {
+    const api = await installReviewApi(page, false, false, false, { structureReview: true });
+    if (surface === "legacy") {
+      const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
+      await page.route("**/vendor/photoswipe/photoswipe.css", route => route.fulfill({ contentType: "text/css", body: "" }));
+      await page.route(`**/story/${api.fixture.campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
+    }
+    const url = surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`;
+    await page.goto(url);
+    const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
+    await expect(recovery).toContainText("invalid structure");
+    await expect(recovery).not.toContainText("Context evidence was omitted");
+    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toHaveCount(0);
+    const retry = surface === "legacy" ? page.locator("#btnRetryGenerationReview") : recovery.getByRole("button", { name: "Continue with retry", exact: true });
+    await retry.click();
+    await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
+    expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+    await page.reload();
+    await expect(recovery).toContainText("invalid structure");
+    expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+  });
+
   test(`${surface} renders a saved review and posts only an explicit Keep decision`, async ({ page }) => {
     const api = await installReviewApi(page);
     if (surface === "legacy") {
