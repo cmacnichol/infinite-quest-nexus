@@ -221,6 +221,17 @@ type TurnGenerationPhase =
   | "story_continuity_repair"
   | "turn_commit";
 
+function responseContractForOperation(job: GenerationExecutionPayload, operation: StoryCostOperation, streaming: boolean) {
+  const contracts = job.orchestration_private?.frozenResponseContracts?.contracts;
+  if (!contracts) return undefined;
+  const key = operation === "story_choice_repair" ? "choices:nonstream"
+    : operation === "story_continuity_review" ? "continuity_review:nonstream"
+      : operation === "story_generation" || operation === "story_recovery" || operation === "event_extension"
+        || operation === "scene_coverage_rewrite" || operation === "story_continuity_repair"
+        ? streaming ? "story:stream" : "story:nonstream" : undefined;
+  return key ? contracts[key] : undefined;
+}
+
 type TurnGenerationDiagnosticContext = {
   generationJobId: string;
   campaignId: string;
@@ -958,6 +969,8 @@ async function callCampaignTextProvider(
   operation: StoryCostOperation,
   request: ProviderRequest
 ) {
+  const responseContract = request.responseContract ?? responseContractForOperation(job, operation, typeof request.onChunk === "function");
+  const preparedRequest = responseContract ? { ...request, responseContract } : request;
   const startedAt = Date.now();
   logger.info({
     event: "turn_generation_provider_started",
@@ -971,7 +984,7 @@ async function callCampaignTextProvider(
   try {
     dependencies.collaborators.onProviderDispatch?.(operation);
     const result = await provider.execute({
-      ...request,
+      ...preparedRequest,
       // Every generation operation is serialized and checked before transport.
       // The transport adapter sends these prepared bytes without rebuilding them.
       canonicalBudgeting: true,
