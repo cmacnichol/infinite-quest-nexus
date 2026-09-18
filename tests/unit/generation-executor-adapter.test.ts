@@ -16,8 +16,10 @@ import { generationExecutionProtocolIdentity, storyOnlyPromptSnapshot } from "..
 import {
   createGenerationExecutor,
   appendFactFormatRepairApplication,
+  bindCampaignResponseContract,
   generationContextFingerprint,
   planGenerationPromptContext,
+  preparePrimaryReservation,
   semanticRepairScope,
   sentCanonicalFactIds,
   type GenerationExecutionCollaborators
@@ -178,6 +180,31 @@ function authorizeReviewRetry(job: GenerationExecutionPayload, checkpoint: Gener
 }
 
 describe("generation executor adapter", () => {
+  it("binds the frozen stream contract before reservation and preserves the legacy reservation body", () => {
+    const provider = { id: "provider", providerType: "openai_compatible", model: "model", contextWindowTokens: 100_000, maxOutputTokens: 100,
+      temperature: 0, requestTimeoutMs: 1_000, configuration: {} } as never;
+    const streamContract = { version: 1, mode: "json_object", operation: "story", streaming: true, forbidFormatFallback: true } as const;
+    const nonstreamContract = { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true } as const;
+    const frozenJob = completeGenerationExecutionPayload();
+    frozenJob.orchestration_private = { frozenResponseContracts: { contracts: {
+      "story:stream": streamContract, "story:nonstream": nonstreamContract
+    } } } as never;
+    const callback = vi.fn();
+    const dispatched = bindCampaignResponseContract(frozenJob, "story_generation", {
+      systemPrompt: "rules", input: "action", onChunk: callback
+    });
+    const reserved = preparePrimaryReservation(provider, dispatched, true);
+    const legacy = preparePrimaryReservation(provider, { systemPrompt: "rules", input: "action", onChunk: callback }, false);
+
+    expect(reserved.body).toContain('"stream":true');
+    expect(reserved.body).toContain('"response_format":{"type":"json_object"}');
+    expect(reserved.payloadHash).toBe(sha256(reserved.body));
+    expect(legacy.body).not.toContain('"stream":true');
+    expect(legacy.body).not.toContain('"stream_options"');
+    expect(() => bindCampaignResponseContract(frozenJob, "story_choice_repair", { systemPrompt: "rules", input: "repair" }))
+      .toThrow(/does not permit/u);
+    expect(bindCampaignResponseContract(frozenJob, "rpg_assessment", { systemPrompt: "rules", input: "assess" }).responseContract).toBeUndefined();
+  });
   it("records an applied fact-format repair exactly once and rejects a conflicting replay", () => {
     const application: FactFormatRepairApplication = {
       version: 1, jobId: claim.jobId, reviewId: "00000000-0000-4000-8000-000000000007", revision: 1,

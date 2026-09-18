@@ -52,6 +52,10 @@ export type ProviderOutputBudget =
       kind: "story_append" | "story_replace";
     }>
   | Readonly<{
+      /** The reviewer returns findings, never a StoryTurnOutput replacement. */
+      kind: "continuity_review";
+    }>
+  | Readonly<{
       /** A repair may emit only the two unprotected choice fields. */
       kind: "story_choice_repair";
     }>
@@ -202,6 +206,9 @@ function eventExtensionMinimum(output: Extract<ProviderOutputBudget, { kind: "ev
 }
 
 function outputSkeleton(output: ProviderOutputBudget): unknown {
+  if (output.kind === "continuity_review") {
+    return { version: "story-continuity-review-v1", verdict: "uncertain", findings: [] };
+  }
   if (output.kind === "story_choice_repair") {
     return { choices: ["x", "x", "x", "x"], custom_action_suggestion: "x" };
   }

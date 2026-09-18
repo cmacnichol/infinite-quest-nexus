@@ -6,6 +6,7 @@ import { CONTINUITY_REVIEW_CONTRACT, buildContinuityReviewInput, validateContinu
 import { estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
 import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
 import type { ProviderRequest } from "../../../packages/story-engine/src/providers.js";
+import type { PreparedResponseContract } from "../../../packages/contracts/src/text-response-format.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 
 export class ContinuityReviewUnavailableError extends Error {
@@ -27,7 +28,7 @@ export type PreparedContinuityRepair = Readonly<{
 export function prepareContinuityRepair(input: Readonly<{
   provider: RuntimeTextExecution; manifest: GenerationEvidenceManifest; promptSnapshot: unknown;
   direction: string; rejectedDraft: StoryTurnOutput; originalMain?: StoryTurnOutput; scope?: "main" | "extension_only";
-  findings: unknown; effectiveContextWindowTokens?: number;
+  findings: unknown; effectiveContextWindowTokens?: number; responseContract?: PreparedResponseContract;
 }>): PreparedContinuityRepair {
   const manifest = generationEvidenceManifestSchema.parse(input.manifest);
   const prompts = assertContinuityReviewPromptSnapshot(input.promptSnapshot, "enforce");
@@ -49,7 +50,8 @@ export function prepareContinuityRepair(input: Readonly<{
           canonicalFactId: entry.canonicalFactId, form: entry.form })),
         original_main: original.draft, original_main_hash: original.draftHash,
         rejected_final: rejected.draft, rejected_final_hash: rejected.draftHash, verified_findings: input.findings }),
-      canonicalBudgeting: true, responseFormatFallback: "forbid", budgetOutput: { kind: "story_replace" }
+      canonicalBudgeting: true, responseFormatFallback: "forbid", budgetOutput: { kind: "story_replace" },
+      ...(input.responseContract ? { responseContract: input.responseContract } : {})
     };
     const serialized = serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
     const tokens = estimateStoryTokens(serialized.body);
@@ -71,6 +73,7 @@ export function prepareContinuityRepair(input: Readonly<{
 export function prepareContinuityReview(input: Readonly<{
   provider: RuntimeTextExecution; manifest: GenerationEvidenceManifest; producingRequestHash: string;
   promptSnapshot: unknown; reviewMode: "observe" | "enforce"; direction: string; draft: StoryTurnOutput; effectiveContextWindowTokens?: number;
+  responseContract?: PreparedResponseContract;
 }>): PreparedContinuityReview {
   const parsed = generationEvidenceManifestSchema.safeParse(input.manifest);
   if (!parsed.success || parsed.data.producingRequestHash !== input.producingRequestHash) throw new ContinuityReviewUnavailableError();
@@ -87,7 +90,8 @@ export function prepareContinuityReview(input: Readonly<{
 
 ${CONTINUITY_REVIEW_CONTRACT}`,
     input: stableStringify({ protocol: "story-continuity-review-v1", producingRequestHash: input.producingRequestHash, manifestHash: manifest.manifestHash, ...projection }),
-    canonicalBudgeting: true, responseFormatFallback: "forbid"
+    canonicalBudgeting: true, responseFormatFallback: "forbid", budgetOutput: { kind: "continuity_review" },
+    ...(input.responseContract ? { responseContract: input.responseContract } : {})
   };
   const prepared = serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
   const requestTokens = estimateStoryTokens(prepared.body);
