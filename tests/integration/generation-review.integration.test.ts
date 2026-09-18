@@ -107,7 +107,23 @@ integration("PostgreSQL generation review persistence", () => {
     expect(row.rows[0]).toMatchObject({ status: "recoverable", lease_owner: null, orchestration_private: { generationReview: fixture.checkpoint } });
     await expect(fixture.execution.renewLease(fixture.scope, 30)).resolves.toBe(false);
     await expect(fixture.execution.claimNext({ workerId: "other-review-worker", leaseSeconds: 30 })).resolves.toBeNull();
-    await expect(commandsAfterPause.retry({ ownerUserId, jobId: fixture.queued.id })).rejects.toMatchObject({ kind: "conflict" });
+    const retryBefore = await pool.query<{ status: string; attempts: number; revision: number; journalSize: number; providerAttempts: number }>(
+      `SELECT status, attempts,
+              (orchestration_private->'generationReview'->>'revision')::int AS revision,
+              jsonb_array_length(orchestration_private->'generationReview'->'decisionJournal')::int AS "journalSize",
+              (SELECT count(*)::int FROM generation_attempts WHERE generation_job_id = generation_jobs.id) AS "providerAttempts"
+         FROM generation_jobs WHERE id=$1`, [fixture.queued.id]
+    );
+    await expect(commandsAfterPause.retry({ ownerUserId, jobId: fixture.queued.id })).rejects.toMatchObject({
+      kind: "conflict", details: { reason: "review_decision_required" }
+    });
+    await expect(pool.query(
+      `SELECT status, attempts,
+              (orchestration_private->'generationReview'->>'revision')::int AS revision,
+              jsonb_array_length(orchestration_private->'generationReview'->'decisionJournal')::int AS "journalSize",
+              (SELECT count(*)::int FROM generation_attempts WHERE generation_job_id = generation_jobs.id) AS "providerAttempts"
+         FROM generation_jobs WHERE id=$1`, [fixture.queued.id]
+    )).resolves.toEqual(retryBefore);
     await expect(commandsAfterPause.getReview({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({
       reviewId: fixture.checkpoint.reviewId, revision: 1, state: "pending", narration: fixture.checkpoint.gateCandidate.story?.narration,
       canKeep: false, canRetry: true, choices: fixture.checkpoint.gateCandidate.story?.choices, findings: [{ code: "invalid_structure", message: expect.any(String) }]
@@ -119,6 +135,10 @@ integration("PostgreSQL generation review persistence", () => {
     await expect(commandsAfterPause.decideReview({ ownerUserId, jobId: fixture.queued.id }, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });
     await expect(pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [fixture.imported.campaignId]))
       .resolves.toMatchObject({ rows: [{ count: 2 }] });
+    await expect(commandsAfterPause.discard({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({ status: "discarded" });
+    await expect(commandsAfterPause.retry({ ownerUserId, jobId: fixture.queued.id })).rejects.toMatchObject({
+      kind: "invalid_state", details: { reason: "retry_source_state", generationStatus: "discarded" }
+    });
   });
 
   it("hydrates the pending review into recovery sync and changes its fingerprint when only the review revision changes", async () => {

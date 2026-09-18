@@ -28,6 +28,7 @@ export type GenerationApplicationErrorReason =
   | "retry_protocol_incompatible"
   | "story_memory_capability_unavailable"
   | "story_memory_enforce_disabled"
+  | "review_decision_required"
   | "retry_source_state"
   | "cancel_source_state"
   | "discard_source_state";

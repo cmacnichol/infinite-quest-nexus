@@ -83,6 +83,7 @@ const mappingFixtures: Record<GenerationApplicationErrorReason, MappingFixture> 
   retry_protocol_incompatible: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "This generation uses an incompatible prompt protocol. Discard it and enqueue a new generation." },
   story_memory_capability_unavailable: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "Story Memory capability is unavailable. Update the campaign enrollment or operator capability before enqueuing." },
   story_memory_enforce_disabled: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "Story Memory enforce mode is disabled. Update the campaign enrollment or operator configuration before enqueuing." },
+  review_decision_required: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "This generation is waiting for a review decision. Refresh the story page and use Retry in the review panel.", expectedDetails: { code: "generation_review_required" } },
   retry_source_state: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Only recoverable or failed generation jobs can be retried." },
   cancel_source_state: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Only active generation jobs can be cancelled." },
   discard_source_state: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Only recoverable or failed generation jobs can be discarded." }
@@ -177,6 +178,18 @@ describe("generation application adapter", () => {
     const mapped = mapGenerationApplicationError(applicationError);
 
     expect(errorSnapshot(mapped)).toEqual(expectedSnapshot(fixture));
+  });
+
+  test("maps a pending review ordinary retry conflict to actionable guidance", () => {
+    const error = mapGenerationApplicationError(new GenerationApplicationError(
+      "conflict", { reason: "review_decision_required" }
+    ));
+
+    expect(error).toMatchObject({
+      statusCode: 409,
+      details: { code: "generation_review_required" }
+    });
+    expect(error.message).toContain("review decision");
   });
 
   test.each([

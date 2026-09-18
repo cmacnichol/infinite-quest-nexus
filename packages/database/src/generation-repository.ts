@@ -788,7 +788,7 @@ export function createPostgresGenerationCommandRepository(
         if (!job) throw notFound({ jobId: scope.jobId });
         const review = generationReviewCheckpointSchema.safeParse(job.orchestrationPrivate?.generationReview);
         if (job.generationStatus === "recoverable" && review.success && review.data.state === "pending") {
-          throw new GenerationApplicationError("conflict");
+          throw new GenerationApplicationError("conflict", { reason: "review_decision_required" });
         }
         if (job.generationStatus !== "recoverable" && job.generationStatus !== "failed") {
           throw new GenerationApplicationError("invalid_state", { reason: "retry_source_state", generationStatus: job.generationStatus });

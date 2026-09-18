@@ -127,13 +127,19 @@ function createRun(
     return response;
   }
 
-  async function retryOrUnrecoverable(): Promise<Error | null> {
+  async function retryOrUnrecoverable(
+    recoverableSnapshot?: import("@infinite-quest/contracts").GenerationStreamSnapshot
+  ): Promise<Readonly<{ error: Error | null; reviewSnapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot | null }>> {
     try {
       await performAction("retry");
-      return null;
+      return { error: null, reviewSnapshot: null };
     } catch (cause) {
       if (cause instanceof GenerationWorkflowProtocolError) throw cause;
-      return toError(cause);
+      if (isReviewDecisionRequired(cause)) {
+        const reviewed = await reconcileRecoverableReview(recoverableSnapshot ?? null);
+        return { error: toError(cause), reviewSnapshot: reviewed?.review === undefined ? null : reviewed };
+      }
+      return { error: toError(cause), reviewSnapshot: null };
     }
   }
 
@@ -176,6 +182,32 @@ function createRun(
     }
   }
 
+  async function reconcileRecoverableReview(
+    snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot | null
+  ): Promise<import("@infinite-quest/contracts").GenerationStreamSnapshot | null> {
+    if (snapshot?.review !== undefined) {
+      reviewRequiresDecision = true;
+      return snapshot;
+    }
+    try {
+      const refreshed = await dependencies.api.syncStatus(campaignId);
+      const recovery = refreshed.generationRecovery;
+      if (recovery?.id === jobId && recovery.status === "recoverable") {
+        if (recovery.review !== undefined) {
+          reviewRequiresDecision = true;
+          return snapshot ? { ...snapshot, review: recovery.review } : recovery;
+        }
+        return snapshot;
+      }
+    } catch {
+      reviewRequiresDecision = true;
+      return snapshot;
+    }
+    // Only a matching recoverable record can confirm legacy retry authority.
+    reviewRequiresDecision = true;
+    return snapshot;
+  }
+
   async function* observe(signal: import("../ports.js").AbortSignalLike, retryFirst: boolean): AsyncIterable<GenerationEvent> {
     if (watcherActive) throw new GenerationWorkflowProtocolError("watch_already_active");
     watcherActive = true;
@@ -185,9 +217,10 @@ function createRun(
         return;
       }
       if (retryFirst) {
-        const retryError = await retryOrUnrecoverable();
-        if (retryError) {
-          yield { type: "settled", outcome: "unrecoverable", error: retryError };
+        const retry = await retryOrUnrecoverable();
+        if (retry.reviewSnapshot) yield { type: "status", snapshot: retry.reviewSnapshot };
+        if (retry.error) {
+          yield { type: "settled", outcome: "unrecoverable", error: retry.error };
           return;
         }
       }
@@ -234,8 +267,10 @@ function createRun(
             }
             const parsed = generationStreamSnapshotSchema.safeParse(sourceEvent.snapshot);
             if (!parsed.success) throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause: parsed.error });
-            if (parsed.data.status === "recoverable" && parsed.data.review !== undefined) reviewRequiresDecision = true;
-            let observation = await observeSnapshot(parsed.data);
+            const reconciled = parsed.data.status === "recoverable"
+              ? await reconcileRecoverableReview(parsed.data)
+              : parsed.data;
+            let observation = await observeSnapshot(reconciled);
             // A new watcher must settle even if this run already observed the terminal snapshot.
             if (observation.kind === "duplicate"
               && ["completed", "failed", "discarded", "cancelled", "recoverable"].includes(parsed.data.status)) {
@@ -265,9 +300,10 @@ function createRun(
               }
               if (observation.snapshot.attempts === 1) {
                 try {
-                  const retryError = await retryOrUnrecoverable();
-                  if (retryError) {
-                    yield { type: "settled", outcome: "unrecoverable", error: retryError };
+                  const retry = await retryOrUnrecoverable(observation.snapshot);
+                  if (retry.reviewSnapshot) yield { type: "status", snapshot: retry.reviewSnapshot };
+                  if (retry.error) {
+                    yield { type: "settled", outcome: "unrecoverable", error: retry.error };
                     return;
                   }
                   restart = true;
@@ -359,4 +395,10 @@ function terminalError(message: string | null | undefined): Error {
 
 function toError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function isReviewDecisionRequired(cause: unknown): boolean {
+  if (typeof cause !== "object" || cause === null) return false;
+  const candidate = cause as { statusCode?: unknown; details?: { code?: unknown } };
+  return candidate.statusCode === 409 && candidate.details?.code === "generation_review_required";
 }
