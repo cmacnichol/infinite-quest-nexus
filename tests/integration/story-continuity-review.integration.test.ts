@@ -523,7 +523,7 @@ integration("T17 durable continuity review", () => {
       rawOutputReference: expect.any(String), requestPayloadHash: expect.any(String),
       providerConfigurationHash: expect.any(String), response: { responseId: expect.any(String), content: expect.any(String) }
     });
-    let acceptedIllustrationEnqueues: ReturnType<typeof vi.fn> | null = null;
+    let acceptedIllustrationEnqueueCount = 0;
 
     if (point === "before_decision") {
       expect(await runGenerationJob(pool, `format-crash-pending-${randomUUID()}`, 30, credentialSecret)).toBe(false);
@@ -542,8 +542,11 @@ integration("T17 durable continuity review", () => {
       const providers = workerProviderGraph(pool, credentialSecret);
       const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
       if (point === "before_commit" || point === "after_commit") {
-        acceptedIllustrationEnqueues = vi.fn(collaborators.illustration.enqueueAcceptedTurnIllustrationSegments);
-        collaborators.illustration.enqueueAcceptedTurnIllustrationSegments = acceptedIllustrationEnqueues;
+        const enqueueIllustrations = collaborators.illustration.enqueueAcceptedTurnIllustrationSegments;
+        collaborators.illustration.enqueueAcceptedTurnIllustrationSegments = async (...args) => {
+          acceptedIllustrationEnqueueCount += 1;
+          return enqueueIllustrations(...args);
+        };
       }
       let interrupted = false;
       const wrapped = {
@@ -579,8 +582,8 @@ integration("T17 durable continuity review", () => {
       expect(claim?.jobId).toBe(job.id);
       await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
       expect(interrupted).toBe(true);
-      if (acceptedIllustrationEnqueues) {
-        expect(acceptedIllustrationEnqueues).toHaveBeenCalledTimes(point === "after_commit" ? 1 : 0);
+      if (point === "before_commit" || point === "after_commit") {
+        expect(acceptedIllustrationEnqueueCount).toBe(point === "after_commit" ? 1 : 0);
       }
     }
 
@@ -644,6 +647,76 @@ integration("T17 durable continuity review", () => {
     )).rows[0]!.orchestration_private;
     expect(saved.generationReview.decisionJournal.map((entry) => entry.decision)).toEqual(["repair_format", "keep"]);
     expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(1);
+  });
+
+  it.each(["matching", "incompatible"] as const)("%s event-extension checkpoints bind to the repaired main before resume", async (extensionState) => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    const triggerId = randomUUID();
+    await pool.query("UPDATE campaign_state SET event_triggers=$2::jsonb WHERE campaign_id=$1", [campaignId, JSON.stringify([{
+      id: triggerId, label: "Keeper arrival", timing: "after", condition: "Mira waits.",
+      effect: "The bell rings as the keeper arrives.", addTextAfter: true, triggeredCount: 0,
+      lastTriggeredTurn: null, lastTriggeredAt: null
+    }])]);
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+
+    await runGenerationJob(pool, `format-extension-offer-${extensionState}-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected format repair offer.");
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = {
+      ...repository,
+      async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+        const saved = await repository.saveOrchestration(scope, value);
+        if (!interrupted && value.extension) {
+          interrupted = true;
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+          throw Object.assign(new Error("Injected stop after repaired event-extension checkpoint."), { code: "generation_cancelled" });
+        }
+        return saved;
+      }
+    };
+    const workerId = `format-extension-${extensionState}-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(job.id);
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+    expect(interrupted).toBe(true);
+    const checkpoint = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    expect(checkpoint.extension).toMatchObject({
+      validatedMainDraftHash: checkpoint.validatedMainDraft.draftHash,
+      finalStoryHash: expect.any(String), producingRequestPayloadHash: expect.any(String)
+    });
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+    if (extensionState === "incompatible") {
+      checkpoint.extension.validatedMainDraftHash = "0".repeat(64);
+      await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [job.id, JSON.stringify(checkpoint)]);
+    }
+
+    const callsBeforeReclaim = requests.length;
+    await runGenerationJob(pool, `format-extension-reclaim-${extensionState}-${randomUUID()}`, 30, credentialSecret);
+    const saved = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    if (extensionState === "incompatible") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+      expect(requests).toHaveLength(callsBeforeReclaim);
+    } else {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      expect(saved.extension.story.narration.startsWith(saved.validatedMainDraft.story.narration)).toBe(true);
+      expect(saved.generationReview.factFormatRepair).toMatchObject({ status: "applied", planHash: offer.formatRepair.planHash });
+    }
   });
 
   it("pauses invalid Story Direction choices until one retry repairs the retained narration", async () => {
