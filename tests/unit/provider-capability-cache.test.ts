@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { capabilityRouteConfigHash, ProviderCapabilityCache } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 
 const key = {
   ownerUserId: "owner", providerProfileId: "profile", providerType: "openrouter" as const,
@@ -67,5 +68,33 @@ describe("provider capability cache", () => {
     expect(capabilityRouteConfigHash({ streaming: true })).not.toBe(capabilityRouteConfigHash({ streaming: false }));
     expect(capabilityRouteConfigHash({ streamingSupport: true })).not.toBe(capabilityRouteConfigHash({ streamingSupport: false }));
     expect(capabilityRouteConfigHash({ textResponseFormatPolicy: "auto" })).not.toBe(capabilityRouteConfigHash({ textResponseFormatPolicy: "required" }));
+  });
+
+  it("keeps transaction-local discovery out of the global cache until a successful commit invalidates it", async () => {
+    const capabilities = createProviderResponseFormatCapabilities();
+    const staged = capabilities.transactionLocal();
+    const stale = { supportedParameters: ["response_format"], discoveredAt: "before" };
+    const replacement = { supportedParameters: ["structured_outputs"], discoveredAt: "after" };
+
+    await capabilities.discover(key, async () => stale);
+    await staged.discover(key, async () => replacement);
+
+    await expect(capabilities.discover(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toEqual(stale);
+    capabilities.invalidate(key.providerProfileId);
+    await expect(capabilities.discover(key, async () => replacement)).resolves.toEqual(replacement);
+  });
+
+  it("does not publish staged capability metadata when a transaction rolls back", async () => {
+    const capabilities = createProviderResponseFormatCapabilities({ registryDigest: "registry-v1" });
+    const staged = capabilities.transactionLocal();
+    const committed = { supportedParameters: ["response_format"], discoveredAt: "committed" };
+    const rolledBack = { supportedParameters: ["structured_outputs"], discoveredAt: "rolled-back" };
+
+    await capabilities.discover(key, async () => committed);
+    await staged.discover(key, async () => rolledBack);
+
+    expect(staged).not.toBe(capabilities);
+    expect(staged.registryDigest).toBe(capabilities.registryDigest);
+    await expect(capabilities.discover(key, async () => ({ supportedParameters: [], discoveredAt: "unexpected" }))).resolves.toEqual(committed);
   });
 });

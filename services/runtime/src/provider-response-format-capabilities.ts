@@ -9,6 +9,7 @@ export type ProviderResponseFormatCapabilities = Readonly<{
   discoverInventory(key: ProviderCapabilityCacheKey, load: () => Promise<ProviderModelInventory>, refresh?: boolean): Promise<ProviderModelInventory>;
   eligibility(input: Omit<ResponseFormatEligibilityInput, "verifications"> & Readonly<{ expectedRegistryDigest?: string }>): ReturnType<typeof resolveResponseFormatEligibility>;
   invalidate(providerProfileId: string): void;
+  transactionLocal(): ProviderResponseFormatCapabilities;
 }>;
 export function createProviderResponseFormatCapabilities(options: Readonly<{ records?: readonly SchemaVerification[]; registryDigest?: string; now?: () => number; cache?: ProviderCapabilityCache<ModelParameterAdvertisement | null>; inventoryCache?: ProviderCapabilityCache<ProviderModelInventory> }> = {}): ProviderResponseFormatCapabilities {
   const cache = options.cache ?? new ProviderCapabilityCache<ModelParameterAdvertisement | null>(options.now ? { now: options.now } : {});
@@ -16,5 +17,9 @@ export function createProviderResponseFormatCapabilities(options: Readonly<{ rec
   const registryDigest = options.registryDigest ?? "";
   return Object.freeze({ registryDigest, discover: async (key, load, refresh) => {
     try { return await cache.load(key, load, refresh); } catch { return null; }
-  }, discoverInventory: (key, load, refresh) => inventoryCache.load(key, load, refresh), invalidate: (id) => { cache.invalidate(id); inventoryCache.invalidate(id); }, eligibility: (input) => input.expectedRegistryDigest !== undefined && input.expectedRegistryDigest !== registryDigest ? { status: "unknown", reason: "discovery_unavailable", verification: null } : resolveResponseFormatEligibility({ ...input, verifications: options.records ?? [] }) });
+  }, discoverInventory: (key, load, refresh) => inventoryCache.load(key, load, refresh), invalidate: (id) => { cache.invalidate(id); inventoryCache.invalidate(id); }, transactionLocal: () => createProviderResponseFormatCapabilities({
+    ...(options.records ? { records: options.records } : {}),
+    ...(options.registryDigest ? { registryDigest: options.registryDigest } : {}),
+    ...(options.now ? { now: options.now } : {})
+  }), eligibility: (input) => input.expectedRegistryDigest !== undefined && input.expectedRegistryDigest !== registryDigest ? { status: "unknown", reason: "discovery_unavailable", verification: null } : resolveResponseFormatEligibility({ ...input, verifications: options.records ?? [] }) });
 }

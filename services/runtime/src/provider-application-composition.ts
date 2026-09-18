@@ -167,7 +167,11 @@ function createInternals(
     ...(options.schemaVerificationDigest ? { registryDigest: options.schemaVerificationDigest } : {}),
     ...(options.clock ? { now: options.clock } : {})
   });
-  function bind(database: DatabaseClient | DatabasePool): ProviderApplicationTransaction {
+  function bind(
+    database: DatabaseClient | DatabasePool,
+    capabilities = responseFormatCapabilities,
+    onProfileMutation?: (providerProfileId: string) => void
+  ): ProviderApplicationTransaction {
     const client = database as DatabaseClient;
     const providerRepositories = createPostgresProviderRepositories(client);
     const prompts = createPromptRepository(client);
@@ -177,7 +181,7 @@ function createInternals(
       credentialSecret: options.credentialSecret,
       transport: options.transport,
       health: providerRepositories.health,
-      responseFormatCapabilities
+      responseFormatCapabilities: capabilities
     });
     const rawApplication = createProviderApplication({
       profiles: providerRepositories.profiles,
@@ -191,12 +195,14 @@ function createInternals(
       ...rawApplication,
       updateProfile: async (command: Parameters<ProviderApplication["updateProfile"]>[0]) => {
         const result = await rawApplication.updateProfile(command);
-        responseFormatCapabilities.invalidate(command.providerProfileId);
+        capabilities.invalidate(command.providerProfileId);
+        onProfileMutation?.(command.providerProfileId);
         return result;
       },
       deleteProfile: async (command: Parameters<ProviderApplication["deleteProfile"]>[0]) => {
         const result = await rawApplication.deleteProfile(command);
-        responseFormatCapabilities.invalidate(command.providerProfileId);
+        capabilities.invalidate(command.providerProfileId);
+        onProfileMutation?.(command.providerProfileId);
         return result;
       }
     });
@@ -207,14 +213,23 @@ function createInternals(
   }
 
   const base = bind(pool);
+  async function runProfileMutation<T>(
+    providerProfileId: string,
+    work: (binding: ProviderApplicationTransaction) => Promise<T>
+  ): Promise<T> {
+    const transactionCapabilities = responseFormatCapabilities.transactionLocal();
+    const result = await withTransaction(pool, async (client) => work(bind(client, transactionCapabilities)));
+    responseFormatCapabilities.invalidate(providerProfileId);
+    return result;
+  }
   const application: ProviderApplication = Object.freeze({
     ...base.application,
     createProfile: (command: Parameters<ProviderApplication["createProfile"]>[0]) =>
       withTransaction(pool, async (client) => bind(client).application.createProfile(command)),
     updateProfile: (command: Parameters<ProviderApplication["updateProfile"]>[0]) =>
-      withTransaction(pool, async (client) => bind(client).application.updateProfile(command)),
+      runProfileMutation(command.providerProfileId, (binding) => binding.application.updateProfile(command)),
     deleteProfile: (command: Parameters<ProviderApplication["deleteProfile"]>[0]) =>
-      withTransaction(pool, async (client) => bind(client).application.deleteProfile(command)),
+      runProfileMutation(command.providerProfileId, (binding) => binding.application.deleteProfile(command)),
     setDefaultProfile: (command: Parameters<ProviderApplication["setDefaultProfile"]>[0]) =>
       withTransaction(pool, async (client) => bind(client).application.setDefaultProfile(command)),
     savePromptOverride: (command: Parameters<ProviderApplication["savePromptOverride"]>[0]) =>
@@ -303,8 +318,16 @@ function createInternals(
     application,
     runtimeAdapter: base.runtime,
     responseFormatCapabilities,
-    transaction: <T>(work: (binding: ProviderApplicationTransaction, client: DatabaseClient) => Promise<T>) =>
-      withTransaction(pool, async (client) => work(bind(client), client)),
+    transaction: async <T>(work: (binding: ProviderApplicationTransaction, client: DatabaseClient) => Promise<T>) => {
+      const invalidatedProfileIds = new Set<string>();
+      const transactionCapabilities = responseFormatCapabilities.transactionLocal();
+      const result = await withTransaction(pool, async (client) => work(
+        bind(client, transactionCapabilities, (providerProfileId) => invalidatedProfileIds.add(providerProfileId)),
+        client
+      ));
+      for (const providerProfileId of invalidatedProfileIds) responseFormatCapabilities.invalidate(providerProfileId);
+      return result;
+    },
     generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs }),
     workerGeneration: Object.freeze({
       ...runtime,
