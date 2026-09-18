@@ -649,6 +649,83 @@ integration("T17 durable continuity review", () => {
     expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(1);
   });
 
+  it("re-opens the normal continuity decision after a repaired candidate conflicts, without a primary rewrite", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewSequence = ["conflict"];
+    requests.length = 0;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+
+    await runGenerationJob(pool, `format-conflict-offer-${randomUUID()}`, 30, credentialSecret);
+    const offer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (offer.version !== 2 || !offer.formatRepair) throw new Error("Expected format repair offer.");
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: offer.reviewId, revision: offer.revision, decision: "repair_format", repairPlanHash: offer.formatRepair.planHash
+    });
+    await runGenerationJob(pool, `format-conflict-review-${randomUUID()}`, 30, credentialSecret);
+
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+    const continuity = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(continuity).toMatchObject({ stage: "continuity", canKeep: true, canRetry: true });
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"))).toHaveLength(1);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(1);
+    expect(await runGenerationJob(pool, `format-conflict-pending-${randomUUID()}`, 30, credentialSecret)).toBe(false);
+    const saved = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    expect(saved.generationReview).toMatchObject({ state: "pending", stage: "continuity", factFormatRepair: { status: "applied", planHash: offer.formatRepair.planHash } });
+  });
+
+  it("uses the current second repair receipt after a full Retry replaces the first malformed candidate", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    malformedFactFormatting = true;
+    reviewVerdict = "pass";
+    requests.length = 0;
+    const acceptedBefore = await acceptedAuthoritySnapshot(campaignId);
+
+    await runGenerationJob(pool, `format-second-repair-first-offer-${randomUUID()}`, 30, credentialSecret);
+    const firstOffer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (firstOffer.version !== 2 || !firstOffer.formatRepair) throw new Error("Expected first format repair offer.");
+    const firstPrimary = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private.primaryResult;
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: firstOffer.reviewId, revision: firstOffer.revision, decision: "retry"
+    });
+    await runGenerationJob(pool, `format-second-repair-full-retry-${randomUUID()}`, 30, credentialSecret);
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(acceptedBefore);
+    const secondOffer = await application.getReview({ ownerUserId, jobId: job.id });
+    if (secondOffer.version !== 2 || !secondOffer.formatRepair) throw new Error(`Expected second format repair offer: ${JSON.stringify({ secondOffer, job: await application.getJob({ ownerUserId, jobId: job.id }) })}`);
+    expect(secondOffer.reviewId).not.toBe(firstOffer.reviewId);
+    const secondPrimary = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private.primaryResult;
+    expect(secondPrimary.response.responseId).not.toBe(firstPrimary.response.responseId);
+
+    await application.decideReview({ ownerUserId, jobId: job.id }, {
+      reviewId: secondOffer.reviewId, revision: secondOffer.revision, decision: "repair_format", repairPlanHash: secondOffer.formatRepair.planHash
+    });
+    await runGenerationJob(pool, `format-second-repair-apply-${randomUUID()}`, 30, credentialSecret);
+
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1") && !body.includes("story-continuity-repair-v1"))).toHaveLength(2);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(1);
+    const saved = (await pool.query<{ orchestration_private: Record<string, any> }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    const repairs = saved.generationReview.decisionJournal.filter((entry: { decision: string }) => entry.decision === "repair_format");
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]).toMatchObject({ reviewId: secondOffer.reviewId, revision: secondOffer.revision, planHash: secondOffer.formatRepair.planHash });
+    expect(saved.generationReview.decisionJournal.map((entry: { decision: string }) => entry.decision)).toEqual(["retry", "repair_format"]);
+    expect(saved.validatedMainDraft).toMatchObject({
+      requestPayloadHash: secondPrimary.requestPayloadHash,
+      response: { responseId: secondPrimary.response.responseId },
+      factFormatRepair: { reviewId: secondOffer.reviewId, planHash: secondOffer.formatRepair.planHash }
+    });
+    expect((await acceptedAuthoritySnapshot(campaignId)).turns as unknown[]).toHaveLength((acceptedBefore.turns as unknown[]).length + 1);
+  });
+
   it.each(["matching", "incompatible"] as const)("%s event-extension checkpoints bind to the repaired main before resume", async (extensionState) => {
     const { job, application, campaignId } = await enqueue("enforce");
     const triggerId = randomUUID();
