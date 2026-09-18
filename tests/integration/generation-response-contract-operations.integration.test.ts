@@ -114,11 +114,11 @@ integration("strict response-contract operation workflow", () => {
     }));
   }
 
-  async function enqueue() {
+  async function enqueue(storyOnly = true) {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `strict operations ${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "strict-operations.story", story: fixture }));
-    await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
+    if (storyOnly) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
     const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: records(), schemaVerificationDigest: digest, clock: () => verificationNow });
     const application = createApiGenerationApplication(pool, apiGraph.generation, undefined, { installedCapability: "r3", enforceEnabled: true });
@@ -212,7 +212,7 @@ integration("strict response-contract operation workflow", () => {
   }, 60_000);
 
   it("uses the strict story contract for an event extension after the exempt event assessment", async () => {
-    const fixture = await enqueue();
+    const fixture = await enqueue(false);
     primaryHasDuplicateChoices = false;
     reviewCalls = 1;
     eventCoverageSequence = [true, true];
@@ -238,7 +238,7 @@ integration("strict response-contract operation workflow", () => {
   }, 60_000);
 
   it("uses one strict scene rewrite and does not redispatch it after a response-captured crash", async () => {
-    const fixture = await enqueue();
+    const fixture = await enqueue(false);
     primaryHasDuplicateChoices = false;
     reviewCalls = 1;
     sceneCoverageSequence = [false, false];
@@ -248,6 +248,7 @@ integration("strict response-contract operation workflow", () => {
     const initialWorker = `strict-scene-gate-${randomUUID()}`;
     const initialClaim = await repository.claimNext({ workerId: initialWorker, leaseSeconds: 30 });
     await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: initialClaim!, workerId: initialWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    expect(await fixture.application.getJob({ ownerUserId, jobId: fixture.job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
     const gate = await fixture.application.getReview({ ownerUserId, jobId: fixture.job.id });
     expect(gate).toMatchObject({ stage: "scene_coverage", state: "pending" });
     await fixture.application.decideReview({ ownerUserId, jobId: fixture.job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
