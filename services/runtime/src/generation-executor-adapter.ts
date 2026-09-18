@@ -42,6 +42,7 @@ import {
   type StoryLengthWordRange
 } from "../../../packages/contracts/src/story-settings.js";
 import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic } from "../../../packages/contracts/src/story-prompt.js";
+import type { GenerationFailureDiagnostic } from "../../../packages/contracts/src/generation-review.js";
 import type {
   AcceptedGenerationCommitCollaborators,
   GenerationExecutionPayload,
@@ -428,6 +429,44 @@ function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): stri
   if (typeof value !== "string") return fallback;
   const normalized = value.trim().toLowerCase();
   return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
+}
+
+function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: string): GenerationFailureDiagnostic {
+  const transport = providerTransportErrorDetails(error);
+  const code = transport
+    ? (transport.timedOut ? "provider_request_timeout" : "provider_transport_error")
+    : safeLogErrorCode(errorCodeFrom(error) || "generation_failed", "generation_failed");
+  const category = code === "provider_request_timeout" ? "provider_timeout"
+    : code === "provider_transport_error" ? "provider_transport"
+    : code === "mechanics_leak" ? "mechanics"
+    : code === "scene_coverage" ? "continuity"
+    : code === "invalid_schema" || code === "invalid_json" ? "format"
+    : code === "output_limit" ? "output_incomplete"
+    : code === "stale_campaign" ? "authority"
+    : "unknown";
+  const supportedCode = code === "provider_request_timeout" || code === "provider_transport_error"
+    || code === "mechanics_leak" || code === "scene_coverage" || code === "invalid_schema"
+    || code === "invalid_json" || code === "output_limit" || code === "stale_campaign"
+    ? code : "generation_failed";
+  return {
+    version: 1,
+    category,
+    code: supportedCode === "invalid_json" ? "invalid_schema" : supportedCode,
+    phase,
+    attemptNumber,
+    occurredAt: new Date().toISOString()
+  } as GenerationFailureDiagnostic;
+}
+
+function emptyOutputFailureDiagnostic(attemptNumber: number): GenerationFailureDiagnostic {
+  return {
+    version: 1,
+    category: "output_incomplete",
+    code: "empty_output",
+    phase: "story_validation",
+    attemptNumber,
+    occurredAt: new Date().toISOString()
+  };
 }
 
 function assertActiveGenerationUpdate(changed: boolean, action: string): void {
@@ -1911,6 +1950,11 @@ async function executeLoadedGeneration(
           decisionJournal: savedReview.data.decisionJournal,
           revision: savedReview.data.revision + 1
         } : {}) });
+      if (!result.content.trim()) {
+        orchestration = await persistOrchestration(repository, scope, job, {
+          lastFailureDiagnostic: emptyOutputFailureDiagnostic(initialAttemptNumber)
+        });
+      }
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected primary candidate for review");
       return true;
     };
@@ -3313,7 +3357,8 @@ async function executeLoadedGeneration(
       ...scope,
       errorCode: PUBLIC_GENERATION_FAILURE_CODE,
       errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
-      recoveryMetadata: transportError ? { transportError } : {}
+      recoveryMetadata: transportError ? { transportError } : {},
+      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, "story_generation")
     });
     if (failed) {
       logger.error({

@@ -1,5 +1,6 @@
 import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
+import type { GenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
 import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
@@ -112,6 +113,8 @@ export type GenerationValidatedMainDraftCheckpoint = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** Safe, last-known failure classification; attempts remain the historical ledger. */
+  lastFailureDiagnostic?: GenerationFailureDiagnostic;
   /** A primary request was durably reserved; a lease reclaim cannot treat it as an unseen request. */
   primaryReservation?: {
     version: 1;
@@ -460,6 +463,7 @@ export type GenerationFailedUpdate = GenerationLeaseScope & Readonly<{
   errorCode: string;
   errorMessage: string;
   recoveryMetadata: Record<string, unknown>;
+  lastFailureDiagnostic?: GenerationFailureDiagnostic;
 }>;
 
 type GenerationTextProvider = Readonly<{
@@ -1492,13 +1496,15 @@ export function createPostgresGenerationExecutionRepository(
       return changed(await pool.query<{ id: string }>(
         `UPDATE generation_jobs SET status = 'failed', error_code = $4, error_message = $5,
            recovery_metadata = recovery_metadata || $6::jsonb,
+           orchestration_private = CASE WHEN $7::jsonb IS NULL THEN orchestration_private
+             ELSE orchestration_private || jsonb_build_object('lastFailureDiagnostic', $7::jsonb) END,
            lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
            AND status IN ('assessing','generating','validating','committing')
            AND lease_expires_at > now()
          RETURNING id`,
         [input.jobId, input.ownerUserId, input.workerId, input.errorCode,
-          input.errorMessage, json(input.recoveryMetadata)]
+          input.errorMessage, json(input.recoveryMetadata), input.lastFailureDiagnostic ? json(input.lastFailureDiagnostic) : null]
       ));
     }
   };

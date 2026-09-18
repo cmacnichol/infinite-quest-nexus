@@ -1,9 +1,22 @@
 import { generationRecoverySchema } from "../../packages/contracts/src/client-api.js";
 import { describe, expect, it } from "vitest";
 import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic, safeGenerationDiagnosticSchema } from "../../packages/contracts/src/story-prompt.js";
+import { projectGenerationFailureDiagnostic } from "../../packages/contracts/src/generation-review.js";
 import { generationDiagnosticPresentation, generationReviewPresentation } from "../../packages/client-core/src/generation/projection.js";
 
 describe("safe public generation diagnostics", () => {
+  it("projects fixed timeout and empty-output failure messages without private error details", () => {
+    const privateMessage = "https://private.example/token?key=SECRET PRIVATE_NARRATION";
+    expect(projectGenerationFailureDiagnostic({
+      version: 1, category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation", attemptNumber: 1,
+      occurredAt: "2026-09-18T00:00:00.000Z", message: privateMessage
+    })).toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
+    expect(projectGenerationFailureDiagnostic({
+      version: 1, category: "output_incomplete", code: "empty_output", phase: "story_validation", attemptNumber: 2,
+      occurredAt: "2026-09-18T00:00:00.000Z", response: privateMessage
+    })).toEqual({ code: "empty_output", message: "The provider returned no usable output." });
+    expect(projectGenerationFailureDiagnostic({ code: "private_provider_token", message: privateMessage })).toBeNull();
+  });
   it("uses server review eligibility ahead of an older discard-and-reenqueue diagnostic", () => {
     const presentation = generationReviewPresentation({
       version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",

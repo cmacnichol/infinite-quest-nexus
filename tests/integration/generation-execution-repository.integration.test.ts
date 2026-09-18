@@ -1303,7 +1303,11 @@ integration("PostgreSQL generation execution repository", () => {
       ...scope,
       errorCode: "generation_failed",
       errorMessage: "The story could not be generated.",
-      recoveryMetadata: { transportError: false }
+      recoveryMetadata: { transportError: false },
+      lastFailureDiagnostic: {
+        version: 1, category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation",
+        attemptNumber: 1, occurredAt: "2026-09-18T00:00:00.000Z"
+      }
     })).resolves.toBe(true);
     await expect(repository.markFailed({
       ...scope,
@@ -1324,7 +1328,10 @@ integration("PostgreSQL generation execution repository", () => {
     )).resolves.toMatchObject({ rows: [{
       status: "failed",
       partial_output: "A safe fictional preview.",
-      orchestration_private: { roll: null },
+      orchestration_private: { roll: null, lastFailureDiagnostic: {
+        version: 1, category: "provider_timeout", code: "provider_request_timeout", phase: "story_generation",
+        attemptNumber: 1, occurredAt: "2026-09-18T00:00:00.000Z"
+      } },
       streaming_segments_state: { provisionalSetId: null }
     }] });
     await expect(pool.query<{ attempt_number: number }>(

@@ -10,6 +10,48 @@ export const generationReviewDecisionRequestSchema = z.strictObject({
   decision: z.enum(["keep", "retry"])
 });
 
+/**
+ * Versioned, private record of the last generation failure. The shape is
+ * deliberately closed so raw provider errors cannot become durable API data.
+ */
+export const generationFailureDiagnosticSchema = z.strictObject({
+  version: z.literal(1),
+  category: z.enum(["format", "mechanics", "continuity", "provider_timeout", "provider_transport", "output_incomplete", "authority", "unknown"]),
+  code: z.enum(["invalid_schema", "mechanics_leak", "scene_coverage", "provider_request_timeout", "provider_transport_error", "empty_output", "output_limit", "stale_campaign", "generation_failed"]),
+  phase: z.string().trim().min(1).max(80),
+  attemptNumber: z.number().int().min(0),
+  occurredAt: z.iso.datetime()
+});
+
+export const generationFailureDiagnosticProjectionSchema = z.strictObject({
+  code: z.enum(["provider_request_timeout", "provider_transport_error", "empty_output", "output_limit", "generation_failed"]),
+  message: z.string().trim().min(1).max(160)
+});
+
+const publicFailureDiagnosticMessages = {
+  provider_request_timeout: "The provider request timed out.",
+  provider_transport_error: "The provider connection failed.",
+  empty_output: "The provider returned no usable output.",
+  output_limit: "The provider output was incomplete.",
+  generation_failed: "The generation could not be completed."
+} as const;
+
+/** Projects a durable private failure category to a fixed public vocabulary. */
+export function projectGenerationFailureDiagnostic(value: unknown): GenerationFailureDiagnosticProjection | null {
+  const source = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+  const parsed = generationFailureDiagnosticSchema.safeParse({
+    version: source.version,
+    category: source.category,
+    code: source.code,
+    phase: source.phase,
+    attemptNumber: source.attemptNumber,
+    occurredAt: source.occurredAt
+  });
+  if (!parsed.success || !(parsed.data.code in publicFailureDiagnosticMessages)) return null;
+  const code = parsed.data.code as keyof typeof publicFailureDiagnosticMessages;
+  return { code, message: publicFailureDiagnosticMessages[code] };
+}
+
 export const generationReviewSummarySchema = z.strictObject({
   version: z.literal(1), reviewId: z.uuid(), revision: z.number().int().safe().positive(),
   state: z.enum(["pending", "decided"]), stage: generationReviewStageSchema,
@@ -148,6 +190,8 @@ export function projectGenerationReviewSummary(value: unknown): GenerationReview
 }
 
 export type GenerationReviewStage = z.infer<typeof generationReviewStageSchema>;
+export type GenerationFailureDiagnostic = Readonly<z.infer<typeof generationFailureDiagnosticSchema>>;
+export type GenerationFailureDiagnosticProjection = Readonly<z.infer<typeof generationFailureDiagnosticProjectionSchema>>;
 export type GenerationReviewReasonCode = z.infer<typeof generationReviewReasonCodeSchema>;
 export type GenerationReviewDecisionRequest = Readonly<z.infer<typeof generationReviewDecisionRequestSchema>>;
 export type GenerationReviewSummary = Readonly<z.infer<typeof generationReviewSummarySchema>>;

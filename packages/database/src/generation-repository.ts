@@ -14,7 +14,7 @@ import {
 } from "../../application/src/index.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../application/src/generation/review-checkpoint.js";
 import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
-import { generationReviewDecisionRequestSchema, projectGenerationReviewDetail, projectGenerationValidationIssues } from "../../contracts/src/generation-review.js";
+import { generationReviewDecisionRequestSchema, projectGenerationFailureDiagnostic, projectGenerationReviewDetail, projectGenerationValidationIssues } from "../../contracts/src/generation-review.js";
 import { continuityReviewCheckpointSchema } from "../../application/src/memory/continuity-review-checkpoint.js";
 import {
   assertStoryMemoryPromptCompatibility,
@@ -70,6 +70,7 @@ type JobRow = {
   errorCode: string | null;
   errorMessage: string | null;
   recoveryMetadata: Record<string, unknown>;
+  failureDiagnostic: unknown;
   reviewSummary: unknown;
   createdAt: string;
   updatedAt: string;
@@ -226,6 +227,7 @@ function jobResult(row: JobRow): GenerationJob {
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,
     recoveryMetadata: row.recoveryMetadata,
+    failureDiagnostic: projectGenerationFailureDiagnostic(row.failureDiagnostic),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     completedAt: row.completedAt,
@@ -617,6 +619,7 @@ export function createPostgresGenerationCommandRepository(
                 requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
+                orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
                 ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
                 partial_output AS "partialOutput", generation_policy AS "generationPolicy"
