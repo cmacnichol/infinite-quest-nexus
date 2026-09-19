@@ -219,6 +219,7 @@ export type ProviderModelInventoryRequest = OwnerScope & Readonly<{
 /** Minimal cancellation shape without coupling the framework-free application package to DOM or Node types. */
 export type ProviderRequestAbortSignal = Readonly<{
   aborted: boolean;
+  reason?: unknown;
   addEventListener(type: "abort", listener: () => void, options?: Readonly<{ once?: boolean }>): void;
   removeEventListener(type: "abort", listener: () => void): void;
 }>;

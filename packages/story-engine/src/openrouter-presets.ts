@@ -13,7 +13,9 @@ const MAX_PRICE_PARAMETERS = new Set(["prompt", "completion", "image", "request"
 
 type CancellableRequestSignal = Readonly<{
   aborted: boolean;
+  reason?: unknown;
   addEventListener(type: "abort", listener: () => void, options?: Readonly<{ once?: boolean }>): void;
+  removeEventListener(type: "abort", listener: () => void): void;
 }>;
 
 export class OpenRouterPresetError extends Error {
@@ -35,14 +37,17 @@ function presetUrl(profile: ProviderTransportProfile, suffix: string): string {
   return `${profile.baseUrl.trim().replace(/\/+$/, "")}/presets${suffix}`;
 }
 
-function cancellationSignal(signal?: CancellableRequestSignal): AbortSignal {
+function cancellationSignal(signal?: CancellableRequestSignal): Readonly<{ signal: AbortSignal; dispose(): void }> {
   const timeout = AbortSignal.timeout(60_000);
-  if (!signal) return timeout;
+  if (!signal) return Object.freeze({ signal: timeout, dispose: () => undefined });
   const controller = new AbortController();
-  const abort = () => controller.abort();
-  if (signal.aborted) abort();
-  else signal.addEventListener("abort", abort, { once: true });
-  return AbortSignal.any([controller.signal, timeout]);
+  const abort = () => controller.abort(signal.reason);
+  if (signal.aborted) { abort(); return Object.freeze({ signal: AbortSignal.any([controller.signal, timeout]), dispose: () => undefined }); }
+  signal.addEventListener("abort", abort, { once: true });
+  return Object.freeze({
+    signal: AbortSignal.any([controller.signal, timeout]),
+    dispose: () => signal.removeEventListener("abort", abort)
+  });
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -164,8 +169,9 @@ function summary(value: unknown): PresetSummary {
 export async function discoverOpenRouterPresets(profile: ProviderTransportProfile, request: Readonly<{ offset: number; limit: number; signal?: CancellableRequestSignal }>, transport: ProviderTransport): Promise<PresetPage> {
   if (profile.providerType !== "openrouter" || !Number.isSafeInteger(request.offset) || request.offset < 0 || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 100) throw new OpenRouterPresetError("invalid_response");
   const url = presetUrl(profile, `?offset=${request.offset}&limit=${request.limit}`);
+  const cancellation = cancellationSignal(request.signal);
   let envelope: Record<string, unknown>;
-  try { envelope = record(await readJson(await transport.fetch(profile, "OpenRouter preset discovery", url, { method: "GET", headers: profileHeaders(profile), signal: cancellationSignal(request.signal) }))); } catch (error) { if (error instanceof OpenRouterPresetError) throw error; throw new OpenRouterPresetError("discovery_unavailable"); }
+  try { envelope = record(await readJson(await transport.fetch(profile, "OpenRouter preset discovery", url, { method: "GET", headers: profileHeaders(profile), signal: cancellation.signal }))); } catch (error) { if (error instanceof OpenRouterPresetError) throw error; throw new OpenRouterPresetError("discovery_unavailable"); } finally { cancellation.dispose(); }
   if (!Array.isArray(envelope.data)) throw new OpenRouterPresetError("invalid_response");
   const presets = Object.freeze(envelope.data.map(summary));
   const totalCount = nonNegativeInt(envelope.total_count);
@@ -176,8 +182,9 @@ export async function discoverOpenRouterPresets(profile: ProviderTransportProfil
 export async function discoverOpenRouterPreset(profile: ProviderTransportProfile, slug: string, transport: ProviderTransport, signal?: CancellableRequestSignal): Promise<ResolvedPreset> {
   if (profile.providerType !== "openrouter" || !slug.trim()) throw new OpenRouterPresetError("invalid_response");
   const url = presetUrl(profile, `/${encodeURIComponent(slug)}`);
+  const cancellation = cancellationSignal(signal);
   let source: Record<string, unknown>;
-  try { source = record(record(await readJson(await transport.fetch(profile, "OpenRouter preset detail discovery", url, { method: "GET", headers: profileHeaders(profile), signal: cancellationSignal(signal) }))).data); } catch (error) { if (error instanceof OpenRouterPresetError) throw error; throw new OpenRouterPresetError("discovery_unavailable"); }
+  try { source = record(record(await readJson(await transport.fetch(profile, "OpenRouter preset detail discovery", url, { method: "GET", headers: profileHeaders(profile), signal: cancellation.signal }))).data); } catch (error) { if (error instanceof OpenRouterPresetError) throw error; throw new OpenRouterPresetError("discovery_unavailable"); } finally { cancellation.dispose(); }
   if (source.slug !== slug) throw new OpenRouterPresetError("invalid_response");
   if (source.status !== "active") throw new OpenRouterPresetError("preset_inactive");
   const version = record(source.designated_version);

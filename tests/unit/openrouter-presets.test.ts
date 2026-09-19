@@ -122,9 +122,50 @@ describe("OpenRouter preset metadata discovery", () => {
     expect(url).toContain("/presets/night%20shift");
     expect(signal).toBeInstanceOf(AbortSignal);
     controller.abort();
-    expect(signal!.aborted).toBe(true);
+    expect(signal!.aborted).toBe(false);
     const failing: ProviderTransport = { fetch: async () => { throw new Error(`connection failed for ${profile.apiKey}`); }, validateSdkEndpoint: async () => undefined, close: async () => undefined };
     await expect(discoverOpenRouterPresets(profile, { offset: 0, limit: 50 }, failing)).rejects.toMatchObject({ diagnosticCode: "discovery_unavailable" });
     await expect(discoverOpenRouterPresets(profile, { offset: 0, limit: 50 }, failing)).rejects.not.toThrow(profile.apiKey);
+  });
+
+  it("releases the structural cancellation listener after successful and failed reads", async () => {
+    const listeners = new Set<() => void>();
+    let adds = 0;
+    let removes = 0;
+    const signal = {
+      aborted: false,
+      addEventListener: (_type: "abort", listener: () => void) => { adds++; listeners.add(listener); },
+      removeEventListener: (_type: "abort", listener: () => void) => { removes++; listeners.delete(listener); }
+    };
+    await discoverOpenRouterPresets(profile, { offset: 0, limit: 50, signal }, transport([new Response(JSON.stringify({ data: [], total_count: 0 }), { status: 200 })]));
+    expect({ adds, removes, listenerCount: listeners.size }).toEqual({ adds: 1, removes: 1, listenerCount: 0 });
+    await expect(discoverOpenRouterPresets(profile, { offset: 0, limit: 50, signal }, { fetch: async () => { throw new Error("network down"); }, validateSdkEndpoint: async () => undefined, close: async () => undefined })).rejects.toMatchObject({ diagnosticCode: "discovery_unavailable" });
+    expect({ adds, removes, listenerCount: listeners.size }).toEqual({ adds: 2, removes: 2, listenerCount: 0 });
+  });
+
+  it("forwards a structural source abort reason to the native transport signal", async () => {
+    const reason = new Error("caller cancelled");
+    let listener: (() => void) | undefined;
+    const source = {
+      aborted: false,
+      reason: undefined as unknown,
+      addEventListener: (_type: "abort", callback: () => void) => { listener = callback; },
+      removeEventListener: () => { listener = undefined; }
+    };
+    let nativeSignal: AbortSignal | undefined;
+    const blocking: ProviderTransport = {
+      fetch: async (_profile, _operation, _url, init) => new Promise<Response>((_resolve, reject) => {
+        nativeSignal = init.signal ?? undefined;
+        init.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      }), validateSdkEndpoint: async () => undefined, close: async () => undefined
+    };
+    const pending = discoverOpenRouterPresets(profile, { offset: 0, limit: 50, signal: source }, blocking);
+    await Promise.resolve();
+    source.aborted = true;
+    source.reason = reason;
+    listener!();
+    await expect(pending).rejects.toMatchObject({ diagnosticCode: "discovery_unavailable" });
+    expect(nativeSignal?.reason).toBe(reason);
+    expect(listener).toBeUndefined();
   });
 });
