@@ -271,3 +271,14 @@ The intended API and legacy UI behavior is approved at the plan level. This is n
 - [ ] **Tasks 6 and 7: verify selection at both entry points.** Rendered tests must cover the native settings picker and legacy per-request selection/Use profile selection. Assert typed save and generation payloads, save/reopen, mode switching, stale discovery replies, retained custom model IDs and clearly labeled explicit historical compatibility overrides. Fresh selections and omitted-policy API requests use the defaults in the table.
 
 Existing explicitly saved Model Legacy/Auto policies and queued v1 snapshots remain compatibility exceptions; they are not defaults for new selections and never downgrade a newly selected preset. New UI work and standard-JSON fallback remain deferred.
+
+### Task 6 prerequisite: persist explicit preset overrides
+
+Current safe provider configuration drops unrecognized keys. The resolver already accepts explicit parameter overrides and a conservative context cap, but the provider API and shared authoring preparation do not yet carry saved override intent. Complete this backend prerequisite with the shared editor task before exposing inheritance controls:
+
+- [ ] Add a strict public saved-override contract using the existing shared generation-parameter schema, with omitted fields meaning inherit and an explicit positive conservative context cap where supplied. Keep normal profile defaults distinct from explicit preset overrides. Validate invalid supplied values before safe configuration projection, rather than silently dropping them.
+- [ ] Carry overrides through provider create/PATCH/view, safe configuration, persistence and portable archive validation; reject them for nontext roles. PATCH omission preserves them, explicit clearing restores inheritance. Save/reopen and old-client tests must prove these semantics.
+- [ ] Pass validated saved overrides into shared preparation for Story, durable/direct authoring and text-assisted refinement. Freeze their effective values and hashes; retries keep the saved plan. Add composed tests proving explicit temperature/output override wins within hard caps, clearing restores preset values, and a user-supplied conservative cap permits unknown route context without claiming discovered capacity.
+- [ ] Cover settings-only edits and selection switching without moving overrides silently to a different selection. The legacy UI must assert real API round trips and subsequent prepared requests, not merely checked Override controls.
+
+This is necessary wiring for the existing inherited-versus-Override requirement, not an additional UI feature or authorization to enable native execution early.
