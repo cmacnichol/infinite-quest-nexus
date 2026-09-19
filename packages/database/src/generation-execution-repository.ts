@@ -62,7 +62,8 @@ import {
   buildScopedEntityCatalog,
   normalizeCampaignTrackers,
   resolveEntityMetadata,
-  stableStringify
+  stableStringify,
+  sha256
 } from "../../domain/src/index.js";
 import {
   isGenerationBaseIdentityV3,
@@ -75,6 +76,7 @@ import {
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { withTransaction } from "./pool.js";
+import { textExecutionPlanSchema, type TextExecutionPlan } from "../../application/src/providers/text-execution-plan.js";
 
 async function enqueueChunkIndexBestEffort(
   client: DatabaseClient,
@@ -145,6 +147,9 @@ function responseContractInvocations(value: unknown): readonly ResponseContractI
 
 function responseContractState(jobId: string, value: GenerationOrchestrationState): void {
   try {
+  if (value.textExecutionPlan !== undefined && !readTextExecutionPlan(value.textExecutionPlan)) {
+    throw new Error(`Generation ${jobId} has an invalid frozen text execution plan.`);
+  }
   const queued = readQueuedResponsePolicy(value.queuedResponsePolicy);
   const frozen = readFrozenResponseContracts(value.frozenResponseContracts);
   const ledger = responseContractInvocations(value.responseContractInvocations);
@@ -226,6 +231,13 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
       code: "generation_checkpoint_incompatible"
     });
   }
+}
+
+function readTextExecutionPlan(value: unknown): TextExecutionPlan | undefined {
+  const parsed = textExecutionPlanSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { planHash, ...unhashed } = parsed.data;
+  return sha256(stableStringify(unhashed)) === planHash ? parsed.data : undefined;
 }
 
 function operationMatchesInvocation(operation: ResponseContractOperation, invocationKey: ResponseInvocationKey): boolean {
@@ -344,6 +356,8 @@ export type FactFormatRepairApplication = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** Version 2 plans are immutable private snapshots; absence is historical v1 behavior. */
+  textExecutionPlan?: TextExecutionPlan;
   /** Absent is the exact historical job shape; present values are server-owned and versioned. */
   queuedResponsePolicy?: QueuedResponsePolicy;
   frozenResponseContracts?: FrozenResponseContracts;
@@ -1820,13 +1834,14 @@ export function createPostgresGenerationExecutionRepository(
         );
         const prior = locked.rows[0]?.orchestrationPrivate;
         if (!prior) return false;
-        const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen,
+        const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen, textExecutionPlan: _plan,
           responseContractInvocations: _ledger, preparedResponseFailures: suppliedFailures, ...mutable } = value;
         const priorFailures = prior.preparedResponseFailures;
         const appendOnly = priorFailures === undefined || (suppliedFailures !== undefined
           && priorFailures.every((entry) => suppliedFailures.some((candidate) => stableStringify(candidate) === stableStringify(entry))));
         const merged: GenerationOrchestrationState = {
           ...mutable,
+          ...(prior.textExecutionPlan === undefined ? {} : { textExecutionPlan: prior.textExecutionPlan }),
           ...(prior.queuedResponsePolicy === undefined ? {} : { queuedResponsePolicy: prior.queuedResponsePolicy }),
           ...(prior.frozenResponseContracts === undefined ? {} : { frozenResponseContracts: prior.frozenResponseContracts }),
           ...(prior.responseContractInvocations === undefined ? {} : { responseContractInvocations: prior.responseContractInvocations }),
@@ -1836,10 +1851,11 @@ export function createPostgresGenerationExecutionRepository(
         responseContractState(scope.jobId, merged);
         return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =
-              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations')
-                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
-                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations')
+              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan')
+                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
+                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan')
                END
+               || CASE WHEN orchestration_private ? 'textExecutionPlan' THEN jsonb_build_object('textExecutionPlan', orchestration_private->'textExecutionPlan') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object('queuedResponsePolicy', orchestration_private->'queuedResponsePolicy') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN jsonb_build_object('frozenResponseContracts', orchestration_private->'frozenResponseContracts') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'responseContractInvocations' THEN jsonb_build_object('responseContractInvocations', orchestration_private->'responseContractInvocations') ELSE '{}'::jsonb END

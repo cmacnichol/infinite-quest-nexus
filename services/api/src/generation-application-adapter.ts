@@ -43,6 +43,8 @@ export function mapGenerationApplicationError(error: GenerationApplicationError)
   switch (details.reason) {
     case "idempotency_mismatch":
       return generationHttpError("The idempotency key was already used for a different generation request.", 409);
+    case "provider_profile_changed_refresh_required":
+      return generationHttpError("The selected text provider changed while this generation was being prepared. Refresh and try again.", 409, { code: "provider_profile_changed_refresh_required" });
     case "action_only_mode":
       return generationHttpError("This campaign accepts player actions only.", 400);
     case "story_only_scene_required":

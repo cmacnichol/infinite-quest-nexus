@@ -37,6 +37,7 @@ import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from 
 import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
 import { generationResponseFormatProjection } from "./generation-response-format-projection.js";
 import { projectGenerationResponseFormat } from "../../contracts/src/generation-response-format-projection.js";
+import { textExecutionPlanSchema, type TextExecutionPlan } from "../../application/src/providers/text-execution-plan.js";
 
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
@@ -136,6 +137,16 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
     modelContextWindowTokens?: number; operationKind: OperationKind; generationPolicy: GenerationPolicySnapshot;
     storyMemoryPolicy: StoryMemoryPolicySnapshot | null;
   }>) => Promise<QueuedResponsePolicy | undefined>;
+  /** Remote-capable preflight. It is deliberately called before beginning the enqueue transaction. */
+  prepareTextExecutionPlan?: (scope: Readonly<{
+    ownerUserId: string; campaignId: string; requestedProviderProfileId: string | null; requestedModel: string;
+    operationKind: OperationKind;
+  }>) => Promise<TextExecutionPlan | undefined>;
+  /** Transaction-local authority check for a plan already resolved by preflight. */
+  verifyTextExecutionPlan?: (client: DatabaseClient, scope: Readonly<{
+    ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string;
+    plan: TextExecutionPlan;
+  }>) => Promise<boolean>;
   readTurnReportedCosts: (
     ownerUserId: string,
     campaignId: string,
@@ -157,6 +168,35 @@ function assertQueuedResponsePolicyIdentity(
     throw new GenerationApplicationError("invalid_state");
   }
   return value;
+}
+
+function readTextExecutionPlan(value: unknown): TextExecutionPlan | undefined {
+  const parsed = textExecutionPlanSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { planHash, ...unhashed } = parsed.data;
+  return sha256(stableStringify(unhashed)) === planHash ? parsed.data : undefined;
+}
+
+async function earlyReplay(
+  pool: DatabasePool, scope: Readonly<{ ownerUserId: string; campaignId: string }>, request: GenerationRequest | GenerationRetryLatestRequest,
+  operationKind: OperationKind
+): Promise<ReturnType<typeof enqueueResult> | undefined> {
+  const requestFingerprint = sha256(stableStringify(request));
+  const result = await pool.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
+    `SELECT id, status, result_turn_id AS "resultTurnId", action, operation_kind AS "operationKind",
+            replacement_turn_id AS "replacementTurnId", expected_turn_number AS "expectedTurnNumber",
+            recovery_metadata AS "recoveryMetadata", created_at AS "createdAt"
+       FROM generation_jobs WHERE campaign_id=$1 AND idempotency_key=$2 AND owner_user_id=$3`,
+    [scope.campaignId, request.idempotencyKey, scope.ownerUserId]
+  );
+  const existing = result.rows[0];
+  if (!existing) return undefined;
+  const replacementMatches = operationKind !== "replace_latest" || existing.expectedTurnNumber === (request as GenerationRetryLatestRequest).expectedCurrentTurnNumber;
+  if (existing.action !== request.action || existing.operationKind !== operationKind || !replacementMatches
+      || (existing.recoveryMetadata.requestFingerprint && existing.recoveryMetadata.requestFingerprint !== requestFingerprint)) {
+    throw new GenerationApplicationError("conflict", { reason: "idempotency_mismatch" });
+  }
+  return enqueueResult(existing, true);
 }
 
 function executionProtocolIdentity(
@@ -369,6 +409,14 @@ export function createPostgresGenerationCommandRepository(
 ): GenerationCommandRepository {
   return {
     async enqueueAppend(scope, request) {
+      const replay = await earlyReplay(pool, scope, request, "append");
+      if (replay) return replay;
+      const resolvedPlan = dependencies.prepareTextExecutionPlan
+        ? await dependencies.prepareTextExecutionPlan({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
+          requestedProviderProfileId: request.providerProfileId || null, requestedModel: request.model || "", operationKind: "append" })
+        : undefined;
+      const preparedPlan = resolvedPlan === undefined ? undefined : readTextExecutionPlan(resolvedPlan);
+      if (resolvedPlan !== undefined && !preparedPlan) throw new GenerationApplicationError("invalid_state");
       return withTransaction(pool, async (client) => {
         const requestFingerprint = sha256(stableStringify(request));
         const existing = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
@@ -403,6 +451,9 @@ export function createPostgresGenerationCommandRepository(
         const generationPolicy = generationPolicyForStyle(campaign.turn_control_style);
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
+        if (preparedPlan && dependencies.verifyTextExecutionPlan && !await dependencies.verifyTextExecutionPlan(client, {
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", plan: preparedPlan
+        })) throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
@@ -452,7 +503,10 @@ export function createPostgresGenerationCommandRepository(
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
-              json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy), json(queuedResponsePolicy ? { queuedResponsePolicy } : {})]
+              json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy), json({
+                ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
+                ...(preparedPlan ? { textExecutionPlan: preparedPlan } : {})
+              })]
           );
           return enqueueResult(inserted.rows[0]!, false);
         } catch (error) {
@@ -467,6 +521,14 @@ export function createPostgresGenerationCommandRepository(
 
     async enqueueReplacement(scope, request) {
       const requestFingerprint = sha256(stableStringify(request));
+      const early = await earlyReplay(pool, scope, request, "replace_latest");
+      if (early) return early;
+      const resolvedPlan = dependencies.prepareTextExecutionPlan
+        ? await dependencies.prepareTextExecutionPlan({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
+          requestedProviderProfileId: request.providerProfileId || null, requestedModel: request.model || "", operationKind: "replace_latest" })
+        : undefined;
+      const preparedPlan = resolvedPlan === undefined ? undefined : readTextExecutionPlan(resolvedPlan);
+      if (resolvedPlan !== undefined && !preparedPlan) throw new GenerationApplicationError("invalid_state");
       try {
         return await withTransaction(pool, async (client) => {
         const existing = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
@@ -529,6 +591,9 @@ export function createPostgresGenerationCommandRepository(
         );
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
+        if (preparedPlan && dependencies.verifyTextExecutionPlan && !await dependencies.verifyTextExecutionPlan(client, {
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", plan: preparedPlan
+        })) throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
@@ -610,7 +675,10 @@ export function createPostgresGenerationCommandRepository(
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
                request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
-              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy), json(queuedResponsePolicy ? { queuedResponsePolicy } : {})]
+              baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy), json({
+                ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
+                ...(preparedPlan ? { textExecutionPlan: preparedPlan } : {})
+              })]
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
           return enqueueResult(inserted.rows[0]!, false);

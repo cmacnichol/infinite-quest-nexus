@@ -55,6 +55,30 @@ integration("PostgreSQL generation command repository", () => {
     });
   }
 
+  function frozenPlan() {
+    const plan = {
+      version: 2 as const, selection: { kind: "model" as const, modelId: "repository-test-model" }, preset: null,
+      candidates: [{ modelId: "repository-test-model", providerPolicy: {}, contextWindowTokens: 32768, maxOutputTokens: 4096 }],
+      presetSystemPrompt: "", parameters: {}, prompt: "Generate the next Story turn.",
+      promptHash: sha256("Generate the next Story turn."), endpointReference: "provider-endpoint",
+      credentialReference: providerProfileId, profileRevision: "a".repeat(64), protocolVersion: "text-execution-plan-v2"
+    };
+    return { ...plan, planHash: sha256(stableStringify(plan)) };
+  }
+
+  function plannedRepository(
+    prepare: () => Promise<ReturnType<typeof frozenPlan>> = async () => frozenPlan(),
+    verify: () => Promise<boolean> = async () => true
+  ) {
+    return createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) => loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) => readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
+      prepareTextExecutionPlan: prepare,
+      verifyTextExecutionPlan: verify
+    });
+  }
+
   function enrolledPolicyRepository() {
     const policy = defaultStoryMemoryPolicy("r1");
     return createPostgresGenerationCommandRepository(pool, {
@@ -131,6 +155,76 @@ integration("PostgreSQL generation command repository", () => {
       context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
     });
   }
+
+  it("persists a prepared plan privately and replays before a second preflight", async () => {
+    const imported = await campaign();
+    let calls = 0;
+    const commands = plannedRepository(async () => { calls += 1; return frozenPlan(); });
+    const request = appendRequest("Freeze this route before queueing.");
+    const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
+    const replay = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
+    expect(replay).toMatchObject({ id: queued.id, duplicate: true });
+    expect(calls).toBe(1);
+    const saved = await pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]);
+    expect(saved.rows[0]?.plan).toMatchObject({ version: 2, planHash: frozenPlan().planHash });
+  });
+
+  it("persists the same frozen private plan for replacement jobs", async () => {
+    const imported = await campaign();
+    const queued = await plannedRepository().enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId }, replacementRequest("Freeze the replacement route.")
+    );
+    const saved = await pool.query<{ plan: unknown; status: string }>(
+      "SELECT orchestration_private->'textExecutionPlan' AS plan,status FROM generation_jobs WHERE id=$1", [queued.id]
+    );
+    expect(saved.rows[0]).toMatchObject({ status: "replacement_queued", plan: { version: 2, planHash: frozenPlan().planHash } });
+  });
+
+  it("rejects a changed profile, credential, or campaign provider after preflight without queueing", async () => {
+    for (const changed of ["profile", "credential", "campaign-provider"]) {
+      const imported = await campaign();
+      const commands = plannedRepository(async () => frozenPlan(), async () => false);
+      await expect(commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest(`Reject ${changed} revision race.`)))
+        .rejects.toMatchObject({ kind: "conflict", details: { reason: "provider_profile_changed_refresh_required" } });
+      await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]))
+        .resolves.toMatchObject({ rows: [{ count: "0" }] });
+    }
+  });
+
+  it("rejects a tampered preflight plan before an accepted turn or Chronicle work can be queued", async () => {
+    const imported = await campaign();
+    const tampered = { ...frozenPlan(), planHash: "b".repeat(64) };
+    const before = await pool.query<{ jobs: string; turns: string; chronicle: string }>(
+      `SELECT (SELECT count(*)::text FROM generation_jobs WHERE campaign_id=$1) AS jobs,
+              (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [imported.campaignId]
+    );
+    await expect(plannedRepository(async () => tampered).enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId }, appendRequest("Reject the tampered queue descriptor.")
+    )).rejects.toMatchObject({ kind: "invalid_state" });
+    await expect(pool.query<{ jobs: string; turns: string; chronicle: string }>(
+      `SELECT (SELECT count(*)::text FROM generation_jobs WHERE campaign_id=$1) AS jobs,
+              (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [imported.campaignId]
+    )).resolves.toMatchObject({ rows: before.rows });
+  });
+
+  it("keeps v1 queue jobs without a text execution plan", async () => {
+    const imported = await campaign();
+    const queued = await repository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Keep historical queue behavior."));
+    await expect(pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ plan: null }] });
+  });
+
+  it("retains a frozen plan when a recoverable job is retried", async () => {
+    const imported = await campaign();
+    const commands = plannedRepository();
+    const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Retry without changing route."));
+    await pool.query("UPDATE generation_jobs SET status='recoverable',error_code='provider_unavailable' WHERE id=$1", [queued.id]);
+    await expect(commands.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ id: queued.id, status: "queued" });
+    await expect(pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ plan: { planHash: frozenPlan().planHash } }] });
+  });
 
   it("freezes a v3 effective character identity for an enrolled append and replacement", async () => {
     const imported = await campaign();

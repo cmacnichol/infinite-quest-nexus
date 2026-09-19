@@ -24,6 +24,7 @@ import {
 } from "../../application/src/providers/index.js";
 import type { EncryptedCredential } from "../../story-engine/src/credentials.js";
 import type { DatabaseClient } from "./pool.js";
+import { sha256, stableStringify } from "../../domain/src/index.js";
 
 type ProviderRow = {
   id: string;
@@ -508,6 +509,9 @@ export type PrivateProviderCredentialRow = Readonly<{
   temperature: number;
   requestTimeoutMs: number;
   configuration: SafeProviderConfiguration;
+  textSelection?: TextModelSelection;
+  /** Opaque revision of every execution-relevant profile field, including encrypted credential material. */
+  executionRevision: string;
   encryptedCredential: EncryptedCredential | null;
 }>;
 
@@ -523,6 +527,19 @@ export async function loadPrivateProviderCredentialRow(
   const row = result.rows[0];
   if (!row) return null;
   const complete = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version;
+  const encryptedCredential = complete ? {
+    ciphertext: row.encrypted_api_key!, nonce: row.credential_nonce!, authTag: row.credential_auth_tag!, keyVersion: row.credential_key_version!
+  } : null;
+  const textSelection = (row.provider_role === "text" || row.provider_role === "intent")
+    ? normalizeTextSelection({ providerType: row.provider_type, providerRole: row.provider_role, defaultModel: row.default_model,
+      ...(row.text_selection === null || row.text_selection === undefined ? {} : { textSelection: row.text_selection as TextModelSelection }) })
+    : undefined;
+  const executionRevision = sha256(stableStringify({
+    id: row.id, providerType: row.provider_type, providerRole: row.provider_role, baseUrl: row.base_url,
+    defaultModel: row.default_model, textSelection, contextWindowTokens: row.context_window_tokens,
+    maxOutputTokens: row.max_output_tokens, temperature: row.temperature, requestTimeoutMs: row.request_timeout_ms,
+    configuration: toSafeProviderConfiguration(row.configuration), enabled: row.enabled, encryptedCredential
+  }));
   return {
     ownerUserId,
     providerProfileId: row.id,
@@ -536,9 +553,9 @@ export async function loadPrivateProviderCredentialRow(
     temperature: row.temperature,
     requestTimeoutMs: row.request_timeout_ms,
     configuration: toSafeProviderConfiguration(row.configuration),
-    encryptedCredential: complete ? {
-      ciphertext: row.encrypted_api_key!, nonce: row.credential_nonce!, authTag: row.credential_auth_tag!, keyVersion: row.credential_key_version!
-    } : null
+    ...(textSelection === undefined ? {} : { textSelection }),
+    executionRevision,
+    encryptedCredential
   };
 }
 

@@ -1,5 +1,6 @@
 import {
   createGenerationApplication,
+  GenerationApplicationError,
   type GenerationApplication,
   type GenerationCommandRepository
 } from "../../../packages/application/src/index.js";
@@ -12,6 +13,8 @@ import { effectiveProviderConfigurationFingerprint } from "../../../packages/con
 import { resolveEffectiveContextWindowTokens } from "../../../packages/story-engine/src/index.js";
 import type { ApiGenerationProviderCollaborators } from "./provider-application-composition.js";
 import { queuedResponseContractPolicy, responseContractInvocationClosure } from "./generation-response-contract.js";
+import { resolveTextExecutionPlan } from "./provider-preset-resolution.js";
+import type { TextExecutionPlan } from "../../../packages/application/src/providers/text-execution-plan.js";
 
 export type ApiGenerationCompositionFactories = Readonly<{
   createCommandRepository(pool: DatabasePool): GenerationCommandRepository;
@@ -56,11 +59,70 @@ export function createQueuedResponsePolicyResolver(providers: ApiGenerationProvi
   };
 }
 
+/**
+ * Resolves remote preset/model metadata before the command repository acquires
+ * campaign locks. The matching verifier below only performs a local profile
+ * read, so an unavailable remote endpoint can never extend a DB transaction.
+ */
+function createTextExecutionPlanPreparation(
+  pool: DatabasePool,
+  providers: ApiGenerationProviderCollaborators,
+): Pick<PostgresGenerationCommandRepositoryDependencies, "prepareTextExecutionPlan" | "verifyTextExecutionPlan"> {
+  return {
+    prepareTextExecutionPlan: async (scope): Promise<TextExecutionPlan | undefined> => {
+      const campaign = await pool.query<{ textProviderProfileId: string | null }>(
+        `SELECT text_provider_profile_id AS "textProviderProfileId" FROM campaigns WHERE id=$1 AND owner_user_id=$2`,
+        [scope.campaignId, scope.ownerUserId]
+      );
+      if (!campaign.rows[0]) throw new GenerationApplicationError("not_found", { campaignId: scope.campaignId });
+      const providerProfileId = scope.requestedProviderProfileId ?? campaign.rows[0]?.textProviderProfileId;
+      if (!providerProfileId) return undefined;
+      const profile = await providers.execution.text({ ownerUserId: scope.ownerUserId }, providerProfileId, "text", undefined);
+      // A request model is an explicit direct selection, so it replaces a
+      // profile preset instead of resolving that preset's first candidate.
+      const selection = scope.requestedModel.trim()
+        ? { kind: "model" as const, modelId: scope.requestedModel.trim() }
+        : profile.textSelection ?? { kind: "model" as const, modelId: profile.model };
+      // Tasks 4/5 own admission and dispatch. Ordinary model jobs retain the
+      // historical queue path; only an explicitly selected native preset gets
+      // a frozen v2 descriptor here.
+      if (selection.kind !== "openrouter_preset") return undefined;
+      return resolveTextExecutionPlan({
+        profile: {
+          ownerUserId: scope.ownerUserId, providerProfileId, profileRevision: profile.executionRevision ?? "legacy-profile-revision",
+          providerType: profile.providerType, selection, contextWindowTokens: profile.contextWindowTokens,
+          maxOutputTokens: profile.maxOutputTokens, endpointReference: profile.endpointIdentity ?? profile.id,
+          credentialReference: profile.id, protocolVersion: "text-execution-plan-v2"
+        },
+        operationPrompt: scope.operationKind === "append" ? "Generate the next Story turn." : "Replace the latest Story turn.",
+        ports: {
+          resolvePreset: async ({ ownerUserId, providerProfileId: id, slug }) =>
+            (await providers.responseFormatInventory.getPreset({ ownerUserId, providerProfileId: id, slug })).preset,
+          discoverModels: async ({ ownerUserId, providerProfileId: id, modelIds }) => {
+            const inventory = await providers.responseFormatInventory.listModels({ ownerUserId, providerProfileId: id, providerRole: "text" });
+            return inventory.models.filter((model) => modelIds.includes(model.id)).map((model) => ({ id: model.id,
+              ...(model.contextWindowTokens === undefined ? {} : { contextWindowTokens: model.contextWindowTokens }) }));
+          }
+        }
+      });
+    },
+    verifyTextExecutionPlan: async (client, scope) => {
+      const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId, undefined);
+      return (profile.executionRevision ?? "legacy-profile-revision") === scope.plan.profileRevision
+        && (profile.endpointIdentity ?? profile.id) === scope.plan.endpointReference
+        && profile.id === scope.providerProfileId
+        && scope.plan.credentialReference === profile.id;
+    }
+  };
+}
+
 export function createApiGenerationApplication(
   pool: DatabasePool,
   providers: ApiGenerationProviderCollaborators,
   factories: ApiGenerationCompositionFactories = productionFactories,
-  operatorConfig?: StoryMemoryOperatorConfig
+  operatorConfig?: StoryMemoryOperatorConfig,
+  /** Task 4/5 owns the production admission gate. Tests may opt in to exercise persistence. */
+  nativeTextExecutionPlanAdmission = false
 ): GenerationApplication {
   // Callers may pass already-resolved operator settings. The safe legacy
   // default keeps isolated factory composition from reading process env.
@@ -76,6 +138,7 @@ export function createApiGenerationApplication(
          enforceEnabled: resolvedOperatorConfig.enforceEnabled
       }),
       resolveQueuedResponsePolicy: createQueuedResponsePolicyResolver(providers),
+      ...(nativeTextExecutionPlanAdmission ? createTextExecutionPlanPreparation(pool, providers) : {}),
       readTurnReportedCosts: (ownerUserId, campaignId, turnIds) => providers.reads.getTurnCosts({
         ownerUserId,
         campaignId,

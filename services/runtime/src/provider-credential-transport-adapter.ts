@@ -10,6 +10,7 @@ import type {
   ProviderRole,
   ProviderRuntimeLeasePort
 } from "../../../packages/application/src/providers/index.js";
+import type { TextModelSelection } from "@infinite-quest/contracts";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
 import {
   loadPrivateProviderCredentialRow,
@@ -54,6 +55,9 @@ export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = R
   /** Opaque hash of the effective non-secret provider destination. */
   endpointIdentity?: string;
   configuration: Readonly<Record<string, unknown>>;
+  /** Opaque execution revision; it changes when any route/credential input changes. */
+  executionRevision?: string;
+  textSelection?: TextModelSelection;
 }>;
 
 export type RuntimeTextExecution = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
@@ -179,6 +183,8 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       requestTimeoutMs: row.requestTimeoutMs,
       endpointIdentity: providerEndpointIdentity(row.baseUrl),
       configuration: Object.freeze({ ...row.configuration })
+      , executionRevision: row.executionRevision
+      , ...(row.textSelection === undefined ? {} : { textSelection: row.textSelection })
     });
   }
 

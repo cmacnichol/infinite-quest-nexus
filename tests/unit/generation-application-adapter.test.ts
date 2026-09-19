@@ -59,6 +59,7 @@ type MappingFixture = Readonly<{
 
 const mappingFixtures: Record<GenerationApplicationErrorReason, MappingFixture> = {
   idempotency_mismatch: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "The idempotency key was already used for a different generation request." },
+  provider_profile_changed_refresh_required: { kind: "conflict", details: {}, expectedStatusCode: 409, expectedMessage: "The selected text provider changed while this generation was being prepared. Refresh and try again.", expectedDetails: { code: "provider_profile_changed_refresh_required" } },
   action_only_mode: { kind: "invalid_state", details: {}, expectedStatusCode: 400, expectedMessage: "This campaign accepts player actions only." },
   story_only_scene_required: { kind: "invalid_state", details: {}, expectedStatusCode: 400, expectedMessage: "This Story Direction campaign accepts scene input only." },
   turn_control_style_invalid: { kind: "invalid_state", details: {}, expectedStatusCode: 409, expectedMessage: "Campaign turn-control style is invalid. Refresh the campaign before trying again." },

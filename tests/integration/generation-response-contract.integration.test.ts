@@ -13,6 +13,7 @@ import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../pac
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProvider, loadPromptSnapshotForTest, providerPromptProtocolVersion, readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
+import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -46,6 +47,13 @@ integration("PostgreSQL response-contract persistence", () => {
   }
   function policy(policy: "auto" | "required" = "auto") {
     return { version: 1 as const, policy, providerProfileId, model: "contract-model", endpointIdentity: "test-endpoint", providerConfigurationHash: hash, verificationRegistryHash: hash, operationClosureVersion: 1 as const, invocationKeys: ["story:nonstream" as const] };
+  }
+  function frozenTextPlan() {
+    const plan = { version: 2 as const, selection: { kind: "model" as const, modelId: "contract-model" }, preset: null,
+      candidates: [{ modelId: "contract-model", providerPolicy: {}, contextWindowTokens: 32768, maxOutputTokens: 4096 }],
+      presetSystemPrompt: "", parameters: {}, prompt: "Frozen Story prompt.", promptHash: sha256("Frozen Story prompt."),
+      endpointReference: "test-endpoint", credentialReference: providerProfileId, profileRevision: hash, protocolVersion: "text-execution-plan-v2" };
+    return { ...plan, planHash: sha256(stableStringify(plan)) };
   }
   function selection(queuedPolicy = policy()) {
     const selected = { version: 1 as const, queuedPolicy, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash, contracts: {
@@ -211,6 +219,8 @@ integration("PostgreSQL response-contract persistence", () => {
   it("keeps all protected contract fields and nested nulls across generic saves and rejects ledger overflow", async () => {
     const imported = await campaign();
     const queued = await commands(true).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Preserve null provenance.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const textPlan = frozenTextPlan();
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('textExecutionPlan',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify(textPlan)]);
     const fixture = await claimed(queued.id);
     const logicalAttemptId = crypto.randomUUID();
     const frozen = selection();
@@ -222,6 +232,7 @@ integration("PostgreSQL response-contract persistence", () => {
     expect(await fixture.repository.saveOrchestration(fixture.scope, { ...reloaded!.orchestration_private, harmless: { nested: null } } as never)).toBe(true);
     const afterSave = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
     expect(afterSave?.orchestration_private.frozenResponseContracts).toEqual(frozen);
+    expect(afterSave?.orchestration_private.textExecutionPlan).toEqual(textPlan);
     expect((afterSave?.orchestration_private as Record<string, unknown> | undefined)?.harmless).toEqual({ nested: null });
     const legacyImported = await campaign();
     const legacyQueued = await commands(false).enqueueAppend({ ownerUserId, campaignId: legacyImported.campaignId }, generationRequestSchema.parse({ action: "Reject protected key injection.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
