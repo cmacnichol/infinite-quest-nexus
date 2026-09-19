@@ -1894,6 +1894,8 @@ integration("independent illustration pipeline", () => {
       requestTimeoutMs: 30_000, endpointIdentity: "native-illustration-endpoint", executionRevision: "native-illustration-revision",
       authorityRevision: "native-illustration-authority", textSelection: { kind: "openrouter_preset", slug: "illustration-native" }, configuration: {}
     }));
+    const loadAuthority = vi.fn(async ({ providerProfileId }: { ownerUserId: string; providerProfileId: string }) =>
+      ({ id: providerProfileId, providerRole: "text", authorityRevision: "native-illustration-authority", endpointIdentity: "native-illustration-endpoint" }));
     const native = {
       ...graph,
       execution: {
@@ -1904,8 +1906,7 @@ integration("independent illustration pipeline", () => {
         nativePresetPlansEnabled: true,
         ports: { resolvePreset, discoverModels },
         preparedExecutor: { execute: prepared },
-        loadAuthority: async ({ providerProfileId }: { ownerUserId: string; providerProfileId: string }) =>
-          ({ id: providerProfileId, providerRole: "text", authorityRevision: "native-illustration-authority", endpointIdentity: "native-illustration-endpoint" })
+        loadAuthority
       }
     } as never;
     await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "missing" }, native);
@@ -1928,6 +1929,21 @@ integration("independent illustration pipeline", () => {
     expect(discoverModels).toHaveBeenCalledTimes(1);
     const completed = await pool.query<{ status: string }>("SELECT status FROM illustration_prompt_jobs WHERE campaign_id=$1", [imported.campaignId]);
     expect(completed.rows.some((row) => row.status === "completed")).toBe(true);
+    const preparedCallsBeforeTamper = prepared.mock.calls.length;
+    const authorityCallsBeforeTamper = loadAuthority.mock.calls.length;
+    await pool.query(
+      `UPDATE illustration_prompt_jobs
+          SET text_execution_snapshot = jsonb_set(text_execution_snapshot, '{plan,parameters,temperature}', '0.99'::jsonb)
+        WHERE campaign_id=$1 AND status='queued'`,
+      [imported.campaignId]
+    );
+    await expect(runNativeIllustrationPromptJob(pool, "native-illustration-tamper-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledTimes(preparedCallsBeforeTamper);
+    expect(loadAuthority).toHaveBeenCalledTimes(authorityCallsBeforeTamper);
+    const tampered = await pool.query<{ status: string; error_code: string | null }>(
+      "SELECT status,error_code FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='recoverable'", [imported.campaignId]
+    );
+    expect(tampered.rows).toContainEqual(expect.objectContaining({ status: "recoverable", error_code: "illustration_text_route_unavailable" }));
     expect(JSON.stringify(await listCampaignIllustrationSegments(pool, imported.campaignId))).not.toContain("PRIVATE_NATIVE_ILLUSTRATION_PROMPT");
   });
 
