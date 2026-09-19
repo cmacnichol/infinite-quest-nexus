@@ -36,6 +36,14 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "story-continuity-evaluator-fixture-secret";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// These historical compatibility scenarios exercise the Legacy response-contract path.
+// Keep every temporary profile update explicit so one test cannot silently change
+// the policy seen by the next case.
+const legacyContinuityResponseFormatConfiguration = { textResponseFormatPolicy: "legacy" } as const;
+const legacyStreamingContinuityResponseFormatConfiguration = {
+  ...legacyContinuityResponseFormatConfiguration,
+  streaming: true
+} as const;
 type CorpusScenario = Readonly<{
   id: string;
   trajectory: "teacher_forced" | "rollout";
@@ -172,7 +180,7 @@ integration("T17 durable continuity review", () => {
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
-    providerId = (await createProvider(pool, { name: `T17 capturing fake ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "t17-capturing-fake", contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: {} }, credentialSecret)).id;
+    providerId = (await createProvider(pool, { name: `T17 capturing fake ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "t17-capturing-fake", contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: legacyContinuityResponseFormatConfiguration }, credentialSecret)).id;
     (server as Server & { transport?: { close(): Promise<void> } }).transport = transport;
   });
 
@@ -436,7 +444,7 @@ integration("T17 durable continuity review", () => {
         "SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id]
       )).rows[0]!.count).toBe(1);
     } finally {
-      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
   }, 60_000);
 
@@ -1098,7 +1106,7 @@ integration("T17 durable continuity review", () => {
     { label: "conflict", unavailable: false, verdict: "conflict" as const },
     { label: "unavailable", unavailable: true, verdict: "pass" as const }
   ])("commits the exact final Keep offline after a $label review", async ({ unavailable, verdict }) => {
-    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyStreamingContinuityResponseFormatConfiguration)]);
     const { job, application, campaignId } = await enqueue("enforce");
     reviewVerdict = verdict; reviewUnavailable = unavailable; requests.length = 0;
     try {
@@ -1151,7 +1159,7 @@ integration("T17 durable continuity review", () => {
     } finally {
       reviewUnavailable = false;
       reviewVerdict = "pass";
-      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
   });
 
@@ -1220,7 +1228,7 @@ integration("T17 durable continuity review", () => {
       )).resolves.toMatchObject({ rows: [{ result_turn_id: null }] });
     } finally {
       reviewVerdict = "pass";
-      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
   });
 
@@ -1231,7 +1239,7 @@ integration("T17 durable continuity review", () => {
     { label: "replacement scene", operation: "replace_latest", scene: true, storyOnly: false },
     { label: "Story-only scene", operation: "append", scene: true, storyOnly: true }
   ] as const)("streams a complete primary candidate and commits the exact final Keep for $label", async ({ operation, scene, storyOnly }) => {
-    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyStreamingContinuityResponseFormatConfiguration)]);
     try {
       const fixture = operation === "append"
         ? await enqueue("enforce", scene, undefined, "Wait at the observatory.", storyOnly)
@@ -1290,12 +1298,12 @@ integration("T17 durable continuity review", () => {
       });
     } finally {
       reviewVerdict = "pass";
-      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
   }, 60_000);
 
   it("reclaims a streamed captured candidate and a persisted Keep decision without another text call", async () => {
-    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyStreamingContinuityResponseFormatConfiguration)]);
     const { job, application } = await enqueue("enforce");
     reviewVerdict = "conflict";
     requests.length = 0;
@@ -1370,7 +1378,7 @@ integration("T17 durable continuity review", () => {
       expect(await application.getJob({ ownerUserId, jobId: next.id })).toMatchObject({ status: "completed" });
     } finally {
       reviewVerdict = "pass";
-      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
   }, 60_000);
 
@@ -1470,7 +1478,7 @@ integration("T17 durable continuity review", () => {
     } finally {
       invalidSemanticRepair = false;
       reviewSequence = [];
-      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
   });
 
