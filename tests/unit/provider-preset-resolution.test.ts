@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveTextExecutionPlan } from "../../services/runtime/src/provider-preset-resolution.js";
-import { publicTextExecutionPlanSummary } from "../../packages/application/src/providers/text-execution-plan.js";
+import { resolveTextExecutionPlan, resolveTextExecutionPlans } from "../../services/runtime/src/provider-preset-resolution.js";
+import {
+  publicTextExecutionPlanSummary,
+  textExecutionPlanSchema as applicationTextExecutionPlanSchema
+} from "../../packages/application/src/providers/text-execution-plan.js";
+import { textExecutionPlanSchema as contractsTextExecutionPlanSchema } from "../../packages/contracts/src/text-execution-plan.js";
 
 const profile = {
   ownerUserId: "00000000-0000-4000-8000-000000000001",
@@ -156,5 +160,98 @@ describe("preset execution-plan resolution", () => {
     expect(Object.isFrozen(plan.parameters)).toBe(true);
     expect(Object.isFrozen(plan.selection)).toBe(true);
     expect(() => (plan.candidates as unknown as Array<unknown>).push({})).toThrow();
+  });
+
+  it("exports the one contracts-owned strict descriptor while keeping the application compatibility surface private", () => {
+    expect(applicationTextExecutionPlanSchema).toBe(contractsTextExecutionPlanSchema);
+    const summary = publicTextExecutionPlanSummary(contractsTextExecutionPlanSchema.parse({
+      version: 2,
+      selection: { kind: "model", modelId: "openai/gpt-4.1-mini" },
+      preset: null,
+      candidates: [{ modelId: "openai/gpt-4.1-mini", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "private prompt",
+      parameters: {},
+      prompt: "private operation prompt",
+      promptHash: "a".repeat(64),
+      endpointReference: "private endpoint",
+      credentialReference: "private credential",
+      profileRevision: "revision",
+      protocolVersion: "protocol",
+      planHash: "b".repeat(64)
+    }));
+    expect(summary).not.toHaveProperty("prompt");
+    expect(JSON.stringify(summary)).not.toContain("private");
+  });
+
+  it("resolves one immutable preset/configuration snapshot for the whole operation set", async () => {
+    let version = 4;
+    const ports = {
+      resolvePreset: vi.fn(async () => ({ ...preset, versionId: `preset-version-${version++}` })),
+      discoverModels: vi.fn(async () => [
+        { id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_400 },
+        { id: "anthropic/claude-sonnet", contextWindowTokens: 24_000, maxOutputTokens: 1_000 }
+      ])
+    };
+
+    const resolved = await resolveTextExecutionPlans({
+      profile,
+      operationPrompts: {
+        worldOutline: "Return the world outline JSON.",
+        worldOutlineRepair: "Repair the world outline JSON."
+      },
+      ports
+    });
+
+    expect(ports.resolvePreset).toHaveBeenCalledTimes(1);
+    expect(ports.discoverModels).toHaveBeenCalledTimes(1);
+    expect(resolved.plans.worldOutline!.preset).toEqual(expect.objectContaining({ versionId: "preset-version-4" }));
+    expect(resolved.plans.worldOutlineRepair!.preset).toEqual(expect.objectContaining({ versionId: "preset-version-4" }));
+    expect(resolved.plans.worldOutline!.prompt).toBe("Use spare prose.\n\nReturn the world outline JSON.");
+    expect(resolved.plans.worldOutlineRepair!.prompt).toBe("Use spare prose.\n\nRepair the world outline JSON.");
+    expect(resolved.plans.worldOutline!.promptHash).not.toBe(resolved.plans.worldOutlineRepair!.promptHash);
+    expect(resolved.plans.worldOutline!.planHash).not.toBe(resolved.plans.worldOutlineRepair!.planHash);
+    expect(resolved.plans.worldOutline!.candidates).toEqual(resolved.plans.worldOutlineRepair!.candidates);
+    expect(resolved.plans.worldOutline!.parameters).toEqual(resolved.plans.worldOutlineRepair!.parameters);
+    expect(Object.isFrozen(resolved)).toBe(true);
+    expect(Object.isFrozen(resolved.plans)).toBe(true);
+  });
+
+  it("resolves an explicit model override once without fetching its inherited preset", async () => {
+    const ports = {
+      resolvePreset: vi.fn(async () => preset),
+      discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1-mini", contextWindowTokens: 16_000, maxOutputTokens: 1_000 }])
+    };
+
+    const resolved = await resolveTextExecutionPlans({
+      profile,
+      overrides: { selection: { kind: "model", modelId: "openai/gpt-4.1-mini" } },
+      operationPrompts: { organizer: "Organize this character.", sourceExtraction: "Extract source facts." },
+      ports
+    });
+
+    expect(ports.resolvePreset).not.toHaveBeenCalled();
+    expect(ports.discoverModels).toHaveBeenCalledTimes(1);
+    expect(Object.values(resolved.plans)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ selection: { kind: "model", modelId: "openai/gpt-4.1-mini" }, preset: null })
+    ]));
+  });
+
+  it("fails the entire operation set before returning a partial snapshot when a prompt or preset configuration is invalid", async () => {
+    const ports = input().ports;
+    await expect(resolveTextExecutionPlans({
+      profile,
+      operationPrompts: { valid: "Return JSON.", invalid: "   " },
+      ports
+    })).rejects.toThrow("operation prompt");
+    expect(ports.resolvePreset).not.toHaveBeenCalled();
+
+    await expect(resolveTextExecutionPlans({
+      profile,
+      operationPrompts: { valid: "Return JSON.", repair: "Repair JSON." },
+      ports: {
+        resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })),
+        discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }])
+      }
+    })).rejects.toThrow("stop");
   });
 });

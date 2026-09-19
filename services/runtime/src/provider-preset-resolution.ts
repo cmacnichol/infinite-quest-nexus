@@ -4,7 +4,7 @@ import {
   textGenerationParametersSchema,
   type TextExecutionPlan,
   type TextGenerationParameters
-} from "../../../packages/application/src/providers/text-execution-plan.js";
+} from "@infinite-quest/contracts";
 import { stableStringify, sha256 } from "../../../packages/domain/src/text.js";
 import { validateOpenRouterPresetConfig } from "../../../packages/story-engine/src/openrouter-presets.js";
 import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
@@ -51,6 +51,20 @@ export type ResolveTextExecutionPlanInput = Readonly<{
   overrides?: TextExecutionPlanOverrides;
   ports: TextExecutionPlanDiscoveryPorts;
 }>;
+
+export type ResolveTextExecutionPlansInput = Readonly<{
+  profile: TextExecutionPlanProfile;
+  /** Named prompts become separately hashed immutable plans from one resolution snapshot. */
+  operationPrompts: Readonly<Record<string, string>>;
+  overrides?: TextExecutionPlanOverrides;
+  ports: TextExecutionPlanDiscoveryPorts;
+}>;
+
+export type ResolvedTextExecutionPlans = Readonly<{
+  plans: Readonly<Record<string, TextExecutionPlan>>;
+}>;
+
+const MAX_OPERATION_PLANS = 32;
 
 function positiveInteger(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(`${field} must be a positive integer.`);
@@ -126,13 +140,31 @@ function applyEffectiveOutputCap(parameters: TextGenerationParameters, maxOutput
   }));
 }
 
-export async function resolveTextExecutionPlan(input: ResolveTextExecutionPlanInput): Promise<TextExecutionPlan> {
+function operationEntries(operationPrompts: Readonly<Record<string, string>>): readonly (readonly [string, string])[] {
+  const entries = Object.entries(operationPrompts);
+  if (!entries.length || entries.length > MAX_OPERATION_PLANS) throw new Error(`Operation plan count must be between 1 and ${MAX_OPERATION_PLANS}.`);
+  return freeze(entries.map(([name, prompt]) => {
+    if (!name.trim() || name.length > 200) throw new Error("An operation name is required and must be at most 200 characters.");
+    const operationPrompt = prompt.trim();
+    if (!operationPrompt) throw new Error(`An operation prompt is required for '${name}'.`);
+    return freeze([name, operationPrompt] as const);
+  }));
+}
+
+type ResolvedPlanInputs = Readonly<{
+  profile: TextExecutionPlanProfile;
+  selection: TextModelSelection;
+  preset: ResolvedPreset | null;
+  configHash: string | null;
+  candidates: readonly unknown[];
+  parameters: TextGenerationParameters;
+  presetSystemPrompt: string;
+}>;
+
+async function resolvePlanInputs(input: Omit<ResolveTextExecutionPlansInput, "operationPrompts">): Promise<ResolvedPlanInputs> {
   const profile = input.profile;
   const overrides = input.overrides ?? {};
   const selection = overrides.selection ?? profile.selection;
-  const operationPrompt = input.operationPrompt.trim();
-  if (!operationPrompt) throw new Error("An operation prompt is required.");
-
   let preset: ResolvedPreset | null = null;
   let config: Readonly<Record<string, unknown>> = {};
   if (selection.kind === "openrouter_preset") {
@@ -161,21 +193,25 @@ export async function resolveTextExecutionPlan(input: ResolveTextExecutionPlanIn
   }));
   const parameters = applyEffectiveOutputCap(requestedParameters, sharedMaxOutputTokens);
   const presetSystemPrompt = preset?.systemPrompt ?? "";
-  const prompt = composePresetPrompt({ presetPrompt: presetSystemPrompt, operationPrompt });
   const configHash = preset ? sha256(stableStringify(config)) : null;
+  return freeze({ profile, selection, preset, configHash, candidates: freeze(candidates), parameters, presetSystemPrompt });
+}
+
+function createPlan(inputs: ResolvedPlanInputs, operationPrompt: string): TextExecutionPlan {
+  const prompt = composePresetPrompt({ presetPrompt: inputs.presetSystemPrompt, operationPrompt });
   const planWithoutHash = {
     version: PLAN_VERSION,
-    selection,
-    preset: preset ? { slug: preset.slug, versionId: preset.versionId, configHash: configHash! } : null,
-    candidates,
-    presetSystemPrompt,
-    parameters,
+    selection: inputs.selection,
+    preset: inputs.preset ? { slug: inputs.preset.slug, versionId: inputs.preset.versionId, configHash: inputs.configHash! } : null,
+    candidates: inputs.candidates,
+    presetSystemPrompt: inputs.presetSystemPrompt,
+    parameters: inputs.parameters,
     prompt,
     promptHash: sha256(prompt),
-    endpointReference: profile.endpointReference,
-    credentialReference: profile.credentialReference,
-    profileRevision: profile.profileRevision,
-    protocolVersion: profile.protocolVersion
+    endpointReference: inputs.profile.endpointReference,
+    credentialReference: inputs.profile.credentialReference,
+    profileRevision: inputs.profile.profileRevision,
+    protocolVersion: inputs.profile.protocolVersion
   };
   // Hash the schema-normalized representation before recursively freezing the
   // same parsed shape. No later consumer can mutate its execution identity.
@@ -183,4 +219,26 @@ export async function resolveTextExecutionPlan(input: ResolveTextExecutionPlanIn
   const { planHash: _placeholder, ...normalizedWithoutHash } = parsedWithoutHash;
   const planHash = sha256(stableStringify(normalizedWithoutHash));
   return deepFreeze(textExecutionPlanSchema.parse({ ...normalizedWithoutHash, planHash }));
+}
+
+/**
+ * Resolves one selected profile into prompt-specific plans without observing a
+ * mutable preset or model inventory more than once for the operation set.
+ */
+export async function resolveTextExecutionPlans(input: ResolveTextExecutionPlansInput): Promise<ResolvedTextExecutionPlans> {
+  const entries = operationEntries(input.operationPrompts);
+  const resolvedInputs = await resolvePlanInputs(input);
+  const plans = Object.fromEntries(entries.map(([name, operationPrompt]) => [name, createPlan(resolvedInputs, operationPrompt)]));
+  return deepFreeze({ plans });
+}
+
+/** Compatibility API for callers that have exactly one operation prompt. */
+export async function resolveTextExecutionPlan(input: ResolveTextExecutionPlanInput): Promise<TextExecutionPlan> {
+  const resolved = await resolveTextExecutionPlans({
+    profile: input.profile,
+    operationPrompts: { single: input.operationPrompt },
+    ...(input.overrides === undefined ? {} : { overrides: input.overrides }),
+    ports: input.ports
+  });
+  return resolved.plans.single!;
 }
