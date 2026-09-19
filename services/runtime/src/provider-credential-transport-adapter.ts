@@ -5,6 +5,8 @@ import type {
   ProviderCandidate,
   ProviderModelInventory,
   ProviderModelInventoryPort,
+  ProviderPresetDetail,
+  ProviderPresetInventory,
   ProviderRole,
   ProviderRuntimeLeasePort
 } from "../../../packages/application/src/providers/index.js";
@@ -21,6 +23,8 @@ import {
   discoverEmbeddingModels,
   discoverImageModels,
   discoverModels,
+  discoverOpenRouterPreset,
+  discoverOpenRouterPresets,
   encryptCredential,
   pollImageProvider,
   submitImageProvider,
@@ -99,6 +103,8 @@ export type RuntimeProviderAdapter = Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory>;
+  discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number }>, credential: string | null): Promise<ProviderPresetInventory>;
+  resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null): Promise<ProviderPresetDetail>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
@@ -122,6 +128,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   leaseDurationMs?: number;
 }>): RuntimeProviderAdapter {
   const leaseDurationMs = options.leaseDurationMs ?? 60_000;
+  const presetSummaryCache = new Map<string, Readonly<{ expiresAt: number; value: Promise<ProviderPresetInventory> }>>();
 
   async function load(ownerUserId: string, providerProfileId: string) {
     const row = await loadPrivateProviderCredentialRow(options.database, ownerUserId, providerProfileId);
@@ -267,7 +274,33 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         throw Object.assign(new Error("Provider model inventory is unavailable."), { statusCode: 502 });
       }
     },
-    discoverCandidateModels: (candidate) => discoverCandidateModels(candidate, null)
+    discoverCandidateModels: (candidate) => discoverCandidateModels(candidate, null),
+    async listPresets(request) {
+      const row = await load(request.ownerUserId, request.providerProfileId);
+      if ((row.providerRole !== "text" && row.providerRole !== "intent") || row.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile not found."), { statusCode: 404 });
+      const identity = createHash("sha256").update(`${request.ownerUserId}|${row.providerProfileId}|${row.baseUrl}|${row.encryptedCredential ?? ""}|${request.offset}|${request.limit}`).digest("hex");
+      if (request.refresh) presetSummaryCache.delete(identity);
+      const cached = presetSummaryCache.get(identity);
+      if (cached && cached.expiresAt > Date.now()) return cached.value;
+      const value = discoverOpenRouterPresets(transportProfile(row), request, options.transport).then((page) => Object.freeze({ providerProfileId: request.providerProfileId, page }));
+      presetSummaryCache.set(identity, Object.freeze({ expiresAt: Date.now() + 60_000, value }));
+      try { return await value; } catch (error) { presetSummaryCache.delete(identity); throw error; }
+    },
+    async getPreset(request) {
+      const row = await load(request.ownerUserId, request.providerProfileId);
+      if ((row.providerRole !== "text" && row.providerRole !== "intent") || row.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile not found."), { statusCode: 404 });
+      return Object.freeze({ providerProfileId: request.providerProfileId, preset: await discoverOpenRouterPreset(transportProfile(row), request.slug, options.transport) });
+    },
+    async discoverCandidatePresets(candidate, request) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration) };
+      return Object.freeze({ providerProfileId: null, page: await discoverOpenRouterPresets(profile, request, options.transport) });
+    },
+    async resolveCandidatePreset(candidate, slug) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration) };
+      return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport) });
+    }
   };
 
   async function discoverCandidateModels(
@@ -369,6 +402,16 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     inventory,
     execution,
     discoverCandidateModelsWithCredential: discoverCandidateModels,
+    async discoverCandidatePresetsWithCredential(candidate, request, credential) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
+      return Object.freeze({ providerProfileId: null, page: await discoverOpenRouterPresets(profile, request, options.transport) });
+    },
+    async resolveCandidatePresetWithCredential(candidate, slug, credential) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
+      return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport) });
+    },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()
         ? encryptCredential(credential.trim(), options.credentialSecret)

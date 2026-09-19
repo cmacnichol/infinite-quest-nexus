@@ -6,6 +6,7 @@ import type {
 import type { TextModelSelection } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
 import type { ModelParameterAdvertisement, TextResponseFormatPolicy } from "@infinite-quest/contracts";
+import type { PresetPage, ResolvedPreset } from "@infinite-quest/contracts";
 
 /** Resolved by Fastify or loaded from a claimed job; never accepted from a browser as authority. */
 export type ProviderRole = "text" | "image" | "embedding" | "intent";
@@ -214,6 +215,11 @@ export type ProviderModelInventoryRequest = OwnerScope & Readonly<{
   /** Explicit operator/API discovery may replace cached metadata. */
   refresh?: boolean;
 }>;
+
+export type ProviderPresetPageRequest = OwnerScope & Readonly<{ providerProfileId: string; offset: number; limit: number; refresh?: boolean }>;
+export type ProviderPresetDetailRequest = OwnerScope & Readonly<{ providerProfileId: string; slug: string }>;
+export type ProviderPresetInventory = Readonly<{ providerProfileId: string | null; page: PresetPage }>;
+export type ProviderPresetDetail = Readonly<{ providerProfileId: string | null; preset: ResolvedPreset }>;
 
 /** Safe, unsaved provider metadata; transient credentials remain outside the application call. */
 export type ProviderCandidate = OwnerScope & ProviderProfileWriteFields;

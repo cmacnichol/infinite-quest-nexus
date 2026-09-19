@@ -10,6 +10,8 @@ import {
   type ProviderApplication,
   type ProviderCandidate,
   type ProviderModelInventory,
+  type ProviderPresetDetail,
+  type ProviderPresetInventory,
   type ProviderProfileMutationResult,
   type ProviderProfileView,
   type ProviderRole,
@@ -41,6 +43,8 @@ type ApiRuntimeProviderAdapter = Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory>;
+  discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number }>, credential: string | null): Promise<ProviderPresetInventory>;
+  resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null): Promise<ProviderPresetDetail>;
 }>;
 
 type ProviderApiComposition = Readonly<{
@@ -233,6 +237,20 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       }));
     },
 
+    async presets(ownerUserId: string, providerProfileId: string, offset: number, limit: number, refresh = false) {
+      const profile = (await composition.application.listProfiles({ ownerUserId })).find((candidate) => candidate.id === providerProfileId);
+      if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      if ((profile.providerRole !== "text" && profile.providerRole !== "intent") || profile.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile is required."), { statusCode: 400 });
+      return (await composition.application.listPresets({ ownerUserId, providerProfileId, offset, limit, refresh })).page;
+    },
+
+    async preset(ownerUserId: string, providerProfileId: string, slug: string) {
+      const profile = (await composition.application.listProfiles({ ownerUserId })).find((candidate) => candidate.id === providerProfileId);
+      if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      if ((profile.providerRole !== "text" && profile.providerRole !== "intent") || profile.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile is required."), { statusCode: 400 });
+      return (await composition.application.getPreset({ ownerUserId, providerProfileId, slug })).preset;
+    },
+
     async discoverModels(ownerUserId: string, input: ProviderProfileInput) {
       assertResponseFormatPolicy(input.configuration);
       assertTextSelectionRole(input);
@@ -264,6 +282,22 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
         ...(input.providerRole === "text" && model.responseFormatAdvertisement ? { responseFormatAdvertisement: model.responseFormatAdvertisement } : {}),
         ...(input.providerRole === "text" && composition.responseFormatCapabilities?.registryDigest ? { responseFormatRegistryDigest: composition.responseFormatCapabilities.registryDigest } : {})
       }));
+    },
+
+    async discoverPresets(ownerUserId: string, input: ProviderProfileInput, offset: number, limit: number) {
+      assertResponseFormatPolicy(input.configuration);
+      assertTextSelectionRole(input);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent" ? normalizeTextSelection(input) : undefined;
+      const candidate: ProviderCandidate = { ownerUserId, name: input.name, providerType: input.providerType, providerRole: input.providerRole, baseUrl: input.baseUrl, defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel, ...(textSelection ? { textSelection } : {}), contextWindowTokens: input.contextWindowTokens, maxOutputTokens: input.maxOutputTokens, temperature: input.temperature, requestTimeoutMs: input.requestTimeoutMs, configuration: toSafeProviderConfiguration(input.configuration), enabled: input.enabled, isDefault: input.isDefault };
+      return (await composition.runtime.discoverCandidatePresetsWithCredential(candidate, { offset, limit }, input.apiKey ?? null)).page;
+    },
+
+    async resolvePreset(ownerUserId: string, input: ProviderProfileInput, slug: string) {
+      assertResponseFormatPolicy(input.configuration);
+      assertTextSelectionRole(input);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent" ? normalizeTextSelection(input) : undefined;
+      const candidate: ProviderCandidate = { ownerUserId, name: input.name, providerType: input.providerType, providerRole: input.providerRole, baseUrl: input.baseUrl, defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel, ...(textSelection ? { textSelection } : {}), contextWindowTokens: input.contextWindowTokens, maxOutputTokens: input.maxOutputTokens, temperature: input.temperature, requestTimeoutMs: input.requestTimeoutMs, configuration: toSafeProviderConfiguration(input.configuration), enabled: input.enabled, isDefault: input.isDefault };
+      return (await composition.runtime.resolveCandidatePresetWithCredential(candidate, slug, input.apiKey ?? null)).preset;
     },
 
     async generateText(ownerUserId: string, request: ProviderTextRequest) {
