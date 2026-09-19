@@ -89,7 +89,12 @@ integration("provider route configuration redaction", () => {
         trustProxyHops: 0
       }
     };
-    transport = createProviderTransport({ policy: createProviderNetworkPolicy({ allowlist: [] }) });
+    transport = {
+      fetch: async (_profile, _operation, url) => {
+        if (url.includes("/presets/night-shift")) return new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "version-2", version: 2, system_prompt: "private preset prompt", config: { models: ["openai/gpt-4o"] } } } }), { status: 200 });
+        return new Response(JSON.stringify({ data: [{ slug: "night-shift", name: "Night Shift", status: "active", designated_version_id: "version-2", updated_at: "2026-09-19T00:00:00Z" }], total_count: 1 }), { status: 200 });
+      }, validateSdkEndpoint: async () => undefined, close: async () => undefined
+    };
     const providers = createProviderApplicationAdapter(createApiProviderApplicationComposition(pool, {
       credentialSecret: config.credentialEncryptionKey,
       transport
@@ -133,6 +138,36 @@ integration("provider route configuration redaction", () => {
       hasApiKey: true
     });
     expect(response.json()).not.toHaveProperty("apiKey");
+  });
+
+  it("discovers saved OpenRouter preset summaries and owner-only detail without returning credentials", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name: `${baseProviderInput.name} PRESET ${crypto.randomUUID()}`,
+      providerType: "openrouter", providerRole: "text", baseUrl: "https://openrouter.test/api/v1", defaultModel: "model", apiKey: "preset-secret", configuration: {}
+    } });
+    expect(created.statusCode).toBe(201);
+    const list = await app.inject({ method: "GET", url: `/api/v1/providers/${created.json().id}/presets?offset=0&limit=50` });
+    expect(list.statusCode).toBe(200);
+    expect(list.json()).toMatchObject({ presets: [{ slug: "night-shift", name: "Night Shift" }], nextOffset: null });
+    expect(JSON.stringify(list.json())).not.toContain("preset-secret");
+    const detail = await app.inject({ method: "GET", url: `/api/v1/providers/${created.json().id}/presets/night-shift` });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({ slug: "night-shift", systemPrompt: "private preset prompt" });
+    expect(JSON.stringify(detail.json())).not.toContain("preset-secret");
+  });
+
+  it("discovers and resolves an unsaved candidate without creating a provider profile", async () => {
+    const name = `${baseProviderInput.name} CANDIDATE ${crypto.randomUUID()}`;
+    const candidate = { ...baseProviderInput, name, providerType: "openrouter", providerRole: "text", baseUrl: "https://openrouter.test/api/v1", defaultModel: "model", apiKey: "candidate-secret", configuration: {} };
+    const discovered = await app.inject({ method: "POST", url: "/api/v1/providers/discover-presets?offset=0&limit=50", payload: candidate });
+    expect(discovered.statusCode).toBe(200);
+    expect(discovered.json()).toMatchObject({ presets: [{ slug: "night-shift" }] });
+    expect(JSON.stringify(discovered.json())).not.toContain("candidate-secret");
+    const resolved = await app.inject({ method: "POST", url: "/api/v1/providers/resolve-preset?slug=night-shift", payload: candidate });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({ slug: "night-shift", systemPrompt: "private preset prompt" });
+    const profiles = await app.inject({ method: "GET", url: "/api/v1/providers" });
+    expect(profiles.json().providers.some((profile: { name: string }) => profile.name === name)).toBe(false);
   });
 
   it("preserves saved configuration values in PATCH responses while keeping the primary API key opaque", async () => {

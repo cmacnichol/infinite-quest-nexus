@@ -60,4 +60,46 @@ describe("OpenRouter preset metadata discovery", () => {
       new Response(JSON.stringify({ data: { slug: "different", name: "Different", status: "active", designated_version: { id: "version-2", version: 2, system_prompt: "Prompt", config: {} } } }), { status: 200 })
     ]))).rejects.toMatchObject({ diagnosticCode: "invalid_response" });
   });
+
+  it("uses finite diagnostics for malformed totals, inactive versions, invalid versions, and unsupported protocol fields", async () => {
+    const cases: readonly [unknown, string, string][] = [
+      [{ data: [], total_count: -1 }, "list", "invalid_response"],
+      [{ data: { slug: "night-shift", name: "Night Shift", status: "inactive", designated_version: { id: "v", version: 1, system_prompt: "x", config: {} } } }, "detail", "preset_inactive"],
+      [{ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 0, system_prompt: "x", config: {} } } }, "detail", "invalid_response"],
+      [{ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x", config: { tools: [{ type: "function" }] } } } }, "detail", "preset_config_unsupported"]
+    ];
+    for (const [payload, mode, diagnosticCode] of cases) {
+      const action = mode === "list"
+        ? discoverOpenRouterPresets(profile, { offset: 0, limit: 50 }, transport([new Response(JSON.stringify(payload), { status: 200 })]))
+        : discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify(payload), { status: 200 })]));
+      await expect(action).rejects.toMatchObject({ diagnosticCode });
+    }
+  });
+
+  it("bounds response and prompt/config sizes while keeping credentials out of failures", async () => {
+    const oversized = "x".repeat(1_048_577);
+    await expect(discoverOpenRouterPresets(profile, { offset: 0, limit: 50 }, transport([new Response(oversized, { status: 200 })]))).rejects.toMatchObject({ diagnosticCode: "invalid_response" });
+    await expect(discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x".repeat(200_001), config: {} } } }), { status: 200 })]))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported" });
+  });
+
+  it("encodes detail slugs, supplies cancellation, and redacts a thrown transport failure", async () => {
+    let url = "";
+    let signal: AbortSignal | undefined;
+    const recording: ProviderTransport = {
+      fetch: async (_profile, _operation, requestedUrl, init) => {
+        url = requestedUrl;
+        signal = init.signal ?? undefined;
+        return new Response(JSON.stringify({ data: { slug: "night shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x", config: {} } } }), { status: 200 });
+      }, validateSdkEndpoint: async () => undefined, close: async () => undefined
+    };
+    const controller = new AbortController();
+    await discoverOpenRouterPreset(profile, "night shift", recording, controller.signal);
+    expect(url).toContain("/presets/night%20shift");
+    expect(signal).toBeInstanceOf(AbortSignal);
+    controller.abort();
+    expect(signal!.aborted).toBe(true);
+    const failing: ProviderTransport = { fetch: async () => { throw new Error(`connection failed for ${profile.apiKey}`); }, validateSdkEndpoint: async () => undefined, close: async () => undefined };
+    await expect(discoverOpenRouterPresets(profile, { offset: 0, limit: 50 }, failing)).rejects.toMatchObject({ diagnosticCode: "discovery_unavailable" });
+    await expect(discoverOpenRouterPresets(profile, { offset: 0, limit: 50 }, failing)).rejects.not.toThrow(profile.apiKey);
+  });
 });

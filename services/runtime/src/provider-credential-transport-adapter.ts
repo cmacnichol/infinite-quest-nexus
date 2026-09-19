@@ -283,8 +283,9 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       const cached = presetSummaryCache.get(identity);
       if (cached && cached.expiresAt > Date.now()) return cached.value;
       const value = discoverOpenRouterPresets(transportProfile(row), request, options.transport).then((page) => Object.freeze({ providerProfileId: request.providerProfileId, page }));
-      presetSummaryCache.set(identity, Object.freeze({ expiresAt: Date.now() + 60_000, value }));
-      try { return await value; } catch (error) { presetSummaryCache.delete(identity); throw error; }
+      const entry = Object.freeze({ expiresAt: Date.now() + 60_000, value });
+      presetSummaryCache.set(identity, entry);
+      try { return await value; } catch (error) { if (presetSummaryCache.get(identity) === entry) presetSummaryCache.delete(identity); throw error; }
     },
     async getPreset(request) {
       const row = await load(request.ownerUserId, request.providerProfileId);
