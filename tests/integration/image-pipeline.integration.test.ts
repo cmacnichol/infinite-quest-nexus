@@ -104,6 +104,17 @@ integration("independent illustration pipeline", () => {
     providerTransport = installIntegrationProviderTransport();
     assetRoot = await mkdtemp(join(tmpdir(), "infinitequest-image-test-"));
     server = createServer((request, response) => {
+      if (request.method === "GET" && (request.url === "/v1/models" || request.url === "/models")) {
+        // The imported-story fixture inherits the required response-contract
+        // policy.  Advertise the synthetic text model's schema capability so
+        // this illustration-isolation test exercises its intended path.
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{
+          id: "synthetic-text-model",
+          supported_parameters: ["response_format", "structured_outputs"]
+        }] }));
+        return;
+      }
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => { body += chunk; });
@@ -193,7 +204,10 @@ integration("independent illustration pipeline", () => {
       temperature: 0,
       enabled: true,
       isDefault: true,
-      configuration: {}
+      // This legacy illustration-isolation fixture does not exercise Story
+      // response contracts.  Pin its historical policy explicitly instead of
+      // weakening the production Required default or forging verification data.
+      configuration: { textResponseFormatPolicy: "legacy" }
     }, credentialSecret)).id;
     imageProviderId = (await createProvider(pool, {
       name: `Synthetic image ${crypto.randomUUID()}`,

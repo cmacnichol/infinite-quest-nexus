@@ -268,12 +268,16 @@ export type ProvisionalIllustrationSegmentRequest = Readonly<{
   segment: IllustrationSegmentSlice;
   config: StreamingIllustrationConfig;
   visualReference?: string;
+  /** Private preflight evidence supplied by the streaming executor. */
+  textExecutionSnapshot?: unknown;
 }>;
 
 export type PromoteProvisionalIllustrationRequest = Readonly<{
   finalNarration: string;
   config: StreamingIllustrationConfig;
   visualReference?: string;
+  /** Private preflight evidence for final segments absent from the stream. */
+  textExecutionSnapshot?: unknown;
 }>;
 
 export type IllustrationWorkerRequest = Readonly<{

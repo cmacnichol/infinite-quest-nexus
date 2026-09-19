@@ -2285,6 +2285,24 @@ async function executeLoadedGeneration(
     });
     const { illustrationConfig, segmentTracker } = streamingIllustration;
     let provisionalSetId: string | null = null;
+    let streamingIllustrationTextExecutionSnapshot = job.streaming_segments_state?.illustrationTextExecutionSnapshot as IllustrationTextExecutionSnapshot | undefined;
+    let illustrationPreflightAttempted = Boolean(streamingIllustrationTextExecutionSnapshot);
+    const prepareStreamingIllustrationText = async () => {
+      if (illustrationPreflightAttempted) return streamingIllustrationTextExecutionSnapshot;
+      illustrationPreflightAttempted = true;
+      try {
+        streamingIllustrationTextExecutionSnapshot = await collaborators.prepareIllustrationTextExecution?.({
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id,
+          operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
+        });
+      } catch (error) {
+        logger.warn({ event: "streaming_illustration_preparation_failed", generationJobId: job.id,
+          errorMessage: error instanceof Error ? error.message : String(error) });
+        streamingIllustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+      }
+      return streamingIllustrationTextExecutionSnapshot;
+    };
     let singleSectionDetected = false;
     let lastPartialUpdate = 0;
     let lastPartialContent = "";
@@ -2337,6 +2355,7 @@ async function executeLoadedGeneration(
         if (!narration) return;
         const newSegments = segmentTracker.detectNewSegments(narration);
         for (const segment of newSegments) {
+          await prepareStreamingIllustrationText();
           if (!provisionalSetId) {
             provisionalSetId = await collaborators.illustration.createProvisionalSet(
               pool,
@@ -2350,7 +2369,8 @@ async function executeLoadedGeneration(
             }
             const streamingState: GenerationStreamingState = {
               ...(job.streaming_segments_state || {}),
-              provisionalSetId
+              provisionalSetId,
+              ...(streamingIllustrationTextExecutionSnapshot ? { illustrationTextExecutionSnapshot: streamingIllustrationTextExecutionSnapshot } : {})
             };
             assertActiveGenerationUpdate(
               await repository.saveStreamingSegments(scope, streamingState),
@@ -2369,7 +2389,8 @@ async function executeLoadedGeneration(
             {
               segment,
               config: illustrationConfig,
-              visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+              visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot),
+              ...(streamingIllustrationTextExecutionSnapshot ? { textExecutionSnapshot: streamingIllustrationTextExecutionSnapshot } : {})
             }
           );
         }
@@ -2381,6 +2402,7 @@ async function executeLoadedGeneration(
             { wordCount: segmentTracker.accumulatedWordCount },
             illustrationConfig.segmentWordCount
           )) return;
+          await prepareStreamingIllustrationText();
           if (!provisionalSetId) {
             provisionalSetId = await collaborators.illustration.createProvisionalSet(
               pool,
@@ -2394,7 +2416,8 @@ async function executeLoadedGeneration(
             }
             const streamingState: GenerationStreamingState = {
               ...(job.streaming_segments_state || {}),
-              provisionalSetId
+              provisionalSetId,
+              ...(streamingIllustrationTextExecutionSnapshot ? { illustrationTextExecutionSnapshot: streamingIllustrationTextExecutionSnapshot } : {})
             };
             assertActiveGenerationUpdate(
               await repository.saveStreamingSegments(scope, streamingState),
@@ -2421,7 +2444,8 @@ async function executeLoadedGeneration(
                 text: narration
               },
               config: illustrationConfig,
-              visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot)
+              visualReference: characterVisualReference(inputs.characterProfile, inputs.characterSnapshot),
+              ...(streamingIllustrationTextExecutionSnapshot ? { textExecutionSnapshot: streamingIllustrationTextExecutionSnapshot } : {})
             }
           );
         }

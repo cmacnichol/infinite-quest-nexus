@@ -177,6 +177,7 @@ export function createIllustrationGenerationTransactionPort(
       segmentConfig(request.config),
       providers,
       request.visualReference,
+      request.textExecutionSnapshot as never,
     ),
     promoteProvisionalSet: (database, scope, request) => promoteProvisionalSet(
       database as DatabaseClient,
@@ -188,6 +189,7 @@ export function createIllustrationGenerationTransactionPort(
       segmentConfig(request.config),
       providers,
       request.visualReference,
+      request.textExecutionSnapshot as never,
     ),
     orphanProvisionalSet: (database, scope) => orphanProvisionalSet(
       database as DatabaseClient,
@@ -322,10 +324,12 @@ export function createIllustrationRepositoryFactories(
       createProvisionalSegment: (scope, request) => createProvisionalSegment(
         pool, scope.ownerUserId, scope.campaignId, scope.generationJobId, scope.setId,
         request.segment, segmentConfig(request.config), providers, request.visualReference,
+        request.textExecutionSnapshot as never,
       ),
       promoteProvisionalSet: (scope, request) => promoteProvisionalSet(
         pool, scope.ownerUserId, scope.generationJobId, scope.turnId, scope.campaignId,
         request.finalNarration, segmentConfig(request.config), providers, request.visualReference,
+        request.textExecutionSnapshot as never,
       ),
       orphanProvisionalSet: (scope) => orphanProvisionalSet(pool, scope.ownerUserId, scope.generationJobId)
     }),

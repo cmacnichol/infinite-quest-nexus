@@ -40,6 +40,30 @@ function promptContent(snapshot: Record<string, any> | undefined, key: string): 
   return entry && typeof entry === "object" && typeof entry.content === "string" ? entry.content : "";
 }
 
+function promptSnapshotForTextExecution(
+  loaded: Record<string, any>,
+  snapshot: IllustrationTextExecutionSnapshot | undefined,
+) {
+  return snapshot?.state === "prepared"
+    && promptContent(loaded, "illustration_refinement") !== snapshot.operationPrompt
+    ? {
+      ...loaded,
+      illustration_refinement: {
+        ...(loaded.illustration_refinement && typeof loaded.illustration_refinement === "object"
+          ? loaded.illustration_refinement : {}),
+        content: snapshot.operationPrompt
+      }
+    }
+    : loaded;
+}
+
+function frozenTextProvider(snapshot: IllustrationTextExecutionSnapshot | undefined) {
+  if (snapshot?.state !== "prepared") return null;
+  const providerProfileId = snapshot.routeBasis.credentialReference;
+  const model = snapshot.plan.candidates[0]?.modelId;
+  return providerProfileId && model ? { providerProfileId, model } : null;
+}
+
 export type SegmentConfigRow = {
   enabled: boolean;
   source_policy: "off" | "library_only" | "library_then_generate" | "generate_only";
@@ -430,7 +454,9 @@ async function createProvisionalSegmentInTransaction(
     [setId, ownerUserId]
   );
   if (!set.rows[0] || !await lockActiveProvisionalGeneration(client, ownerUserId, campaignId, generationJobId, set.rows[0].turn_id)) return false;
-  const promptSnapshot = await illustrationPrompts(providers, ownerUserId, campaignId);
+  const promptSnapshot = promptSnapshotForTextExecution(
+    await illustrationPrompts(providers, ownerUserId, campaignId), textExecutionSnapshot,
+  );
   const sanitizedSegment = stripMechanicsLeakage(segmentData.text).text;
   if (!sanitizedSegment) return false; // Silent skip if no fiction text
 
@@ -484,7 +510,7 @@ async function createProvisionalSegmentInTransaction(
     }
   } else {
     // ai_refined
-    const textProvider = await directProvider(
+    const textProvider = frozenTextProvider(textExecutionSnapshot) ?? await directProvider(
       providers, ownerUserId, "text", config.campaign_text_provider_id,
     );
     if (textProvider) {
@@ -519,16 +545,13 @@ export async function createProvisionalSegment(
   },
   config: SegmentConfigRow,
   providers: IllustrationProviderCollaborators,
-  visualReference?: string
+  visualReference?: string,
+  suppliedTextExecutionSnapshot?: IllustrationTextExecutionSnapshot,
 ): Promise<boolean> {
   if (isDatabasePool(client)) {
     const promptSnapshot = await illustrationPrompts(providers, ownerUserId, campaignId);
-    const textExecutionSnapshot = await prepareIllustrationTextExecution(
-      ownerUserId,
-      campaignId,
-      config,
-      promptContent(promptSnapshot, "illustration_refinement"),
-      providers,
+    const textExecutionSnapshot = suppliedTextExecutionSnapshot ?? await prepareIllustrationTextExecution(
+      ownerUserId, campaignId, config, promptContent(promptSnapshot, "illustration_refinement"), providers,
     );
     return withTransaction(client, (transaction) => createProvisionalSegmentInTransaction(
       transaction, ownerUserId, campaignId, generationJobId, setId, segmentData, config, providers, visualReference,
@@ -536,7 +559,8 @@ export async function createProvisionalSegment(
     ));
   }
   return createProvisionalSegmentInTransaction(
-    client, ownerUserId, campaignId, generationJobId, setId, segmentData, config, providers, visualReference
+    client, ownerUserId, campaignId, generationJobId, setId, segmentData, config, providers, visualReference,
+    suppliedTextExecutionSnapshot,
   );
 }
 
@@ -549,7 +573,8 @@ export async function promoteProvisionalSet(
   finalNarration: string,
   config: SegmentConfigRow,
   providers: IllustrationProviderCollaborators,
-  visualReference?: string
+  visualReference?: string,
+  textExecutionSnapshot?: IllustrationTextExecutionSnapshot,
 ) {
   // Update the set
   const setResult = await client.query<{ id: string, character_visual_reference: string }>(
@@ -598,7 +623,7 @@ export async function promoteProvisionalSet(
     if (!existingOrdinals.has(piece.ordinal)) {
       await createProvisionalSegment(
         client, ownerUserId, campaignId, generationJobId, setId, piece, config, providers,
-        visualReference || dbVisualReference,
+        visualReference || dbVisualReference, textExecutionSnapshot,
       );
     }
   }
@@ -639,18 +664,9 @@ async function createTurnSet(
   const turn = turnResult.rows[0];
   if (!turn) throw Object.assign(new Error("Accepted turn not found."), { statusCode: 404 });
   const config = await loadConfig(client, ownerUserId, turn.campaign_id);
-  const loadedPromptSnapshot = await illustrationPrompts(providers, ownerUserId, turn.campaign_id);
-  const promptSnapshot = textExecutionSnapshot?.state === "prepared"
-    && promptContent(loadedPromptSnapshot, "illustration_refinement") !== textExecutionSnapshot.operationPrompt
-    ? {
-      ...loadedPromptSnapshot,
-      illustration_refinement: {
-        ...(loadedPromptSnapshot.illustration_refinement && typeof loadedPromptSnapshot.illustration_refinement === "object"
-          ? loadedPromptSnapshot.illustration_refinement : {}),
-        content: textExecutionSnapshot.operationPrompt
-      }
-    }
-    : loadedPromptSnapshot;
+  const promptSnapshot = promptSnapshotForTextExecution(
+    await illustrationPrompts(providers, ownerUserId, turn.campaign_id), textExecutionSnapshot,
+  );
   const visualReference = characterVisualReference(turn.character_profile, turn.character_snapshot);
   const active = await client.query<{ id: string }>(
     `SELECT id FROM turn_illustration_sets
@@ -712,7 +728,9 @@ async function createTurnSet(
       );
       continue;
     }
-    const textProvider = await directProvider(providers, ownerUserId, "text", config.campaign_text_provider_id);
+    const textProvider = frozenTextProvider(textExecutionSnapshot) ?? await directProvider(
+      providers, ownerUserId, "text", config.campaign_text_provider_id,
+    );
     if (!textProvider) {
       await queueSegmentDelivery(
         client, ownerUserId, segment, config, directPrompt, "ai_fallback",

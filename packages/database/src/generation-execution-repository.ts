@@ -802,6 +802,7 @@ function factFormatRepairApplicationsMatchExecutionJob(
 
 export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
+  illustrationTextExecutionSnapshot?: unknown;
 };
 
 export type GenerationOrchestrationInputs = {
@@ -959,8 +960,9 @@ export async function reconcileNextAcceptedStreamingIllustration(
   return withTransaction(pool, async (client) => {
     const pending = await client.query<{
       id: string; owner_user_id: string; campaign_id: string; result_turn_id: string; narration: string;
+      streaming_segments_state: GenerationStreamingState;
     }>(
-      `SELECT j.id,j.owner_user_id,j.campaign_id,j.result_turn_id,t.narration
+      `SELECT j.id,j.owner_user_id,j.campaign_id,j.result_turn_id,j.streaming_segments_state,t.narration
          FROM generation_jobs j JOIN turns t ON t.id=j.result_turn_id AND t.owner_user_id=j.owner_user_id
         WHERE j.status='completed' AND j.result_turn_id IS NOT NULL
           AND j.streaming_segments_state->>'provisionalIllustrationReconciliation'='pending'
@@ -973,7 +975,9 @@ export async function reconcileNextAcceptedStreamingIllustration(
     });
     await illustration.promoteProvisionalSet(client, {
       ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id, turnId: job.result_turn_id
-    }, { finalNarration: job.narration, config });
+    }, { finalNarration: job.narration, config,
+      ...(job.streaming_segments_state.illustrationTextExecutionSnapshot
+        ? { textExecutionSnapshot: job.streaming_segments_state.illustrationTextExecutionSnapshot } : {}) });
     await client.query(
       `UPDATE generation_jobs
           SET streaming_segments_state = streaming_segments_state - 'provisionalIllustrationReconciliation', updated_at=now()
@@ -1567,7 +1571,9 @@ async function commitAcceptedTurn(
         await collaborators.illustration.promoteProvisionalSet(
           client,
           { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id, turnId },
-          { finalNarration: story.narration, config: illustrationConfig }
+          { finalNarration: story.narration, config: illustrationConfig,
+            ...((job.streaming_segments_state?.illustrationTextExecutionSnapshot ?? input.illustrationTextExecutionSnapshot)
+              ? { textExecutionSnapshot: job.streaming_segments_state?.illustrationTextExecutionSnapshot ?? input.illustrationTextExecutionSnapshot } : {}) }
         );
       } else {
         await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
