@@ -6,6 +6,8 @@ import { generationRequestSchema, generationRetryLatestRequestSchema } from "../
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
+import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -224,6 +226,48 @@ integration("PostgreSQL generation command repository", () => {
     await expect(commands.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ id: queued.id, status: "queued" });
     await expect(pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]))
       .resolves.toMatchObject({ rows: [{ plan: { planHash: frozenPlan().planHash } }] });
+  });
+
+  it("moves a post-queue tampered plan to recoverable before worker execution", async () => {
+    const imported = await campaign();
+    const queued = await plannedRepository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Reject tampering before dispatch."));
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `tamper-${crypto.randomUUID()}`;
+    await pool.query("UPDATE generation_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL WHERE id<>$1 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')", [queued.id]);
+    const claim = await execution.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{textExecutionPlan,planHash}',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify("b".repeat(64))]);
+    await expect(execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+  });
+
+  it("keeps production composition admission disabled until an explicit gate enables preflight", async () => {
+    let remoteCalls = 0;
+    const profile = { id: providerProfileId, name: "preset", providerRole: "text" as const, providerType: "openrouter" as const,
+      model: "@preset/test", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 1000,
+      endpointIdentity: "endpoint", executionRevision: "a".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "test" }, configuration: {} };
+    const collaborators = {
+      execution: { text: async () => profile },
+      loadQueuedTextProfile: async () => profile,
+      responseFormatInventory: {
+        getPreset: async () => { remoteCalls += 1; return { providerProfileId, preset: { slug: "test", versionId: "v1", config: { model: "preset-model" }, configHash: "c".repeat(64) } }; },
+        listModels: async () => { remoteCalls += 1; return { providerProfileId, providerRole: "text" as const, models: [{ id: "preset-model", name: "Preset", contextWindowTokens: 32768 }] }; }
+      },
+      responseFormatCapabilities: { registryDigest: "d".repeat(64) },
+      promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() }
+    } as never;
+    const disabledCampaign = await campaign();
+    const operator = { installedCapability: "r3" as const, enforceEnabled: true };
+    const disabled = createApiGenerationApplication(pool, collaborators, undefined, operator, false);
+    await disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, appendRequest("Do not prepare until admitted."));
+    expect(remoteCalls).toBe(0);
+    const enabledCampaign = await campaign();
+    const enabled = createApiGenerationApplication(pool, collaborators, undefined, operator, true);
+    await enabled.enqueueAppend({ ownerUserId, campaignId: enabledCampaign.campaignId }, appendRequest("Prepare only outside the transaction."));
+    expect(remoteCalls).toBe(2);
+    const saved = await pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE campaign_id=$1", [enabledCampaign.campaignId]);
+    expect(saved.rows[0]?.plan).toMatchObject({ version: 2, preset: { slug: "test" } });
   });
 
   it("freezes a v3 effective character identity for an enrolled append and replacement", async () => {
