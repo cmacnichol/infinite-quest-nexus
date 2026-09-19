@@ -3,6 +3,7 @@ import type {
   PromptCatalogKey,
   ProviderType
 } from "@infinite-quest/contracts";
+import type { TextModelSelection } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
 import type { ModelParameterAdvertisement, TextResponseFormatPolicy } from "@infinite-quest/contracts";
 
@@ -83,6 +84,7 @@ type ProviderProfileViewBase = Readonly<{
   providerType: ProviderType;
   baseUrl: string;
   defaultModel: string;
+  textSelection?: TextModelSelection;
   contextWindowTokens: number;
   maxOutputTokens: number;
   temperature: number;
@@ -130,6 +132,7 @@ export type ProviderProfileWriteFields<R extends ProviderRole = ProviderRole> = 
   providerRole: R;
   baseUrl: string;
   defaultModel: string;
+  textSelection?: TextModelSelection;
   contextWindowTokens: number;
   maxOutputTokens: number;
   temperature: number;
@@ -147,6 +150,7 @@ export type ProviderProfileChanges = Readonly<{
   name?: string;
   baseUrl?: string;
   defaultModel?: string;
+  textSelection?: TextModelSelection;
   contextWindowTokens?: number;
   maxOutputTokens?: number;
   temperature?: number;

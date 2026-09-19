@@ -3520,6 +3520,7 @@ integration("deterministic owner-wide System Archive export", () => {
           enabled: false, health: "unknown",
           authority: {
             providerType: "openrouter", providerRole: "intent", defaultModel: "intent-model",
+            textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
             contextWindowTokens: 12_345, maxOutputTokens: 678, temperature: 0.37,
             configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4, retryLimit: 4 },
             requestTimeoutMs: 45_678, enabled: true, isDefault: true, createdAt, updatedAt,
@@ -3831,7 +3832,7 @@ integration("deterministic owner-wide System Archive export", () => {
     )).rows).toEqual(checkpointsBefore.rows);
 
     await expect(pool.query(
-      `SELECT profile.provider_type,profile.provider_role,profile.default_model,
+      `SELECT profile.provider_type,profile.provider_role,profile.default_model,profile.text_selection,
               profile.context_window_tokens,profile.max_output_tokens,profile.temperature,
               profile.configuration,profile.request_timeout_ms,profile.enabled,profile.is_default,
               campaign.text_provider_profile_id,campaign.image_provider_profile_id,
@@ -3849,6 +3850,7 @@ integration("deterministic owner-wide System Archive export", () => {
       provider_type: "openrouter",
       provider_role: "intent",
       default_model: "intent-model",
+      text_selection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
       context_window_tokens: 12_345,
       max_output_tokens: 678,
       temperature: 0.37,

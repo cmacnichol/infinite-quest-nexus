@@ -33,8 +33,8 @@ const productionFactories: ApiGenerationCompositionFactories = {
 export function createQueuedResponsePolicyResolver(providers: ApiGenerationProviderCollaborators): NonNullable<PostgresGenerationCommandRepositoryDependencies["resolveQueuedResponsePolicy"]> {
   return async (client, scope) => {
     const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId, scope.requestedModel);
-    const policy = profile.configuration.textResponseFormatPolicy as "legacy" | "auto" | "required" | undefined;
-    if (!policy || policy === "legacy") return undefined;
+    const policy = profile.configuration.textResponseFormatPolicy as "legacy" | "auto" | "required" | undefined ?? "required";
+    if (policy === "legacy") return undefined;
     const effectiveContextWindowTokens = resolveEffectiveContextWindowTokens(profile.contextWindowTokens, scope.modelContextWindowTokens);
     const configurationHash = effectiveProviderConfigurationFingerprint({
       providerId: profile.id, providerType: profile.providerType, endpointIdentity: profile.endpointIdentity ?? "",

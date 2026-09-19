@@ -15,6 +15,7 @@ import {
   type ProviderRole,
   type PromptScope
 } from "../../../packages/application/src/providers/index.js";
+import { normalizeTextSelection, selectionCompatibilityId } from "../../../packages/contracts/src/provider-selection.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
 import { capabilityRouteConfigHash, providerEndpointIdentity } from "../../../packages/contracts/src/provider-capability-identity.js";
@@ -85,6 +86,7 @@ function profileResponse(
     providerRole: profile.providerRole,
     baseUrl: profile.baseUrl,
     defaultModel: profile.defaultModel,
+    ...(profile.textSelection === undefined ? {} : { textSelection: profile.textSelection }),
     contextWindowTokens: profile.contextWindowTokens,
     maxOutputTokens: profile.maxOutputTokens,
     temperature: profile.temperature,
@@ -114,6 +116,10 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async create(ownerUserId: string, input: ProviderProfileInput) {
       assertResponseFormatPolicy(input.configuration);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent"
+        ? normalizeTextSelection(input)
+        : undefined;
+      const defaultModel = textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel;
       return composition.transaction(async ({ application, runtime }) => {
         const mutation = await application.createProfile({
           ownerUserId,
@@ -121,7 +127,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
           providerType: input.providerType,
           providerRole: input.providerRole,
           baseUrl: input.baseUrl,
-          defaultModel: input.defaultModel,
+          defaultModel,
+          ...(textSelection === undefined ? {} : { textSelection }),
           contextWindowTokens: input.contextWindowTokens,
           maxOutputTokens: input.maxOutputTokens,
           temperature: input.temperature,
@@ -142,6 +149,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
       assertResponseFormatPolicy(input.configuration);
+      const textSelection = input.textSelection;
       return composition.transaction(async ({ application, runtime }) => {
         const mutation = await application.updateProfile({
           ownerUserId,
@@ -149,7 +157,10 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
           changes: {
             ...(input.name === undefined ? {} : { name: input.name }),
             ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
-            ...(input.defaultModel === undefined ? {} : { defaultModel: input.defaultModel }),
+            ...(input.defaultModel === undefined && textSelection === undefined ? {} : {
+              ...(input.defaultModel === undefined ? { defaultModel: selectionCompatibilityId(textSelection!) } : { defaultModel: input.defaultModel }),
+              ...(textSelection === undefined ? {} : { textSelection })
+            }),
             ...(input.contextWindowTokens === undefined ? {} : { contextWindowTokens: input.contextWindowTokens }),
             ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
             ...(input.temperature === undefined ? {} : { temperature: input.temperature }),
@@ -217,13 +228,17 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async discoverModels(ownerUserId: string, input: ProviderProfileInput) {
       assertResponseFormatPolicy(input.configuration);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent"
+        ? normalizeTextSelection(input)
+        : undefined;
       const inventory = await composition.runtime.discoverCandidateModelsWithCredential({
         ownerUserId,
         name: input.name,
         providerType: input.providerType,
         providerRole: input.providerRole,
         baseUrl: input.baseUrl,
-        defaultModel: input.defaultModel,
+        defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel,
+        ...(textSelection === undefined ? {} : { textSelection }),
         contextWindowTokens: input.contextWindowTokens,
         maxOutputTokens: input.maxOutputTokens,
         temperature: input.temperature,

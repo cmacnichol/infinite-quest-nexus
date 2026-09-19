@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { textModelSelectionSchema } from "./provider-selection.js";
 import {
   archiveAssetRecordSchema,
   archiveErrorCodeSchema,
@@ -862,6 +863,7 @@ const systemPortableProviderV2Schema = systemPortableProviderSchema.safeExtend({
     providerType: providerTypeSchema,
     providerRole: providerRoleSchema,
     defaultModel: z.string().max(300),
+    textSelection: textModelSelectionSchema.nullable().optional(),
     contextWindowTokens: nonnegativeSafeIntegerSchema,
     maxOutputTokens: nonnegativeSafeIntegerSchema,
     temperature: z.number().finite(),

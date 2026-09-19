@@ -38,6 +38,40 @@ describe("provider API configuration boundary", () => {
     expect(value.application.createProfile.mock.calls[0]?.[0].configuration).toEqual({ textResponseFormatPolicy: "auto" });
   });
 
+  it("accepts a native OpenRouter preset and derives its legacy default model", async () => {
+    const value = adapter();
+    const textSelection = { kind: "openrouter_preset" as const, slug: "nexus-nsfw" };
+    value.application.createProfile.mockResolvedValue({
+      profile: {
+        ...input, id, defaultModel: "@preset/nexus-nsfw", textSelection,
+        configuration: { textResponseFormatPolicy: "required" }, hasCredential: false,
+        health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now"
+      },
+      configurationProjection: { kind: "same_request_echo", configuration: { textResponseFormatPolicy: "required" } }
+    });
+
+    const result = await value.adapter.create(owner, { ...input, defaultModel: "", textSelection } as never);
+
+    expect(value.application.createProfile).toHaveBeenCalledWith(expect.objectContaining({
+      defaultModel: "@preset/nexus-nsfw", textSelection
+    }));
+    expect(result).toMatchObject({ defaultModel: "@preset/nexus-nsfw", textSelection });
+  });
+
+  it("preserves an explicit compatibility policy when a rename-only patch omits it", async () => {
+    const value = adapter();
+    value.application.updateProfile.mockResolvedValue({
+      profile: {
+        ...input, id, name: "Renamed", configuration: { textResponseFormatPolicy: "legacy" },
+        textSelection: { kind: "model", modelId: "model" }, hasCredential: false,
+        health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now"
+      }, configurationProjection: { kind: "sanitized_read" }
+    });
+    const result = await value.adapter.update(owner, id, { name: "Renamed" } as never);
+    expect(value.application.updateProfile).toHaveBeenCalledWith(expect.objectContaining({ changes: { name: "Renamed" } }));
+    expect(result.configuration).toEqual({ textResponseFormatPolicy: "legacy" });
+  });
+
   it("does not expose text response-format metadata through image inventory or a text embedding fallback", async () => {
     const value = adapter();
     const metadata = { supportedParameters: ["response_format"], discoveredAt: "2026-09-18T00:00:00.000Z" };

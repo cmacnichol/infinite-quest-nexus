@@ -657,6 +657,60 @@ integration("provider PostgreSQL adapters", () => {
     });
   });
 
+  it("persists native text selections with compatibility IDs and required defaults", async () => {
+    const scoped = await fixture("native-preset-selection");
+    const preset = await inTransaction((client) => createPostgresProviderRepositories(client).profiles.createProfile({
+      ...profileCommand(scoped.ownerUserId, `Preset ${crypto.randomUUID()}`),
+      providerType: "openrouter",
+      defaultModel: "",
+      textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
+      configuration: toSafeProviderConfiguration({})
+    }));
+    expect(preset).toMatchObject({
+      defaultModel: "@preset/nexus-nsfw",
+      textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
+      configuration: { textResponseFormatPolicy: "required" }
+    });
+
+    await expect(inTransaction((client) => createPostgresProviderRepositories(client).profiles.updateProfile({
+      ownerUserId: second.ownerUserId,
+      providerProfileId: preset.id,
+      changes: { name: "Foreign rename" }
+    }))).rejects.toMatchObject({ statusCode: 404 });
+
+    await expect(inTransaction((client) => createPostgresProviderRepositories(client).resolution.resolveEmbedding({
+      ownerUserId: scoped.ownerUserId,
+      selectedProviderProfileId: preset.id,
+      allowTextFallback: true
+    }))).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/preset/i) });
+
+    const legacy = await inTransaction(async (client) => {
+      const profile = await createPostgresProviderRepositories(client).profiles.createProfile({
+        ...profileCommand(scoped.ownerUserId, `Legacy ${crypto.randomUUID()}`),
+        providerType: "openrouter",
+        configuration: toSafeProviderConfiguration({ textResponseFormatPolicy: "legacy" })
+      });
+      return createPostgresProviderRepositories(client).profiles.updateProfile({
+        ownerUserId: scoped.ownerUserId, providerProfileId: profile.id, changes: { name: "Legacy renamed" }
+      });
+    });
+    expect(legacy.configuration).toMatchObject({ textResponseFormatPolicy: "legacy" });
+
+    const historical = await inTransaction(async (client) => {
+      const profile = await createPostgresProviderRepositories(client).profiles.createProfile({
+        ...profileCommand(scoped.ownerUserId, `Historical ${crypto.randomUUID()}`), providerType: "openrouter"
+      });
+      await client.query("UPDATE provider_profiles SET configuration='{}'::jsonb WHERE id=$1", [profile.id]);
+      return createPostgresProviderRepositories(client).profiles.updateProfile({
+        ownerUserId: scoped.ownerUserId, providerProfileId: profile.id, changes: { defaultModel: "openai/gpt-4o" }
+      });
+    });
+    expect(historical).toMatchObject({
+      defaultModel: "openai/gpt-4o", textSelection: { kind: "model", modelId: "openai/gpt-4o" },
+      configuration: { textResponseFormatPolicy: "required" }
+    });
+  });
+
   it("keeps cost writes caller-transaction-owned and reads isolated by owner, campaign, turn, category, and currency", async () => {
     const profile = await inTransaction((client) =>
       createPostgresProviderRepositories(client).profiles.createProfile(profileCommand(first.ownerUserId, `Cost ${crypto.randomUUID()}`))

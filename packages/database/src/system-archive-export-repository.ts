@@ -593,6 +593,7 @@ const DOMAIN_SQL = {
                'authority',jsonb_build_object(
                  'providerType',profile.provider_type,'providerRole',profile.provider_role,
                  'defaultModel',profile.default_model,
+                 'textSelection',profile.text_selection,
                  'contextWindowTokens',profile.context_window_tokens,
                  'maxOutputTokens',profile.max_output_tokens,'temperature',profile.temperature,
                  'configuration',profile.configuration,

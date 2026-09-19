@@ -319,6 +319,7 @@ describe("System Archive contracts", () => {
           kind: "intent",
           authority: {
             providerType: "openrouter", providerRole: "intent", defaultModel: "intent-model",
+            textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
             contextWindowTokens: 12_345, maxOutputTokens: 678, temperature: 0.37,
             configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4 },
             requestTimeoutMs: 45_678, enabled: true, isDefault: true, createdAt, updatedAt
@@ -377,6 +378,8 @@ describe("System Archive contracts", () => {
 
     const parsed = records.map((record) => systemRecordEnvelopeSchema.parse(record));
     expect(parsed.map((entry) => entry.formatVersion)).toEqual([2, 2, 2, 2, 2]);
+    expect((parsed[0]!.record as { authority: { textSelection?: unknown } }).authority.textSelection)
+      .toEqual({ kind: "openrouter_preset", slug: "nexus-nsfw" });
     expect((parsed[2]!.record as { action: string }).action).toBe(exact);
     expect((parsed[3]!.record as { authority: { ordinal: number } }).authority.ordinal).toBe(27);
     expect(() => systemRecordEnvelopeSchema.parse({

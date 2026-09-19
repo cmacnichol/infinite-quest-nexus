@@ -1,6 +1,7 @@
 export * from "./imports.js";
 export * from "./memory.js";
 export * from "./generation.js";
+export * from "./provider-selection.js";
 export * from "./text-response-format.js";
 export * from "./generation-response-contract.js";
 export * from "./generation-response-format-projection.js";

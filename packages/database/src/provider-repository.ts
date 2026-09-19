@@ -5,6 +5,11 @@ import {
   type ProviderType
 } from "../../contracts/src/generation.js";
 import {
+  normalizeTextSelection,
+  selectionCompatibilityId,
+  type TextModelSelection
+} from "../../contracts/src/provider-selection.js";
+import {
   toSafeProviderConfiguration,
   type CreateProviderProfileCommand,
   type DirectProviderResolution,
@@ -27,6 +32,7 @@ type ProviderRow = {
   provider_role: ProviderRole;
   base_url: string;
   default_model: string;
+  text_selection: unknown;
   context_window_tokens: number;
   max_output_tokens: number;
   temperature: number;
@@ -45,7 +51,7 @@ type ProviderRow = {
   updated_at: Date | string;
 };
 
-const SELECT_COLUMNS = `id, name, provider_type, provider_role, base_url, default_model,
+const SELECT_COLUMNS = `id, name, provider_type, provider_role, base_url, default_model, text_selection,
   context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration,
   encrypted_api_key, credential_nonce, credential_auth_tag, credential_key_version, enabled,
   is_default, health_status, consecutive_failures, last_health_check_at, created_at, updated_at`;
@@ -66,6 +72,19 @@ function capability(role: ProviderRole): ProviderProfileView["capability"] {
 }
 
 function profileView(row: ProviderRow): ProviderProfileView {
+  let textSelection: TextModelSelection | undefined;
+  if (row.provider_role === "text" || row.provider_role === "intent") {
+    try {
+      textSelection = normalizeTextSelection({
+        providerType: row.provider_type,
+        providerRole: row.provider_role,
+        defaultModel: row.default_model,
+        ...(row.text_selection === null || row.text_selection === undefined ? {} : { textSelection: row.text_selection as TextModelSelection })
+      });
+    } catch {
+      // Historical malformed aliases remain visible through defaultModel without rewriting persisted data.
+    }
+  }
   return {
     id: row.id,
     name: row.name,
@@ -74,6 +93,7 @@ function profileView(row: ProviderRow): ProviderProfileView {
     capability: capability(row.provider_role),
     baseUrl: row.base_url,
     defaultModel: row.default_model,
+    ...(textSelection === undefined ? {} : { textSelection }),
     contextWindowTokens: row.context_window_tokens,
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
@@ -108,12 +128,33 @@ function validateCreate(command: CreateProviderProfileCommand): CreateProviderPr
   const configuration = validateProviderConfiguration(command.providerType, command.configuration);
   const parsed = providerProfileInputSchema.parse({ ...command, configuration });
   if (parsed.isDefault && !parsed.enabled) throw httpError("A disabled provider cannot be the default.", 400);
+  if (parsed.textSelection !== undefined && parsed.providerRole !== "text" && parsed.providerRole !== "intent") {
+    throw httpError("Text selections are available only for text or intent provider profiles.", 400);
+  }
+  const textSelection = normalizeTextSelection({
+    providerType: parsed.providerType,
+    providerRole: parsed.providerRole,
+    defaultModel: parsed.defaultModel,
+    ...(parsed.textSelection === undefined ? {} : { textSelection: parsed.textSelection })
+  });
   return {
     ...command,
     ...parsed,
     baseUrl: parsed.baseUrl.replace(/\/+$/, ""),
+    defaultModel: selectionCompatibilityId(textSelection),
+    ...(parsed.providerRole === "text" || parsed.providerRole === "intent" ? { textSelection } : {}),
     configuration
   } as CreateProviderProfileCommand;
+}
+
+function withRequiredTextResponseFormat(
+  role: ProviderRole,
+  configuration: SafeProviderConfiguration,
+): SafeProviderConfiguration {
+  if ((role === "text" || role === "intent") && configuration.textResponseFormatPolicy === undefined) {
+    return toSafeProviderConfiguration({ ...configuration, textResponseFormatPolicy: "required" });
+  }
+  return configuration;
 }
 
 async function lockRole(client: DatabaseClient, ownerUserId: string, role: ProviderRole): Promise<void> {
@@ -197,7 +238,11 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
     },
 
     async createProfile(rawCommand) {
-      const command = validateCreate(rawCommand);
+      const parsed = validateCreate(rawCommand);
+      const command = {
+        ...parsed,
+        configuration: withRequiredTextResponseFormat(parsed.providerRole, parsed.configuration)
+      } as CreateProviderProfileCommand;
       if (command.isDefault) {
         await lockRole(client, command.ownerUserId, command.providerRole);
         await client.query(
@@ -207,13 +252,13 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       }
       const result = await client.query<ProviderRow>(
         `INSERT INTO provider_profiles (
-           owner_user_id, name, provider_type, provider_role, base_url, default_model,
+           owner_user_id, name, provider_type, provider_role, base_url, default_model, text_selection,
            context_window_tokens, max_output_tokens, temperature, request_timeout_ms,
            configuration, enabled, is_default
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14)
          RETURNING ${SELECT_COLUMNS}`,
         [command.ownerUserId, command.name, command.providerType, command.providerRole,
-          command.baseUrl, command.defaultModel.trim(), command.contextWindowTokens,
+          command.baseUrl, command.defaultModel.trim(), command.textSelection ? JSON.stringify(command.textSelection) : null, command.contextWindowTokens,
           command.maxOutputTokens, command.temperature, command.requestTimeoutMs,
           JSON.stringify(command.configuration), command.enabled, command.isDefault]
       );
@@ -244,12 +289,17 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
         providerRole: row.provider_role,
         baseUrl: changes.baseUrl ?? row.base_url,
         defaultModel: changes.defaultModel ?? row.default_model,
+        ...(changes.textSelection === undefined && (row.text_selection === null || changes.defaultModel !== undefined) ? {} : {
+          textSelection: changes.textSelection ?? row.text_selection as TextModelSelection
+        }),
         contextWindowTokens: changes.contextWindowTokens ?? row.context_window_tokens,
         maxOutputTokens: changes.maxOutputTokens ?? row.max_output_tokens,
         temperature: changes.temperature ?? row.temperature,
         requestTimeoutMs: changes.requestTimeoutMs ?? row.request_timeout_ms,
         configuration: changes.configuration === undefined
-          ? toSafeProviderConfiguration(row.configuration)
+          ? (changes.defaultModel === undefined && changes.textSelection === undefined
+              ? toSafeProviderConfiguration(row.configuration)
+              : withRequiredTextResponseFormat(row.provider_role, toSafeProviderConfiguration(row.configuration)))
           : validateProviderConfiguration(row.provider_type, changes.configuration),
         enabled: changes.enabled ?? row.enabled,
         isDefault: changes.isDefault ?? row.is_default
@@ -261,11 +311,11 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
         );
       }
       const result = await client.query<ProviderRow>(
-        `UPDATE provider_profiles SET name=$3, base_url=$4, default_model=$5,
-           context_window_tokens=$6, max_output_tokens=$7, temperature=$8, request_timeout_ms=$9,
-           configuration=$10::jsonb, enabled=$11, is_default=$12, updated_at=now()
+        `UPDATE provider_profiles SET name=$3, base_url=$4, default_model=$5, text_selection=$6::jsonb,
+           context_window_tokens=$7, max_output_tokens=$8, temperature=$9, request_timeout_ms=$10,
+           configuration=$11::jsonb, enabled=$12, is_default=$13, updated_at=now()
          WHERE id=$1 AND owner_user_id=$2 RETURNING ${SELECT_COLUMNS}`,
-        [row.id, command.ownerUserId, merged.name, merged.baseUrl, merged.defaultModel.trim(),
+        [row.id, command.ownerUserId, merged.name, merged.baseUrl, merged.defaultModel.trim(), merged.textSelection ? JSON.stringify(merged.textSelection) : null,
           merged.contextWindowTokens, merged.maxOutputTokens, merged.temperature,
           merged.requestTimeoutMs, JSON.stringify(merged.configuration), merged.enabled, merged.isDefault]
       );
@@ -386,7 +436,10 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
           selectedTextFallbackAllowed ? request.selectedProviderProfileId : undefined,
           request.model,
         );
-        if (fallback.status === "resolved") return { ...fallback, requestedRole: "embedding", source: "text_fallback" };
+        if (fallback.status === "resolved") {
+          if (fallback.model.startsWith("@preset/")) throw httpError("A text preset cannot be used for embedding fallback.", 400);
+          return { ...fallback, requestedRole: "embedding", source: "text_fallback" };
+        }
       }
       return { status: "unconfigured", requestedRole: "embedding", resolvedRole: null, source: "none" };
     }

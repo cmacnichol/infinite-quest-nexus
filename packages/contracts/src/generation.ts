@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { textModelSelectionSchema } from "./provider-selection.js";
 import { generationResponseFormatProjectionSchema } from "./generation-response-format-projection.js";
 export {
   canonicalFactUpdateSchema,
@@ -31,6 +32,7 @@ export const providerProfileInputSchema = z.object({
   providerRole: providerRoleSchema.default("text"),
   baseUrl: z.url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), "Base URL must use HTTP or HTTPS."),
   defaultModel: z.string().trim().max(500).default(""),
+  textSelection: textModelSelectionSchema.optional(),
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).default(32768),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).default(4096),
   temperature: z.coerce.number().min(0).max(2).default(0.8),
@@ -61,6 +63,7 @@ export const providerProfileUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   baseUrl: z.url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), "Base URL must use HTTP or HTTPS.").optional(),
   defaultModel: z.string().trim().max(500).optional(),
+  textSelection: textModelSelectionSchema.optional(),
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional(),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).optional(),
   temperature: z.coerce.number().min(0).max(2).optional(),
