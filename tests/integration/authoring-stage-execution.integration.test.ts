@@ -21,6 +21,8 @@ import { prepareAuthoringTextExecution } from "../../services/runtime/src/author
 import type { RuntimeProviderExecutionPort, RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 import type { ProviderRequest, ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { ProviderHttpError } from "../../packages/story-engine/src/providers.js";
+import { composePresetPrompt } from "../../packages/story-engine/src/preset-prompt.js";
+import { buildSourceExtractionPrompt, buildSourceWorldPrompt } from "../../packages/domain/src/authoring-prompts.js";
 import { assembleGeneratedWorld } from "../../services/runtime/src/provider-world-generation-adapter.js";
 import fixture from "../fixtures/authoring/reliability.json" with { type: "json" };
 
@@ -100,6 +102,24 @@ integration("durable authoring real repository and stage dispatcher", () => {
     expect("version" in persisted).toBe(nativePresetPlansEnabled);
     expect(getPreset).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
     expect(listModels).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
+  });
+
+  it.each(["faithful", "expand"] as const)("composition freezes exact native source prompts for %s mode", async (mode) => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "story_source", target: { kind: "new_world" }, idempotencyKey: randomUUID(), name: "chapter.txt", text: "Iris wears a blue coat.", mode, boundaryParagraphId: "paragraph:0", instructions: "Keep evidence." });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000013", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result('{"facts":[]}') };
+    const preset = "Preset system.";
+    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled: true, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset: async () => ({ preset: { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: preset } }), listModels: async () => ({ models: [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }] }) }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) }, promptTools: { content: () => "" } } as never, dispatch: (async () => ({ kind: "source_plan", chunks: [{ id: "chunk", sourceId: "source", sourceRange: { start: 0, end: 1 }, contentHash: "a".repeat(64), spans: [{ paragraphId: "paragraph:0", start: 0, end: 1 }] }] })) as never });
+    await expect(worker.runNext({ workerId: "source-plans", leaseSeconds: 60 })).resolves.toBe(true);
+    const row = (await pool.query<{ execution_snapshot: any }>("SELECT execution_snapshot FROM authoring_jobs WHERE id = $1", [job.id])).rows[0]!.execution_snapshot;
+    const plans = row.textExecutionPlans;
+    const extraction = (repair: boolean) => buildSourceExtractionPrompt({ instructions: "", sourceText: "", mode, chunk: { sourceRange: { start: 0, end: 0 }, paragraphSpans: [] }, repair }).systemPrompt;
+    const world = (repair: boolean) => buildSourceWorldPrompt({ instructions: "", reviewGeneration: 0, selection: { source: { id: "snapshot", name: "snapshot", sha256: "0".repeat(64) }, boundaryParagraphId: "snapshot", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: [], mode }, repair }).systemPrompt;
+    expect(plans.sourceExtraction.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: extraction(false) }));
+    expect(plans.sourceExtractionRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: extraction(true) }));
+    expect(plans.sourceWorld.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(false) }));
+    expect(plans.sourceWorldRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(true) }));
   });
 
   it.each(["heartbeat false", "heartbeat error", "shutdown"])("leaves a real job resumable after %s, drains and resumes its pinned snapshot after expiry", async (mode) => {
