@@ -57,6 +57,8 @@ export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = R
   configuration: Readonly<Record<string, unknown>>;
   /** Opaque execution revision; it changes when any route/credential input changes. */
   executionRevision?: string;
+  /** Opaque authority revision for endpoint, owner-scoped role, enabled row, and credential material only. */
+  authorityRevision?: string;
   textSelection?: TextModelSelection;
 }>;
 
@@ -171,6 +173,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     model = row.defaultModel,
     contextWindowTokens = row.contextWindowTokens,
   ): RuntimeProviderDescriptor<R> {
+    const authorityRevision = createHash("sha256").update(JSON.stringify({
+      providerProfileId: row.providerProfileId,
+      providerRole: row.providerRole,
+      baseUrl: row.baseUrl,
+      credential: row.encryptedCredential
+    })).digest("hex");
     return Object.freeze({
       id: row.providerProfileId,
       name: row.name,
@@ -184,6 +192,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       endpointIdentity: providerEndpointIdentity(row.baseUrl),
       configuration: Object.freeze({ ...row.configuration })
       , executionRevision: row.executionRevision
+      , authorityRevision
       , ...(row.textSelection === undefined ? {} : { textSelection: row.textSelection })
     });
   }
