@@ -856,7 +856,7 @@ export async function generateWorldPreviewForOwner(
       },
       providers,
       progressKey || "world-generation-preview",
-      providerResolution.status === "resolved" ? providerResolution.model : undefined,
+      undefined,
       async (phase, progressPercent, message) => {
         if (progressKey) {
           await dependencies.updateWorldGenerationProgress(pool, ownerUserId, progressKey, {

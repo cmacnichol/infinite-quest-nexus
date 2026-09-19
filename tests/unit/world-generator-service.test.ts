@@ -1,8 +1,11 @@
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
+import { effectiveAuthoringPrompt } from "../../packages/domain/src/authoring-prompts.js";
+import { buildPlayableCharacterGenerationPrompt, CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/character-authoring.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
 import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
+import { composePresetPrompt } from "../../packages/story-engine/src/preset-prompt.js";
 import {
   ProviderTransportError,
   ProviderHttpError,
@@ -216,12 +219,20 @@ it("prepares one inherited preset workflow for the direct CYOA world and seed pi
   expect(executePrepared.mock.calls.map(([input]) => input.operation)).toEqual(["worldOutline", "worldOutlineRepair", "seedCharacter", "seedCharacterRepair", "seedCharacter", "seedCharacter"]);
   expect(executePrepared.mock.calls[1]?.[0].request.rejectedResponse).toBe("{");
   expect(executePrepared.mock.calls[3]?.[0].request.rejectedResponse).toContain("Different Character");
-  expect(requests[0]?.systemPrompt).toContain("Preset instructions.");
-  expect(requests[1]?.systemPrompt).toContain("Preset instructions.");
+  expect(requests.map((request) => request.systemPrompt)).toEqual([
+    composePresetPrompt({ presetPrompt: "Preset instructions.", operationPrompt: effectiveAuthoringPrompt("world", PROMPT_TEMPLATE_CATALOG.world_generation.defaultContent).content }),
+    composePresetPrompt({ presetPrompt: "Preset instructions.", operationPrompt: effectiveAuthoringPrompt("world", PROMPT_TEMPLATE_CATALOG.world_generation_recovery.defaultContent).content }),
+    composePresetPrompt({ presetPrompt: "Preset instructions.", operationPrompt: effectiveAuthoringPrompt("world_character", PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent).content }),
+    composePresetPrompt({ presetPrompt: "Preset instructions.", operationPrompt: effectiveAuthoringPrompt("world_character", PROMPT_TEMPLATE_CATALOG.world_character_generation_recovery.defaultContent).content }),
+    composePresetPrompt({ presetPrompt: "Preset instructions.", operationPrompt: effectiveAuthoringPrompt("world_character", PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent).content }),
+    composePresetPrompt({ presetPrompt: "Preset instructions.", operationPrompt: effectiveAuthoringPrompt("world_character", PROMPT_TEMPLATE_CATALOG.world_character_generation.defaultContent).content })
+  ]);
 });
 
 it("dispatches standalone character repair through one prepared preset workflow", async () => {
+  const requests: ProviderRequest[] = [];
   const executePrepared = vi.fn(async ({ operation: _operation, request }: { operation: string; request: ProviderRequest }) => {
+    requests.push(request);
     const response = executePrepared.mock.calls.length === 1 ? "{\"name\":\"Mira\"}" : JSON.stringify(character("Mira"));
     return providerResult(response, "standalone-response");
   });
@@ -235,8 +246,9 @@ it("dispatches standalone character repair through one prepared preset workflow"
     authoringTextPlans: { nativePresetPlansEnabled: true, preparedExecutor: { execute: executePrepared }, loadAuthority: async () => ({ id: "provider-id", providerRole: "text", authorityRevision: "authority" }), ports: { resolvePreset: async () => getPreset(), discoverModels: async () => listModels() } }
   } as unknown as WorldGenerationProviderCollaborators;
 
+  const content = worldContentSchema.parse({ world: { title: "The Moving Roads" }, playableCharacters: [] });
   const result = await generatePlayableCharacterPreviewForOwner({} as never, "owner-id", {
-    content: worldContentSchema.parse({ world: { title: "The Moving Roads" }, playableCharacters: [] }), prompt: "Create Mira.", progressKey: "character-preview"
+    content, prompt: "Create Mira.", progressKey: "character-preview"
   }, providers, { createWorldGenerationProgress: async () => undefined, updateWorldGenerationProgress: async () => undefined });
 
   expect(result.character.name).toBe("Mira");
@@ -244,8 +256,98 @@ it("dispatches standalone character repair through one prepared preset workflow"
   expect(listModels).toHaveBeenCalledTimes(1);
   expect(executePrepared.mock.calls.map(([input]) => input.operation)).toEqual(["standaloneCharacter", "standaloneCharacter"]);
   expect(executePrepared.mock.calls[1]?.[0].request.rejectedResponse).toBe('{"name":"Mira"}');
+  const operationPrompt = effectiveAuthoringPrompt("character", buildPlayableCharacterGenerationPrompt(
+    content,
+    "Create Mira.",
+    undefined,
+    PROMPT_TEMPLATE_CATALOG.character_generation.defaultContent.replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION)
+  ).systemPrompt).content;
+  expect(requests.map((request) => request.systemPrompt)).toEqual([
+    composePresetPrompt({ presetPrompt: "Preset character instructions.", operationPrompt }),
+    composePresetPrompt({ presetPrompt: "Preset character instructions.", operationPrompt })
+  ]);
 });
 
+function nativeDirectWorldHarness(options: Readonly<{ changeAuthorityAfterWorld?: boolean }> = {}) {
+  const captured: Array<{ plan: { selection: unknown }; request: ProviderRequest }> = [];
+  const getPreset = vi.fn(async ({ slug }: { slug: string }) => ({
+    slug, name: slug, versionId: "v1", version: 1,
+    configHash: "c".repeat(64), config: { models: ["native-model"] }, systemPrompt: `${slug} instructions.`
+  }));
+  const listModels = vi.fn(async ({ modelIds }: { modelIds: readonly string[] }) => modelIds.map((id) => ({ id, contextWindowTokens: 8192, maxOutputTokens: 1024 })));
+  let authorityRevision = "authority";
+  let seedInitials = 0;
+  const executePrepared = vi.fn(async ({ operation, plan, request }: { operation: string; plan: { selection: unknown }; request: ProviderRequest }) => {
+    captured.push({ plan, request });
+    if (operation === "worldOutline") {
+      if (options.changeAuthorityAfterWorld) authorityRevision = "changed";
+      return providerResult(worldDraftResponse(3));
+    }
+    seedInitials += 1;
+    return providerResult(JSON.stringify(character(`Character ${seedInitials}`)));
+  });
+  const providers = {
+    resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider-id", model: "inherited-model" }) },
+    execution: { text: async () => ({
+      id: "provider-id", name: "Native", providerRole: "text", providerType: "openrouter", model: "inherited-model",
+      contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000,
+      configuration: {}, executionRevision: "execution", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "inherited" },
+      execute: async () => { throw new Error("legacy execute must not receive enabled native work"); }
+    }) },
+    prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) },
+    promptTools: { content: (_snapshot: unknown, key: keyof typeof PROMPT_TEMPLATE_CATALOG) => PROMPT_TEMPLATE_CATALOG[key].defaultContent },
+    authoringTextPlans: {
+      nativePresetPlansEnabled: true,
+      preparedExecutor: { execute: executePrepared },
+      loadAuthority: async () => ({ id: "provider-id", providerRole: "text", authorityRevision }),
+      ports: { resolvePreset: getPreset, discoverModels: listModels }
+    }
+  } as unknown as WorldGenerationProviderCollaborators;
+  return { captured, executePrepared, getPreset, listModels, providers };
+}
+
+it("keeps the inherited preset when the world preview wrapper resolves a provider model", async () => {
+  const harness = nativeDirectWorldHarness();
+  await generateWorldPreviewForOwner({} as never, "owner-id", {
+    title: "The Moving Roads", prompt: "Roads move beneath moonlight.", progressKey: "world-preview"
+  }, harness.providers, {
+    createWorldGenerationProgress: async () => undefined,
+    updateWorldGenerationProgress: async () => undefined
+  });
+
+  expect(harness.getPreset).toHaveBeenCalledWith(expect.objectContaining({ slug: "inherited" }));
+  expect(harness.captured[0]?.plan.selection).toEqual({ kind: "openrouter_preset", slug: "inherited" });
+});
+
+it("uses a direct concrete world model override without resolving the inherited preset", async () => {
+  const harness = nativeDirectWorldHarness();
+  await generateTemplateWorld({} as never, "owner-id", "provider-id", {
+    sourceName: "test-prompt", sourceKind: "prompt", title: "The Moving Roads", summary: "Roads move beneath moonlight.", keywords: [], excerpts: []
+  }, harness.providers, "world-preview", "concrete-model");
+
+  expect(harness.getPreset).not.toHaveBeenCalled();
+  expect(harness.captured[0]?.plan.selection).toEqual({ kind: "model", modelId: "concrete-model" });
+});
+
+it("normalizes an explicit preset alias before direct world preparation", async () => {
+  const harness = nativeDirectWorldHarness();
+  await generateTemplateWorld({} as never, "owner-id", "provider-id", {
+    sourceName: "test-prompt", sourceKind: "prompt", title: "The Moving Roads", summary: "Roads move beneath moonlight.", keywords: [], excerpts: []
+  }, harness.providers, "world-preview", "@preset/explicit");
+
+  expect(harness.getPreset).toHaveBeenCalledWith(expect.objectContaining({ slug: "explicit" }));
+  expect(harness.captured[0]?.plan.selection).toEqual({ kind: "openrouter_preset", slug: "explicit" });
+});
+
+it("rejects before a seed dispatch when authority changes after a successful world dispatch", async () => {
+  const harness = nativeDirectWorldHarness({ changeAuthorityAfterWorld: true });
+  await expect(generateTemplateWorld({} as never, "owner-id", "provider-id", {
+    sourceName: "test-prompt", sourceKind: "prompt", title: "The Moving Roads", summary: "Roads move beneath moonlight.", keywords: [], excerpts: []
+  }, harness.providers, "world-preview")).rejects.toThrow("Native authoring provider authority is unavailable.");
+
+  expect(harness.executePrepared).toHaveBeenCalledTimes(1);
+  expect(harness.captured).toHaveLength(1);
+});
 function worldProvidersWithError(error: unknown): WorldGenerationProviderCollaborators {
   return {
     resolution: { resolveDirect: async () => ({
