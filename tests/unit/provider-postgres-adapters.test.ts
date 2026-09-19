@@ -205,6 +205,17 @@ describe("provider PostgreSQL adapter boundaries", () => {
       "alternate-model"
     );
     expect(changedEndpointExecution.endpointIdentity).not.toBe(execution.endpointIdentity);
+    expect(changedEndpointExecution.authorityRevision).not.toBe(execution.authorityRevision);
+    row.temperature = 0.9;
+    const ordinaryEditExecution = await adapter.execution.text(
+      { ownerUserId: "00000000-0000-4000-8000-000000000012" }, row.id, "text", "alternate-model"
+    );
+    expect(ordinaryEditExecution.authorityRevision).toBe(changedEndpointExecution.authorityRevision);
+    row.encrypted_api_key = `${encrypted.ciphertext}changed`;
+    const credentialChangedExecution = await adapter.execution.text(
+      { ownerUserId: "00000000-0000-4000-8000-000000000012" }, row.id, "text", "alternate-model"
+    );
+    expect(credentialChangedExecution.authorityRevision).not.toBe(ordinaryEditExecution.authorityRevision);
     expect(JSON.stringify(changedEndpointExecution)).not.toContain(row.base_url);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(health.recordHealth).toHaveBeenCalledWith(expect.objectContaining({ outcome: "healthy" }));

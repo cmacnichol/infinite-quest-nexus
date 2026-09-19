@@ -384,6 +384,20 @@ describe("source authoring adapter", () => {
     expect(prepared.byteLength).toBe(new TextEncoder().encode(prepared.body).length);
   });
 
+  it("measures and dispatches the same frozen v2 source prompt for initial and repair", () => {
+    const { source, chunk } = sourceAndChunk();
+    const execution: RuntimeTextExecution = { id: "source-profile", name: "Source", providerRole: "text", providerType: "openai_compatible", model: "source-model", contextWindowTokens: 8_000, maxOutputTokens: 400, temperature: 0.2, requestTimeoutMs: 30_000, configuration: {}, execute: async () => result('{"facts":[]}') };
+    const budget = createRuntimeSourceAuthoringRequestBudget(execution);
+    const plan = { prompt: "Frozen preset plus source protocol." };
+    const input = { source, chunk, boundaryParagraphId: source.paragraphs[1]!.id, mode: "faithful" as const, instructions: "Keep evidence." };
+    const initial = renderSourceExtractionRequest(input, false, [], undefined, plan);
+    const repair = renderSourceExtractionRequest(input, true, [{ path: "facts" }], "rejected", plan);
+    expect(budget.prepareInitial(initial).body).toBe(budget.render(initial));
+    expect(budget.prepareRepair(repair).body).toBe(budget.render(repair));
+    expect(initial.systemPrompt).toBe(plan.prompt);
+    expect(repair.systemPrompt).toBe(plan.prompt);
+  });
+
   it("uses trusted nonzero global Unicode spans and rejects excerpt-local citation coordinates", async () => {
     const source = normalizeSourceDocument("unicode-source.txt", "😀 Prelude.\n\nMara guards the harbor gate.", "unicode-source");
     const paragraph = source.paragraphs[1]!;

@@ -72,9 +72,8 @@ export function renderSourceExtractionRequest(input: SourceExtractionInput, repa
     mode: input.mode,
     repair,
     issues,
-    ...(rejectedResponse === undefined ? {} : { rejectedResponse }),
-    ...(plan === undefined ? {} : { systemPrompt: plan.prompt })
-  });
+    ...(rejectedResponse === undefined ? {} : { rejectedResponse })
+  }, plan);
 }
 
 export function renderSourceExtractionProviderRequest(input: SourceExtractionRequestFrame, plan?: Pick<TextExecutionPlan, "prompt">): ProviderRequest {
