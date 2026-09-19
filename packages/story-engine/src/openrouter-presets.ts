@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { PresetPage, PresetSummary, ResolvedPreset, ProviderPresetDiagnosticCode } from "@infinite-quest/contracts";
+import { stableStringify } from "../../domain/src/text.js";
 import type { ProviderTransport, ProviderTransportProfile } from "./provider-transport.js";
 
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -119,6 +120,7 @@ function providerConfig(value: unknown): Readonly<Record<string, unknown>> {
   if (!value || typeof value !== "object" || Array.isArray(value)) unsupported("provider");
   const source = value as Record<string, unknown>;
   for (const field of Object.keys(source)) if (!PROVIDER_PARAMETERS.has(field)) unsupported(`provider.${field}`);
+  if (source.order !== undefined && source.sort !== undefined) unsupported("provider.sort");
   const result: Record<string, unknown> = {};
   for (const [field, candidate] of Object.entries(source)) {
     switch (field) {
@@ -140,7 +142,11 @@ function providerConfig(value: unknown): Readonly<Record<string, unknown>> {
   return Object.freeze(result);
 }
 
-function boundedConfig(value: unknown): Readonly<Record<string, unknown>> {
+/**
+ * The single admission boundary for OpenRouter preset configuration. Runtime
+ * resolution reuses this rather than maintaining a second routing allowlist.
+ */
+export function validateOpenRouterPresetConfig(value: unknown): Readonly<Record<string, unknown>> {
   const source = record(value);
   const result: Record<string, unknown> = {};
   for (const field of Object.keys(source)) if (!PRESET_PARAMETERS.has(field)) unsupported(field);
@@ -190,7 +196,7 @@ export async function discoverOpenRouterPreset(profile: ProviderTransportProfile
   const version = record(source.designated_version);
   const systemPrompt = text(version.system_prompt);
   if (systemPrompt.length > MAX_PROMPT_LENGTH) throw new OpenRouterPresetError("preset_config_unsupported");
-  const config = boundedConfig(version.config);
-  const serialized = JSON.stringify(config);
+  const config = validateOpenRouterPresetConfig(version.config);
+  const serialized = stableStringify(config);
   return Object.freeze({ slug: text(source.slug), name: text(source.name), versionId: text(version.id), version: positiveInt(version.version), systemPrompt, config, configHash: createHash("sha256").update(serialized).digest("hex") });
 }
