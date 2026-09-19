@@ -16,6 +16,7 @@ import {
   isIllustrationSegmentEligible,
   segmentIllustrationText,
   sha256,
+  stableStringify,
   stripMechanicsLeakage,
   truncateAtBoundary
 } from "../../../packages/domain/src/index.js";
@@ -25,6 +26,14 @@ import {
 } from "../../../packages/story-engine/src/index.js";
 import { insertImageJob } from "./illustration-image-job-adapter.js";
 import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
+import { prepareAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
+import {
+  textExecutionPlanSchema,
+  textExecutionRouteBasisSchema,
+  type TextExecutionPlan,
+  type TextExecutionRouteBasis
+} from "@infinite-quest/contracts";
+import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
 
 function promptContent(snapshot: Record<string, any> | undefined, key: string): string {
   const entry = snapshot?.[key];
@@ -65,6 +74,135 @@ type SegmentRow = {
   resolved_prompt: string;
   character_visual_reference: string;
 };
+
+/** Private v2 evidence. NULL remains the historical v1 prompt-job branch. */
+export type IllustrationTextExecutionSnapshot = Readonly<{
+  version: 2;
+  state: "prepared";
+  ownerUserId: string;
+  operationPrompt: string;
+  routeBasis: TextExecutionRouteBasis;
+  plan: TextExecutionPlan;
+}> | Readonly<{
+  version: 2;
+  state: "unavailable";
+  errorCode: "illustration_text_route_unavailable";
+}>;
+
+function readIllustrationTextExecutionSnapshot(
+  value: unknown,
+  claimedOwnerUserId: string,
+  claimedProviderProfileId: string,
+  operationPrompt: string,
+): IllustrationTextExecutionSnapshot | null {
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object") throw new Error("The saved illustration text execution snapshot is invalid.");
+  const snapshot = value as { version?: unknown; state?: unknown; ownerUserId?: unknown; routeBasis?: unknown; plan?: unknown; errorCode?: unknown };
+  if (snapshot.version !== 2) throw new Error("The saved illustration text execution snapshot is invalid.");
+  if (snapshot.state === "unavailable" && snapshot.errorCode === "illustration_text_route_unavailable") {
+    return { version: 2, state: "unavailable", errorCode: snapshot.errorCode };
+  }
+  if (snapshot.state !== "prepared" || typeof snapshot.ownerUserId !== "string" || snapshot.ownerUserId !== claimedOwnerUserId
+    || typeof (snapshot as { operationPrompt?: unknown }).operationPrompt !== "string"
+    || (snapshot as { operationPrompt: string }).operationPrompt !== operationPrompt) {
+    throw new Error("The saved illustration text execution snapshot is invalid.");
+  }
+  const routeBasis = textExecutionRouteBasisSchema.parse(snapshot.routeBasis);
+  const plan = textExecutionPlanSchema.parse(snapshot.plan);
+  const derived = deriveTextExecutionPlan(routeBasis, operationPrompt);
+  if (plan.routeBasisHash !== routeBasis.routeBasisHash
+    || stableStringify(plan) !== stableStringify(derived)
+    || plan.credentialReference !== routeBasis.credentialReference
+    || routeBasis.credentialReference !== claimedProviderProfileId) {
+    throw new Error("The saved illustration text execution snapshot is invalid.");
+  }
+  return { version: 2, state: "prepared", ownerUserId: snapshot.ownerUserId, operationPrompt, routeBasis, plan };
+}
+
+/**
+ * Performs any preset/model discovery before a caller opens its parent Story
+ * transaction. A selected native route is never allowed to downgrade into the
+ * mutable v1 executor when this preflight cannot produce a durable plan.
+ */
+export async function prepareIllustrationTextExecution(
+  ownerUserId: string,
+  campaignId: string,
+  config: SegmentConfigRow,
+  operationPrompt: string,
+  providers: Pick<IllustrationProviderCollaborators, "execution" | "resolution" | "illustrationTextPlans">,
+): Promise<IllustrationTextExecutionSnapshot | undefined> {
+  const options = providers.illustrationTextPlans;
+  if (config.segment_prompt_mode !== "ai_refined" || options?.nativePresetPlansEnabled !== true) return undefined;
+  try {
+    const selected = await directProvider(providers, ownerUserId, "text", config.campaign_text_provider_id);
+    if (!selected) return { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+    const execution = await providers.execution.text(
+      { ownerUserId }, selected.providerProfileId, "text", selected.model
+    );
+    if (execution.textSelection?.kind !== "openrouter_preset") return undefined;
+    if (!options.preparedExecutor || !options.loadAuthority) {
+      return { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+    }
+    const prepared = await prepareAuthoringTextExecution({
+      ownerUserId,
+      execution,
+      operationPrompts: { illustrationPromptRefinement: operationPrompt },
+      ports: options.ports,
+    });
+    const plan = prepared.plans.illustrationPromptRefinement;
+    const routeBasisHash = plan?.routeBasisHash;
+    const requestTimeoutMs = plan?.requestTimeoutMs;
+    if (!plan || !routeBasisHash || !requestTimeoutMs) throw new Error("Illustration refinement preparation did not produce a frozen route plan.");
+    const { routeBasisHash: _routeBasisHash, ...routeBasis } = plan;
+    return {
+      version: 2,
+      state: "prepared",
+      ownerUserId,
+      operationPrompt,
+      routeBasis: {
+        version: 2,
+        selection: plan.selection,
+        preset: plan.preset,
+        candidates: plan.candidates,
+        presetSystemPrompt: plan.presetSystemPrompt,
+        parameters: plan.parameters,
+        endpointReference: plan.endpointReference,
+        credentialReference: plan.credentialReference,
+        profileRevision: plan.profileRevision,
+        ...(plan.authorityRevision ? { authorityRevision: plan.authorityRevision } : {}),
+        requestTimeoutMs,
+        protocolVersion: plan.protocolVersion,
+        routeBasisHash
+      },
+      plan
+    };
+  } catch {
+    return { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+  }
+}
+
+/** Prepares one campaign route before direct/rebuild/backfill transactions begin. */
+export async function prepareCampaignIllustrationTextExecution(
+  pool: DatabasePool,
+  ownerUserId: string,
+  campaignId: string,
+  providers: IllustrationProviderCollaborators,
+): Promise<IllustrationTextExecutionSnapshot | undefined> {
+  let config: SegmentConfigRow;
+  try {
+    config = await loadConfig(pool, ownerUserId, campaignId);
+  } catch {
+    return undefined;
+  }
+  const snapshot = await illustrationPrompts(providers, ownerUserId, campaignId);
+  return prepareIllustrationTextExecution(
+    ownerUserId,
+    campaignId,
+    config,
+    promptContent(snapshot, "illustration_refinement"),
+    providers,
+  );
+}
 
 export async function loadConfig(client: DatabaseClient | DatabasePool, ownerUserId: string, campaignId: string): Promise<SegmentConfigRow> {
   const campaign = await client.query(
@@ -116,7 +254,7 @@ function imageConfig(config: SegmentConfigRow, providerProfileId: string | null,
 }
 
 async function illustrationPrompts(
-  providers: IllustrationProviderCollaborators,
+  providers: Pick<IllustrationProviderCollaborators, "prompts">,
   ownerUserId: string,
   campaignId: string,
 ) {
@@ -124,7 +262,7 @@ async function illustrationPrompts(
 }
 
 async function directProvider(
-  providers: IllustrationProviderCollaborators,
+  providers: Pick<IllustrationProviderCollaborators, "resolution">,
   ownerUserId: string,
   providerRole: "text" | "image",
   selectedProviderProfileId?: string | null,
@@ -284,7 +422,8 @@ async function createProvisionalSegmentInTransaction(
   },
   config: SegmentConfigRow,
   providers: IllustrationProviderCollaborators,
-  visualReference?: string
+  visualReference?: string,
+  textExecutionSnapshot?: IllustrationTextExecutionSnapshot,
 ): Promise<boolean> {
   const set = await client.query<{ turn_id: string | null }>(
     "SELECT turn_id FROM turn_illustration_sets WHERE id = $1 AND owner_user_id = $2",
@@ -350,11 +489,13 @@ async function createProvisionalSegmentInTransaction(
     );
     if (textProvider) {
       await client.query(
-        `INSERT INTO illustration_prompt_jobs (
-           owner_user_id, campaign_id, generation_job_id, segment_id, provider_profile_id, requested_model
-         ) VALUES ($1,$2,$3,$4,$5,$6)
+      `INSERT INTO illustration_prompt_jobs (
+           owner_user_id, campaign_id, generation_job_id, segment_id, provider_profile_id, requested_model,
+           prompt_snapshot, text_execution_snapshot
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (segment_id) DO NOTHING`,
-        [ownerUserId, campaignId, generationJobId, segment.id, textProvider.providerProfileId, textProvider.model]
+        [ownerUserId, campaignId, generationJobId, segment.id, textProvider.providerProfileId, textProvider.model,
+          JSON.stringify(promptSnapshot), textExecutionSnapshot ? JSON.stringify(textExecutionSnapshot) : null]
       );
     }
   }
@@ -381,8 +522,17 @@ export async function createProvisionalSegment(
   visualReference?: string
 ): Promise<boolean> {
   if (isDatabasePool(client)) {
+    const promptSnapshot = await illustrationPrompts(providers, ownerUserId, campaignId);
+    const textExecutionSnapshot = await prepareIllustrationTextExecution(
+      ownerUserId,
+      campaignId,
+      config,
+      promptContent(promptSnapshot, "illustration_refinement"),
+      providers,
+    );
     return withTransaction(client, (transaction) => createProvisionalSegmentInTransaction(
-      transaction, ownerUserId, campaignId, generationJobId, setId, segmentData, config, providers, visualReference
+      transaction, ownerUserId, campaignId, generationJobId, setId, segmentData, config, providers, visualReference,
+      textExecutionSnapshot
     ));
   }
   return createProvisionalSegmentInTransaction(
@@ -472,6 +622,7 @@ async function createTurnSet(
   turnId: string,
   mode: "missing" | "rebuild",
   providers: IllustrationProviderCollaborators,
+  textExecutionSnapshot?: IllustrationTextExecutionSnapshot,
 ) {
   const turnResult = await client.query<{
     campaign_id: string;
@@ -488,7 +639,18 @@ async function createTurnSet(
   const turn = turnResult.rows[0];
   if (!turn) throw Object.assign(new Error("Accepted turn not found."), { statusCode: 404 });
   const config = await loadConfig(client, ownerUserId, turn.campaign_id);
-  const promptSnapshot = await illustrationPrompts(providers, ownerUserId, turn.campaign_id);
+  const loadedPromptSnapshot = await illustrationPrompts(providers, ownerUserId, turn.campaign_id);
+  const promptSnapshot = textExecutionSnapshot?.state === "prepared"
+    && promptContent(loadedPromptSnapshot, "illustration_refinement") !== textExecutionSnapshot.operationPrompt
+    ? {
+      ...loadedPromptSnapshot,
+      illustration_refinement: {
+        ...(loadedPromptSnapshot.illustration_refinement && typeof loadedPromptSnapshot.illustration_refinement === "object"
+          ? loadedPromptSnapshot.illustration_refinement : {}),
+        content: textExecutionSnapshot.operationPrompt
+      }
+    }
+    : loadedPromptSnapshot;
   const visualReference = characterVisualReference(turn.character_profile, turn.character_snapshot);
   const active = await client.query<{ id: string }>(
     `SELECT id FROM turn_illustration_sets
@@ -563,10 +725,11 @@ async function createTurnSet(
     await client.query(
       `INSERT INTO illustration_prompt_jobs (
          owner_user_id, campaign_id, turn_id, segment_id, provider_profile_id,
-         requested_model, max_attempts, prompt_snapshot
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         requested_model, max_attempts, prompt_snapshot, text_execution_snapshot
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [ownerUserId, turn.campaign_id, turnId, segment.id, textProvider.providerProfileId,
-        textProvider.model, config.max_attempts, JSON.stringify(promptSnapshot)]
+        textProvider.model, config.max_attempts, JSON.stringify(promptSnapshot),
+        textExecutionSnapshot ? JSON.stringify(textExecutionSnapshot) : null]
     );
   }
   return { setId, duplicate: false, segmentCount: eligiblePieces.length };
@@ -579,7 +742,17 @@ export async function generateTurnIllustrationSegments(
   providers: IllustrationProviderCollaborators,
 ) {
   const ownerUserId = await initialOwnerId(pool);
-  return withTransaction(pool, (client) => createTurnSet(client, ownerUserId, turnId, request.mode, providers));
+  const turn = await pool.query<{ campaign_id: string }>(
+    "SELECT campaign_id FROM turns WHERE id = $1 AND owner_user_id = $2",
+    [turnId, ownerUserId]
+  );
+  const campaignId = turn.rows[0]?.campaign_id;
+  const textExecutionSnapshot = campaignId
+    ? await prepareCampaignIllustrationTextExecution(pool, ownerUserId, campaignId, providers)
+    : undefined;
+  return withTransaction(pool, (client) => createTurnSet(
+    client, ownerUserId, turnId, request.mode, providers, textExecutionSnapshot
+  ));
 }
 
 export async function enqueueAcceptedTurnIllustrationSegments(
@@ -588,6 +761,7 @@ export async function enqueueAcceptedTurnIllustrationSegments(
   campaignId: string,
   turnId: string,
   providers: IllustrationProviderCollaborators,
+  textExecutionSnapshot?: IllustrationTextExecutionSnapshot,
 ) {
   const enabled = await client.query(
     `SELECT 1 FROM campaign_illustration_configs
@@ -595,7 +769,7 @@ export async function enqueueAcceptedTurnIllustrationSegments(
     [campaignId, ownerUserId]
   );
   if (!enabled.rows[0]) return null;
-  return createTurnSet(client, ownerUserId, turnId, "missing", providers);
+  return createTurnSet(client, ownerUserId, turnId, "missing", providers, textExecutionSnapshot);
 }
 
 export async function previewIllustrationBackfill(
@@ -647,6 +821,15 @@ export async function enqueueIllustrationBackfill(
   providers: IllustrationProviderCollaborators,
 ) {
   const ownerUserId = await initialOwnerId(pool);
+  const existing = await pool.query(
+    `SELECT id, status, estimated_turns AS "turnCount", estimated_segments AS "segmentCount",
+            estimated_images AS "imageCount", queued_sets AS "queuedSets"
+       FROM illustration_backfill_jobs
+      WHERE campaign_id = $1 AND owner_user_id = $2 AND idempotency_key = $3`,
+    [campaignId, ownerUserId, request.idempotencyKey]
+  );
+  if (existing.rows[0]) return { ...existing.rows[0], duplicate: true };
+  const textExecutionSnapshot = await prepareCampaignIllustrationTextExecution(pool, ownerUserId, campaignId, providers);
   return withTransaction(pool, async (client) => {
     const duplicate = await client.query(
       `SELECT id, status, estimated_turns AS "turnCount", estimated_segments AS "segmentCount",
@@ -672,7 +855,7 @@ export async function enqueueIllustrationBackfill(
     );
     let queuedSets = 0;
     for (const turn of turns.rows) {
-      const queued = await createTurnSet(client, ownerUserId, turn.id, request.mode, providers);
+      const queued = await createTurnSet(client, ownerUserId, turn.id, request.mode, providers, textExecutionSnapshot);
       if (!queued.duplicate) queuedSets += 1;
     }
     const inserted = await client.query(
@@ -1058,6 +1241,44 @@ export async function runIllustrationPromptJob(
   const segment = segmentResult.rows[0];
   if (!segment) return true;
   try {
+    let frozen: IllustrationTextExecutionSnapshot | null;
+    try {
+      frozen = readIllustrationTextExecutionSnapshot(
+        claimed.text_execution_snapshot,
+        claimed.owner_user_id,
+        claimed.provider_profile_id,
+        promptContent(claimed.prompt_snapshot, "illustration_refinement"),
+      );
+    } catch {
+      throw Object.assign(new Error("The saved illustration text execution snapshot is invalid."), {
+        code: "illustration_text_route_unavailable"
+      });
+    }
+    if (frozen?.state === "unavailable") {
+      throw Object.assign(new Error("The selected illustration text route could not be prepared."), {
+        code: frozen.errorCode
+      });
+    }
+    if (frozen?.state === "prepared") {
+      const loadAuthority = providers.illustrationTextPlans?.loadAuthority;
+      if (!loadAuthority || !frozen.routeBasis.authorityRevision) {
+        throw Object.assign(new Error("The saved illustration text route has no authority verifier."), {
+          code: "illustration_text_route_unavailable"
+        });
+      }
+      const current = await loadAuthority({
+        ownerUserId: claimed.owner_user_id,
+        providerProfileId: claimed.provider_profile_id
+      });
+      if (current.id !== claimed.provider_profile_id
+        || current.providerRole !== "text"
+        || current.authorityRevision !== frozen.routeBasis.authorityRevision
+        || (current.endpointIdentity ?? current.id) !== frozen.routeBasis.endpointReference) {
+        throw Object.assign(new Error("The saved illustration text route no longer has current provider authority."), {
+          code: "illustration_text_route_unavailable"
+        });
+      }
+    }
     const storyContext = await loadBriefIllustrationStoryContext(
       pool,
       claimed.owner_user_id,
@@ -1074,7 +1295,8 @@ export async function runIllustrationPromptJob(
         model: claimed.requested_model,
         systemPrompt: promptContent(claimed.prompt_snapshot, "illustration_refinement"),
         fictionText: segment.source_text,
-        storyContext
+        storyContext,
+        ...(frozen?.state === "prepared" ? { textExecutionPlan: frozen.plan } : {})
       });
     const prompt = result.prompt;
     const responseId = String(result.metadata.responseId || "");
@@ -1137,19 +1359,23 @@ export async function runIllustrationPromptJob(
         await client.query(
           `UPDATE illustration_prompt_jobs
               SET status = 'fallback', completed_at = now(), updated_at = now(),
-                  error_code = 'refinement_exhausted', error_message = $3,
+                  error_code = $3, error_message = $4,
                   lease_owner = NULL, lease_expires_at = NULL
             WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
-          [claimed.id, workerId, error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
+          [claimed.id, workerId,
+            typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "refinement_exhausted",
+            error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
         );
       } else {
         await client.query(
           `UPDATE illustration_prompt_jobs
               SET status = 'recoverable', next_attempt_at = now() + interval '15 seconds',
-                  error_code = 'refinement_failed', error_message = $3,
+                  error_code = $3, error_message = $4,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
-          [claimed.id, workerId, error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
+          [claimed.id, workerId,
+            typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "refinement_failed",
+            error instanceof Error ? error.message.slice(0, 4000) : String(error).slice(0, 4000)]
         );
       }
     });

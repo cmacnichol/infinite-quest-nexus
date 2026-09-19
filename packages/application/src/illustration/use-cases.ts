@@ -55,8 +55,8 @@ export function createIllustrationApplication(
       promoteProvisionalSet: (database, scope, request) =>
         dependencies.transaction.promoteProvisionalSet(database, scope, request),
       orphanProvisionalSet: (database, scope) => dependencies.transaction.orphanProvisionalSet(database, scope),
-      enqueueAcceptedTurnIllustrationSegments: (database, scope) =>
-        dependencies.transaction.enqueueAcceptedTurnIllustrationSegments(database, scope)
+      enqueueAcceptedTurnIllustrationSegments: (database, scope, request) =>
+        dependencies.transaction.enqueueAcceptedTurnIllustrationSegments(database, scope, request)
     }
   };
 }

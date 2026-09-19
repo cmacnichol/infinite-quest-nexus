@@ -17,6 +17,7 @@ import type {
   RuntimeImageExecution,
   RuntimeTextExecution
 } from "./provider-credential-transport-adapter.js";
+import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 
 export type ImageProviderAdapterDependencies = Readonly<{
   loadImageExecution(
@@ -42,6 +43,8 @@ export type PromptRefinementAdapterDependencies = Readonly<{
   recordProviderHealth: ImageProviderAdapterDependencies["recordProviderHealth"];
   buildRefinementInput(fictionText: string, storyContext: string): string;
   parseRefinedPrompt(content: string): string;
+  /** Frozen v2 routes dispatch through the shared plan-aware executor. */
+  preparedTextExecutor?: PreparedAuthoringTextExecutor;
 }>;
 
 export type ArtifactDownloadAdapterDependencies = Readonly<{
@@ -221,15 +224,30 @@ export function createIllustrationPromptRefinementAdapter(
   return {
     async refinePrompt(request) {
       try {
-        const provider = await dependencies.loadTextExecution(
-          request.ownerUserId,
-          request.providerProfileId,
-          request.model,
-        );
-        const result = await provider.execute({
-          systemPrompt: request.systemPrompt,
+        const providerRequest = {
+          systemPrompt: request.textExecutionPlan?.prompt ?? request.systemPrompt,
           input: dependencies.buildRefinementInput(request.fictionText, request.storyContext)
-        });
+        };
+        const result = request.textExecutionPlan
+          ? await (() => {
+            if (!dependencies.preparedTextExecutor) {
+              throw Object.assign(new Error("The frozen illustration route has no prepared text executor."), {
+                code: "prepared_text_execution_unavailable"
+              });
+            }
+            return dependencies.preparedTextExecutor.execute({
+              plan: request.textExecutionPlan,
+              operation: "illustration_prompt_refinement",
+              ownerUserId: request.ownerUserId,
+              providerProfileId: request.providerProfileId,
+              request: providerRequest
+            });
+          })()
+          : await dependencies.loadTextExecution(
+            request.ownerUserId,
+            request.providerProfileId,
+            request.model,
+          ).then((provider) => provider.execute(providerRequest));
         await dependencies.recordProviderHealth(
           pool,
           request.ownerUserId,

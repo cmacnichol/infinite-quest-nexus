@@ -19,7 +19,7 @@ export type DirectAuthoringTextPlanOptions = Readonly<{
   nativePresetPlansEnabled?: boolean;
   preparedExecutor?: PreparedAuthoringTextExecutor;
   /** Reloads only current owner/profile authority before each paid dispatch. */
-  loadAuthority?(input: Readonly<{ ownerUserId: string; providerProfileId: string }>): Promise<Pick<RuntimeTextExecution, "id" | "providerRole" | "authorityRevision">>;
+  loadAuthority?(input: Readonly<{ ownerUserId: string; providerProfileId: string }>): Promise<Pick<RuntimeTextExecution, "id" | "providerRole" | "authorityRevision" | "endpointIdentity">>;
   ports: TextExecutionPlanDiscoveryPorts;
 }>;
 

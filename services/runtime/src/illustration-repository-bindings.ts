@@ -36,6 +36,7 @@ import {
   generateTurnIllustrationSegments,
   listCampaignIllustrationSegments,
   loadConfig,
+  prepareCampaignIllustrationTextExecution,
   orphanProvisionalSet,
   previewIllustrationBackfill,
   promoteProvisionalSet,
@@ -193,12 +194,13 @@ export function createIllustrationGenerationTransactionPort(
       scope.ownerUserId,
       scope.generationJobId,
     ),
-    enqueueAcceptedTurnIllustrationSegments: (database, scope) => enqueueAcceptedTurnIllustrationSegments(
+    enqueueAcceptedTurnIllustrationSegments: (database, scope, request) => enqueueAcceptedTurnIllustrationSegments(
       database as DatabaseClient,
       scope.ownerUserId,
       scope.campaignId,
       scope.turnId,
       providers,
+      request?.textExecutionSnapshot as import("./illustration-segment-job-adapter.js").IllustrationTextExecutionSnapshot | undefined,
     )
   };
 }
@@ -263,16 +265,19 @@ export function createIllustrationRepositoryFactories(
         await assertInitialOwner(pool, scope.ownerUserId);
         return generateTurnIllustrationSegments(pool, scope.turnId, request, providers);
       },
-      enqueueAcceptedTurnIllustrationSegments: (scope) => withTransaction(
-        pool,
-        (client) => enqueueAcceptedTurnIllustrationSegments(
+      enqueueAcceptedTurnIllustrationSegments: async (scope) => {
+        const textExecutionSnapshot = await prepareCampaignIllustrationTextExecution(
+          pool, scope.ownerUserId, scope.campaignId, providers
+        );
+        return withTransaction(pool, (client) => enqueueAcceptedTurnIllustrationSegments(
           client,
           scope.ownerUserId,
           scope.campaignId,
           scope.turnId,
           providers,
-        ),
-      ),
+          textExecutionSnapshot,
+        ));
+      },
       async previewIllustrationBackfill(scope, request) {
         await assertInitialOwner(pool, scope.ownerUserId);
         return previewIllustrationBackfill(pool, scope.campaignId, request.mode);

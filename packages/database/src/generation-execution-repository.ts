@@ -916,6 +916,8 @@ export type AcceptedGenerationCommit = Readonly<{
   inputs: GenerationOrchestrationInputs;
   orchestration: GenerationOrchestrationState;
   fictionAction: string;
+  /** Prepared outside the accepted-turn transaction; private illustration job state only. */
+  illustrationTextExecutionSnapshot?: unknown;
   collaborators: AcceptedGenerationCommitCollaborators;
   onIllustrationEnqueueError(error: unknown, turnId: string): void;
 }>;
@@ -1570,13 +1572,15 @@ async function commitAcceptedTurn(
       } else {
         await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
           client,
-          { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId }
+          { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId },
+          input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : undefined
         );
       }
     } else {
       await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
         client,
-        { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId }
+        { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId },
+        input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : undefined
       );
     }
     await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");

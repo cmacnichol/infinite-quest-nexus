@@ -7,6 +7,7 @@ import type {
   IllustrationSegmentRequest,
   WorldCoverRequest
 } from "@infinite-quest/contracts";
+import type { TextExecutionPlan } from "@infinite-quest/contracts";
 
 export type IllustrationOwnerScope = Readonly<{
   ownerUserId: string;
@@ -381,6 +382,8 @@ export type IllustrationPromptRefinementRequest = IllustrationSegmentExecutionSc
   systemPrompt: string;
   fictionText: string;
   storyContext: string;
+  /** Private durable v2 plan; never include this in a serving projection. */
+  textExecutionPlan?: TextExecutionPlan;
 }>;
 
 export type IllustrationPromptRefinementResult = Readonly<{

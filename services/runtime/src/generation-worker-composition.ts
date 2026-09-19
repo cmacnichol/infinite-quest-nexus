@@ -28,6 +28,7 @@ import {
   type GenerationExecutionCollaborators,
   type GenerationExecutorDependencies
 } from "./generation-executor-adapter.js";
+import { loadConfig, prepareIllustrationTextExecution } from "./illustration-segment-job-adapter.js";
 
 type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutionRepository;
 
@@ -65,6 +66,17 @@ export function createGenerationExecutionCollaborators(
   return {
     memory: memory.generation,
     illustration: illustration.generation,
+    prepareIllustrationTextExecution: async ({ ownerUserId, campaignId, operationPrompt }) => {
+      let config;
+      try {
+        config = await loadConfig(pool, ownerUserId, campaignId);
+      } catch {
+        // Illustrations are optional; disabled/missing configuration has no
+        // refinement job to prepare and cannot block the accepted Story turn.
+        return undefined;
+      }
+      return prepareIllustrationTextExecution(ownerUserId, campaignId, config, operationPrompt, providers);
+    },
     loadTextExecution: (ownerUserId, providerProfileId, model) => providers.execution.text(
       { ownerUserId },
       providerProfileId,

@@ -189,6 +189,73 @@ describe("illustration provider adapters", () => {
       expect.anything(), ownerUserId, providerProfileId, true
     );
   });
+
+  it("dispatches a frozen refinement plan through the prepared text executor without loading mutable text execution", async () => {
+    const legacyExecution = vi.fn(async () => {
+      throw new Error("legacy text execution must not receive a frozen refinement plan");
+    });
+    const preparedExecute = vi.fn(async () => ({
+      content: "Moonlit observatory, silver lens, cinematic fantasy illustration",
+      responseId: "prepared-response-1",
+      finishReason: "stop",
+      outputLimited: false,
+      modelInstanceId: "prepared-model",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      reportedCost: null,
+      rawMetadata: {}
+    }));
+    const adapter = createIllustrationPromptRefinementAdapter(
+      {} as DatabasePool,
+      {
+        loadTextExecution: legacyExecution as never,
+        preparedTextExecutor: { execute: preparedExecute },
+        recordProviderHealth: vi.fn(async () => undefined) as never,
+        buildRefinementInput: (fictionText, storyContext) => `${fictionText}\n${storyContext}`,
+        parseRefinedPrompt: (content) => content
+      }
+    );
+
+    await expect(adapter.refinePrompt({
+      ownerUserId,
+      campaignId,
+      turnId: "33333333-3333-4333-8333-333333333333",
+      segmentId: "44444444-4444-4444-8444-444444444444",
+      providerProfileId,
+      model: "text-model",
+      systemPrompt: "Return only a fiction-only visual prompt.",
+      fictionText: "Moonlight fills the observatory.",
+      storyContext: "A quiet night beneath a violet sky.",
+      textExecutionPlan: {
+        version: 2,
+        selection: { kind: "openrouter_preset", slug: "illustration" },
+        preset: { slug: "illustration", versionId: "v1", configHash: "a".repeat(64) },
+        candidates: [{ modelId: "prepared-model", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+        presetSystemPrompt: "Preset instructions.",
+        parameters: { temperature: 0.2 },
+        prompt: "Preset instructions.\n\nReturn only a fiction-only visual prompt.",
+        promptHash: "b".repeat(64),
+        endpointReference: "endpoint-1",
+        credentialReference: providerProfileId,
+        profileRevision: "profile-1",
+        authorityRevision: "authority-1",
+        requestTimeoutMs: 30_000,
+        protocolVersion: "illustration-refinement-v2",
+        routeBasisHash: "c".repeat(64),
+        planHash: "d".repeat(64)
+      }
+    })).resolves.toMatchObject({ prompt: "Moonlit observatory, silver lens, cinematic fantasy illustration" });
+
+    expect(legacyExecution).not.toHaveBeenCalled();
+    expect(preparedExecute).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "illustration_prompt_refinement",
+      ownerUserId,
+      providerProfileId,
+      request: {
+        systemPrompt: "Preset instructions.\n\nReturn only a fiction-only visual prompt.",
+        input: expect.stringContaining("Moonlight fills the observatory.")
+      }
+    }));
+  });
 });
 
 describe("illustration artifact download adapter", () => {

@@ -50,6 +50,9 @@ export function createIllustrationPlatformBindings(
         "text",
         model
       ),
+      ...(providers.illustrationTextPlans?.preparedExecutor
+        ? { preparedTextExecutor: providers.illustrationTextPlans.preparedExecutor }
+        : {}),
       recordProviderHealth: (_pool, ownerUserId, providerProfileId, healthy) => providers.health.recordHealth({
         ownerUserId,
         providerProfileId,

@@ -84,6 +84,8 @@ export type WorkerGenerationProviderCollaborators = ApiGenerationProviderCollabo
 export type IllustrationProviderCollaborators = ProviderConsumerRuntime & Readonly<{
   prompts: IllustrationPromptPort;
   costs: ProviderIllustrationCostPort;
+  /** Disabled by default until the v2 route and worker rollout gates are complete. */
+  illustrationTextPlans?: DirectAuthoringTextPlanOptions;
 }>;
 
 export type ChronicleProviderCollaborators = ProviderConsumerRuntime & Readonly<{

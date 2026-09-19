@@ -62,6 +62,7 @@ import type {
   FactFormatRepairApplication
 } from "../../../packages/database/src/generation-execution-repository.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
+import type { IllustrationTextExecutionSnapshot } from "./illustration-segment-job-adapter.js";
 import {
   activatedEventsFromResponse,
   buildEventExtensionPrompt,
@@ -211,6 +212,10 @@ type GenerationCostAttribution = Readonly<{
 export type GenerationExecutionCollaborators = Readonly<{
   memory: MemoryGenerationTransactionPort;
   illustration: IllustrationGenerationTransactionPort;
+  /** Resolves optional illustration route metadata before the accepted-turn transaction begins. */
+  prepareIllustrationTextExecution?(
+    input: Readonly<{ ownerUserId: string; campaignId: string; operationPrompt: string }>
+  ): Promise<IllustrationTextExecutionSnapshot | undefined>;
   loadTextExecution(
     ownerUserId: string,
     providerProfileId: string,
@@ -1665,6 +1670,18 @@ async function executeLoadedGeneration(
       assertActiveGenerationUpdate(await repository.markGenerating(scope), "resuming final Keep generation state");
       assertActiveGenerationUpdate(await repository.markValidating(scope), "resuming final Keep validation");
       assertActiveGenerationUpdate(await repository.markCommitting(scope), "resuming final Keep commit");
+      let illustrationTextExecutionSnapshot: IllustrationTextExecutionSnapshot | undefined;
+      try {
+        illustrationTextExecutionSnapshot = await collaborators.prepareIllustrationTextExecution?.({
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id,
+          operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
+        });
+      } catch (error) {
+        logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
+          errorMessage: error instanceof Error ? error.message : String(error) });
+        illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+      }
       const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
         scope, job, story,
         provider: providerDescriptor as { id: string; providerType: string; model: string },
@@ -1675,6 +1692,7 @@ async function executeLoadedGeneration(
         inputs: frozenInputs as GenerationExecutionPayload["orchestration_inputs"],
         orchestration: frozenOrchestration as GenerationOrchestrationState,
         fictionAction: frozen.fictionAction as string,
+        ...(illustrationTextExecutionSnapshot ? { illustrationTextExecutionSnapshot } : {}),
         collaborators: { memory: collaborators.memory, illustration: collaborators.illustration,
           attributeGenerationCostsToTurn: collaborators.attributeGenerationCostsToTurn },
         onIllustrationEnqueueError(error, acceptedTurnId) {
@@ -3883,6 +3901,18 @@ async function executeLoadedGeneration(
       illustration: collaborators.illustration,
       attributeGenerationCostsToTurn: collaborators.attributeGenerationCostsToTurn
     };
+    let illustrationTextExecutionSnapshot: IllustrationTextExecutionSnapshot | undefined;
+    try {
+      illustrationTextExecutionSnapshot = await collaborators.prepareIllustrationTextExecution?.({
+        ownerUserId: job.owner_user_id,
+        campaignId: job.campaign_id,
+        operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
+      });
+    } catch (error) {
+      logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
+        errorMessage: error instanceof Error ? error.message : String(error) });
+      illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+    }
     const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
       scope,
       job,
@@ -3896,6 +3926,7 @@ async function executeLoadedGeneration(
       inputs,
       orchestration,
       fictionAction: safeAction,
+      ...(illustrationTextExecutionSnapshot ? { illustrationTextExecutionSnapshot } : {}),
       collaborators: acceptedCommitCollaborators,
       onIllustrationEnqueueError(error, acceptedTurnId) {
         logger.warn({
