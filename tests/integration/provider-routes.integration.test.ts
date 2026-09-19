@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import * as http from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -154,6 +155,42 @@ integration("provider route configuration redaction", () => {
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({ slug: "night-shift", systemPrompt: "private preset prompt" });
     expect(JSON.stringify(detail.json())).not.toContain("preset-secret");
+  });
+
+  it("aborts a disconnected saved-preset request through the route, adapter, runtime, and transport reader without aborting a completed request", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name: `${baseProviderInput.name} PRESET-CANCEL ${crypto.randomUUID()}`,
+      providerType: "openrouter", providerRole: "text", baseUrl: "https://openrouter.test/api/v1", defaultModel: "model", apiKey: "preset-cancel-secret", configuration: {}
+    } });
+    expect(created.statusCode).toBe(201);
+    const originalFetch = transport.fetch;
+    let completedSignal: AbortSignal | undefined;
+    transport.fetch = async (_profile, _operation, _url, init) => {
+      completedSignal = init.signal ?? undefined;
+      return new Response(JSON.stringify({ data: [{ slug: "completed", name: "Completed", status: "active", designated_version_id: "v", updated_at: "2026-09-19T00:00:00Z" }], total_count: 1 }), { status: 200 });
+    };
+    try {
+      const completed = await app.inject({ method: "GET", url: `/api/v1/providers/${created.json().id}/presets?offset=0&limit=50` });
+      expect(completed.statusCode).toBe(200);
+      expect(completedSignal?.aborted).toBe(false);
+
+      let started!: () => void;
+      const startedReading = new Promise<void>((resolveStarted) => { started = resolveStarted; });
+      let observedAbort!: () => void;
+      const aborted = new Promise<void>((resolveAbort) => { observedAbort = resolveAbort; });
+      transport.fetch = async (_profile, _operation, _url, init) => new Promise<Response>((_resolve, reject) => {
+        started();
+        init.signal?.addEventListener("abort", () => { observedAbort(); reject(new DOMException("disconnected", "AbortError")); }, { once: true });
+      });
+      const address = await app.listen({ port: 0, host: "127.0.0.1" });
+      const request = http.get(`${address}/api/v1/providers/${created.json().id}/presets?offset=0&limit=50&refresh=true`);
+      request.on("error", () => undefined);
+      await startedReading;
+      request.destroy();
+      await aborted;
+    } finally {
+      transport.fetch = originalFetch;
+    }
   });
 
   it("discovers and resolves an unsaved candidate without creating a provider profile", async () => {

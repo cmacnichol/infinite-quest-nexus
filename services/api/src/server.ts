@@ -771,6 +771,15 @@ export async function buildServer({
     return reply.code(201).send(provider);
   });
 
+  function providerRequestSignal(request: any, reply: any): Readonly<{ signal: AbortSignal; dispose(): void }> {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const close = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    request.raw.once("aborted", abort);
+    reply.raw.once("close", close);
+    return { signal: controller.signal, dispose: () => { request.raw.off("aborted", abort); reply.raw.off("close", close); } };
+  }
+
   app.get<{
     Params: { providerId: string };
     Querystring: { providerRole?: string; refresh?: string };
@@ -791,18 +800,20 @@ export async function buildServer({
   app.get<{
     Params: { providerId: string };
     Querystring: { offset?: string; limit?: string; refresh?: string };
-  }>("/api/v1/providers/:providerId/presets", async (request) => {
+  }>("/api/v1/providers/:providerId/presets", async (request, reply) => {
     const query = z.object({
       offset: z.coerce.number().int().min(0).default(0),
       limit: z.coerce.number().int().min(1).max(100).default(50),
       refresh: z.enum(["true", "false"]).optional()
     }).parse(request.query);
-    return providers.presets(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId), query.offset, query.limit, query.refresh === "true");
+    const cancellation = providerRequestSignal(request, reply);
+    try { return await providers.presets(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId), query.offset, query.limit, query.refresh === "true", cancellation.signal); } finally { cancellation.dispose(); }
   });
 
-  app.get<{ Params: { providerId: string; slug: string } }>("/api/v1/providers/:providerId/presets/:slug", async (request) => (
-    providers.preset(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId), z.string().min(1).max(200).parse(request.params.slug))
-  ));
+  app.get<{ Params: { providerId: string; slug: string } }>("/api/v1/providers/:providerId/presets/:slug", async (request, reply) => {
+    const cancellation = providerRequestSignal(request, reply);
+    try { return await providers.preset(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId), z.string().min(1).max(200).parse(request.params.slug), cancellation.signal); } finally { cancellation.dispose(); }
+  });
 
   app.put<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/default", async (request) => (
     providers.setDefault(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))
@@ -824,14 +835,14 @@ export async function buildServer({
     models: await providers.discoverModels(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body))
   }));
 
-  app.post<{ Querystring: { offset?: string; limit?: string } }>("/api/v1/providers/discover-presets", async (request) => {
+  app.post<{ Querystring: { offset?: string; limit?: string } }>("/api/v1/providers/discover-presets", async (request, reply) => {
     const query = z.object({ offset: z.coerce.number().int().min(0).default(0), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(request.query);
-    return providers.discoverPresets(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body), query.offset, query.limit);
+    const cancellation = providerRequestSignal(request, reply); try { return await providers.discoverPresets(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body), query.offset, query.limit, cancellation.signal); } finally { cancellation.dispose(); }
   });
 
-  app.post<{ Querystring: { slug?: string } }>("/api/v1/providers/resolve-preset", async (request) => {
+  app.post<{ Querystring: { slug?: string } }>("/api/v1/providers/resolve-preset", async (request, reply) => {
     const slug = z.string().min(1).max(200).parse(request.query.slug);
-    return providers.resolvePreset(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body), slug);
+    const cancellation = providerRequestSignal(request, reply); try { return await providers.resolvePreset(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body), slug, cancellation.signal); } finally { cancellation.dispose(); }
   });
 
   app.delete<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (

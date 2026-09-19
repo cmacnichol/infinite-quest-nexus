@@ -51,8 +51,8 @@ export interface ProviderModelInventoryPort {
   discoverCandidateModels(candidate: ProviderCandidate): Promise<ProviderModelInventory>;
   listPresets(request: ProviderPresetPageRequest): Promise<ProviderPresetInventory>;
   getPreset(request: ProviderPresetDetailRequest): Promise<ProviderPresetDetail>;
-  discoverCandidatePresets(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number }>): Promise<ProviderPresetInventory>;
-  resolveCandidatePreset(candidate: ProviderCandidate, slug: string): Promise<ProviderPresetDetail>;
+  discoverCandidatePresets(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number; signal?: AbortSignal }>): Promise<ProviderPresetInventory>;
+  resolveCandidatePreset(candidate: ProviderCandidate, slug: string, signal?: AbortSignal): Promise<ProviderPresetDetail>;
 }
 
 export interface ProviderHealthPort {

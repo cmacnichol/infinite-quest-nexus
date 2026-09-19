@@ -216,8 +216,8 @@ export type ProviderModelInventoryRequest = OwnerScope & Readonly<{
   refresh?: boolean;
 }>;
 
-export type ProviderPresetPageRequest = OwnerScope & Readonly<{ providerProfileId: string; offset: number; limit: number; refresh?: boolean }>;
-export type ProviderPresetDetailRequest = OwnerScope & Readonly<{ providerProfileId: string; slug: string }>;
+export type ProviderPresetPageRequest = OwnerScope & Readonly<{ providerProfileId: string; offset: number; limit: number; refresh?: boolean; signal?: AbortSignal }>;
+export type ProviderPresetDetailRequest = OwnerScope & Readonly<{ providerProfileId: string; slug: string; signal?: AbortSignal }>;
 export type ProviderPresetInventory = Readonly<{ providerProfileId: string | null; page: PresetPage }>;
 export type ProviderPresetDetail = Readonly<{ providerProfileId: string | null; preset: ResolvedPreset }>;
 

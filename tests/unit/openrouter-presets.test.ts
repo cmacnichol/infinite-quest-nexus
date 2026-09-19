@@ -19,13 +19,23 @@ function transport(responses: readonly Response[]): ProviderTransport {
 }
 
 describe("OpenRouter preset metadata discovery", () => {
-  it("projects an incremental page from the documented data envelope without prompt disclosure", async () => {
-    const result = await discoverOpenRouterPresets(profile, { offset: 50, limit: 50 }, transport([
+  it("walks each returned page offset from the documented data envelope without prompt disclosure", async () => {
+    const calls: string[] = [];
+    const pages = [
       new Response(JSON.stringify({
         data: Array.from({ length: 50 }, (_, index) => ({ slug: `night-shift-${index}`, name: `Night Shift ${index}`, status: "active", designated_version_id: `v${index}`, updated_at: "2026-09-19T00:00:00Z" })),
         total_count: 101
+      }), { status: 200 }),
+      new Response(JSON.stringify({
+        data: [{ slug: "night-shift-100", name: "Night Shift 100", status: "active", designated_version_id: "v100", updated_at: "2026-09-19T00:00:00Z" }],
+        total_count: 101
       }), { status: 200 })
-    ]));
+    ];
+    const twoPageTransport: ProviderTransport = {
+      fetch: async (_profile, _operation, url) => { calls.push(url); return pages.shift() ?? new Response("missing", { status: 500 }); },
+      validateSdkEndpoint: async () => undefined, close: async () => undefined
+    };
+    const result = await discoverOpenRouterPresets(profile, { offset: 50, limit: 50 }, twoPageTransport);
 
     expect(result).toEqual({
       presets: expect.arrayContaining([{ slug: "night-shift-0", name: "Night Shift 0", status: "active", designatedVersionId: "v0", updatedAt: "2026-09-19T00:00:00Z" }]),
@@ -33,6 +43,12 @@ describe("OpenRouter preset metadata discovery", () => {
       offset: 50,
       nextOffset: 100
     });
+    const finalPage = await discoverOpenRouterPresets(profile, { offset: result.nextOffset!, limit: 50 }, twoPageTransport);
+    expect(finalPage).toMatchObject({ offset: 100, nextOffset: null, presets: [{ slug: "night-shift-100" }] });
+    expect(calls).toEqual([
+      "https://openrouter.example/api/v1/presets?offset=50&limit=50",
+      "https://openrouter.example/api/v1/presets?offset=100&limit=50"
+    ]);
   });
 
   it("retains the selected version standard prompt and supported config from a fresh detail response", async () => {
@@ -74,6 +90,15 @@ describe("OpenRouter preset metadata discovery", () => {
         : discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify(payload), { status: 200 })]));
       await expect(action).rejects.toMatchObject({ diagnosticCode });
     }
+    await expect(discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x", config: { provider: { arbitrary: true } } } } }), { status: 200 })]))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported" });
+  });
+
+  it("accepts only range-valid typed generation and provider-routing fields", async () => {
+    const detail = (config: unknown) => discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x", config } } }), { status: 200 })]));
+    await expect(detail({ model: "openai/gpt-4o", models: ["openai/gpt-4o"], temperature: 1, top_p: 0.5, top_k: 20, frequency_penalty: 1, presence_penalty: -1, repetition_penalty: 1.1, min_p: 0.1, top_a: 0.2, seed: 42, max_tokens: 512, max_completion_tokens: 512, provider: { order: ["openai"], only: ["openai"], ignore: ["anthropic"], allow_fallbacks: true, require_parameters: true, data_collection: "allow", sort: "price", quantizations: ["fp16"], enforce_distillable_text: true, preferred_min_throughput: 1, preferred_max_latency: 2, max_price: { prompt: 1, completion: 2 } } })).resolves.toMatchObject({ slug: "night-shift" });
+    for (const config of [
+      { temperature: "warm" }, { top_p: 2 }, { top_k: -1 }, { frequency_penalty: Infinity }, { presence_penalty: 3 }, { repetition_penalty: 0 }, { min_p: -0.1 }, { top_a: 2 }, { seed: 1.5 }, { max_tokens: 0 }, { models: [1] }, { provider: { allow_fallbacks: "yes" } }, { provider: { order: [1] } }, { provider: { data_collection: "unknown" } }, { provider: { sort: "unknown" } }, { provider: { max_price: 1 } }
+    ]) await expect(detail(config)).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported" });
   });
 
   it("bounds response and prompt/config sizes while keeping credentials out of failures", async () => {

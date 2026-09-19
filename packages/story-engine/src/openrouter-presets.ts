@@ -7,6 +7,9 @@ const MAX_PROMPT_LENGTH = 200_000;
 const MAX_CONFIG_DEPTH = 16;
 const MAX_MODELS = 32;
 const MAX_PROVIDER_ARRAY = 64;
+const PRESET_PARAMETERS = new Set(["model", "models", "temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_p", "top_a", "seed", "max_tokens", "max_completion_tokens", "provider"]);
+const PROVIDER_PARAMETERS = new Set(["order", "only", "ignore", "allow_fallbacks", "require_parameters", "data_collection", "sort", "quantizations", "enforce_distillable_text", "preferred_min_throughput", "preferred_max_latency", "max_price", "zdr"]);
+const MAX_PRICE_PARAMETERS = new Set(["prompt", "completion", "image", "request"]);
 
 export class OpenRouterPresetError extends Error {
   constructor(readonly diagnosticCode: ProviderPresetDiagnosticCode, message = "Preset discovery is unavailable.") {
@@ -78,18 +81,69 @@ function positiveInt(value: unknown): number {
   return result;
 }
 
-function boundedConfig(value: unknown, depth = 0, key = ""): unknown {
-  if (depth > MAX_CONFIG_DEPTH) throw new OpenRouterPresetError("preset_config_unsupported");
-  if (["messages", "tools", "transforms", "stop", "response_format"].includes(key)) throw new OpenRouterPresetError("preset_config_unsupported");
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (Array.isArray(value)) {
-    const limit = key === "models" ? MAX_MODELS : key === "order" || key === "only" || key === "ignore" ? MAX_PROVIDER_ARRAY : 64;
-    if (value.length > limit) throw new OpenRouterPresetError("preset_config_unsupported");
-    return Object.freeze(value.map((entry) => boundedConfig(entry, depth + 1)));
+function unsupported(field: string): never {
+  throw new OpenRouterPresetError("preset_config_unsupported", `Preset config field '${field}' is unsupported or invalid.`);
+}
+
+function finiteNumber(value: unknown, field: string, minimum: number, maximum = Number.MAX_VALUE): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) unsupported(field);
+  return value;
+}
+
+function positiveInteger(value: unknown, field: string, minimum = 1): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum) unsupported(field);
+  return value as number;
+}
+
+function stringList(value: unknown, field: string, maximum: number): readonly string[] {
+  if (!Array.isArray(value) || value.length > maximum || value.some((entry) => typeof entry !== "string" || !entry.trim())) unsupported(field);
+  return Object.freeze([...value]);
+}
+
+function providerConfig(value: unknown): Readonly<Record<string, unknown>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) unsupported("provider");
+  const source = value as Record<string, unknown>;
+  for (const field of Object.keys(source)) if (!PROVIDER_PARAMETERS.has(field)) unsupported(`provider.${field}`);
+  const result: Record<string, unknown> = {};
+  for (const [field, candidate] of Object.entries(source)) {
+    switch (field) {
+      case "order": case "only": case "ignore": case "quantizations": result[field] = stringList(candidate, `provider.${field}`, MAX_PROVIDER_ARRAY); break;
+      case "allow_fallbacks": case "require_parameters": case "enforce_distillable_text": case "zdr": if (typeof candidate !== "boolean") unsupported(`provider.${field}`); result[field] = candidate; break;
+      case "data_collection": if (candidate !== "allow" && candidate !== "deny") unsupported("provider.data_collection"); result[field] = candidate; break;
+      case "sort": if (candidate !== "price" && candidate !== "throughput" && candidate !== "latency") unsupported("provider.sort"); result[field] = candidate; break;
+      case "preferred_min_throughput": case "preferred_max_latency": result[field] = finiteNumber(candidate, `provider.${field}`, 0); break;
+      case "max_price": {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) unsupported("provider.max_price");
+        const prices = candidate as Record<string, unknown>;
+        if (!Object.keys(prices).length) unsupported("provider.max_price");
+        for (const priceField of Object.keys(prices)) if (!MAX_PRICE_PARAMETERS.has(priceField)) unsupported(`provider.max_price.${priceField}`);
+        result[field] = Object.freeze(Object.fromEntries(Object.entries(prices).map(([priceField, price]) => [priceField, finiteNumber(price, `provider.max_price.${priceField}`, 0)])));
+        break;
+      }
+    }
   }
+  return Object.freeze(result);
+}
+
+function boundedConfig(value: unknown): Readonly<Record<string, unknown>> {
   const source = record(value);
-  return Object.freeze(Object.fromEntries(Object.entries(source).map(([entryKey, entry]) => [entryKey, boundedConfig(entry, depth + 1, entryKey)])));
+  const result: Record<string, unknown> = {};
+  for (const field of Object.keys(source)) if (!PRESET_PARAMETERS.has(field)) unsupported(field);
+  for (const [field, candidate] of Object.entries(source)) {
+    switch (field) {
+      case "model": if (typeof candidate !== "string" || !candidate.trim()) unsupported(field); result[field] = candidate; break;
+      case "models": result[field] = stringList(candidate, field, MAX_MODELS); break;
+      case "temperature": result[field] = finiteNumber(candidate, field, 0, 2); break;
+      case "top_p": case "min_p": case "top_a": result[field] = finiteNumber(candidate, field, 0, 1); break;
+      case "top_k": result[field] = positiveInteger(candidate, field, 0); break;
+      case "frequency_penalty": case "presence_penalty": result[field] = finiteNumber(candidate, field, -2, 2); break;
+      case "repetition_penalty": result[field] = finiteNumber(candidate, field, Number.EPSILON); break;
+      case "seed": result[field] = positiveInteger(candidate, field, 0); break;
+      case "max_tokens": case "max_completion_tokens": result[field] = positiveInteger(candidate, field); break;
+      case "provider": result[field] = providerConfig(candidate); break;
+    }
+  }
+  return Object.freeze(result);
 }
 
 function summary(value: unknown): PresetSummary {
@@ -119,7 +173,7 @@ export async function discoverOpenRouterPreset(profile: ProviderTransportProfile
   const version = record(source.designated_version);
   const systemPrompt = text(version.system_prompt);
   if (systemPrompt.length > MAX_PROMPT_LENGTH) throw new OpenRouterPresetError("preset_config_unsupported");
-  const config = record(boundedConfig(version.config)) as Readonly<Record<string, unknown>>;
+  const config = boundedConfig(version.config);
   const serialized = JSON.stringify(config);
   return Object.freeze({ slug: text(source.slug), name: text(source.name), versionId: text(version.id), version: positiveInt(version.version), systemPrompt, config, configHash: createHash("sha256").update(serialized).digest("hex") });
 }
