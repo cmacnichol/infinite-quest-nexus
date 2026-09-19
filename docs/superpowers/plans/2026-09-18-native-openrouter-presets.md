@@ -253,3 +253,21 @@ Corrected the former model Legacy/Auto default ambiguity: both selection types n
 Release gate: create a fresh profile through each UI mode and directly through the API without a format policy; verify model mode requires capability evidence, preset mode requires none, and both successful paths send json_schema. Repeat after save/reopen and selection switching. Simulate schema rejection and verify no standard-JSON retry. Missing metadata on a direct model must produce a preflight explanation, not a hidden downgrade.
 
 New UI work remains deferred. This review validates plan consistency and coverage, not implemented behavior or live endpoint compatibility.
+
+## Final review addendum: explicit release gates
+
+The intended API and legacy UI behavior is approved at the plan level. This is not implementation sign-off. The following refinements are mandatory parts of the existing task gates:
+
+| Selection in legacy settings or a request override | Default | Admission | Failure behavior |
+| --- | --- | --- | --- |
+| Model, including a custom concrete model ID | Required Structured Outputs | Advertised capability plus matching current schema, operation and streaming verification | Missing evidence blocks before inference; no silent JSON downgrade |
+| Native OpenRouter Preset | Structured Outputs, labeled Trusted preset | No local model/provider capability or verification gate | Provider schema rejection is visible; no schema stripping or standard-JSON retry |
+| Use profile selection | Inherit the typed selection and its applicable policy | Apply the Model or Preset rule above | Never replace an inherited preset with its first model |
+
+- [ ] **Task 3: preserve effective prompts.** Freeze the complete effective operation prompt, including protocol expansion and repair instructions, rather than only a raw prompt-library template. Compose the preset prompt exactly once before the earliest input-budget calculation. Request-capture tests must compare the planned, measured and dispatched initial and repair bodies for authoring, source authoring, Story and text-assisted illustration refinement.
+- [ ] **Task 4: enumerate the entire schema closure.** Include RPG assessment, event-trigger decisions, scene coverage, event coverage, authoring, source extraction/world generation, organizer and refinement operations as well as Story and repairs. Scene coverage and event coverage need distinct schema identities despite their shared cost-operation label. Retain domain validation and mechanics/fiction separation. Test every active operation with preset metadata that lacks structured-output capability evidence; every provider request must still contain its complete operation schema. Direct models retain verification for those same applicable contracts.
+- [ ] **Tasks 3 and 5: gate every admission boundary.** A production-default-false feature gate must cover native capture/execution in Story queueing, durable authoring, direct consumers and illustration refinement until transport and worker compatibility gates pass. A missing executor that fails after creating a v2 snapshot does not count as disabled admission. Test flag-off behavior and explicit opt-in separately.
+- [ ] **Tasks 5 and 8: prevent downlevel claims.** Exercise historical claim/reclaim SQL against v2 Story, authoring and illustration work, including paired authoring parent/stage updates. Prove old workers cannot change or execute the saved v2 work. Upgrade all workers before enabling admission; rollback preserves frozen jobs.
+- [ ] **Tasks 6 and 7: verify selection at both entry points.** Rendered tests must cover the native settings picker and legacy per-request selection/Use profile selection. Assert typed save and generation payloads, save/reopen, mode switching, stale discovery replies, retained custom model IDs and clearly labeled explicit historical compatibility overrides. Fresh selections and omitted-policy API requests use the defaults in the table.
+
+Existing explicitly saved Model Legacy/Auto policies and queued v1 snapshots remain compatibility exceptions; they are not defaults for new selections and never downgrade a newly selected preset. New UI work and standard-JSON fallback remain deferred.
