@@ -36,7 +36,7 @@ const preset = {
     seed: 42,
     max_tokens: 1_500,
     max_completion_tokens: 1_200,
-    provider: { order: ["anthropic", "openai"], only: ["anthropic", "openai"], ignore: ["other"], allow_fallbacks: true, data_collection: "deny", quantizations: ["fp16"], preferred_min_throughput: 1, preferred_max_latency: 2, max_price: { prompt: 1, completion: 2 }, zdr: true }
+    provider: { order: ["anthropic", "openai"], only: ["anthropic", "openai"], ignore: ["other"], allow_fallbacks: true, require_parameters: true, data_collection: "deny", quantizations: ["fp16"], enforce_distillable_text: true, preferred_min_throughput: 1, preferred_max_latency: 2, max_price: { prompt: 1, completion: 2 }, zdr: true }
   }
 };
 
@@ -60,8 +60,8 @@ describe("preset execution-plan resolution", () => {
     const resolved = await resolveTextExecutionPlan(input());
 
     expect(resolved.candidates).toEqual([
-      expect.objectContaining({ modelId: "openai/gpt-4.1", contextWindowTokens: 16_000, maxOutputTokens: 1_000, providerPolicy: expect.objectContaining({ order: ["anthropic", "openai"], only: ["anthropic", "openai"], allow_fallbacks: true }) }),
-      expect.objectContaining({ modelId: "anthropic/claude-sonnet", contextWindowTokens: 16_000, maxOutputTokens: 1_000 })
+      expect.objectContaining({ modelId: "openai/gpt-4.1", contextWindowTokens: 16_000, maxOutputTokens: 1_000, providerPolicy: preset.config.provider }),
+      expect.objectContaining({ modelId: "anthropic/claude-sonnet", contextWindowTokens: 16_000, maxOutputTokens: 1_000, providerPolicy: preset.config.provider })
     ]);
     expect(resolved.parameters).toEqual(expect.objectContaining({
       temperature: 0.7, top_p: 0.8, top_k: 20, frequency_penalty: 0.1, presence_penalty: 0.2,
@@ -76,7 +76,7 @@ describe("preset execution-plan resolution", () => {
     const resolved = await resolveTextExecutionPlan(input({ overrides: { parameters: { temperature: 0.3, top_p: 0.4 } } }));
 
     expect(resolved.parameters).toEqual(expect.objectContaining({ temperature: 0.3, top_p: 0.4, top_k: 20 }));
-    expect(resolved.candidates[0]!.providerPolicy).toEqual(expect.objectContaining({ order: ["anthropic", "openai"], allow_fallbacks: true }));
+    expect(resolved.candidates[0]!.providerPolicy).toEqual(preset.config.provider);
   });
 
   it("replaces an inherited preset entirely for an explicit direct-model selection", async () => {
@@ -101,6 +101,29 @@ describe("preset execution-plan resolution", () => {
     await expect(resolveTextExecutionPlan(input({ profile: { ...profile, contextWindowTokens: undefined }, overrides: { conservativeContextWindowTokens: 8_000 }, ports }))).resolves.toMatchObject({ candidates: [expect.objectContaining({ contextWindowTokens: 8_000 })] });
   });
 
+  it("always applies an explicit conservative context cap, including with known model capacity", async () => {
+    const resolved = await resolveTextExecutionPlan(input({ overrides: { conservativeContextWindowTokens: 8_000 } }));
+
+    expect(resolved.candidates).toEqual(expect.arrayContaining([expect.objectContaining({ contextWindowTokens: 8_000 })]));
+  });
+
+  it("allows explicit output overrides up to hard profile and model ceilings", async () => {
+    const resolved = await resolveTextExecutionPlan(input({
+      profile: { ...profile, maxOutputTokens: 4_000 },
+      overrides: { parameters: { max_tokens: 4_000, max_completion_tokens: 4_000 } },
+      ports: {
+        resolvePreset: vi.fn(async () => preset),
+        discoverModels: vi.fn(async () => [
+          { id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 8_000 },
+          { id: "anthropic/claude-sonnet", contextWindowTokens: 24_000, maxOutputTokens: 8_000 }
+        ])
+      }
+    }));
+
+    expect(resolved.candidates).toEqual(expect.arrayContaining([expect.objectContaining({ maxOutputTokens: 4_000 })]));
+    expect(resolved.parameters).toEqual(expect.objectContaining({ max_tokens: 4_000, max_completion_tokens: 4_000 }));
+  });
+
   it("hashes canonical configuration and prompt identity deterministically", async () => {
     const first = await resolveTextExecutionPlan(input());
     const reordered = await resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { provider: preset.config.provider, max_completion_tokens: 1_200, max_tokens: 1_500, seed: 42, top_a: 0.1, min_p: 0.05, repetition_penalty: 1.1, presence_penalty: 0.2, frequency_penalty: 0.1, top_k: 20, top_p: 0.8, temperature: 0.7, models: preset.config.models } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_400 }, { id: "anthropic/claude-sonnet", contextWindowTokens: 24_000, maxOutputTokens: 1_000 }]) } }));
@@ -120,5 +143,18 @@ describe("preset execution-plan resolution", () => {
     expect(summary).not.toHaveProperty("prompt");
     expect(JSON.stringify(summary)).not.toContain(profile.endpointReference);
     expect(JSON.stringify(summary)).not.toContain(profile.credentialReference!);
+  });
+
+  it("deep-freezes the validated plan so its hash cannot diverge by mutation", async () => {
+    const plan = await resolveTextExecutionPlan(input());
+
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan.candidates)).toBe(true);
+    expect(Object.isFrozen(plan.candidates[0]!)).toBe(true);
+    expect(Object.isFrozen(plan.candidates[0]!.providerPolicy)).toBe(true);
+    expect(Object.isFrozen(plan.candidates[0]!.providerPolicy.max_price!)).toBe(true);
+    expect(Object.isFrozen(plan.parameters)).toBe(true);
+    expect(Object.isFrozen(plan.selection)).toBe(true);
+    expect(() => (plan.candidates as unknown as Array<unknown>).push({})).toThrow();
   });
 });

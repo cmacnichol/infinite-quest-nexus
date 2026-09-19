@@ -61,6 +61,13 @@ function freeze<T>(value: T): T {
   return Object.freeze(value);
 }
 
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+  return value;
+}
+
 function parameterFields(config: Readonly<Record<string, unknown>>): TextGenerationParameters {
   const source = Object.fromEntries(Object.entries(config).filter(([key]) => key !== "model" && key !== "models" && key !== "provider"));
   return freeze(textGenerationParametersSchema.parse(source));
@@ -87,8 +94,8 @@ function contextLimit(discovered: readonly TextModelLimit[], profile: TextExecut
   const unknownRouteCapacity = discovered.length === 0 || discovered.some((model) => model.contextWindowTokens === undefined);
   if (unknownRouteCapacity) {
     if (overrides.conservativeContextWindowTokens === undefined) throw new Error("A conservative context cap is required when model context capacity is unknown.");
-    limits.push(positiveInteger(overrides.conservativeContextWindowTokens, "conservativeContextWindowTokens"));
   }
+  if (overrides.conservativeContextWindowTokens !== undefined) limits.push(positiveInteger(overrides.conservativeContextWindowTokens, "conservativeContextWindowTokens"));
   if (profile.contextWindowTokens !== undefined) limits.push(positiveInteger(profile.contextWindowTokens, "Profile contextWindowTokens"));
   return Math.min(...limits);
 }
@@ -170,6 +177,10 @@ export async function resolveTextExecutionPlan(input: ResolveTextExecutionPlanIn
     profileRevision: profile.profileRevision,
     protocolVersion: profile.protocolVersion
   };
-  const planHash = sha256(stableStringify(planWithoutHash));
-  return freeze(textExecutionPlanSchema.parse({ ...planWithoutHash, planHash }));
+  // Hash the schema-normalized representation before recursively freezing the
+  // same parsed shape. No later consumer can mutate its execution identity.
+  const parsedWithoutHash = textExecutionPlanSchema.parse({ ...planWithoutHash, planHash: "0".repeat(64) });
+  const { planHash: _placeholder, ...normalizedWithoutHash } = parsedWithoutHash;
+  const planHash = sha256(stableStringify(normalizedWithoutHash));
+  return deepFreeze(textExecutionPlanSchema.parse({ ...normalizedWithoutHash, planHash }));
 }
