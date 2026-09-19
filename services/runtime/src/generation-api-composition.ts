@@ -4,7 +4,7 @@ import {
   type GenerationApplication,
   type GenerationCommandRepository
 } from "../../../packages/application/src/index.js";
-import { createPostgresGenerationCommandRepository } from "../../../packages/database/src/generation-repository.js";
+import { createPostgresGenerationCommandRepository, resolveTextProviderId } from "../../../packages/database/src/generation-repository.js";
 import type { PostgresGenerationCommandRepositoryDependencies } from "../../../packages/database/src/generation-repository.js";
 import { resolveStoryMemoryPromptSnapshot, resolveStoryPromptSnapshot } from "../../../packages/database/src/prompt-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
@@ -75,7 +75,11 @@ function createTextExecutionPlanPreparation(
         [scope.campaignId, scope.ownerUserId]
       );
       if (!campaign.rows[0]) throw new GenerationApplicationError("not_found", { campaignId: scope.campaignId });
-      const providerProfileId = scope.requestedProviderProfileId ?? campaign.rows[0]?.textProviderProfileId;
+      const providerProfileId = await resolveTextProviderId(
+        pool,
+        scope.ownerUserId,
+        scope.requestedProviderProfileId ?? campaign.rows[0]?.textProviderProfileId,
+      );
       if (!providerProfileId) return undefined;
       const profile = await providers.execution.text({ ownerUserId: scope.ownerUserId }, providerProfileId, "text", undefined);
       // A request model is an explicit direct selection, so it replaces a

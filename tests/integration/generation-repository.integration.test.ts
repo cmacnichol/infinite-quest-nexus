@@ -7,10 +7,11 @@ import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import { loadPrivateProviderCredentialRow, writeEncryptedProviderCredential } from "../../packages/database/src/provider-repository.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
@@ -228,6 +229,24 @@ integration("PostgreSQL generation command repository", () => {
       .resolves.toMatchObject({ rows: [{ plan: { planHash: frozenPlan().planHash } }] });
   });
 
+  it("retains a frozen plan after an expired lease is reclaimed", async () => {
+    const imported = await campaign();
+    const queued = await plannedRepository().enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId }, appendRequest("Reclaim the original frozen route.")
+    );
+    await pool.query("UPDATE generation_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL WHERE id<>$1 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')", [queued.id]);
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const first = await execution.claimNext({ workerId: `first-${crypto.randomUUID()}`, leaseSeconds: 30 });
+    expect(first?.jobId).toBe(queued.id);
+    await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
+    const second = await execution.claimNext({ workerId: `second-${crypto.randomUUID()}`, leaseSeconds: 30 });
+    expect(second).toMatchObject({ jobId: queued.id, attempts: 2 });
+    await expect(pool.query<{ attempts: number; plan: unknown }>(
+      "SELECT attempts,orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]
+    )).resolves.toMatchObject({ rows: [{ attempts: 2, plan: { planHash: frozenPlan().planHash } }] });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
   it("moves a post-queue tampered plan to recoverable before worker execution", async () => {
     const imported = await campaign();
     const queued = await plannedRepository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Reject tampering before dispatch."));
@@ -242,32 +261,140 @@ integration("PostgreSQL generation command repository", () => {
       .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
   });
 
-  it("keeps production composition admission disabled until an explicit gate enables preflight", async () => {
-    let remoteCalls = 0;
+  it("uses real profile revisions to reject metadata-time profile, credential, and campaign-default changes outside transactions", async () => {
+    const alternateProvider = await createProvider(pool, {
+      name: `Alternate native preset ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "alternate-model", contextWindowTokens: 32768,
+      maxOutputTokens: 4096, temperature: 0, enabled: true, configuration: {}
+    }, credentialSecret);
+    const presetProvider = await createProvider(pool, {
+      name: `Native preset ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "@preset/test",
+      contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, enabled: true, configuration: {}, apiKey: "before-rotation"
+    }, credentialSecret);
+    await pool.query("UPDATE provider_profiles SET text_selection=$2::jsonb WHERE id=$1", [presetProvider.id, JSON.stringify({ kind: "openrouter_preset", slug: "test" })]);
+    await expect(loadPrivateProviderCredentialRow(pool as unknown as DatabaseClient, ownerUserId, presetProvider.id)).resolves.toMatchObject({
+      textSelection: { kind: "openrouter_preset", slug: "test" }
+    });
+    let activeTransactions = 0;
+    const trackQuery = (target: { query: (...argumentsList: any[]) => any }) => async (...argumentsList: any[]) => {
+      const statement = typeof argumentsList[0] === "string" ? argumentsList[0] : argumentsList[0]?.text;
+      if (statement === "BEGIN") activeTransactions += 1;
+      try { return await target.query(...argumentsList); }
+      finally { if (statement === "COMMIT" || statement === "ROLLBACK") activeTransactions -= 1; }
+    };
+    const trackedPool = new Proxy(pool, {
+      get(target, property, receiver) {
+        if (property === "query") return trackQuery(target as unknown as { query: (...argumentsList: any[]) => any });
+        if (property === "connect") return async () => {
+          const client = await target.connect();
+          return new Proxy(client, { get(clientTarget, clientProperty, clientReceiver) {
+            if (clientProperty === "query") return trackQuery(clientTarget as unknown as { query: (...argumentsList: any[]) => any });
+            const value = Reflect.get(clientTarget, clientProperty, clientReceiver);
+            return typeof value === "function" ? value.bind(clientTarget) : value;
+          }});
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as DatabasePool;
+    const descriptor = async (database: DatabaseClient | DatabasePool, id: string, model?: string) => {
+      const row = await loadPrivateProviderCredentialRow(database as DatabaseClient, ownerUserId, id);
+      if (!row) throw new Error("Expected a real enabled provider profile.");
+      return { id: row.providerProfileId, name: row.name, providerRole: "text" as const, providerType: row.providerType,
+        model: model?.trim() || row.defaultModel, contextWindowTokens: row.contextWindowTokens, maxOutputTokens: row.maxOutputTokens,
+        temperature: row.temperature, requestTimeoutMs: row.requestTimeoutMs, endpointIdentity: row.baseUrl,
+        executionRevision: row.executionRevision, ...(row.textSelection ? { textSelection: row.textSelection } : {}), configuration: row.configuration };
+    };
+    for (const mutation of ["profile", "credential", "campaign-default"] as const) {
+      const imported = await campaign();
+      await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, presetProvider.id]);
+      let metadataCalls = 0;
+      const mutate = async () => {
+        if (mutation === "profile") await pool.query("UPDATE provider_profiles SET max_output_tokens=max_output_tokens+1 WHERE id=$1", [presetProvider.id]);
+        if (mutation === "credential") await writeEncryptedProviderCredential(pool as unknown as DatabaseClient, ownerUserId, presetProvider.id, { ciphertext: `rotated-${crypto.randomUUID()}`, nonce: "rotated-nonce", authTag: "rotated-tag", keyVersion: 1 });
+        if (mutation === "campaign-default") await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, alternateProvider.id]);
+      };
+      const collaborators = {
+        execution: { text: async (scope: { ownerUserId: string }, id: string) => descriptor(pool, id) },
+        loadQueuedTextProfile: (client: DatabaseClient, _owner: string, id: string, model?: string) => descriptor(client, id, model),
+        responseFormatInventory: {
+          getPreset: async () => { expect(activeTransactions).toBe(0); metadataCalls += 1; await mutate(); return { providerProfileId: presetProvider.id, preset: { slug: "test", versionId: "v1", config: { model: "preset-model" }, configHash: "c".repeat(64) } }; },
+          listModels: async () => { expect(activeTransactions).toBe(0); metadataCalls += 1; return { providerProfileId: presetProvider.id, providerRole: "text" as const, models: [{ id: "preset-model", name: "Preset", contextWindowTokens: 32768 }] }; }
+        }, responseFormatCapabilities: { registryDigest: "d".repeat(64) }, promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() }
+      } as never;
+      const app = createApiGenerationApplication(trackedPool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+      const { providerProfileId: _ignored, ...campaignRequest } = appendRequest(`Reject real ${mutation} changes.`);
+      await expect(app.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse(campaignRequest)))
+        .rejects.toMatchObject({ kind: "conflict", details: { reason: "provider_profile_changed_refresh_required" } });
+      expect(metadataCalls).toBe(2);
+      await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]))
+        .resolves.toMatchObject({ rows: [{ count: "0" }] });
+    }
+  });
+
+  it("skips inherited preset metadata for an explicit model and short-circuits missing or foreign campaigns", async () => {
+    let profileCalls = 0;
+    let metadataCalls = 0;
     const profile = { id: providerProfileId, name: "preset", providerRole: "text" as const, providerType: "openrouter" as const,
       model: "@preset/test", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 1000,
       endpointIdentity: "endpoint", executionRevision: "a".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "test" }, configuration: {} };
-    const collaborators = {
-      execution: { text: async () => profile },
-      loadQueuedTextProfile: async () => profile,
-      responseFormatInventory: {
-        getPreset: async () => { remoteCalls += 1; return { providerProfileId, preset: { slug: "test", versionId: "v1", config: { model: "preset-model" }, configHash: "c".repeat(64) } }; },
-        listModels: async () => { remoteCalls += 1; return { providerProfileId, providerRole: "text" as const, models: [{ id: "preset-model", name: "Preset", contextWindowTokens: 32768 }] }; }
-      },
-      responseFormatCapabilities: { registryDigest: "d".repeat(64) },
-      promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() }
-    } as never;
+    const collaborators = { execution: { text: async () => { profileCalls += 1; return profile; } }, loadQueuedTextProfile: async (_client: DatabaseClient, _owner: string, _id: string, model?: string) => ({ ...profile, model: model?.trim() || profile.model }),
+      responseFormatInventory: { getPreset: async () => { metadataCalls += 1; throw new Error("Metadata must not be called."); }, listModels: async () => { metadataCalls += 1; throw new Error("Metadata must not be called."); } },
+      responseFormatCapabilities: { registryDigest: "d".repeat(64) }, promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() } } as never;
     const disabledCampaign = await campaign();
-    const operator = { installedCapability: "r3" as const, enforceEnabled: true };
-    const disabled = createApiGenerationApplication(pool, collaborators, undefined, operator, false);
-    await disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, appendRequest("Do not prepare until admitted."));
-    expect(remoteCalls).toBe(0);
-    const enabledCampaign = await campaign();
-    const enabled = createApiGenerationApplication(pool, collaborators, undefined, operator, true);
-    await enabled.enqueueAppend({ ownerUserId, campaignId: enabledCampaign.campaignId }, appendRequest("Prepare only outside the transaction."));
-    expect(remoteCalls).toBe(2);
-    const saved = await pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE campaign_id=$1", [enabledCampaign.campaignId]);
-    expect(saved.rows[0]?.plan).toMatchObject({ version: 2, preset: { slug: "test" } });
+    const disabled = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, false);
+    await disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, appendRequest("Keep admission disabled."));
+    expect(profileCalls).toBe(0);
+    expect(metadataCalls).toBe(0);
+    const app = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const imported = await campaign();
+    await app.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ ...appendRequest("Use the direct model."), model: "direct-model" }));
+    expect(metadataCalls).toBe(0);
+    const foreignCampaignId = crypto.randomUUID();
+    await expect(app.enqueueAppend({ ownerUserId, campaignId: foreignCampaignId }, appendRequest("Do not discover a missing campaign.")))
+      .rejects.toMatchObject({ kind: "not_found", details: { campaignId: foreignCampaignId } });
+    expect(profileCalls).toBe(1);
+    expect(metadataCalls).toBe(0);
+    const foreignOwner = await pool.query<{ id: string }>("INSERT INTO users (display_name) VALUES ('Native preflight foreign owner') RETURNING id");
+    const foreignWorld = await pool.query<{ id: string }>("INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Native preflight foreign world') RETURNING id", [foreignOwner.rows[0]!.id]);
+    const foreignVersion = await pool.query<{ id: string }>("INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,'{}'::jsonb) RETURNING id", [foreignWorld.rows[0]!.id, foreignOwner.rows[0]!.id]);
+    const foreignCampaign = await pool.query<{ id: string }>("INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Native preflight foreign campaign') RETURNING id", [foreignOwner.rows[0]!.id, foreignVersion.rows[0]!.id]);
+    await expect(app.enqueueAppend({ ownerUserId, campaignId: foreignCampaign.rows[0]!.id }, appendRequest("Do not discover a foreign campaign.")))
+      .rejects.toMatchObject({ kind: "not_found", details: { campaignId: foreignCampaign.rows[0]!.id } });
+    expect(profileCalls).toBe(1);
+    expect(metadataCalls).toBe(0);
+  });
+
+  it("preflights an owner-default preset when the campaign has no provider binding", async () => {
+    const imported = await campaign();
+    const defaultPreset = await createProvider(pool, {
+      name: `Default native preset ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "@preset/default", contextWindowTokens: 32768,
+      maxOutputTokens: 4096, temperature: 0, enabled: true, configuration: {}
+    }, credentialSecret);
+    await pool.query("UPDATE provider_profiles SET is_default=true,text_selection=$2::jsonb WHERE id=$1", [defaultPreset.id, JSON.stringify({ kind: "openrouter_preset", slug: "default" })]);
+    try {
+      await pool.query("UPDATE campaigns SET text_provider_profile_id=NULL WHERE id=$1", [imported.campaignId]);
+      let metadataCalls = 0;
+      const profile = { id: defaultPreset.id, name: "default", providerRole: "text" as const, providerType: "openrouter" as const,
+        model: "@preset/default", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 1000,
+        endpointIdentity: "endpoint", executionRevision: "a".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "default" }, configuration: {} };
+      const collaborators = { execution: { text: async () => profile }, loadQueuedTextProfile: async () => profile,
+        responseFormatInventory: {
+          getPreset: async () => { metadataCalls += 1; return { providerProfileId: defaultPreset.id, preset: { slug: "default", versionId: "v1", config: { model: "preset-model" }, configHash: "c".repeat(64) } }; },
+          listModels: async () => { metadataCalls += 1; return { providerProfileId: defaultPreset.id, providerRole: "text" as const, models: [{ id: "preset-model", name: "Preset", contextWindowTokens: 32768 }] }; }
+        }, responseFormatCapabilities: { registryDigest: "d".repeat(64) }, promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() } } as never;
+      const app = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+      const { providerProfileId: _ignored, ...defaultRequest } = appendRequest("Freeze the owner default preset.");
+      await app.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse(defaultRequest));
+      expect(metadataCalls).toBe(2);
+      await expect(pool.query<{ providerProfileId: string; plan: unknown }>(
+        "SELECT provider_profile_id AS \"providerProfileId\",orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]
+      )).resolves.toMatchObject({ rows: [{ providerProfileId: defaultPreset.id, plan: { version: 2, preset: { slug: "default" } } }] });
+    } finally {
+      await pool.query("UPDATE provider_profiles SET is_default=false WHERE id=$1", [defaultPreset.id]);
+    }
   });
 
   it("freezes a v3 effective character identity for an enrolled append and replacement", async () => {

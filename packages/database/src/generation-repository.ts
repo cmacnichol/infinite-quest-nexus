@@ -352,8 +352,8 @@ function generationPolicyForStyle(turnControlStyle: string): GenerationPolicySna
   };
 }
 
-async function resolveTextProviderId(
-  client: DatabaseClient,
+export async function resolveTextProviderId(
+  client: DatabaseClient | DatabasePool,
   ownerUserId: string,
   selectedId: string | null | undefined
 ): Promise<string | null> {
