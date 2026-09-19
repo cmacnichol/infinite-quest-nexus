@@ -318,7 +318,7 @@ describe("System Archive contracts", () => {
           ...validProviderRecord,
           kind: "intent",
           authority: {
-            providerType: "openrouter", providerRole: "intent", defaultModel: "intent-model",
+            providerType: "openrouter", providerRole: "intent", defaultModel: "@preset/nexus-nsfw",
             textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
             contextWindowTokens: 12_345, maxOutputTokens: 678, temperature: 0.37,
             configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4 },
@@ -386,6 +386,15 @@ describe("System Archive contracts", () => {
       ...records[3],
       record: { ...records[3]!.record, authority: undefined }
     })).toThrow();
+    for (const authority of [
+      { ...records[0]!.record.authority, providerRole: "embedding" },
+      { ...records[0]!.record.authority, providerType: "lmstudio" },
+      { ...records[0]!.record.authority, defaultModel: "different-model" }
+    ]) {
+      expect(() => systemRecordEnvelopeSchema.parse({
+        ...records[0], record: { ...records[0]!.record, authority }
+      })).toThrow();
+    }
   });
 
   it("rejects nested secret and capability aliases from version-two portable authority", () => {

@@ -6,7 +6,6 @@ ALTER TABLE provider_profiles
   CHECK (
     text_selection IS NULL OR (
       jsonb_typeof(text_selection) = 'object'
-      AND jsonb_object_length(text_selection) = 2
       AND (
         (text_selection->>'kind' = 'model'
           AND text_selection ? 'modelId'

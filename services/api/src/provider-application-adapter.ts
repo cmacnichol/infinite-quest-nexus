@@ -107,6 +107,12 @@ function profileResponse(
 
 export type ProviderApiTransportAdapter = ReturnType<typeof createProviderApplicationAdapter>;
 
+function assertTextSelectionRole(input: Readonly<{ providerRole: ProviderRole; textSelection?: unknown }>): void {
+  if (input.textSelection !== undefined && input.providerRole !== "text" && input.providerRole !== "intent") {
+    throw Object.assign(new Error("Text selections are available only for text or intent provider profiles."), { statusCode: 400 });
+  }
+}
+
 export function createProviderApplicationAdapter(composition: ProviderApiComposition) {
   return Object.freeze({
     application: composition.application,
@@ -116,6 +122,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async create(ownerUserId: string, input: ProviderProfileInput) {
       assertResponseFormatPolicy(input.configuration);
+      assertTextSelectionRole(input);
       const textSelection = input.providerRole === "text" || input.providerRole === "intent"
         ? normalizeTextSelection(input)
         : undefined;
@@ -228,6 +235,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
 
     async discoverModels(ownerUserId: string, input: ProviderProfileInput) {
       assertResponseFormatPolicy(input.configuration);
+      assertTextSelectionRole(input);
       const textSelection = input.providerRole === "text" || input.providerRole === "intent"
         ? normalizeTextSelection(input)
         : undefined;

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { textModelSelectionSchema } from "./provider-selection.js";
+import { selectionCompatibilityId, textModelSelectionSchema } from "./provider-selection.js";
 import {
   archiveAssetRecordSchema,
   archiveErrorCodeSchema,
@@ -873,7 +873,19 @@ const systemPortableProviderV2Schema = systemPortableProviderSchema.safeExtend({
     isDefault: z.boolean(),
     createdAt: archiveTimestampSchema,
     updatedAt: archiveTimestampSchema
-  }).strict()
+  }).strict().superRefine((authority, context) => {
+    const selection = authority.textSelection;
+    if (!selection) return;
+    if (authority.providerRole !== "text" && authority.providerRole !== "intent") {
+      context.addIssue({ code: "custom", path: ["textSelection"], message: "Text selections require a text or intent provider role." });
+    }
+    if (selection.kind === "openrouter_preset" && authority.providerType !== "openrouter") {
+      context.addIssue({ code: "custom", path: ["textSelection"], message: "OpenRouter presets require an OpenRouter provider." });
+    }
+    if (authority.defaultModel !== selectionCompatibilityId(selection)) {
+      context.addIssue({ code: "custom", path: ["defaultModel"], message: "defaultModel must match textSelection." });
+    }
+  })
 });
 
 const systemPromptRecordV2Schema = systemPromptRecordSchema.safeExtend({

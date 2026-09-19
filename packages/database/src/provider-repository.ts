@@ -150,8 +150,9 @@ function validateCreate(command: CreateProviderProfileCommand): CreateProviderPr
 function withRequiredTextResponseFormat(
   role: ProviderRole,
   configuration: SafeProviderConfiguration,
+  force = false,
 ): SafeProviderConfiguration {
-  if ((role === "text" || role === "intent") && configuration.textResponseFormatPolicy === undefined) {
+  if ((role === "text" || role === "intent") && (force || configuration.textResponseFormatPolicy === undefined)) {
     return toSafeProviderConfiguration({ ...configuration, textResponseFormatPolicy: "required" });
   }
   return configuration;
@@ -282,13 +283,39 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       const row = current.rows[0];
       if (!row) throw httpError("Provider profile not found.", 404);
       const changes = command.changes;
+      const existingSelection = (() => {
+        try {
+          return selectionCompatibilityId(normalizeTextSelection({
+            providerType: row.provider_type, providerRole: row.provider_role, defaultModel: row.default_model,
+            ...(row.text_selection === null ? {} : { textSelection: row.text_selection as TextModelSelection })
+          }));
+        } catch {
+          return null;
+        }
+      })();
+      const requestedSelection = (() => {
+        try {
+          return selectionCompatibilityId(normalizeTextSelection({
+            providerType: row.provider_type, providerRole: row.provider_role,
+            defaultModel: changes.defaultModel ?? (changes.textSelection === undefined ? row.default_model : ""),
+            ...(changes.textSelection === undefined && (row.text_selection === null || changes.defaultModel !== undefined) ? {} : {
+              textSelection: changes.textSelection ?? row.text_selection as TextModelSelection
+            })
+          }));
+        } catch {
+          return null;
+        }
+      })();
+      const selectionChanged = existingSelection === null || requestedSelection === null
+        ? changes.defaultModel !== undefined || changes.textSelection !== undefined
+        : existingSelection !== requestedSelection;
       const merged = validateCreate({
         ownerUserId: command.ownerUserId,
         name: changes.name ?? row.name,
         providerType: row.provider_type,
         providerRole: row.provider_role,
         baseUrl: changes.baseUrl ?? row.base_url,
-        defaultModel: changes.defaultModel ?? row.default_model,
+        defaultModel: changes.defaultModel ?? (changes.textSelection === undefined ? row.default_model : requestedSelection ?? row.default_model),
         ...(changes.textSelection === undefined && (row.text_selection === null || changes.defaultModel !== undefined) ? {} : {
           textSelection: changes.textSelection ?? row.text_selection as TextModelSelection
         }),
@@ -299,7 +326,7 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
         configuration: changes.configuration === undefined
           ? (changes.defaultModel === undefined && changes.textSelection === undefined
               ? toSafeProviderConfiguration(row.configuration)
-              : withRequiredTextResponseFormat(row.provider_role, toSafeProviderConfiguration(row.configuration)))
+              : withRequiredTextResponseFormat(row.provider_role, toSafeProviderConfiguration(row.configuration), selectionChanged))
           : validateProviderConfiguration(row.provider_type, changes.configuration),
         enabled: changes.enabled ?? row.enabled,
         isDefault: changes.isDefault ?? row.is_default

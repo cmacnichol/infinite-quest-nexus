@@ -696,6 +696,36 @@ integration("provider PostgreSQL adapters", () => {
     });
     expect(legacy.configuration).toMatchObject({ textResponseFormatPolicy: "legacy" });
 
+    for (const [policy, changes] of [
+      ["legacy", { defaultModel: "openai/gpt-4o" }],
+      ["auto", { textSelection: { kind: "openrouter_preset" as const, slug: "nexus-nsfw" } }]
+    ] as const) {
+      const updated = await inTransaction(async (client) => {
+        const profiles = createPostgresProviderRepositories(client).profiles;
+        const profile = await profiles.createProfile({
+          ...profileCommand(scoped.ownerUserId, `Policy ${policy} ${crypto.randomUUID()}`),
+          providerType: "openrouter",
+          configuration: toSafeProviderConfiguration({ textResponseFormatPolicy: policy })
+        });
+        return profiles.updateProfile({ ownerUserId: scoped.ownerUserId, providerProfileId: profile.id, changes });
+      });
+      expect(updated.configuration).toMatchObject({ textResponseFormatPolicy: "required" });
+    }
+
+    const explicitAuto = await inTransaction(async (client) => {
+      const profiles = createPostgresProviderRepositories(client).profiles;
+      const profile = await profiles.createProfile({
+        ...profileCommand(scoped.ownerUserId, `Explicit auto ${crypto.randomUUID()}`),
+        providerType: "openrouter",
+        configuration: toSafeProviderConfiguration({ textResponseFormatPolicy: "legacy" })
+      });
+      return profiles.updateProfile({
+        ownerUserId: scoped.ownerUserId, providerProfileId: profile.id,
+        changes: { defaultModel: "openai/gpt-4o", configuration: toSafeProviderConfiguration({ textResponseFormatPolicy: "auto" }) }
+      });
+    });
+    expect(explicitAuto.configuration).toMatchObject({ textResponseFormatPolicy: "auto" });
+
     const historical = await inTransaction(async (client) => {
       const profile = await createPostgresProviderRepositories(client).profiles.createProfile({
         ...profileCommand(scoped.ownerUserId, `Historical ${crypto.randomUUID()}`), providerType: "openrouter"

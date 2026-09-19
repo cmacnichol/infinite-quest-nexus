@@ -47,3 +47,33 @@
 
 - This task intentionally does not resolve remote OpenRouter preset metadata or execute preset aliases. Later tasks must use the typed selection to build immutable resolved execution plans before dispatch.
 - No browser or live-provider verification was run because Task 1 changes contracts, persistence, and API seams only.
+
+## Review-fix round 1
+
+### Delivered
+
+- A default-model or typed-selection change now treats the profile as new work: when the request omits a response-format policy, it persists `required`. Rename-only patches retain saved `legacy` or `auto`, and an explicitly supplied compatible policy still wins.
+- The selection merge derives the compatibility `defaultModel` from a supplied `textSelection`, so the two fields remain synchronized before the database write.
+- Create and candidate-discovery reject `textSelection` on image or embedding roles with the adapter's established finite client validation shape (`statusCode: 400`) before application or provider calls.
+- Version-two archive provider authorities reject selections on non-text roles, OpenRouter presets on other provider types, and `defaultModel` values that contradict `textSelection`. The real import boundary re-parses each record and rolls back these invalid records before persistence.
+- Removed an unsupported PostgreSQL `jsonb_object_length` migration check exposed by the fresh task-owned database migration run; the remaining JSON type and discriminator checks are compatible with PostgreSQL.
+
+### RED
+
+1. `corepack pnpm exec vitest run tests/unit/provider-api-adapter.test.ts tests/unit/system-archive-contracts.test.ts --reporter=dot`
+   - Failed as intended: image create/candidate paths silently continued with `textSelection`, and invalid V2 provider authorities parsed successfully.
+2. `corepack pnpm exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/provider-postgres-adapters.integration.test.ts --reporter=dot`
+   - Failed on the added selection-change regression: the old `defaultModel` contradicted a supplied preset selection during update. The merge now derives the compatibility ID first.
+
+### GREEN
+
+- `corepack pnpm exec vitest run tests/unit/provider-api-adapter.test.ts tests/unit/system-archive-contracts.test.ts tests/unit/generation-response-contract-preflight.test.ts --reporter=dot`
+  - 98 passed, covering role rejection, archive authority validation, and Required queue-envelope capture.
+- `corepack pnpm exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/provider-postgres-adapters.integration.test.ts --reporter=dot`
+  - 9 real PostgreSQL tests passed, including saved Legacy/Auto profiles changing through old `defaultModel` and typed `textSelection`, plus an explicit Auto override.
+- `corepack pnpm exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/system-archive.integration.test.ts -t "round-trips non-default v2 authority exactly" --reporter=dot`
+  - 1 real PostgreSQL test passed (52 filtered): invalid role/type/compatibility combinations were rejected at the import boundary without a `provider_profiles` write, and the valid export/import round-trip retained the preset selection.
+- `corepack pnpm exec tsc -p tsconfig.json --noEmit`
+  - Passed.
+- `git diff --check`
+  - Passed.

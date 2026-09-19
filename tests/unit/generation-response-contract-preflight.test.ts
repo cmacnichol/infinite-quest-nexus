@@ -95,6 +95,18 @@ describe("generation response-contract production preflight collaborators", () =
     } as never)).resolves.toBeUndefined();
   });
 
+  it("captures a required policy when the queued profile carries the new-work default", async () => {
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => ({ ...profile, configuration: { textResponseFormatPolicy: "required" } })),
+      responseFormatCapabilities: { registryDigest }
+    } as never;
+    const queued = await createQueuedResponsePolicyResolver(apiProviders)({} as never, {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: profile.model,
+      operationKind: "append", generationPolicy: { playMode: "legacy" }, storyMemoryPolicy: null
+    } as never);
+    expect(readQueuedResponsePolicy(queued)?.policy).toBe("required");
+  });
+
   it("uses the supplied composition client for queue-time profile loading without borrowing from the pool", async () => {
     const row = {
       id: profile.id, name: "Text", provider_type: "openrouter", provider_role: "text", base_url: "https://provider.example/v1",

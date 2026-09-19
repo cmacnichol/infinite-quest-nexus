@@ -58,6 +58,19 @@ describe("provider API configuration boundary", () => {
     expect(result).toMatchObject({ defaultModel: "@preset/nexus-nsfw", textSelection });
   });
 
+  it.each(["create", "candidate"] as const)("rejects a supplied text selection for an image profile at %s", async (operation) => {
+    const value = adapter();
+    const image = {
+      ...input, providerRole: "image", textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" }
+    };
+    const call = operation === "create"
+      ? () => value.adapter.create(owner, image as never)
+      : () => value.adapter.discoverModels(owner, image as never);
+    await expect(call()).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/text selection/i) });
+    expect(value.application.createProfile).not.toHaveBeenCalled();
+    expect(value.runtime.discoverCandidateModelsWithCredential).not.toHaveBeenCalled();
+  });
+
   it("preserves an explicit compatibility policy when a rename-only patch omits it", async () => {
     const value = adapter();
     value.application.updateProfile.mockResolvedValue({

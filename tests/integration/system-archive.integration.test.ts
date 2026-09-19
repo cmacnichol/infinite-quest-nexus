@@ -3515,11 +3515,11 @@ integration("deterministic owner-wide System Archive export", () => {
         domain: "providers", formatVersion: 2, sourceId: providerId,
         record: {
           sourceId: providerId, kind: "intent", displayName: "Intent sentinel",
-          baseUrl: "https://provider.invalid/v2", selectedModel: "intent-model",
+          baseUrl: "https://provider.invalid/v2", selectedModel: "@preset/nexus-nsfw",
           contextWindow: 12_345, timeoutMs: 45_678, retryLimit: 4,
           enabled: false, health: "unknown",
           authority: {
-            providerType: "openrouter", providerRole: "intent", defaultModel: "intent-model",
+            providerType: "openrouter", providerRole: "intent", defaultModel: "@preset/nexus-nsfw",
             textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
             contextWindowTokens: 12_345, maxOutputTokens: 678, temperature: 0.37,
             configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4, retryLimit: 4 },
@@ -3708,6 +3708,21 @@ integration("deterministic owner-wide System Archive export", () => {
     ];
     records.sort((left, right) =>
       SYSTEM_ARCHIVE_DOMAINS.indexOf(left.domain) - SYSTEM_ARCHIVE_DOMAINS.indexOf(right.domain));
+    const providerRecord = records.find((record) => record.domain === "providers")!;
+    const authority = (providerRecord.record as { authority: { providerRole: string; providerType: string; defaultModel: string } }).authority;
+    for (const invalidAuthority of [
+      { ...authority, providerRole: "embedding" },
+      { ...authority, providerType: "lmstudio" },
+      { ...authority, defaultModel: "contradictory-model" },
+    ]) {
+      const invalidProvider = JSON.parse(JSON.stringify(providerRecord)) as { record: { authority: typeof authority } };
+      invalidProvider.record.authority = invalidAuthority;
+      await expect(imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+        await transaction.insertLogicalDomains([invalidProvider] as never);
+      })).rejects.toThrow();
+    }
+    await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM provider_profiles"))
+      .resolves.toMatchObject({ rows: [{ count: "0" }] });
     const assetBytes = Buffer.from("v2-system-archive-asset-sentinel");
     const assetHash = sha256(assetBytes);
     const asset = systemArchiveAssetRecordV2Schema.parse({
@@ -3849,7 +3864,7 @@ integration("deterministic owner-wide System Archive export", () => {
     )).resolves.toMatchObject({ rows: [{
       provider_type: "openrouter",
       provider_role: "intent",
-      default_model: "intent-model",
+      default_model: "@preset/nexus-nsfw",
       text_selection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
       context_window_tokens: 12_345,
       max_output_tokens: 678,
