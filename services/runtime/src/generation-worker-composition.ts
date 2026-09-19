@@ -71,6 +71,22 @@ export function createGenerationExecutionCollaborators(
       "text",
       model
     ),
+    verifyTextExecutionRouteAuthority: async (ownerUserId, routeBasis) => {
+      // Route choices and prompt policy are frozen with the queued job.  A
+      // resumed native job may read only the current credential authority;
+      // ordinary execution settings must not replace the frozen basis.
+      if (!routeBasis.authorityRevision || !routeBasis.credentialReference) return false;
+      const current = await providers.execution.text(
+        { ownerUserId },
+        routeBasis.credentialReference,
+        "text",
+        routeBasis.candidates[0]?.modelId
+      );
+      return current.id === routeBasis.credentialReference
+        && current.providerRole === "text"
+        && current.authorityRevision === routeBasis.authorityRevision
+        && (current.endpointIdentity ?? current.id) === routeBasis.endpointReference;
+    },
     resolveResponseContracts: async (ownerUserId, profile, queuedPolicy, runtimeProfile) => {
       // Identity and adapter validation must fail before discovery.  Discovery
       // can be unavailable or malformed, but must never make an old queue

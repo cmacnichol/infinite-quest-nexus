@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveTextExecutionPlan, resolveTextExecutionPlans } from "../../services/runtime/src/provider-preset-resolution.js";
+import {
+  deriveTextExecutionPlan,
+  resolveTextExecutionPlan,
+  resolveTextExecutionRouteBasis,
+  resolveTextExecutionPlans
+} from "../../services/runtime/src/provider-preset-resolution.js";
 import {
   publicTextExecutionPlanSummary,
   textExecutionPlanSchema as applicationTextExecutionPlanSchema
@@ -60,6 +65,37 @@ function input(overrides: Record<string, unknown> = {}) {
 }
 
 describe("preset execution-plan resolution", () => {
+  it("freezes one prompt-independent route basis and derives each real operation prompt exactly once", async () => {
+    const ports = {
+      resolvePreset: vi.fn(async () => preset),
+      discoverModels: vi.fn(async () => [
+        { id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_400 },
+        { id: "anthropic/claude-sonnet", contextWindowTokens: 24_000, maxOutputTokens: 1_000 }
+      ])
+    };
+
+    const basis = await resolveTextExecutionRouteBasis({ profile, ports });
+    const main = deriveTextExecutionPlan(basis, "Return the required Story JSON.");
+    const repair = deriveTextExecutionPlan(basis, "Repair only the invalid choices.");
+
+    expect(ports.resolvePreset).toHaveBeenCalledOnce();
+    expect(ports.discoverModels).toHaveBeenCalledOnce();
+    expect(basis).toMatchObject({
+      version: 2,
+      selection: { kind: "openrouter_preset", slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "preset-version-4" },
+      presetSystemPrompt: "Use spare prose.", requestTimeoutMs: 300_000
+    });
+    expect(basis).not.toHaveProperty("prompt");
+    expect(basis).not.toHaveProperty("promptHash");
+    expect(main.prompt).toBe("Use spare prose.\n\nReturn the required Story JSON.");
+    expect(repair.prompt).toBe("Use spare prose.\n\nRepair only the invalid choices.");
+    expect(main.prompt).toMatch(/^Use spare prose\.(?![\s\S]*Use spare prose\.)/u);
+    expect(main.routeBasisHash).toBe(basis.routeBasisHash);
+    expect(main.requestTimeoutMs).toBe(300_000);
+    expect(main.planHash).not.toBe(repair.planHash);
+  });
+
   it("resolves the ordered preset routing and applies hard output/context minima", async () => {
     const resolved = await resolveTextExecutionPlan(input());
 

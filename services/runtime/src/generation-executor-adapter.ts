@@ -124,8 +124,49 @@ import { providerPromptProtocolVersion } from "./provider-application-compositio
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
 import { queuedResponsePolicyHash, type FrozenResponseContracts, type QueuedResponsePolicy, type ResponseContractOperation } from "../../../packages/contracts/src/generation-response-contract.js";
 import type { ResponseInvocationKey } from "../../../packages/contracts/src/text-response-format.js";
+import type { TextExecutionPlan } from "../../../packages/contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
+import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
+import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 
 type GenerationTextProvider = RuntimeTextExecution;
+
+/**
+ * Creates one invocation-specific prompt from private frozen route evidence.
+ * The plan deliberately remains executor-local; provider requests carry only
+ * their public transport fields and cannot serialize private route metadata.
+ */
+export function deriveCampaignTextExecutionPlan(
+  job: GenerationExecutionPayload,
+  operationPrompt: string
+): TextExecutionPlan | undefined {
+  const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+  return routeBasis ? deriveTextExecutionPlan(routeBasis, operationPrompt) : undefined;
+}
+
+export function bindCampaignTextExecutionPlan(
+  job: GenerationExecutionPayload,
+  request: ProviderRequest,
+  preboundPlan?: TextExecutionPlan
+): ProviderRequest {
+  const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+  if (!routeBasis) {
+    if (preboundPlan) throw new Error("A Story text execution plan cannot be bound without its frozen route basis.");
+    return request;
+  }
+  const plan = preboundPlan ?? deriveTextExecutionPlan(routeBasis, request.systemPrompt);
+  if (plan.routeBasisHash !== routeBasis.routeBasisHash) {
+    throw new Error("Frozen Story text execution plan belongs to a different route basis.");
+  }
+  if (preboundPlan) {
+    if (request.systemPrompt === plan.prompt) return request;
+    if (composePresetPrompt({ presetPrompt: routeBasis.presetSystemPrompt, operationPrompt: request.systemPrompt }) !== plan.prompt) {
+      throw new Error("Frozen Story text execution plan conflicts with the request prompt.");
+    }
+    return { ...request, systemPrompt: plan.prompt };
+  }
+  return { ...request, systemPrompt: plan.prompt };
+}
 
 /** Extension repair is safe only when every blocking citation points into the
  * appended narration. Any state-field or main-text conflict replaces main. */
@@ -168,6 +209,13 @@ export type GenerationExecutionCollaborators = Readonly<{
     providerProfileId: string,
     model?: string
   ): Promise<GenerationTextProvider>;
+  /** Task 5 supplies the physical v2 route transport. Native jobs may only dispatch through this plan-aware seam. */
+  preparedTextExecutor?: PreparedAuthoringTextExecutor;
+  /** Reads only current owner/profile authority for a saved v2 route basis. */
+  verifyTextExecutionRouteAuthority?(
+    ownerUserId: string,
+    routeBasis: NonNullable<GenerationOrchestrationState["textExecutionRouteBasis"]>
+  ): Promise<boolean>;
   promptFromSnapshot(
     snapshot: PromptSnapshot | Record<string, unknown> | undefined,
     key: PromptTemplateKey
@@ -850,8 +898,31 @@ export function preparePrimaryReservation(
     : { systemPrompt: request.systemPrompt, input: request.input });
 }
 
+function frozenRouteLimits(job: GenerationExecutionPayload): Readonly<{ contextWindowTokens: number; maxOutputTokens: number }> | undefined {
+  const candidates = job.orchestration_private?.textExecutionRouteBasis?.candidates;
+  if (!candidates?.length) return undefined;
+  return {
+    contextWindowTokens: Math.min(...candidates.map((candidate) => candidate.contextWindowTokens)),
+    maxOutputTokens: Math.min(...candidates.map((candidate) => candidate.maxOutputTokens))
+  };
+}
+
 function effectiveContextWindowTokens(provider: GenerationTextProvider, job: GenerationExecutionPayload): number {
-  return resolveEffectiveContextWindowTokens(provider.contextWindowTokens, job.context_options.modelContextWindowTokens);
+  const limits = frozenRouteLimits(job);
+  return resolveEffectiveContextWindowTokens(limits?.contextWindowTokens ?? provider.contextWindowTokens, job.context_options.modelContextWindowTokens);
+}
+
+function effectiveMaxOutputTokens(provider: GenerationTextProvider, job: GenerationExecutionPayload): number {
+  return frozenRouteLimits(job)?.maxOutputTokens ?? provider.maxOutputTokens;
+}
+
+function requirePreparedTextExecutor(collaborators: GenerationExecutionCollaborators): PreparedAuthoringTextExecutor {
+  if (!collaborators.preparedTextExecutor) {
+    throw Object.assign(new Error("The frozen Story route has no prepared text executor."), {
+      code: "prepared_text_execution_unavailable"
+    });
+  }
+  return collaborators.preparedTextExecutor;
 }
 
 function effectiveProviderConfigurationHash(provider: GenerationTextProvider, job: GenerationExecutionPayload): string {
@@ -1096,9 +1167,11 @@ export async function callCampaignTextProvider(
   provider: GenerationTextProvider,
   job: GenerationExecutionPayload,
   operation: StoryCostOperation,
-  request: ProviderRequest
+  request: ProviderRequest,
+  preboundPlan?: TextExecutionPlan
 ) {
-  const preparedRequest = bindCampaignResponseContract(job, operation, request);
+  const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
+  const preparedRequest = bindCampaignResponseContract(job, operation, bindCampaignTextExecutionPlan(job, request, executionPlan));
   const scope = dependencies.responseContractScope;
   const frozenContract = preparedRequest.responseContract;
   // Historical requests remain byte-for-byte on their legacy transport path.
@@ -1111,7 +1184,7 @@ export async function callCampaignTextProvider(
     ...(preparedRequest.rejectedResponse ? { completeRejectedDraft: { content: preparedRequest.rejectedResponse, complete: true as const } } : {}),
     ...(preparedRequest.onChunk ? { onChunk: preparedRequest.onChunk } : {})
   }, {
-    inputLimit: effectiveContextWindowTokens(provider, job) - provider.maxOutputTokens,
+    inputLimit: effectiveContextWindowTokens(provider, job) - effectiveMaxOutputTokens(provider, job),
     count: estimateStoryTokens,
     countMode: "estimated",
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
@@ -1164,11 +1237,18 @@ export async function callCampaignTextProvider(
     });
     try {
       dependencies.collaborators.onProviderDispatch?.(operation);
-      result = await provider.execute({
+      const transportRequest = {
         ...preparedRequest,
         canonicalBudgeting: true,
         effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job)
-      });
+      };
+      result = executionPlan
+        ? await requirePreparedTextExecutor(dependencies.collaborators).execute({
+          plan: executionPlan, operation, ownerUserId: job.owner_user_id,
+          providerProfileId: job.orchestration_private?.textExecutionRouteBasis?.credentialReference ?? job.provider_profile_id,
+          request: transportRequest
+        })
+        : await provider.execute(transportRequest);
     } catch (error) {
       logProviderTransportError(error, {
         generationJobId: job.id, campaignId: job.campaign_id, providerProfileId: job.provider_profile_id, storyOperation: operation
@@ -1246,13 +1326,20 @@ export async function callCampaignTextProvider(
   });
   try {
     dependencies.collaborators.onProviderDispatch?.(operation);
-    const result = await provider.execute({
+    const transportRequest = {
       ...preparedRequest,
       // Every generation operation is serialized and checked before transport.
       // The transport adapter sends these prepared bytes without rebuilding them.
       canonicalBudgeting: true,
       effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job)
-    });
+    };
+    const result = executionPlan
+      ? await requirePreparedTextExecutor(dependencies.collaborators).execute({
+        plan: executionPlan, operation, ownerUserId: job.owner_user_id,
+        providerProfileId: job.orchestration_private?.textExecutionRouteBasis?.credentialReference ?? job.provider_profile_id,
+        request: transportRequest
+      })
+      : await provider.execute(transportRequest);
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool,
       provider,
@@ -1592,13 +1679,38 @@ async function executeLoadedGeneration(
         providerResponseId: (response as ProviderResult).responseId || null, finishReason: (response as ProviderResult).finishReason || null });
       return true;
     }
-    const provider = await phase("provider_loading", () => collaborators.loadTextExecution(
-      job.owner_user_id,
-      job.provider_profile_id,
-      job.requested_model
-    ));
+    const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+    if (routeBasis) {
+      if (!collaborators.verifyTextExecutionRouteAuthority
+        || !await collaborators.verifyTextExecutionRouteAuthority(job.owner_user_id, routeBasis)) {
+        throw Object.assign(new Error("The saved Story route no longer has current provider authority."), {
+          code: "generation_checkpoint_incompatible"
+        });
+      }
+    }
+    const provider = await phase("provider_loading", async () => {
+      if (!routeBasis) return collaborators.loadTextExecution(job.owner_user_id, job.provider_profile_id, job.requested_model);
+      requirePreparedTextExecutor(collaborators);
+      const limits = frozenRouteLimits(job)!;
+      return {
+        id: routeBasis.credentialReference ?? job.provider_profile_id,
+        name: "Frozen Story route basis",
+        providerRole: "text" as const,
+        providerType: "openrouter" as const,
+        // This descriptor supports local planning and auditing only. Task 5's
+        // prepared executor receives the full ordered candidate set.
+        model: routeBasis.candidates[0]!.modelId,
+        contextWindowTokens: limits.contextWindowTokens,
+        maxOutputTokens: limits.maxOutputTokens,
+        temperature: routeBasis.parameters.temperature ?? 1,
+        requestTimeoutMs: routeBasis.requestTimeoutMs,
+        endpointIdentity: routeBasis.endpointReference,
+        configuration: {},
+        execute: async () => { throw new Error("Frozen Story routes must use the prepared text executor."); }
+      } satisfies GenerationTextProvider;
+    });
 
-    if (frozenStoryMemoryPolicySnapshot && effectiveProviderConfigurationHash(provider, job) !== frozenStoryMemoryPolicySnapshot.providerConfigurationFingerprint) {
+    if (!routeBasis && frozenStoryMemoryPolicySnapshot && effectiveProviderConfigurationHash(provider, job) !== frozenStoryMemoryPolicySnapshot.providerConfigurationFingerprint) {
       assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
         errorCode: "generation_checkpoint_incompatible", errorMessage: "The provider configuration changed after this job was queued.",
         recoveryMetadata: { reason: "provider_configuration_changed", diagnostic: {
@@ -1610,7 +1722,9 @@ async function executeLoadedGeneration(
 
     // New-mode jobs must select (or reload) their full closure before *any*
     // text operation, including mechanics and trigger assessments below.
-    const queuedResponsePolicy = job.orchestration_private?.queuedResponsePolicy;
+    // Task 4 owns v2 schema/response-contract identity. A frozen native route
+    // must not compare its planning descriptor against mutable profile config.
+    const queuedResponsePolicy = routeBasis ? undefined : job.orchestration_private?.queuedResponsePolicy;
     if (queuedResponsePolicy) {
       let frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
       if (!frozenResponseContracts) {
@@ -1639,10 +1753,10 @@ async function executeLoadedGeneration(
       const safeAction = safeTurnInput(job.action);
       const storyLength = snapshottedStoryLength(job.context_options);
       const effectiveContextWindow = effectiveContextWindowTokens(provider, job);
-      const inputTokenLimit = effectiveContextWindow - provider.maxOutputTokens;
+      const inputTokenLimit = effectiveContextWindow - effectiveMaxOutputTokens(provider, job);
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
-      const storySystemPrompt = generationPolicy?.playMode === "story_only"
+      const storyBaseSystemPrompt = generationPolicy?.playMode === "story_only"
         ? composeStoryOnlySystemPrompt(
           baseStorySystemPrompt,
           generationPolicy,
@@ -1655,6 +1769,10 @@ async function executeLoadedGeneration(
           : storySystemContractProtocol
             ? composeStoryPromptSystemPrompt(baseStorySystemPrompt, storySystemContractProtocol)
             : baseStorySystemPrompt;
+      // Bind the preset before fixed-envelope accounting so it reduces the
+      // Chronicle/context budget rather than causing a late transport overflow.
+      const storyTextExecutionPlan = deriveCampaignTextExecutionPlan(job, storyBaseSystemPrompt);
+      const storySystemPrompt = storyTextExecutionPlan?.prompt ?? storyBaseSystemPrompt;
       const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
         + estimateStoryTokens((hasFrozenStoryMemoryPolicy ? buildStoryMemoryUserPrompt : buildStoryUserPrompt)(
           emptyPromptContext,
@@ -1667,7 +1785,7 @@ async function executeLoadedGeneration(
         + 1024;
       if (inputTokenLimit - fixedPromptEnvelope < 512) {
         throw Object.assign(new Error(
-          `The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${provider.maxOutputTokens}) and story prompt envelope.`
+          `The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${effectiveMaxOutputTokens(provider, job)}) and story prompt envelope.`
         ), { code: "context_budget_invalid" });
       }
       const configuredCampaignContextBudget = Number(job.context_options.budgetTokens || 32000);
@@ -1681,6 +1799,7 @@ async function executeLoadedGeneration(
         effectiveContextWindow,
         inputTokenLimit,
         storySystemPrompt,
+        storyTextExecutionPlan,
         configuredCampaignContextBudget,
         safeContextBudget
       };
@@ -1691,6 +1810,7 @@ async function executeLoadedGeneration(
       effectiveContextWindow,
       inputTokenLimit,
       storySystemPrompt,
+      storyTextExecutionPlan,
       configuredCampaignContextBudget,
       safeContextBudget
     } = preparedInput;
@@ -1916,7 +2036,7 @@ async function executeLoadedGeneration(
         estimatorVersion: "story-token-estimate-v1",
         effectiveContextWindow,
         inputTokenLimit,
-        reservedOutputTokens: provider.maxOutputTokens,
+        reservedOutputTokens: effectiveMaxOutputTokens(provider, job),
         estimatedPromptTokens: contextPlan.requestTokens,
         campaignId: job.campaign_id,
         worldVersionId: job.world_version_id ?? "",
@@ -2385,7 +2505,7 @@ async function executeLoadedGeneration(
     }
     const dispatchedPrimary = !validatedDraft && !savedChoiceRepair?.originalResponse && !capturedPrimary;
     let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", () =>
-      callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest));
+      callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest, storyTextExecutionPlan));
     if (dispatchedPrimary) {
       const preparedPrimary = preparedRequestForResult(result, provider, primaryRequest);
       orchestration = await persistOrchestration(repository, scope, job, {

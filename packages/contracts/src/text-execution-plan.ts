@@ -17,8 +17,30 @@ export const providerRoutingPolicySchema = z.object({
 
 export const textRouteCandidateSchema = z.object({ modelId: z.string().trim().min(1).max(500), providerPolicy: providerRoutingPolicySchema, contextWindowTokens: positiveIntegerSchema, maxOutputTokens: positiveIntegerSchema }).strict();
 
+/**
+ * Prompt-independent immutable route evidence captured before generation is
+ * queued. Story operation prompts are not all known at enqueue time; callers
+ * derive a complete TextExecutionPlan from this basis only when they have the
+ * frozen template and bounded dynamic repair input for an invocation.
+ */
+const textExecutionRouteShape = {
+  version: z.literal(2), selection: textModelSelectionSchema,
+  preset: z.object({ slug: z.string().trim().min(1).max(200), versionId: z.string().trim().min(1).max(500), configHash: hashSchema }).strict().nullable(),
+  candidates: z.array(textRouteCandidateSchema).min(1).max(32), presetSystemPrompt: z.string().max(200_000),
+  parameters: textGenerationParametersSchema, endpointReference: z.string().trim().min(1).max(500),
+  credentialReference: z.string().trim().min(1).max(500).nullable(), profileRevision: z.string().trim().min(1).max(500),
+  authorityRevision: z.string().trim().min(1).max(500).optional(), requestTimeoutMs: positiveIntegerSchema.optional(),
+  protocolVersion: z.string().trim().min(1).max(500)
+};
+
+export const textExecutionRouteBasisSchema = z.object({
+  ...textExecutionRouteShape, requestTimeoutMs: positiveIntegerSchema, routeBasisHash: hashSchema
+}).strict();
+
 export const textExecutionPlanSchema = z.object({
-  version: z.literal(2), selection: textModelSelectionSchema, preset: z.object({ slug: z.string().trim().min(1).max(200), versionId: z.string().trim().min(1).max(500), configHash: hashSchema }).strict().nullable(), candidates: z.array(textRouteCandidateSchema).min(1).max(32), presetSystemPrompt: z.string().max(200_000), parameters: textGenerationParametersSchema, prompt: z.string().min(1).max(400_000), promptHash: hashSchema, endpointReference: z.string().trim().min(1).max(500), credentialReference: z.string().trim().min(1).max(500).nullable(), profileRevision: z.string().trim().min(1).max(500), authorityRevision: z.string().trim().min(1).max(500).optional(), protocolVersion: z.string().trim().min(1).max(500), planHash: hashSchema
+  ...textExecutionRouteShape, prompt: z.string().min(1).max(400_000), promptHash: hashSchema,
+  /** Present only for plans derived from a frozen route basis. */
+  routeBasisHash: hashSchema.optional(), planHash: hashSchema
 }).strict();
 
 export const textExecutionPlanPublicSummarySchema = z.object({ version: z.literal(2), selection: textModelSelectionSchema, preset: z.object({ slug: z.string().trim().min(1), versionId: z.string().trim().min(1), configHash: hashSchema }).strict().nullable(), candidates: z.array(textRouteCandidateSchema).min(1), parameters: textGenerationParametersSchema, planHash: hashSchema }).strict();
@@ -26,6 +48,7 @@ export const textExecutionPlanPublicSummarySchema = z.object({ version: z.litera
 export type TextGenerationParameters = Readonly<z.infer<typeof textGenerationParametersSchema>>;
 export type ProviderRoutingPolicy = Readonly<z.infer<typeof providerRoutingPolicySchema>>;
 export type TextRouteCandidate = Readonly<z.infer<typeof textRouteCandidateSchema>>;
+export type TextExecutionRouteBasis = Readonly<z.infer<typeof textExecutionRouteBasisSchema>>;
 export type TextExecutionPlan = Readonly<z.infer<typeof textExecutionPlanSchema>>;
 export type TextExecutionPlanPublicSummary = Readonly<z.infer<typeof textExecutionPlanPublicSummarySchema>>;
 

@@ -76,7 +76,7 @@ import {
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { withTransaction } from "./pool.js";
-import { textExecutionPlanSchema, type TextExecutionPlan } from "../../application/src/providers/text-execution-plan.js";
+import { textExecutionPlanSchema, textExecutionRouteBasisSchema, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
 
 async function enqueueChunkIndexBestEffort(
   client: DatabaseClient,
@@ -147,6 +147,9 @@ function responseContractInvocations(value: unknown): readonly ResponseContractI
 
 function responseContractState(jobId: string, value: GenerationOrchestrationState): void {
   try {
+  if (value.textExecutionRouteBasis !== undefined && !readTextExecutionRouteBasis(value.textExecutionRouteBasis)) {
+    throw new Error(`Generation ${jobId} has an invalid frozen text execution route basis.`);
+  }
   if (value.textExecutionPlan !== undefined && !readTextExecutionPlan(value.textExecutionPlan)) {
     throw new Error(`Generation ${jobId} has an invalid frozen text execution plan.`);
   }
@@ -238,6 +241,13 @@ function readTextExecutionPlan(value: unknown): TextExecutionPlan | undefined {
   if (!parsed.success) return undefined;
   const { planHash, ...unhashed } = parsed.data;
   return sha256(stableStringify(unhashed)) === planHash ? parsed.data : undefined;
+}
+
+function readTextExecutionRouteBasis(value: unknown): TextExecutionRouteBasis | undefined {
+  const parsed = textExecutionRouteBasisSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { routeBasisHash, ...unhashed } = parsed.data;
+  return sha256(stableStringify(unhashed)) === routeBasisHash ? parsed.data : undefined;
 }
 
 function operationMatchesInvocation(operation: ResponseContractOperation, invocationKey: ResponseInvocationKey): boolean {
@@ -356,6 +366,8 @@ export type FactFormatRepairApplication = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** Prompt-independent v2 route evidence captured before queueing. */
+  textExecutionRouteBasis?: TextExecutionRouteBasis;
   /** Version 2 plans are immutable private snapshots; absence is historical v1 behavior. */
   textExecutionPlan?: TextExecutionPlan;
   /** Absent is the exact historical job shape; present values are server-owned and versioned. */
@@ -1834,13 +1846,14 @@ export function createPostgresGenerationExecutionRepository(
         );
         const prior = locked.rows[0]?.orchestrationPrivate;
         if (!prior) return false;
-        const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen, textExecutionPlan: _plan,
+        const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen, textExecutionRouteBasis: _basis, textExecutionPlan: _plan,
           responseContractInvocations: _ledger, preparedResponseFailures: suppliedFailures, ...mutable } = value;
         const priorFailures = prior.preparedResponseFailures;
         const appendOnly = priorFailures === undefined || (suppliedFailures !== undefined
           && priorFailures.every((entry) => suppliedFailures.some((candidate) => stableStringify(candidate) === stableStringify(entry))));
         const merged: GenerationOrchestrationState = {
           ...mutable,
+          ...(prior.textExecutionRouteBasis === undefined ? {} : { textExecutionRouteBasis: prior.textExecutionRouteBasis }),
           ...(prior.textExecutionPlan === undefined ? {} : { textExecutionPlan: prior.textExecutionPlan }),
           ...(prior.queuedResponsePolicy === undefined ? {} : { queuedResponsePolicy: prior.queuedResponsePolicy }),
           ...(prior.frozenResponseContracts === undefined ? {} : { frozenResponseContracts: prior.frozenResponseContracts }),
@@ -1851,10 +1864,11 @@ export function createPostgresGenerationExecutionRepository(
         responseContractState(scope.jobId, merged);
         return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =
-              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan')
-                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
-                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan')
+              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis')
+                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
+                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis')
                END
+               || CASE WHEN orchestration_private ? 'textExecutionRouteBasis' THEN jsonb_build_object('textExecutionRouteBasis', orchestration_private->'textExecutionRouteBasis') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'textExecutionPlan' THEN jsonb_build_object('textExecutionPlan', orchestration_private->'textExecutionPlan') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object('queuedResponsePolicy', orchestration_private->'queuedResponsePolicy') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN jsonb_build_object('frozenResponseContracts', orchestration_private->'frozenResponseContracts') ELSE '{}'::jsonb END

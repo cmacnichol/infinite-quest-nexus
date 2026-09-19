@@ -51,6 +51,26 @@ function collaborators(input: Readonly<{ inventory?: () => Promise<unknown>; reg
 }
 
 describe("generation response-contract production preflight collaborators", () => {
+  it("checks only current owner-scoped authority for a resumed frozen route", async () => {
+    const { result, providers } = collaborators();
+    const basis = {
+      authorityRevision: "frozen-authority", credentialReference: profile.id, endpointReference: profile.endpointIdentity,
+      candidates: [{ modelId: "frozen-model" }]
+    };
+    (providers.execution.text as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...profile, providerRole: "text", model: "ordinary-profile-edit", temperature: 1.2, requestTimeoutMs: 5_000,
+      configuration: { textResponseFormatPolicy: "legacy" }, authorityRevision: "frozen-authority"
+    });
+
+    await expect(result.verifyTextExecutionRouteAuthority!("owner", basis as never)).resolves.toBe(true);
+    expect(providers.execution.text).toHaveBeenCalledWith({ ownerUserId: "owner" }, profile.id, "text", "frozen-model");
+
+    (providers.execution.text as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...profile, providerRole: "text", authorityRevision: "rotated-authority"
+    });
+    await expect(result.verifyTextExecutionRouteAuthority!("owner", basis as never)).resolves.toBe(false);
+  });
+
   it.each([
     ["append action non-streaming without review", "append", "legacy", false, "off", ["story:nonstream"]],
     ["replacement action streaming with observe review", "replacement", "legacy", true, "observe", ["story:nonstream", "story:stream", "continuity_review:nonstream"]],

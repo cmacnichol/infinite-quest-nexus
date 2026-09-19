@@ -1,7 +1,9 @@
 import type { ResolvedPreset, TextModelSelection } from "@infinite-quest/contracts";
 import {
   textExecutionPlanSchema,
+  textExecutionRouteBasisSchema,
   textGenerationParametersSchema,
+  type TextExecutionRouteBasis,
   type TextExecutionPlan,
   type TextGenerationParameters
 } from "@infinite-quest/contracts";
@@ -32,6 +34,7 @@ export type TextExecutionPlanProfile = Readonly<{
   /** Legacy/default profile sizing is not evidence of an unknown route's capacity. */
   contextWindowTokens?: number;
   maxOutputTokens: number;
+  requestTimeoutMs?: number;
   parameters?: TextGenerationParameters;
   endpointReference: string;
   credentialReference: string | null;
@@ -198,29 +201,63 @@ async function resolvePlanInputs(input: Omit<ResolveTextExecutionPlansInput, "op
   return freeze({ profile, selection, preset, configHash, candidates: freeze(candidates), parameters, presetSystemPrompt });
 }
 
-function createPlan(inputs: ResolvedPlanInputs, operationPrompt: string): TextExecutionPlan {
-  const prompt = composePresetPrompt({ presetPrompt: inputs.presetSystemPrompt, operationPrompt });
-  const planWithoutHash = {
+function readRouteBasis(value: unknown): TextExecutionRouteBasis {
+  const parsed = textExecutionRouteBasisSchema.parse(value);
+  const { routeBasisHash, ...unhashed } = parsed;
+  if (sha256(stableStringify(unhashed)) !== routeBasisHash) throw new Error("Frozen text execution route basis hash is invalid.");
+  return deepFreeze(parsed);
+}
+
+function createRouteBasis(inputs: ResolvedPlanInputs): TextExecutionRouteBasis {
+  const basisWithoutHash = {
     version: PLAN_VERSION,
     selection: inputs.selection,
     preset: inputs.preset ? { slug: inputs.preset.slug, versionId: inputs.preset.versionId, configHash: inputs.configHash! } : null,
     candidates: inputs.candidates,
     presetSystemPrompt: inputs.presetSystemPrompt,
     parameters: inputs.parameters,
-    prompt,
-    promptHash: sha256(prompt),
     endpointReference: inputs.profile.endpointReference,
     credentialReference: inputs.profile.credentialReference,
     profileRevision: inputs.profile.profileRevision,
     ...(inputs.profile.authorityRevision === undefined ? {} : { authorityRevision: inputs.profile.authorityRevision }),
-    protocolVersion: inputs.profile.protocolVersion
+    requestTimeoutMs: inputs.profile.requestTimeoutMs ?? 300_000,
+    protocolVersion: inputs.profile.protocolVersion,
   };
-  // Hash the schema-normalized representation before recursively freezing the
-  // same parsed shape. No later consumer can mutate its execution identity.
-  const parsedWithoutHash = textExecutionPlanSchema.parse({ ...planWithoutHash, planHash: "0".repeat(64) });
+  const parsedWithoutHash = textExecutionRouteBasisSchema.parse({ ...basisWithoutHash, routeBasisHash: "0".repeat(64) });
+  const { routeBasisHash: _placeholder, ...normalizedWithoutHash } = parsedWithoutHash;
+  const routeBasisHash = sha256(stableStringify(normalizedWithoutHash));
+  return deepFreeze(textExecutionRouteBasisSchema.parse({ ...normalizedWithoutHash, routeBasisHash }));
+}
+
+/** Derives the complete, prompt-specific plan without reading mutable metadata. */
+export function deriveTextExecutionPlan(routeBasis: TextExecutionRouteBasis, operationPrompt: string): TextExecutionPlan {
+  const basis = readRouteBasis(routeBasis);
+  const prompt = composePresetPrompt({ presetPrompt: basis.presetSystemPrompt, operationPrompt });
+  const planWithoutHash = {
+    version: PLAN_VERSION,
+    selection: basis.selection,
+    preset: basis.preset,
+    candidates: basis.candidates,
+    presetSystemPrompt: basis.presetSystemPrompt,
+    parameters: basis.parameters,
+    prompt,
+    promptHash: sha256(prompt),
+    endpointReference: basis.endpointReference,
+    credentialReference: basis.credentialReference,
+    profileRevision: basis.profileRevision,
+    ...(basis.authorityRevision === undefined ? {} : { authorityRevision: basis.authorityRevision }),
+    requestTimeoutMs: basis.requestTimeoutMs,
+    protocolVersion: basis.protocolVersion
+  };
+  const parsedWithoutHash = textExecutionPlanSchema.parse({ ...planWithoutHash, routeBasisHash: basis.routeBasisHash, planHash: "0".repeat(64) });
   const { planHash: _placeholder, ...normalizedWithoutHash } = parsedWithoutHash;
   const planHash = sha256(stableStringify(normalizedWithoutHash));
   return deepFreeze(textExecutionPlanSchema.parse({ ...normalizedWithoutHash, planHash }));
+}
+
+/** Resolves one selected profile into an immutable prompt-independent route basis. */
+export async function resolveTextExecutionRouteBasis(input: Omit<ResolveTextExecutionPlansInput, "operationPrompts">): Promise<TextExecutionRouteBasis> {
+  return createRouteBasis(await resolvePlanInputs(input));
 }
 
 /**
@@ -229,8 +266,8 @@ function createPlan(inputs: ResolvedPlanInputs, operationPrompt: string): TextEx
  */
 export async function resolveTextExecutionPlans(input: ResolveTextExecutionPlansInput): Promise<ResolvedTextExecutionPlans> {
   const entries = operationEntries(input.operationPrompts);
-  const resolvedInputs = await resolvePlanInputs(input);
-  const plans = Object.fromEntries(entries.map(([name, operationPrompt]) => [name, createPlan(resolvedInputs, operationPrompt)]));
+  const routeBasis = await resolveTextExecutionRouteBasis(input);
+  const plans = Object.fromEntries(entries.map(([name, operationPrompt]) => [name, deriveTextExecutionPlan(routeBasis, operationPrompt)]));
   return deepFreeze({ plans });
 }
 

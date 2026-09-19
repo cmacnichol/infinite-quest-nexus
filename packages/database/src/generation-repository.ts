@@ -37,10 +37,15 @@ import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from 
 import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
 import { generationResponseFormatProjection } from "./generation-response-format-projection.js";
 import { projectGenerationResponseFormat } from "../../contracts/src/generation-response-format-projection.js";
-import { textExecutionPlanSchema, type TextExecutionPlan } from "../../application/src/providers/text-execution-plan.js";
+import { textExecutionRouteBasisSchema, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
+import { selectionCompatibilityId, type TextModelSelection } from "../../contracts/src/provider-selection.js";
 
 type OperationKind = "append" | "replace_latest";
 type JobStatus = GenerationJob["status"];
+
+function requestedModelFor(request: Pick<GenerationRequest, "model" | "textSelection">): string {
+  return request.textSelection ? selectionCompatibilityId(request.textSelection) : request.model || "";
+}
 
 type EnqueueRow = {
   id: string;
@@ -138,14 +143,15 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
     storyMemoryPolicy: StoryMemoryPolicySnapshot | null;
   }>) => Promise<QueuedResponsePolicy | undefined>;
   /** Remote-capable preflight. It is deliberately called before beginning the enqueue transaction. */
-  prepareTextExecutionPlan?: (scope: Readonly<{
+  prepareTextExecutionRouteBasis?: (scope: Readonly<{
     ownerUserId: string; campaignId: string; requestedProviderProfileId: string | null; requestedModel: string;
+    requestedTextSelection?: TextModelSelection;
     operationKind: OperationKind;
-  }>) => Promise<TextExecutionPlan | undefined>;
-  /** Transaction-local authority check for a plan already resolved by preflight. */
-  verifyTextExecutionPlan?: (client: DatabaseClient, scope: Readonly<{
+  }>) => Promise<TextExecutionRouteBasis | undefined>;
+  /** Transaction-local authority check for a route basis already resolved by preflight. */
+  verifyTextExecutionRouteBasis?: (client: DatabaseClient, scope: Readonly<{
     ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string;
-    plan: TextExecutionPlan;
+    routeBasis: TextExecutionRouteBasis;
   }>) => Promise<boolean>;
   readTurnReportedCosts: (
     ownerUserId: string,
@@ -170,11 +176,11 @@ function assertQueuedResponsePolicyIdentity(
   return value;
 }
 
-function readTextExecutionPlan(value: unknown): TextExecutionPlan | undefined {
-  const parsed = textExecutionPlanSchema.safeParse(value);
+function readTextExecutionRouteBasis(value: unknown): TextExecutionRouteBasis | undefined {
+  const parsed = textExecutionRouteBasisSchema.safeParse(value);
   if (!parsed.success) return undefined;
-  const { planHash, ...unhashed } = parsed.data;
-  return sha256(stableStringify(unhashed)) === planHash ? parsed.data : undefined;
+  const { routeBasisHash, ...unhashed } = parsed.data;
+  return sha256(stableStringify(unhashed)) === routeBasisHash ? parsed.data : undefined;
 }
 
 async function earlyReplay(
@@ -409,14 +415,16 @@ export function createPostgresGenerationCommandRepository(
 ): GenerationCommandRepository {
   return {
     async enqueueAppend(scope, request) {
+      const requestedModel = requestedModelFor(request);
       const replay = await earlyReplay(pool, scope, request, "append");
       if (replay) return replay;
-      const resolvedPlan = dependencies.prepareTextExecutionPlan
-        ? await dependencies.prepareTextExecutionPlan({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
-          requestedProviderProfileId: request.providerProfileId || null, requestedModel: request.model || "", operationKind: "append" })
+      const resolvedBasis = dependencies.prepareTextExecutionRouteBasis
+        ? await dependencies.prepareTextExecutionRouteBasis({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
+          requestedProviderProfileId: request.providerProfileId || null, requestedModel,
+          ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}), operationKind: "append" })
         : undefined;
-      const preparedPlan = resolvedPlan === undefined ? undefined : readTextExecutionPlan(resolvedPlan);
-      if (resolvedPlan !== undefined && !preparedPlan) throw new GenerationApplicationError("invalid_state");
+      const preparedBasis = resolvedBasis === undefined ? undefined : readTextExecutionRouteBasis(resolvedBasis);
+      if (resolvedBasis !== undefined && !preparedBasis) throw new GenerationApplicationError("invalid_state");
       return withTransaction(pool, async (client) => {
         const requestFingerprint = sha256(stableStringify(request));
         const existing = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
@@ -451,17 +459,17 @@ export function createPostgresGenerationCommandRepository(
         const generationPolicy = generationPolicyForStyle(campaign.turn_control_style);
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
-        if (preparedPlan && dependencies.verifyTextExecutionPlan && !await dependencies.verifyTextExecutionPlan(client, {
-          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", plan: preparedPlan
+        if (preparedBasis && dependencies.verifyTextExecutionRouteBasis && !await dependencies.verifyTextExecutionRouteBasis(client, {
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel, routeBasis: preparedBasis
         })) throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
-          ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
+          ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel, ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
         const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
-          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel,
           ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }),
           operationKind: "append", generationPolicy, storyMemoryPolicy
-        })), providerProfileId, request.model || "");
+        })), providerProfileId, requestedModel);
         const storyLengthProfile = request.storyLengthProfileOverride
           ?? storyLengthProfileFromUnknown(campaign.story_length_profile);
         const storyLength = storyLengthWordRange(storyLengthProfile);
@@ -502,10 +510,10 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-              request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
+              requestedModel, json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy), json({
                 ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
-                ...(preparedPlan ? { textExecutionPlan: preparedPlan } : {})
+                ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );
           return enqueueResult(inserted.rows[0]!, false);
@@ -520,15 +528,17 @@ export function createPostgresGenerationCommandRepository(
     },
 
     async enqueueReplacement(scope, request) {
+      const requestedModel = requestedModelFor(request);
       const requestFingerprint = sha256(stableStringify(request));
       const early = await earlyReplay(pool, scope, request, "replace_latest");
       if (early) return early;
-      const resolvedPlan = dependencies.prepareTextExecutionPlan
-        ? await dependencies.prepareTextExecutionPlan({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
-          requestedProviderProfileId: request.providerProfileId || null, requestedModel: request.model || "", operationKind: "replace_latest" })
+      const resolvedBasis = dependencies.prepareTextExecutionRouteBasis
+        ? await dependencies.prepareTextExecutionRouteBasis({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
+          requestedProviderProfileId: request.providerProfileId || null, requestedModel,
+          ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}), operationKind: "replace_latest" })
         : undefined;
-      const preparedPlan = resolvedPlan === undefined ? undefined : readTextExecutionPlan(resolvedPlan);
-      if (resolvedPlan !== undefined && !preparedPlan) throw new GenerationApplicationError("invalid_state");
+      const preparedBasis = resolvedBasis === undefined ? undefined : readTextExecutionRouteBasis(resolvedBasis);
+      if (resolvedBasis !== undefined && !preparedBasis) throw new GenerationApplicationError("invalid_state");
       try {
         return await withTransaction(pool, async (client) => {
         const existing = await client.query<EnqueueRow & { recoveryMetadata: Record<string, unknown> }>(
@@ -591,17 +601,17 @@ export function createPostgresGenerationCommandRepository(
         );
         const providerProfileId = await resolveTextProviderId(client, scope.ownerUserId, request.providerProfileId || campaign.text_provider_profile_id);
         if (!providerProfileId) throw new GenerationApplicationError("provider_required", { reason: "no_text_provider" });
-        if (preparedPlan && dependencies.verifyTextExecutionPlan && !await dependencies.verifyTextExecutionPlan(client, {
-          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", plan: preparedPlan
+        if (preparedBasis && dependencies.verifyTextExecutionRouteBasis && !await dependencies.verifyTextExecutionRouteBasis(client, {
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel, routeBasis: preparedBasis
         })) throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
-          ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "", ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
+          ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel, ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
         const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
-          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel: request.model || "",
+          ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel,
           ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }),
           operationKind: "replace_latest", generationPolicy, storyMemoryPolicy
-        })), providerProfileId, request.model || "");
+        })), providerProfileId, requestedModel);
         const baseTurnNumber = campaign.active_turn_number - 1;
         let baseState: Record<string, unknown> = {};
         let baseScratchpadSafeForPrompt = false;
@@ -673,11 +683,11 @@ export function createPostgresGenerationCommandRepository(
               request.action, generationPolicy.playMode === "story_only" ? "scene" : request.requestedInputMode,
               generationPolicy.playMode === "story_only" ? "scene" : request.resolvedInputMode,
               generationPolicy.playMode === "story_only" ? "explicit" : request.inputModeSource, classificationId,
-               request.model || "", json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
+               requestedModel, json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy), json({
                 ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
-                ...(preparedPlan ? { textExecutionPlan: preparedPlan } : {})
+                ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");

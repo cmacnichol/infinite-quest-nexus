@@ -60,6 +60,7 @@ describe("executeAuthoringStage", () => {
     expect(prepared.plans.standaloneCharacter!.prompt).toBe("Preset rules.\n\nCreate a cartographer.");
     expect(prepared.plans.worldOutline!.prompt).toBe("Preset rules.\n\nCreate a world.");
     expect(prepared.plans.standaloneCharacter!.authorityRevision).toBe("authority");
+    expect(prepared.plans.standaloneCharacter!.requestTimeoutMs).toBe(10_000);
   });
 
   it("rejects v2 preparation without current authority evidence", async () => {

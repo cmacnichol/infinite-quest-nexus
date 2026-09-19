@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { textModelSelectionSchema } from "./provider-selection.js";
+import { selectionCompatibilityId, textModelSelectionSchema } from "./provider-selection.js";
 import { generationResponseFormatProjectionSchema } from "./generation-response-format-projection.js";
 export {
   canonicalFactUpdateSchema,
@@ -92,6 +92,8 @@ export const generationRequestSchema = z.object({
   classificationId: z.uuid().optional(),
   providerProfileId: z.uuid().optional(),
   model: z.string().trim().max(500).optional(),
+  /** Typed native selection. The legacy model field remains its exact compatibility alias. */
+  textSelection: textModelSelectionSchema.optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   context: z.object({
     budgetTokens: z.coerce.number().int().min(512).max(4_000_000).default(32000),
@@ -99,6 +101,10 @@ export const generationRequestSchema = z.object({
     recentTurns: z.coerce.number().int().min(1).max(100).default(8),
     modelContextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional()
   }).default({ budgetTokens: 32000, compression: "auto", recentTurns: 8 })
+}).superRefine((value, context) => {
+  if (value.model && value.textSelection && value.model !== selectionCompatibilityId(value.textSelection)) {
+    context.addIssue({ code: "custom", path: ["textSelection"], message: "model and textSelection contradict each other." });
+  }
 });
 
 export const generationRetryLatestRequestSchema = generationRequestSchema.extend({

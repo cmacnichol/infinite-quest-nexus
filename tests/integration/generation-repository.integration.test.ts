@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GenerationApplicationError } from "../../packages/application/src/index.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
@@ -58,27 +59,27 @@ integration("PostgreSQL generation command repository", () => {
     });
   }
 
-  function frozenPlan() {
-    const plan = {
+  function frozenRouteBasis() {
+    const basis = {
       version: 2 as const, selection: { kind: "model" as const, modelId: "repository-test-model" }, preset: null,
       candidates: [{ modelId: "repository-test-model", providerPolicy: {}, contextWindowTokens: 32768, maxOutputTokens: 4096 }],
-      presetSystemPrompt: "", parameters: {}, prompt: "Generate the next Story turn.",
-      promptHash: sha256("Generate the next Story turn."), endpointReference: "provider-endpoint",
-      credentialReference: providerProfileId, profileRevision: "a".repeat(64), protocolVersion: "text-execution-plan-v2"
+      presetSystemPrompt: "", parameters: {}, endpointReference: "provider-endpoint",
+      credentialReference: providerProfileId, profileRevision: "a".repeat(64), requestTimeoutMs: 30_000,
+      protocolVersion: "text-execution-route-basis-v2"
     };
-    return { ...plan, planHash: sha256(stableStringify(plan)) };
+    return { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
   }
 
   function plannedRepository(
-    prepare: () => Promise<ReturnType<typeof frozenPlan>> = async () => frozenPlan(),
+    prepare: () => Promise<ReturnType<typeof frozenRouteBasis>> = async () => frozenRouteBasis(),
     verify: () => Promise<boolean> = async () => true
   ) {
     return createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) => loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
       promptProtocolVersion: providerPromptProtocolVersion,
       readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) => readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
-      prepareTextExecutionPlan: prepare,
-      verifyTextExecutionPlan: verify
+      prepareTextExecutionRouteBasis: prepare,
+      verifyTextExecutionRouteBasis: verify
     });
   }
 
@@ -162,14 +163,14 @@ integration("PostgreSQL generation command repository", () => {
   it("persists a prepared plan privately and replays before a second preflight", async () => {
     const imported = await campaign();
     let calls = 0;
-    const commands = plannedRepository(async () => { calls += 1; return frozenPlan(); });
+    const commands = plannedRepository(async () => { calls += 1; return frozenRouteBasis(); });
     const request = appendRequest("Freeze this route before queueing.");
     const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
     const replay = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
     expect(replay).toMatchObject({ id: queued.id, duplicate: true });
     expect(calls).toBe(1);
-    const saved = await pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]);
-    expect(saved.rows[0]?.plan).toMatchObject({ version: 2, planHash: frozenPlan().planHash });
+    const saved = await pool.query<{ basis: unknown }>("SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]);
+    expect(saved.rows[0]?.basis).toMatchObject({ version: 2, routeBasisHash: frozenRouteBasis().routeBasisHash });
   });
 
   it("persists the same frozen private plan for replacement jobs", async () => {
@@ -177,16 +178,16 @@ integration("PostgreSQL generation command repository", () => {
     const queued = await plannedRepository().enqueueReplacement(
       { ownerUserId, campaignId: imported.campaignId }, replacementRequest("Freeze the replacement route.")
     );
-    const saved = await pool.query<{ plan: unknown; status: string }>(
-      "SELECT orchestration_private->'textExecutionPlan' AS plan,status FROM generation_jobs WHERE id=$1", [queued.id]
+    const saved = await pool.query<{ basis: unknown; status: string }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis,status FROM generation_jobs WHERE id=$1", [queued.id]
     );
-    expect(saved.rows[0]).toMatchObject({ status: "replacement_queued", plan: { version: 2, planHash: frozenPlan().planHash } });
+    expect(saved.rows[0]).toMatchObject({ status: "replacement_queued", basis: { version: 2, routeBasisHash: frozenRouteBasis().routeBasisHash } });
   });
 
   it("rejects a changed profile, credential, or campaign provider after preflight without queueing", async () => {
     for (const changed of ["profile", "credential", "campaign-provider"]) {
       const imported = await campaign();
-      const commands = plannedRepository(async () => frozenPlan(), async () => false);
+      const commands = plannedRepository(async () => frozenRouteBasis(), async () => false);
       await expect(commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest(`Reject ${changed} revision race.`)))
         .rejects.toMatchObject({ kind: "conflict", details: { reason: "provider_profile_changed_refresh_required" } });
       await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]))
@@ -196,7 +197,7 @@ integration("PostgreSQL generation command repository", () => {
 
   it("rejects a tampered preflight plan before an accepted turn or Chronicle work can be queued", async () => {
     const imported = await campaign();
-    const tampered = { ...frozenPlan(), planHash: "b".repeat(64) };
+    const tampered = { ...frozenRouteBasis(), routeBasisHash: "b".repeat(64) };
     const before = await pool.query<{ jobs: string; turns: string; chronicle: string }>(
       `SELECT (SELECT count(*)::text FROM generation_jobs WHERE campaign_id=$1) AS jobs,
               (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
@@ -215,8 +216,8 @@ integration("PostgreSQL generation command repository", () => {
   it("keeps v1 queue jobs without a text execution plan", async () => {
     const imported = await campaign();
     const queued = await repository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Keep historical queue behavior."));
-    await expect(pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]))
-      .resolves.toMatchObject({ rows: [{ plan: null }] });
+    await expect(pool.query<{ basis: unknown }>("SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ basis: null }] });
   });
 
   it("retains a frozen plan when a recoverable job is retried", async () => {
@@ -225,8 +226,8 @@ integration("PostgreSQL generation command repository", () => {
     const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Retry without changing route."));
     await pool.query("UPDATE generation_jobs SET status='recoverable',error_code='provider_unavailable' WHERE id=$1", [queued.id]);
     await expect(commands.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ id: queued.id, status: "queued" });
-    await expect(pool.query<{ plan: unknown }>("SELECT orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]))
-      .resolves.toMatchObject({ rows: [{ plan: { planHash: frozenPlan().planHash } }] });
+    await expect(pool.query<{ basis: unknown }>("SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ basis: { routeBasisHash: frozenRouteBasis().routeBasisHash } }] });
   });
 
   it("retains a frozen plan after an expired lease is reclaimed", async () => {
@@ -241,9 +242,9 @@ integration("PostgreSQL generation command repository", () => {
     await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
     const second = await execution.claimNext({ workerId: `second-${crypto.randomUUID()}`, leaseSeconds: 30 });
     expect(second).toMatchObject({ jobId: queued.id, attempts: 2 });
-    await expect(pool.query<{ attempts: number; plan: unknown }>(
-      "SELECT attempts,orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE id=$1", [queued.id]
-    )).resolves.toMatchObject({ rows: [{ attempts: 2, plan: { planHash: frozenPlan().planHash } }] });
+    await expect(pool.query<{ attempts: number; basis: unknown }>(
+      "SELECT attempts,orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]
+    )).resolves.toMatchObject({ rows: [{ attempts: 2, basis: { routeBasisHash: frozenRouteBasis().routeBasisHash } }] });
     await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
 
@@ -255,7 +256,7 @@ integration("PostgreSQL generation command repository", () => {
     await pool.query("UPDATE generation_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL WHERE id<>$1 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')", [queued.id]);
     const claim = await execution.claimNext({ workerId, leaseSeconds: 30 });
     expect(claim?.jobId).toBe(queued.id);
-    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{textExecutionPlan,planHash}',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify("b".repeat(64))]);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{textExecutionRouteBasis,routeBasisHash}',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify("b".repeat(64))]);
     await expect(execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
     await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
       .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
@@ -304,7 +305,9 @@ integration("PostgreSQL generation command repository", () => {
       return { id: row.providerProfileId, name: row.name, providerRole: "text" as const, providerType: row.providerType,
         model: model?.trim() || row.defaultModel, contextWindowTokens: row.contextWindowTokens, maxOutputTokens: row.maxOutputTokens,
         temperature: row.temperature, requestTimeoutMs: row.requestTimeoutMs, endpointIdentity: row.baseUrl,
-        executionRevision: row.executionRevision, ...(row.textSelection ? { textSelection: row.textSelection } : {}), configuration: row.configuration };
+        executionRevision: row.executionRevision,
+        authorityRevision: createHash("sha256").update(JSON.stringify({ providerProfileId: row.providerProfileId, providerRole: row.providerRole, baseUrl: row.baseUrl, credential: row.encryptedCredential })).digest("hex"),
+        ...(row.textSelection ? { textSelection: row.textSelection } : {}), configuration: row.configuration };
     };
     for (const mutation of ["profile", "credential", "campaign-default"] as const) {
       const imported = await campaign();
@@ -379,7 +382,7 @@ integration("PostgreSQL generation command repository", () => {
       let metadataCalls = 0;
       const profile = { id: defaultPreset.id, name: "default", providerRole: "text" as const, providerType: "openrouter" as const,
         model: "@preset/default", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 1000,
-        endpointIdentity: "endpoint", executionRevision: "a".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "default" }, configuration: {} };
+        endpointIdentity: "endpoint", executionRevision: "a".repeat(64), authorityRevision: "b".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "default" }, configuration: {} };
       const collaborators = { execution: { text: async () => profile }, loadQueuedTextProfile: async () => profile,
         responseFormatInventory: {
           getPreset: async () => { metadataCalls += 1; return { providerProfileId: defaultPreset.id, preset: { slug: "default", versionId: "v1", config: { model: "preset-model" }, configHash: "c".repeat(64) } }; },
@@ -389,9 +392,9 @@ integration("PostgreSQL generation command repository", () => {
       const { providerProfileId: _ignored, ...defaultRequest } = appendRequest("Freeze the owner default preset.");
       await app.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse(defaultRequest));
       expect(metadataCalls).toBe(2);
-      await expect(pool.query<{ providerProfileId: string; plan: unknown }>(
-        "SELECT provider_profile_id AS \"providerProfileId\",orchestration_private->'textExecutionPlan' AS plan FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]
-      )).resolves.toMatchObject({ rows: [{ providerProfileId: defaultPreset.id, plan: { version: 2, preset: { slug: "default" } } }] });
+      await expect(pool.query<{ providerProfileId: string; basis: unknown }>(
+        "SELECT provider_profile_id AS \"providerProfileId\",orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]
+      )).resolves.toMatchObject({ rows: [{ providerProfileId: defaultPreset.id, basis: { version: 2, preset: { slug: "default" }, authorityRevision: "b".repeat(64), parameters: { temperature: 0 }, requestTimeoutMs: 1000 } }] });
     } finally {
       await pool.query("UPDATE provider_profiles SET is_default=false WHERE id=$1", [defaultPreset.id]);
     }

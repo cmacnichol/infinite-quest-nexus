@@ -13,8 +13,9 @@ import { effectiveProviderConfigurationFingerprint } from "../../../packages/con
 import { resolveEffectiveContextWindowTokens } from "../../../packages/story-engine/src/index.js";
 import type { ApiGenerationProviderCollaborators } from "./provider-application-composition.js";
 import { queuedResponseContractPolicy, responseContractInvocationClosure } from "./generation-response-contract.js";
-import { resolveTextExecutionPlan } from "./provider-preset-resolution.js";
-import type { TextExecutionPlan } from "../../../packages/application/src/providers/text-execution-plan.js";
+import { resolveTextExecutionRouteBasis } from "./provider-preset-resolution.js";
+import type { TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
+import { normalizeTextSelection } from "../../../packages/contracts/src/provider-selection.js";
 
 export type ApiGenerationCompositionFactories = Readonly<{
   createCommandRepository(pool: DatabasePool): GenerationCommandRepository;
@@ -64,12 +65,12 @@ export function createQueuedResponsePolicyResolver(providers: ApiGenerationProvi
  * campaign locks. The matching verifier below only performs a local profile
  * read, so an unavailable remote endpoint can never extend a DB transaction.
  */
-function createTextExecutionPlanPreparation(
+function createTextExecutionRouteBasisPreparation(
   pool: DatabasePool,
   providers: ApiGenerationProviderCollaborators,
-): Pick<PostgresGenerationCommandRepositoryDependencies, "prepareTextExecutionPlan" | "verifyTextExecutionPlan"> {
+): Pick<PostgresGenerationCommandRepositoryDependencies, "prepareTextExecutionRouteBasis" | "verifyTextExecutionRouteBasis"> {
   return {
-    prepareTextExecutionPlan: async (scope): Promise<TextExecutionPlan | undefined> => {
+    prepareTextExecutionRouteBasis: async (scope): Promise<TextExecutionRouteBasis | undefined> => {
       const campaign = await pool.query<{ textProviderProfileId: string | null }>(
         `SELECT text_provider_profile_id AS "textProviderProfileId" FROM campaigns WHERE id=$1 AND owner_user_id=$2`,
         [scope.campaignId, scope.ownerUserId]
@@ -82,23 +83,28 @@ function createTextExecutionPlanPreparation(
       );
       if (!providerProfileId) return undefined;
       const profile = await providers.execution.text({ ownerUserId: scope.ownerUserId }, providerProfileId, "text", undefined);
-      // A request model is an explicit direct selection, so it replaces a
-      // profile preset instead of resolving that preset's first candidate.
-      const selection = scope.requestedModel.trim()
-        ? { kind: "model" as const, modelId: scope.requestedModel.trim() }
-        : profile.textSelection ?? { kind: "model" as const, modelId: profile.model };
+      // Typed request selections win. The legacy model field is normalized
+      // only through its exact compatibility alias, so @preset/slug remains a
+      // preset and is never mistaken for a model ID.
+      const selection = scope.requestedTextSelection ?? (scope.requestedModel.trim()
+        ? normalizeTextSelection({ providerType: profile.providerType, providerRole: "text", defaultModel: scope.requestedModel })
+        : profile.textSelection ?? normalizeTextSelection({ providerType: profile.providerType, providerRole: "text", defaultModel: profile.model }));
       // Tasks 4/5 own admission and dispatch. Ordinary model jobs retain the
       // historical queue path; only an explicitly selected native preset gets
       // a frozen v2 descriptor here.
       if (selection.kind !== "openrouter_preset") return undefined;
-      return resolveTextExecutionPlan({
+      if (!profile.executionRevision || !profile.authorityRevision) {
+        throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+      }
+      return resolveTextExecutionRouteBasis({
         profile: {
-          ownerUserId: scope.ownerUserId, providerProfileId, profileRevision: profile.executionRevision ?? "legacy-profile-revision",
+          ownerUserId: scope.ownerUserId, providerProfileId, profileRevision: profile.executionRevision,
+          authorityRevision: profile.authorityRevision,
           providerType: profile.providerType, selection, contextWindowTokens: profile.contextWindowTokens,
           maxOutputTokens: profile.maxOutputTokens, endpointReference: profile.endpointIdentity ?? profile.id,
-          credentialReference: profile.id, protocolVersion: "text-execution-plan-v2"
+          credentialReference: profile.id, requestTimeoutMs: profile.requestTimeoutMs,
+          parameters: { temperature: profile.temperature }, protocolVersion: "text-execution-route-basis-v2"
         },
-        operationPrompt: scope.operationKind === "append" ? "Generate the next Story turn." : "Replace the latest Story turn.",
         ports: {
           resolvePreset: async ({ ownerUserId, providerProfileId: id, slug }) =>
             (await providers.responseFormatInventory.getPreset({ ownerUserId, providerProfileId: id, slug })).preset,
@@ -110,12 +116,13 @@ function createTextExecutionPlanPreparation(
         }
       });
     },
-    verifyTextExecutionPlan: async (client, scope) => {
+    verifyTextExecutionRouteBasis: async (client, scope) => {
       const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId, undefined);
-      return (profile.executionRevision ?? "legacy-profile-revision") === scope.plan.profileRevision
-        && (profile.endpointIdentity ?? profile.id) === scope.plan.endpointReference
+      return profile.executionRevision === scope.routeBasis.profileRevision
+        && profile.authorityRevision === scope.routeBasis.authorityRevision
+        && (profile.endpointIdentity ?? profile.id) === scope.routeBasis.endpointReference
         && profile.id === scope.providerProfileId
-        && scope.plan.credentialReference === profile.id;
+        && scope.routeBasis.credentialReference === profile.id;
     }
   };
 }
@@ -142,7 +149,7 @@ export function createApiGenerationApplication(
          enforceEnabled: resolvedOperatorConfig.enforceEnabled
       }),
       resolveQueuedResponsePolicy: createQueuedResponsePolicyResolver(providers),
-      ...(nativeTextExecutionPlanAdmission ? createTextExecutionPlanPreparation(pool, providers) : {}),
+      ...(nativeTextExecutionPlanAdmission ? createTextExecutionRouteBasisPreparation(pool, providers) : {}),
       readTurnReportedCosts: (ownerUserId, campaignId, turnIds) => providers.reads.getTurnCosts({
         ownerUserId,
         campaignId,
