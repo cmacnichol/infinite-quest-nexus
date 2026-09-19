@@ -1,5 +1,8 @@
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../../packages/application/src/authoring/ports.js";
 import { authoringStageOutputSchema, type AuthoringExecutionSnapshot, type AuthoringStageOutput } from "../../../packages/application/src/authoring/types.js";
+import { textExecutionPlanSchema, type TextExecutionPlan } from "@infinite-quest/contracts";
+import type { AuthoringTextOperation } from "../../../packages/contracts/src/authoring.js";
+import { stableStringify } from "../../../packages/domain/src/text.js";
 import type { RuntimeProviderExecutionPort, RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 import { AuthoringResponseError } from "./authoring-response-adapter.js";
 import {
@@ -44,11 +47,12 @@ export function createAuthoringExecutionSnapshot(
   prompts: Record<string, string>,
   protocols: Record<string, string>,
   sha256: (value: string) => string,
+  plans?: Readonly<Partial<Record<AuthoringTextOperation, TextExecutionPlan>>>
 ): AuthoringExecutionSnapshot {
   const textConfiguration = typeof execution.configuration.httpReferer === "string"
     ? { httpReferer: execution.configuration.httpReferer }
     : {};
-  return {
+  const base = {
     providerProfileId: execution.id,
     model: execution.model,
     configurationHash: sha256(stableJson({
@@ -66,6 +70,9 @@ export function createAuthoringExecutionSnapshot(
     prompts: { ...prompts },
     protocols: { ...protocols }
   };
+  return plans && Object.keys(plans).length > 0
+    ? { ...base, version: 2, textExecutionPlans: { ...plans } }
+    : base;
 }
 
 export type LoadedAuthoringStage = Readonly<{
@@ -85,6 +92,42 @@ export type LoadedAuthoringStage = Readonly<{
   ownerUserId: string;
   currentClaim?(): Promise<boolean>;
 }>;
+
+export type PreparedAuthoringTextExecutor = Readonly<{
+  execute(input: Readonly<{
+    plan: TextExecutionPlan;
+    operation: string;
+    request: import("../../../packages/story-engine/src/providers.js").ProviderRequest;
+    currentClaim?: () => Promise<boolean>;
+  }>): Promise<import("../../../packages/story-engine/src/providers.js").ProviderResult>;
+}>;
+
+type AuthoringExecutionSnapshotV2 = AuthoringExecutionSnapshot & Readonly<{
+  version: 2;
+  textExecutionPlans: Partial<Record<AuthoringTextOperation, TextExecutionPlan>>;
+}>;
+
+function v2Snapshot(snapshot: AuthoringExecutionSnapshot): snapshot is AuthoringExecutionSnapshotV2 {
+  return "version" in snapshot && snapshot.version === 2;
+}
+
+function planMatchesHash(plan: TextExecutionPlan, sha256: (value: string) => string): boolean {
+  const { planHash, ...withoutHash } = plan;
+  return sha256(stableStringify(withoutHash)) === planHash;
+}
+
+function operationFor(stage: LoadedAuthoringStage, repair: boolean): string {
+  if (stage.stageKey === "world") return repair ? "worldOutlineRepair" : "worldOutline";
+  if (stage.stageKey.startsWith("character:")) {
+    return stage.parentOutputs.some((output) => output.kind === "outline")
+      ? repair ? "seedCharacterRepair" : "seedCharacter"
+      : "standaloneCharacter";
+  }
+  const sourceWorld = stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:");
+  return sourceWorld
+    ? repair ? "sourceWorldRepair" : "sourceWorld"
+    : repair ? "sourceExtractionRepair" : "sourceExtraction";
+}
 
 /**
  * Execute one already-claimed durable authoring stage.  The repository is the
@@ -139,19 +182,56 @@ function providerFailureStage(stage: LoadedAuthoringStage): "world" | "character
 export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
   execution: RuntimeProviderExecutionPort;
   sha256: (value: string) => string;
+  /** Task 5 supplies route transport. V2 cannot fall through to legacy execution. */
+  preparedExecutor?: PreparedAuthoringTextExecutor;
 }>): (stage: LoadedAuthoringStage) => Promise<AuthoringStageOutput> {
   return async (stage) => {
     let provider: RuntimeTextExecution;
-    try {
-      provider = await options.execution.text(
-        { ownerUserId: stage.ownerUserId }, stage.snapshot.providerProfileId, "text", stage.snapshot.model,
-        stage.snapshot.contextWindowTokens
-      );
-    } catch {
-      throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
-    }
-    if (!compatibleSnapshot(stage.snapshot, provider, options.sha256)) {
-      throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+    if (v2Snapshot(stage.snapshot)) {
+      const snapshot = stage.snapshot;
+      const initialOperation = operationFor(stage, false);
+      const initialPlan = snapshot.textExecutionPlans[initialOperation as keyof typeof snapshot.textExecutionPlans];
+      if (!initialPlan || !planMatchesHash(textExecutionPlanSchema.parse(initialPlan), options.sha256) || !options.preparedExecutor) {
+        throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+      }
+      const candidate = initialPlan.candidates[0]!;
+      provider = {
+        id: stage.snapshot.providerProfileId,
+        name: "Frozen authoring plan",
+        providerRole: "text",
+        providerType: "openrouter",
+        model: candidate.modelId,
+        contextWindowTokens: candidate.contextWindowTokens,
+        maxOutputTokens: candidate.maxOutputTokens,
+        temperature: initialPlan.parameters.temperature ?? 1,
+        requestTimeoutMs: stage.snapshot.requestTimeoutMs,
+        configuration: {},
+        execute: async (request) => {
+          const operation = operationFor(stage, request.rejectedResponse !== undefined);
+          const plan = snapshot.textExecutionPlans[operation as keyof typeof snapshot.textExecutionPlans];
+          if (!plan || !planMatchesHash(textExecutionPlanSchema.parse(plan), options.sha256)) {
+            throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+          }
+          return options.preparedExecutor!.execute({
+            plan,
+            operation,
+            request: { ...request, systemPrompt: plan.prompt },
+            ...(stage.currentClaim === undefined ? {} : { currentClaim: stage.currentClaim })
+          });
+        }
+      };
+    } else {
+      try {
+        provider = await options.execution.text(
+          { ownerUserId: stage.ownerUserId }, stage.snapshot.providerProfileId, "text", stage.snapshot.model,
+          stage.snapshot.contextWindowTokens
+        );
+      } catch {
+        throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+      }
+      if (!compatibleSnapshot(stage.snapshot, provider, options.sha256)) {
+        throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+      }
     }
     if (stage.input.kind === "story_source") {
       const isSourceWorldStage = stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:");

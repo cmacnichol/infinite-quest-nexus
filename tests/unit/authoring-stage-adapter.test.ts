@@ -5,6 +5,7 @@ import { normalizeSourceDocument } from "../../packages/domain/src/source-author
 import { planSourceChunks } from "../../packages/domain/src/source-authoring-budget.js";
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../packages/application/src/authoring/ports.js";
 import type { AuthoringExecutionSnapshot } from "../../packages/application/src/authoring/types.js";
+import { authoringExecutionSnapshotSchema } from "../../packages/contracts/src/authoring.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { expandWorldCharacterSeed } from "../../services/runtime/src/provider-world-generation-adapter.js";
@@ -69,6 +70,52 @@ describe("executeAuthoringStage", () => {
     expect(left).toMatchObject({ providerProfileId: "text-1", model: "model-pinned" });
     const changedTemperature = createAuthoringExecutionSnapshot({ ...base, temperature: 0.9 }, { world: "prompt" }, { authoring: "v1" }, hash);
     expect(changedTemperature.configurationHash).not.toEqual(left.configurationHash);
+  });
+
+  it("accepts a private v2 per-operation text plan while preserving a literal v1 snapshot", () => {
+    const v1 = authoringExecutionSnapshotSchema.parse(snapshot);
+    const plan = {
+      version: 2,
+      selection: { kind: "model", modelId: "model-pinned" },
+      preset: null,
+      candidates: [{ modelId: "model-pinned", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+      presetSystemPrompt: "Preset instructions.",
+      parameters: { temperature: 0.7 },
+      prompt: "Preset instructions.\n\nCreate a capable cartographer.",
+      promptHash: "a".repeat(64),
+      endpointReference: "endpoint-1",
+      credentialReference: "credential-1",
+      profileRevision: "profile-1",
+      protocolVersion: "authoring-v2",
+      planHash: "b".repeat(64)
+    };
+    const v2 = authoringExecutionSnapshotSchema.parse({
+      ...snapshot,
+      version: 2,
+      textExecutionPlans: { standaloneCharacter: plan }
+    });
+
+    expect(v1).not.toHaveProperty("version");
+    expect(v2).toMatchObject({ version: 2, textExecutionPlans: { standaloneCharacter: { prompt: plan.prompt } } });
+  });
+
+  it("freezes supplied operation plans into a v2 authoring snapshot", () => {
+    const parsed = authoringExecutionSnapshotSchema.parse({
+      ...snapshot,
+      version: 2,
+      textExecutionPlans: {
+        standaloneCharacter: {
+          version: 2, selection: { kind: "model", modelId: "model-pinned" }, preset: null,
+          candidates: [{ modelId: "model-pinned", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+          presetSystemPrompt: "", parameters: {}, prompt: "Frozen prompt.", promptHash: "a".repeat(64),
+          endpointReference: "endpoint-1", credentialReference: null, profileRevision: "profile-1", protocolVersion: "authoring-v2", planHash: "b".repeat(64)
+        }
+      }
+    });
+    if (!("textExecutionPlans" in parsed)) throw new Error("Expected v2 plan fixture.");
+    const plan = parsed.textExecutionPlans;
+    const frozen = createAuthoringExecutionSnapshot(descriptor, { character_generation: "legacy" }, { character: "v1" }, sha256, plan);
+    expect(frozen).toMatchObject({ version: 2, textExecutionPlans: { standaloneCharacter: { prompt: "Frozen prompt." } } });
   });
 
   it("loads the pinned claim and dispatches only its missing stage", async () => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { textExecutionPlanSchema } from "./text-execution-plan.js";
 import { apiTimestampSchema } from "./http.js";
 import {
   playableCharacterSchema,
@@ -164,7 +165,7 @@ export const authoringStageOutputSchema = z.discriminatedUnion("kind", [
 ]);
 
 /** Safe pinned execution fields only; endpoint URLs and credentials are deliberately absent. */
-export const authoringExecutionSnapshotSchema = z.object({
+const authoringExecutionSnapshotV1Schema = z.object({
   providerProfileId: z.string().trim().min(1).max(200),
   model: z.string().trim().min(1).max(500),
   configurationHash: z.string().regex(/^[0-9a-f]{64}$/u),
@@ -174,6 +175,34 @@ export const authoringExecutionSnapshotSchema = z.object({
   prompts: z.record(z.string().min(1).max(200), z.string().max(200_000)),
   protocols: z.record(z.string().min(1).max(200), z.string().min(1).max(1_000))
 }).strict();
+
+/** Each durable stage has a separately composed, frozen v2 plan. */
+export const authoringTextOperationSchema = z.enum([
+  "worldOutline",
+  "worldOutlineRepair",
+  "seedCharacter",
+  "seedCharacterRepair",
+  "standaloneCharacter",
+  "sourceExtraction",
+  "sourceExtractionRepair",
+  "sourceWorld",
+  "sourceWorldRepair"
+]);
+
+const authoringExecutionSnapshotV2Schema = authoringExecutionSnapshotV1Schema.extend({
+  version: z.literal(2),
+  textExecutionPlans: z.partialRecord(authoringTextOperationSchema, textExecutionPlanSchema)
+    .refine((plans) => Object.keys(plans).length > 0)
+}).strict();
+
+/**
+ * V1 is retained byte-for-byte for existing jobs. V2 stays private execution
+ * state and pins a complete prompt plan per authoring operation.
+ */
+export const authoringExecutionSnapshotSchema = z.union([
+  authoringExecutionSnapshotV1Schema,
+  authoringExecutionSnapshotV2Schema
+]);
 
 export const authoringStageViewSchema = z.object({
   id: authoringIdSchema,
@@ -335,3 +364,4 @@ export type AuthoringResult = WorldContent | PlayableCharacter;
 export type AuthoringWorldOutline = z.infer<typeof authoringWorldOutlineSchema>;
 export type AuthoringStageOutput = z.infer<typeof authoringStageOutputSchema>;
 export type AuthoringExecutionSnapshot = z.infer<typeof authoringExecutionSnapshotSchema>;
+export type AuthoringTextOperation = z.infer<typeof authoringTextOperationSchema>;
