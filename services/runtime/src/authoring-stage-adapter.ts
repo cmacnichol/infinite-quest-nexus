@@ -129,6 +129,15 @@ function operationFor(stage: LoadedAuthoringStage, repair: boolean): string {
     : repair ? "sourceExtractionRepair" : "sourceExtraction";
 }
 
+function sourcePlansFor(stage: LoadedAuthoringStage, sourceWorld: boolean): Readonly<{ initial: TextExecutionPlan; repair: TextExecutionPlan }> | undefined {
+  if (!v2Snapshot(stage.snapshot)) return undefined;
+  const initialKey = sourceWorld ? "sourceWorld" : "sourceExtraction";
+  const repairKey = sourceWorld ? "sourceWorldRepair" : "sourceExtractionRepair";
+  const initial = stage.snapshot.textExecutionPlans[initialKey];
+  const repair = stage.snapshot.textExecutionPlans[repairKey];
+  return initial && repair ? { initial, repair } : undefined;
+}
+
 /**
  * Execute one already-claimed durable authoring stage.  The repository is the
  * authority for the claim fence and pinned snapshot; callers provide the
@@ -245,6 +254,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         throw new AuthoringResponseError({ code: "source_evidence_invalid", stage: "source", retryable: false, issues: [] });
       }
       const sourceInput = stage.input;
+      const sourcePlans = sourcePlansFor(stage, isSourceWorldStage);
       const diagnosticContext = { authoringJobId: stage.jobId, stageKey: stage.stageKey, ...(stage.stageId === undefined ? {} : { stageId: stage.stageId }), ...(stage.stageGeneration === undefined ? {} : { stageGeneration: stage.stageGeneration }) };
       const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider, undefined, diagnosticContext);
       if (isSourceWorldStage) {
@@ -257,7 +267,8 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         if (selectedCharacterFactIds.some((id) => !stage.sourceSelection!.selectedCharacterFactIds.includes(id))) {
           throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });
         }
-        const adapter = createSourceWorldAuthoringAdapter({ requestBudget, diagnosticContext, delay: async () => undefined });
+        const adapter = createSourceWorldAuthoringAdapter({ requestBudget, diagnosticContext, delay: async () => undefined,
+          ...(sourcePlans === undefined ? {} : { plans: sourcePlans }) });
         const assembled = await adapter.synthesizeSourceWorld({
           selection: { ...stage.sourceSelection, selectedCharacterFactIds },
           reviewGeneration: stage.sourceSelection.reviewGeneration,
@@ -296,7 +307,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
             mode: frame.mode ?? sourceInput.mode,
             repair: frame.repair,
             issues: []
-          }))
+          }, sourcePlans?.initial))
         });
         return { kind: "source_plan", chunks: chunks.map((chunk) => ({
           ...chunk,
@@ -319,7 +330,8 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         const adapter = createSourceAuthoringAdapter({
           requestBudget,
           diagnosticContext,
-          delay: async () => undefined
+          delay: async () => undefined,
+          ...(sourcePlans === undefined ? {} : { plans: sourcePlans })
         });
         return { kind: "source_extraction", facts: await adapter.extractSourceChunk({
           source, chunk, boundaryParagraphId: sourceInput.boundaryParagraphId,
