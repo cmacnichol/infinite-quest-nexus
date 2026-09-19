@@ -43,6 +43,7 @@ import {
 } from "./provider-world-generation-adapter.js";
 import { createProviderResponseFormatCapabilities, type ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
 import type { SchemaVerification } from "@infinite-quest/contracts";
+import type { DirectAuthoringTextPlanOptions } from "./authoring-text-execution-preparation.js";
 
 export type ProviderApplicationTransaction = Readonly<{
   application: ProviderApplication;
@@ -93,6 +94,7 @@ export type ChronicleProviderCollaborators = ProviderConsumerRuntime & Readonly<
 export type WorldGenerationProviderCollaborators = ProviderConsumerRuntime & Readonly<{
   prompts: WorldGenerationPromptPort;
   costs: WorldGenerationCostPort;
+  authoringTextPlans?: DirectAuthoringTextPlanOptions;
 }>;
 
 export type AuthoringWorkerProviderCollaborators = Readonly<{
@@ -106,6 +108,7 @@ export type AuthoringWorkerProviderCollaborators = Readonly<{
 export type CharacterOrganizationProviderCollaborators = ProviderConsumerRuntime & Readonly<{
   prompts: CharacterOrganizationPromptPort;
   costs: CharacterOrganizationCostPort;
+  authoringTextPlans?: DirectAuthoringTextPlanOptions;
 }>;
 
 export type InfiniteWorldsProviderCollaborators = ProviderConsumerRuntime & Readonly<{

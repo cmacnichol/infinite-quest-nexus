@@ -445,6 +445,12 @@ describe("strict character profile organizer validation", () => {
 
   it("sends the effective organizer contract on initial and repair provider calls", async () => {
     const requests: Array<{ systemPrompt: string; input: string }> = [];
+    const executePrepared = vi.fn(async ({ operation: _operation, request }: { operation: string; request: { systemPrompt: string; input: string } }) => {
+      requests.push(request);
+      return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} };
+    });
+    const getPreset = vi.fn(async () => ({ slug: "organizer", name: "Organizer", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset instructions." }));
+    const listModels = vi.fn(async () => [{ id: "native-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
     const responses = [
       { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "wrong quote" }], unassignedText: [], conflicts: [], warnings: [] },
       { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }], unassignedText: [], conflicts: [], warnings: [] }
@@ -455,17 +461,22 @@ describe("strict character profile organizer validation", () => {
       "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
       {
         resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
-        execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string; input: string }); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
+        execution: { text: async () => ({ id: "provider", name: "Native", providerRole: "text", providerType: "openrouter", model: "model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, configuration: {}, executionRevision: "execution", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "organizer" }, execute: async () => { throw new Error("legacy execute must not receive enabled native work"); } }) },
         prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
-        promptTools: { content: () => "Organize supplied character facts." }
+        promptTools: { content: (_snapshot: unknown, key: string) => key === "character_profile_repair" ? "Repair organizer response." : "Organize supplied character facts." },
+        authoringTextPlans: { nativePresetPlansEnabled: true, preparedExecutor: { execute: executePrepared }, loadAuthority: async () => ({ id: "provider", providerRole: "text", authorityRevision: "authority" }), ports: { resolvePreset: async () => getPreset(), discoverModels: async () => listModels() } }
       } as never
     );
     expect(result.candidate.appearance.clothing).toBe("weathered blue cloak");
     expect(requests).toHaveLength(2);
+    expect(getPreset).toHaveBeenCalledTimes(1);
+    expect(listModels).toHaveBeenCalledTimes(1);
+    expect(executePrepared.mock.calls.map(([input]) => input.operation)).toEqual(["organizer", "organizerRepair"]);
     for (const request of requests) {
       expect(request.systemPrompt).toContain('"path":"appearance.clothing","source":"legacyGuidance","quote":"exact source excerpt"');
       expect(request.systemPrompt).toContain("character-profile-organizer-v3");
       expect(request.systemPrompt).toContain("untrusted reference");
+      expect(request.systemPrompt).toContain("Preset instructions.");
       expect((request as Record<string, unknown>).responseFormatFallback).toBe("forbid");
       expect(request).not.toHaveProperty("previousResponseId");
     }
@@ -474,6 +485,29 @@ describe("strict character profile organizer validation", () => {
       code: "custom",
       message: "Organizer evidence does not support a populated profile field."
     }]);
+    expect(requests[0]?.systemPrompt).not.toBe(requests[1]?.systemPrompt);
+  });
+
+  it("retains the legacy organizer request and repair path", async () => {
+    const requests: Array<{ systemPrompt: string; input: string }> = [];
+    const responses = [
+      { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "wrong quote" }], unassignedText: [], conflicts: [], warnings: [] },
+      { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }], unassignedText: [], conflicts: [], warnings: [] }
+    ];
+    const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+    await organizeWorldCharacterProfileForOwner(
+      { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      {
+        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+        execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string; input: string }); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
+        prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+        promptTools: { content: () => "Organize supplied character facts." }
+      } as never
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.systemPrompt).toContain("character-profile-organizer-v3");
+    expect(JSON.parse(requests[1]!.input).validationFailures).toEqual([{ path: "evidence.0.source", code: "custom", message: "Organizer evidence does not support a populated profile field." }]);
   });
 
   it("repairs malformed organizer output once and fails safely when the replacement is malformed", async () => {

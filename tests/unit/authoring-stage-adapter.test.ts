@@ -6,8 +6,9 @@ import { planSourceChunks } from "../../packages/domain/src/source-authoring-bud
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../packages/application/src/authoring/ports.js";
 import type { AuthoringExecutionSnapshot } from "../../packages/application/src/authoring/types.js";
 import { authoringExecutionSnapshotSchema } from "../../packages/contracts/src/authoring.js";
+import { normalizeTextSelection } from "../../packages/contracts/src/provider-selection.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
-import { prepareAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { prepareAuthoringTextExecution, prepareDirectAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { expandWorldCharacterSeed } from "../../services/runtime/src/provider-world-generation-adapter.js";
 
@@ -68,6 +69,45 @@ describe("executeAuthoringStage", () => {
       operationPrompts: { standaloneCharacter: "Create a cartographer." },
       ports: { resolvePreset: async () => { throw new Error("unused"); }, discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }] }
     })).rejects.toThrow("authority revisions");
+  });
+
+  it("fails closed before direct dispatch when the frozen authority changes", async () => {
+    const execute = vi.fn(async () => providerResult("{}"));
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution: { ...descriptor, name: "Text", providerRole: "text", providerType: "openrouter", executionRevision: "ordinary", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "story" }, execute: async () => providerResult("{}") },
+      operationPrompts: { worldOutline: "Create a world." },
+      options: {
+        nativePresetPlansEnabled: true,
+        preparedExecutor: { execute },
+        loadAuthority: async () => ({ id: "text-1", providerRole: "text", authorityRevision: "authority-b" }),
+        ports: {
+          resolvePreset: async () => ({ slug: "story", name: "Story", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Preset rules." }),
+          discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+        }
+      }
+    });
+    await expect(prepared!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "{}" } })).rejects.toThrow("authority");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("uses explicit direct models without preset lookup and resolves explicit preset aliases", async () => {
+    const getPreset = vi.fn(async ({ slug }: { slug: string }) => ({ slug, name: slug, versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["preset-model"] }, systemPrompt: `${slug} instructions.` }));
+    const discoverModels = vi.fn(async ({ modelIds }: { modelIds: readonly string[] }) => modelIds.map((id) => ({ id, contextWindowTokens: 8192, maxOutputTokens: 1024 })));
+    const captured: Array<{ plan: { selection: unknown } }> = [];
+    const execute = vi.fn(async (input: { plan: { selection: unknown } }) => { captured.push(input); return providerResult("{}"); });
+    const options = { nativePresetPlansEnabled: true, preparedExecutor: { execute }, loadAuthority: async () => ({ id: "text-1", providerRole: "text" as const, authorityRevision: "authority" }), ports: { resolvePreset: getPreset, discoverModels } };
+    const execution = { ...descriptor, name: "Text", providerRole: "text" as const, providerType: "openrouter" as const, executionRevision: "ordinary", authorityRevision: "authority", textSelection: { kind: "openrouter_preset" as const, slug: "inherited" }, execute: async () => providerResult("{}") };
+    const direct = await prepareDirectAuthoringTextExecution({ ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create a world." }, options, selectionOverride: { kind: "model", modelId: "explicit-model" } });
+    await direct!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "{}" } });
+    expect(getPreset).not.toHaveBeenCalled();
+    expect(captured[0]?.plan.selection).toEqual({ kind: "model", modelId: "explicit-model" });
+
+    const alias = normalizeTextSelection({ providerType: "openrouter", providerRole: "text", defaultModel: "@preset/explicit" });
+    const preset = await prepareDirectAuthoringTextExecution({ ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create a world." }, options, selectionOverride: alias });
+    await preset!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "{}" } });
+    expect(getPreset).toHaveBeenCalledWith(expect.objectContaining({ slug: "explicit" }));
+    expect(captured[1]?.plan.selection).toEqual({ kind: "openrouter_preset", slug: "explicit" });
   });
   it("preserves the synchronous seed prompt field names in the shared expansion seam", async () => {
     let sentSeed: unknown;

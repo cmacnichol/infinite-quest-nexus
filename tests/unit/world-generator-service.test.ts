@@ -11,6 +11,7 @@ import {
 } from "../../packages/story-engine/src/providers.js";
 import {
   generatedWorldProviderError,
+  generatePlayableCharacterPreviewForOwner,
   generateTemplateWorld,
   generateWorldPreviewForOwner,
   incompleteGeneratedCharacterError,
@@ -19,6 +20,7 @@ import {
   worldGenerationFailureDiagnostic
 } from "../../services/runtime/src/provider-world-generation-adapter.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
+import { worldContentSchema } from "../../packages/contracts/src/world-library.js";
 import type { WorldGenerationProviderCollaborators } from "../../services/runtime/src/provider-application-composition.js";
 
 function profile() {
@@ -169,6 +171,80 @@ function generationHarness(
     )
   };
 }
+
+it("prepares one inherited preset workflow for the direct CYOA world and seed pipeline", async () => {
+  const requests: ProviderRequest[] = [];
+  let seedInitials = 0;
+  const executePrepared = vi.fn(async ({ operation, request }: { operation: string; request: ProviderRequest }) => {
+    requests.push(request);
+    if (operation === "worldOutline") return providerResult("{");
+    if (operation === "worldOutlineRepair") return providerResult(worldDraftResponse(3));
+    if (operation === "seedCharacterRepair") return providerResult(JSON.stringify(character("Character 1")));
+    seedInitials += 1;
+    return providerResult(JSON.stringify(character(seedInitials === 1 ? "Different Character" : `Character ${seedInitials}`)));
+  });
+  const getPreset = vi.fn(async () => ({
+    slug: "world", name: "World", versionId: "v1", version: 1,
+    configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset instructions."
+  }));
+  const listModels = vi.fn(async () => [{ id: "native-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+  const providers = {
+    resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider-id", model: "inherited-model" }) },
+    execution: { text: async () => ({
+      id: "provider-id", name: "Native", providerRole: "text", providerType: "openrouter", model: "inherited-model",
+      contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000,
+      configuration: {}, executionRevision: "execution", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "world" },
+      execute: async () => { throw new Error("legacy execute must not receive enabled native work"); }
+    }) },
+    prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) },
+    promptTools: { content: (_snapshot: unknown, key: keyof typeof PROMPT_TEMPLATE_CATALOG) => PROMPT_TEMPLATE_CATALOG[key].defaultContent },
+    authoringTextPlans: {
+      nativePresetPlansEnabled: true,
+      preparedExecutor: { execute: executePrepared },
+      loadAuthority: async () => ({ id: "provider-id", providerRole: "text", authorityRevision: "authority" }),
+      ports: { resolvePreset: async () => getPreset(), discoverModels: async () => listModels() }
+    }
+  } as unknown as WorldGenerationProviderCollaborators;
+
+  await generateTemplateWorld({} as never, "owner-id", "provider-id", {
+    sourceName: "imported-cyoa.json", sourceKind: "cyoa_json", title: "The Moving Roads", summary: "Roads move beneath moonlight.", keywords: [], excerpts: []
+  }, providers, "world-preview");
+
+  expect(getPreset).toHaveBeenCalledTimes(1);
+  expect(listModels).toHaveBeenCalledTimes(1);
+  expect(executePrepared).toHaveBeenCalledTimes(6);
+  expect(executePrepared.mock.calls.map(([input]) => input.operation)).toEqual(["worldOutline", "worldOutlineRepair", "seedCharacter", "seedCharacterRepair", "seedCharacter", "seedCharacter"]);
+  expect(executePrepared.mock.calls[1]?.[0].request.rejectedResponse).toBe("{");
+  expect(executePrepared.mock.calls[3]?.[0].request.rejectedResponse).toContain("Different Character");
+  expect(requests[0]?.systemPrompt).toContain("Preset instructions.");
+  expect(requests[1]?.systemPrompt).toContain("Preset instructions.");
+});
+
+it("dispatches standalone character repair through one prepared preset workflow", async () => {
+  const executePrepared = vi.fn(async ({ operation: _operation, request }: { operation: string; request: ProviderRequest }) => {
+    const response = executePrepared.mock.calls.length === 1 ? "{\"name\":\"Mira\"}" : JSON.stringify(character("Mira"));
+    return providerResult(response, "standalone-response");
+  });
+  const getPreset = vi.fn(async () => ({ slug: "character", name: "Character", versionId: "v1", version: 1, configHash: "b".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset character instructions." }));
+  const listModels = vi.fn(async () => [{ id: "native-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+  const providers = {
+    resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider-id", model: "inherited-model" }) },
+    execution: { text: async () => ({ id: "provider-id", name: "Native", providerRole: "text", providerType: "openrouter", model: "inherited-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, configuration: {}, executionRevision: "execution", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "character" }, execute: async () => { throw new Error("legacy execute must not receive enabled native work"); } }) },
+    prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) },
+    promptTools: { content: (_snapshot: unknown, key: keyof typeof PROMPT_TEMPLATE_CATALOG) => PROMPT_TEMPLATE_CATALOG[key].defaultContent },
+    authoringTextPlans: { nativePresetPlansEnabled: true, preparedExecutor: { execute: executePrepared }, loadAuthority: async () => ({ id: "provider-id", providerRole: "text", authorityRevision: "authority" }), ports: { resolvePreset: async () => getPreset(), discoverModels: async () => listModels() } }
+  } as unknown as WorldGenerationProviderCollaborators;
+
+  const result = await generatePlayableCharacterPreviewForOwner({} as never, "owner-id", {
+    content: worldContentSchema.parse({ world: { title: "The Moving Roads" }, playableCharacters: [] }), prompt: "Create Mira.", progressKey: "character-preview"
+  }, providers, { createWorldGenerationProgress: async () => undefined, updateWorldGenerationProgress: async () => undefined });
+
+  expect(result.character.name).toBe("Mira");
+  expect(getPreset).toHaveBeenCalledTimes(1);
+  expect(listModels).toHaveBeenCalledTimes(1);
+  expect(executePrepared.mock.calls.map(([input]) => input.operation)).toEqual(["standaloneCharacter", "standaloneCharacter"]);
+  expect(executePrepared.mock.calls[1]?.[0].request.rejectedResponse).toBe('{"name":"Mira"}');
+});
 
 function worldProvidersWithError(error: unknown): WorldGenerationProviderCollaborators {
   return {

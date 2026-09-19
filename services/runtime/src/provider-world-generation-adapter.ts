@@ -33,13 +33,19 @@ import {
   extractJsonObject,
   ProviderHttpError,
   providerTransportErrorDetails,
+  type ProviderRequest,
   type ProviderResult
 } from "../../../packages/story-engine/src/index.js";
+import { normalizeTextSelection } from "../../../packages/contracts/src/provider-selection.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import type { WorldGenerationProviderCollaborators } from "./provider-application-composition.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 import { runAuthoringResponse } from "./authoring-response-adapter.js";
 import type { AuthoringWorldOutline } from "../../../packages/application/src/authoring/types.js";
+import {
+  prepareDirectAuthoringTextExecution,
+  type PreparedDirectAuthoringTextExecution
+} from "./authoring-text-execution-preparation.js";
 
 const coerceText = (val: unknown): string => {
   if (val === null || val === undefined) return "";
@@ -533,6 +539,7 @@ export function normalizeRawWorldJson(raw: unknown): Record<string, unknown> {
 export async function generateWorldOutline(options: Readonly<{
   input: TemplateWorldInput;
   provider: Pick<RuntimeTextExecution, "execute">;
+  preparedExecution?: PreparedDirectAuthoringTextExecution;
   worldPrompt: ReturnType<typeof buildTemplateWorldPrompt>;
   prompt: string;
   repairPrompt: string;
@@ -543,7 +550,7 @@ export async function generateWorldOutline(options: Readonly<{
     stage: "world",
     request: async (attempt) => {
       if (attempt.repair) await options.onRepair?.();
-      return options.provider.execute({
+      const request: ProviderRequest = {
         ...options.worldPrompt,
         systemPrompt: effectiveAuthoringPrompt("world", attempt.repair ? options.repairPrompt : options.prompt).content,
         responseFormatFallback: "forbid",
@@ -551,7 +558,10 @@ export async function generateWorldOutline(options: Readonly<{
           rejectedResponse: attempt.rejectedResponse,
           recoveryInput: JSON.stringify({ issues: attempt.issues })
         })
-      });
+      };
+      return options.preparedExecution
+        ? options.preparedExecution.execute({ operation: attempt.repair ? "worldOutlineRepair" : "worldOutline", request })
+        : options.provider.execute(request);
     },
     parse: (content) => completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(content))),
     delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
@@ -577,6 +587,7 @@ export function allocateOutlineCharacterIds(outline: AuthoringWorldOutline): Aut
 /** Named Patch 1 seam shared by synchronous generation and durable child stages. */
 export async function expandWorldCharacterSeed(options: Readonly<{
   provider: Pick<RuntimeTextExecution, "execute">;
+  preparedExecution?: PreparedDirectAuthoringTextExecution;
   outline: AuthoringWorldOutline;
   seed: AuthoringWorldOutline["seeds"][number];
   characterIndex: number;
@@ -612,7 +623,7 @@ export async function expandWorldCharacterSeed(options: Readonly<{
     stage: "character",
     request: async (attempt) => {
       if (attempt.repair) await options.onRepair?.();
-      return options.provider.execute({
+      const request: ProviderRequest = {
         ...characterRequest,
         systemPrompt: effectiveAuthoringPrompt("world_character", attempt.repair ? options.repairPrompt : options.prompt).content,
         responseFormatFallback: "forbid",
@@ -620,7 +631,10 @@ export async function expandWorldCharacterSeed(options: Readonly<{
           rejectedResponse: attempt.rejectedResponse,
           recoveryInput: JSON.stringify({ issues: attempt.issues })
         })
-      });
+      };
+      return options.preparedExecution
+        ? options.preparedExecution.execute({ operation: attempt.repair ? "seedCharacterRepair" : "seedCharacter", request })
+        : options.provider.execute(request);
     },
     parse: (content) => parseGeneratedCharacterForSeed(content, {
       id: options.seed.id,
@@ -700,10 +714,29 @@ export async function generateTemplateWorld(
 
   await onProgress?.("generating_world", 30, "Synthesizing world structure and character seeds via LLM…");
   const promptSnapshot = (await providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId, worldId })).snapshot;
-  const worldPrompt = buildTemplateWorldPrompt(input, providers.promptTools.content(promptSnapshot, "world_generation"));
+  const worldPromptTemplate = providers.promptTools.content(promptSnapshot, "world_generation");
   const worldRepairPrompt = providers.promptTools.content(promptSnapshot, "world_generation_recovery");
+  const seedPrompt = providers.promptTools.content(promptSnapshot, "world_character_generation");
+  const seedRepairPrompt = providers.promptTools.content(promptSnapshot, "world_character_generation_recovery");
+  const worldPrompt = buildTemplateWorldPrompt(input, worldPromptTemplate);
+  const preparedExecution = await prepareDirectAuthoringTextExecution({
+    ownerUserId,
+    execution: provider,
+    ...(providers.authoringTextPlans === undefined ? {} : { options: providers.authoringTextPlans }),
+    operationPrompts: {
+      worldOutline: effectiveAuthoringPrompt("world", worldPromptTemplate).content,
+      worldOutlineRepair: effectiveAuthoringPrompt("world", worldRepairPrompt).content,
+      seedCharacter: effectiveAuthoringPrompt("world_character", seedPrompt).content,
+      seedCharacterRepair: effectiveAuthoringPrompt("world_character", seedRepairPrompt).content
+    },
+    ...(model === undefined ? {} : { selectionOverride: normalizeTextSelection({
+      providerType: provider.providerType,
+      providerRole: "text",
+      defaultModel: model
+    }) })
+  });
   const converted = await generateWorldOutline({
-    input, provider, worldPrompt, prompt: providers.promptTools.content(promptSnapshot, "world_generation"), repairPrompt: worldRepairPrompt,
+    input, provider, ...(preparedExecution === null ? {} : { preparedExecution }), worldPrompt, prompt: worldPromptTemplate, repairPrompt: worldRepairPrompt,
     onRepair: async () => {
       await onProgress?.("recovering_world", 35, "Generated world was incomplete. Requesting a complete replacement…");
     }
@@ -725,8 +758,7 @@ export async function generateTemplateWorld(
       seed,
       characterIndex,
       acceptedCharacterNames: rawCharacters.map((character) => character.name),
-      prompt: providers.promptTools.content(promptSnapshot, "world_character_generation"),
-      repairPrompt: providers.promptTools.content(promptSnapshot, "world_character_generation_recovery"),
+      ...(preparedExecution === null ? {} : { preparedExecution }), prompt: seedPrompt, repairPrompt: seedRepairPrompt,
       onRepair: async () => {
         await onProgress?.("recovering_character", percent, `Character ${characterIndex + 1} was incomplete. Requesting a complete replacement…`);
       }
@@ -874,6 +906,7 @@ function characterGenerationError(message: string, statusCode: number, code: str
 /** Named Patch 1 seam for standalone and existing-character durable stages. */
 export async function generateStandalonePlayableCharacter(options: Readonly<{
   provider: Pick<RuntimeTextExecution, "execute">;
+  preparedExecution?: PreparedDirectAuthoringTextExecution;
   content: WorldContent;
   promptText: string;
   currentCharacter?: WorldContent["playableCharacters"][number] | undefined;
@@ -897,7 +930,7 @@ export async function generateStandalonePlayableCharacter(options: Readonly<{
     stage: "character",
     request: async (attempt) => {
       if (attempt.repair) await options.onRepair?.();
-      return options.provider.execute({
+      const request: ProviderRequest = {
         ...prompt,
         systemPrompt: effectiveAuthoringPrompt("character", prompt.systemPrompt).content,
         responseFormatFallback: "forbid",
@@ -905,7 +938,10 @@ export async function generateStandalonePlayableCharacter(options: Readonly<{
           rejectedResponse: attempt.rejectedResponse,
           recoveryInput: JSON.stringify({ issues: attempt.issues })
         })
-      });
+      };
+      return options.preparedExecution
+        ? options.preparedExecution.execute({ operation: "standaloneCharacter", request })
+        : options.provider.execute(request);
     },
     parse: (content) => normalizeGeneratedPlayableCharacter(extractJsonObject(content), generatedId, options.currentCharacter),
     delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
@@ -947,12 +983,26 @@ async function generatePlayableCharacterCandidate(
   );
   await onProgress?.("generating", 35, "Generating character preview.");
   const promptSnapshot = (await providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId, worldId })).snapshot;
+  const promptTemplate = providers.promptTools.content(promptSnapshot, "character_generation");
+  const operationPrompt = effectiveAuthoringPrompt("character", buildPlayableCharacterGenerationPrompt(
+    content,
+    request.prompt,
+    currentCharacter,
+    promptTemplate.replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION),
+  ).systemPrompt).content;
+  const preparedExecution = await prepareDirectAuthoringTextExecution({
+    ownerUserId,
+    execution: provider,
+    ...(providers.authoringTextPlans === undefined ? {} : { options: providers.authoringTextPlans }),
+    operationPrompts: { standaloneCharacter: operationPrompt }
+  });
   const { character } = await generateStandalonePlayableCharacter({
     provider,
+    ...(preparedExecution === null ? {} : { preparedExecution }),
     content,
     promptText: request.prompt,
     currentCharacter,
-    promptTemplate: providers.promptTools.content(promptSnapshot, "character_generation"),
+    promptTemplate,
     onRepair: async () => {
       await onProgress?.("generating", 35, "Generated character was incomplete. Requesting a complete replacement.");
     }

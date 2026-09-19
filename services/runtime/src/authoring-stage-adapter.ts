@@ -19,6 +19,8 @@ import { planSourceChunks } from "../../../packages/domain/src/source-authoring-
 import { createRuntimeSourceAuthoringRequestBudget } from "./source-authoring-budget.js";
 import { createSourceAuthoringAdapter, createSourceWorldAuthoringAdapter, renderSourceExtractionProviderRequest } from "./source-authoring-adapter.js";
 import type { SourceWorldSelection } from "../../../packages/domain/src/source-world-proposal.js";
+import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
+export type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 
 export const AUTHORING_EXECUTION_PROTOCOLS = Object.freeze({
   world: WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION,
@@ -91,17 +93,6 @@ export type LoadedAuthoringStage = Readonly<{
   sourceSelection?: SourceWorldSelection & Readonly<{ reviewGeneration: number }>;
   ownerUserId: string;
   currentClaim?(): Promise<boolean>;
-}>;
-
-export type PreparedAuthoringTextExecutor = Readonly<{
-  execute(input: Readonly<{
-    plan: TextExecutionPlan;
-    operation: string;
-    ownerUserId: string;
-    providerProfileId: string;
-    request: import("../../../packages/story-engine/src/providers.js").ProviderRequest;
-    currentClaim?: () => Promise<boolean>;
-  }>): Promise<import("../../../packages/story-engine/src/providers.js").ProviderResult>;
 }>;
 
 type AuthoringExecutionSnapshotV2 = AuthoringExecutionSnapshot & Readonly<{
