@@ -64,7 +64,11 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const prepared = await prepareAuthoringTextExecution({ ownerUserId, execution: provider, operationPrompts: { standaloneCharacter: "Create a cartographer." }, ports: { resolvePreset, discoverModels } });
     const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared.plans as never);
     await repository.initializeExecutionSnapshot(claim, snapshot);
-    expect((await repository.read({ ownerUserId }, job.id))!).not.toHaveProperty("executionSnapshot");
+    const conflicting = createAuthoringExecutionSnapshot(provider, { character_generation: "conflicting" }, { character: "conflicting" }, sha256);
+    expect(await repository.initializeExecutionSnapshot(claim, conflicting)).toEqual(snapshot);
+    const publicView = (await repository.read({ ownerUserId }, job.id))!;
+    expect(publicView).not.toHaveProperty("executionSnapshot");
+    expect(JSON.stringify(publicView)).not.toContain("Preset system.");
     expect(resolvePreset).toHaveBeenCalledOnce();
     expect(discoverModels).toHaveBeenCalledOnce();
     await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [claim.stageId]);

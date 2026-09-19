@@ -17,7 +17,8 @@ import {
   executeAuthoringStage,
   type LoadedAuthoringStage
 } from "./authoring-stage-adapter.js";
-import { effectiveAuthoringPrompt, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import { buildSourceExtractionPrompt, buildSourceWorldPrompt, effectiveAuthoringPrompt, CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import type { AuthoringSubmit } from "@infinite-quest/contracts";
 import { SourceExtractionSplitNeededError } from "./source-authoring-adapter.js";
 import { resolveSourceAuthoringTextExecution } from "./source-authoring-budget.js";
 import { prepareAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
@@ -57,8 +58,11 @@ function snapshotPrompts(snapshot: Record<string, unknown>, content: (snapshot: 
   };
 }
 
-function authoringOperationPrompts(prompts: ReturnType<typeof snapshotPrompts>) {
-  return { worldOutline: effectiveAuthoringPrompt("world", prompts.world_generation).content, worldOutlineRepair: effectiveAuthoringPrompt("world", prompts.world_generation_recovery).content, seedCharacter: effectiveAuthoringPrompt("world_character", prompts.world_character_generation).content, seedCharacterRepair: effectiveAuthoringPrompt("world_character", prompts.world_character_generation_recovery).content, standaloneCharacter: effectiveAuthoringPrompt("character", prompts.character_generation).content, sourceExtraction: effectiveAuthoringPrompt("source_extraction", prompts.source_extraction).content, sourceExtractionRepair: effectiveAuthoringPrompt("source_extraction", prompts.source_extraction_recovery).content, sourceWorld: effectiveAuthoringPrompt("source_world", prompts.source_world).content, sourceWorldRepair: effectiveAuthoringPrompt("source_world", prompts.source_world_recovery).content };
+function authoringOperationPrompts(prompts: ReturnType<typeof snapshotPrompts>, input: AuthoringSubmit) {
+  const mode = input.kind === "story_source" ? input.mode : "faithful";
+  const extraction = (repair: boolean) => buildSourceExtractionPrompt({ instructions: "", sourceText: "", mode, chunk: { sourceRange: { start: 0, end: 0 }, paragraphSpans: [] }, repair }).systemPrompt;
+  const sourceWorld = (repair: boolean) => buildSourceWorldPrompt({ instructions: "", reviewGeneration: 0, selection: { source: { id: "snapshot", name: "snapshot", sha256: "0".repeat(64) }, boundaryParagraphId: "snapshot", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: [], mode }, repair }).systemPrompt;
+  return { worldOutline: effectiveAuthoringPrompt("world", prompts.world_generation).content, worldOutlineRepair: effectiveAuthoringPrompt("world", prompts.world_generation_recovery).content, seedCharacter: effectiveAuthoringPrompt("world_character", prompts.world_character_generation).content, seedCharacterRepair: effectiveAuthoringPrompt("world_character", prompts.world_character_generation_recovery).content, standaloneCharacter: effectiveAuthoringPrompt("character", prompts.character_generation.replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION)).content, sourceExtraction: extraction(false), sourceExtractionRepair: extraction(true), sourceWorld: sourceWorld(false), sourceWorldRepair: sourceWorld(true) };
 }
 
 /** Runtime-only authoring graph. It owns default resolution, credentials and heartbeat state. */
@@ -130,7 +134,7 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
             const prepared = await prepareAuthoringTextExecution({
               ownerUserId: claim.ownerUserId,
               execution: provider,
-              operationPrompts: authoringOperationPrompts(prompts),
+              operationPrompts: authoringOperationPrompts(prompts, input),
               ports: {
                 resolvePreset: async ({ ownerUserId, providerProfileId, slug }) => (await options.providers.inventory.getPreset({ ownerUserId, providerProfileId, slug })).preset,
                 discoverModels: async ({ ownerUserId, providerProfileId }) => (await options.providers.inventory.listModels({ ownerUserId, providerProfileId, providerRole: "text" })).models
