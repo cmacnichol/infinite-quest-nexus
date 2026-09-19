@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import sharp from "sharp";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { generationRequestSchema, illustrationConfigSchema, illustrationSegmentRequestSchema, worldCoverRequestSchema } from "../../packages/contracts/src/generation.js";
 import { assetListQuerySchema } from "../../packages/contracts/src/assets.js";
 import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/src/world-library.js";
@@ -31,6 +31,9 @@ import {
 import { getCampaignCostSummary } from "../helpers/provider-application-fixtures.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
+import { generateTurnIllustrationSegments as generateNativeIllustrationSegments, runIllustrationPromptJob as runNativeIllustrationPromptJob } from "../../services/runtime/src/illustration-segment-job-adapter.js";
+import { createIllustrationWorkerPorts } from "../../services/runtime/src/illustration-composition.js";
+import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -1855,6 +1858,77 @@ integration("independent illustration pipeline", () => {
       prompt_jobs: 0,
       resolution_jobs: 0
     });
+  });
+
+  it("persists and dispatches a native refinement plan after ordinary profile edits before its first claim", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only", providerProfileId: imageProviderId, model: "synthetic-image-model",
+      segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const turn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    );
+    await pool.query(
+      "UPDATE turns SET narration=repeat('Mira follows the lantern-lit road through the fog toward the observatory. ', 24) WHERE id=$1",
+      [turn.rows[0]!.id]
+    );
+    await pool.query(
+      "UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, textProviderId]
+    );
+    const graph = workerProviderGraph(pool, credentialSecret).illustration;
+    const prepared = vi.fn(async () => ({
+      content: "Lanterns guide Mira along the fogbound road, cinematic fantasy illustration",
+      responseId: "native-illustration-response", finishReason: "stop", metadata: {}
+    }));
+    const resolvePreset = vi.fn(async () => ({
+      slug: "illustration-native", name: "Illustration native", versionId: "illustration-v1", version: 1,
+      configHash: "a".repeat(64), config: { model: "frozen-illustration-model", temperature: 0.17 },
+      systemPrompt: "PRIVATE_NATIVE_ILLUSTRATION_PROMPT"
+    }));
+    const discoverModels = vi.fn(async () => [{ id: "frozen-illustration-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+    const frozenExecution = vi.fn(async () => ({
+      id: textProviderId, name: "Native illustration fixture", providerRole: "text", providerType: "openrouter",
+      model: "synthetic-text-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.4,
+      requestTimeoutMs: 30_000, endpointIdentity: "native-illustration-endpoint", executionRevision: "native-illustration-revision",
+      authorityRevision: "native-illustration-authority", textSelection: { kind: "openrouter_preset", slug: "illustration-native" }, configuration: {}
+    }));
+    const native = {
+      ...graph,
+      execution: {
+        ...graph.execution,
+        text: frozenExecution
+      },
+      illustrationTextPlans: {
+        nativePresetPlansEnabled: true,
+        ports: { resolvePreset, discoverModels },
+        preparedExecutor: { execute: prepared },
+        loadAuthority: async ({ providerProfileId }: { ownerUserId: string; providerProfileId: string }) =>
+          ({ id: providerProfileId, providerRole: "text", authorityRevision: "native-illustration-authority", endpointIdentity: "native-illustration-endpoint" })
+      }
+    } as never;
+    await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "missing" }, native);
+    const saved = await pool.query<{ provider_profile_id: string; requested_model: string; prompt_snapshot: Record<string, unknown>; text_execution_snapshot: Record<string, any> }>(
+      "SELECT provider_profile_id,requested_model,prompt_snapshot,text_execution_snapshot FROM illustration_prompt_jobs WHERE campaign_id=$1", [imported.campaignId]
+    );
+    expect(saved.rows[0]).toMatchObject({ provider_profile_id: textProviderId, requested_model: "frozen-illustration-model",
+      text_execution_snapshot: { version: 2, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_NATIVE_ILLUSTRATION_PROMPT") } } });
+    await pool.query("UPDATE provider_profiles SET default_model='edited-after-enqueue', temperature=0.91 WHERE id=$1", [textProviderId]);
+    const executionCallsBeforeClaim = frozenExecution.mock.calls.length;
+    const ports = createIllustrationWorkerPorts(pool, native);
+    await expect(runNativeIllustrationPromptJob(pool, "native-illustration-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "illustration_prompt_refinement", providerProfileId: textProviderId,
+      plan: expect.objectContaining({ prompt: expect.stringContaining("PRIVATE_NATIVE_ILLUSTRATION_PROMPT"), requestTimeoutMs: 30_000,
+        parameters: { temperature: 0.17 }, candidates: [expect.objectContaining({ modelId: "frozen-illustration-model" })] })
+    }));
+    expect(frozenExecution).toHaveBeenCalledTimes(executionCallsBeforeClaim);
+    expect(resolvePreset).toHaveBeenCalledTimes(1);
+    expect(discoverModels).toHaveBeenCalledTimes(1);
+    const completed = await pool.query<{ status: string }>("SELECT status FROM illustration_prompt_jobs WHERE campaign_id=$1", [imported.campaignId]);
+    expect(completed.rows.some((row) => row.status === "completed")).toBe(true);
+    expect(JSON.stringify(await listCampaignIllustrationSegments(pool, imported.campaignId))).not.toContain("PRIVATE_NATIVE_ILLUSTRATION_PROMPT");
   });
 
   secureGeneratedAssetsIt("leaves an accepted story unchanged when its configured image model is incompatible", async () => {
