@@ -1670,17 +1670,19 @@ async function executeLoadedGeneration(
       assertActiveGenerationUpdate(await repository.markGenerating(scope), "resuming final Keep generation state");
       assertActiveGenerationUpdate(await repository.markValidating(scope), "resuming final Keep validation");
       assertActiveGenerationUpdate(await repository.markCommitting(scope), "resuming final Keep commit");
-      let illustrationTextExecutionSnapshot: IllustrationTextExecutionSnapshot | undefined;
-      try {
-        illustrationTextExecutionSnapshot = await collaborators.prepareIllustrationTextExecution?.({
-          ownerUserId: job.owner_user_id,
-          campaignId: job.campaign_id,
-          operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
-        });
-      } catch (error) {
-        logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
-          errorMessage: error instanceof Error ? error.message : String(error) });
-        illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+      let illustrationTextExecutionSnapshot = job.streaming_segments_state?.illustrationTextExecutionSnapshot as IllustrationTextExecutionSnapshot | undefined;
+      if (!illustrationTextExecutionSnapshot) {
+        try {
+          illustrationTextExecutionSnapshot = await collaborators.prepareIllustrationTextExecution?.({
+            ownerUserId: job.owner_user_id,
+            campaignId: job.campaign_id,
+            operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
+          });
+        } catch (error) {
+          logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
+            errorMessage: error instanceof Error ? error.message : String(error) });
+          illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+        }
       }
       const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
         scope, job, story,
@@ -3925,17 +3927,19 @@ async function executeLoadedGeneration(
       illustration: collaborators.illustration,
       attributeGenerationCostsToTurn: collaborators.attributeGenerationCostsToTurn
     };
-    let illustrationTextExecutionSnapshot: IllustrationTextExecutionSnapshot | undefined;
-    try {
-      illustrationTextExecutionSnapshot = await collaborators.prepareIllustrationTextExecution?.({
-        ownerUserId: job.owner_user_id,
-        campaignId: job.campaign_id,
-        operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
-      });
-    } catch (error) {
-      logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
-        errorMessage: error instanceof Error ? error.message : String(error) });
-      illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+    let illustrationTextExecutionSnapshot = job.streaming_segments_state?.illustrationTextExecutionSnapshot as IllustrationTextExecutionSnapshot | undefined;
+    if (!illustrationTextExecutionSnapshot) {
+      try {
+        illustrationTextExecutionSnapshot = await collaborators.prepareIllustrationTextExecution?.({
+          ownerUserId: job.owner_user_id,
+          campaignId: job.campaign_id,
+          operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
+        });
+      } catch (error) {
+        logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
+          errorMessage: error instanceof Error ? error.message : String(error) });
+        illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+      }
     }
     const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
       scope,

@@ -1126,13 +1126,24 @@ integration("T17 durable continuity review", () => {
       await application.decideReview({ ownerUserId, jobId: job.id }, {
         reviewId: review.reviewId, revision: review.revision, decision: "keep"
       });
+      await pool.query(
+        `UPDATE generation_jobs
+            SET streaming_segments_state=jsonb_build_object(
+              'illustrationTextExecutionSnapshot',
+              jsonb_build_object('version',2,'state','unavailable','errorCode','illustration_text_route_unavailable')
+            )
+          WHERE id=$1`,
+        [job.id]
+      );
       const requestsBeforeOfflineKeep = requests.length;
       const repository = createPostgresGenerationExecutionRepository(pool);
       const providers = workerProviderGraph(pool, credentialSecret);
       const loadTextExecution = vi.fn(async () => { throw new Error("text provider must remain offline for final Keep"); });
+      const prepareIllustrationTextExecution = vi.fn(async () => { throw new Error("Keep must reuse the saved illustration snapshot"); });
       const collaborators = {
         ...createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation),
-        loadTextExecution
+        loadTextExecution,
+        prepareIllustrationTextExecution
       };
       const workerId = `offline-final-keep-resume-${randomUUID()}`;
       const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
@@ -1140,6 +1151,7 @@ integration("T17 durable continuity review", () => {
       await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
 
       expect(loadTextExecution).not.toHaveBeenCalled();
+      expect(prepareIllustrationTextExecution).not.toHaveBeenCalled();
       expect(requests).toHaveLength(requestsBeforeOfflineKeep);
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
       const acceptedAfter = await pool.query<{ count: number }>(

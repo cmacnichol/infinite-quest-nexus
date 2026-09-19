@@ -765,6 +765,17 @@ export async function generateTurnIllustrationSegments(
     [turnId, ownerUserId]
   );
   const campaignId = turn.rows[0]?.campaign_id;
+  // A missing-mode replay is a no-op. Check it before native route discovery:
+  // a duplicate must not refresh mutable preset metadata merely to return the
+  // already durable set. The transaction path below still owns the race.
+  if (campaignId && request.mode === "missing") {
+    const active = await pool.query<{ id: string }>(
+      `SELECT id FROM turn_illustration_sets
+        WHERE turn_id = $1 AND owner_user_id = $2 AND is_active = true`,
+      [turnId, ownerUserId]
+    );
+    if (active.rows[0]) return { setId: active.rows[0].id, duplicate: true, segmentCount: 0 };
+  }
   const textExecutionSnapshot = campaignId
     ? await prepareCampaignIllustrationTextExecution(pool, ownerUserId, campaignId, providers)
     : undefined;
@@ -1284,10 +1295,17 @@ export async function runIllustrationPromptJob(
           code: "illustration_text_route_unavailable"
         });
       }
-      const current = await loadAuthority({
-        ownerUserId: claimed.owner_user_id,
-        providerProfileId: claimed.provider_profile_id
-      });
+      let current: Awaited<ReturnType<typeof loadAuthority>>;
+      try {
+        current = await loadAuthority({
+          ownerUserId: claimed.owner_user_id,
+          providerProfileId: claimed.provider_profile_id
+        });
+      } catch {
+        throw Object.assign(new Error("The saved illustration text route no longer has current provider authority."), {
+          code: "illustration_text_route_unavailable"
+        });
+      }
       if (current.id !== claimed.provider_profile_id
         || current.providerRole !== "text"
         || current.authorityRevision !== frozen.routeBasis.authorityRevision

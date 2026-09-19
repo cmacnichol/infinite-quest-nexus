@@ -1940,6 +1940,96 @@ describe("generation executor adapter", () => {
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
   });
 
+  it("hands one opaque prepared illustration snapshot through streamed provisional work and the accepted commit", async () => {
+    const job = completeGenerationExecutionPayload();
+    const frozenSnapshot = {
+      version: 2, state: "prepared",
+      routeBasis: { credentialReference: "illustration-profile", authorityRevision: "authority", endpointReference: "endpoint" },
+      plan: { prompt: "PRIVATE_FROZEN_ILLUSTRATION_PROMPT", parameters: { temperature: 0.27 }, candidates: [{ modelId: "frozen-illustration-model" }] },
+      operationPrompt: "Refine fiction only."
+    } as never;
+    const narration = Array.from({ length: 120 }, () => "Lanterns guide Mira through the quiet observatory.").join(" ");
+    const output = JSON.stringify({ narration, choices: ["Enter.", "Wait.", "Study.", "Call."],
+      custom_action_suggestion: "Follow the lanterns.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
+      canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), pauseForReview: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true),
+      saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Streaming provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000,
+      configuration: { streaming: true }, execute: vi.fn(async (request: { onChunk?: (delta: string, accumulated: string) => Promise<void> }) => {
+        await request.onChunk?.(output, output);
+        return { content: output, responseId: "stream", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} };
+      })
+    };
+    const illustration = {
+      loadStreamingIllustrationConfig: vi.fn(async () => ({
+        enabled: true, sourcePolicy: "library_only", matchingScope: "campaign", confidenceProfile: "balanced", repetitionWindow: 3,
+        providerProfileId: null, model: "", size: "1024x1024", aspectRatio: "1:1", quality: "auto", outputFormat: "png", maxAttempts: 3,
+        segmentWordCount: 100, imagesPerSegment: 1, segmentPromptMode: "ai_refined", refinementPrompt: "", defaultRefinementPrompt: "",
+        updatedAt: null, campaignImageProviderProfileId: null, campaignTextProviderProfileId: claim.providerProfileId
+      })),
+      createProvisionalSet: vi.fn(async () => "provisional-set"), createProvisionalSegment: vi.fn(async () => undefined),
+      promoteProvisionalSet: vi.fn(async () => undefined), orphanProvisionalSet: vi.fn(async () => undefined),
+      enqueueAcceptedTurnIllustrationSegments: vi.fn(async () => undefined)
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration, prepareIllustrationTextExecution: vi.fn(async () => frozenSnapshot), loadTextExecution: vi.fn(async () => provider),
+      promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "native-streaming-snapshot", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(collaborators.prepareIllustrationTextExecution).toHaveBeenCalledOnce();
+    expect(repository.saveStreamingSegments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      provisionalSetId: "provisional-set", illustrationTextExecutionSnapshot: frozenSnapshot
+    }));
+    expect((illustration.createProvisionalSegment as ReturnType<typeof vi.fn>).mock.calls.some(([, , request]) =>
+      (request as { textExecutionSnapshot?: unknown }).textExecutionSnapshot === frozenSnapshot
+    )).toBe(true);
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ illustrationTextExecutionSnapshot: frozenSnapshot }));
+  });
+
+  it("commits an accepted story when illustration preflight throws, carrying only unavailable metadata", async () => {
+    const job = completeGenerationExecutionPayload();
+    const output = JSON.stringify({ narration: "The observatory door opens onto a quiet moonlit hall.", choices: ["Enter.", "Wait.", "Study.", "Call."],
+      custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
+      canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), pauseForReview: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true),
+      saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Commit provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content: output, responseId: "normal", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }))
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
+      prepareIllustrationTextExecution: vi.fn(async () => { throw new Error("synthetic metadata outage"); }),
+      promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "illustration-preflight-outage", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      illustrationTextExecutionSnapshot: { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" }
+    }));
+    expect(repository.markRecoverable).not.toHaveBeenCalled();
+  });
+
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {
     const repository = guardedRepository();
     const collaborators = rejectedCollaborators();

@@ -11,7 +11,7 @@ import { storyImportRequestSchema } from "../../packages/contracts/src/imports.j
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
-import { createApiGenerationApplication } from "../helpers/runtime-application-fixtures.js";
+import { createApiGenerationApplication, createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
 import { createWorkerIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
 import { enqueueAcceptedTurnIllustration, enqueueIllustration, enqueueWorldCover, getIllustrationConfig, getImageJob, getLatestWorldCoverJob, listCampaignImageJobs, retryImageJob, runImageJob, setIllustrationConfig } from "../helpers/illustration-job-fixtures.js";
 import { createWorld, getWorld, importLegacyStoryWithMemoryOff as importLegacyStory } from "../helpers/memory-aware-services.js";
@@ -31,9 +31,10 @@ import {
 import { getCampaignCostSummary } from "../helpers/provider-application-fixtures.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
-import { generateTurnIllustrationSegments as generateNativeIllustrationSegments, runIllustrationPromptJob as runNativeIllustrationPromptJob } from "../../services/runtime/src/illustration-segment-job-adapter.js";
+import { createProvisionalSegment as createNativeProvisionalSegment, enqueueIllustrationBackfill as enqueueNativeIllustrationBackfill, generateTurnIllustrationSegments as generateNativeIllustrationSegments, promoteProvisionalSet as promoteNativeProvisionalSet, runIllustrationPromptJob as runNativeIllustrationPromptJob } from "../../services/runtime/src/illustration-segment-job-adapter.js";
 import { createIllustrationWorkerPorts } from "../../services/runtime/src/illustration-composition.js";
 import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
+import { reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -1909,6 +1910,21 @@ integration("independent illustration pipeline", () => {
         loadAuthority
       }
     } as never;
+
+    async function makeOnlyPromptClaimable(id: string) {
+      await pool.query(
+        `UPDATE illustration_prompt_jobs
+            SET next_attempt_at=now() + interval '1 hour'
+          WHERE id <> $1 AND status IN ('queued','recoverable')`,
+        [id]
+      );
+      await pool.query(
+        `UPDATE illustration_prompt_jobs
+            SET lease_expires_at=now() + interval '1 hour'
+          WHERE id <> $1 AND status='refining'`,
+        [id]
+      );
+    }
     await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "missing" }, native);
     const saved = await pool.query<{ provider_profile_id: string; requested_model: string; prompt_snapshot: Record<string, unknown>; text_execution_snapshot: Record<string, any> }>(
       "SELECT provider_profile_id,requested_model,prompt_snapshot,text_execution_snapshot FROM illustration_prompt_jobs WHERE campaign_id=$1", [imported.campaignId]
@@ -1945,6 +1961,401 @@ integration("independent illustration pipeline", () => {
     );
     expect(tampered.rows).toContainEqual(expect.objectContaining({ status: "recoverable", error_code: "illustration_text_route_unavailable" }));
     expect(JSON.stringify(await listCampaignIllustrationSegments(pool, imported.campaignId))).not.toContain("PRIVATE_NATIVE_ILLUSTRATION_PROMPT");
+  });
+
+  it("keeps a native refinement plan through duplicate replay and an expired-lease reclaim using current provider authority", async () => {
+    const imported = await campaign();
+    const nativeTextProviderId = (await createProvider(pool, {
+      name: `Native illustration authority ${crypto.randomUUID()}`,
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl,
+      defaultModel: "@preset/frozen-illustration",
+      textSelection: { kind: "openrouter_preset", slug: "frozen-illustration" },
+      contextWindowTokens: 8192,
+      maxOutputTokens: 1024,
+      temperature: 0.63,
+      enabled: true,
+      configuration: { textResponseFormatPolicy: "legacy" }
+    }, credentialSecret)).id;
+    const ownerUserId = await initialOwnerId(pool);
+    await expect(pool.query<{ text_selection: Record<string, unknown> }>(
+      "SELECT text_selection FROM provider_profiles WHERE id=$1 AND owner_user_id=$2", [nativeTextProviderId, ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ text_selection: { kind: "openrouter_preset", slug: "frozen-illustration" } }] });
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, nativeTextProviderId]);
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only", providerProfileId: imageProviderId, model: "synthetic-image-model",
+      segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1, maxAttempts: 3
+    }));
+    const turn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    );
+    await pool.query(
+      "UPDATE turns SET narration=repeat('Mira follows the lantern-lit road through the fog toward the observatory. ', 24) WHERE id=$1",
+      [turn.rows[0]!.id]
+    );
+    const graph = workerProviderGraph(pool, credentialSecret).illustration;
+    const resolvePreset = vi.fn(async () => ({
+      slug: "frozen-illustration", name: "Frozen illustration", versionId: "frozen-illustration-v1", version: 1,
+      configHash: "b".repeat(64), config: { model: "frozen-illustration-model", temperature: 0.17 },
+      systemPrompt: "PRIVATE_FROZEN_ILLUSTRATION_PROMPT"
+    }));
+    const discoverModels = vi.fn(async () => [{ id: "frozen-illustration-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+    const prepared = vi.fn(async () => ({
+      content: "Mira and a lantern on the fogbound road, cinematic fantasy illustration",
+      responseId: "native-reclaim-response", finishReason: "stop", metadata: {}
+    }));
+    const native = {
+      ...graph,
+      illustrationTextPlans: {
+        nativePresetPlansEnabled: true,
+        ports: { resolvePreset, discoverModels },
+        preparedExecutor: { execute: prepared },
+        // Deliberately use the real worker graph: endpoint, enabled state,
+        // and credential authority are read at claim time.
+        loadAuthority: async ({ ownerUserId: authorityOwnerId, providerProfileId }: { ownerUserId: string; providerProfileId: string }) => {
+          const current = await graph.execution.text({ ownerUserId: authorityOwnerId }, providerProfileId, "text");
+          return { id: current.id, providerRole: current.providerRole, authorityRevision: current.authorityRevision!, endpointIdentity: current.endpointIdentity! };
+        }
+      }
+    } as never;
+
+    async function makeOnlyPromptClaimable(id: string) {
+      await pool.query(
+        `UPDATE illustration_prompt_jobs
+            SET next_attempt_at=now() + interval '1 hour'
+          WHERE id <> $1 AND status IN ('queued','recoverable')`,
+        [id]
+      );
+      await pool.query(
+        `UPDATE illustration_prompt_jobs
+            SET lease_expires_at=now() + interval '1 hour'
+          WHERE id <> $1 AND status='refining'`,
+        [id]
+      );
+    }
+
+    const first = await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "missing" }, native);
+    expect(first).toMatchObject({ duplicate: false, segmentCount: expect.any(Number) });
+    const before = await pool.query<{ id: string; text_execution_snapshot: Record<string, unknown> }>(
+      "SELECT id,text_execution_snapshot FROM illustration_prompt_jobs WHERE campaign_id=$1 ORDER BY created_at", [imported.campaignId]
+    );
+    expect(before.rows).toHaveLength(first.segmentCount);
+    const discoveryAfterFirstQueue = { presets: resolvePreset.mock.calls.length, models: discoverModels.mock.calls.length };
+    const replay = await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "missing" }, native);
+    expect(replay).toEqual({ setId: first.setId, duplicate: true, segmentCount: 0 });
+    expect({ presets: resolvePreset.mock.calls.length, models: discoverModels.mock.calls.length }).toEqual(discoveryAfterFirstQueue);
+
+    const target = before.rows[0]!;
+    await pool.query(
+      "UPDATE illustration_prompt_jobs SET status='cancelled' WHERE campaign_id=$1 AND id <> $2",
+      [imported.campaignId, target.id]
+    );
+    await pool.query(
+      "UPDATE illustration_prompt_jobs SET status='refining', lease_owner='expired-native-worker', lease_expires_at=now() - interval '1 second' WHERE id=$1",
+      [target.id]
+    );
+    await pool.query(
+      "UPDATE provider_profiles SET temperature=0.99 WHERE id=$1 AND owner_user_id=$2",
+      [nativeTextProviderId, ownerUserId]
+    );
+    const ports = createIllustrationWorkerPorts(pool, native);
+    await makeOnlyPromptClaimable(target.id);
+    await expect(runNativeIllustrationPromptJob(pool, "native-reclaim-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledWith(expect.objectContaining({
+      providerProfileId: nativeTextProviderId,
+      plan: expect.objectContaining({
+        prompt: expect.stringContaining("PRIVATE_FROZEN_ILLUSTRATION_PROMPT"),
+        parameters: { temperature: 0.17 },
+        candidates: [expect.objectContaining({ modelId: "frozen-illustration-model" })]
+      })
+    }));
+    const after = await pool.query<{ text_execution_snapshot: Record<string, unknown>; status: string }>(
+      "SELECT text_execution_snapshot,status FROM illustration_prompt_jobs WHERE id=$1", [target.id]
+    );
+    expect(after.rows[0]).toEqual({ text_execution_snapshot: target.text_execution_snapshot, status: "completed" });
+    expect({ presets: resolvePreset.mock.calls.length, models: discoverModels.mock.calls.length }).toEqual(discoveryAfterFirstQueue);
+
+    async function oneFreshNativePromptJob() {
+      await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "rebuild" }, native);
+      const fresh = await pool.query<{ id: string }>(
+        "SELECT id FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='queued' ORDER BY created_at DESC LIMIT 1",
+        [imported.campaignId]
+      );
+      const job = fresh.rows[0]!;
+      await pool.query(
+        "UPDATE illustration_prompt_jobs SET status='cancelled' WHERE campaign_id=$1 AND status IN ('queued','recoverable') AND id <> $2",
+        [imported.campaignId, job.id]
+      );
+      return job.id;
+    }
+
+    const disabledJobId = await oneFreshNativePromptJob();
+    const dispatchesBeforeDisabledAuthority = prepared.mock.calls.length;
+    await pool.query("UPDATE provider_profiles SET enabled=false WHERE id=$1 AND owner_user_id=$2", [nativeTextProviderId, ownerUserId]);
+    await makeOnlyPromptClaimable(disabledJobId);
+    await expect(runNativeIllustrationPromptJob(pool, "native-disabled-authority-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledTimes(dispatchesBeforeDisabledAuthority);
+    await expect(pool.query<{ status: string; error_code: string | null }>(
+      "SELECT status,error_code FROM illustration_prompt_jobs WHERE id=$1", [disabledJobId]
+    )).resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "illustration_text_route_unavailable" }] });
+
+    await pool.query("UPDATE provider_profiles SET enabled=true, base_url=$3 WHERE id=$1 AND owner_user_id=$2", [nativeTextProviderId, ownerUserId, baseUrl]);
+    const endpointChangedJobId = await oneFreshNativePromptJob();
+    const dispatchesBeforeEndpointChange = prepared.mock.calls.length;
+    await pool.query("UPDATE provider_profiles SET base_url=$3 WHERE id=$1 AND owner_user_id=$2", [nativeTextProviderId, ownerUserId, `${baseUrl}/changed`]);
+    await makeOnlyPromptClaimable(endpointChangedJobId);
+    await expect(runNativeIllustrationPromptJob(pool, "native-endpoint-authority-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledTimes(dispatchesBeforeEndpointChange);
+    await expect(pool.query<{ status: string; error_code: string | null }>(
+      "SELECT status,error_code FROM illustration_prompt_jobs WHERE id=$1", [endpointChangedJobId]
+    )).resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "illustration_text_route_unavailable" }] });
+
+    await pool.query("UPDATE provider_profiles SET base_url=$3 WHERE id=$1 AND owner_user_id=$2", [nativeTextProviderId, ownerUserId, baseUrl]);
+    const preview = await previewIllustrationBackfill(pool, imported.campaignId, "rebuild");
+    const discoveryBeforeBackfill = { presets: resolvePreset.mock.calls.length, models: discoverModels.mock.calls.length };
+    const backfillRequest = {
+      mode: "rebuild" as const,
+      expectedConfigUpdatedAt: preview.configUpdatedAt,
+      expectedTurnCount: preview.totalCampaignTurns,
+      idempotencyKey: crypto.randomUUID()
+    };
+    const backfill = await enqueueNativeIllustrationBackfill(pool, imported.campaignId, backfillRequest, native);
+    expect(backfill).toMatchObject({ duplicate: false, status: "completed", queuedSets: preview.turnCount });
+    const backfilledPlans = await pool.query<{ text_execution_snapshot: Record<string, unknown> | null }>(
+      "SELECT text_execution_snapshot FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='queued'", [imported.campaignId]
+    );
+    expect(backfilledPlans.rows.length).toBeGreaterThan(0);
+    expect(backfilledPlans.rows.every((job) => (
+      job.text_execution_snapshot?.version === 2 && job.text_execution_snapshot.state === "prepared"
+    ))).toBe(true);
+    const backfillReplay = await enqueueNativeIllustrationBackfill(pool, imported.campaignId, backfillRequest, native);
+    expect(backfillReplay).toMatchObject({ id: backfill.id, duplicate: true });
+    expect({ presets: resolvePreset.mock.calls.length, models: discoverModels.mock.calls.length }).toEqual({
+      presets: discoveryBeforeBackfill.presets + 1,
+      models: discoveryBeforeBackfill.models + 1
+    });
+
+    const malformed = (await pool.query<{ id: string }>(
+      "SELECT id FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='queued' ORDER BY created_at DESC LIMIT 1", [imported.campaignId]
+    )).rows[0]!;
+    await pool.query(
+      "UPDATE illustration_prompt_jobs SET status='cancelled' WHERE campaign_id=$1 AND status='queued' AND id <> $2",
+      [imported.campaignId, malformed.id]
+    );
+    await pool.query("UPDATE illustration_prompt_jobs SET text_execution_snapshot='{}'::jsonb WHERE id=$1", [malformed.id]);
+    const dispatchesBeforeMalformed = prepared.mock.calls.length;
+    await makeOnlyPromptClaimable(malformed.id);
+    await expect(runNativeIllustrationPromptJob(pool, "native-malformed-snapshot-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledTimes(dispatchesBeforeMalformed);
+    await expect(pool.query<{ status: string; error_code: string | null }>(
+      "SELECT status,error_code FROM illustration_prompt_jobs WHERE id=$1", [malformed.id]
+    )).resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "illustration_text_route_unavailable" }] });
+  });
+
+  it("promotes provisional native plans and reconciles final segments with their frozen snapshot", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const nativeTextProviderId = (await createProvider(pool, {
+      name: `Native streaming illustration ${crypto.randomUUID()}`,
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl,
+      defaultModel: "@preset/streaming-illustration",
+      textSelection: { kind: "openrouter_preset", slug: "streaming-illustration" },
+      contextWindowTokens: 8192,
+      maxOutputTokens: 1024,
+      temperature: 0.47,
+      enabled: true,
+      configuration: { textResponseFormatPolicy: "legacy" }
+    }, credentialSecret)).id;
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, nativeTextProviderId]);
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only", providerProfileId: imageProviderId, model: "synthetic-image-model",
+      segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1
+    }));
+    const turns = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 2", [imported.campaignId]
+    );
+    expect(turns.rows).toHaveLength(2);
+    const graph = workerProviderGraph(pool, credentialSecret).illustration;
+    const resolvePreset = vi.fn(async () => ({
+      slug: "streaming-illustration", name: "Streaming illustration", versionId: "streaming-illustration-v1", version: 1,
+      configHash: "c".repeat(64), config: { model: "frozen-streaming-illustration-model", temperature: 0.27 },
+      systemPrompt: "PRIVATE_STREAMING_ILLUSTRATION_PROMPT"
+    }));
+    const discoverModels = vi.fn(async () => [{ id: "frozen-streaming-illustration-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+    const prepared = vi.fn(async () => ({
+      content: "Mira follows the lantern through the fogbound causeway, cinematic fantasy illustration",
+      responseId: "streaming-native-prompt", finishReason: "stop", metadata: {}
+    }));
+    const native = {
+      ...graph,
+      illustrationTextPlans: {
+        nativePresetPlansEnabled: true,
+        ports: { resolvePreset, discoverModels },
+        preparedExecutor: { execute: prepared },
+        loadAuthority: async ({ ownerUserId: authorityOwnerId, providerProfileId }: { ownerUserId: string; providerProfileId: string }) => {
+          const current = await graph.execution.text({ ownerUserId: authorityOwnerId }, providerProfileId, "text");
+          return { id: current.id, providerRole: current.providerRole, authorityRevision: current.authorityRevision!, endpointIdentity: current.endpointIdentity! };
+        }
+      }
+    } as never;
+    const config = await loadConfig(pool, ownerUserId, imported.campaignId);
+    const provisionalNarration = Array.from({ length: 6 }, () =>
+      "Mira follows a lantern through the foggy causeway toward the quiet observatory while silver leaves turn slowly above the road."
+    ).join(" ");
+    const finalNarration = Array.from({ length: 18 }, () =>
+      "Mira follows a lantern through the foggy causeway toward the quiet observatory while silver leaves turn slowly above the road."
+    ).join(" ");
+    await pool.query("UPDATE turns SET narration=$2 WHERE id IN ($1,$3)", [turns.rows[0]!.id, finalNarration, turns.rows[1]!.id]);
+
+    const directPromotion = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Promote a provisional native illustration.", providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [directPromotion.id]);
+    const directSetId = await createProvisionalSet(pool, ownerUserId, imported.campaignId, directPromotion.id);
+    expect(directSetId).toEqual(expect.any(String));
+    await expect(createNativeProvisionalSegment(
+      pool, ownerUserId, imported.campaignId, directPromotion.id, directSetId!,
+      { ordinal: 0, startOffset: 0, endOffset: provisionalNarration.length, startWord: 0, endWord: 120, wordCount: 120, text: provisionalNarration },
+      config, native
+    )).resolves.toBe(true);
+    const frozen = await pool.query<{ text_execution_snapshot: Record<string, unknown> }>(
+      "SELECT text_execution_snapshot FROM illustration_prompt_jobs WHERE generation_job_id=$1", [directPromotion.id]
+    );
+    const frozenSnapshot = frozen.rows[0]!.text_execution_snapshot;
+    expect(frozenSnapshot).toMatchObject({ version: 2, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMING_ILLUSTRATION_PROMPT") } });
+    await promoteNativeProvisionalSet(
+      pool, ownerUserId, directPromotion.id, turns.rows[0]!.id, imported.campaignId, finalNarration, config, native,
+      undefined, frozenSnapshot as never
+    );
+    const directlyPromoted = await pool.query<{ ordinal: number; text_execution_snapshot: Record<string, unknown> }>(
+      `SELECT segments.ordinal,prompt_jobs.text_execution_snapshot
+         FROM turn_illustration_segments segments
+         JOIN illustration_prompt_jobs prompt_jobs ON prompt_jobs.segment_id=segments.id
+        WHERE segments.generation_job_id=$1 ORDER BY segments.ordinal`,
+      [directPromotion.id]
+    );
+    expect(directlyPromoted.rows.length).toBeGreaterThan(1);
+    expect(directlyPromoted.rows.map((row) => row.text_execution_snapshot)).toEqual(
+      Array.from({ length: directlyPromoted.rows.length }, () => frozenSnapshot)
+    );
+    await pool.query(
+      "UPDATE generation_jobs SET status='completed',result_turn_id=$2 WHERE id=$1",
+      [directPromotion.id, turns.rows[0]!.id]
+    );
+
+    const deferredPromotion = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Reconcile a provisional native illustration.", providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [deferredPromotion.id]);
+    const deferredSetId = await createProvisionalSet(pool, ownerUserId, imported.campaignId, deferredPromotion.id);
+    expect(deferredSetId).toEqual(expect.any(String));
+    await expect(createNativeProvisionalSegment(
+      pool, ownerUserId, imported.campaignId, deferredPromotion.id, deferredSetId!,
+      { ordinal: 0, startOffset: 0, endOffset: provisionalNarration.length, startWord: 0, endWord: 120, wordCount: 120, text: provisionalNarration },
+      config, native, undefined, frozenSnapshot as never
+    )).resolves.toBe(true);
+    await pool.query(
+      `UPDATE generation_jobs
+          SET status='completed',result_turn_id=$2,
+              streaming_segments_state=$3::jsonb
+        WHERE id=$1`,
+      [deferredPromotion.id, turns.rows[1]!.id, JSON.stringify({
+        provisionalSetId: deferredSetId,
+        provisionalIllustrationReconciliation: "pending",
+        illustrationTextExecutionSnapshot: frozenSnapshot
+      })]
+    );
+    expect(await reconcileNextAcceptedStreamingIllustration(pool, createApiIllustrationApplication(pool).generation)).toBe(true);
+    const reconciled = await pool.query<{ ordinal: number; text_execution_snapshot: Record<string, unknown> }>(
+      `SELECT segments.ordinal,prompt_jobs.text_execution_snapshot
+         FROM turn_illustration_segments segments
+         JOIN illustration_prompt_jobs prompt_jobs ON prompt_jobs.segment_id=segments.id
+        WHERE segments.generation_job_id=$1 ORDER BY segments.ordinal`,
+      [deferredPromotion.id]
+    );
+    expect(reconciled.rows.length).toBeGreaterThan(1);
+    expect(reconciled.rows.map((row) => row.text_execution_snapshot)).toEqual(
+      Array.from({ length: reconciled.rows.length }, () => frozenSnapshot)
+    );
+    const reconciledTarget = await pool.query<{ id: string }>(
+      `SELECT prompt_jobs.id
+         FROM illustration_prompt_jobs prompt_jobs
+         JOIN turn_illustration_segments segments ON segments.id=prompt_jobs.segment_id
+        WHERE prompt_jobs.generation_job_id=$1 AND segments.ordinal > 0
+        ORDER BY segments.ordinal LIMIT 1`,
+      [deferredPromotion.id]
+    );
+    expect(reconciledTarget.rows[0]?.id).toEqual(expect.any(String));
+    await pool.query(
+      `UPDATE illustration_prompt_jobs SET next_attempt_at=now() + interval '1 hour'
+        WHERE id <> $1 AND status IN ('queued','recoverable')`,
+      [reconciledTarget.rows[0]!.id]
+    );
+    await pool.query(
+      `UPDATE illustration_prompt_jobs SET lease_expires_at=now() + interval '1 hour'
+        WHERE id <> $1 AND status='refining'`,
+      [reconciledTarget.rows[0]!.id]
+    );
+    const ports = createIllustrationWorkerPorts(pool, native);
+    await expect(runNativeIllustrationPromptJob(
+      pool, "native-reconciled-prompt-worker", 30, ports.promptRefinement, ports.costs, native
+    )).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledWith(expect.objectContaining({
+      providerProfileId: nativeTextProviderId,
+      plan: (frozenSnapshot as { plan: unknown }).plan
+    }));
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM illustration_prompt_jobs WHERE id=$1", [reconciledTarget.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
+    expect(await reconcileNextAcceptedStreamingIllustration(pool, createApiIllustrationApplication(pool).generation)).toBe(false);
+    expect(JSON.stringify(await getGenerationJob(pool, deferredPromotion.id))).not.toContain("PRIVATE_STREAMING_ILLUSTRATION_PROMPT");
+  });
+
+  it("keeps historical null snapshots on the default-off refinement path", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only", providerProfileId: imageProviderId, model: "synthetic-image-model",
+      segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1
+    }));
+    const turn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    );
+    await pool.query(
+      "UPDATE turns SET narration=repeat('Mira follows the lantern-lit road through the fog toward the observatory. ', 24) WHERE id=$1",
+      [turn.rows[0]!.id]
+    );
+    const queued = await generateTurnIllustrationSegments(
+      pool, turn.rows[0]!.id, illustrationSegmentRequestSchema.parse({ mode: "missing" })
+    );
+    const snapshots = await pool.query<{ id: string; text_execution_snapshot: Record<string, unknown> | null }>(
+      "SELECT id,text_execution_snapshot FROM illustration_prompt_jobs WHERE campaign_id=$1 ORDER BY created_at", [imported.campaignId]
+    );
+    expect(snapshots.rows).toHaveLength(queued.segmentCount);
+    expect(snapshots.rows.every((job) => job.text_execution_snapshot === null)).toBe(true);
+    await pool.query(
+      `UPDATE illustration_prompt_jobs
+          SET next_attempt_at=now() + interval '1 hour'
+        WHERE id <> $1 AND status IN ('queued','recoverable')`,
+      [snapshots.rows[0]!.id]
+    );
+    await pool.query(
+      `UPDATE illustration_prompt_jobs
+          SET lease_expires_at=now() + interval '1 hour'
+        WHERE id <> $1 AND status='refining'`,
+      [snapshots.rows[0]!.id]
+    );
+    await expect(runIllustrationPromptJob(pool, "legacy-null-snapshot-worker", 30, credentialSecret)).resolves.toBe(true);
+    await expect(pool.query<{ status: string; attempts: number; error_code: string | null }>(
+      "SELECT status,attempts,error_code FROM illustration_prompt_jobs WHERE id=$1", [snapshots.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{
+      status: expect.stringMatching(/^(completed|recoverable)$/), attempts: 1,
+      error_code: expect.not.stringMatching(/^illustration_text_route_unavailable$/)
+    }] });
   });
 
   secureGeneratedAssetsIt("leaves an accepted story unchanged when its configured image model is incompatible", async () => {

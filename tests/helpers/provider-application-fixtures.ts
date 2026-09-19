@@ -40,6 +40,7 @@ export async function createProvider(
     providerRole: input.providerRole,
     baseUrl: input.baseUrl,
     defaultModel: input.defaultModel,
+    ...(input.textSelection === undefined ? {} : { textSelection: input.textSelection }),
     contextWindowTokens: input.contextWindowTokens,
     maxOutputTokens: input.maxOutputTokens,
     temperature: input.temperature,
