@@ -17,7 +17,7 @@ import {
   executeAuthoringStage,
   type LoadedAuthoringStage
 } from "./authoring-stage-adapter.js";
-import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
+import { effectiveAuthoringPrompt, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
 import { SourceExtractionSplitNeededError } from "./source-authoring-adapter.js";
 import { resolveSourceAuthoringTextExecution } from "./source-authoring-budget.js";
 import { prepareAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
@@ -58,7 +58,7 @@ function snapshotPrompts(snapshot: Record<string, unknown>, content: (snapshot: 
 }
 
 function authoringOperationPrompts(prompts: ReturnType<typeof snapshotPrompts>) {
-  return { worldOutline: prompts.world_generation, worldOutlineRepair: prompts.world_generation_recovery, seedCharacter: prompts.world_character_generation, seedCharacterRepair: prompts.world_character_generation_recovery, standaloneCharacter: prompts.character_generation, sourceExtraction: prompts.source_extraction, sourceExtractionRepair: prompts.source_extraction_recovery, sourceWorld: prompts.source_world, sourceWorldRepair: prompts.source_world_recovery };
+  return { worldOutline: effectiveAuthoringPrompt("world", prompts.world_generation).content, worldOutlineRepair: effectiveAuthoringPrompt("world", prompts.world_generation_recovery).content, seedCharacter: effectiveAuthoringPrompt("world_character", prompts.world_character_generation).content, seedCharacterRepair: effectiveAuthoringPrompt("world_character", prompts.world_character_generation_recovery).content, standaloneCharacter: effectiveAuthoringPrompt("character", prompts.character_generation).content, sourceExtraction: effectiveAuthoringPrompt("source_extraction", prompts.source_extraction).content, sourceExtractionRepair: effectiveAuthoringPrompt("source_extraction", prompts.source_extraction_recovery).content, sourceWorld: effectiveAuthoringPrompt("source_world", prompts.source_world).content, sourceWorldRepair: effectiveAuthoringPrompt("source_world", prompts.source_world_recovery).content };
 }
 
 /** Runtime-only authoring graph. It owns default resolution, credentials and heartbeat state. */
@@ -69,6 +69,8 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
   sha256: (value: string) => string;
   signal?: AbortSignal;
   heartbeatMilliseconds?: number;
+  /** Task 5 admission stays off until its route transport is available. */
+  nativePresetPlansEnabled?: boolean;
   dispatch?: (stage: LoadedAuthoringStage) => Promise<AuthoringStageOutput>;
 }>): AuthoringWorkerApplication {
   const repository = options.repository ?? createPostgresAuthoringRepository(options.pool!);
@@ -120,7 +122,7 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
             // Historical direct-model authoring remains v1. Native preset
             // adoption is explicit, so ordinary callers do not gain remote
             // inventory work or a changed retry contract.
-            if (provider.textSelection?.kind !== "openrouter_preset") {
+            if (options.nativePresetPlansEnabled !== true || provider.textSelection?.kind !== "openrouter_preset") {
               return createAuthoringExecutionSnapshot(provider, prompts, input.kind === "story_source"
                 ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION }
                 : AUTHORING_EXECUTION_PROTOCOLS, options.sha256);

@@ -83,6 +83,21 @@ integration("durable authoring real repository and stage dispatcher", () => {
     expect(discoverModels).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])("composition captures native plans only when admission is enabled: %s", async (nativePresetPlansEnabled) => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a cartographer.", content: worldContentSchema.parse({ world: { title: "Gate" } }) });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000012", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result(JSON.stringify(fixture.character)) };
+    const getPreset = vi.fn(async () => ({ preset: { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset system." } }));
+    const listModels = vi.fn(async () => ({ models: [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }] }));
+    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset, listModels }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: { character_generation: { content: "Character template." } } }) }, promptTools: { content: (snapshot: any, key: string) => snapshot[key]?.content ?? "" } } as never, dispatch: async (stage) => ({ kind: "character", character: { ...fixture.character, id: stage.stageKey.slice("character:".length) } }) });
+    await expect(worker.runNext({ workerId: "gate", leaseSeconds: 60 })).resolves.toBe(true);
+    const persisted = (await pool.query<{ execution_snapshot: unknown }>("SELECT execution_snapshot FROM authoring_jobs WHERE id = $1", [job.id])).rows[0]!.execution_snapshot as Record<string, unknown>;
+    expect("version" in persisted).toBe(nativePresetPlansEnabled);
+    expect(getPreset).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
+    expect(listModels).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
+  });
+
   it.each(["heartbeat false", "heartbeat error", "shutdown"])("leaves a real job resumable after %s, drains and resumes its pinned snapshot after expiry", async (mode) => {
     const repository = createPostgresAuthoringRepository(pool);
     const started = deferred<void>();
