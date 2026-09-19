@@ -148,7 +148,7 @@ describe("frozen Story route basis", () => {
     expect(frozen.markFailed).not.toHaveBeenCalled();
   });
 
-  it("derives and binds an auxiliary prompt once at the central dispatch seam", async () => {
+  it("derives every auxiliary and repair prompt once at the prepared dispatch seam", async () => {
     const basis = {
       version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
       preset: { slug: "night-shift", versionId: "v1", configHash: "d".repeat(64) },
@@ -172,16 +172,45 @@ describe("frozen Story route basis", () => {
     });
     const dependencies = { pool: {} as DatabasePool, collaborators: { recordProfileCost: vi.fn(async () => undefined), preparedTextExecutor: { execute: executePrepared } } } as never;
 
-    await callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
-      systemPrompt: "Check this scene for required coverage.", input: "{}"
-    });
+    const operations = [
+      "rpg_assessment", "event_trigger_before", "story_recovery", "story_choice_repair", "event_trigger_after",
+      "event_extension", "scene_coverage_validation", "scene_coverage_rewrite", "story_continuity_review", "story_continuity_repair"
+    ] as const;
+    for (const operation of operations) {
+      await callCampaignTextProvider(dependencies, provider, job, operation, {
+        systemPrompt: `Actual ${operation} prompt.`, input: "{}"
+      });
+    }
 
     expect(provider.execute).not.toHaveBeenCalled();
-    const prepared = preparedCalls[0] as { request: { systemPrompt: string }; plan: { requestTimeoutMs: number; parameters: unknown; candidates: unknown } };
-    const request = prepared.request;
-    expect(request.systemPrompt).toBe("Use spare prose.\n\nCheck this scene for required coverage.");
-    expect(request.systemPrompt.split("Use spare prose.")).toHaveLength(2);
-    expect(prepared.plan).toMatchObject({ requestTimeoutMs: 30_000, parameters: { temperature: 0.2 }, candidates: basis.candidates });
+    expect(preparedCalls).toHaveLength(operations.length);
+    for (const [index, operation] of operations.entries()) {
+      const prepared = preparedCalls[index] as { operation: string; request: { systemPrompt: string }; plan: { requestTimeoutMs: number; parameters: unknown; candidates: unknown } };
+      expect(prepared.operation).toBe(operation);
+      expect(prepared.request.systemPrompt).toBe(`Use spare prose.\n\nActual ${operation} prompt.`);
+      expect(prepared.request.systemPrompt.split("Use spare prose.")).toHaveLength(2);
+      expect(prepared.plan).toMatchObject({ requestTimeoutMs: 30_000, parameters: { temperature: 0.2 }, candidates: basis.candidates });
+    }
+  });
+
+  it("fails a native invocation before inference when Task 5 has not supplied a prepared executor", async () => {
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "v1", configHash: "e".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "Use spare prose.", parameters: {}, endpointReference: "endpoint", credentialReference: "profile",
+      profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000, protocolVersion: "route-basis-v2"
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    const job = { ...completeGenerationExecutionPayload(), orchestration_private: { textExecutionRouteBasis: routeBasis } };
+    const provider = { id: "profile", name: "legacy", providerRole: "text" as const, providerType: "openrouter" as const,
+      model: "legacy", contextWindowTokens: 16_000, maxOutputTokens: 1_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const dependencies = { pool: {} as DatabasePool, collaborators: { recordProfileCost: vi.fn(async () => undefined) } } as never;
+
+    await expect(callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+      systemPrompt: "Actual coverage prompt.", input: "{}"
+    })).rejects.toMatchObject({ code: "prepared_text_execution_unavailable" });
+    expect(provider.execute).not.toHaveBeenCalled();
   });
 });
 
