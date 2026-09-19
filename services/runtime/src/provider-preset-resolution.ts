@@ -26,6 +26,7 @@ export type TextExecutionPlanProfile = Readonly<{
   ownerUserId: string;
   providerProfileId: string;
   profileRevision: string;
+  authorityRevision?: string;
   providerType: string;
   selection: TextModelSelection;
   /** Legacy/default profile sizing is not evidence of an unknown route's capacity. */
@@ -211,6 +212,7 @@ function createPlan(inputs: ResolvedPlanInputs, operationPrompt: string): TextEx
     endpointReference: inputs.profile.endpointReference,
     credentialReference: inputs.profile.credentialReference,
     profileRevision: inputs.profile.profileRevision,
+    ...(inputs.profile.authorityRevision === undefined ? {} : { authorityRevision: inputs.profile.authorityRevision }),
     protocolVersion: inputs.profile.protocolVersion
   };
   // Hash the schema-normalized representation before recursively freezing the

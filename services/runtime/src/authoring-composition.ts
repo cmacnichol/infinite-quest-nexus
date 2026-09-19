@@ -20,6 +20,7 @@ import {
 import { SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
 import { SourceExtractionSplitNeededError } from "./source-authoring-adapter.js";
 import { resolveSourceAuthoringTextExecution } from "./source-authoring-budget.js";
+import { prepareAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
 
 type RuntimeRepository = AuthoringExecutionRepository;
 
@@ -54,6 +55,10 @@ function snapshotPrompts(snapshot: Record<string, unknown>, content: (snapshot: 
     source_world: content(snapshot, "source_world"),
     source_world_recovery: content(snapshot, "source_world_recovery")
   };
+}
+
+function authoringOperationPrompts(prompts: ReturnType<typeof snapshotPrompts>) {
+  return { worldOutline: prompts.world_generation, worldOutlineRepair: prompts.world_generation_recovery, seedCharacter: prompts.world_character_generation, seedCharacterRepair: prompts.world_character_generation_recovery, standaloneCharacter: prompts.character_generation, sourceExtraction: prompts.source_extraction, sourceExtractionRepair: prompts.source_extraction_recovery, sourceWorld: prompts.source_world, sourceWorldRepair: prompts.source_world_recovery };
 }
 
 /** Runtime-only authoring graph. It owns default resolution, credentials and heartbeat state. */
@@ -111,9 +116,27 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
               })).execution
               : await options.providers.execution.text({ ownerUserId: claim.ownerUserId }, resolution.providerProfileId, "text", resolution.model);
             const prompt = await options.providers.prompts.loadWorldGenerationPromptSnapshot({ ownerUserId: claim.ownerUserId, worldId: claim.jobId });
-            return createAuthoringExecutionSnapshot(provider, snapshotPrompts(prompt.snapshot as Record<string, unknown>, options.providers.promptTools.content as never), input.kind === "story_source"
+            const prompts = snapshotPrompts(prompt.snapshot as Record<string, unknown>, options.providers.promptTools.content as never);
+            // Historical direct-model authoring remains v1. Native preset
+            // adoption is explicit, so ordinary callers do not gain remote
+            // inventory work or a changed retry contract.
+            if (provider.textSelection?.kind !== "openrouter_preset") {
+              return createAuthoringExecutionSnapshot(provider, prompts, input.kind === "story_source"
+                ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION }
+                : AUTHORING_EXECUTION_PROTOCOLS, options.sha256);
+            }
+            const prepared = await prepareAuthoringTextExecution({
+              ownerUserId: claim.ownerUserId,
+              execution: provider,
+              operationPrompts: authoringOperationPrompts(prompts),
+              ports: {
+                resolvePreset: async ({ ownerUserId, providerProfileId, slug }) => (await options.providers.inventory.getPreset({ ownerUserId, providerProfileId, slug })).preset,
+                discoverModels: async ({ ownerUserId, providerProfileId }) => (await options.providers.inventory.listModels({ ownerUserId, providerProfileId, providerRole: "text" })).models
+              }
+            });
+            return createAuthoringExecutionSnapshot(provider, prompts, input.kind === "story_source"
               ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION }
-              : AUTHORING_EXECUTION_PROTOCOLS, options.sha256);
+              : AUTHORING_EXECUTION_PROTOCOLS, options.sha256, prepared.plans as never);
           },
             dispatch: async (stage) => dispatch(stage)
           });

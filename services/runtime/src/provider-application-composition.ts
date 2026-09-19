@@ -97,7 +97,7 @@ export type WorldGenerationProviderCollaborators = ProviderConsumerRuntime & Rea
 
 export type AuthoringWorkerProviderCollaborators = Readonly<{
   execution: RuntimeProviderExecutionPort;
-  inventory: SourceAuthoringModelInventory;
+  inventory: ProviderModelInventoryPort;
   resolution: Pick<ProviderResolutionPort, "resolveDirect">;
   prompts: WorldGenerationPromptPort;
   promptTools: ProviderPromptTools;

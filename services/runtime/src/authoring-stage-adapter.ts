@@ -97,6 +97,8 @@ export type PreparedAuthoringTextExecutor = Readonly<{
   execute(input: Readonly<{
     plan: TextExecutionPlan;
     operation: string;
+    ownerUserId: string;
+    providerProfileId: string;
     request: import("../../../packages/story-engine/src/providers.js").ProviderRequest;
     currentClaim?: () => Promise<boolean>;
   }>): Promise<import("../../../packages/story-engine/src/providers.js").ProviderResult>;
@@ -200,7 +202,18 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
       const snapshot = stage.snapshot;
       const initialOperation = operationFor(stage, false);
       const initialPlan = snapshot.textExecutionPlans[initialOperation as keyof typeof snapshot.textExecutionPlans];
-      if (!initialPlan || !planMatchesHash(textExecutionPlanSchema.parse(initialPlan), options.sha256) || !options.preparedExecutor) {
+      const plans = Object.values(snapshot.textExecutionPlans);
+      if (!initialPlan || !plans.length || !plans.every((plan) => plan !== undefined && plan.authorityRevision !== undefined && plan.profileRevision === initialPlan.profileRevision && plan.authorityRevision === initialPlan.authorityRevision && planMatchesHash(textExecutionPlanSchema.parse(plan), options.sha256)) || !options.preparedExecutor) {
+        throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+      }
+      let authority: RuntimeTextExecution;
+      try {
+        authority = await options.execution.text({ ownerUserId: stage.ownerUserId }, snapshot.providerProfileId, "text");
+      } catch {
+        throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+      }
+      if (authority.id !== snapshot.providerProfileId || authority.providerRole !== "text"
+        || authority.authorityRevision !== initialPlan.authorityRevision) {
         throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
       }
       const candidate = initialPlan.candidates[0]!;
@@ -224,6 +237,8 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
           return options.preparedExecutor!.execute({
             plan,
             operation,
+            ownerUserId: stage.ownerUserId,
+            providerProfileId: snapshot.providerProfileId,
             request: { ...request, systemPrompt: plan.prompt },
             ...(stage.currentClaim === undefined ? {} : { currentClaim: stage.currentClaim })
           });

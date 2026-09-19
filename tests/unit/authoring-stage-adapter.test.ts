@@ -7,6 +7,7 @@ import type { AuthoringClaim, AuthoringExecutionRepository } from "../../package
 import type { AuthoringExecutionSnapshot } from "../../packages/application/src/authoring/types.js";
 import { authoringExecutionSnapshotSchema } from "../../packages/contracts/src/authoring.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
+import { prepareAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { expandWorldCharacterSeed } from "../../services/runtime/src/provider-world-generation-adapter.js";
 
@@ -44,6 +45,30 @@ function runtimeStage(overrides: Partial<Parameters<ReturnType<typeof createRunt
 }
 
 describe("executeAuthoringStage", () => {
+  it("resolves one inherited preset into every frozen authoring operation exactly once", async () => {
+    const resolvePreset = vi.fn(async () => ({ slug: "story", name: "Story", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Preset rules." }));
+    const discoverModels = vi.fn(async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+    const prepared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution: { ...descriptor, name: "Text", providerRole: "text", providerType: "openrouter", executionRevision: "ordinary", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "story" }, execute: async () => providerResult("{}") },
+      operationPrompts: { standaloneCharacter: "Create a cartographer.", worldOutline: "Create a world." },
+      ports: { resolvePreset, discoverModels }
+    });
+    expect(resolvePreset).toHaveBeenCalledOnce();
+    expect(discoverModels).toHaveBeenCalledOnce();
+    expect(prepared.plans.standaloneCharacter!.prompt).toBe("Preset rules.\n\nCreate a cartographer.");
+    expect(prepared.plans.worldOutline!.prompt).toBe("Preset rules.\n\nCreate a world.");
+    expect(prepared.plans.standaloneCharacter!.authorityRevision).toBe("authority");
+  });
+
+  it("rejects v2 preparation without current authority evidence", async () => {
+    await expect(prepareAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution: { ...descriptor, name: "Text", providerRole: "text", providerType: "openrouter", textSelection: { kind: "model", modelId: "model-pinned" }, execute: async () => providerResult("{}") },
+      operationPrompts: { standaloneCharacter: "Create a cartographer." },
+      ports: { resolvePreset: async () => { throw new Error("unused"); }, discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }] }
+    })).rejects.toThrow("authority revisions");
+  });
   it("preserves the synchronous seed prompt field names in the shared expansion seam", async () => {
     let sentSeed: unknown;
     const seed = { id: "durable-character", name: "Iris", role: "Cartographer", concept: "Maps shifting roads.", narrativeHook: "Her map changes at dawn." };
