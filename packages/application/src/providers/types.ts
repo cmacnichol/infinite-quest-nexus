@@ -216,8 +216,15 @@ export type ProviderModelInventoryRequest = OwnerScope & Readonly<{
   refresh?: boolean;
 }>;
 
-export type ProviderPresetPageRequest = OwnerScope & Readonly<{ providerProfileId: string; offset: number; limit: number; refresh?: boolean; signal?: AbortSignal }>;
-export type ProviderPresetDetailRequest = OwnerScope & Readonly<{ providerProfileId: string; slug: string; signal?: AbortSignal }>;
+/** Minimal cancellation shape without coupling the framework-free application package to DOM or Node types. */
+export type ProviderRequestAbortSignal = Readonly<{
+  aborted: boolean;
+  addEventListener(type: "abort", listener: () => void, options?: Readonly<{ once?: boolean }>): void;
+  removeEventListener(type: "abort", listener: () => void): void;
+}>;
+
+export type ProviderPresetPageRequest = OwnerScope & Readonly<{ providerProfileId: string; offset: number; limit: number; refresh?: boolean; signal?: ProviderRequestAbortSignal }>;
+export type ProviderPresetDetailRequest = OwnerScope & Readonly<{ providerProfileId: string; slug: string; signal?: ProviderRequestAbortSignal }>;
 export type ProviderPresetInventory = Readonly<{ providerProfileId: string | null; page: PresetPage }>;
 export type ProviderPresetDetail = Readonly<{ providerProfileId: string | null; preset: ResolvedPreset }>;
 

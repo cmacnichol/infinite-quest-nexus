@@ -11,6 +11,11 @@ const PRESET_PARAMETERS = new Set(["model", "models", "temperature", "top_p", "t
 const PROVIDER_PARAMETERS = new Set(["order", "only", "ignore", "allow_fallbacks", "require_parameters", "data_collection", "sort", "quantizations", "enforce_distillable_text", "preferred_min_throughput", "preferred_max_latency", "max_price", "zdr"]);
 const MAX_PRICE_PARAMETERS = new Set(["prompt", "completion", "image", "request"]);
 
+type CancellableRequestSignal = Readonly<{
+  aborted: boolean;
+  addEventListener(type: "abort", listener: () => void, options?: Readonly<{ once?: boolean }>): void;
+}>;
+
 export class OpenRouterPresetError extends Error {
   constructor(readonly diagnosticCode: ProviderPresetDiagnosticCode, message = "Preset discovery is unavailable.") {
     super(message);
@@ -30,9 +35,14 @@ function presetUrl(profile: ProviderTransportProfile, suffix: string): string {
   return `${profile.baseUrl.trim().replace(/\/+$/, "")}/presets${suffix}`;
 }
 
-function cancellationSignal(signal?: AbortSignal): AbortSignal {
+function cancellationSignal(signal?: CancellableRequestSignal): AbortSignal {
   const timeout = AbortSignal.timeout(60_000);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+  if (!signal) return timeout;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+  return AbortSignal.any([controller.signal, timeout]);
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -151,7 +161,7 @@ function summary(value: unknown): PresetSummary {
   return Object.freeze({ slug: text(source.slug), name: text(source.name), status: text(source.status), designatedVersionId: text(source.designated_version_id), updatedAt: text(source.updated_at) });
 }
 
-export async function discoverOpenRouterPresets(profile: ProviderTransportProfile, request: Readonly<{ offset: number; limit: number; signal?: AbortSignal }>, transport: ProviderTransport): Promise<PresetPage> {
+export async function discoverOpenRouterPresets(profile: ProviderTransportProfile, request: Readonly<{ offset: number; limit: number; signal?: CancellableRequestSignal }>, transport: ProviderTransport): Promise<PresetPage> {
   if (profile.providerType !== "openrouter" || !Number.isSafeInteger(request.offset) || request.offset < 0 || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 100) throw new OpenRouterPresetError("invalid_response");
   const url = presetUrl(profile, `?offset=${request.offset}&limit=${request.limit}`);
   let envelope: Record<string, unknown>;
@@ -163,7 +173,7 @@ export async function discoverOpenRouterPresets(profile: ProviderTransportProfil
   return Object.freeze({ presets, totalCount, offset: request.offset, nextOffset: request.offset + presets.length < totalCount ? request.offset + presets.length : null });
 }
 
-export async function discoverOpenRouterPreset(profile: ProviderTransportProfile, slug: string, transport: ProviderTransport, signal?: AbortSignal): Promise<ResolvedPreset> {
+export async function discoverOpenRouterPreset(profile: ProviderTransportProfile, slug: string, transport: ProviderTransport, signal?: CancellableRequestSignal): Promise<ResolvedPreset> {
   if (profile.providerType !== "openrouter" || !slug.trim()) throw new OpenRouterPresetError("invalid_response");
   const url = presetUrl(profile, `/${encodeURIComponent(slug)}`);
   let source: Record<string, unknown>;
