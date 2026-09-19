@@ -108,7 +108,7 @@ describe("source authoring adapter", () => {
     const evidenceId = JSON.parse(expected.input).chunk.paragraphSpans[0].evidenceId;
     const valid = JSON.stringify({ facts: [{ category: "character", subject: "Iris", predicate: "wears", value: "a blue coat", provenance: "stated", citations: [{ evidenceId }] }] });
     const adapter = createSourceAuthoringAdapter({
-      plans: { initial: { prompt: `Preset\n\n${expected.systemPrompt}` }, repair: { prompt: "Preset\n\nRepair source evidence." } },
+      plans: { initial: { prompt: `Preset\n\n${expected.systemPrompt}` }, repair: { prompt: `Preset\n\n${renderSourceExtractionRequest(input, true, []).systemPrompt}` } },
       requestBudget: {
         executeInitial: async (request) => { issued.push(request); return result(valid.replace(evidenceId, "evidence:000000000000000000000000")); },
         executeRepair: async (request) => { issued.push(request); return result(valid); }
@@ -117,8 +117,10 @@ describe("source authoring adapter", () => {
     });
     await expect(adapter.extractSourceChunk(input)).resolves.toHaveLength(1);
     expect(issued).toHaveLength(2);
-    expect(issued[0]!.systemPrompt).toContain(expected.systemPrompt);
-    expect(issued[1]!.systemPrompt).toContain("Repair source evidence.");
+    expect(issued[0]!.systemPrompt).toBe(`Preset\n\n${expected.systemPrompt}`);
+    expect(issued[1]!.systemPrompt).toBe(`Preset\n\n${renderSourceExtractionRequest(input, true, []).systemPrompt}`);
+    expect(issued[0]!.systemPrompt.match(/Preset/g)).toHaveLength(1);
+    expect(issued[1]!.systemPrompt.match(/Preset/g)).toHaveLength(1);
     expect(issued[1]!.recoveryInput).toBeDefined();
   });
 
@@ -407,7 +409,7 @@ describe("source authoring adapter", () => {
     expect(prepared.byteLength).toBe(new TextEncoder().encode(prepared.body).length);
   });
 
-  it("measures and dispatches the same frozen v2 source prompt for initial and repair", () => {
+  it("serializes the same frozen v2 source prompt for initial and repair", () => {
     const { source, chunk } = sourceAndChunk();
     const execution: RuntimeTextExecution = { id: "source-profile", name: "Source", providerRole: "text", providerType: "openai_compatible", model: "source-model", contextWindowTokens: 8_000, maxOutputTokens: 400, temperature: 0.2, requestTimeoutMs: 30_000, configuration: {}, execute: async () => result('{"facts":[]}') };
     const budget = createRuntimeSourceAuthoringRequestBudget(execution);
