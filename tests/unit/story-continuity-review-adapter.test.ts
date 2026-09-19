@@ -23,6 +23,25 @@ describe("exact continuity review provider request", () => {
     expect(prepared.request.responseFormatFallback).toBe("forbid");
     expect(prepared.request.budgetOutput).toBeUndefined();
   });
+  it("composes a frozen execution prompt before review and repair bodies are measured", () => {
+    const compose = vi.fn((operationPrompt: string) => ({
+      systemPrompt: `Frozen preset instruction.\n\n${operationPrompt}`
+    }));
+    const review = prepare({ prepareSystemPrompt: compose });
+    const repair = prepareContinuityRepair({
+      provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
+      findings: [{ code: "conflict", evidence_ids: [entry.id] }],
+      prepareSystemPrompt: compose
+    });
+
+    expect(review.request.systemPrompt).toContain("Frozen preset instruction.");
+    expect(review.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, review.request).body);
+    expect(review.requestHash).toBe(sha256(review.body));
+    expect(repair.request.systemPrompt).toContain("Frozen preset instruction.");
+    expect(repair.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, repair.request).body);
+    expect(repair.requestHash).toBe(sha256(repair.body));
+    expect(compose).toHaveBeenCalledTimes(2);
+  });
   it("rejects missing manifest entries, changed producing request and overflow before dispatch", () => {
     expect(() => prepare({ manifest: { ...manifest, entries: [] } })).toThrow();
     expect(() => prepare({ producingRequestHash: "a".repeat(64) })).toThrow();

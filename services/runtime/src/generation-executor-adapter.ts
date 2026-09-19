@@ -144,6 +144,13 @@ export function deriveCampaignTextExecutionPlan(
   return routeBasis ? deriveTextExecutionPlan(routeBasis, operationPrompt) : undefined;
 }
 
+function prepareCampaignSystemPrompt(job: GenerationExecutionPayload, operationPrompt: string) {
+  const textExecutionPlan = deriveCampaignTextExecutionPlan(job, operationPrompt);
+  return textExecutionPlan
+    ? { systemPrompt: textExecutionPlan.prompt, textExecutionPlan }
+    : { systemPrompt: operationPrompt };
+}
+
 export function bindCampaignTextExecutionPlan(
   job: GenerationExecutionPayload,
   request: ProviderRequest,
@@ -2697,12 +2704,14 @@ async function executeLoadedGeneration(
           }), "saving consumed Story Direction choice repair state");
           return true;
         } else {
+          const choiceRepairPlan = deriveCampaignTextExecutionPlan(job, storyOnlyChoiceRepairSystemPrompt!);
+          const choiceRepairSystemPrompt = choiceRepairPlan?.prompt ?? storyOnlyChoiceRepairSystemPrompt!;
           const repairRequest = bindCampaignResponseContract(job, "story_choice_repair", {
-            systemPrompt: storyOnlyChoiceRepairSystemPrompt!,
+            systemPrompt: choiceRepairSystemPrompt,
             input: buildStoryOnlyChoiceRepairInput(choiceOnly.base),
             budgetOutput: { kind: "story_choice_repair" as const }
           });
-          const initialRepairRequest = choiceRepairPreparedRequest(provider, storyOnlyChoiceRepairSystemPrompt!, choiceOnly.base,
+          const initialRepairRequest = choiceRepairPreparedRequest(provider, choiceRepairSystemPrompt, choiceOnly.base,
             repairRequest.responseContract?.mode ?? "json_object", repairRequest.responseContract);
           const repairResponseContract = choiceRepairResponseContractIdentity(job);
           const pendingCheckpoint = existing?.status === "pending" ? existing : null;
@@ -2731,7 +2740,7 @@ async function executeLoadedGeneration(
               choiceRepair: { ...orchestration.choiceRepair!, status: "dispatched" }
             });
             const repairResponse = await phase("story_choice_repair", () => callCampaignTextProvider(
-              ledgerDependencies, provider, job, "story_choice_repair", repairRequest
+              ledgerDependencies, provider, job, "story_choice_repair", repairRequest, choiceRepairPlan
             ));
             if (repairResponse.outputLimited) throw new Error("Choice repair reached its output limit.");
             const fields = parseChoiceRepair(repairResponse.content);
@@ -2960,7 +2969,8 @@ async function executeLoadedGeneration(
           provider,
           job,
           "scene_coverage_rewrite",
-          sceneRewriteRequest
+          sceneRewriteRequest,
+          storyTextExecutionPlan
         ));
         // The provider can canonicalize the prepared request after the
         // reservation (for example, by retrying without response_format).
@@ -3198,7 +3208,7 @@ async function executeLoadedGeneration(
         let repairedMain: ReturnType<typeof parseStoryOutput>;
         try {
           repairResult = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
-            ledgerDependencies, provider, job, "scene_coverage_rewrite", repairRequest
+            ledgerDependencies, provider, job, "scene_coverage_rewrite", repairRequest, storyTextExecutionPlan
           ));
           repairedMain = (repairResult.outputLimited
             ? { ok: false as const, code: "output_limit", errors: ["The event-coverage rewrite reached its output limit."] }
@@ -3539,7 +3549,8 @@ async function executeLoadedGeneration(
             provider,
             job,
             "scene_coverage_rewrite",
-            repairRequest
+            repairRequest,
+            storyTextExecutionPlan
           ));
           if (!repairResponse.outputLimited) {
             // A coverage rewrite may replace a rejected extension suffix.  Only the
@@ -3665,6 +3676,7 @@ async function executeLoadedGeneration(
           if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
           const prepared = prepareContinuityReview({ provider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
             promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory, effectiveContextWindowTokens: effectiveContextWindow,
+            prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
             ...(frozenContractForOperation(job, "story_continuity_review") ? { responseContract: frozenContractForOperation(job, "story_continuity_review") } : {}) });
           const priorLedger = orchestration.logicalAttempt ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0,
             reviewsConsumed: 0, automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0,
@@ -3673,7 +3685,9 @@ async function executeLoadedGeneration(
           checkpoint = { ...checkpoint, status: "dispatched", reviewRequestHash: prepared.requestHash };
           orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint,
             logicalAttempt: { ...priorLedger, reviewsConsumed: priorLedger.reviewsConsumed + 1 }, sourceEvidenceManifest: finalManifest });
-          const reviewed = await phase("story_continuity_review", () => callCampaignTextProvider(ledgerDependencies, provider, job, "story_continuity_review", prepared.request));
+          const reviewed = await phase("story_continuity_review", () => callCampaignTextProvider(
+            ledgerDependencies, provider, job, "story_continuity_review", prepared.request, prepared.textExecutionPlan
+          ));
           const validated = validatePreparedContinuityReviewResult(prepared, reviewed);
           checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"] };
         } catch (error) {
@@ -3756,6 +3770,7 @@ async function executeLoadedGeneration(
               preparedRepair = prepareContinuityRepair({ provider, manifest: finalManifest, promptSnapshot: frozenPromptEnvelope,
                 direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
                 effectiveContextWindowTokens: effectiveContextWindow,
+                prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
                 ...(frozenContractForOperation(job, "story_continuity_repair") ? { responseContract: frozenContractForOperation(job, "story_continuity_repair") } : {}) });
             } catch (error) {
               if (await reofferFailedAuthorizedRetry("continuity", "The authorized continuity repair request could not be prepared.")) return true;
@@ -3787,7 +3802,9 @@ async function executeLoadedGeneration(
             let repairResponse: ProviderResult;
             let repairedStory: StoryTurnOutput | null = null;
             try {
-              repairResponse = await phase("story_continuity_repair", () => callCampaignTextProvider(ledgerDependencies, provider, job, "story_continuity_repair", preparedRepair.request));
+              repairResponse = await phase("story_continuity_repair", () => callCampaignTextProvider(
+                ledgerDependencies, provider, job, "story_continuity_repair", preparedRepair.request, preparedRepair.textExecutionPlan
+              ));
               if (!repairResponse.outputLimited) {
                 if (extensionOnly) repairedStory = parseEventExtension(
                   repairResponse.content,

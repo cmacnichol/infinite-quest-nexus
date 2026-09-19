@@ -7,6 +7,7 @@ import { estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from ".
 import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
 import type { ProviderRequest } from "../../../packages/story-engine/src/providers.js";
 import type { PreparedResponseContract } from "../../../packages/contracts/src/text-response-format.js";
+import type { TextExecutionPlan } from "../../../packages/contracts/src/text-execution-plan.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 
 export class ContinuityReviewUnavailableError extends Error {
@@ -16,12 +17,26 @@ export class ContinuityReviewUnavailableError extends Error {
 export type PreparedContinuityReview = Readonly<{
   request: ProviderRequest; body: string; requestHash: string; input: ContinuityReviewInput;
   manifestHash: string; requestTokens: number; safetyAllowanceTokens: number;
+  textExecutionPlan?: TextExecutionPlan;
 }>;
 
 export type PreparedContinuityRepair = Readonly<{
   request: ProviderRequest; body: string; requestHash: string; requiredEvidenceIds: readonly string[];
   manifest: GenerationEvidenceManifest; omittedEvidenceIds: readonly string[];
+  textExecutionPlan?: TextExecutionPlan;
 }>;
+
+export type PreparedContinuitySystemPrompt = Readonly<{
+  systemPrompt: string;
+  textExecutionPlan?: TextExecutionPlan;
+}>;
+
+function prepareSystemPrompt(
+  operationPrompt: string,
+  transform?: (operationPrompt: string) => PreparedContinuitySystemPrompt
+): PreparedContinuitySystemPrompt {
+  return transform ? transform(operationPrompt) : { systemPrompt: operationPrompt };
+}
 
 /** A repair is deliberately a fresh, complete request.  Rejected narration is
  * untrusted input and its private fields never cross this boundary. */
@@ -29,6 +44,7 @@ export function prepareContinuityRepair(input: Readonly<{
   provider: RuntimeTextExecution; manifest: GenerationEvidenceManifest; promptSnapshot: unknown;
   direction: string; rejectedDraft: StoryTurnOutput; originalMain?: StoryTurnOutput; scope?: "main" | "extension_only";
   findings: unknown; effectiveContextWindowTokens?: number; responseContract?: PreparedResponseContract;
+  prepareSystemPrompt?: (operationPrompt: string) => PreparedContinuitySystemPrompt;
 }>): PreparedContinuityRepair {
   const manifest = generationEvidenceManifestSchema.parse(input.manifest);
   const prompts = assertContinuityReviewPromptSnapshot(input.promptSnapshot, "enforce");
@@ -43,8 +59,12 @@ export function prepareContinuityRepair(input: Readonly<{
   if ([...required].some((id) => !manifest.entries.some((entry) => entry.id === id))) throw new ContinuityReviewUnavailableError();
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
   const prepare = (entries: GenerationEvidenceManifest["entries"]): PreparedContinuityRepair | null => {
+    const systemPrompt = prepareSystemPrompt(
+      `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.`,
+      input.prepareSystemPrompt
+    );
     const request: ProviderRequest = {
-      systemPrompt: `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.`,
+      systemPrompt: systemPrompt.systemPrompt,
       input: stableStringify({ protocol: "story-continuity-repair-v1", scope: input.scope ?? "main", direction: input.direction,
         protected_authority: entries.map((entry) => ({ id: entry.id, content: entry.content, required: required.has(entry.id), role: entry.semanticRole,
           canonicalFactId: entry.canonicalFactId, form: entry.form })),
@@ -59,7 +79,8 @@ export function prepareContinuityRepair(input: Readonly<{
     const rebound = { ...manifest, entries, requiredReviewEvidenceIds: [...required], producingRequestHash: serialized.payloadHash };
     return { request, body: serialized.body, requestHash: serialized.payloadHash, requiredEvidenceIds: [...required],
       manifest: generationEvidenceManifestSchema.parse({ ...rebound, manifestHash: generationEvidenceManifestHash(rebound) }),
-      omittedEvidenceIds: manifest.entries.filter((entry) => !entries.some((selected) => selected.id === entry.id)).map((entry) => entry.id) };
+      omittedEvidenceIds: manifest.entries.filter((entry) => !entries.some((selected) => selected.id === entry.id)).map((entry) => entry.id),
+      ...(systemPrompt.textExecutionPlan ? { textExecutionPlan: systemPrompt.textExecutionPlan } : {}) };
   };
   // One constrained replan: keep protected authority, direction, every cited
   // conflict source and both complete permitted candidate projections.
@@ -74,6 +95,7 @@ export function prepareContinuityReview(input: Readonly<{
   provider: RuntimeTextExecution; manifest: GenerationEvidenceManifest; producingRequestHash: string;
   promptSnapshot: unknown; reviewMode: "observe" | "enforce"; direction: string; draft: StoryTurnOutput; effectiveContextWindowTokens?: number;
   responseContract?: PreparedResponseContract;
+  prepareSystemPrompt?: (operationPrompt: string) => PreparedContinuitySystemPrompt;
 }>): PreparedContinuityReview {
   const parsed = generationEvidenceManifestSchema.safeParse(input.manifest);
   if (!parsed.success || parsed.data.producingRequestHash !== input.producingRequestHash) throw new ContinuityReviewUnavailableError();
@@ -86,9 +108,10 @@ export function prepareContinuityReview(input: Readonly<{
     evidence: manifest.entries.map((entry) => ({ id: entry.id, content: entry.content, required: manifest.requiredReviewEvidenceIds.includes(entry.id), role: entry.semanticRole,
       sourceKind: entry.source.kind, selectionGroup: entry.selectionGroup }))
   });
-  const request: ProviderRequest = { systemPrompt: `${reviewPrompt.content}
+  const systemPrompt = prepareSystemPrompt(`${reviewPrompt.content}
 
-${CONTINUITY_REVIEW_CONTRACT}`,
+${CONTINUITY_REVIEW_CONTRACT}`, input.prepareSystemPrompt);
+  const request: ProviderRequest = { systemPrompt: systemPrompt.systemPrompt,
     input: stableStringify({ protocol: "story-continuity-review-v1", producingRequestHash: input.producingRequestHash, manifestHash: manifest.manifestHash, ...projection }),
     canonicalBudgeting: true, responseFormatFallback: "forbid",
     ...(input.responseContract ? { responseContract: input.responseContract, budgetOutput: { kind: "continuity_review" as const } } : {})
@@ -98,7 +121,8 @@ ${CONTINUITY_REVIEW_CONTRACT}`,
   const safetyAllowanceTokens = estimatedInputSafetyAllowanceTokens(requestTokens);
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
   if (!Number.isSafeInteger(limit) || requestTokens + safetyAllowanceTokens + input.provider.maxOutputTokens > limit) throw new ContinuityReviewUnavailableError();
-  return { request, body: prepared.body, requestHash: prepared.payloadHash, input: projection, manifestHash: manifest.manifestHash, requestTokens, safetyAllowanceTokens };
+  return { request, body: prepared.body, requestHash: prepared.payloadHash, input: projection, manifestHash: manifest.manifestHash, requestTokens, safetyAllowanceTokens,
+    ...(systemPrompt.textExecutionPlan ? { textExecutionPlan: systemPrompt.textExecutionPlan } : {}) };
 }
 
 export async function executePreparedContinuityReview(provider: RuntimeTextExecution, prepared: PreparedContinuityReview) {

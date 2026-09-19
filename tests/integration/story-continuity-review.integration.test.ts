@@ -21,6 +21,7 @@ import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/
 import type { GenerationEvidenceManifest } from "../../packages/application/src/memory/generation-context.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { sha256Hex } from "../../packages/contracts/src/hash.js";
+import { sha256, stableStringify } from "../../packages/domain/src/text.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
@@ -127,7 +128,18 @@ integration("T17 durable continuity review", () => {
     server = createServer((request, response) => {
       if (request.url === "/models" || request.url === "/v1/models") {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ data: [{ id: "t17-capturing-fake" }] }));
+        response.end(JSON.stringify({ data: [
+          { id: "t17-capturing-fake", context_length: 65_536 },
+          { id: "t17-native-frozen", context_length: 65_536 }
+        ] }));
+        return;
+      }
+      if (request.url === "/presets/keep") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "keep", name: "Frozen Keep", status: "active",
+          designated_version: { id: "keep-v1", version: 1, system_prompt: "Native frozen preset instruction.", config: { model: "t17-native-frozen", temperature: 0.2 } }
+        } }));
         return;
       }
       let body = "";
@@ -1382,7 +1394,7 @@ integration("T17 durable continuity review", () => {
   });
 
   it("re-offers the original final candidate after a failed authorized continuity retry and keeps it offline", async () => {
-    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
     const { job, application, campaignId } = await enqueue("enforce");
     reviewVerdict = "pass"; reviewSequence = ["conflict"]; requests.length = 0;
     try {
@@ -1413,20 +1425,43 @@ integration("T17 durable continuity review", () => {
         "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
       )).rows[0]!.count).toBe(acceptedBefore);
 
+      const basisWithoutHash = {
+        version: 2 as const,
+        selection: { kind: "openrouter_preset" as const, slug: "keep" },
+        preset: { slug: "keep", versionId: "keep-v1", configHash: "c".repeat(64) },
+        candidates: [{ modelId: "keep-model", providerPolicy: {}, contextWindowTokens: 32768, maxOutputTokens: 4096 }],
+        presetSystemPrompt: "Keep frozen prompt.",
+        parameters: { temperature: 0.2 },
+        endpointReference: "frozen-provider-endpoint",
+        credentialReference: providerId,
+        profileRevision: "b".repeat(64),
+        authorityRevision: "a".repeat(64),
+        requestTimeoutMs: 23456,
+        protocolVersion: "text-execution-route-basis-v2"
+      };
+      const routeBasis = { ...basisWithoutHash, routeBasisHash: sha256(stableStringify(basisWithoutHash)) };
+      await pool.query(
+        "UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('textExecutionRouteBasis',$2::jsonb) WHERE id=$1",
+        [job.id, JSON.stringify(routeBasis)]
+      );
+
       await application.decideReview({ ownerUserId, jobId: job.id }, {
         reviewId: reoffered.reviewId, revision: reoffered.revision, decision: "keep"
       });
       const repository = createPostgresGenerationExecutionRepository(pool);
       const providers = workerProviderGraph(pool, credentialSecret);
       const loadTextExecution = vi.fn(async () => { throw new Error("text provider must remain offline for re-offered final Keep"); });
+      const verifyTextExecutionRouteAuthority = vi.fn(async () => { throw new Error("native route authority must remain offline for re-offered final Keep"); });
       const collaborators = {
         ...createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation),
-        loadTextExecution
+        loadTextExecution,
+        verifyTextExecutionRouteAuthority
       };
       const workerId = `continuity-reoffer-keep-${randomUUID()}`;
       const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
       await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
       expect(loadTextExecution).not.toHaveBeenCalled();
+      expect(verifyTextExecutionRouteAuthority).not.toHaveBeenCalled();
       expect(requests.filter((body) => body.includes("story-continuity-repair-v1"))).toHaveLength(1);
       expect((await pool.query<{ count: number }>(
         "SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [campaignId]
@@ -1437,6 +1472,104 @@ integration("T17 durable continuity review", () => {
       reviewSequence = [];
       await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({})]);
     }
+  });
+
+  it("keeps a queue-produced native preset candidate without a second prepared execution", async () => {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
+    const nativeProvider = await createProvider(pool, {
+      name: `T17 native Keep ${randomUUID()}`,
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      defaultModel: "@preset/keep",
+      contextWindowTokens: 65_536,
+      maxOutputTokens: 4_096,
+      temperature: 0,
+      enabled: true,
+      configuration: { textResponseFormatPolicy: "auto" },
+      apiKey: "native-keep-fixture"
+    }, credentialSecret);
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Native Keep ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "native-keep.story", story }));
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Wait for the observatory keeper.",
+      requestedInputMode: "action",
+      resolvedInputMode: "action",
+      inputModeSource: "explicit",
+      providerProfileId: nativeProvider.id,
+      textSelection: { kind: "openrouter_preset", slug: "keep" },
+      idempotencyKey: randomUUID(),
+      context: { budgetTokens: 32000, compression: "full", recentTurns: 8 }
+    }));
+    await expect(pool.query<{ basis: { preset: { slug: string }; parameters: { temperature: number }; candidates: Array<{ modelId: string }> } }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ basis: { preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "t17-native-frozen" }] } }] });
+
+    reviewVerdict = "conflict";
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const preparedTextExecutor = vi.fn(async ({ plan, operation, request }: { plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string; request: { input: string; systemPrompt: string } }) => ({
+      content: reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] })),
+      responseId: randomUUID(), finishReason: "stop", outputLimited: false, modelInstanceId: plan.candidates[0]!.modelId,
+      usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {}
+    }));
+    const composedCollaborators = createGenerationExecutionCollaborators(
+      pool,
+      createApiIllustrationApplication(pool, providers.illustration),
+      apiMemoryApplication(pool, credentialSecret),
+      providers.generation
+    );
+    const nativeAuthorityVerifier = composedCollaborators.verifyTextExecutionRouteAuthority;
+    if (!nativeAuthorityVerifier) throw new Error("Native route authority verification is unavailable.");
+    const verifyTextExecutionRouteAuthority = vi.fn(async (...input: Parameters<typeof nativeAuthorityVerifier>) => nativeAuthorityVerifier(...input));
+    const collaborators = {
+      ...composedCollaborators,
+      loadTextExecution: vi.fn(async () => { throw new Error("native route must use the prepared executor"); }),
+      verifyTextExecutionRouteAuthority,
+      preparedTextExecutor: { execute: preparedTextExecutor }
+    };
+    const initialWorker = `native-keep-initial-${randomUUID()}`;
+    const initialClaim = await repository.claimNext({ workerId: initialWorker, leaseSeconds: 30 });
+    expect(initialClaim?.jobId).toBe(job.id);
+    await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: initialClaim!, workerId: initialWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    const review = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+    expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
+    for (const [input] of preparedTextExecutor.mock.calls) {
+      expect(input.request.systemPrompt).toBe(input.plan.prompt);
+      expect(input.plan.prompt).toContain("Native frozen preset instruction.");
+    }
+    expect(verifyTextExecutionRouteAuthority).toHaveBeenCalled();
+    const candidate = (await pool.query<{ candidate: { storyHash: string; story: { narration: string } } }>(
+      "SELECT orchestration_private->'generationReview'->'gateCandidate' AS candidate FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.candidate;
+    expect(sha256Hex(canonicalEvidenceJson(candidate.story))).toBe(candidate.storyHash);
+
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+    const offlinePreparedExecutor = vi.fn(async () => { throw new Error("Keep must not execute a prepared native route"); });
+    const offlineAuthority = vi.fn(async () => { throw new Error("Keep must not read native route authority"); });
+    const offlineLoadTextExecution = vi.fn(async () => { throw new Error("Keep must not load text execution"); });
+    const offlineCollaborators = { ...collaborators,
+      preparedTextExecutor: { execute: offlinePreparedExecutor },
+      verifyTextExecutionRouteAuthority: offlineAuthority,
+      loadTextExecution: offlineLoadTextExecution
+    };
+    const keepWorker = `native-keep-final-${randomUUID()}`;
+    const keepClaim = await repository.claimNext({ workerId: keepWorker, leaseSeconds: 30 });
+    expect(keepClaim?.jobId).toBe(job.id);
+    await expect(createGenerationExecutor({ pool, repository, collaborators: offlineCollaborators }).execute({ claim: keepClaim!, workerId: keepWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    expect(offlinePreparedExecutor).not.toHaveBeenCalled();
+    expect(offlineAuthority).not.toHaveBeenCalled();
+    expect(offlineLoadTextExecution).not.toHaveBeenCalled();
+    await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: "completed" });
+    await expect(pool.query<{ narration: string; candidateHash: string }>(
+      "SELECT narration,model_metadata->'reviewAcceptance'->>'candidateHash' AS \"candidateHash\" FROM turns WHERE campaign_id=$1 AND turn_number=$2",
+      [imported.campaignId, job.expectedTurnNumber]
+    )).resolves.toMatchObject({ rows: [{ narration: candidate.story.narration, candidateHash: candidate.storyHash }] });
   });
 
   it("keeps an uncovered scene main exactly, then pauses again for a later final continuity conflict", async () => {

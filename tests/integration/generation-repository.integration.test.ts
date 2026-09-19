@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GenerationApplicationError } from "../../packages/application/src/index.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
+import type { TextExecutionRouteBasis } from "../../packages/contracts/src/text-execution-plan.js";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
@@ -71,7 +72,7 @@ integration("PostgreSQL generation command repository", () => {
   }
 
   function plannedRepository(
-    prepare: () => Promise<ReturnType<typeof frozenRouteBasis>> = async () => frozenRouteBasis(),
+    prepare: () => Promise<TextExecutionRouteBasis> = async () => frozenRouteBasis(),
     verify: () => Promise<boolean> = async () => true
   ) {
     return createPostgresGenerationCommandRepository(pool, {
@@ -248,6 +249,34 @@ integration("PostgreSQL generation command repository", () => {
     await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
 
+  it("resumes a queued native route after ordinary profile edits with its saved limits and policy", async () => {
+    const imported = await campaign();
+    const basisWithoutHash = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "queued" },
+      preset: { slug: "queued", versionId: "queued-v1", configHash: "c".repeat(64) },
+      candidates: [{ modelId: "queued-model", providerPolicy: { order: ["queued-model"] }, contextWindowTokens: 12000, maxOutputTokens: 1400 }],
+      presetSystemPrompt: "Saved queue prompt.", parameters: { temperature: 0.21 }, endpointReference: "provider-endpoint",
+      credentialReference: providerProfileId, profileRevision: "b".repeat(64), authorityRevision: "a".repeat(64), requestTimeoutMs: 23456,
+      protocolVersion: "text-execution-route-basis-v2"
+    };
+    const basis = { ...basisWithoutHash, routeBasisHash: sha256(stableStringify(basisWithoutHash)) };
+    const commands = plannedRepository(async () => basis);
+    const workerId = `saved-route-${crypto.randomUUID()}`;
+    const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Resume the frozen native queue."));
+    await pool.query("UPDATE provider_profiles SET temperature=0.91,request_timeout_ms=98765,configuration=$2::jsonb WHERE id=$1", [providerProfileId, JSON.stringify({ changed: true })]);
+    await pool.query("UPDATE generation_jobs SET status='recoverable',error_code='provider_unavailable' WHERE id=$1", [queued.id]);
+    await expect(commands.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const claim = await execution.claimNext({ workerId, leaseSeconds: 30 });
+    const payload = await execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    expect(payload?.orchestration_private?.textExecutionRouteBasis).toMatchObject({
+      routeBasisHash: basis.routeBasisHash, parameters: { temperature: 0.21 }, requestTimeoutMs: 23456,
+      candidates: [{ modelId: "queued-model", providerPolicy: { order: ["queued-model"] }, contextWindowTokens: 12000, maxOutputTokens: 1400 }]
+    });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+    await pool.query("UPDATE provider_profiles SET temperature=0,request_timeout_ms=300000,configuration='{}'::jsonb WHERE id=$1", [providerProfileId]);
+  });
+
   it("moves a post-queue tampered plan to recoverable before worker execution", async () => {
     const imported = await campaign();
     const queued = await plannedRepository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Reject tampering before dispatch."));
@@ -398,6 +427,102 @@ integration("PostgreSQL generation command repository", () => {
     } finally {
       await pool.query("UPDATE provider_profiles SET is_default=false WHERE id=$1", [defaultPreset.id]);
     }
+  });
+
+  it("freezes typed and exact legacy preset overrides through the API while a concrete model replaces inheritance", async () => {
+    const nativeProvider = await createProvider(pool, {
+      name: `API native override ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "@preset/inherited", contextWindowTokens: 32768,
+      maxOutputTokens: 4096, temperature: 0.35, enabled: true, configuration: {}
+    }, credentialSecret);
+    await pool.query("UPDATE provider_profiles SET text_selection=$2::jsonb WHERE id=$1", [
+      nativeProvider.id, JSON.stringify({ kind: "openrouter_preset", slug: "inherited" })
+    ]);
+    const metadataCalls: string[] = [];
+    const profile = {
+      id: nativeProvider.id, name: "API native override", providerRole: "text" as const, providerType: "openrouter" as const,
+      model: "@preset/inherited", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0.35,
+      requestTimeoutMs: 1_000, endpointIdentity: "api-native-endpoint", executionRevision: "e".repeat(64),
+      authorityRevision: "a".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "inherited" }, configuration: {}
+    };
+    const collaborators = {
+      execution: { text: async () => profile },
+      loadQueuedTextProfile: async (_client: DatabaseClient, _ownerUserId: string, _providerProfileId: string, model?: string) => ({
+        ...profile, model: model?.trim() || profile.model
+      }),
+      responseFormatInventory: {
+        getPreset: async ({ slug }: { slug: string }) => {
+          metadataCalls.push(`preset:${slug}`);
+          return { providerProfileId: nativeProvider.id, preset: {
+            slug, versionId: `${slug}-v1`, systemPrompt: `${slug} system prompt`, config: { model: `${slug}-model` }, configHash: sha256(`${slug}-config`)
+          } };
+        },
+        listModels: async () => {
+          metadataCalls.push("models");
+          return { providerProfileId: nativeProvider.id, providerRole: "text" as const, models: [
+            { id: "typed-model", name: "Typed", contextWindowTokens: 32768 },
+            { id: "legacy-model", name: "Legacy", contextWindowTokens: 32768 }
+          ] };
+        }
+      },
+      responseFormatCapabilities: { registryDigest: "d".repeat(64) }, promptTools: { protocolVersion: () => "test" },
+      prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() }
+    } as never;
+    const app = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const typedCampaign = await campaign();
+    const typedReplacementCampaign = await campaign();
+    const concreteReplacementCampaign = await campaign();
+    const legacyCampaign = await campaign();
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id = ANY($1::uuid[])", [
+      [typedCampaign.campaignId, typedReplacementCampaign.campaignId, concreteReplacementCampaign.campaignId, legacyCampaign.campaignId], nativeProvider.id
+    ]);
+    const typedRequest = generationRequestSchema.parse({
+      ...appendRequest("Freeze the typed API preset."), providerProfileId: nativeProvider.id,
+      textSelection: { kind: "openrouter_preset", slug: "typed" }
+    });
+    const typed = await app.enqueueAppend({ ownerUserId, campaignId: typedCampaign.campaignId }, typedRequest);
+    const replay = await app.enqueueAppend({ ownerUserId, campaignId: typedCampaign.campaignId }, typedRequest);
+    expect(replay).toMatchObject({ id: typed.id, duplicate: true });
+    expect(metadataCalls).toEqual(["preset:typed", "models"]);
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [typed.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "typed" }, preset: { slug: "typed" }, presetSystemPrompt: "typed system prompt"
+    } }] });
+
+    const typedReplacement = await app.enqueueReplacement({ ownerUserId, campaignId: typedReplacementCampaign.campaignId }, generationRetryLatestRequestSchema.parse({
+      ...replacementRequest("Freeze the typed replacement preset."), providerProfileId: nativeProvider.id,
+      textSelection: { kind: "openrouter_preset", slug: "typed" }
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [typedReplacement.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "typed" }, preset: { slug: "typed" }, presetSystemPrompt: "typed system prompt"
+    } }] });
+    expect(metadataCalls).toEqual(["preset:typed", "models", "preset:typed", "models"]);
+
+    const replacement = await app.enqueueReplacement({ ownerUserId, campaignId: concreteReplacementCampaign.campaignId }, generationRetryLatestRequestSchema.parse({
+      ...replacementRequest("Replace inherited routing with a concrete model."), providerProfileId: nativeProvider.id,
+      textSelection: { kind: "model", modelId: "concrete-model" }
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [replacement.id]
+    )).resolves.toMatchObject({ rows: [{ basis: null }] });
+    expect(metadataCalls).toEqual(["preset:typed", "models", "preset:typed", "models"]);
+
+    const legacy = await app.enqueueAppend({ ownerUserId, campaignId: legacyCampaign.campaignId }, generationRequestSchema.parse({
+      ...appendRequest("Freeze the exact legacy preset alias."), providerProfileId: nativeProvider.id, model: "@preset/legacy"
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [legacy.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "legacy" }, preset: { slug: "legacy" }, presetSystemPrompt: "legacy system prompt"
+    } }] });
+    expect(metadataCalls).toEqual(["preset:typed", "models", "preset:typed", "models", "preset:legacy", "models"]);
+    await app.cancel({ ownerUserId, jobId: typed.id });
+    await app.cancel({ ownerUserId, jobId: typedReplacement.id });
+    await app.cancel({ ownerUserId, jobId: replacement.id });
+    await app.cancel({ ownerUserId, jobId: legacy.id });
   });
 
   it("freezes a v3 effective character identity for an enrolled append and replacement", async () => {
