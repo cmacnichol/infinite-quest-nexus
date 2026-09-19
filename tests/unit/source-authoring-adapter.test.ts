@@ -99,6 +99,28 @@ describe("source authoring adapter", () => {
     expect(() => validateExtractedSourceFactsWithinBoundary(source, chunk, source.paragraphs[0]!.id, [{ ...base, citations: [{ evidenceId: entry.evidenceId }] }])).toThrow();
   });
 
+  it.each(["faithful", "expand"] as const)("dispatches frozen initial and repair plans for %s source extraction", async (mode) => {
+    const { source, chunk } = sourceAndChunk();
+    const input = { source, chunk, boundaryParagraphId: source.paragraphs[1]!.id, instructions: "Keep evidence.", mode };
+    const issued: ProviderRequest[] = [];
+    const expected = renderSourceExtractionRequest(input, false, []);
+    const evidenceId = JSON.parse(expected.input).chunk.paragraphSpans[0].evidenceId;
+    const valid = JSON.stringify({ facts: [{ category: "character", subject: "Iris", predicate: "wears", value: "a blue coat", provenance: "stated", citations: [{ evidenceId }] }] });
+    const adapter = createSourceAuthoringAdapter({
+      plans: { initial: { prompt: `Preset\n\n${expected.systemPrompt}` }, repair: { prompt: "Preset\n\nRepair source evidence." } },
+      requestBudget: {
+        executeInitial: async (request) => { issued.push(request); return result(valid.replace(evidenceId, "evidence:000000000000000000000000")); },
+        executeRepair: async (request) => { issued.push(request); return result(valid); }
+      },
+      delay: async () => undefined
+    });
+    await expect(adapter.extractSourceChunk(input)).resolves.toHaveLength(1);
+    expect(issued).toHaveLength(2);
+    expect(issued[0]!.systemPrompt).toContain(expected.systemPrompt);
+    expect(issued[1]!.systemPrompt).toContain("Repair source evidence.");
+    expect(issued[1]!.recoveryInput).toBeDefined();
+  });
+
   it.each([undefined, "", "another-job", "debug-job"])("logs citation text only for the opted-in job (%s)", async (debugJobId) => {
     vi.stubEnv("AI_AUTHORING_CITATION_DEBUG_JOB_ID", debugJobId);
     const source = normalizeSourceDocument("Synthetic", "Iris wears a \u{1F600} blue coat.\n\nEXCLUDED ENDING", "debug-source");
