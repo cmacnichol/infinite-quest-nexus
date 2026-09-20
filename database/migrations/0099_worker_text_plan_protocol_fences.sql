@@ -65,6 +65,37 @@ BEGIN
 END;
 $$;
 
+-- Mirrors the contracts' canonicalJson/stableStringify rules for persisted
+-- JSON-compatible values: array order is retained and object keys are sorted.
+CREATE FUNCTION canonical_jsonb_text(value jsonb)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE kind text;
+BEGIN
+  IF value IS NULL THEN RETURN NULL; END IF;
+  kind := jsonb_typeof(value);
+  IF kind='object' THEN
+    RETURN '{' || COALESCE((
+      SELECT string_agg(to_json(entry.key)::text || ':' || canonical_jsonb_text(entry.value), ',' ORDER BY entry.key COLLATE "C")
+        FROM jsonb_each(value) entry
+    ), '') || '}';
+  END IF;
+  IF kind='array' THEN
+    RETURN '[' || COALESCE((
+      SELECT string_agg(canonical_jsonb_text(item.value), ',' ORDER BY item.ordinality)
+        FROM jsonb_array_elements(value) WITH ORDINALITY item(value, ordinality)
+    ), '') || ']';
+  END IF;
+  IF kind='string' THEN RETURN to_json(value #>> '{}')::text; END IF;
+  IF kind='null' THEN RETURN 'null'; END IF;
+  RETURN value #>> '{}';
+END;
+$$;
+
+CREATE FUNCTION canonical_jsonb_sha256(value jsonb)
+RETURNS text LANGUAGE sql IMMUTABLE AS $$
+  SELECT encode(digest(convert_to(canonical_jsonb_text(value),'UTF8'),'sha256'),'hex')
+$$;
+
 CREATE FUNCTION valid_positive_integer(value jsonb)
 RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
   SELECT COALESCE(jsonb_typeof(value) = 'number'
@@ -112,6 +143,7 @@ BEGIN
   RETURN jsonb_object_has_only_keys(value, ARRAY['version','operation','streaming','forbidFormatFallback','mode','schemaVersion','schemaHash','schemaName','schema','providerRoutingSlugs','routeConfigHash','adapterProtocol'])
     AND jsonb_object_has_keys(value, ARRAY['version','operation','streaming','forbidFormatFallback','mode','schemaVersion','schemaHash','schemaName','schema','providerRoutingSlugs','routeConfigHash','adapterProtocol'])
     AND valid_bounded_text(value->'schemaVersion',1,200) AND valid_hash_text(value->'schemaHash')
+    AND value->>'schemaHash'=canonical_jsonb_sha256(value->'schema')
     AND valid_bounded_text(value->'schemaName',1,200) AND jsonb_typeof(value->'schema') = 'object'
     AND valid_bounded_string_array(value->'providerRoutingSlugs',64,128)
     AND valid_hash_text(value->'routeConfigHash') AND value->>'adapterProtocol' = 'text-schema-adapter-v1';
@@ -131,7 +163,8 @@ BEGIN
   FOR key, contract IN SELECT * FROM jsonb_each(value->'contracts') LOOP
     IF NOT key = ANY(queued_keys) OR NOT valid_v1_prepared_response_contract(contract, key) THEN RETURN false; END IF;
   END LOOP;
-  RETURN NOT EXISTS (SELECT 1 FROM unnest(queued_keys) queued WHERE NOT (value->'contracts') ? queued);
+  RETURN NOT EXISTS (SELECT 1 FROM unnest(queued_keys) queued WHERE NOT (value->'contracts') ? queued)
+    AND value->>'selectionHash'=canonical_jsonb_sha256(value-'selectionHash');
 END;
 $$;
 
@@ -371,9 +404,30 @@ BEGIN
      OR (document ? 'requestTimeoutMs' AND NOT valid_positive_integer(document->'requestTimeoutMs')) THEN RETURN false; END IF;
   IF plan THEN
     RETURN valid_bounded_text(document->'prompt',1,400000) AND valid_hash_text(document->'promptHash')
-      AND valid_hash_text(document->'planHash') AND (NOT document ? 'routeBasisHash' OR valid_hash_text(document->'routeBasisHash'));
+      AND document->>'promptHash'=encode(digest(convert_to(document->>'prompt','UTF8'),'sha256'),'hex')
+      AND valid_hash_text(document->'planHash')
+      AND document->>'planHash'=canonical_jsonb_sha256(document-'planHash')
+      AND (NOT document ? 'routeBasisHash' OR valid_hash_text(document->'routeBasisHash'));
   END IF;
-  RETURN valid_hash_text(document->'routeBasisHash');
+  RETURN valid_hash_text(document->'routeBasisHash')
+    AND document->>'routeBasisHash'=canonical_jsonb_sha256(document-'routeBasisHash');
+END;
+$$;
+
+CREATE FUNCTION valid_derived_text_execution_plan(route_basis jsonb, plan jsonb, operation_prompt text)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE composed_prompt text; expected_plan jsonb;
+BEGIN
+  IF NOT valid_text_execution_route_shape(route_basis,false)
+     OR NOT valid_text_execution_route_shape(plan,true) THEN RETURN false; END IF;
+  composed_prompt := CASE WHEN btrim(route_basis->>'presetSystemPrompt')=''
+    THEN btrim(operation_prompt)
+    ELSE btrim(route_basis->>'presetSystemPrompt') || E'\n\n' || btrim(operation_prompt) END;
+  expected_plan := route_basis || jsonb_build_object(
+    'prompt',composed_prompt,
+    'promptHash',encode(digest(convert_to(composed_prompt,'UTF8'),'sha256'),'hex')
+  );
+  RETURN plan-'planHash'=expected_plan;
 END;
 $$;
 
@@ -541,12 +595,13 @@ $$;
 
 CREATE FUNCTION valid_frozen_response_contracts_v2(document jsonb)
 RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
-DECLARE contract jsonb; key text; policy jsonb;
+DECLARE contract jsonb; key text; policy jsonb; verification jsonb;
 BEGIN
   IF NOT jsonb_object_has_only_keys(document,ARRAY['version','queuedPolicy','selectedAt','capabilityEvidenceHash','contracts','selectionHash'])
      OR NOT jsonb_object_has_keys(document,ARRAY['version','queuedPolicy','selectedAt','capabilityEvidenceHash','contracts','selectionHash'])
      OR document->>'version'<>'2' OR NOT valid_iso_datetime_text(document->'selectedAt')
      OR NOT valid_hash_text(document->'capabilityEvidenceHash') OR NOT valid_hash_text(document->'selectionHash')
+     OR document->>'selectionHash'<>canonical_jsonb_sha256(document-'selectionHash')
      OR jsonb_typeof(document->'contracts') IS DISTINCT FROM 'object' OR document->'contracts'='{}'::jsonb THEN RETURN false; END IF;
   policy := document->'queuedPolicy';
   IF NOT jsonb_object_has_only_keys(policy,ARRAY['version','policy','providerProfileId','admission','authority','operationClosureVersion','invocationKeys'])
@@ -561,6 +616,16 @@ BEGIN
     SELECT 1 FROM jsonb_array_elements_text(policy->'invocationKeys') invocation(invocation_key)
      WHERE invocation.invocation_key NOT IN ('story:stream','story:nonstream','choices:nonstream','continuity_review:nonstream','rpg_assessment:nonstream','event_trigger_before:nonstream','event_trigger_after:nonstream','scene_coverage:nonstream','event_coverage:nonstream','world_outline:nonstream','world_seed_character:nonstream','standalone_character:nonstream','character_organizer:nonstream','source_extraction:nonstream','source_synthesis:nonstream','source_character:nonstream','illustration_prompt_refinement:nonstream')
   ) OR (SELECT count(*)<>count(DISTINCT invocation.invocation_key) FROM jsonb_array_elements_text(policy->'invocationKeys') invocation(invocation_key)) THEN RETURN false; END IF;
+  IF policy->'authority'->>'kind'='model_verified' THEN
+    verification := policy->'admission'->'verification';
+    IF policy->>'providerProfileId' IS DISTINCT FROM policy->'authority'->>'providerProfileId'
+       OR verification->>'providerType' IS DISTINCT FROM policy->'authority'->>'providerType'
+       OR verification->>'endpointIdentity' IS DISTINCT FROM policy->'authority'->>'endpointIdentity'
+       OR verification->>'model' IS DISTINCT FROM policy->'authority'->>'model'
+       OR verification->>'routeConfigHash' IS DISTINCT FROM policy->'authority'->>'routeConfigHash'
+       OR NOT (policy->'invocationKeys') ? (verification->>'operation' || ':' || CASE WHEN verification->>'streaming'='true' THEN 'stream' ELSE 'nonstream' END)
+       THEN RETURN false; END IF;
+  END IF;
   FOR key, contract IN SELECT * FROM jsonb_each(document->'contracts') LOOP
     IF NOT (policy->'invocationKeys') ? key
        OR NOT jsonb_object_has_only_keys(contract,ARRAY['version','mode','admission','operation','streaming','forbidFormatFallback','schemaVersion','schemaHash','schemaName','schema','authority'])
@@ -572,9 +637,19 @@ BEGIN
        OR contract->'authority'->>'kind' IS DISTINCT FROM policy->'authority'->>'kind'
        OR NOT valid_bounded_text(contract->'operation',1,100) OR jsonb_typeof(contract->'streaming')<>'boolean'
        OR NOT valid_bounded_text(contract->'schemaVersion',1,200) OR NOT valid_hash_text(contract->'schemaHash')
+       OR contract->>'schemaHash'<>canonical_jsonb_sha256(contract->'schema')
        OR NOT valid_bounded_text(contract->'schemaName',1,200) OR jsonb_typeof(contract->'schema')<>'object'
        OR contract->>'operation' IS DISTINCT FROM split_part(key,':',1)
        OR contract->'streaming' IS DISTINCT FROM to_jsonb(split_part(key,':',2)='stream') THEN RETURN false; END IF;
+    IF policy->'authority'->>'kind'='model_verified' THEN
+      IF contract->'authority' IS DISTINCT FROM ((policy->'authority') - 'authorityRevision'::text) THEN RETURN false; END IF;
+      IF policy->'admission'->'verification'->>'operation'=contract->>'operation'
+         AND policy->'admission'->'verification'->>'streaming'=contract->>'streaming'
+         AND policy->'admission'->'verification'->>'schemaHash' IS DISTINCT FROM contract->>'schemaHash'
+         THEN RETURN false; END IF;
+    ELSIF contract->'authority' IS DISTINCT FROM jsonb_build_object(
+      'kind','preset_trusted','routeBasisHash',policy->'authority'->'routeBasisHash'
+    ) THEN RETURN false; END IF;
   END LOOP;
   RETURN NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(policy->'invocationKeys') queued WHERE NOT (document->'contracts') ? queued);
 END;
@@ -593,10 +668,7 @@ BEGIN
   RETURN jsonb_object_has_only_keys(snapshot,ARRAY['version','state','ownerUserId','operationPrompt','routeBasis','plan'])
     AND jsonb_object_has_keys(snapshot,ARRAY['version','state','ownerUserId','operationPrompt','routeBasis','plan'])
     AND valid_bounded_text(snapshot->'ownerUserId',1,200) AND valid_bounded_text(snapshot->'operationPrompt',1,200000)
-    AND valid_text_execution_route_shape(snapshot->'routeBasis',false)
-    AND valid_text_execution_route_shape(snapshot->'plan',true)
-    AND snapshot->'plan'->>'routeBasisHash'=snapshot->'routeBasis'->>'routeBasisHash'
-    AND snapshot->'plan'->'credentialReference' IS NOT DISTINCT FROM snapshot->'routeBasis'->'credentialReference';
+    AND valid_derived_text_execution_plan(snapshot->'routeBasis',snapshot->'plan',snapshot->>'operationPrompt');
 END;
 $$;
 
@@ -629,10 +701,7 @@ BEGIN
      OR snapshot->>'providerType' NOT IN ('openrouter','openai_compatible')
      OR NOT valid_bounded_text(snapshot->'trustedOperationPrompt',1,200000)
      OR snapshot->>'trustedOperationPrompt' IS DISTINCT FROM snapshot->>'operationPrompt'
-     OR NOT valid_text_execution_route_shape(snapshot->'routeBasis',false)
-     OR NOT valid_text_execution_route_shape(snapshot->'plan',true)
-     OR snapshot->'plan'->>'routeBasisHash' IS DISTINCT FROM snapshot->'routeBasis'->>'routeBasisHash'
-     OR snapshot->'plan'->'credentialReference' IS DISTINCT FROM snapshot->'routeBasis'->'credentialReference'
+     OR NOT valid_derived_text_execution_plan(snapshot->'routeBasis',snapshot->'plan',snapshot->>'operationPrompt')
      OR NOT valid_frozen_response_contracts_v2(snapshot->'frozenResponseContracts') THEN RETURN false; END IF;
   request_config := snapshot->'requestConfiguration';
   RETURN jsonb_object_has_only_keys(request_config,ARRAY['httpReferer'])

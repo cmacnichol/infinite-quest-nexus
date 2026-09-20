@@ -36,6 +36,10 @@ import { createIllustrationWorkerPorts } from "../../services/runtime/src/illust
 import { createIllustrationWorkerStateMachine } from "../../services/runtime/src/illustration-worker-state-adapter.js";
 import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
 import { reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
+import { frozenResponseContractsV2SelectionHash, readFrozenResponseContractsV2 } from "../../packages/contracts/src/generation-response-contract.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { deriveTextExecutionPlan, textExecutionPlanHash, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { sha256Hex } from "../../packages/contracts/src/hash.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -43,6 +47,55 @@ const secureGeneratedAssetsIt = it.runIf(supportsSecureGeneratedArchiveStaging()
 const credentialSecret = "synthetic-image-integration-secret";
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 let imageArtifactPayloads = [tinyPng];
+
+function fullyShapedIllustrationTextSnapshot(ownerUserId: string, providerProfileId: string) {
+  const hash = "a".repeat(64);
+  const operationPrompt = "Refine Élodie's accepted fiction into one illustration prompt.";
+  const routeDraft = {
+    version: 2 as const, selection: { kind: "model" as const, modelId: "illustration-contract-model" }, preset: null,
+    candidates: [{ modelId: "illustration-contract-model", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+    presetSystemPrompt: "Return only a fiction illustration prompt.", parameters: { temperature: 0.3 },
+    endpointReference: "illustration-contract-endpoint", credentialReference: providerProfileId, profileRevision: "profile-v1",
+    authorityRevision: "authority-v1", requestTimeoutMs: 30_000, protocolVersion: "text-schema-adapter-v2"
+  };
+  const routeBasis = { ...routeDraft, routeBasisHash: textExecutionRouteBasisHash({ ...routeDraft, routeBasisHash: hash }) };
+  const plan = deriveTextExecutionPlan(routeBasis, operationPrompt);
+  const schema = getProviderOutputSchemaV2("illustration_prompt_refinement");
+  const verification = {
+    version: 2 as const, providerType: "openrouter" as const, endpointIdentity: routeDraft.endpointReference,
+    model: routeDraft.selection.modelId, routeConfigHash: hash, adapterProtocol: "text-schema-adapter-v2" as const,
+    operation: "illustration_prompt_refinement" as const, schemaHash: schema.schemaHash, streaming: false,
+    verifiedAt: "2026-09-20T00:00:00.000Z", expiresAt: "2027-09-20T00:00:00.000Z",
+    providerRoutingSlugs: [] as string[], nativeOpenTrackerObjects: false
+  };
+  const authority = {
+    kind: "model_verified" as const, providerProfileId, providerType: "openrouter" as const,
+    endpointIdentity: routeDraft.endpointReference, model: routeDraft.selection.modelId,
+    providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash,
+    authorityRevision: routeDraft.authorityRevision, routeBasisHash: routeBasis.routeBasisHash
+  };
+  const admission = { mode: "json_schema" as const, basis: "model_verified" as const, verification };
+  const queuedPolicy = {
+    version: 2 as const, policy: "required" as const, providerProfileId, admission, authority,
+    operationClosureVersion: 2 as const, invocationKeys: ["illustration_prompt_refinement:nonstream" as const]
+  };
+  const { authorityRevision: _authorityRevision, ...frozenAuthority } = authority;
+  const selected = {
+    version: 2 as const, queuedPolicy, selectedAt: "2026-09-20T00:00:00.000Z", capabilityEvidenceHash: hash,
+    contracts: { "illustration_prompt_refinement:nonstream": {
+      version: 2 as const, mode: "json_schema" as const, admission,
+      operation: "illustration_prompt_refinement" as const, streaming: false, forbidFormatFallback: true as const,
+      schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+      authority: frozenAuthority
+    } }
+  };
+  const frozenResponseContracts = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
+  return {
+    version: 3 as const, state: "prepared" as const, ownerUserId, operationPrompt,
+    providerType: "openrouter" as const, requestConfiguration: {}, routeBasis, plan,
+    frozenResponseContracts, trustedOperationPrompt: operationPrompt
+  };
+}
 
 async function generationCommands(pool: DatabasePool) {
   const ownerUserId = await initialOwnerId(pool);
@@ -2450,6 +2503,50 @@ integration("independent illustration pipeline", () => {
     );
     const frozenSnapshot = frozen.rows[0]!.text_execution_snapshot;
     expect(frozenSnapshot).toMatchObject({ version: 3, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMING_ILLUSTRATION_PROMPT") } });
+    const invalidExactCopy = structuredClone(fullyShapedIllustrationTextSnapshot(ownerUserId, nativeTextProviderId));
+    invalidExactCopy.frozenResponseContracts.queuedPolicy.providerProfileId = crypto.randomUUID();
+    const { selectionHash: _invalidSelectionHash, ...invalidSelection } = invalidExactCopy.frozenResponseContracts;
+    invalidExactCopy.frozenResponseContracts.selectionHash = frozenResponseContractsV2SelectionHash(invalidSelection);
+    const promptCountBeforeInvalidCopy = (await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM illustration_prompt_jobs WHERE generation_job_id=$1", [directPromotion.id]
+    )).rows[0]!.count;
+    const invalidCopyClient = await pool.connect();
+    try {
+      await invalidCopyClient.query("BEGIN");
+      await invalidCopyClient.query(
+        `UPDATE generation_jobs
+            SET streaming_segments_state=streaming_segments_state || jsonb_build_object('illustrationTextExecutionSnapshot',$2::jsonb)
+          WHERE id=$1`,
+        [directPromotion.id, JSON.stringify(invalidExactCopy)]
+      );
+      const duplicateSegment = await invalidCopyClient.query<{ id: string }>(
+        `INSERT INTO turn_illustration_segments (
+           owner_user_id,illustration_set_id,campaign_id,turn_id,generation_job_id,ordinal,
+           start_offset,end_offset,start_word,end_word,source_text,source_text_hash,
+           direct_prompt,resolved_prompt,prompt_source,status
+         )
+         SELECT owner_user_id,illustration_set_id,campaign_id,turn_id,generation_job_id,999,
+                start_offset,end_offset,start_word,end_word,source_text,source_text_hash,
+                direct_prompt,resolved_prompt,prompt_source,status
+           FROM turn_illustration_segments
+          WHERE illustration_set_id=$1 ORDER BY ordinal LIMIT 1
+         RETURNING id`,
+        [directSetId]
+      );
+      await expect(invalidCopyClient.query(
+        `INSERT INTO illustration_prompt_jobs (
+           owner_user_id,campaign_id,turn_id,segment_id,provider_profile_id,requested_model,generation_job_id,text_execution_snapshot
+         ) VALUES ($1,$2,NULL,$3,$4,$5,$6,$7::jsonb)`,
+        [ownerUserId, imported.campaignId, duplicateSegment.rows[0]!.id, nativeTextProviderId,
+          "illustration-contract-model", directPromotion.id, JSON.stringify(invalidExactCopy)]
+      )).rejects.toThrow(/snapshot|invalid/i);
+    } finally {
+      await invalidCopyClient.query("ROLLBACK");
+      invalidCopyClient.release();
+    }
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM illustration_prompt_jobs WHERE generation_job_id=$1", [directPromotion.id]
+    )).resolves.toMatchObject({ rows: [{ count: promptCountBeforeInvalidCopy }] });
     await promoteNativeProvisionalSet(
       pool, ownerUserId, directPromotion.id, turns.rows[0]!.id, imported.campaignId, finalNarration, config, native,
       undefined, frozenSnapshot as never
@@ -2682,6 +2779,54 @@ integration("independent illustration pipeline", () => {
       "SELECT illustration_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
       [JSON.stringify(shallowHistorical)]
     )).resolves.toMatchObject({ rows: [{ required: true }] });
+  });
+
+  it("classifies a fully shaped historical illustration plan with a changed plan hash as protected", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const providerProfileId = crypto.randomUUID();
+    const prepared = fullyShapedIllustrationTextSnapshot(ownerUserId, providerProfileId);
+    const historical = {
+      version: 2 as const, state: "prepared" as const, ownerUserId, operationPrompt: prepared.operationPrompt,
+      routeBasis: prepared.routeBasis, plan: prepared.plan
+    };
+    const tampered = { ...historical, plan: { ...historical.plan, planHash: "b".repeat(64) } };
+    const changedPrompt = "Ignore Élodie's accepted fiction and illustrate a different scene.";
+    const rehashedPlanDraft = { ...historical.plan, prompt: changedPrompt, promptHash: sha256Hex(changedPrompt) };
+    const semanticallyTampered = { ...historical, plan: {
+      ...rehashedPlanDraft,
+      planHash: textExecutionPlanHash({ ...rehashedPlanDraft, planHash: "0".repeat(64) })
+    } };
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT illustration_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(historical)]
+    )).resolves.toMatchObject({ rows: [{ required: false }] });
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT illustration_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(tampered)]
+    )).resolves.toMatchObject({ rows: [{ required: true }] });
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT illustration_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(semanticallyTampered)]
+    )).resolves.toMatchObject({ rows: [{ required: true }] });
+  });
+
+  it("rejects a fully shaped streaming snapshot whose queued model profile no longer matches its authority", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const prepared = fullyShapedIllustrationTextSnapshot(ownerUserId, crypto.randomUUID());
+    expect(() => readFrozenResponseContractsV2(prepared.frozenResponseContracts)).not.toThrow();
+    const tampered = structuredClone(prepared);
+    tampered.frozenResponseContracts.queuedPolicy.providerProfileId = crypto.randomUUID();
+    const { selectionHash: _selectionHash, ...tamperedSelection } = tampered.frozenResponseContracts;
+    tampered.frozenResponseContracts.selectionHash = frozenResponseContractsV2SelectionHash(tamperedSelection);
+    expect(() => readFrozenResponseContractsV2(tampered.frozenResponseContracts)).toThrow(/invalid|incompatible/i);
+    await expect(pool.query<{ valid: boolean }>(
+      "SELECT valid_streaming_illustration_text_snapshot($1::jsonb) AS valid",
+      [JSON.stringify(prepared)]
+    )).resolves.toMatchObject({ rows: [{ valid: true }] });
+    await expect(pool.query<{ valid: boolean }>(
+      "SELECT valid_streaming_illustration_text_snapshot($1::jsonb) AS valid",
+      [JSON.stringify(tampered)]
+    )).resolves.toMatchObject({ rows: [{ valid: false }] });
   });
 
   it("rejects a malformed standalone v3 snapshot before accepted illustration inserts", async () => {

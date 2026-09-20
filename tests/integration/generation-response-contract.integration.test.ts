@@ -280,6 +280,37 @@ integration("PostgreSQL response-contract persistence", () => {
     expect((await historicalClaim("old-v1")).rows).toEqual([expect.objectContaining({ id: legacy, status: "assessing", attempts: 1 })]);
     await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [legacy]);
   });
+
+  it("fences a fully shaped historical Story selection whose selection hash was changed", async () => {
+    const imported = await campaign();
+    const frozen = selection();
+    const tampered = { ...frozen, selectionHash: "b".repeat(64) };
+    expect(tampered.selectionHash).not.toBe(frozen.selectionHash);
+    const queued = await commands(false).enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRequestSchema.parse({ action: "Fence a semantic v1 hash mismatch.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } })
+    );
+    await pool.query(
+      "UPDATE generation_jobs SET orchestration_private=jsonb_build_object('frozenResponseContracts',$2::jsonb) WHERE id=$1",
+      [queued.id, JSON.stringify(tampered)]
+    );
+    const before = (await pool.query(
+      "SELECT status,attempts,lease_owner,lease_expires_at FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0];
+    expect((await historicalClaim("old-tampered-selection-hash")).rows).toEqual([]);
+    expect((await pool.query(
+      "SELECT status,attempts,lease_owner,lease_expires_at FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]).toEqual(before);
+    await expect(pool.query<{ valid: boolean }>(
+      "SELECT valid_v1_frozen_response_contracts($1::jsonb) AS valid",
+      [JSON.stringify(frozen)]
+    )).resolves.toMatchObject({ rows: [{ valid: true }] });
+    await expect(pool.query<{ valid: boolean }>(
+      "SELECT valid_v1_frozen_response_contracts($1::jsonb) AS valid",
+      [JSON.stringify(tampered)]
+    )).resolves.toMatchObject({ rows: [{ valid: false }] });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
   it("persists a trusted queued policy privately and retains a legacy row's absent shape", async () => {
     const imported = await campaign();
     const legacyImported = await campaign();

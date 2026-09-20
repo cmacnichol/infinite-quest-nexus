@@ -112,3 +112,46 @@ git diff --check
 Result: **3 unit files passed; 80/80 passed; TypeScript no-emit passed; diff check passed**.
 
 No production database or deployment was touched. No live or paid provider call was made. Task 8 must still enforce the operational all-workers-upgraded gate before deployment.
+
+## Independent review round 2 fixes
+
+The second review confirmed the ancestry and old-generic-claim fixes, then found that several complete historical snapshots could still pass SQL shape checks after their semantic hashes or authority bindings were changed. This follow-up keeps the native-admission default off and strengthens only the database protocol classifiers and copy boundary.
+
+- PostgreSQL now serializes the supported JSON contract values with the same recursive canonical rules as the TypeScript hash helpers: array order is preserved, object keys use C/ASCII ordering, strings use JSON escaping, scalars retain their JSON representation, and SHA-256 is computed over UTF-8. A valid nested fixture containing arrays, objects, null, a decimal, and non-ASCII prompt text has matching JavaScript and SQL hashes.
+- Historical Story v1 evidence now recomputes contract schema hashes and the frozen selection hash. A fully shaped snapshot with only `selectionHash` changed is protected from downlevel claims.
+- Historical authoring v2 evidence now recomputes route, prompt, and plan hashes. Illustration v2 and streaming v3 additionally require the frozen plan to be the exact plan derived from its route basis and trusted operation prompt.
+- Frozen response contracts now recompute their selection and schema hashes and bind the queued policy to the frozen authority and verification evidence. Changing the queued provider profile and recomputing `selectionHash` still fails when the authority remains unchanged.
+- The exact streaming parent-to-child database copy path is covered with a fully shaped, correctly rehashed but authority-inconsistent parent. The child insert fails and the transaction rolls back without adding a prompt row.
+
+### Review-round 2 RED evidence
+
+The focused pre-fix run used the three affected PostgreSQL integration files and the four new semantic-tamper cases. It failed **4 tests with 81 skipped**:
+
+- an old Story claim mutated a fully shaped v1 selection whose only invalid field was `selectionHash`;
+- a fully shaped authoring v2 plan with a changed `planHash` was classified as historical;
+- a fully shaped illustration v2 plan with a changed `planHash` was classified as historical; and
+- SQL accepted a fully shaped streaming v3 snapshot after its queued provider profile and selection hash were changed, while the authoritative TypeScript reader rejected the authority mismatch.
+
+The first full affected run after the production fix passed 55 tests and skipped 14, then 16 later Story cases failed because the new protected queued fixture remained claimable by subsequent test helpers. This was fixture isolation rather than a production defect. The regression now terminally cleans up its protected row, and the unchanged later claim cases select their intended fixtures.
+
+### Review-round 2 GREEN verification
+
+The focused semantic run passed **4/4**, with **81 skipped**. It includes a correctly recomputed illustration `planHash` whose plan disagrees with the frozen route basis and operation prompt, and a correctly recomputed response-contract `selectionHash` whose queued policy disagrees with frozen authority. Both are rejected.
+
+The final dedicated PostgreSQL run was:
+
+```powershell
+& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config '.superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts' tests/integration/generation-response-contract.integration.test.ts tests/integration/authoring-stage-execution.integration.test.ts tests/integration/image-pipeline.integration.test.ts
+```
+
+Result: **3 files passed; 71 passed, 14 Linux-only skipped**.
+
+```powershell
+& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run tests/unit/migration-order.test.ts
+& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec tsc -p tsconfig.json --noEmit
+git diff --check
+```
+
+Result: **migration-order 1/1 passed; TypeScript no-emit passed; diff check passed**.
+
+The SQL canonicalizer is intentionally limited to the JSON value forms used by these authoritative schemas; it is not introduced as a general replacement for application serialization. Compatibility and parity were verified with actual valid historical fixtures, including nested data and non-ASCII text. No production database or deployment was touched, no live or paid provider call was made, and native admission remains off.

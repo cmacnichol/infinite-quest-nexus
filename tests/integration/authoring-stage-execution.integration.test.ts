@@ -18,6 +18,7 @@ import { AuthoringResponseError } from "../../services/runtime/src/authoring-res
 import { createRuntimeAuthoringApplication, createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
 import { prepareAuthoringResponseContractExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { RuntimeProviderExecutionPort, RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
@@ -206,6 +207,38 @@ integration("durable authoring real repository and stage dispatcher", () => {
     await expect(pool.query<{ required: boolean }>(
       "SELECT authoring_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
       [JSON.stringify(malformed)]
+    )).resolves.toMatchObject({ rows: [{ required: true }] });
+  });
+
+  it("classifies a fully shaped historical authoring plan with a changed plan hash as protected", async () => {
+    const routeDraft = {
+      version: 2 as const, selection: { kind: "model" as const, modelId: "historical-authoring-model" }, preset: null,
+      candidates: [{ modelId: "historical-authoring-model", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+      presetSystemPrompt: "Historical authoring system prompt.", parameters: { temperature: 0.4 },
+      endpointReference: "historical-authoring-endpoint", credentialReference: randomUUID(), profileRevision: "profile-v1",
+      requestTimeoutMs: 30_000, protocolVersion: "text-execution-plan-v2"
+    };
+    const routeBasis = { ...routeDraft, routeBasisHash: textExecutionRouteBasisHash({ ...routeDraft, routeBasisHash: "0".repeat(64) }) };
+    const plan = deriveTextExecutionPlan(routeBasis, "Create Élodie's historical world outline.");
+    const snapshot = {
+      version: 2 as const, providerProfileId: routeDraft.credentialReference, model: "historical-authoring-model",
+      configurationHash: "a".repeat(64), contextWindowTokens: 8192, maxOutputTokens: 1024, requestTimeoutMs: 30_000,
+      prompts: { world_generation: "Historical authoring system prompt." }, protocols: { world: "world-authoring-v1" },
+      textExecutionPlans: { worldOutline: plan }
+    };
+    const tampered = { ...snapshot, textExecutionPlans: { worldOutline: { ...plan, planHash: "b".repeat(64) } } };
+    const { planHash: _planHash, ...unhashedPlan } = plan;
+    await expect(pool.query<{ hash: string }>(
+      "SELECT canonical_jsonb_sha256($1::jsonb) AS hash",
+      [JSON.stringify(unhashedPlan)]
+    )).resolves.toMatchObject({ rows: [{ hash: plan.planHash }] });
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT authoring_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(snapshot)]
+    )).resolves.toMatchObject({ rows: [{ required: false }] });
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT authoring_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(tampered)]
     )).resolves.toMatchObject({ rows: [{ required: true }] });
   });
 
