@@ -292,6 +292,32 @@ integration("PostgreSQL response-contract persistence", () => {
       .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
   });
 
+  it("rejects missing or rehashed saved preset bases during reclaim before completed evidence can replay", async () => {
+    for (const tamper of ["missing", "rehashed"] as const) {
+      const { queued, fixture, frozen, routeBasis, logicalAttemptId, initial } = await v2PresetFixture(`Reject ${tamper} saved preset route basis.`);
+      const requestBody = "{}"; const requestPayloadHash = sha256Hex(requestBody); const prompt = "Write the next turn."; const plan = deriveTextExecutionPlan(routeBasis, prompt);
+      const input = { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "story_generation" as const, requestPayloadHash,
+        request: v2Audit(frozen, prompt, plan, requestPayloadHash), routeBasis, plan, trustedOperationPrompt: prompt };
+      const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, input);
+      await fixture.repository.markResponseContractInvocationDispatched!(fixture.scope, reserved!.id, requestPayloadHash);
+      await fixture.repository.completeResponseContractInvocation!(fixture.scope, reserved!.id, { returnedModel: "contract-model", returnedProviderRoute: "route-a", diagnosticCode: null });
+      expect(await fixture.repository.saveOrchestration(fixture.scope, { ...initial, primaryResult: primaryResultCheckpoint(requestBody, requestPayloadHash) } as never)).toBe(true);
+      if (tamper === "missing") {
+        await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private-'textExecutionRouteBasis', lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
+      } else {
+        const alteredDraft = { ...routeBasis, presetSystemPrompt: "A different but valid persisted preset instruction." };
+        const alteredBasis = { ...alteredDraft, routeBasisHash: textExecutionRouteBasisHash({ ...alteredDraft, routeBasisHash: hash }) };
+        await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('textExecutionRouteBasis',$2::jsonb), lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id, JSON.stringify(alteredBasis)]);
+      }
+      const repository = createPostgresGenerationExecutionRepository(pool); const workerId = `basis-reclaim-${tamper}-${crypto.randomUUID()}`;
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(queued.id);
+      await expect(repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+      await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
+        .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+    }
+  });
+
   it("binds multiple concrete operations to the persisted logical attempt and finalizes each response once", async () => {
     const imported = await campaign();
     const queuedPolicy = { version: 1 as const, policy: "auto" as const, providerProfileId, model: "contract-model", endpointIdentity: "test-endpoint", providerConfigurationHash: hash, verificationRegistryHash: hash, operationClosureVersion: 1 as const, invocationKeys: ["story:nonstream" as const] };

@@ -50,6 +50,24 @@ corepack pnpm exec vitest run --config .superpowers/sdd/2026-09-18-native-openro
 
 Result: 5 files, 32 tests passed. `git diff --check` also passed before commit.
 
+## Review fix 1: persisted preset route basis
+
+The first independent review found that a v2 preset job could load completed invocation/checkpoint evidence after its saved route basis had changed, because the old check ran only when reserving a later call. The state validator now uses shared contract assertions to require a preset job's persisted basis before accepting state, bind its route hash and preset authority tuple to the queued authority, and bind every frozen closure route hash to that same basis. Verified Model v2 jobs remain valid without a route basis; v1 behavior is unchanged.
+
+RED was captured with the new real PostgreSQL reclaim case:
+
+```powershell
+corepack pnpm exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/generation-response-contract.integration.test.ts --reporter=dot
+```
+
+Before the fix, the test expected `loadExecutionPayload` to return `null` after an expired lease and a missing saved basis, but it returned the completed payload instead. The job remained `assessing` instead of becoming `recoverable` with `generation_checkpoint_incompatible`.
+
+GREEN after the shared assertion and state-validation change:
+
+- `corepack pnpm exec tsc -p tsconfig.json --noEmit` passed.
+- The focused unit command above passed: 5 files, 53 tests.
+- The related real PostgreSQL command passed: 5 files, 33 tests. The new case creates a completed invocation and matching primary checkpoint, then proves both a missing basis and a separately valid/rehashed changed basis are rejected during reclaim/load before replay.
+
 ## 4B3 handoff
 
 - Read queued policy with `readQueuedResponsePolicyVersioned` and identify it with `queuedResponsePolicyVersionedHash`. Do not feed a v2 value to the v1 reader or hash helper.

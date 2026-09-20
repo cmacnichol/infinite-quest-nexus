@@ -435,17 +435,50 @@ export function assertPresetResponseContractAuthorityBinding(
   if (policy.authority.kind !== "preset_trusted" || contract.authority.kind !== "preset_trusted") {
     throw new Error("Preset response-contract binding requires preset-trusted authority.");
   }
-  const routeBasis = readTextExecutionRouteBasis(routeBasisValue);
+  let routeBasis: TextExecutionRouteBasis;
+  try {
+    routeBasis = assertPresetResponseContractRouteBasisAuthority(policy, routeBasisValue);
+  } catch {
+    throw new Error("Preset response-contract basis or plan identity changed.");
+  }
   const plan = readTextExecutionPlan(planValue);
   const expectedPlan = deriveTextExecutionPlan(routeBasis, trustedOperationPrompt);
-  const authority = policy.authority;
-  if (routeBasis.routeBasisHash !== authority.routeBasisHash || routeBasis.selection.kind !== "openrouter_preset"
-    || routeBasis.selection.slug !== authority.selection.slug || routeBasis.endpointReference !== authority.endpointReference
-    || routeBasis.credentialReference !== authority.credentialReference || routeBasis.authorityRevision !== authority.authorityRevision
-    || routeBasis.profileRevision !== authority.profileRevision || plan.routeBasisHash !== routeBasis.routeBasisHash
+  if (plan.routeBasisHash !== routeBasis.routeBasisHash
     || plan.planHash !== contract.authority.planHash || contract.authority.routeBasisHash !== routeBasis.routeBasisHash
     || canonicalJson(plan) !== canonicalJson(expectedPlan)) {
     throw new Error("Preset response-contract basis or plan identity changed.");
   }
   return Object.freeze({ routeBasis, plan });
+}
+
+/** Validates the persisted route basis against the queue-time preset authority. */
+export function assertPresetResponseContractRouteBasisAuthority(
+  policy: QueuedResponsePolicyV2,
+  routeBasisValue: unknown
+): TextExecutionRouteBasis {
+  if (policy.authority.kind !== "preset_trusted") throw new Error("Preset response-contract route binding requires preset-trusted authority.");
+  const routeBasis = readTextExecutionRouteBasis(routeBasisValue);
+  const authority = policy.authority;
+  if (routeBasis.routeBasisHash !== authority.routeBasisHash || routeBasis.selection.kind !== "openrouter_preset"
+    || routeBasis.selection.slug !== authority.selection.slug || routeBasis.endpointReference !== authority.endpointReference
+    || routeBasis.credentialReference !== authority.credentialReference || routeBasis.authorityRevision !== authority.authorityRevision
+    || routeBasis.profileRevision !== authority.profileRevision) {
+    throw new Error("Preset response-contract route basis identity changed.");
+  }
+  return routeBasis;
+}
+
+/** Extends the queue-time preset assertion to every frozen closure authority. */
+export function assertFrozenPresetResponseContractRouteBasisAuthority(
+  frozenValue: FrozenResponseContractsV2,
+  routeBasisValue: unknown
+): TextExecutionRouteBasis {
+  const frozen = readFrozenResponseContractsV2(frozenValue);
+  const routeBasis = assertPresetResponseContractRouteBasisAuthority(frozen.queuedPolicy, routeBasisValue);
+  for (const contract of Object.values(frozen.contracts)) {
+    if (contract.authority.kind !== "preset_trusted" || contract.authority.routeBasisHash !== routeBasis.routeBasisHash) {
+      throw new Error("Frozen preset response-contract route basis identity changed.");
+    }
+  }
+  return routeBasis;
 }

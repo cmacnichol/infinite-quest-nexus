@@ -22,6 +22,8 @@ import {
   responseContractOperationV2MatchesInvocation,
   responseContractOperationSchema,
   bindFrozenResponseContractInvocationV2,
+  assertPresetResponseContractRouteBasisAuthority,
+  assertFrozenPresetResponseContractRouteBasisAuthority,
   type AttemptResponseContractAudit,
   type AttemptResponseContractAuditV2,
   type FrozenResponseContracts,
@@ -180,6 +182,10 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
   if (frozen && (!queued || frozen.version !== queued.version
     || queuedResponsePolicyVersionedHash(queued) !== queuedResponsePolicyVersionedHash(frozen.queuedPolicy))) {
     throw new Error("Frozen response contract does not match the queued policy.");
+  }
+  if (queued?.version === 2 && queued.authority.kind === "preset_trusted") {
+    assertPresetResponseContractRouteBasisAuthority(queued, value.textExecutionRouteBasis);
+    if (frozen?.version === 2) assertFrozenPresetResponseContractRouteBasisAuthority(frozen, value.textExecutionRouteBasis);
   }
   if (ledger && !frozen) throw new Error("Response-contract invocation ledger requires a frozen contract.");
   if (failures && !frozen) throw new Error("Prepared response failure evidence requires a frozen contract.");

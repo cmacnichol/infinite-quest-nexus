@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   bindFrozenResponseContractInvocationV2,
+  assertFrozenPresetResponseContractRouteBasisAuthority,
+  assertPresetResponseContractRouteBasisAuthority,
   frozenResponseContractsSelectionHash,
   frozenResponseContractsV2SelectionHash,
   readAttemptResponseContractAudit,
@@ -49,6 +51,11 @@ describe("durable response-contract persistence contracts", () => {
 
     expect(readQueuedResponsePolicyVersioned(policy)).toEqual(policy);
     expect(readFrozenResponseContractsVersioned(frozen)).toEqual(frozen);
+    expect(assertPresetResponseContractRouteBasisAuthority(policy, routeBasis)).toEqual(routeBasis);
+    expect(assertFrozenPresetResponseContractRouteBasisAuthority(frozen, routeBasis)).toEqual(routeBasis);
+    const alteredBasisDraft = { ...routeBasis, presetSystemPrompt: "A different but valid persisted instruction." };
+    const alteredBasis = { ...alteredBasisDraft, routeBasisHash: textExecutionRouteBasisHash({ ...alteredBasisDraft, routeBasisHash: hash }) };
+    expect(() => assertPresetResponseContractRouteBasisAuthority(policy, alteredBasis)).toThrow(/route basis identity changed/i);
     expect(bindFrozenResponseContractInvocationV2({ frozen, invocationKey: "story:nonstream", operation: "story_generation", routeBasis, plan: primary, trustedOperationPrompt: "Write the next turn." }).authority).toMatchObject({ planHash: primary.planHash });
     expect(bindFrozenResponseContractInvocationV2({ frozen, invocationKey: "story:nonstream", operation: "story_recovery", routeBasis, plan: repair, trustedOperationPrompt: "Repair the rejected turn." }).authority).toMatchObject({ planHash: repair.planHash });
     expect(primary.planHash).not.toBe(repair.planHash);
