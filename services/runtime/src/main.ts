@@ -54,14 +54,18 @@ await runRuntimeLifecycle(config, abortController, {
     waitForDatabaseMigrations,
     createApiProviders: (pool, credentialSecret, transport) => createApiProviderApplicationComposition(
       pool,
-      { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest }
+      { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true }
     ),
     createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
       pool,
-      { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest }
+      { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true }
     ),
     createProviderApiAdapter: createProviderApplicationAdapter,
-    createApiGeneration: (pool, providers, operatorConfig) => createApiGenerationApplication(pool, providers, undefined, operatorConfig),
+    createApiGeneration: (pool, providers, operatorConfig) => createApiGenerationApplication(
+      pool, providers, undefined, operatorConfig, config.nativeTextExecutionPlanAdmission === true
+    ),
     createApiIllustration: createApiIllustrationApplication,
     createApiMemory: createApiMemoryApplication,
     createApiWorldCampaign: createApiWorldCampaignApplication,
@@ -69,11 +73,13 @@ await runRuntimeLifecycle(config, abortController, {
     createWorkerIllustration: createWorkerIllustrationApplication,
     createWorkerGeneration: createWorkerGenerationApplication,
     createWorkerAuthoring: (pool, providers, signal) => createRuntimeAuthoringWorkerApplication({
-      pool, providers, signal, sha256: (value) => createHash("sha256").update(value).digest("hex")
+      pool, providers, signal, sha256: (value) => createHash("sha256").update(value).digest("hex"),
+      nativePresetPlansEnabled: config.nativeTextExecutionPlanAdmission === true
     }),
     createApiAuthoring: (pool) => createRuntimeAuthoringApplication(
       pool,
-      (value) => createHash("sha256").update(value).digest("hex")
+      (value) => createHash("sha256").update(value).digest("hex"),
+      { nativePresetPlansEnabled: config.nativeTextExecutionPlanAdmission === true }
     ),
     buildServer,
     runWorker

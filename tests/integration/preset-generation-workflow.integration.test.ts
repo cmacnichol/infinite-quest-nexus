@@ -50,7 +50,7 @@ integration("durable preset physical attempts", () => {
 
   it("persists safe fallback attempts in frozen order and isolates logical owners", async () => {
     const attempts = createPostgresPreparedTextAttemptRepository(pool);
-    const firstScope = { kind: "direct", ownerUserId, requestScopeId: crypto.randomUUID(), operation: "initial" } as const;
+    const firstScope = { kind: "direct", ownerUserId, requestScopeId: crypto.randomUUID(), invocationId: crypto.randomUUID(), operation: "initial" } as const;
     const secondScope = { ...firstScope, requestScopeId: crypto.randomUUID() };
     const invoke = vi.fn()
       .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { statusCode: 429, retryAfterMs: 0 }))
@@ -139,7 +139,7 @@ integration("durable preset physical attempts", () => {
 
   it("durably records direct-request provenance and emitted output before terminal completion", async () => {
     const attempts = createPostgresPreparedTextAttemptRepository(pool);
-    const scope = { kind: "direct", ownerUserId, requestScopeId: crypto.randomUUID(), operation: "initial" } as const;
+    const scope = { kind: "direct", ownerUserId, requestScopeId: crypto.randomUUID(), invocationId: crypto.randomUUID(), operation: "initial" } as const;
     await expect(executePresetRoutes({
       candidates: candidates.slice(0, 1), planProvenance, logicalReservation: scope, attempts,
       prepareCandidate: () => ({ body: "{}", payloadHash: "e".repeat(64) }), totalDeadlineMs: 2_000,

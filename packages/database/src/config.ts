@@ -44,6 +44,8 @@ export type RuntimeConfig = {
   aiAuthoringJobsEnabled?: boolean;
   /** Source intake/execution can pause independently while durable P2 jobs remain available. */
   aiStorySourceAuthoringEnabled?: boolean;
+  /** Enables v2/v3 prepared text plans consistently across API enqueue and workers. */
+  nativeTextExecutionPlanAdmission?: boolean;
   legacyWebRoot: string;
   nextWebRoot: string;
   assetStorageDriver: "filesystem";
@@ -239,6 +241,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     workerGenerationConcurrency,
     aiAuthoringJobsEnabled: booleanSetting("AI_AUTHORING_JOBS_ENABLED", false),
     aiStorySourceAuthoringEnabled: booleanSetting("AI_STORY_SOURCE_AUTHORING_ENABLED", true),
+    nativeTextExecutionPlanAdmission: booleanSetting("NATIVE_TEXT_EXECUTION_PLAN_ADMISSION", false),
     legacyWebRoot: resolve(process.env.LEGACY_WEB_ROOT?.trim() || "apps/web/dist"),
     nextWebRoot: resolve(process.env.NEXT_WEB_ROOT?.trim() || "apps/web-next/dist"),
     assetStorageDriver: "filesystem",

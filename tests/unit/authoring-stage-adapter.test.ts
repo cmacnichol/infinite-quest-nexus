@@ -45,7 +45,10 @@ function runtimeStage(overrides: Partial<Parameters<ReturnType<typeof createRunt
   return {
     input: { kind: "character" as const, idempotencyKey: "character-key", target: { kind: "new_world" as const }, prompt: "Create a capable cartographer.", content: { schemaVersion: 5, world: { title: "Roads", genre: "fantasy", tone: "hopeful", backgroundStory: "Roads move.", premise: "Map them.", firstAction: "Walk.", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } },
     snapshot: { ...snapshot, prompts: { ...snapshot.prompts, character_generation: "Use {{protocol}} and return complete character JSON." } },
-    stageKey: "character:durable-character", parentOutputs: [], ownerUserId: "owner-1", ...overrides
+    stageKey: "character:durable-character", parentOutputs: [], ownerUserId: "owner-1",
+    jobId: claim.jobId, stageId: claim.stageId, jobGeneration: claim.jobGeneration,
+    stageGeneration: claim.stageGeneration, leaseToken: claim.leaseToken,
+    ...overrides
   } as Parameters<ReturnType<typeof createRuntimeAuthoringStageDispatcher>>[0];
 }
 
@@ -527,7 +530,11 @@ describe("executeAuthoringStage", () => {
       input: { kind: "story_source", idempotencyKey: `source-${mode}-${consumer}`, target: { kind: "new_world" }, name: source.name, text: source.text, mode, boundaryParagraphId: source.paragraphs[0]!.id, instructions: "Use reviewed facts." },
       snapshot: fullSnapshot, stageKey,
       ...(consumer === "extraction" ? { parentOutputs: [{ kind: "source_plan", chunks: [{ ...chunk, sourceRange: { ...chunk.sourceRange }, spans: chunk.spans.map((span) => ({ ...span })) }] }] } : { sourceSelection: selection }),
-      jobId: `job-${mode}-${consumer}`
+      jobId: `job-${mode}-${consumer}`,
+      stageId: `stage-${mode}-${consumer}`,
+      jobGeneration: 7,
+      stageGeneration: 11,
+      leaseToken: `lease-${mode}-${consumer}`
     }));
     expect(output.kind).toBe(consumer === "extraction" ? "source_extraction" : "source_world");
     expect(calls.map((call) => call.operation)).toEqual([
@@ -537,6 +544,18 @@ describe("executeAuthoringStage", () => {
     expect(calls.map((call) => call.invocationKey)).toEqual([
       `${consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character"}:nonstream`,
       `${consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character"}:nonstream`
+    ]);
+    expect(calls.map((call) => call.logicalReservation)).toEqual([
+      {
+        kind: "authoring", ownerUserId: "owner-1", jobId: `job-${mode}-${consumer}`,
+        stageId: `stage-${mode}-${consumer}`, jobGeneration: 7, stageGeneration: 11,
+        leaseToken: `lease-${mode}-${consumer}`, operation: "initial"
+      },
+      {
+        kind: "authoring", ownerUserId: "owner-1", jobId: `job-${mode}-${consumer}`,
+        stageId: `stage-${mode}-${consumer}`, jobGeneration: 7, stageGeneration: 11,
+        leaseToken: `lease-${mode}-${consumer}`, operation: "repair"
+      }
     ]);
     for (const [index, call] of calls.entries()) {
       const body = JSON.parse(call.preparedRequest.body);

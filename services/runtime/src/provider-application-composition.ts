@@ -27,6 +27,7 @@ import type { DatabaseClient, DatabasePool } from "../../../packages/database/sr
 import { withTransaction } from "../../../packages/database/src/pool.js";
 import { createPostgresProviderRepositories } from "../../../packages/database/src/provider-repository.js";
 import { createPromptRepository } from "../../../packages/database/src/prompt-repository.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../../packages/database/src/prepared-text-attempt-repository.js";
 import type { ProviderTransport } from "../../../packages/story-engine/src/provider-transport.js";
 import type { WorldContent } from "../../../packages/contracts/src/world-library.js";
 import type { TemplateWorldInput } from "../../../packages/domain/src/world-template.js";
@@ -43,7 +44,18 @@ import {
 } from "./provider-world-generation-adapter.js";
 import { createProviderResponseFormatCapabilities, type ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
 import type { SchemaVerification, SchemaVerificationV2 } from "@infinite-quest/contracts";
-import type { DirectAuthoringTextPlanOptions } from "./authoring-text-execution-preparation.js";
+import type { DirectAuthoringTextPlanOptions, PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
+import { createPreparedTextExecutor } from "./prepared-text-executor.js";
+
+type ProviderCompositionOptions = Readonly<{
+  credentialSecret: string;
+  transport: ProviderTransport;
+  schemaVerifications?: readonly (SchemaVerification | SchemaVerificationV2)[];
+  schemaVerificationDigest?: string;
+  clock?: () => number;
+  /** One admission switch is supplied unchanged to API enqueue and every worker graph. */
+  nativeTextExecutionPlanAdmission?: boolean;
+}>;
 
 export type ProviderApplicationTransaction = Readonly<{
   application: ProviderApplication;
@@ -79,6 +91,7 @@ export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Reado
 
 export type WorkerGenerationProviderCollaborators = ApiGenerationProviderCollaborators & Readonly<{
   attributeCosts: Pick<ProviderCostPort, "attributeGenerationCostsToTurn">;
+  preparedTextExecutor: PreparedAuthoringTextExecutor;
 }>;
 
 export type IllustrationProviderCollaborators = ProviderConsumerRuntime & Readonly<{
@@ -101,7 +114,7 @@ export type WorldGenerationProviderCollaborators = ProviderConsumerRuntime & Rea
 
 export type AuthoringWorkerProviderCollaborators = Readonly<{
   execution: RuntimeProviderExecutionPort;
-  inventory: ProviderModelInventoryPort;
+  inventory: Pick<ProviderModelInventoryPort, "discoverCandidateModels" | "listModels">;
   resolution: Pick<ProviderResolutionPort, "resolveDirect">;
   prompts: WorldGenerationPromptPort;
   promptTools: ProviderPromptTools;
@@ -173,7 +186,7 @@ export function providerPromptProtocolVersion(snapshot: PromptSnapshotVersion["s
 
 function createInternals(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly (SchemaVerification | SchemaVerificationV2)[]; schemaVerificationDigest?: string; clock?: () => number }>,
+  options: ProviderCompositionOptions,
 ) {
   const responseFormatCapabilities = createProviderResponseFormatCapabilities({
     ...(options.schemaVerifications ? { records: options.schemaVerifications } : {}),
@@ -226,6 +239,36 @@ function createInternals(
   }
 
   const base = bind(pool);
+  const preparedTextExecutor = createPreparedTextExecutor({
+    attempts: createPostgresPreparedTextAttemptRepository(pool),
+    loadAuthority: (ownerUserId, providerProfileId, model) => base.runtime.execution.text(
+      { ownerUserId }, providerProfileId, "text", model
+    )
+  });
+  const authoringTextPlans: DirectAuthoringTextPlanOptions = Object.freeze({
+    nativePresetPlansEnabled: options.nativeTextExecutionPlanAdmission === true,
+    preparedExecutor: preparedTextExecutor,
+    loadAuthority: ({ ownerUserId, providerProfileId }) => base.runtime.execution.text(
+      { ownerUserId }, providerProfileId, "text"
+    ),
+    ports: {
+      resolvePreset: async (input) => (await base.runtime.inventory.getPreset({
+        ownerUserId: input.ownerUserId,
+        providerProfileId: input.providerProfileId,
+        slug: input.slug
+      })).preset,
+      discoverModels: async (input) => {
+        const inventory = await base.runtime.inventory.listModels({
+          ownerUserId: input.ownerUserId,
+          providerProfileId: input.providerProfileId,
+          providerRole: "text"
+        });
+        const requested = new Set(input.modelIds);
+        return inventory.models.filter((model) => requested.has(model.id));
+      }
+    },
+    responseFormatCapabilities
+  });
   async function runProfileMutation<T>(
     providerProfileId: string,
     work: (binding: ProviderApplicationTransaction) => Promise<T>
@@ -308,7 +351,7 @@ function createInternals(
     recordInfiniteWorldsCost: (database, command) => costs.recordCost(database, command)
   };
 
-  const worldGeneration = Object.freeze({ ...runtime, prompts: worldPrompts, costs: worldCosts });
+  const worldGeneration = Object.freeze({ ...runtime, prompts: worldPrompts, costs: worldCosts, authoringTextPlans });
   const infiniteWorlds = Object.freeze({
     ...runtime,
     prompts: infiniteWorldsPrompts,
@@ -352,20 +395,21 @@ function createInternals(
       attributeCosts: costs,
       responseFormatCapabilities,
       responseFormatInventory: base.runtime.inventory,
+      preparedTextExecutor,
       loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
         bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model)
     }),
-    illustration: Object.freeze({ ...runtime, prompts: illustrationPrompts, costs: illustrationCosts }),
+    illustration: Object.freeze({ ...runtime, prompts: illustrationPrompts, costs: illustrationCosts, illustrationTextPlans: authoringTextPlans }),
     chronicle: Object.freeze({ ...runtime, prompts: chroniclePrompts, costs: chronicleCosts }),
     worldGeneration,
-    characterOrganization: Object.freeze({ ...runtime, prompts: characterPrompts, costs: characterCosts }),
+    characterOrganization: Object.freeze({ ...runtime, prompts: characterPrompts, costs: characterCosts, authoringTextPlans }),
     infiniteWorlds,
   };
 }
 
 export function createApiProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly (SchemaVerification | SchemaVerificationV2)[]; schemaVerificationDigest?: string; clock?: () => number }>,
+  options: ProviderCompositionOptions,
 ): ApiProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({
@@ -385,7 +429,7 @@ export function createApiProviderApplicationComposition(
 
 export function createWorkerProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly (SchemaVerification | SchemaVerificationV2)[]; schemaVerificationDigest?: string; clock?: () => number }>,
+  options: ProviderCompositionOptions,
 ): WorkerProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({
@@ -396,10 +440,14 @@ export function createWorkerProviderApplicationComposition(
     chronicle: graph.chronicle,
     worldGeneration: Object.freeze({
       execution: graph.worldGeneration.execution,
-      inventory: graph.runtimeAdapter.inventory,
+      inventory: Object.freeze({
+        discoverCandidateModels: graph.runtimeAdapter.inventory.discoverCandidateModels,
+        listModels: graph.runtimeAdapter.inventory.listModels
+      }),
       resolution: Object.freeze({ resolveDirect: graph.worldGeneration.resolution.resolveDirect }),
       prompts: graph.worldGeneration.prompts,
-      promptTools: graph.worldGeneration.promptTools
+      promptTools: graph.worldGeneration.promptTools,
+      authoringTextPlans: graph.worldGeneration.authoringTextPlans
     })
   });
 }

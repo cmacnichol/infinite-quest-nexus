@@ -165,6 +165,8 @@ describe("direct authoring v2 response contracts", () => {
         safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens(requestTokens)
       });
     }
+    await prepared!.execute({ operation: "seedCharacter", request: { systemPrompt: "untrusted", input: "input:second-seed", responseFormatFallback: "forbid" } });
+    await prepared!.execute({ operation: "seedCharacterRepair", request: { systemPrompt: "untrusted", input: "input:second-seed", recoveryInput: "repair", rejectedResponse: "{}", responseFormatFallback: "forbid" } });
     expect(eligibilityV2).not.toHaveBeenCalled();
     expect(ports.resolvePreset).toHaveBeenCalledTimes(1);
     expect(ports.discoverModels).toHaveBeenCalledTimes(1);
@@ -186,7 +188,50 @@ describe("direct authoring v2 response contracts", () => {
       operation: "unknown" as never,
       request: { systemPrompt: "untrusted", input: "{}", responseFormatFallback: "forbid" }
     })).rejects.toBeTruthy();
-    expect(execute).toHaveBeenCalledTimes(operationCases.length);
+    expect(execute).toHaveBeenCalledTimes(operationCases.length + 2);
+    const reservations = execute.mock.calls.map(([call]) => (call as any).logicalReservation);
+    expect(reservations.map((reservation) => reservation.operation)).toEqual([
+      "initial", "repair", "initial", "repair", "initial", "repair", "initial", "repair", "initial", "repair"
+    ]);
+    expect(new Set(reservations.map((reservation) => reservation.requestScopeId)).size).toBe(1);
+    for (const [initialIndex, repairIndex] of [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]] as const) {
+      expect(reservations[initialIndex].invocationId).toBe(reservations[repairIndex].invocationId);
+    }
+    expect(new Set([reservations[0], reservations[2], reservations[4], reservations[6], reservations[8]]
+      .map((reservation) => reservation.invocationId)).size).toBe(5);
+    expect(reservations.every((reservation) => reservation.kind === "direct" && reservation.ownerUserId === "owner-1")).toBe(true);
+  });
+
+  it("keeps concurrent prepared requests in distinct parent scopes", async () => {
+    const execute = vi.fn(async (_input: unknown) => providerResult());
+    const options = {
+      nativePresetPlansEnabled: true,
+      preparedExecutor: { execute },
+      loadAuthority: async () => ({ id: PROFILE_ID, providerRole: "text" as const, authorityRevision: "authority-revision", endpointIdentity: ENDPOINT_ID }),
+      ports: discoveryPorts(true),
+      responseFormatCapabilities: directCapabilities()
+    } as never;
+    const [first, second] = await Promise.all([
+      prepareDirectAuthoringTextExecution({
+        ownerUserId: "owner-1", execution: execution({ kind: "openrouter_preset", slug: "authoring" }),
+        operationPrompts: { worldOutline: "Create the world." }, options
+      }),
+      prepareDirectAuthoringTextExecution({
+        ownerUserId: "owner-1", execution: execution({ kind: "openrouter_preset", slug: "authoring" }),
+        operationPrompts: { worldOutline: "Create the world." }, options
+      })
+    ]);
+
+    await Promise.all([first!.execute({
+      operation: "worldOutline", request: { systemPrompt: "untrusted", input: "same input", responseFormatFallback: "forbid" }
+    }), second!.execute({
+      operation: "worldOutline", request: { systemPrompt: "untrusted", input: "same input", responseFormatFallback: "forbid" }
+    })]);
+
+    const reservations = execute.mock.calls.map(([call]) => (call as any).logicalReservation);
+    expect(reservations).toHaveLength(2);
+    expect(reservations[0].requestScopeId).not.toBe(reservations[1].requestScopeId);
+    expect(reservations[0].invocationId).not.toBe(reservations[1].invocationId);
   });
 
   it("blocks an unsupported inherited Model before either execution seam runs", async () => {

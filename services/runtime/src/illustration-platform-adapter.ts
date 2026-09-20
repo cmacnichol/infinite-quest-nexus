@@ -238,6 +238,16 @@ export function createIllustrationPromptRefinementAdapter(
   return {
     async refinePrompt(request) {
       try {
+        const logicalReservation = request.promptJobId && request.claimAttempt !== undefined && request.leaseOwner
+          ? {
+            kind: "illustration" as const,
+            ownerUserId: request.ownerUserId,
+            promptJobId: request.promptJobId,
+            claimAttempt: request.claimAttempt,
+            leaseOwner: request.leaseOwner,
+            operation: "initial" as const
+          }
+          : undefined;
         const providerRequest = {
           systemPrompt: request.textExecutionPlan?.prompt ?? request.systemPrompt,
           input: dependencies.buildRefinementInput(request.fictionText, request.storyContext)
@@ -249,13 +259,20 @@ export function createIllustrationPromptRefinementAdapter(
                 code: "prepared_text_execution_unavailable"
               });
             }
+            if (!logicalReservation) {
+              throw Object.assign(new Error("The frozen illustration route has no durable prompt-job claim."), {
+                code: "prepared_route_reservation_required"
+              });
+            }
             if (!request.textExecutionContract) {
               return dependencies.preparedTextExecutor.execute({
                 plan: request.textExecutionPlan,
                 operation: "illustration_prompt_refinement",
                 ownerUserId: request.ownerUserId,
                 providerProfileId: request.providerProfileId,
-                request: providerRequest
+                request: providerRequest,
+                logicalReservation,
+                ...(request.currentClaim === undefined ? {} : { currentClaim: request.currentClaim })
               });
             }
             const prepared: PreparedAuthoringResponseContractExecution = {
@@ -284,7 +301,9 @@ export function createIllustrationPromptRefinementAdapter(
               ownerUserId: request.ownerUserId,
               providerProfileId: request.providerProfileId,
               request: { ...providerRequest, systemPrompt: request.textExecutionPlan.prompt },
-              preparedRequest
+              preparedRequest,
+              logicalReservation,
+              ...(request.currentClaim === undefined ? {} : { currentClaim: request.currentClaim })
             });
           })()
           : await dependencies.loadTextExecution(

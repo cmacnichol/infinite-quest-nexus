@@ -241,6 +241,7 @@ export function createSourceAuthoringAdapter(options: Readonly<{
             ? { ...options.diagnosticContext, requestAttempt, repair }
             : undefined),
           delay: options.delay,
+          transportRetryOwner: options.plans ? "prepared_executor" : "outer",
           ...(currentClaim === undefined ? {} : { currentClaim })
         });
       } catch (error) {
@@ -360,6 +361,7 @@ export function createSourceWorldAuthoringAdapter(options: Readonly<{
         },
         parse: (content) => parseSourceWorldResponse(input, content),
         delay: options.delay,
+        transportRetryOwner: options.plans ? "prepared_executor" : "outer",
         ...(currentClaim === undefined ? {} : { currentClaim })
       });
     }

@@ -35,7 +35,8 @@ import {
   renderPreparedAuthoringRequest,
   serializePreparedAuthoringRequest,
   type PreparedAuthoringResponseContractExecution,
-  type PreparedAuthoringTextExecutor
+  type PreparedAuthoringTextExecutor,
+  type PreparedDirectAuthoringTextExecution
 } from "./authoring-text-execution-preparation.js";
 import type { PreparedProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
 export type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
@@ -114,7 +115,9 @@ export function createAuthoringExecutionSnapshot(
 export type LoadedAuthoringStage = Readonly<{
   jobId: string;
   stageId?: string;
+  jobGeneration?: number;
   stageGeneration?: number;
+  leaseToken?: string;
   input: Awaited<ReturnType<AuthoringExecutionRepository["loadClaim"]>> extends infer Claim
     ? Claim extends { input: infer Input } ? Input : never
     : never;
@@ -247,7 +250,25 @@ export async function executeAuthoringStage(options: Readonly<{
     if (!await options.repository.loadClaim(options.claim)) return false;
     // Local shutdown/heartbeat loss can happen while the database read waits.
     return options.currentClaim ? options.currentClaim() : true;
-  }});
+  }, jobGeneration: options.claim.jobGeneration, leaseToken: options.claim.leaseToken });
+}
+
+function authoringReservation(stage: LoadedAuthoringStage, repair: boolean) {
+  if (!stage.stageId || stage.jobGeneration === undefined || stage.stageGeneration === undefined || !stage.leaseToken) {
+    throw Object.assign(new Error("Prepared authoring execution requires the durable stage claim identity."), {
+      code: "prepared_route_reservation_required"
+    });
+  }
+  return {
+    kind: "authoring" as const,
+    ownerUserId: stage.ownerUserId,
+    jobId: stage.jobId,
+    stageId: stage.stageId,
+    jobGeneration: stage.jobGeneration,
+    stageGeneration: stage.stageGeneration,
+    leaseToken: stage.leaseToken,
+    operation: repair ? "repair" as const : "initial" as const
+  };
 }
 
 function compatibleSnapshot(snapshot: AuthoringExecutionSnapshot, execution: RuntimeTextExecution, sha256: (value: string) => string): boolean {
@@ -277,6 +298,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
 }>): (stage: LoadedAuthoringStage) => Promise<AuthoringStageOutput> {
   return async (stage) => {
     let provider: RuntimeTextExecution;
+    let preparedExecution: PreparedDirectAuthoringTextExecution | undefined;
     let nativeSourceExecution: NativeSourceAuthoringRequestExecution | undefined;
     if (v3Snapshot(stage.snapshot)) {
       const snapshot = authoringExecutionSnapshotSchema.parse(stage.snapshot) as BoundAuthoringExecutionSnapshotV3;
@@ -369,6 +391,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
           providerProfileId: snapshot.providerProfileId,
           request: executorRequest,
           preparedRequest: checkedRequest,
+          logicalReservation: authoringReservation(stage, operation.endsWith("Repair")),
           ...(stage.currentClaim === undefined ? {} : { currentClaim: stage.currentClaim })
         });
       };
@@ -386,6 +409,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         configuration: snapshot.requestConfiguration,
         execute: async (request) => executeBound(request, boundOperationFor(stage, request.rejectedResponse !== undefined))
       };
+      preparedExecution = { execute: ({ request }) => provider.execute(request) };
       nativeSourceExecution = {
         renderInitial: (request) => renderPreparedAuthoringRequest({
           execution: { providerType: snapshot.providerType, configuration: snapshot.requestConfiguration },
@@ -442,10 +466,12 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
             ownerUserId: stage.ownerUserId,
             providerProfileId: snapshot.providerProfileId,
             request: { ...request, systemPrompt: plan.prompt },
+            logicalReservation: authoringReservation(stage, request.rejectedResponse !== undefined),
             ...(stage.currentClaim === undefined ? {} : { currentClaim: stage.currentClaim })
           });
         }
       };
+      preparedExecution = { execute: ({ request }) => provider.execute(request) };
     } else {
       try {
         provider = await options.execution.text(
@@ -566,6 +592,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
       const outline = await generateWorldOutline({
         input,
         provider,
+        ...(preparedExecution === undefined ? {} : { preparedExecution }),
         worldPrompt: buildTemplateWorldPrompt(input, stage.snapshot.prompts.world_generation ?? ""),
         prompt: stage.snapshot.prompts.world_generation ?? "",
         repairPrompt: stage.snapshot.prompts.world_generation_recovery ?? "",
@@ -580,6 +607,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
     if (seed && outline?.kind === "outline") {
       const expanded = await expandWorldCharacterSeed({
         provider,
+        ...(preparedExecution === undefined ? {} : { preparedExecution }),
         outline: outline.outline,
         seed,
         characterIndex: outline.outline.seeds.findIndex((candidate) => candidate.id === characterId),
@@ -602,6 +630,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
     }
     const generated = await generateStandalonePlayableCharacter({
       provider,
+      ...(preparedExecution === undefined ? {} : { preparedExecution }),
       content: stage.input.content,
       promptText: stage.input.prompt,
       currentCharacter,

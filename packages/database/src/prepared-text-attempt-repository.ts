@@ -32,7 +32,7 @@ function reservationKey(value: LogicalReservation): string {
   if (value.kind === "story") return `${value.generationJobId}:${value.invocationId}`;
   if (value.kind === "authoring") return `${value.jobId}:${value.stageId}:${value.jobGeneration}:${value.stageGeneration}:${value.operation}`;
   if (value.kind === "illustration") return `${value.promptJobId}:${value.claimAttempt}:${value.operation}`;
-  return `${value.requestScopeId}:${value.operation}`;
+  return `${value.requestScopeId}:${value.invocationId}:${value.operation}`;
 }
 
 function record(row: AttemptRow): PhysicalAttemptRecord {

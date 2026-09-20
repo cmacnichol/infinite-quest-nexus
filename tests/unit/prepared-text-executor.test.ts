@@ -76,7 +76,7 @@ function executionInput(onChunk: (delta: string, accumulated: string) => void | 
     preparedRequest: { body, payloadHash: hash(body), operation: "story generation" as const, budgetAudit: null },
     logicalReservation: {
       kind: "direct" as const, ownerUserId: "00000000-0000-4000-8000-000000000001",
-      requestScopeId: randomUUID(), operation: "initial" as const
+      requestScopeId: randomUUID(), invocationId: randomUUID(), operation: "initial" as const
     }
   };
 }

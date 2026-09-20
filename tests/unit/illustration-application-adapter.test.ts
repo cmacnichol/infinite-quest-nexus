@@ -226,6 +226,9 @@ describe("illustration provider adapters", () => {
       campaignId,
       turnId: "33333333-3333-4333-8333-333333333333",
       segmentId: "44444444-4444-4444-8444-444444444444",
+      promptJobId: "55555555-5555-4555-8555-555555555555",
+      claimAttempt: 3,
+      leaseOwner: "illustration-worker-1",
       providerProfileId,
       model: "text-model",
       systemPrompt: "Return only a fiction-only visual prompt.",
@@ -256,6 +259,11 @@ describe("illustration provider adapters", () => {
       operation: "illustration_prompt_refinement",
       ownerUserId,
       providerProfileId,
+      logicalReservation: {
+        kind: "illustration", ownerUserId,
+        promptJobId: "55555555-5555-4555-8555-555555555555",
+        claimAttempt: 3, leaseOwner: "illustration-worker-1", operation: "initial"
+      },
       request: {
         systemPrompt: "Preset instructions.\n\nReturn only a fiction-only visual prompt.",
         input: expect.stringContaining("Moonlight fills the observatory.")
@@ -314,6 +322,7 @@ describe("illustration provider adapters", () => {
     });
     const request = {
       ownerUserId, campaignId, turnId: null, segmentId, providerProfileId,
+      promptJobId: "66666666-6666-4666-8666-666666666666", claimAttempt: 4, leaseOwner: "illustration-worker-2",
       model: "illustration-model", systemPrompt: "untrusted mutable prompt",
       fictionText: "Moonlight fills the observatory.", storyContext: "A quiet night beneath a violet sky.",
       textExecutionPlan: prepared.plans.illustrationPromptRefinement!,
@@ -331,7 +340,12 @@ describe("illustration provider adapters", () => {
     const body = JSON.parse(invocation.preparedRequest.body);
     expect(invocation).toMatchObject({
       operation: "illustration_prompt_refinement", invocationKey: "illustration_prompt_refinement:nonstream",
-      trustedOperationPrompt: "Return one fiction-only image prompt."
+      trustedOperationPrompt: "Return one fiction-only image prompt.",
+      logicalReservation: {
+        kind: "illustration", ownerUserId,
+        promptJobId: "66666666-6666-4666-8666-666666666666",
+        claimAttempt: 4, leaseOwner: "illustration-worker-2", operation: "initial"
+      }
     });
     expect(body.response_format.json_schema.name).toBe(getProviderOutputSchemaV2("illustration_prompt_refinement").name);
     expect(body.messages[0].content).toBe(routeKind === "preset" ? "Frozen illustration instructions.\n\nReturn one fiction-only image prompt." : "Return one fiction-only image prompt.");

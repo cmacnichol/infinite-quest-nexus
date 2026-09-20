@@ -1425,6 +1425,18 @@ export async function runIllustrationPromptJob(
         campaignId: claimed.campaign_id,
         turnId: segment.turn_id,
         segmentId: segment.id,
+        promptJobId: claimed.id,
+        claimAttempt: claimed.attempts,
+        leaseOwner: workerId,
+        currentClaim: async () => {
+          const current = await pool.query(
+            `SELECT 1 FROM illustration_prompt_jobs
+              WHERE id=$1 AND owner_user_id=$2 AND status='refining' AND attempts=$3
+                AND lease_owner=$4 AND lease_expires_at > now()`,
+            [claimed.id, claimed.owner_user_id, claimed.attempts, workerId]
+          );
+          return Boolean(current.rows[0]);
+        },
         providerProfileId: claimed.provider_profile_id,
         model: claimed.requested_model,
         systemPrompt: promptContent(claimed.prompt_snapshot, "illustration_refinement"),

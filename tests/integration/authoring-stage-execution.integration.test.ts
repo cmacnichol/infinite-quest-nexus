@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { authoringRuntimeFixture, deferred } from "../helpers/authoring-runtime.js";
@@ -27,6 +28,9 @@ import { ProviderHttpError } from "../../packages/story-engine/src/providers.js"
 import { composePresetPrompt } from "../../packages/story-engine/src/preset-prompt.js";
 import { buildSourceExtractionPrompt, buildSourceWorldPrompt } from "../../packages/domain/src/authoring-prompts.js";
 import { assembleGeneratedWorld } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { currentIntegrationProviderTransport, installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import fixture from "../fixtures/authoring/reliability.json" with { type: "json" };
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -460,6 +464,108 @@ integration("durable authoring real repository and stage dispatcher", () => {
     expect("version" in persisted).toBe(nativePresetPlansEnabled);
     expect(getPreset).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
     expect(listModels).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
+  });
+
+  it("isolates two matching durable jobs through the composed prepared executor and exact provider body", async () => {
+    const credentialSecret = "task-5c-authoring-composition-secret";
+    const requestBodies: string[] = [];
+    installIntegrationProviderTransport();
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/models" || request.url === "/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "native-model", context_length: 16_384, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        return;
+      }
+      if (request.url === "/v1/presets/authoring" || request.url === "/presets/authoring") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "authoring", name: "Authoring", status: "active",
+          designated_version: { id: "authoring-v1", version: 1, system_prompt: "Frozen durable preset.", config: { model: "native-model", temperature: 0.2 } }
+        } }));
+        return;
+      }
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        if (!request.url?.endsWith("/chat/completions")) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "fixture_route_not_found" } }));
+          return;
+        }
+        requestBodies.push(body);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          id: randomUUID(), model: "native-model",
+          choices: [{ message: { content: JSON.stringify(fixture.world) }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }
+        }));
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("authoring fixture server did not bind");
+      const provider = await createProvider(pool, {
+        name: `task-5c-authoring-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: "@preset/authoring",
+        textSelection: { kind: "openrouter_preset", slug: "authoring" }, contextWindowTokens: 16_384,
+        maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+      }, credentialSecret);
+      const repository = createPostgresAuthoringRepository(pool, { textPlanProtocol: 2 });
+      const makeInput = () => authoringSubmitSchema.parse({
+        kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create the same durable world."
+      });
+      const firstInput = makeInput();
+      const secondInput = makeInput();
+      const first = await repository.submit({ ownerUserId }, firstInput, sha256(JSON.stringify(firstInput)));
+      const second = await repository.submit({ ownerUserId }, secondInput, sha256(JSON.stringify(secondInput)));
+      const graph = createWorkerProviderApplicationComposition(pool, {
+        credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+      });
+      expect(graph.worldGeneration.authoringTextPlans?.preparedExecutor).toBe(graph.generation.preparedTextExecutor);
+      const worker = createRuntimeAuthoringWorkerApplication({
+        pool, repository, providers: graph.worldGeneration, nativePresetPlansEnabled: true, sha256
+      });
+      const [firstRun, secondRun] = await Promise.all([
+        worker.runNext({ workerId: "task-5c-authoring-a", leaseSeconds: 60 }),
+        worker.runNext({ workerId: "task-5c-authoring-b", leaseSeconds: 60 })
+      ]);
+      const jobOutcomes = await pool.query<{ id: string; status: string; stage_status: string; failure: unknown }>(
+        `SELECT jobs.id,jobs.status,stages.status AS stage_status,stages.failure
+           FROM authoring_jobs jobs
+           JOIN authoring_job_stages stages ON stages.job_id=jobs.id
+          WHERE jobs.id=ANY($1::uuid[])
+          ORDER BY jobs.id`,
+        [[first.id, second.id]]
+      );
+      expect([firstRun, secondRun], JSON.stringify(jobOutcomes.rows)).toEqual([true, true]);
+
+      const attempts = await pool.query<{
+        id: string; reservation_key: string; request_body: string; outcome: string;
+        logical_reservation: { jobId: string; operation: string };
+      }>(
+        `SELECT id,reservation_key,request_body,outcome,logical_reservation
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='authoring' AND logical_reservation->>'jobId'=ANY($1::text[])
+          ORDER BY logical_reservation->>'jobId'`,
+        [[first.id, second.id]]
+      );
+      expect(attempts.rows).toHaveLength(2);
+      expect(new Set(attempts.rows.map((row) => row.id)).size).toBe(2);
+      expect(new Set(attempts.rows.map((row) => row.reservation_key)).size).toBe(2);
+      expect(new Set(attempts.rows.map((row) => row.logical_reservation.jobId))).toEqual(new Set([first.id, second.id]));
+      expect(attempts.rows.every((row) => row.logical_reservation.operation === "initial" && row.outcome === "succeeded")).toBe(true);
+      expect(attempts.rows[0]!.request_body).toBe(attempts.rows[1]!.request_body);
+      expect(requestBodies).toHaveLength(2);
+      expect(requestBodies[0]).toBe(requestBodies[1]);
+      const body = JSON.parse(requestBodies[0]!);
+      expect(body.response_format.json_schema.name).toBe("infinite_quest_world_outline_v1");
+      expect(requestBodies[0]!.match(/Frozen durable preset\./g)).toHaveLength(1);
+      expect(provider.textSelection).toEqual({ kind: "openrouter_preset", slug: "authoring" });
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    }
   });
 
   it.each(["faithful", "expand"] as const)("composition freezes exact native source prompts for %s mode", async (mode) => {

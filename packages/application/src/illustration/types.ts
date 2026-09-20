@@ -381,6 +381,11 @@ export type IllustrationImageExecutionResult =
     }>);
 
 export type IllustrationPromptRefinementRequest = IllustrationSegmentExecutionScope & Readonly<{
+  /** Private durable prompt-job claim identity for prepared text attempts. */
+  promptJobId?: string;
+  claimAttempt?: number;
+  leaseOwner?: string;
+  currentClaim?(): Promise<boolean>;
   providerProfileId: string;
   model: string;
   systemPrompt: string;

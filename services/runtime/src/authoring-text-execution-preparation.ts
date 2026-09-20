@@ -18,6 +18,7 @@ import {
   type TextExecutionRouteBasis,
   type TextModelSelection
 } from "@infinite-quest/contracts";
+import { randomUUID } from "node:crypto";
 import { resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
 import {
   assertDirectResponseContractRouteBasisAuthority,
@@ -367,12 +368,23 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
     capabilityEvidenceHash: contractPreparation.capabilityEvidenceHash
   });
   const trustedPrompts = Object.freeze(Object.fromEntries(promptEntries));
+  const repairOperations = new Set<DirectAuthoringTextOperationV2>([
+    "worldOutlineRepair", "seedCharacterRepair", "standaloneCharacterRepair", "organizerRepair"
+  ]);
+  const requestScopeId = randomUUID();
+  const activeInvocations = new Map<string, string>();
   return Object.freeze({
     execute: async ({ operation, request }) => {
       const identity = directAuthoringResponseContractIdentity(operation);
       const plan = prepared.plans[operation];
       const trustedOperationPrompt = trustedPrompts[operation];
       if (!plan || !trustedOperationPrompt) throw new Error(`Native authoring plan is missing operation '${operation}'.`);
+      const repair = repairOperations.has(operation);
+      const operationFamily = operation.replace(/Repair$/u, "");
+      if (!repair || !activeInvocations.has(operationFamily)) {
+        activeInvocations.set(operationFamily, randomUUID());
+      }
+      const invocationId = activeInvocations.get(operationFamily)!;
       const authority = await options.loadAuthority!({ ownerUserId: input.ownerUserId, providerProfileId: input.execution.id });
       if (authority.id !== input.execution.id || authority.providerRole !== "text"
         || authority.authorityRevision !== plan.authorityRevision
@@ -415,7 +427,14 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
         plan, operation: identity.operation, invocationKey: identity.invocationKey,
         frozenResponseContracts, routeBasis: prepared.routeBasis, trustedOperationPrompt,
         ownerUserId: input.ownerUserId, providerProfileId: input.execution.id,
-        request: executorRequest, preparedRequest
+        request: executorRequest, preparedRequest,
+        logicalReservation: {
+          kind: "direct",
+          ownerUserId: input.ownerUserId,
+          requestScopeId,
+          invocationId,
+          operation: repair ? "repair" : "initial"
+        }
       });
     }
   });

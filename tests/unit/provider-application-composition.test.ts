@@ -75,6 +75,29 @@ function listModels(composition: ReturnType<typeof createApiProviderApplicationC
 }
 
 describe("provider application composition capability cache transactions", () => {
+  it("shares one default-off prepared executor across every API and worker text consumer graph", () => {
+    const pool = { connect: vi.fn(), query: vi.fn() };
+    const transport = { fetch: vi.fn(), validateSdkEndpoint: vi.fn(), close: vi.fn() };
+    const disabled = createApiProviderApplicationComposition(pool as never, { credentialSecret: "test-secret", transport });
+    expect(disabled.worldGeneration.authoringTextPlans?.nativePresetPlansEnabled).toBe(false);
+
+    const api = createApiProviderApplicationComposition(pool as never, {
+      credentialSecret: "test-secret", transport, nativeTextExecutionPlanAdmission: true
+    });
+    expect(api.worldGeneration.authoringTextPlans?.preparedExecutor)
+      .toBe(api.characterOrganization.authoringTextPlans?.preparedExecutor);
+    expect(api.worldGeneration.authoringTextPlans?.preparedExecutor)
+      .toBe(api.illustration.illustrationTextPlans?.preparedExecutor);
+
+    const worker = createWorkerProviderApplicationComposition(pool as never, {
+      credentialSecret: "test-secret", transport, nativeTextExecutionPlanAdmission: true
+    });
+    expect(worker.worldGeneration.authoringTextPlans?.preparedExecutor)
+      .toBe(worker.illustration.illustrationTextPlans?.preparedExecutor);
+    expect(worker.generation.preparedTextExecutor)
+      .toBe(worker.worldGeneration.authoringTextPlans?.preparedExecutor);
+  });
+
   it("uses the canonical empty registry digest through API queue and worker frozen-contract parsing", async () => {
     const row = { ...profile("story-model"), configuration: { textResponseFormatPolicy: "auto" } };
     const client = { query: vi.fn(async (sql: string) => {
