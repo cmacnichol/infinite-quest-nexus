@@ -565,6 +565,7 @@ export async function generateWorldOutline(options: Readonly<{
     },
     parse: (content) => completeConvertedWorldSchema.parse(normalizeRawWorldJson(extractJsonObject(content))),
     delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
+    transportRetryOwner: options.preparedExecution ? "prepared_executor" : "outer",
     ...(options.currentClaim === undefined ? {} : { currentClaim: options.currentClaim })
   });
   return {
@@ -644,6 +645,7 @@ export async function expandWorldCharacterSeed(options: Readonly<{
       narrative_hook: options.seed.narrativeHook
     }, options.characterIndex),
     delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
+    transportRetryOwner: options.preparedExecution ? "prepared_executor" : "outer",
     ...(options.currentClaim === undefined ? {} : { currentClaim: options.currentClaim })
   });
 }
@@ -940,11 +942,12 @@ export async function generateStandalonePlayableCharacter(options: Readonly<{
         })
       };
       return options.preparedExecution
-        ? options.preparedExecution.execute({ operation: "standaloneCharacter", request })
+        ? options.preparedExecution.execute({ operation: attempt.repair ? "standaloneCharacterRepair" : "standaloneCharacter", request })
         : options.provider.execute(request);
     },
     parse: (content) => normalizeGeneratedPlayableCharacter(extractJsonObject(content), generatedId, options.currentCharacter),
     delay: async (milliseconds) => { await new Promise<void>((resolve) => setTimeout(resolve, milliseconds)); },
+    transportRetryOwner: options.preparedExecution ? "prepared_executor" : "outer",
     ...(options.currentClaim === undefined ? {} : { currentClaim: options.currentClaim })
   });
   return { character };
@@ -994,7 +997,7 @@ async function generatePlayableCharacterCandidate(
     ownerUserId,
     execution: provider,
     ...(providers.authoringTextPlans === undefined ? {} : { options: providers.authoringTextPlans }),
-    operationPrompts: { standaloneCharacter: operationPrompt }
+    operationPrompts: { standaloneCharacter: operationPrompt, standaloneCharacterRepair: operationPrompt }
   });
   const { character } = await generateStandalonePlayableCharacter({
     provider,

@@ -349,7 +349,8 @@ async function organize(
         ? preparedExecution.execute({ operation: attempt.repair ? "organizerRepair" : "organizer", request })
         : provider.execute(request);
     },
-    parse: (content) => validateOrganizerResult(extractJsonObject(content), sources)
+    parse: (content) => validateOrganizerResult(extractJsonObject(content), sources),
+    transportRetryOwner: preparedExecution ? "prepared_executor" : "outer"
   });
 }
 

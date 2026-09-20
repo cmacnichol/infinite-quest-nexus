@@ -368,6 +368,25 @@ describe("runAuthoringResponse", () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ["ambiguous timeout", () => timeoutError(), "authoring_provider_timeout"],
+    ["exhausted route", () => new ProviderTransportError("route exhausted", {
+      providerType: "openrouter", operation: "authoring", endpoint: "https://provider.test", model: "model",
+      timeoutMs: 1_000, durationMs: 10, timedOut: false, transportCode: "route_exhausted",
+      causeCategory: "network", causeMessage: "No route remained."
+    }), "authoring_provider_unavailable"]
+  ] as const)("treats prepared-executor %s failures as terminal", async (_label, error, code) => {
+    const request = vi.fn().mockImplementation(async () => { throw error(); });
+    const delay = vi.fn(async () => undefined);
+
+    await expect(runAuthoringResponse({
+      stage: "world", request, parse: JSON.parse, delay,
+      transportRetryOwner: "prepared_executor"
+    })).rejects.toMatchObject({ authoringFailure: { code, retryable: false } });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(delay).not.toHaveBeenCalled();
+  });
+
   it("keeps malformed output plus repair transport failures inside four calls", async () => {
     const request = vi.fn()
       .mockResolvedValueOnce(providerResult("{"))

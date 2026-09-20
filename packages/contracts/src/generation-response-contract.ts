@@ -9,7 +9,13 @@ import {
   responseInvocationKeySchema,
   responseInvocationKeyV2Schema
 } from "./text-response-format.js";
-import { getProviderOutputSchemaV2, providerOutputSchemaOperationV2Schema, stableJsonHash } from "./provider-output-schema.js";
+import {
+  getProviderOutputSchemaV2,
+  providerOutputSchemaOperationV2Schema,
+  responseContractOperationV2Schema,
+  stableJsonHash,
+  type ResponseContractOperationV2
+} from "./provider-output-schema.js";
 import { deriveTextExecutionPlan, readTextExecutionPlan, readTextExecutionRouteBasis, type TextExecutionPlan, type TextExecutionRouteBasis } from "./text-execution-plan.js";
 export type { ResponseInvocationKey } from "./text-response-format.js";
 
@@ -344,11 +350,18 @@ export function readFrozenResponseContractsVersioned(value: unknown): FrozenResp
   throw new Error("Frozen response contracts are invalid or incompatible.");
 }
 
-export const responseContractOperationV2Schema = z.enum([
-  "story_generation", "story_recovery", "story_choice_repair", "event_extension", "scene_coverage_rewrite", "story_continuity_review", "story_continuity_repair",
-  "rpg_assessment", "event_trigger_before", "event_trigger_after", "scene_coverage_validation", "event_coverage_validation"
-]);
-export type ResponseContractOperationV2 = z.infer<typeof responseContractOperationV2Schema>;
+export { responseContractOperationV2Schema, type ResponseContractOperationV2 } from "./provider-output-schema.js";
+
+const authoringInvocationSchemas = {
+  world_outline: "world_outline", world_outline_repair: "world_outline",
+  world_seed_character: "world_seed_character", world_seed_character_repair: "world_seed_character",
+  standalone_character: "standalone_character", standalone_character_repair: "standalone_character",
+  character_organizer: "character_organizer", character_organizer_repair: "character_organizer",
+  source_extraction: "source_extraction", source_extraction_repair: "source_extraction",
+  source_synthesis: "source_synthesis", source_synthesis_repair: "source_synthesis",
+  source_character: "source_character", source_character_repair: "source_character",
+  illustration_prompt_refinement: "illustration_prompt_refinement"
+} as const;
 
 export function responseContractOperationV2MatchesInvocation(operation: ResponseContractOperationV2, invocationKey: z.infer<typeof responseInvocationKeyV2Schema>): boolean {
   if (operation === "story_choice_repair") return invocationKey === "choices:nonstream";
@@ -356,6 +369,8 @@ export function responseContractOperationV2MatchesInvocation(operation: Response
   if (operation === "rpg_assessment" || operation === "event_trigger_before" || operation === "event_trigger_after" || operation === "scene_coverage_validation" || operation === "event_coverage_validation") {
     return invocationKey === `${operation}:nonstream` || (operation === "scene_coverage_validation" && invocationKey === "scene_coverage:nonstream") || (operation === "event_coverage_validation" && invocationKey === "event_coverage:nonstream");
   }
+  const schemaOperation = authoringInvocationSchemas[operation as keyof typeof authoringInvocationSchemas];
+  if (schemaOperation) return invocationKey === `${schemaOperation}:nonstream`;
   return invocationKey === "story:nonstream" || (operation === "story_generation" && invocationKey === "story:stream");
 }
 

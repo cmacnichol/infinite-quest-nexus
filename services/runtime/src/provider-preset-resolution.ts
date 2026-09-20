@@ -1,4 +1,4 @@
-import type { ResolvedPreset, TextModelSelection } from "@infinite-quest/contracts";
+import type { ModelParameterAdvertisement, ResolvedPreset, TextModelSelection } from "@infinite-quest/contracts";
 import {
   deriveTextExecutionPlan as deriveTextExecutionPlanFromContracts,
   textExecutionPlanSchema,
@@ -17,6 +17,7 @@ export type TextModelLimit = Readonly<{
   id: string;
   contextWindowTokens?: number;
   maxOutputTokens?: number;
+  responseFormatAdvertisement?: ModelParameterAdvertisement;
 }>;
 
 export type TextExecutionPlanDiscoveryPorts = Readonly<{
@@ -65,7 +66,9 @@ export type ResolveTextExecutionPlansInput = Readonly<{
 }>;
 
 export type ResolvedTextExecutionPlans = Readonly<{
+  routeBasis: TextExecutionRouteBasis;
   plans: Readonly<Record<string, TextExecutionPlan>>;
+  modelAdvertisements: Readonly<Record<string, ModelParameterAdvertisement | null>>;
 }>;
 
 const MAX_OPERATION_PLANS = 32;
@@ -163,6 +166,7 @@ type ResolvedPlanInputs = Readonly<{
   candidates: readonly unknown[];
   parameters: TextGenerationParameters;
   presetSystemPrompt: string;
+  modelAdvertisements: Readonly<Record<string, ModelParameterAdvertisement | null>>;
 }>;
 
 async function resolvePlanInputs(input: Omit<ResolveTextExecutionPlansInput, "operationPrompts">): Promise<ResolvedPlanInputs> {
@@ -198,7 +202,14 @@ async function resolvePlanInputs(input: Omit<ResolveTextExecutionPlansInput, "op
   const parameters = applyEffectiveOutputCap(requestedParameters, sharedMaxOutputTokens);
   const presetSystemPrompt = preset?.systemPrompt ?? "";
   const configHash = preset ? sha256(stableStringify(config)) : null;
-  return freeze({ profile, selection, preset, configHash, candidates: freeze(candidates), parameters, presetSystemPrompt });
+  const modelAdvertisements = Object.fromEntries(ids.map((modelId) => [
+    modelId,
+    byId.get(modelId)?.responseFormatAdvertisement ?? null
+  ]));
+  return freeze({
+    profile, selection, preset, configHash, candidates: freeze(candidates), parameters, presetSystemPrompt,
+    modelAdvertisements: freeze(modelAdvertisements)
+  });
 }
 
 function createRouteBasis(inputs: ResolvedPlanInputs): TextExecutionRouteBasis {
@@ -237,9 +248,10 @@ export async function resolveTextExecutionRouteBasis(input: Omit<ResolveTextExec
  */
 export async function resolveTextExecutionPlans(input: ResolveTextExecutionPlansInput): Promise<ResolvedTextExecutionPlans> {
   const entries = operationEntries(input.operationPrompts);
-  const routeBasis = await resolveTextExecutionRouteBasis(input);
+  const resolved = await resolvePlanInputs(input);
+  const routeBasis = createRouteBasis(resolved);
   const plans = Object.fromEntries(entries.map(([name, operationPrompt]) => [name, deriveTextExecutionPlan(routeBasis, operationPrompt)]));
-  return deepFreeze({ plans });
+  return deepFreeze({ routeBasis, plans, modelAdvertisements: resolved.modelAdvertisements });
 }
 
 /** Compatibility API for callers that have exactly one operation prompt. */

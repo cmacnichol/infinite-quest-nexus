@@ -13,6 +13,52 @@ export const providerOutputSchemaOperationV2Schema = z.enum([
 ]);
 export type ProviderOutputSchemaOperationV2 = z.infer<typeof providerOutputSchemaOperationV2Schema>;
 
+/**
+ * Logical invocation identities stay separate from provider envelope names.
+ * Initial and repair calls can share one envelope while retaining different
+ * frozen prompts, plan hashes, and audit identities.
+ */
+export const responseContractOperationV2Schema = z.enum([
+  "story_generation", "story_recovery", "story_choice_repair", "event_extension", "scene_coverage_rewrite",
+  "story_continuity_review", "story_continuity_repair", "rpg_assessment", "event_trigger_before",
+  "event_trigger_after", "scene_coverage_validation", "event_coverage_validation",
+  "world_outline", "world_outline_repair", "world_seed_character", "world_seed_character_repair",
+  "standalone_character", "standalone_character_repair", "character_organizer", "character_organizer_repair",
+  "source_extraction", "source_extraction_repair", "source_synthesis", "source_synthesis_repair",
+  "source_character", "source_character_repair", "illustration_prompt_refinement"
+]);
+export type ResponseContractOperationV2 = z.infer<typeof responseContractOperationV2Schema>;
+
+export const directAuthoringTextOperationV2Schema = z.enum([
+  "worldOutline", "worldOutlineRepair", "seedCharacter", "seedCharacterRepair",
+  "standaloneCharacter", "standaloneCharacterRepair", "organizer", "organizerRepair"
+]);
+export type DirectAuthoringTextOperationV2 = z.infer<typeof directAuthoringTextOperationV2Schema>;
+
+const directAuthoringContractIdentity = {
+  worldOutline: { operation: "world_outline", schemaOperation: "world_outline" },
+  worldOutlineRepair: { operation: "world_outline_repair", schemaOperation: "world_outline" },
+  seedCharacter: { operation: "world_seed_character", schemaOperation: "world_seed_character" },
+  seedCharacterRepair: { operation: "world_seed_character_repair", schemaOperation: "world_seed_character" },
+  standaloneCharacter: { operation: "standalone_character", schemaOperation: "standalone_character" },
+  standaloneCharacterRepair: { operation: "standalone_character_repair", schemaOperation: "standalone_character" },
+  organizer: { operation: "character_organizer", schemaOperation: "character_organizer" },
+  organizerRepair: { operation: "character_organizer_repair", schemaOperation: "character_organizer" }
+} as const satisfies Record<DirectAuthoringTextOperationV2, Readonly<{
+  operation: ResponseContractOperationV2;
+  schemaOperation: ProviderOutputSchemaOperationV2;
+}>>;
+
+export function directAuthoringResponseContractIdentity(operationValue: unknown): Readonly<{
+  operation: ResponseContractOperationV2;
+  schemaOperation: ProviderOutputSchemaOperationV2;
+  invocationKey: `${ProviderOutputSchemaOperationV2}:nonstream`;
+}> {
+  const operation = directAuthoringTextOperationV2Schema.parse(operationValue);
+  const identity = directAuthoringContractIdentity[operation];
+  return Object.freeze({ ...identity, invocationKey: `${identity.schemaOperation}:nonstream` });
+}
+
 export type ProviderOutputSchemaV2 = Readonly<{
   operation: ProviderOutputSchemaOperationV2;
   version: string;

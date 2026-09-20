@@ -7,8 +7,12 @@ import type { AuthoringClaim, AuthoringExecutionRepository } from "../../package
 import type { AuthoringExecutionSnapshot } from "../../packages/application/src/authoring/types.js";
 import { authoringExecutionSnapshotSchema } from "../../packages/contracts/src/authoring.js";
 import { normalizeTextSelection } from "../../packages/contracts/src/provider-selection.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import type { SchemaVerificationV2 } from "../../packages/contracts/src/text-response-format.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
 import { prepareAuthoringTextExecution, prepareDirectAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { expandWorldCharacterSeed } from "../../services/runtime/src/provider-world-generation-adapter.js";
 
@@ -93,12 +97,35 @@ describe("executeAuthoringStage", () => {
   });
 
   it("uses explicit direct models without preset lookup and resolves explicit preset aliases", async () => {
+    const profileId = "22222222-2222-4222-8222-222222222222";
     const getPreset = vi.fn(async ({ slug }: { slug: string }) => ({ slug, name: slug, versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["preset-model"] }, systemPrompt: `${slug} instructions.` }));
-    const discoverModels = vi.fn(async ({ modelIds }: { modelIds: readonly string[] }) => modelIds.map((id) => ({ id, contextWindowTokens: 8192, maxOutputTokens: 1024 })));
+    const discoverModels = vi.fn(async ({ modelIds }: { modelIds: readonly string[] }) => modelIds.map((id) => ({
+      id, contextWindowTokens: 8192, maxOutputTokens: 1024,
+      responseFormatAdvertisement: {
+        supportedParameters: ["response_format", "structured_outputs"],
+        discoveredAt: "2026-09-20T00:00:00.000Z"
+      }
+    })));
     const captured: Array<{ plan: { selection: unknown } }> = [];
     const execute = vi.fn(async (input: { plan: { selection: unknown } }) => { captured.push(input); return providerResult("{}"); });
-    const options = { nativePresetPlansEnabled: true, preparedExecutor: { execute }, loadAuthority: async () => ({ id: "text-1", providerRole: "text" as const, authorityRevision: "authority" }), ports: { resolvePreset: getPreset, discoverModels } };
-    const execution = { ...descriptor, name: "Text", providerRole: "text" as const, providerType: "openrouter" as const, executionRevision: "ordinary", authorityRevision: "authority", textSelection: { kind: "openrouter_preset" as const, slug: "inherited" }, execute: async () => providerResult("{}") };
+    const verification: SchemaVerificationV2 = {
+      version: 2, providerType: "openrouter", endpointIdentity: "native-endpoint", model: "explicit-model",
+      routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+      operation: "world_outline", schemaHash: getProviderOutputSchemaV2("world_outline").schemaHash,
+      streaming: false, verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+      providerRoutingSlugs: ["openai"], nativeOpenTrackerObjects: true
+    };
+    const options = {
+      nativePresetPlansEnabled: true, preparedExecutor: { execute },
+      loadAuthority: async () => ({ id: profileId, providerRole: "text" as const, endpointIdentity: "native-endpoint", authorityRevision: "authority" }),
+      ports: { resolvePreset: getPreset, discoverModels },
+      responseFormatCapabilities: createProviderResponseFormatCapabilities({ records: [verification], now: () => Date.parse("2026-09-20T00:00:00.000Z") })
+    };
+    const execution = {
+      ...descriptor, id: profileId, endpointIdentity: "native-endpoint", name: "Text", providerRole: "text" as const,
+      providerType: "openrouter" as const, executionRevision: "ordinary", authorityRevision: "authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "inherited" }, execute: async () => providerResult("{}")
+    };
     const direct = await prepareDirectAuthoringTextExecution({ ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create a world." }, options, selectionOverride: { kind: "model", modelId: "explicit-model" } });
     await direct!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "{}" } });
     expect(getPreset).not.toHaveBeenCalled();

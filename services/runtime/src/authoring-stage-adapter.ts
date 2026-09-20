@@ -109,7 +109,7 @@ function planMatchesHash(plan: TextExecutionPlan, sha256: (value: string) => str
   return sha256(stableStringify(withoutHash)) === planHash;
 }
 
-function operationFor(stage: LoadedAuthoringStage, repair: boolean): string {
+function operationFor(stage: LoadedAuthoringStage, repair: boolean): AuthoringTextOperation {
   if (stage.stageKey === "world") return repair ? "worldOutlineRepair" : "worldOutline";
   if (stage.stageKey.startsWith("character:")) {
     return stage.parentOutputs.some((output) => output.kind === "outline")

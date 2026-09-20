@@ -1,0 +1,196 @@
+import { createHash } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
+import { getProviderOutputSchemaV2, type SchemaVerificationV2 } from "@infinite-quest/contracts";
+import { bindFrozenResponseContractInvocationV2 } from "../../packages/contracts/src/generation-response-contract.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
+import { prepareDirectAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
+
+const PROFILE_ID = "11111111-1111-4111-8111-111111111111";
+const ENDPOINT_ID = "endpoint-identity";
+const MODEL_ID = "openai/test-model";
+const REGISTRY_DIGEST = createHash("sha256").update("direct-authoring-verifications").digest("hex");
+const CONFIGURATION = { providerRouting: { only: ["openai"] } };
+const ROUTE_CONFIG_HASH = capabilityRouteConfigHash(CONFIGURATION);
+const ADVERTISEMENT = {
+  supportedParameters: ["response_format", "structured_outputs"],
+  discoveredAt: "2026-09-20T00:00:00.000Z"
+} as const;
+
+const operationCases = [
+  ["worldOutline", "world_outline", "world_outline", "infinite_quest_world_outline_v1"],
+  ["worldOutlineRepair", "world_outline_repair", "world_outline", "infinite_quest_world_outline_v1"],
+  ["seedCharacter", "world_seed_character", "world_seed_character", "infinite_quest_world_seed_character_v1"],
+  ["seedCharacterRepair", "world_seed_character_repair", "world_seed_character", "infinite_quest_world_seed_character_v1"],
+  ["standaloneCharacter", "standalone_character", "standalone_character", "infinite_quest_standalone_character_v1"],
+  ["standaloneCharacterRepair", "standalone_character_repair", "standalone_character", "infinite_quest_standalone_character_v1"],
+  ["organizer", "character_organizer", "character_organizer", "infinite_quest_character_organizer_v1"],
+  ["organizerRepair", "character_organizer_repair", "character_organizer", "infinite_quest_character_organizer_v1"]
+] as const;
+
+function providerResult(): ProviderResult {
+  return {
+    content: "{}", responseId: "response", finishReason: "stop", outputLimited: false,
+    modelInstanceId: MODEL_ID, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    reportedCost: null, rawMetadata: {}
+  };
+}
+
+function execution(selection: { kind: "model"; modelId: string } | { kind: "openrouter_preset"; slug: string } | undefined) {
+  return {
+    id: PROFILE_ID, name: "Text", providerRole: "text" as const, providerType: "openrouter" as const,
+    model: MODEL_ID, contextWindowTokens: 16_384, maxOutputTokens: 2_048, temperature: 0.4,
+    requestTimeoutMs: 30_000, endpointIdentity: ENDPOINT_ID, configuration: CONFIGURATION,
+    executionRevision: "profile-revision", authorityRevision: "authority-revision",
+    ...(selection === undefined ? {} : { textSelection: selection }),
+    execute: vi.fn(async () => { throw new Error("legacy execution must not run"); })
+  };
+}
+
+function verification(operation: Parameters<typeof getProviderOutputSchemaV2>[0]): SchemaVerificationV2 {
+  return {
+    version: 2, providerType: "openrouter", endpointIdentity: ENDPOINT_ID, model: MODEL_ID,
+    routeConfigHash: ROUTE_CONFIG_HASH, adapterProtocol: "text-schema-adapter-v2", operation,
+    schemaHash: getProviderOutputSchemaV2(operation).schemaHash, streaming: false,
+    verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+    providerRoutingSlugs: ["openai"], nativeOpenTrackerObjects: true
+  };
+}
+
+function directCapabilities() {
+  return createProviderResponseFormatCapabilities({
+    records: [...new Set(operationCases.map(([, , schemaOperation]) => schemaOperation))].map(verification),
+    registryDigest: REGISTRY_DIGEST,
+    now: () => Date.parse("2026-09-20T00:00:00.000Z")
+  });
+}
+
+function operationPrompts() {
+  return Object.fromEntries(operationCases.map(([operation]) => [operation, `Operation prompt for ${operation}.`]));
+}
+
+function discoveryPorts(preset = false) {
+  return {
+    resolvePreset: vi.fn(async () => ({
+      slug: "authoring", name: "Authoring", versionId: "preset-v1", version: 1,
+      configHash: "a".repeat(64), config: { models: [MODEL_ID] }, systemPrompt: "Preset instructions."
+    })),
+    discoverModels: vi.fn(async () => [{
+      id: MODEL_ID, contextWindowTokens: 16_384, maxOutputTokens: 2_048,
+      ...(preset ? {} : { responseFormatAdvertisement: ADVERTISEMENT })
+    }])
+  };
+}
+
+describe("direct authoring v2 response contracts", () => {
+  it.each([
+    ["inherited concrete Model", undefined],
+    ["explicit concrete Model", { kind: "model" as const, modelId: MODEL_ID }]
+  ])("requires exact schemas for every %s operation and passes the canonical body unchanged", async (_label, selectionOverride) => {
+    const execute = vi.fn(async (_input: unknown) => providerResult());
+    const provider = execution(selectionOverride === undefined ? undefined : { kind: "openrouter_preset", slug: "ignored" });
+    const ports = discoveryPorts();
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: provider, operationPrompts: operationPrompts(),
+      ...(selectionOverride === undefined ? {} : { selectionOverride }),
+      options: {
+        nativePresetPlansEnabled: true, preparedExecutor: { execute },
+        loadAuthority: async () => ({ id: PROFILE_ID, providerRole: "text", authorityRevision: "authority-revision", endpointIdentity: ENDPOINT_ID }),
+        ports, responseFormatCapabilities: directCapabilities()
+      } as never
+    });
+
+    expect(prepared).not.toBeNull();
+    for (const [operation, semanticOperation, schemaOperation, schemaName] of operationCases) {
+      await prepared!.execute({ operation, request: { systemPrompt: "untrusted", input: `input:${operation}`, responseFormatFallback: "forbid" } });
+      const invocation = execute.mock.calls.at(-1)![0] as any;
+      const body = JSON.parse(invocation.preparedRequest.body);
+      expect(invocation.operation).toBe(semanticOperation);
+      expect(invocation.invocationKey).toBe(`${schemaOperation}:nonstream`);
+      expect(invocation.frozenResponseContracts.contracts[`${schemaOperation}:nonstream`]).toMatchObject({
+        operation: schemaOperation, admission: { basis: "model_verified" }
+      });
+      expect(invocation.frozenResponseContracts.queuedPolicy.authority.routeBasisHash)
+        .toBe(invocation.routeBasis.routeBasisHash);
+      expect(body.response_format).toEqual({
+        type: "json_schema",
+        json_schema: { name: schemaName, strict: true, schema: getProviderOutputSchemaV2(schemaOperation).schema }
+      });
+      expect(invocation.preparedRequest.payloadHash).toBe(createHash("sha256").update(invocation.preparedRequest.body).digest("hex"));
+      expect(invocation.request.systemPrompt).toBe(`Operation prompt for ${operation}.`);
+    }
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(ports.resolvePreset).not.toHaveBeenCalled();
+  });
+
+  it("trusts every preset schema without consulting the direct capability gate and composes each prompt once", async () => {
+    const execute = vi.fn(async (_input: unknown) => providerResult());
+    const eligibilityV2 = vi.fn(() => { throw new Error("preset capability gate must not run"); });
+    const ports = discoveryPorts(true);
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: execution({ kind: "openrouter_preset", slug: "authoring" }),
+      operationPrompts: operationPrompts(),
+      options: {
+        nativePresetPlansEnabled: true, preparedExecutor: { execute },
+        loadAuthority: async () => ({ id: PROFILE_ID, providerRole: "text", authorityRevision: "authority-revision", endpointIdentity: ENDPOINT_ID }),
+        ports,
+        responseFormatCapabilities: { ...directCapabilities(), eligibilityV2 }
+      } as never
+    });
+
+    for (const [operation, semanticOperation, schemaOperation, schemaName] of operationCases) {
+      await prepared!.execute({ operation, request: { systemPrompt: "untrusted", input: `input:${operation}`, responseFormatFallback: "forbid" } });
+      const invocation = execute.mock.calls.at(-1)![0] as any;
+      const bodyText = invocation.preparedRequest.body as string;
+      const body = JSON.parse(bodyText);
+      expect(invocation.operation).toBe(semanticOperation);
+      expect(invocation.invocationKey).toBe(`${schemaOperation}:nonstream`);
+      expect(invocation.frozenResponseContracts.contracts[`${schemaOperation}:nonstream`].admission).toEqual({ mode: "json_schema", basis: "preset_trusted" });
+      expect(body.response_format.json_schema.name).toBe(schemaName);
+      expect(bodyText.match(/Preset instructions\./g)).toHaveLength(1);
+      expect(bodyText.match(new RegExp(`Operation prompt for ${operation}\\.`, "g"))).toHaveLength(1);
+    }
+    expect(eligibilityV2).not.toHaveBeenCalled();
+    expect(ports.resolvePreset).toHaveBeenCalledTimes(1);
+    expect(ports.discoverModels).toHaveBeenCalledTimes(1);
+
+    const invocation = execute.mock.calls[0]![0] as any;
+    expect(() => bindFrozenResponseContractInvocationV2({
+      frozen: { ...invocation.frozenResponseContracts, contracts: {} },
+      routeBasis: invocation.routeBasis, plan: invocation.plan,
+      invocationKey: invocation.invocationKey, operation: invocation.operation,
+      trustedOperationPrompt: invocation.trustedOperationPrompt
+    })).toThrow(/invalid|unavailable/i);
+    expect(() => bindFrozenResponseContractInvocationV2({
+      frozen: invocation.frozenResponseContracts, routeBasis: invocation.routeBasis,
+      plan: { ...invocation.plan, prompt: "tampered" },
+      invocationKey: invocation.invocationKey, operation: invocation.operation,
+      trustedOperationPrompt: invocation.trustedOperationPrompt
+    })).toThrow(/basis or plan identity changed|invalid/i);
+    await expect(prepared!.execute({
+      operation: "unknown" as never,
+      request: { systemPrompt: "untrusted", input: "{}", responseFormatFallback: "forbid" }
+    })).rejects.toBeTruthy();
+    expect(execute).toHaveBeenCalledTimes(operationCases.length);
+  });
+
+  it("blocks an unsupported inherited Model before either execution seam runs", async () => {
+    const preparedExecute = vi.fn(async () => providerResult());
+    const provider = execution(undefined);
+    const ports = discoveryPorts();
+    ports.discoverModels.mockResolvedValue([{ id: MODEL_ID, contextWindowTokens: 16_384, maxOutputTokens: 2_048,
+      responseFormatAdvertisement: { supportedParameters: ["response_format"], discoveredAt: ADVERTISEMENT.discoveredAt } }] as never);
+
+    await expect(prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: provider, operationPrompts: { worldOutline: "Create a world." },
+      options: {
+        nativePresetPlansEnabled: true, preparedExecutor: { execute: preparedExecute },
+        loadAuthority: async () => ({ id: PROFILE_ID, providerRole: "text", authorityRevision: "authority-revision", endpointIdentity: ENDPOINT_ID }),
+        ports, responseFormatCapabilities: directCapabilities()
+      } as never
+    })).rejects.toThrow(/verified response contract|required response contract/i);
+    expect(preparedExecute).not.toHaveBeenCalled();
+    expect(provider.execute).not.toHaveBeenCalled();
+  });
+});
