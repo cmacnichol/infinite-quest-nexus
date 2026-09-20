@@ -905,7 +905,7 @@ export function bindCampaignResponseContract(
   const contract = responseContractForOperation(job, operation, typeof request.onChunk === "function");
   if (!contract) {
     if (!v2 && (operation === "rpg_assessment" || operation === "event_trigger_before"
-      || operation === "event_trigger_after" || operation === "scene_coverage_validation")) return request;
+      || operation === "event_trigger_after" || operation === "scene_coverage_validation" || operation === "event_coverage_validation")) return request;
     throw Object.assign(new Error(`Frozen response-contract closure does not permit ${operation}.`), {
       code: "response_contract_unavailable"
     });
@@ -2975,7 +2975,7 @@ async function executeLoadedGeneration(
       let coverageOutputLimited = true;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
+          callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
             input: buildSceneCoveragePrompt(safeAction, parsedNarration)
           }));

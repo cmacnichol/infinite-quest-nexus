@@ -100,6 +100,10 @@ function dependencies(ledger: ReturnType<typeof auditLedger>) {
 }
 
 describe("generation response-contract executor operation matrix", () => {
+  it("preserves historical v1 event coverage without a contract", () => {
+    const legacy = job();
+    expect(bindCampaignResponseContract(legacy, "event_coverage_validation", request()).responseContract).toBeUndefined();
+  });
   it.each([
     ["RPG assessment", "rpg_assessment", "rpg_assessment:nonstream"],
     ["before trigger", "event_trigger_before", "event_trigger_before:nonstream"],
