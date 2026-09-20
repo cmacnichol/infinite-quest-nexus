@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
+import { buildSourceExtractionPrompt, buildSourceWorldPrompt, CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 import { normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
 import { planSourceChunks } from "../../packages/domain/src/source-authoring-budget.js";
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../packages/application/src/authoring/ports.js";
@@ -10,7 +10,7 @@ import { normalizeTextSelection } from "../../packages/contracts/src/provider-se
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import type { SchemaVerificationV2 } from "../../packages/contracts/src/text-response-format.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
-import { prepareAuthoringTextExecution, prepareDirectAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { prepareAuthoringResponseContractExecution, prepareAuthoringTextExecution, prepareDirectAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
@@ -447,6 +447,106 @@ describe("executeAuthoringStage", () => {
 
     expect(requestInput).toMatchObject({ acceptedFacts: [expect.objectContaining({ id: iris.id })], selectedCharacterFactIds: [iris.id], reviewGeneration: 3 });
     expect(output).toMatchObject({ kind: "source_world", proposal: { world: { title: "chapter.txt" }, playableCharacters: [expect.objectContaining({ name: "Iris", profile: expect.objectContaining({ appearance: expect.objectContaining({ clothing: "blue coat", apparentAge: "" }) }) })] } });
+  });
+
+  it.each([
+    ["preset", "faithful", "extraction"], ["preset", "expand", "extraction"],
+    ["preset", "faithful", "synthesis"], ["preset", "expand", "synthesis"],
+    ["preset", "faithful", "character"], ["preset", "expand", "character"],
+    ["model", "faithful", "extraction"], ["model", "expand", "extraction"],
+    ["model", "faithful", "synthesis"], ["model", "expand", "synthesis"],
+    ["model", "faithful", "character"], ["model", "expand", "character"]
+  ] as const)("dispatches bound %s %s source %s initial and repair contracts through the actual stage caller", async (routeKind, mode, consumer) => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris wears a blue coat.", `job-${mode}-${consumer}`);
+    const iris = {
+      id: "source-fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const,
+      citations: [{ sourceId: source.id, paragraphId: source.paragraphs[0]!.id, start: 0, end: source.paragraphs[0]!.end, quote: source.text }]
+    };
+    const selection = {
+      source, boundaryParagraphId: source.paragraphs[0]!.id, acceptedFacts: [iris], selectedCharacterFactIds: [iris.id],
+      characterIdentityGroups: [{ representativeFactId: iris.id, factIds: [iris.id] }], mode, reviewGeneration: 3
+    };
+    const extractionPrompt = (repair: boolean) => buildSourceExtractionPrompt({
+      instructions: "", sourceText: "", mode,
+      chunk: { sourceRange: { start: 0, end: 0 }, paragraphSpans: [] }, repair
+    }).systemPrompt;
+    const worldPrompt = (repair: boolean) => buildSourceWorldPrompt({
+      instructions: "", reviewGeneration: 0,
+      selection: { source: { id: "snapshot", name: "snapshot", sha256: "0".repeat(64) }, boundaryParagraphId: "snapshot", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: [], mode },
+      repair
+    }).systemPrompt;
+    const initialOperation = consumer === "extraction" ? "sourceExtraction" : consumer === "synthesis" ? "sourceSynthesis" : "sourceCharacter";
+    const repairOperation = consumer === "extraction" ? "sourceExtractionRepair" : consumer === "synthesis" ? "sourceSynthesisRepair" : "sourceCharacterRepair";
+    const initialPrompt = consumer === "extraction" ? extractionPrompt(false) : worldPrompt(false);
+    const repairPrompt = consumer === "extraction" ? extractionPrompt(true) : worldPrompt(true);
+    const nativeProvider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000031", name: "Native source", providerRole: "text" as const,
+      providerType: "openrouter" as const, model: "source-model", endpointIdentity: "source-endpoint", executionRevision: "ordinary-source",
+      authorityRevision: "authority-source", textSelection: routeKind === "preset" ? { kind: "openrouter_preset" as const, slug: "source" } : { kind: "model" as const, modelId: "source-model" },
+      execute: async () => { throw new Error("legacy source execution must not run"); }
+    };
+    const schemaOperation = consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character";
+    const verification: SchemaVerificationV2 = {
+      version: 2, providerType: "openrouter", endpointIdentity: "source-endpoint", model: "source-model",
+      routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+      operation: schemaOperation, schemaHash: getProviderOutputSchemaV2(schemaOperation).schemaHash,
+      streaming: false, verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+      providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+    };
+    const resolvePreset = vi.fn(async () => ({ slug: "source", name: "Source", versionId: "source-v1", version: 1, configHash: "a".repeat(64), config: { models: ["source-model"] }, systemPrompt: "Frozen source preset." }));
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId: "owner-1", execution: nativeProvider,
+      operationPrompts: { [initialOperation]: initialPrompt, [repairOperation]: repairPrompt },
+      ports: {
+        resolvePreset,
+        discoverModels: async () => [{ id: "source-model", contextWindowTokens: 8192, maxOutputTokens: 1024,
+          ...(routeKind === "model" ? { responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" } } : {}) }]
+      },
+      ...(routeKind === "model" ? { responseFormatCapabilities: createProviderResponseFormatCapabilities({ records: [verification], now: () => Date.parse("2026-09-20T00:00:00.000Z") }) } : {})
+    });
+    const fullSnapshot = createAuthoringExecutionSnapshot(nativeProvider, {}, {
+      source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION
+    }, sha256, prepared);
+    const chunk = planSourceChunks({
+      source, boundaryParagraphId: source.paragraphs[0]!.id, systemPrompt: initialPrompt, instructions: "Use reviewed facts.",
+      budget: { contextWindowTokens: descriptor.contextWindowTokens, maxOutputTokens: descriptor.maxOutputTokens, countTokens: (value) => new TextEncoder().encode(value).length }
+    })[0]!;
+    const calls: any[] = [];
+    const preparedExecutor = vi.fn(async (input: any) => {
+      calls.push(input);
+      if (calls.length === 1) return providerResult("not json");
+      if (consumer === "extraction") return providerResult(JSON.stringify({ facts: [] }));
+      if (consumer === "synthesis") return providerResult(JSON.stringify({ fields: [], characterFields: [] }));
+      return providerResult(JSON.stringify({ fields: [], characterFields: [{ selectedCharacterFactId: iris.id, fields: [{ path: "profile.appearance.clothing", value: "blue coat", supportingFactIds: [iris.id] }] }] }));
+    });
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => nativeProvider } as never, sha256, preparedExecutor: { execute: preparedExecutor }
+    });
+    const stageKey = consumer === "extraction" ? `source:chunk:${chunk.id}` : consumer === "synthesis" ? "source:synthesis" : `source:character:${iris.id}`;
+    const output = await dispatch(runtimeStage({
+      input: { kind: "story_source", idempotencyKey: `source-${mode}-${consumer}`, target: { kind: "new_world" }, name: source.name, text: source.text, mode, boundaryParagraphId: source.paragraphs[0]!.id, instructions: "Use reviewed facts." },
+      snapshot: fullSnapshot, stageKey,
+      ...(consumer === "extraction" ? { parentOutputs: [{ kind: "source_plan", chunks: [{ ...chunk, sourceRange: { ...chunk.sourceRange }, spans: chunk.spans.map((span) => ({ ...span })) }] }] } : { sourceSelection: selection }),
+      jobId: `job-${mode}-${consumer}`
+    }));
+    expect(output.kind).toBe(consumer === "extraction" ? "source_extraction" : "source_world");
+    expect(calls.map((call) => call.operation)).toEqual([
+      consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character",
+      consumer === "extraction" ? "source_extraction_repair" : consumer === "synthesis" ? "source_synthesis_repair" : "source_character_repair"
+    ]);
+    expect(calls.map((call) => call.invocationKey)).toEqual([
+      `${consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character"}:nonstream`,
+      `${consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character"}:nonstream`
+    ]);
+    for (const [index, call] of calls.entries()) {
+      const body = JSON.parse(call.preparedRequest.body);
+      expect(body.response_format.json_schema.name).toBe(getProviderOutputSchemaV2(schemaOperation).name);
+      expect(body.messages[0].content).toBe(index === 0 ? prepared.plans[initialOperation]!.prompt : prepared.plans[repairOperation]!.prompt);
+      expect(body.messages.filter((message: any) => message.content === (index === 0 ? prepared.plans[initialOperation]!.prompt : prepared.plans[repairOperation]!.prompt))).toHaveLength(1);
+      expect(call.preparedRequest.budgetAudit).toMatchObject({ countMode: "estimated", outputReserveTokens: 1024 });
+      expect(call.frozenResponseContracts.contracts[`${schemaOperation}:nonstream`].admission.basis).toBe(routeKind === "model" ? "model_verified" : "preset_trusted");
+    }
+    expect(resolvePreset).toHaveBeenCalledTimes(routeKind === "preset" ? 1 : 0);
   });
 
   it.each(["source:plan", "source:chunk:source-chunk:0"])("classifies an unavailable resumed %s provider as a source failure", async (stageKey) => {

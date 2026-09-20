@@ -105,6 +105,8 @@ export type AuthoringWorkerProviderCollaborators = Readonly<{
   resolution: Pick<ProviderResolutionPort, "resolveDirect">;
   prompts: WorldGenerationPromptPort;
   promptTools: ProviderPromptTools;
+  /** Disabled by default until the Task 5 prepared route transport is composed. */
+  authoringTextPlans?: DirectAuthoringTextPlanOptions;
 }>;
 
 export type CharacterOrganizationProviderCollaborators = ProviderConsumerRuntime & Readonly<{

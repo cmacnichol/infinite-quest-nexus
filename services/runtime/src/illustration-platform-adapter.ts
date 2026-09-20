@@ -17,7 +17,11 @@ import type {
   RuntimeImageExecution,
   RuntimeTextExecution
 } from "./provider-credential-transport-adapter.js";
-import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
+import {
+  serializePreparedAuthoringRequest,
+  type PreparedAuthoringResponseContractExecution,
+  type PreparedAuthoringTextExecutor
+} from "./authoring-text-execution-preparation.js";
 
 export type ImageProviderAdapterDependencies = Readonly<{
   loadImageExecution(
@@ -66,6 +70,16 @@ function sanitizedProviderMetadata(
       .map(([key, nested]) => [key, sanitize(nested)]));
   };
   return sanitize(metadata ?? {}) as Readonly<Record<string, unknown>>;
+}
+
+function assertIllustrationPromptEnvelope(content: string): void {
+  let value: unknown;
+  try { value = JSON.parse(content); } catch { throw new Error("Prompt refinement did not return the required JSON envelope."); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Prompt refinement did not return the required JSON envelope.");
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 1 || typeof record.image_prompt !== "string") {
+    throw new Error("Prompt refinement did not return the required image_prompt envelope.");
+  }
 }
 
 function imageArtifact(artifact: ImageProviderArtifact): IllustrationImageArtifact {
@@ -235,12 +249,42 @@ export function createIllustrationPromptRefinementAdapter(
                 code: "prepared_text_execution_unavailable"
               });
             }
+            if (!request.textExecutionContract) {
+              return dependencies.preparedTextExecutor.execute({
+                plan: request.textExecutionPlan,
+                operation: "illustration_prompt_refinement",
+                ownerUserId: request.ownerUserId,
+                providerProfileId: request.providerProfileId,
+                request: providerRequest
+              });
+            }
+            const prepared: PreparedAuthoringResponseContractExecution = {
+              routeBasis: request.textExecutionContract.routeBasis,
+              plans: { illustrationPromptRefinement: request.textExecutionPlan },
+              modelAdvertisements: {},
+              frozenResponseContracts: request.textExecutionContract.frozenResponseContracts,
+              trustedOperationPrompts: { illustrationPromptRefinement: request.textExecutionContract.trustedOperationPrompt }
+            };
+            const preparedRequest = serializePreparedAuthoringRequest({
+              execution: {
+                providerType: request.textExecutionContract.providerType,
+                configuration: request.textExecutionContract.requestConfiguration
+              },
+              prepared,
+              operation: "illustrationPromptRefinement",
+              request: providerRequest
+            });
             return dependencies.preparedTextExecutor.execute({
               plan: request.textExecutionPlan,
               operation: "illustration_prompt_refinement",
+              invocationKey: "illustration_prompt_refinement:nonstream",
+              frozenResponseContracts: request.textExecutionContract.frozenResponseContracts,
+              routeBasis: request.textExecutionContract.routeBasis,
+              trustedOperationPrompt: request.textExecutionContract.trustedOperationPrompt,
               ownerUserId: request.ownerUserId,
               providerProfileId: request.providerProfileId,
-              request: providerRequest
+              request: { ...providerRequest, systemPrompt: request.textExecutionPlan.prompt },
+              preparedRequest
             });
           })()
           : await dependencies.loadTextExecution(
@@ -254,6 +298,7 @@ export function createIllustrationPromptRefinementAdapter(
           request.providerProfileId,
           true,
         );
+        if (request.textExecutionContract) assertIllustrationPromptEnvelope(result.content);
         return {
           providerRole: "text",
           providerProfileId: request.providerProfileId,

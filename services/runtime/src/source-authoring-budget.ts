@@ -12,6 +12,7 @@ import type { RuntimeProviderExecutionPort } from "./provider-credential-transpo
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerTransportErrorDetails, ProviderHttpError } from "../../../packages/story-engine/src/providers.js";
 import type { AuthoringDiagnosticContext } from "./authoring-response-adapter.js";
+import { estimatedInputSafetyAllowanceTokens, estimateStoryTokens } from "../../../packages/story-engine/src/index.js";
 
 const SOURCE_CONTEXT_FRACTION = 0.8;
 
@@ -106,6 +107,7 @@ function legacyProfile(execution: RuntimeTextExecution): LegacyProviderRequestPr
 
 export type PreparedSourceAuthoringRequest = Readonly<{
   request: ProviderRequest;
+  preparedRequest: PreparedProviderRequest;
   body: string;
   payloadHash: string;
   byteLength: number;
@@ -121,6 +123,15 @@ export type RuntimeSourceAuthoringRequestBudget = Readonly<{
   prepareRepair(request: ProviderRequest): PreparedSourceAuthoringRequest;
   executeInitial(request: ProviderRequest): Promise<ProviderResult>;
   executeRepair(request: ProviderRequest): Promise<ProviderResult>;
+}>;
+
+export type NativeSourceAuthoringRequestExecution = Readonly<{
+  renderInitial(request: ProviderRequest): PreparedProviderRequest;
+  renderRepair(request: ProviderRequest): PreparedProviderRequest;
+  prepareInitial(request: ProviderRequest): PreparedProviderRequest;
+  prepareRepair(request: ProviderRequest): PreparedProviderRequest;
+  executeInitial(request: ProviderRequest, prepared: PreparedProviderRequest): Promise<ProviderResult>;
+  executeRepair(request: ProviderRequest, prepared: PreparedProviderRequest): Promise<ProviderResult>;
 }>;
 
 function sourceInputLimit(contextWindowTokens: number, maxOutputTokens: number): number {
@@ -144,6 +155,7 @@ function toPrepared(
   }
   return Object.freeze({
     request,
+    preparedRequest: prepared,
     body: prepared.body,
     payloadHash: prepared.payloadHash,
     byteLength,
@@ -164,7 +176,8 @@ function assertMeasuredLegacySourceRequest(request: ProviderRequest): void {
 export function createRuntimeSourceAuthoringRequestBudget(
   execution: RuntimeTextExecution,
   verifiedModelContextWindowTokens?: number,
-  diagnosticContext?: AuthoringDiagnosticContext
+  diagnosticContext?: AuthoringDiagnosticContext,
+  nativeExecution?: NativeSourceAuthoringRequestExecution
 ): RuntimeSourceAuthoringRequestBudget {
   const contextWindowTokens = resolveAuthoringContextWindowTokens(execution.contextWindowTokens, verifiedModelContextWindowTokens);
   const inputLimit = sourceInputLimit(contextWindowTokens, execution.maxOutputTokens);
@@ -172,14 +185,30 @@ export function createRuntimeSourceAuthoringRequestBudget(
   const budget: AuthoringBudget = Object.freeze({
     contextWindowTokens,
     maxOutputTokens: execution.maxOutputTokens,
-    countTokens: (body) => new TextEncoder().encode(body).length
+    countTokens: nativeExecution
+      ? (body) => {
+        const requestTokens = estimateStoryTokens(body);
+        return requestTokens + estimatedInputSafetyAllowanceTokens(requestTokens);
+      }
+      : (body) => new TextEncoder().encode(body).length
   });
   const prepareInitial = (request: ProviderRequest) => {
     assertMeasuredLegacySourceRequest(request);
-    return toPrepared(request, serializeLegacyProviderRequest(profile, request), inputLimit, false);
+    const prepared = nativeExecution?.prepareInitial(request) ?? serializeLegacyProviderRequest(profile, request);
+    const result = toPrepared(request, prepared, Number.MAX_SAFE_INTEGER, false);
+    if (budget.countTokens(result.body) > inputLimit) throw new RuntimeSourceAuthoringBudgetError("The complete serialized source authoring request exceeds its effective input budget.");
+    return result;
   };
   const prepareRepair = (request: ProviderRequest) => {
     assertMeasuredLegacySourceRequest(request);
+    if (nativeExecution) {
+      const rendered = nativeExecution.renderRepair(request);
+      const prepared = nativeExecution.prepareRepair(request);
+      const droppedRejectedResponse = request.rejectedResponse !== undefined && rendered.body !== prepared.body;
+      const result = toPrepared(request, prepared, Number.MAX_SAFE_INTEGER, droppedRejectedResponse);
+      if (budget.countTokens(result.body) > inputLimit) throw new RuntimeSourceAuthoringBudgetError("The complete serialized source authoring request exceeds its effective input budget.");
+      return result;
+    }
     try {
       return toPrepared(request, serializeLegacyProviderRequest(profile, request), inputLimit, false);
     } catch (error) {
@@ -190,19 +219,28 @@ export function createRuntimeSourceAuthoringRequestBudget(
   };
   let requestAttempt = 0;
   const execute = async (prepared: PreparedSourceAuthoringRequest, repair: boolean): Promise<ProviderResult> => {
-    if (!diagnosticContext) return execution.execute(prepared.request);
+    if (!diagnosticContext) {
+      return nativeExecution
+        ? (repair
+          ? nativeExecution.executeRepair(prepared.request, prepared.preparedRequest)
+          : nativeExecution.executeInitial(prepared.request, prepared.preparedRequest))
+        : execution.execute(prepared.request);
+    }
     const startedAt = Date.now();
     const context = { ...diagnosticContext, providerProfileId: execution.id, model: execution.model, providerType: execution.providerType, requestAttempt: ++requestAttempt, repair };
     let headersReceived = false;
     let providerResponseId: string | undefined;
     logger.info({ event: "authoring_provider_started", ...context, streaming: Boolean(prepared.request.onChunk), requestBytes: prepared.byteLength, maxOutputTokens: execution.maxOutputTokens, contextWindowTokens, requestTimeoutMs: execution.requestTimeoutMs, droppedRejectedResponse: prepared.droppedRejectedResponse });
     try {
-      const result = await execution.execute({ ...prepared.request, onResponseHeaders: (headers) => {
+      const requestWithHeaders = { ...prepared.request, onResponseHeaders: (headers: Parameters<NonNullable<ProviderRequest["onResponseHeaders"]>>[0]) => {
         headersReceived = true;
         providerResponseId = headers.providerResponseId;
         logger.info({ event: "authoring_provider_headers", ...context, ...headers, durationMs: Date.now() - startedAt });
         prepared.request.onResponseHeaders?.(headers);
-      } });
+      } };
+      const result = nativeExecution
+        ? await (repair ? nativeExecution.executeRepair(requestWithHeaders, prepared.preparedRequest) : nativeExecution.executeInitial(requestWithHeaders, prepared.preparedRequest))
+        : await execution.execute(requestWithHeaders);
       providerResponseId ??= /^[a-zA-Z0-9_-]{1,200}$/.test(result.responseId) ? result.responseId : undefined;
       logger.info({ event: "authoring_provider_completed", ...context, providerResponseId, durationMs: Date.now() - startedAt, finishReason: /^(stop|length|tool_calls|content_filter|max_tokens|end_turn)$/.test(result.finishReason) ? result.finishReason : "other", outputLimited: result.outputLimited, inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, totalTokens: result.usage.totalTokens, outputCharacters: result.content.length });
       return result;
@@ -217,7 +255,9 @@ export function createRuntimeSourceAuthoringRequestBudget(
     inputLimit,
     render: (request) => {
       assertMeasuredLegacySourceRequest(request);
-      return serializeLegacyProviderRequest(profile, request).body;
+      return (nativeExecution
+        ? (request.recoveryInput === undefined ? nativeExecution.renderInitial(request) : nativeExecution.renderRepair(request))
+        : serializeLegacyProviderRequest(profile, request)).body;
     },
     prepareInitial,
     prepareRepair,

@@ -1478,7 +1478,7 @@ integration("T17 durable continuity review", () => {
         operationPrompt,
         nativeIllustration,
       );
-      expect(prepared).toMatchObject({ version: 2, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMED_NATIVE_PROMPT") } });
+      expect(prepared).toMatchObject({ version: 3, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMED_NATIVE_PROMPT") } });
       frozenSnapshot = prepared;
       return prepared;
     });

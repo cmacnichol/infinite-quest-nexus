@@ -1,6 +1,18 @@
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../../packages/application/src/authoring/ports.js";
-import { authoringStageOutputSchema, type AuthoringExecutionSnapshot, type AuthoringStageOutput } from "../../../packages/application/src/authoring/types.js";
-import { textExecutionPlanSchema, type TextExecutionPlan } from "@infinite-quest/contracts";
+import { authoringExecutionSnapshotSchema, authoringStageOutputSchema, type AuthoringExecutionSnapshot, type AuthoringStageOutput } from "../../../packages/application/src/authoring/types.js";
+import {
+  authoringResponseContractIdentity,
+  authoringTextOperationV2Schema,
+  readFrozenResponseContractsV2,
+  readTextExecutionPlan,
+  readTextExecutionRouteBasis,
+  textExecutionPlanSchema,
+  type AuthoringTextOperationV2,
+  type FrozenResponseContractsV2,
+  type TextExecutionPlan,
+  type TextExecutionRouteBasis
+} from "@infinite-quest/contracts";
+import { bindFrozenResponseContractInvocationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 import type { AuthoringTextOperation } from "../../../packages/contracts/src/authoring.js";
 import { stableStringify } from "../../../packages/domain/src/text.js";
 import type { RuntimeProviderExecutionPort, RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
@@ -16,10 +28,16 @@ import { buildTemplateWorldPrompt } from "../../../packages/domain/src/world-tem
 import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../../packages/domain/src/authoring-prompts.js";
 import { sourceDocumentFromNormalizedText } from "../../../packages/domain/src/source-authoring.js";
 import { planSourceChunks } from "../../../packages/domain/src/source-authoring-budget.js";
-import { createRuntimeSourceAuthoringRequestBudget } from "./source-authoring-budget.js";
+import { createRuntimeSourceAuthoringRequestBudget, type NativeSourceAuthoringRequestExecution } from "./source-authoring-budget.js";
 import { createSourceAuthoringAdapter, createSourceWorldAuthoringAdapter, renderSourceExtractionProviderRequest } from "./source-authoring-adapter.js";
 import type { SourceWorldSelection } from "../../../packages/domain/src/source-world-proposal.js";
-import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
+import {
+  renderPreparedAuthoringRequest,
+  serializePreparedAuthoringRequest,
+  type PreparedAuthoringResponseContractExecution,
+  type PreparedAuthoringTextExecutor
+} from "./authoring-text-execution-preparation.js";
+import type { PreparedProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
 export type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 
 export const AUTHORING_EXECUTION_PROTOCOLS = Object.freeze({
@@ -43,13 +61,14 @@ export function createAuthoringExecutionSnapshot(
     maxOutputTokens: number;
     requestTimeoutMs: number;
     temperature: number;
+    providerType?: string;
     endpointIdentity?: string;
     configuration: Readonly<Record<string, unknown>>;
   }>,
   prompts: Record<string, string>,
   protocols: Record<string, string>,
   sha256: (value: string) => string,
-  plans?: Readonly<Partial<Record<AuthoringTextOperation, TextExecutionPlan>>>
+  prepared?: Readonly<Partial<Record<AuthoringTextOperation, TextExecutionPlan>>> | PreparedAuthoringResponseContractExecution
 ): AuthoringExecutionSnapshot {
   const textConfiguration = typeof execution.configuration.httpReferer === "string"
     ? { httpReferer: execution.configuration.httpReferer }
@@ -72,8 +91,23 @@ export function createAuthoringExecutionSnapshot(
     prompts: { ...prompts },
     protocols: { ...protocols }
   };
-  return plans && Object.keys(plans).length > 0
-    ? { ...base, version: 2, textExecutionPlans: { ...plans } }
+  if (prepared && "routeBasis" in prepared) {
+    if (execution.configuration.httpReferer !== undefined && typeof execution.configuration.httpReferer !== "string") {
+      throw new Error("Authoring HTTP referer must be a string.");
+    }
+    return {
+      ...base,
+      version: 3,
+      providerType: execution.providerType === "openai_compatible" ? "openai_compatible" : "openrouter",
+      requestConfiguration: textConfiguration,
+      routeBasis: prepared.routeBasis,
+      frozenResponseContracts: prepared.frozenResponseContracts,
+      textExecutionPlans: { ...prepared.plans },
+      trustedOperationPrompts: { ...prepared.trustedOperationPrompts }
+    } as AuthoringExecutionSnapshot;
+  }
+  return prepared && Object.keys(prepared).length > 0
+    ? { ...base, version: 2, textExecutionPlans: { ...prepared } }
     : base;
 }
 
@@ -100,8 +134,22 @@ type AuthoringExecutionSnapshotV2 = AuthoringExecutionSnapshot & Readonly<{
   textExecutionPlans: Partial<Record<AuthoringTextOperation, TextExecutionPlan>>;
 }>;
 
+type BoundAuthoringExecutionSnapshotV3 = AuthoringExecutionSnapshot & Readonly<{
+  version: 3;
+  providerType: "openrouter" | "openai_compatible";
+  requestConfiguration: Readonly<{ httpReferer?: string }>;
+  routeBasis: TextExecutionRouteBasis;
+  frozenResponseContracts: FrozenResponseContractsV2;
+  textExecutionPlans: Partial<Record<AuthoringTextOperationV2, TextExecutionPlan>>;
+  trustedOperationPrompts: Partial<Record<AuthoringTextOperationV2, string>>;
+}>;
+
 function v2Snapshot(snapshot: AuthoringExecutionSnapshot): snapshot is AuthoringExecutionSnapshotV2 {
   return "version" in snapshot && snapshot.version === 2;
+}
+
+function v3Snapshot(snapshot: AuthoringExecutionSnapshot | unknown): snapshot is BoundAuthoringExecutionSnapshotV3 {
+  return Boolean(snapshot && typeof snapshot === "object" && "version" in snapshot && snapshot.version === 3);
 }
 
 function planMatchesHash(plan: TextExecutionPlan, sha256: (value: string) => string): boolean {
@@ -109,23 +157,23 @@ function planMatchesHash(plan: TextExecutionPlan, sha256: (value: string) => str
   return sha256(stableStringify(withoutHash)) === planHash;
 }
 
-function operationFor(stage: LoadedAuthoringStage, repair: boolean): AuthoringTextOperation {
+function operationFor(stage: LoadedAuthoringStage, repair: boolean): AuthoringTextOperationV2 {
   if (stage.stageKey === "world") return repair ? "worldOutlineRepair" : "worldOutline";
   if (stage.stageKey.startsWith("character:")) {
     return stage.parentOutputs.some((output) => output.kind === "outline")
       ? repair ? "seedCharacterRepair" : "seedCharacter"
-      : "standaloneCharacter";
+      : repair ? "standaloneCharacterRepair" : "standaloneCharacter";
   }
-  const sourceWorld = stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:");
-  return sourceWorld
-    ? repair ? "sourceWorldRepair" : "sourceWorld"
-    : repair ? "sourceExtractionRepair" : "sourceExtraction";
+  if (stage.stageKey === "source:synthesis") return repair ? "sourceSynthesisRepair" : "sourceSynthesis";
+  if (stage.stageKey.startsWith("source:character:")) return repair ? "sourceCharacterRepair" : "sourceCharacter";
+  return repair ? "sourceExtractionRepair" : "sourceExtraction";
 }
 
 function sourcePlansFor(stage: LoadedAuthoringStage, sourceWorld: boolean): Readonly<{ initial: TextExecutionPlan; repair: TextExecutionPlan }> | undefined {
-  if (!v2Snapshot(stage.snapshot)) return undefined;
-  const initialKey = sourceWorld ? "sourceWorld" : "sourceExtraction";
-  const repairKey = sourceWorld ? "sourceWorldRepair" : "sourceExtractionRepair";
+  if (!v2Snapshot(stage.snapshot) && !v3Snapshot(stage.snapshot)) return undefined;
+  const sourceCharacter = stage.stageKey.startsWith("source:character:");
+  const initialKey = sourceWorld ? sourceCharacter ? "sourceCharacter" : "sourceSynthesis" : "sourceExtraction";
+  const repairKey = sourceWorld ? sourceCharacter ? "sourceCharacterRepair" : "sourceSynthesisRepair" : "sourceExtractionRepair";
   const initial = stage.snapshot.textExecutionPlans[initialKey];
   const repair = stage.snapshot.textExecutionPlans[repairKey];
   return initial && repair ? { initial, repair } : undefined;
@@ -184,12 +232,133 @@ function providerFailureStage(stage: LoadedAuthoringStage): "world" | "character
 export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
   execution: RuntimeProviderExecutionPort;
   sha256: (value: string) => string;
-  /** Task 5 supplies route transport. V2 cannot fall through to legacy execution. */
+  /** Task 5 supplies route transport. Bound v3 cannot fall through to legacy execution. */
   preparedExecutor?: PreparedAuthoringTextExecutor;
 }>): (stage: LoadedAuthoringStage) => Promise<AuthoringStageOutput> {
   return async (stage) => {
     let provider: RuntimeTextExecution;
-    if (v2Snapshot(stage.snapshot)) {
+    let nativeSourceExecution: NativeSourceAuthoringRequestExecution | undefined;
+    if (v3Snapshot(stage.snapshot)) {
+      const snapshot = authoringExecutionSnapshotSchema.parse(stage.snapshot) as BoundAuthoringExecutionSnapshotV3;
+      const routeBasis = readTextExecutionRouteBasis(snapshot.routeBasis);
+      const frozenResponseContracts = readFrozenResponseContractsV2(snapshot.frozenResponseContracts);
+      const textExecutionPlans = Object.fromEntries(Object.entries(snapshot.textExecutionPlans).map(([operationValue, value]) => {
+        const operation = authoringTextOperationV2Schema.parse(operationValue);
+        return [operation, readTextExecutionPlan(value)];
+      })) as Partial<Record<AuthoringTextOperationV2, TextExecutionPlan>>;
+      const trustedOperationPrompts = Object.fromEntries(Object.entries(snapshot.trustedOperationPrompts).map(([operationValue, value]) => {
+        const operation = authoringTextOperationV2Schema.parse(operationValue);
+        if (typeof value !== "string" || !value.trim()) throw new Error("The saved authoring operation prompt is invalid.");
+        return [operation, value];
+      })) as Partial<Record<AuthoringTextOperationV2, string>>;
+      const planOperations = Object.keys(textExecutionPlans).sort();
+      const promptOperations = Object.keys(trustedOperationPrompts).sort();
+      if (stableStringify(planOperations) !== stableStringify(promptOperations)) {
+        throw new Error("The saved authoring response contract operation closure is incomplete.");
+      }
+      for (const [operationValue, trustedOperationPrompt] of Object.entries(trustedOperationPrompts)) {
+        const operation = authoringTextOperationV2Schema.parse(operationValue);
+        const plan = textExecutionPlans[operation];
+        if (!plan) throw new Error("The saved authoring response contract is missing its operation plan.");
+        const identity = authoringResponseContractIdentity(operation);
+        bindFrozenResponseContractInvocationV2({
+          frozen: frozenResponseContracts,
+          routeBasis,
+          plan,
+          invocationKey: identity.invocationKey,
+          operation: identity.operation,
+          trustedOperationPrompt: trustedOperationPrompt!
+        });
+      }
+      const initialOperation = operationFor(stage, false);
+      const repairOperation = operationFor(stage, true);
+      if (!textExecutionPlans[initialOperation] || !textExecutionPlans[repairOperation]
+        || !trustedOperationPrompts[initialOperation] || !trustedOperationPrompts[repairOperation]
+        || !options.preparedExecutor) {
+        throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+      }
+      const prepared: PreparedAuthoringResponseContractExecution = {
+        routeBasis,
+        plans: textExecutionPlans as Record<string, TextExecutionPlan>,
+        modelAdvertisements: {},
+        frozenResponseContracts,
+        trustedOperationPrompts
+      };
+      const candidate = routeBasis.candidates[0]!;
+      const prepareOperation = (operation: AuthoringTextOperationV2, request: Parameters<RuntimeTextExecution["execute"]>[0]) =>
+        serializePreparedAuthoringRequest({
+          execution: {
+            providerType: snapshot.providerType,
+            configuration: snapshot.requestConfiguration
+          },
+          prepared,
+          operation,
+          request
+        });
+      const executeBound = async (
+        request: Parameters<RuntimeTextExecution["execute"]>[0],
+        operation: AuthoringTextOperationV2,
+        preparedRequest?: PreparedProviderRequest
+      ) => {
+        const plan = textExecutionPlans[operation]!;
+        const trustedOperationPrompt = trustedOperationPrompts[operation]!;
+        let authority: RuntimeTextExecution;
+        try {
+          authority = await options.execution.text({ ownerUserId: stage.ownerUserId }, snapshot.providerProfileId, "text");
+        } catch {
+          throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+        }
+        if (authority.id !== snapshot.providerProfileId || authority.providerRole !== "text"
+          || authority.authorityRevision !== routeBasis.authorityRevision
+          || (authority.endpointIdentity ?? authority.id) !== routeBasis.endpointReference) {
+          throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });
+        }
+        const executorRequest = { ...request, systemPrompt: plan.prompt };
+        const checkedRequest = preparedRequest ?? prepareOperation(operation, executorRequest);
+        const identity = authoringResponseContractIdentity(operation);
+        return options.preparedExecutor!.execute({
+          plan,
+          operation: identity.operation,
+          invocationKey: identity.invocationKey,
+          frozenResponseContracts,
+          routeBasis,
+          trustedOperationPrompt,
+          ownerUserId: stage.ownerUserId,
+          providerProfileId: snapshot.providerProfileId,
+          request: executorRequest,
+          preparedRequest: checkedRequest,
+          ...(stage.currentClaim === undefined ? {} : { currentClaim: stage.currentClaim })
+        });
+      };
+      provider = {
+        id: snapshot.providerProfileId,
+        name: "Frozen authoring contract",
+        providerRole: "text",
+        providerType: snapshot.providerType,
+        model: candidate.modelId,
+        contextWindowTokens: candidate.contextWindowTokens,
+        maxOutputTokens: candidate.maxOutputTokens,
+        temperature: routeBasis.parameters.temperature ?? 1,
+        requestTimeoutMs: routeBasis.requestTimeoutMs,
+        endpointIdentity: routeBasis.endpointReference,
+        configuration: snapshot.requestConfiguration,
+        execute: async (request) => executeBound(request, operationFor(stage, request.rejectedResponse !== undefined))
+      };
+      nativeSourceExecution = {
+        renderInitial: (request) => renderPreparedAuthoringRequest({
+          execution: { providerType: snapshot.providerType, configuration: snapshot.requestConfiguration },
+          prepared, operation: operationFor(stage, false), request
+        }),
+        renderRepair: (request) => renderPreparedAuthoringRequest({
+          execution: { providerType: snapshot.providerType, configuration: snapshot.requestConfiguration },
+          prepared, operation: operationFor(stage, true), request
+        }),
+        prepareInitial: (request) => prepareOperation(operationFor(stage, false), request),
+        prepareRepair: (request) => prepareOperation(operationFor(stage, true), request),
+        executeInitial: (request, preparedRequest) => executeBound(request, operationFor(stage, false), preparedRequest),
+        executeRepair: (request, preparedRequest) => executeBound(request, operationFor(stage, true), preparedRequest)
+      };
+    } else if (v2Snapshot(stage.snapshot)) {
       const snapshot = stage.snapshot;
       const initialOperation = operationFor(stage, false);
       const initialPlan = snapshot.textExecutionPlans[initialOperation as keyof typeof snapshot.textExecutionPlans];
@@ -262,7 +431,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
       const sourceInput = stage.input;
       const sourcePlans = sourcePlansFor(stage, isSourceWorldStage);
       const diagnosticContext = { authoringJobId: stage.jobId, stageKey: stage.stageKey, ...(stage.stageId === undefined ? {} : { stageId: stage.stageId }), ...(stage.stageGeneration === undefined ? {} : { stageGeneration: stage.stageGeneration }) };
-      const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider, undefined, diagnosticContext);
+      const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider, undefined, diagnosticContext, nativeSourceExecution);
       if (isSourceWorldStage) {
         if (!stage.sourceSelection) {
           throw new AuthoringResponseError({ code: "source_review_conflict", stage: "source", retryable: false, issues: [] });

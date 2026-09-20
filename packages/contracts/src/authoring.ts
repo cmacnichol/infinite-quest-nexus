@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { textExecutionPlanSchema } from "./text-execution-plan.js";
+import { frozenResponseContractsV2Schema } from "./generation-response-contract.js";
+import { authoringTextOperationV2Schema } from "./provider-output-schema.js";
+import { textExecutionPlanSchema, textExecutionRouteBasisSchema } from "./text-execution-plan.js";
 import { apiTimestampSchema } from "./http.js";
 import {
   playableCharacterSchema,
@@ -183,25 +185,43 @@ export const authoringTextOperationSchema = z.enum([
   "seedCharacter",
   "seedCharacterRepair",
   "standaloneCharacter",
+  "standaloneCharacterRepair",
   "sourceExtraction",
   "sourceExtractionRepair",
   "sourceWorld",
-  "sourceWorldRepair"
+  "sourceWorldRepair",
+  "sourceSynthesis",
+  "sourceSynthesisRepair",
+  "sourceCharacter",
+  "sourceCharacterRepair"
 ]);
 
-const authoringExecutionSnapshotV2Schema = authoringExecutionSnapshotV1Schema.extend({
+const authoringExecutionSnapshotV2LegacySchema = authoringExecutionSnapshotV1Schema.extend({
   version: z.literal(2),
   textExecutionPlans: z.partialRecord(authoringTextOperationSchema, textExecutionPlanSchema)
     .refine((plans) => Object.keys(plans).length > 0)
 }).strict();
 
+const authoringExecutionSnapshotV3Schema = authoringExecutionSnapshotV1Schema.extend({
+  version: z.literal(3),
+  providerType: z.enum(["openrouter", "openai_compatible"]),
+  requestConfiguration: z.object({ httpReferer: z.string().trim().min(1).max(2_000).optional() }).strict(),
+  routeBasis: textExecutionRouteBasisSchema,
+  frozenResponseContracts: frozenResponseContractsV2Schema,
+  textExecutionPlans: z.partialRecord(authoringTextOperationV2Schema, textExecutionPlanSchema)
+    .refine((plans) => Object.keys(plans).length > 0),
+  trustedOperationPrompts: z.partialRecord(authoringTextOperationV2Schema, z.string().trim().min(1).max(200_000))
+    .refine((prompts) => Object.keys(prompts).length > 0)
+}).strict();
+
 /**
- * V1 is retained byte-for-byte for existing jobs. V2 stays private execution
- * state and pins a complete prompt plan per authoring operation.
+ * V1 is retained byte-for-byte and plan-only V2 stays explicit for historical
+ * jobs. Bound V3 cannot downgrade to either format when contract fields vanish.
  */
 export const authoringExecutionSnapshotSchema = z.union([
   authoringExecutionSnapshotV1Schema,
-  authoringExecutionSnapshotV2Schema
+  authoringExecutionSnapshotV2LegacySchema,
+  authoringExecutionSnapshotV3Schema
 ]);
 
 export const authoringStageViewSchema = z.object({

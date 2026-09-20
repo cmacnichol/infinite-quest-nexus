@@ -7,7 +7,7 @@ import type {
   IllustrationSegmentRequest,
   WorldCoverRequest
 } from "@infinite-quest/contracts";
-import type { TextExecutionPlan } from "@infinite-quest/contracts";
+import type { FrozenResponseContractsV2, TextExecutionPlan, TextExecutionRouteBasis } from "@infinite-quest/contracts";
 
 export type IllustrationOwnerScope = Readonly<{
   ownerUserId: string;
@@ -388,6 +388,14 @@ export type IllustrationPromptRefinementRequest = IllustrationSegmentExecutionSc
   storyContext: string;
   /** Private durable v2 plan; never include this in a serving projection. */
   textExecutionPlan?: TextExecutionPlan;
+  /** Full private contract binding for new durable prompt jobs. */
+  textExecutionContract?: Readonly<{
+    providerType: "openrouter" | "openai_compatible";
+    requestConfiguration: Readonly<{ httpReferer?: string }>;
+    routeBasis: TextExecutionRouteBasis;
+    frozenResponseContracts: FrozenResponseContractsV2;
+    trustedOperationPrompt: string;
+  }>;
 }>;
 
 export type IllustrationPromptRefinementResult = Readonly<{

@@ -26,14 +26,16 @@ import {
 } from "../../../packages/story-engine/src/index.js";
 import { insertImageJob } from "./illustration-image-job-adapter.js";
 import type { IllustrationProviderCollaborators } from "./provider-application-composition.js";
-import { prepareAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
+import { prepareAuthoringResponseContractExecution } from "./authoring-text-execution-preparation.js";
 import {
   textExecutionPlanSchema,
   textExecutionRouteBasisSchema,
+  type FrozenResponseContractsV2,
   type TextExecutionPlan,
   type TextExecutionRouteBasis
 } from "@infinite-quest/contracts";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
+import { bindFrozenResponseContractInvocationV2, readFrozenResponseContractsV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 
 function promptContent(snapshot: Record<string, any> | undefined, key: string): string {
   const entry = snapshot?.[key];
@@ -99,14 +101,29 @@ type SegmentRow = {
   character_visual_reference: string;
 };
 
-/** Private v2 evidence. NULL remains the historical v1 prompt-job branch. */
+/** Private v3 evidence. NULL and plan-only v2 remain explicit historical branches. */
 export type IllustrationTextExecutionSnapshot = Readonly<{
+  version: 3;
+  state: "prepared";
+  ownerUserId: string;
+  operationPrompt: string;
+  providerType: "openrouter" | "openai_compatible";
+  requestConfiguration: Readonly<{ httpReferer?: string }>;
+  routeBasis: TextExecutionRouteBasis;
+  plan: TextExecutionPlan;
+  frozenResponseContracts: FrozenResponseContractsV2;
+  trustedOperationPrompt: string;
+}> | Readonly<{
   version: 2;
   state: "prepared";
   ownerUserId: string;
   operationPrompt: string;
   routeBasis: TextExecutionRouteBasis;
   plan: TextExecutionPlan;
+}> | Readonly<{
+  version: 3;
+  state: "unavailable";
+  errorCode: "illustration_text_route_unavailable";
 }> | Readonly<{
   version: 2;
   state: "unavailable";
@@ -121,14 +138,13 @@ function readIllustrationTextExecutionSnapshot(
 ): IllustrationTextExecutionSnapshot | null {
   if (value === null || value === undefined) return null;
   if (!value || typeof value !== "object") throw new Error("The saved illustration text execution snapshot is invalid.");
-  const snapshot = value as { version?: unknown; state?: unknown; ownerUserId?: unknown; routeBasis?: unknown; plan?: unknown; errorCode?: unknown };
-  if (snapshot.version !== 2) throw new Error("The saved illustration text execution snapshot is invalid.");
+  const snapshot = value as { version?: unknown; state?: unknown; ownerUserId?: unknown; operationPrompt?: unknown; providerType?: unknown; requestConfiguration?: unknown; routeBasis?: unknown; plan?: unknown; frozenResponseContracts?: unknown; trustedOperationPrompt?: unknown; errorCode?: unknown };
+  if (snapshot.version !== 2 && snapshot.version !== 3) throw new Error("The saved illustration text execution snapshot is invalid.");
   if (snapshot.state === "unavailable" && snapshot.errorCode === "illustration_text_route_unavailable") {
-    return { version: 2, state: "unavailable", errorCode: snapshot.errorCode };
+    return { version: snapshot.version, state: "unavailable", errorCode: snapshot.errorCode };
   }
   if (snapshot.state !== "prepared" || typeof snapshot.ownerUserId !== "string" || snapshot.ownerUserId !== claimedOwnerUserId
-    || typeof (snapshot as { operationPrompt?: unknown }).operationPrompt !== "string"
-    || (snapshot as { operationPrompt: string }).operationPrompt !== operationPrompt) {
+    || snapshot.operationPrompt !== operationPrompt) {
     throw new Error("The saved illustration text execution snapshot is invalid.");
   }
   const routeBasis = textExecutionRouteBasisSchema.parse(snapshot.routeBasis);
@@ -140,7 +156,36 @@ function readIllustrationTextExecutionSnapshot(
     || routeBasis.credentialReference !== claimedProviderProfileId) {
     throw new Error("The saved illustration text execution snapshot is invalid.");
   }
-  return { version: 2, state: "prepared", ownerUserId: snapshot.ownerUserId, operationPrompt, routeBasis, plan };
+  if (snapshot.version === 2) {
+    return { version: 2, state: "prepared", ownerUserId: snapshot.ownerUserId, operationPrompt, routeBasis, plan };
+  }
+  const frozenResponseContracts = readFrozenResponseContractsV2(snapshot.frozenResponseContracts);
+  if (snapshot.trustedOperationPrompt !== operationPrompt) throw new Error("The saved illustration text execution snapshot is invalid.");
+  if ((snapshot.providerType !== "openrouter" && snapshot.providerType !== "openai_compatible")
+    || !snapshot.requestConfiguration || typeof snapshot.requestConfiguration !== "object"
+    || Array.isArray(snapshot.requestConfiguration)) {
+    throw new Error("The saved illustration text execution snapshot is invalid.");
+  }
+  bindFrozenResponseContractInvocationV2({
+    frozen: frozenResponseContracts,
+    routeBasis,
+    plan,
+    invocationKey: "illustration_prompt_refinement:nonstream",
+    operation: "illustration_prompt_refinement",
+    trustedOperationPrompt: operationPrompt
+  });
+  const requestConfigurationValue = snapshot.requestConfiguration as { httpReferer?: unknown };
+  if (Object.keys(requestConfigurationValue).some((key) => key !== "httpReferer")
+    || (requestConfigurationValue.httpReferer !== undefined
+      && (typeof requestConfigurationValue.httpReferer !== "string"
+        || !requestConfigurationValue.httpReferer.trim()
+        || requestConfigurationValue.httpReferer.length > 2_000))) {
+    throw new Error("The saved illustration text execution snapshot is invalid.");
+  }
+  const requestConfiguration = requestConfigurationValue.httpReferer === undefined
+    ? {}
+    : { httpReferer: requestConfigurationValue.httpReferer };
+  return { version: 3, state: "prepared", ownerUserId: snapshot.ownerUserId, operationPrompt, providerType: snapshot.providerType, requestConfiguration, routeBasis, plan, frozenResponseContracts, trustedOperationPrompt: operationPrompt };
 }
 
 /**
@@ -159,49 +204,36 @@ export async function prepareIllustrationTextExecution(
   if (config.segment_prompt_mode !== "ai_refined" || options?.nativePresetPlansEnabled !== true) return undefined;
   try {
     const selected = await directProvider(providers, ownerUserId, "text", config.campaign_text_provider_id);
-    if (!selected) return { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+    if (!selected) return { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
     const execution = await providers.execution.text(
       { ownerUserId }, selected.providerProfileId, "text", selected.model
     );
-    if (execution.textSelection?.kind !== "openrouter_preset") return undefined;
     if (!options.preparedExecutor || !options.loadAuthority) {
-      return { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+      return { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
     }
-    const prepared = await prepareAuthoringTextExecution({
+    const prepared = await prepareAuthoringResponseContractExecution({
       ownerUserId,
       execution,
       operationPrompts: { illustrationPromptRefinement: operationPrompt },
       ports: options.ports,
+      ...(options.responseFormatCapabilities === undefined ? {} : { responseFormatCapabilities: options.responseFormatCapabilities })
     });
     const plan = prepared.plans.illustrationPromptRefinement;
-    const routeBasisHash = plan?.routeBasisHash;
-    const requestTimeoutMs = plan?.requestTimeoutMs;
-    if (!plan || !routeBasisHash || !requestTimeoutMs) throw new Error("Illustration refinement preparation did not produce a frozen route plan.");
-    const { routeBasisHash: _routeBasisHash, ...routeBasis } = plan;
+    if (!plan) throw new Error("Illustration refinement preparation did not produce a frozen route plan.");
     return {
-      version: 2,
+      version: 3,
       state: "prepared",
       ownerUserId,
       operationPrompt,
-      routeBasis: {
-        version: 2,
-        selection: plan.selection,
-        preset: plan.preset,
-        candidates: plan.candidates,
-        presetSystemPrompt: plan.presetSystemPrompt,
-        parameters: plan.parameters,
-        endpointReference: plan.endpointReference,
-        credentialReference: plan.credentialReference,
-        profileRevision: plan.profileRevision,
-        ...(plan.authorityRevision ? { authorityRevision: plan.authorityRevision } : {}),
-        requestTimeoutMs,
-        protocolVersion: plan.protocolVersion,
-        routeBasisHash
-      },
-      plan
+      providerType: execution.providerType === "openai_compatible" ? "openai_compatible" : "openrouter",
+      requestConfiguration: typeof execution.configuration.httpReferer === "string" ? { httpReferer: execution.configuration.httpReferer } : {},
+      routeBasis: prepared.routeBasis,
+      plan,
+      frozenResponseContracts: prepared.frozenResponseContracts,
+      trustedOperationPrompt: prepared.trustedOperationPrompts.illustrationPromptRefinement!
     };
   } catch {
-    return { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+    return { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
   }
 }
 
@@ -1330,7 +1362,16 @@ export async function runIllustrationPromptJob(
         systemPrompt: promptContent(claimed.prompt_snapshot, "illustration_refinement"),
         fictionText: segment.source_text,
         storyContext,
-        ...(frozen?.state === "prepared" ? { textExecutionPlan: frozen.plan } : {})
+        ...(frozen?.state === "prepared" ? {
+          textExecutionPlan: frozen.plan,
+          ...(frozen.version === 3 ? { textExecutionContract: {
+            providerType: frozen.providerType,
+            requestConfiguration: frozen.requestConfiguration,
+            routeBasis: frozen.routeBasis,
+            frozenResponseContracts: frozen.frozenResponseContracts,
+            trustedOperationPrompt: frozen.trustedOperationPrompt
+          } } : {})
+        } : {})
       });
     const prompt = result.prompt;
     const responseId = String(result.metadata.responseId || "");

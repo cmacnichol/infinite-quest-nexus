@@ -1895,7 +1895,7 @@ integration("independent illustration pipeline", () => {
     );
     const graph = workerProviderGraph(pool, credentialSecret).illustration;
     const prepared = vi.fn(async () => ({
-      content: "Lanterns guide Mira along the fogbound road, cinematic fantasy illustration",
+      content: JSON.stringify({ image_prompt: "Lanterns guide Mira along the fogbound road, cinematic fantasy illustration" }),
       responseId: "native-illustration-response", finishReason: "stop", metadata: {}
     }));
     const resolvePreset = vi.fn(async () => ({
@@ -1931,13 +1931,21 @@ integration("independent illustration pipeline", () => {
       "SELECT provider_profile_id,requested_model,prompt_snapshot,text_execution_snapshot FROM illustration_prompt_jobs WHERE campaign_id=$1", [imported.campaignId]
     );
     expect(saved.rows[0]).toMatchObject({ provider_profile_id: textProviderId, requested_model: "frozen-illustration-model",
-      text_execution_snapshot: { version: 2, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_NATIVE_ILLUSTRATION_PROMPT") } } });
+      text_execution_snapshot: {
+        version: 3, state: "prepared", providerType: "openrouter",
+        routeBasis: { selection: { kind: "openrouter_preset", slug: "illustration-native" } },
+        plan: { prompt: expect.stringContaining("PRIVATE_NATIVE_ILLUSTRATION_PROMPT") },
+        frozenResponseContracts: { version: 2, contracts: { "illustration_prompt_refinement:nonstream": { admission: { basis: "preset_trusted" } } } },
+        trustedOperationPrompt: expect.any(String)
+      } });
     await pool.query("UPDATE provider_profiles SET default_model='edited-after-enqueue', temperature=0.91 WHERE id=$1", [textProviderId]);
     const executionCallsBeforeClaim = frozenExecution.mock.calls.length;
     const ports = createIllustrationWorkerPorts(pool, native);
     await expect(runNativeIllustrationPromptJob(pool, "native-illustration-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
     expect(prepared).toHaveBeenCalledWith(expect.objectContaining({
       operation: "illustration_prompt_refinement", providerProfileId: textProviderId,
+      invocationKey: "illustration_prompt_refinement:nonstream",
+      preparedRequest: expect.objectContaining({ budgetAudit: expect.objectContaining({ countMode: "estimated", outputReserveTokens: 1024 }) }),
       plan: expect.objectContaining({ prompt: expect.stringContaining("PRIVATE_NATIVE_ILLUSTRATION_PROMPT"), requestTimeoutMs: 30_000,
         parameters: { temperature: 0.17 }, candidates: [expect.objectContaining({ modelId: "frozen-illustration-model" })] })
     }));
@@ -1950,8 +1958,9 @@ integration("independent illustration pipeline", () => {
     const authorityCallsBeforeTamper = loadAuthority.mock.calls.length;
     await pool.query(
       `UPDATE illustration_prompt_jobs
-          SET text_execution_snapshot = jsonb_set(text_execution_snapshot, '{plan,parameters,temperature}', '0.99'::jsonb)
-        WHERE campaign_id=$1 AND status='queued'`,
+          SET text_execution_snapshot = jsonb_set(text_execution_snapshot, '{plan,parameters,temperature}', '0.99'::jsonb),
+              created_at = clock_timestamp() - interval '2 days'
+        WHERE id=(SELECT id FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='queued' ORDER BY id LIMIT 1)`,
       [imported.campaignId]
     );
     await expect(runNativeIllustrationPromptJob(pool, "native-illustration-tamper-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
@@ -1961,6 +1970,23 @@ integration("independent illustration pipeline", () => {
       "SELECT status,error_code FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='recoverable'", [imported.campaignId]
     );
     expect(tampered.rows).toContainEqual(expect.objectContaining({ status: "recoverable", error_code: "illustration_text_route_unavailable" }));
+
+    const preparedCallsBeforeDowngrade = prepared.mock.calls.length;
+    const authorityCallsBeforeDowngrade = loadAuthority.mock.calls.length;
+    await pool.query(
+      `UPDATE illustration_prompt_jobs
+          SET text_execution_snapshot = text_execution_snapshot - ARRAY['providerType','requestConfiguration','routeBasis','frozenResponseContracts','trustedOperationPrompt']::text[],
+              created_at = clock_timestamp() - interval '1 day'
+        WHERE id=(SELECT id FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='queued' ORDER BY id LIMIT 1)`,
+      [imported.campaignId]
+    );
+    await expect(runNativeIllustrationPromptJob(pool, "native-illustration-downgrade-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    expect(prepared).toHaveBeenCalledTimes(preparedCallsBeforeDowngrade);
+    expect(loadAuthority).toHaveBeenCalledTimes(authorityCallsBeforeDowngrade);
+    const downgradeRejected = await pool.query<{ status: string; error_code: string | null }>(
+      "SELECT status,error_code FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='recoverable'", [imported.campaignId]
+    );
+    expect(downgradeRejected.rows.filter((row) => row.error_code === "illustration_text_route_unavailable").length).toBeGreaterThanOrEqual(2);
     expect(JSON.stringify(await listCampaignIllustrationSegments(pool, imported.campaignId))).not.toContain("PRIVATE_NATIVE_ILLUSTRATION_PROMPT");
   });
 
@@ -2123,7 +2149,7 @@ integration("independent illustration pipeline", () => {
     }));
     const discoverModels = vi.fn(async () => [{ id: "frozen-illustration-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
     const prepared = vi.fn(async () => ({
-      content: "Mira and a lantern on the fogbound road, cinematic fantasy illustration",
+      content: JSON.stringify({ image_prompt: "Mira and a lantern on the fogbound road, cinematic fantasy illustration" }),
       responseId: "native-reclaim-response", finishReason: "stop", metadata: {}
     }));
     const native = {
@@ -2170,6 +2196,8 @@ integration("independent illustration pipeline", () => {
     await expect(runNativeIllustrationPromptJob(pool, "native-reclaim-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
     expect(prepared).toHaveBeenCalledWith(expect.objectContaining({
       providerProfileId: nativeTextProviderId,
+      invocationKey: "illustration_prompt_refinement:nonstream",
+      preparedRequest: expect.objectContaining({ budgetAudit: expect.objectContaining({ countMode: "estimated", outputReserveTokens: 1024 }) }),
       plan: expect.objectContaining({
         prompt: expect.stringContaining("PRIVATE_FROZEN_ILLUSTRATION_PROMPT"),
         parameters: { temperature: 0.17 },
@@ -2233,7 +2261,7 @@ integration("independent illustration pipeline", () => {
     );
     expect(backfilledPlans.rows.length).toBeGreaterThan(0);
     expect(backfilledPlans.rows.every((job) => (
-      job.text_execution_snapshot?.version === 2 && job.text_execution_snapshot.state === "prepared"
+      job.text_execution_snapshot?.version === 3 && job.text_execution_snapshot.state === "prepared"
     ))).toBe(true);
     const backfillReplay = await enqueueNativeIllustrationBackfill(pool, imported.campaignId, backfillRequest, native);
     expect(backfillReplay).toMatchObject({ id: backfill.id, duplicate: true });
@@ -2292,7 +2320,7 @@ integration("independent illustration pipeline", () => {
     }));
     const discoverModels = vi.fn(async () => [{ id: "frozen-streaming-illustration-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
     const prepared = vi.fn(async () => ({
-      content: "Mira follows the lantern through the fogbound causeway, cinematic fantasy illustration",
+      content: JSON.stringify({ image_prompt: "Mira follows the lantern through the fogbound causeway, cinematic fantasy illustration" }),
       responseId: "streaming-native-prompt", finishReason: "stop", metadata: {}
     }));
     const native = {
@@ -2332,7 +2360,7 @@ integration("independent illustration pipeline", () => {
       "SELECT text_execution_snapshot FROM illustration_prompt_jobs WHERE generation_job_id=$1", [directPromotion.id]
     );
     const frozenSnapshot = frozen.rows[0]!.text_execution_snapshot;
-    expect(frozenSnapshot).toMatchObject({ version: 2, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMING_ILLUSTRATION_PROMPT") } });
+    expect(frozenSnapshot).toMatchObject({ version: 3, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMING_ILLUSTRATION_PROMPT") } });
     await promoteNativeProvisionalSet(
       pool, ownerUserId, directPromotion.id, turns.rows[0]!.id, imported.campaignId, finalNarration, config, native,
       undefined, frozenSnapshot as never

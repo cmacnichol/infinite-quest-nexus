@@ -35,6 +35,13 @@ export const directAuthoringTextOperationV2Schema = z.enum([
 ]);
 export type DirectAuthoringTextOperationV2 = z.infer<typeof directAuthoringTextOperationV2Schema>;
 
+export const authoringTextOperationV2Schema = z.enum([
+  ...directAuthoringTextOperationV2Schema.options,
+  "sourceExtraction", "sourceExtractionRepair", "sourceSynthesis", "sourceSynthesisRepair",
+  "sourceCharacter", "sourceCharacterRepair", "illustrationPromptRefinement"
+]);
+export type AuthoringTextOperationV2 = z.infer<typeof authoringTextOperationV2Schema>;
+
 const directAuthoringContractIdentity = {
   worldOutline: { operation: "world_outline", schemaOperation: "world_outline" },
   worldOutlineRepair: { operation: "world_outline_repair", schemaOperation: "world_outline" },
@@ -43,11 +50,28 @@ const directAuthoringContractIdentity = {
   standaloneCharacter: { operation: "standalone_character", schemaOperation: "standalone_character" },
   standaloneCharacterRepair: { operation: "standalone_character_repair", schemaOperation: "standalone_character" },
   organizer: { operation: "character_organizer", schemaOperation: "character_organizer" },
-  organizerRepair: { operation: "character_organizer_repair", schemaOperation: "character_organizer" }
-} as const satisfies Record<DirectAuthoringTextOperationV2, Readonly<{
+  organizerRepair: { operation: "character_organizer_repair", schemaOperation: "character_organizer" },
+  sourceExtraction: { operation: "source_extraction", schemaOperation: "source_extraction" },
+  sourceExtractionRepair: { operation: "source_extraction_repair", schemaOperation: "source_extraction" },
+  sourceSynthesis: { operation: "source_synthesis", schemaOperation: "source_synthesis" },
+  sourceSynthesisRepair: { operation: "source_synthesis_repair", schemaOperation: "source_synthesis" },
+  sourceCharacter: { operation: "source_character", schemaOperation: "source_character" },
+  sourceCharacterRepair: { operation: "source_character_repair", schemaOperation: "source_character" },
+  illustrationPromptRefinement: { operation: "illustration_prompt_refinement", schemaOperation: "illustration_prompt_refinement" }
+} as const satisfies Record<AuthoringTextOperationV2, Readonly<{
   operation: ResponseContractOperationV2;
   schemaOperation: ProviderOutputSchemaOperationV2;
 }>>;
+
+export function authoringResponseContractIdentity(operationValue: unknown): Readonly<{
+  operation: ResponseContractOperationV2;
+  schemaOperation: ProviderOutputSchemaOperationV2;
+  invocationKey: `${ProviderOutputSchemaOperationV2}:nonstream`;
+}> {
+  const operation = authoringTextOperationV2Schema.parse(operationValue);
+  const identity = directAuthoringContractIdentity[operation];
+  return Object.freeze({ ...identity, invocationKey: `${identity.schemaOperation}:nonstream` });
+}
 
 export function directAuthoringResponseContractIdentity(operationValue: unknown): Readonly<{
   operation: ResponseContractOperationV2;
@@ -55,8 +79,7 @@ export function directAuthoringResponseContractIdentity(operationValue: unknown)
   invocationKey: `${ProviderOutputSchemaOperationV2}:nonstream`;
 }> {
   const operation = directAuthoringTextOperationV2Schema.parse(operationValue);
-  const identity = directAuthoringContractIdentity[operation];
-  return Object.freeze({ ...identity, invocationKey: `${identity.schemaOperation}:nonstream` });
+  return authoringResponseContractIdentity(operation);
 }
 
 export type ProviderOutputSchemaV2 = Readonly<{

@@ -21,7 +21,7 @@ import { buildSourceExtractionPrompt, buildSourceWorldPrompt, effectiveAuthoring
 import type { AuthoringSubmit } from "@infinite-quest/contracts";
 import { SourceExtractionSplitNeededError } from "./source-authoring-adapter.js";
 import { resolveSourceAuthoringTextExecution } from "./source-authoring-budget.js";
-import { prepareAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
+import { prepareAuthoringResponseContractExecution } from "./authoring-text-execution-preparation.js";
 
 type RuntimeRepository = AuthoringExecutionRepository;
 
@@ -62,7 +62,21 @@ function authoringOperationPrompts(prompts: ReturnType<typeof snapshotPrompts>, 
   const mode = input.kind === "story_source" ? input.mode : "faithful";
   const extraction = (repair: boolean) => buildSourceExtractionPrompt({ instructions: "", sourceText: "", mode, chunk: { sourceRange: { start: 0, end: 0 }, paragraphSpans: [] }, repair }).systemPrompt;
   const sourceWorld = (repair: boolean) => buildSourceWorldPrompt({ instructions: "", reviewGeneration: 0, selection: { source: { id: "snapshot", name: "snapshot", sha256: "0".repeat(64) }, boundaryParagraphId: "snapshot", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: [], mode }, repair }).systemPrompt;
-  return { worldOutline: effectiveAuthoringPrompt("world", prompts.world_generation).content, worldOutlineRepair: effectiveAuthoringPrompt("world", prompts.world_generation_recovery).content, seedCharacter: effectiveAuthoringPrompt("world_character", prompts.world_character_generation).content, seedCharacterRepair: effectiveAuthoringPrompt("world_character", prompts.world_character_generation_recovery).content, standaloneCharacter: effectiveAuthoringPrompt("character", prompts.character_generation.replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION)).content, sourceExtraction: extraction(false), sourceExtractionRepair: extraction(true), sourceWorld: sourceWorld(false), sourceWorldRepair: sourceWorld(true) };
+  const standalone = effectiveAuthoringPrompt("character", prompts.character_generation.replaceAll("{{protocol}}", CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION)).content;
+  return {
+    worldOutline: effectiveAuthoringPrompt("world", prompts.world_generation).content,
+    worldOutlineRepair: effectiveAuthoringPrompt("world", prompts.world_generation_recovery).content,
+    seedCharacter: effectiveAuthoringPrompt("world_character", prompts.world_character_generation).content,
+    seedCharacterRepair: effectiveAuthoringPrompt("world_character", prompts.world_character_generation_recovery).content,
+    standaloneCharacter: standalone,
+    standaloneCharacterRepair: standalone,
+    sourceExtraction: extraction(false),
+    sourceExtractionRepair: extraction(true),
+    sourceSynthesis: sourceWorld(false),
+    sourceSynthesisRepair: sourceWorld(true),
+    sourceCharacter: sourceWorld(false),
+    sourceCharacterRepair: sourceWorld(true)
+  };
 }
 
 /** Runtime-only authoring graph. It owns default resolution, credentials and heartbeat state. */
@@ -78,7 +92,13 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
   dispatch?: (stage: LoadedAuthoringStage) => Promise<AuthoringStageOutput>;
 }>): AuthoringWorkerApplication {
   const repository = options.repository ?? createPostgresAuthoringRepository(options.pool!);
-  const dispatch = options.dispatch ?? createRuntimeAuthoringStageDispatcher({ execution: options.providers.execution, sha256: options.sha256 });
+  const dispatch = options.dispatch ?? createRuntimeAuthoringStageDispatcher({
+    execution: options.providers.execution,
+    sha256: options.sha256,
+    ...(options.providers.authoringTextPlans?.preparedExecutor === undefined
+      ? {}
+      : { preparedExecutor: options.providers.authoringTextPlans.preparedExecutor })
+  });
   const application = createAuthoringWorkerApplication({
     repository,
     execute: async (claim, worker) => {
@@ -126,23 +146,22 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
             // Historical direct-model authoring remains v1. Native preset
             // adoption is explicit, so ordinary callers do not gain remote
             // inventory work or a changed retry contract.
-            if (options.nativePresetPlansEnabled !== true || provider.textSelection?.kind !== "openrouter_preset") {
+            const planOptions = options.providers.authoringTextPlans;
+            if (options.nativePresetPlansEnabled !== true || planOptions?.nativePresetPlansEnabled !== true) {
               return createAuthoringExecutionSnapshot(provider, prompts, input.kind === "story_source"
                 ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION }
                 : AUTHORING_EXECUTION_PROTOCOLS, options.sha256);
             }
-            const prepared = await prepareAuthoringTextExecution({
+            const prepared = await prepareAuthoringResponseContractExecution({
               ownerUserId: claim.ownerUserId,
               execution: provider,
               operationPrompts: authoringOperationPrompts(prompts, input),
-              ports: {
-                resolvePreset: async ({ ownerUserId, providerProfileId, slug }) => (await options.providers.inventory.getPreset({ ownerUserId, providerProfileId, slug })).preset,
-                discoverModels: async ({ ownerUserId, providerProfileId }) => (await options.providers.inventory.listModels({ ownerUserId, providerProfileId, providerRole: "text" })).models
-              }
+              ports: planOptions.ports,
+              ...(planOptions.responseFormatCapabilities === undefined ? {} : { responseFormatCapabilities: planOptions.responseFormatCapabilities })
             });
             return createAuthoringExecutionSnapshot(provider, prompts, input.kind === "story_source"
               ? { ...AUTHORING_EXECUTION_PROTOCOLS, source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION }
-              : AUTHORING_EXECUTION_PROTOCOLS, options.sha256, prepared.plans as never);
+              : AUTHORING_EXECUTION_PROTOCOLS, options.sha256, prepared);
           },
             dispatch: async (stage) => dispatch(stage)
           });

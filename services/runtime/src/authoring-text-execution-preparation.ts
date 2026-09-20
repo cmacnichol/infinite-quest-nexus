@@ -1,9 +1,12 @@
 import {
+  authoringResponseContractIdentity,
+  authoringTextOperationV2Schema,
   directAuthoringResponseContractIdentity,
   directAuthoringTextOperationV2Schema,
   deriveTextExecutionPlan,
   getProviderOutputSchemaV2,
   type AuthoringTextOperation,
+  type AuthoringTextOperationV2,
   type DirectAuthoringTextOperationV2,
   type FrozenResponseContractsV2,
   type ModelParameterAdvertisement,
@@ -24,8 +27,10 @@ import {
 import { effectiveProviderConfigurationFingerprint } from "../../../packages/contracts/src/story-memory-policy.js";
 import {
   estimatedInputSafetyAllowanceTokens,
+  serializeBoundFrozenPresetProviderRequest,
   serializeCheckedBoundFrozenPresetProviderRequest,
   serializeCheckedProviderRequest,
+  serializeProviderRequest,
   validateCompleteRejectedDraft,
   type CanonicalProviderRequest,
   type PreparedProviderRequest
@@ -98,7 +103,10 @@ export async function prepareAuthoringTextExecution(input: Readonly<{
   return resolved;
 }
 
-function frozenProfile(execution: RuntimeTextExecution, routeBasis: TextExecutionRouteBasis): TextProviderProfile {
+function frozenProfile(
+  execution: Pick<RuntimeTextExecution, "providerType" | "configuration">,
+  routeBasis: TextExecutionRouteBasis
+): TextProviderProfile {
   const candidate = routeBasis.candidates[0];
   if (!candidate) throw new Error("Native authoring route has no frozen candidate.");
   return {
@@ -113,7 +121,7 @@ function frozenProfile(execution: RuntimeTextExecution, routeBasis: TextExecutio
   };
 }
 
-function canonicalDirectAuthoringRequest(request: ProviderRequest): CanonicalProviderRequest {
+function canonicalAuthoringRequest(request: ProviderRequest): CanonicalProviderRequest {
   const completeRejectedDraft = validateCompleteRejectedDraft(request.rejectedResponse);
   return {
     systemPrompt: request.systemPrompt,
@@ -206,6 +214,116 @@ function directContractPreparation(input: Readonly<{
   };
 }
 
+export type PreparedAuthoringResponseContractExecution = PreparedAuthoringTextPlans & Readonly<{
+  frozenResponseContracts: FrozenResponseContractsV2;
+  trustedOperationPrompts: Readonly<Partial<Record<AuthoringTextOperationV2, string>>>;
+}>;
+
+/** Resolves one immutable authoring route and freezes its complete operation closure. */
+export async function prepareAuthoringResponseContractExecution(input: Readonly<{
+  ownerUserId: string;
+  execution: RuntimeTextExecution;
+  operationPrompts: Readonly<Partial<Record<AuthoringTextOperationV2, string>>>;
+  ports: TextExecutionPlanDiscoveryPorts;
+  selectionOverride?: TextModelSelection;
+  responseFormatCapabilities?: DirectAuthoringTextPlanOptions["responseFormatCapabilities"];
+}>): Promise<PreparedAuthoringResponseContractExecution> {
+  const selection = input.selectionOverride ?? input.execution.textSelection
+    ?? { kind: "model" as const, modelId: input.execution.model };
+  const promptEntries = Object.entries(input.operationPrompts).map(([operationValue, prompt]) => {
+    const operation = authoringTextOperationV2Schema.parse(operationValue);
+    if (typeof prompt !== "string" || !prompt.trim()) throw new Error(`Native authoring prompt is missing operation '${operation}'.`);
+    return [operation, prompt.trim()] as const;
+  });
+  if (!promptEntries.length) throw new Error("Native authoring preparation requires at least one operation.");
+  const prepared = await prepareAuthoringTextExecution({
+    ownerUserId: input.ownerUserId,
+    execution: input.execution,
+    operationPrompts: Object.fromEntries(promptEntries),
+    ports: input.ports,
+    selectionOverride: selection
+  });
+  const invocationKeys = [...new Set(promptEntries.map(([operation]) => authoringResponseContractIdentity(operation).invocationKey))];
+  const contractPreparation = directContractPreparation({
+    execution: input.execution,
+    selection,
+    routeBasis: prepared.routeBasis,
+    invocationKeys,
+    modelAdvertisements: prepared.modelAdvertisements,
+    ...(input.responseFormatCapabilities === undefined ? {} : { capabilities: input.responseFormatCapabilities })
+  });
+  const frozenResponseContracts = resolveGenerationResponseContractsV2({
+    queuedPolicy: contractPreparation.queuedPolicy,
+    ...(contractPreparation.eligible === undefined ? {} : { eligible: contractPreparation.eligible }),
+    capabilityEvidenceHash: contractPreparation.capabilityEvidenceHash
+  });
+  return Object.freeze({
+    ...prepared,
+    frozenResponseContracts,
+    trustedOperationPrompts: Object.freeze(Object.fromEntries(promptEntries))
+  });
+}
+
+type PreparedAuthoringSerializationInput = Readonly<{
+  execution: Pick<RuntimeTextExecution, "providerType" | "configuration">;
+  prepared: PreparedAuthoringResponseContractExecution;
+  operation: AuthoringTextOperationV2;
+  request: ProviderRequest;
+}>;
+
+function authoringSerializationContext(input: PreparedAuthoringSerializationInput) {
+  const identity = authoringResponseContractIdentity(input.operation);
+  const plan = input.prepared.plans[input.operation];
+  const trustedOperationPrompt = input.prepared.trustedOperationPrompts[input.operation];
+  if (!plan || !trustedOperationPrompt) throw new Error(`Native authoring plan is missing operation '${input.operation}'.`);
+  const request = { ...input.request, systemPrompt: plan.prompt };
+  const canonicalRequest = canonicalAuthoringRequest(request);
+  const profile = frozenProfile(input.execution, input.prepared.routeBasis);
+  const binding = {
+    frozen: input.prepared.frozenResponseContracts,
+    routeBasis: input.prepared.routeBasis,
+    plan,
+    invocationKey: identity.invocationKey,
+    operation: identity.operation,
+    trustedOperationPrompt
+  };
+  return { canonicalRequest, profile, binding };
+}
+
+/**
+ * Capacity-unchecked canonical rendering for source chunk search.  It binds
+ * the exact schema, route, plan and trusted prompt used at dispatch; only the
+ * selected chunk proceeds to checked admission.
+ */
+export function renderPreparedAuthoringRequest(input: PreparedAuthoringSerializationInput): PreparedProviderRequest {
+  const { canonicalRequest, profile, binding } = authoringSerializationContext(input);
+  return input.prepared.routeBasis.selection.kind === "openrouter_preset"
+    ? serializeBoundFrozenPresetProviderRequest(profile, canonicalRequest, binding)
+    : serializeProviderRequest(profile, canonicalRequest, {
+      responseContract: bindFrozenResponseContractInvocationV2(binding)
+    });
+}
+
+/** Canonical checked serialization shared by selected source chunks, durable dispatch and illustration refinement. */
+export function serializePreparedAuthoringRequest(input: PreparedAuthoringSerializationInput): PreparedProviderRequest {
+  const { canonicalRequest, profile, binding } = authoringSerializationContext(input);
+  const candidate = input.prepared.routeBasis.candidates[0]!;
+  const checkedOptions = {
+    inputLimit: candidate.contextWindowTokens - candidate.maxOutputTokens,
+    count: estimateStoryTokens,
+    countMode: "estimated" as const,
+    safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
+    contextWindowTokens: candidate.contextWindowTokens,
+    output: input.request.budgetOutput ?? { kind: "story_append" as const }
+  };
+  return input.prepared.routeBasis.selection.kind === "openrouter_preset"
+    ? serializeCheckedBoundFrozenPresetProviderRequest(profile, canonicalRequest, binding, checkedOptions)
+    : serializeCheckedProviderRequest(profile, canonicalRequest, {
+      ...checkedOptions,
+      responseContract: bindFrozenResponseContractInvocationV2(binding)
+    });
+}
+
 /**
  * Prepares one direct workflow and carries exact route, schema, plan, and body
  * identity to the route executor. Local semantic validators and repair remain
@@ -259,7 +377,7 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
         throw new Error("Native authoring provider authority is unavailable.");
       }
       const executorRequest = { ...request, systemPrompt: plan.prompt };
-      const canonicalRequest = canonicalDirectAuthoringRequest(executorRequest);
+      const canonicalRequest = canonicalAuthoringRequest(executorRequest);
       const profile = frozenProfile(input.execution, prepared.routeBasis);
       const candidate = prepared.routeBasis.candidates[0]!;
       const checkedOptions = {

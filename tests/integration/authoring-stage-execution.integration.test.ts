@@ -5,7 +5,7 @@ import { authoringRuntimeFixture, deferred } from "../helpers/authoring-runtime.
 import { runWorker } from "../../services/worker/src/worker.js";
 import { runRuntimeLifecycle } from "../../services/runtime/src/lifecycle.js";
 import { inertWorkerIllustration, inertWorkerMemory } from "../helpers/memory-applications.js";
-import { authoringSubmitSchema, playableCharacterSchema, worldContentSchema } from "../../packages/contracts/src/index.js";
+import { authoringSubmitSchema, getProviderOutputSchemaV2, playableCharacterSchema, worldContentSchema, type SchemaVerificationV2 } from "../../packages/contracts/src/index.js";
 import { createAuthoringApplication } from "../../packages/application/src/authoring/use-cases.js";
 import { createAuthoringWorkerApplication } from "../../packages/application/src/authoring/worker.js";
 import type { AuthoringClaim } from "../../packages/application/src/authoring/ports.js";
@@ -17,7 +17,9 @@ import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PRO
 import { AuthoringResponseError } from "../../services/runtime/src/authoring-response-adapter.js";
 import { createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
-import { prepareAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { prepareAuthoringResponseContractExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { RuntimeProviderExecutionPort, RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 import type { ProviderRequest, ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { ProviderHttpError } from "../../packages/story-engine/src/providers.js";
@@ -29,6 +31,21 @@ import fixture from "../fixtures/authoring/reliability.json" with { type: "json"
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const result = (content: string): ProviderResult => ({ content, responseId: "synthetic", finishReason: "stop", outputLimited: false, modelInstanceId: "synthetic", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} });
+
+function standaloneModelCapabilities(input: Readonly<{ endpointIdentity: string; model: string; configuration: Record<string, unknown> }>) {
+  const schema = getProviderOutputSchemaV2("standalone_character");
+  const verification: SchemaVerificationV2 = {
+    version: 2, providerType: "openrouter", endpointIdentity: input.endpointIdentity, model: input.model,
+    routeConfigHash: capabilityRouteConfigHash(input.configuration), adapterProtocol: "text-schema-adapter-v2",
+    operation: "standalone_character", schemaHash: schema.schemaHash, streaming: false,
+    verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+    providerRoutingSlugs: ["openai"], nativeOpenTrackerObjects: true
+  };
+  return createProviderResponseFormatCapabilities({
+    records: [verification], registryDigest: sha256("authoring-model-registry"),
+    now: () => Date.parse("2026-09-20T00:00:00.000Z")
+  });
+}
 
 integration("durable authoring real repository and stage dispatcher", () => {
   let pool: DatabasePool;
@@ -55,7 +72,7 @@ integration("durable authoring real repository and stage dispatcher", () => {
     return { snapshot, loads, dispatch: createRuntimeAuthoringStageDispatcher({ execution, sha256 }) };
   }
 
-  it("persists one private native-v2 plan and reclaims it after ordinary edits without metadata reload", async () => {
+  it("persists one private bound-v3 contract and reclaims it after ordinary edits without metadata reload", async () => {
     const repository = createPostgresAuthoringRepository(pool);
     const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a cartographer.", content: worldContentSchema.parse({ world: { title: "V2" } }) });
     const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
@@ -63,8 +80,9 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000011", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result(JSON.stringify(fixture.character)) };
     const resolvePreset = vi.fn(async () => ({ slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset system." }));
     const discoverModels = vi.fn(async () => [{ id: "native-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
-    const prepared = await prepareAuthoringTextExecution({ ownerUserId, execution: provider, operationPrompts: { standaloneCharacter: "Create a cartographer." }, ports: { resolvePreset, discoverModels } });
-    const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared.plans as never);
+    const prepared = await prepareAuthoringResponseContractExecution({ ownerUserId, execution: provider, operationPrompts: { standaloneCharacter: "Create a cartographer.", standaloneCharacterRepair: "Create a cartographer." }, ports: { resolvePreset, discoverModels } });
+    const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
+    if (!("routeBasis" in snapshot)) throw new Error("Expected a bound authoring snapshot.");
     await repository.initializeExecutionSnapshot(claim, snapshot);
     const conflicting = createAuthoringExecutionSnapshot(provider, { character_generation: "conflicting" }, { character: "conflicting" }, sha256);
     expect(await repository.initializeExecutionSnapshot(claim, conflicting)).toEqual(snapshot);
@@ -77,7 +95,16 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const reclaimed = (await repository.claim("v2-reclaim", 60))!;
     const loaded = (await repository.loadClaim(reclaimed))!;
     expect(loaded.snapshot).toEqual(snapshot);
-    const executed = vi.fn(async ({ request }: { request: ProviderRequest }) => { expect(request.systemPrompt).toBe("Preset system.\n\nCreate a cartographer."); return result(JSON.stringify(fixture.character)); });
+    const executed = vi.fn(async ({ request, preparedRequest, frozenResponseContracts, routeBasis, trustedOperationPrompt }: any) => {
+      expect(request.systemPrompt).toBe("Preset system.\n\nCreate a cartographer.");
+      expect(JSON.parse(preparedRequest.body).response_format.json_schema.name).toBe("infinite_quest_standalone_character_v1");
+      expect(preparedRequest.body.match(/Preset system\./g)).toHaveLength(1);
+      expect(preparedRequest.budgetAudit).toMatchObject({ countMode: "estimated", outputReserveTokens: 1024 });
+      expect(frozenResponseContracts.version).toBe(2);
+      expect(routeBasis.routeBasisHash).toBe(snapshot.routeBasis.routeBasisHash);
+      expect(trustedOperationPrompt).toBe("Create a cartographer.");
+      return result(JSON.stringify(fixture.character));
+    });
     const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ({ ...provider, executionRevision: "ordinary-edited" }) } as never, sha256, preparedExecutor: { execute: executed } });
     await expect(executeAuthoringStage({ claim: reclaimed, repository, dispatch })).resolves.toMatchObject({ kind: "character" });
     expect(executed).toHaveBeenCalledWith(expect.objectContaining({ ownerUserId, providerProfileId: provider.id }));
@@ -89,14 +116,116 @@ integration("durable authoring real repository and stage dispatcher", () => {
     expect(discoverModels).toHaveBeenCalledOnce();
   });
 
+  it("reclaims a complete inherited-Model contract after ordinary edits and rejects current authority drift", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a model-bound cartographer.", content: worldContentSchema.parse({ world: { title: "Model V2" } }) });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const claim = (await repository.claim("model-initial", 60))!;
+    const configuration = { providerRouting: { only: ["openai"] } };
+    const provider: RuntimeTextExecution = {
+      id: "00000000-0000-4000-8000-000000000021", name: "Native model", providerRole: "text",
+      providerType: "openrouter", model: "openai/model-authoring", contextWindowTokens: 8192,
+      maxOutputTokens: 1024, temperature: 0.6, requestTimeoutMs: 30_000,
+      endpointIdentity: "endpoint-model", executionRevision: "ordinary-model-a", authorityRevision: "authority-model-a",
+      configuration, execute: async () => { throw new Error("legacy model execution must not run"); }
+    };
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId, execution: provider,
+      operationPrompts: { standaloneCharacter: "Create a model-bound cartographer.", standaloneCharacterRepair: "Repair the model-bound cartographer." },
+      ports: {
+        resolvePreset: async () => { throw new Error("inherited Model must not resolve a preset"); },
+        discoverModels: async () => [{
+          id: provider.model, contextWindowTokens: provider.contextWindowTokens, maxOutputTokens: provider.maxOutputTokens,
+          responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" }
+        }]
+      },
+      responseFormatCapabilities: standaloneModelCapabilities({ endpointIdentity: provider.endpointIdentity!, model: provider.model, configuration })
+    });
+    const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
+    if (!("routeBasis" in snapshot)) throw new Error("Expected a bound authoring snapshot.");
+    expect(snapshot).toMatchObject({ version: 3, providerType: "openrouter", routeBasis: { selection: { kind: "model", modelId: provider.model } } });
+    expect(JSON.stringify(snapshot)).not.toContain("presetSlug");
+    await repository.initializeExecutionSnapshot(claim, snapshot);
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [claim.stageId]);
+    const reclaimed = (await repository.claim("model-reclaim", 60))!;
+    const loaded = (await repository.loadClaim(reclaimed))!;
+    expect(loaded.snapshot).toEqual(snapshot);
+    const executed = vi.fn(async ({ preparedRequest, frozenResponseContracts, routeBasis, trustedOperationPrompt }: any) => {
+      const body = JSON.parse(preparedRequest.body);
+      expect(body.response_format.json_schema.name).toBe(getProviderOutputSchemaV2("standalone_character").name);
+      expect(body.provider).toEqual({ require_parameters: true, only: ["openai"] });
+      expect(preparedRequest.budgetAudit).toMatchObject({ countMode: "estimated", outputReserveTokens: 1024 });
+      expect(frozenResponseContracts.contracts["standalone_character:nonstream"].admission.basis).toBe("model_verified");
+      expect(routeBasis.routeBasisHash).toBe(snapshot.routeBasis.routeBasisHash);
+      expect(trustedOperationPrompt).toBe("Create a model-bound cartographer.");
+      return result(JSON.stringify(fixture.character));
+    });
+    const ordinaryEdited = {
+      ...provider, executionRevision: "ordinary-model-edited", temperature: 1.4,
+      requestTimeoutMs: 5_000, contextWindowTokens: 4096, maxOutputTokens: 512,
+      configuration: { providerRouting: { only: ["changed-later"] } }
+    };
+    const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ordinaryEdited } as never, sha256, preparedExecutor: { execute: executed } });
+    const output = await executeAuthoringStage({ claim: reclaimed, repository, dispatch });
+    expect(output).toMatchObject({ kind: "character" });
+    await expect(repository.checkpoint(reclaimed, output!)).resolves.toBe(true);
+    expect(executed).toHaveBeenCalledOnce();
+    const denied = vi.fn();
+    const authorityChanged = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ({ ...ordinaryEdited, authorityRevision: "authority-model-revoked" }) } as never, sha256, preparedExecutor: { execute: denied } });
+    await expect(authorityChanged({ ...loaded, jobId: reclaimed.jobId, stageId: reclaimed.stageId, stageGeneration: reclaimed.stageGeneration, ownerUserId })).rejects.toMatchObject({ authoringFailure: { code: "authoring_provider_unavailable" } });
+    expect(denied).not.toHaveBeenCalled();
+    expect((await repository.read({ ownerUserId }, job.id))!.status).toBe("awaiting_review");
+
+    const tamperedInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+    const tamperedJob = await repository.submit({ ownerUserId }, tamperedInput, sha256(JSON.stringify(tamperedInput)));
+    const tamperedClaim = (await repository.claim("model-tamper-initial", 60))!;
+    expect(tamperedClaim.jobId).toBe(tamperedJob.id);
+    await repository.initializeExecutionSnapshot(tamperedClaim, snapshot);
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [tamperedClaim.stageId]);
+    await pool.query(
+      "UPDATE authoring_jobs SET execution_snapshot = jsonb_set(execution_snapshot, '{frozenResponseContracts,selectionHash}', to_jsonb($2::text)) WHERE id = $1",
+      [tamperedJob.id, "0".repeat(64)]
+    );
+    const tamperedReclaim = (await repository.claim("model-tamper-reclaim", 60))!;
+    await expect(repository.loadClaim(tamperedReclaim)).rejects.toThrow(/snapshot|contract|invalid|incompatible/i);
+    expect(executed).toHaveBeenCalledOnce();
+
+    const missingSingle = structuredClone(snapshot) as any;
+    delete missingSingle.requestConfiguration;
+    const missingSingleExecutor = vi.fn();
+    const missingSingleDispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => ordinaryEdited } as never, sha256,
+      preparedExecutor: { execute: missingSingleExecutor }
+    });
+    await expect(missingSingleDispatch({ ...loaded, snapshot: missingSingle, jobId: reclaimed.jobId, stageId: reclaimed.stageId, stageGeneration: reclaimed.stageGeneration, ownerUserId }))
+      .rejects.toThrow(/invalid|required|snapshot/i);
+    expect(missingSingleExecutor).not.toHaveBeenCalled();
+
+    const downgradeInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+    const downgradeJob = await repository.submit({ ownerUserId }, downgradeInput, sha256(JSON.stringify(downgradeInput)));
+    const downgradeClaim = (await repository.claim("model-downgrade-initial", 60))!;
+    expect(downgradeClaim.jobId).toBe(downgradeJob.id);
+    await repository.initializeExecutionSnapshot(downgradeClaim, snapshot);
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [downgradeClaim.stageId]);
+    await pool.query(
+      `UPDATE authoring_jobs
+          SET execution_snapshot = execution_snapshot - ARRAY['providerType','requestConfiguration','routeBasis','frozenResponseContracts','trustedOperationPrompts']::text[]
+        WHERE id = $1`,
+      [downgradeJob.id]
+    );
+    const downgradeReclaim = (await repository.claim("model-downgrade-reclaim", 60))!;
+    await expect(repository.loadClaim(downgradeReclaim)).rejects.toThrow(/snapshot|invalid|version|required/i);
+    expect(missingSingleExecutor).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])("composition captures native plans only when admission is enabled: %s", async (nativePresetPlansEnabled) => {
     const repository = createPostgresAuthoringRepository(pool);
     const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a cartographer.", content: worldContentSchema.parse({ world: { title: "Gate" } }) });
     const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
     const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000012", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result(JSON.stringify(fixture.character)) };
-    const getPreset = vi.fn(async () => ({ preset: { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset system." } }));
-    const listModels = vi.fn(async () => ({ models: [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }] }));
-    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset, listModels }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: { character_generation: { content: "Character template." } } }) }, promptTools: { content: (snapshot: any, key: string) => snapshot[key]?.content ?? "" } } as never, dispatch: (async (stage: { stageKey: string }) => ({ kind: "character", character: { ...fixture.character, id: stage.stageKey.slice("character:".length) } })) as never });
+    const getPreset = vi.fn(async (_input?: unknown) => ({ preset: { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset system." } }));
+    const listModels = vi.fn(async (_input?: unknown) => ({ models: [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }] }));
+    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset, listModels }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: { character_generation: { content: "Character template." } } }) }, promptTools: { content: (snapshot: any, key: string) => snapshot[key]?.content ?? "" }, authoringTextPlans: { nativePresetPlansEnabled, preparedExecutor: { execute: async () => result("{}") }, loadAuthority: async () => provider, ports: { resolvePreset: async (input: any) => (await getPreset(input)).preset, discoverModels: async (input: any) => (await listModels(input)).models } } } as never, dispatch: (async (stage: { stageKey: string }) => ({ kind: "character", character: { ...fixture.character, id: stage.stageKey.slice("character:".length) } })) as never });
     await expect(worker.runNext({ workerId: "gate", leaseSeconds: 60 })).resolves.toBe(true);
     const persisted = (await pool.query<{ execution_snapshot: unknown }>("SELECT execution_snapshot FROM authoring_jobs WHERE id = $1", [job.id])).rows[0]!.execution_snapshot as Record<string, unknown>;
     expect("version" in persisted).toBe(nativePresetPlansEnabled);
@@ -110,7 +239,9 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
     const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000013", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result('{"facts":[]}') };
     const preset = "Preset system.";
-    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled: true, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset: async () => ({ preset: { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: preset } }), listModels: async () => ({ models: [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }] }) }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) }, promptTools: { content: () => "" } } as never, dispatch: (async () => ({ kind: "source_plan", chunks: [{ id: "chunk", sourceId: "source", sourceRange: { start: 0, end: 1 }, contentHash: "a".repeat(64), spans: [{ paragraphId: "paragraph:0", start: 0, end: 1 }] }] })) as never });
+    const resolvedPreset = { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: preset };
+    const models = [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }];
+    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled: true, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset: async () => ({ preset: resolvedPreset }), listModels: async () => ({ models }) }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) }, promptTools: { content: () => "" }, authoringTextPlans: { nativePresetPlansEnabled: true, preparedExecutor: { execute: async () => result("{}") }, loadAuthority: async () => provider, ports: { resolvePreset: async () => resolvedPreset, discoverModels: async () => models } } } as never, dispatch: (async () => ({ kind: "source_plan", chunks: [{ id: "chunk", sourceId: "source", sourceRange: { start: 0, end: 1 }, contentHash: "a".repeat(64), spans: [{ paragraphId: "paragraph:0", start: 0, end: 1 }] }] })) as never });
     await expect(worker.runNext({ workerId: "source-plans", leaseSeconds: 60 })).resolves.toBe(true);
     const row = (await pool.query<{ execution_snapshot: any }>("SELECT execution_snapshot FROM authoring_jobs WHERE id = $1", [job.id])).rows[0]!.execution_snapshot;
     const plans = row.textExecutionPlans;
@@ -118,8 +249,10 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const world = (repair: boolean) => buildSourceWorldPrompt({ instructions: "", reviewGeneration: 0, selection: { source: { id: "snapshot", name: "snapshot", sha256: "0".repeat(64) }, boundaryParagraphId: "snapshot", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: [], mode }, repair }).systemPrompt;
     expect(plans.sourceExtraction.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: extraction(false) }));
     expect(plans.sourceExtractionRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: extraction(true) }));
-    expect(plans.sourceWorld.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(false) }));
-    expect(plans.sourceWorldRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(true) }));
+    expect(plans.sourceSynthesis.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(false) }));
+    expect(plans.sourceSynthesisRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(true) }));
+    expect(plans.sourceCharacter.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(false) }));
+    expect(plans.sourceCharacterRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(true) }));
   });
 
   it.each(["heartbeat false", "heartbeat error", "shutdown"])("leaves a real job resumable after %s, drains and resumes its pinned snapshot after expiry", async (mode) => {
