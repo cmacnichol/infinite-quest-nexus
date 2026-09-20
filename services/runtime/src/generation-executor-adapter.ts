@@ -2003,7 +2003,7 @@ async function executeLoadedGeneration(
         } catch (error) {
           logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
             errorMessage: error instanceof Error ? error.message : String(error) });
-          illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+          illustrationTextExecutionSnapshot = { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
         }
       }
       const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({
@@ -2674,7 +2674,7 @@ async function executeLoadedGeneration(
       } catch (error) {
         logger.warn({ event: "streaming_illustration_preparation_failed", generationJobId: job.id,
           errorMessage: error instanceof Error ? error.message : String(error) });
-        streamingIllustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+        streamingIllustrationTextExecutionSnapshot = { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
       }
       return streamingIllustrationTextExecutionSnapshot;
     };
@@ -4369,7 +4369,7 @@ async function executeLoadedGeneration(
       } catch (error) {
         logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
           errorMessage: error instanceof Error ? error.message : String(error) });
-        illustrationTextExecutionSnapshot = { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
+        illustrationTextExecutionSnapshot = { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
       }
     }
     const { turnId } = await phase("turn_commit", () => repository.commitAcceptedTurn({

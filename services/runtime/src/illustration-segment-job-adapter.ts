@@ -1269,6 +1269,7 @@ export async function runIllustrationPromptJob(
   providers: IllustrationProviderCollaborators,
 ): Promise<boolean> {
   const claimed = await withTransaction(pool, async (client) => {
+    await client.query("SELECT set_config('app.text_plan_protocol', '2', true)");
     const result = await client.query<any>(
       `WITH candidate AS (
          SELECT id FROM illustration_prompt_jobs

@@ -389,7 +389,12 @@ describe("generation executor adapter", () => {
     dependencies.collaborators.recordProfileCost.mockRejectedValueOnce(new Error("cost write failed"));
     await expect(callCampaignTextProvider(dependencies, provider as never, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toThrow("cost write failed");
     expect(completed).toHaveBeenCalledTimes(1);
-    expect(completed).toHaveBeenCalledWith(expect.any(Object), expect.any(String), { returnedModel: "returned", returnedProviderRoute: "route", diagnosticCode: null });
+    expect(completed).toHaveBeenCalledWith(expect.any(Object), expect.any(String), {
+      returnedModel: "returned",
+      returnedProviderRoute: "route",
+      diagnosticCode: null,
+      resultHash: null
+    });
   });
 
   it("persists bounded private partial prepared-response evidence before completing the failed invocation", async () => {
@@ -2116,7 +2121,7 @@ describe("generation executor adapter", () => {
       .execute({ workerId: "illustration-preflight-outage", leaseSeconds: 30, claim })).resolves.toBe(true);
 
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
-      illustrationTextExecutionSnapshot: { version: 2, state: "unavailable", errorCode: "illustration_text_route_unavailable" }
+      illustrationTextExecutionSnapshot: { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" }
     }));
     expect(repository.markRecoverable).not.toHaveBeenCalled();
   });

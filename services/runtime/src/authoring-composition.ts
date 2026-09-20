@@ -28,10 +28,12 @@ type RuntimeRepository = AuthoringExecutionRepository;
 /** Provider-free API composition. Execution credentials stay in the worker graph. */
 export function createRuntimeAuthoringApplication(
   pool: DatabasePool,
-  sha256: (value: string) => string
+  sha256: (value: string) => string,
+  options: Readonly<{ nativePresetPlansEnabled?: boolean }> = {}
 ): AuthoringApplication {
   return createAuthoringApplication({
-    repository: createPostgresAuthoringRepository(pool),
+    repository: createPostgresAuthoringRepository(pool,
+      options.nativePresetPlansEnabled === true ? { textPlanProtocol: 2 } : {}),
     targets: createPostgresAuthoringTargetPort(pool),
     worlds: createPostgresAuthoringWorldApplyAdapter(),
     sha256
@@ -91,7 +93,9 @@ export function createRuntimeAuthoringWorkerApplication(options: Readonly<{
   nativePresetPlansEnabled?: boolean;
   dispatch?: (stage: LoadedAuthoringStage) => Promise<AuthoringStageOutput>;
 }>): AuthoringWorkerApplication {
-  const repository = options.repository ?? createPostgresAuthoringRepository(options.pool!);
+  const repository = options.repository ?? createPostgresAuthoringRepository(
+    options.pool!, options.nativePresetPlansEnabled === true ? { textPlanProtocol: 2 } : {}
+  );
   const dispatch = options.dispatch ?? createRuntimeAuthoringStageDispatcher({
     execution: options.providers.execution,
     sha256: options.sha256,

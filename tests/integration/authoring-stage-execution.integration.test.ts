@@ -15,7 +15,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 import { AuthoringResponseError } from "../../services/runtime/src/authoring-response-adapter.js";
-import { createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
+import { createRuntimeAuthoringApplication, createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
 import { prepareAuthoringResponseContractExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
@@ -72,6 +72,144 @@ integration("durable authoring real repository and stage dispatcher", () => {
     return { snapshot, loads, dispatch: createRuntimeAuthoringStageDispatcher({ execution, sha256 }) };
   }
 
+  async function historicalAuthoringClaim(workerId: string, seconds = 60): Promise<AuthoringClaim | null> {
+    return (await (async () => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const jobs = await client.query<any>(`SELECT jobs.id,jobs.owner_user_id,jobs.execution_generation,jobs.review_generation
+          FROM authoring_jobs jobs WHERE jobs.kind = ANY($1::text[]) AND jobs.status IN ('queued','running')
+            AND jobs.expires_at > clock_timestamp() AND EXISTS (
+              SELECT 1 FROM authoring_job_stages stages WHERE stages.job_id = jobs.id
+                AND stages.owner_user_id = jobs.owner_user_id
+                AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key)
+                AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency
+                  LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key
+                    AND parent.generation = dependency.value::int AND parent.status = 'validated'
+                    AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key)
+                  WHERE parent.id IS NULL)
+                AND (stages.status = 'queued' AND ((stages.attempt_count = 0 AND stages.retry_count = 0) OR stages.next_attempt_at <= clock_timestamp())
+                  OR stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3))
+          ORDER BY jobs.created_at,jobs.id FOR UPDATE SKIP LOCKED LIMIT 1`, [["world_concept", "character", "story_source"]]);
+        const job = jobs.rows[0];
+        if (!job) { await client.query("COMMIT"); return null; }
+        const stages = await client.query<any>(`SELECT stages.id,stages.generation,stages.lease_token,stages.lease_expires_at
+          FROM authoring_job_stages stages WHERE stages.job_id = $1 AND stages.owner_user_id = $2
+            AND (stages.source_review_generation IS NULL OR stages.source_review_generation = $3)
+            AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key)
+            AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency
+              LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key
+                AND parent.generation = dependency.value::int AND parent.status = 'validated'
+                AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key)
+              WHERE parent.id IS NULL)
+            AND ((stages.status = 'queued' AND ((stages.attempt_count = 0 AND stages.retry_count = 0) OR stages.next_attempt_at <= clock_timestamp()))
+              OR (stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3))
+          ORDER BY stages.next_attempt_at,stages.created_at,stages.id FOR UPDATE SKIP LOCKED LIMIT 1`, [job.id, job.owner_user_id, job.review_generation]);
+        const stage = stages.rows[0];
+        if (!stage) { await client.query("COMMIT"); return null; }
+        await client.query("UPDATE authoring_job_stages SET status = 'running', attempt_count = attempt_count + 1, lease_token = gen_random_uuid(), lease_owner = $2, lease_expires_at = clock_timestamp() + make_interval(secs => $3::int), started_at = COALESCE(started_at, clock_timestamp()), updated_at = clock_timestamp() WHERE id = $1", [stage.id, workerId, seconds]);
+        const row = (await client.query<any>("SELECT id,generation,lease_token,lease_expires_at FROM authoring_job_stages WHERE id=$1", [stage.id])).rows[0]!;
+        await client.query("UPDATE authoring_jobs SET status = 'running', last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1", [job.id]);
+        await client.query("COMMIT");
+        return { jobId: job.id, stageId: row.id, ownerUserId: job.owner_user_id, jobGeneration: job.execution_generation,
+          stageGeneration: row.generation, leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at.toISOString() };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    })());
+  }
+
+  it.each(["queued", "expired"] as const)("fences an exact historical authoring %s claim before snapshot initialization and dispatch", async (state) => {
+    const protocolRepository = (createPostgresAuthoringRepository as unknown as (
+      value: DatabasePool,
+      options: { textPlanProtocol: 2 }
+    ) => ReturnType<typeof createPostgresAuthoringRepository>)(pool, { textPlanProtocol: 2 });
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a fenced cartographer.", content: worldContentSchema.parse({ world: { title: "Fenced authoring" } }) });
+    const job = await protocolRepository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    await expect(pool.query<{ text_plan_protocol: number | null }>(
+      "SELECT text_plan_protocol FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: 2 }] });
+    let priorClaim: AuthoringClaim | null = null;
+    if (state === "expired") {
+      priorClaim = await protocolRepository.claim("compatible-authoring", 60);
+      expect(priorClaim?.jobId).toBe(job.id);
+      await pool.query("UPDATE authoring_job_stages SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [priorClaim!.stageId]);
+    }
+    const before = (await pool.query(
+      `SELECT jobs.status AS job_status,jobs.last_activity_at,jobs.expires_at,jobs.execution_generation,
+              stages.id AS stage_id,stages.generation AS stage_generation,
+              stages.status AS stage_status,stages.attempt_count,stages.lease_token,stages.lease_owner,stages.lease_expires_at
+         FROM authoring_jobs jobs JOIN authoring_job_stages stages ON stages.job_id=jobs.id WHERE jobs.id=$1`,
+      [job.id]
+    )).rows[0];
+    let synthetic: AuthoringClaim;
+    if (state === "queued") {
+      await expect(historicalAuthoringClaim("old-authoring")).rejects.toThrow(TypeError);
+      synthetic = {
+        jobId: job.id,
+        stageId: before.stage_id,
+        ownerUserId,
+        jobGeneration: before.execution_generation,
+        stageGeneration: before.stage_generation,
+        leaseToken: randomUUID(),
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+      };
+    } else {
+      synthetic = (await historicalAuthoringClaim("compatible-authoring"))!;
+      expect(synthetic.jobId).toBe(job.id);
+    }
+    expect((await pool.query(
+      `SELECT jobs.status AS job_status,jobs.last_activity_at,jobs.expires_at,jobs.execution_generation,
+              stages.id AS stage_id,stages.generation AS stage_generation,
+              stages.status AS stage_status,stages.attempt_count,stages.lease_token,stages.lease_owner,stages.lease_expires_at
+         FROM authoring_jobs jobs JOIN authoring_job_stages stages ON stages.job_id=jobs.id WHERE jobs.id=$1`,
+      [job.id]
+    )).rows[0]).toEqual(before);
+    const runtimeFixture = runtime(async () => result(JSON.stringify(fixture.character)));
+    expect(await protocolRepository.loadClaim(synthetic!)).toBeNull();
+    expect(await protocolRepository.initializeExecutionSnapshot(synthetic!, runtimeFixture.snapshot)).toBeNull();
+    expect(await protocolRepository.heartbeat(synthetic!, 60)).toBe(false);
+    const dispatch = vi.fn(async () => ({ kind: "character", character: fixture.character } as const));
+    await expect(executeAuthoringStage({ claim: synthetic, repository: protocolRepository, dispatch: dispatch as never })).resolves.toBeNull();
+    expect(dispatch).not.toHaveBeenCalled();
+    const compatible = await protocolRepository.claim("compatible-authoring-reclaim", 60);
+    expect(compatible).toMatchObject({ jobId: job.id, stageId: synthetic.stageId });
+    expect(compatible?.stageGeneration).toBe(synthetic.stageGeneration);
+  });
+
+  it("keeps genuine v1 authoring snapshots on the historical claim path", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a historical cartographer.", content: worldContentSchema.parse({ world: { title: "Historical authoring" } }) });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const claim = (await repository.claim("v1-snapshot-initial", 60))!;
+    const historical = runtime(async () => result(JSON.stringify(fixture.character))).snapshot;
+    expect("version" in historical).toBe(false);
+    await expect(repository.initializeExecutionSnapshot(claim, historical)).resolves.toEqual(historical);
+    await expect(pool.query<{ text_plan_protocol: number | null }>(
+      "SELECT text_plan_protocol FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: null }] });
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [claim.stageId]);
+    await expect(historicalAuthoringClaim("historical-v1-authoring"))
+      .resolves.toMatchObject({ jobId: job.id, stageId: claim.stageId });
+    await expect(pool.query<{ attempt_count: number; lease_owner: string }>(
+      "SELECT attempt_count,lease_owner FROM authoring_job_stages WHERE id=$1", [claim.stageId]
+    )).resolves.toMatchObject({ rows: [{ attempt_count: 2, lease_owner: "historical-v1-authoring" }] });
+  });
+
+  it("marks native authoring intent in API composition before the first claim and permits terminal cleanup", async () => {
+    const application = createRuntimeAuthoringApplication(pool, sha256, { nativePresetPlansEnabled: true });
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create an API-marked cartographer.", content: worldContentSchema.parse({ world: { title: "API marker" } }) });
+    const job = await application.submit({ ownerUserId }, input);
+    await expect(pool.query<{ text_plan_protocol: number | null; status: string; execution_snapshot: unknown }>(
+      "SELECT text_plan_protocol,status,execution_snapshot FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: 2, status: "queued", execution_snapshot: null }] });
+    await expect(application.cancel({ ownerUserId }, job.id, job.revision)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(pool.query<{ text_plan_protocol: number | null; status: string }>(
+      "SELECT text_plan_protocol,status FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: 2, status: "cancelled" }] });
+  });
+
   it("persists one private bound-v3 contract and reclaims it after ordinary edits without metadata reload", async () => {
     const repository = createPostgresAuthoringRepository(pool);
     const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a cartographer.", content: worldContentSchema.parse({ world: { title: "V2" } }) });
@@ -90,6 +228,20 @@ integration("durable authoring real repository and stage dispatcher", () => {
     });
     const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
     if (!("routeBasis" in snapshot)) throw new Error("Expected a bound authoring snapshot.");
+    const planOnlySnapshot = createAuthoringExecutionSnapshot(
+      provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256,
+      { standaloneCharacter: snapshot.textExecutionPlans.standaloneCharacter! }
+    );
+    expect(planOnlySnapshot).toMatchObject({ version: 2, textExecutionPlans: { standaloneCharacter: expect.any(Object) } });
+    const planOnlyInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+    const planOnlyJob = await repository.submit({ ownerUserId }, planOnlyInput, sha256(JSON.stringify(planOnlyInput)));
+    const planOnlyClaim = (await repository.claim("plan-v2-initial", 60))!;
+    expect(planOnlyClaim.jobId).toBe(planOnlyJob.id);
+    await repository.initializeExecutionSnapshot(planOnlyClaim, planOnlySnapshot);
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [planOnlyClaim.stageId]);
+    await expect(historicalAuthoringClaim("historical-plan-v2")).resolves.toMatchObject({ jobId: planOnlyJob.id, stageId: planOnlyClaim.stageId });
+    await pool.query("UPDATE authoring_jobs SET status='cancelled' WHERE id=$1", [planOnlyJob.id]);
+    await pool.query("UPDATE authoring_job_stages SET status='cancelled',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE job_id=$1", [planOnlyJob.id]);
     await repository.initializeExecutionSnapshot(claim, snapshot);
     const conflicting = createAuthoringExecutionSnapshot(provider, { character_generation: "conflicting" }, { character: "conflicting" }, sha256);
     expect(await repository.initializeExecutionSnapshot(claim, conflicting)).toEqual(snapshot);
@@ -127,14 +279,10 @@ integration("durable authoring real repository and stage dispatcher", () => {
         delete tamperedSnapshot.textExecutionPlans[operation];
         delete tamperedSnapshot.trustedOperationPrompts[operation];
       }
-      await pool.query("UPDATE authoring_jobs SET execution_snapshot = $2::jsonb WHERE id = $1", [tamperedJob.id, JSON.stringify(tamperedSnapshot)]);
-      await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [tamperedClaim.stageId]);
-      const tamperedReclaim = (await repository.claim("closure-" + tamper + "-reclaim", 60))!;
-      const tamperedLoaded = (await repository.loadClaim(tamperedReclaim))!;
-      await expect(dispatch({
-        ...tamperedLoaded, jobId: tamperedReclaim.jobId, stageId: tamperedReclaim.stageId,
-        stageGeneration: tamperedReclaim.stageGeneration, ownerUserId
-      })).rejects.toThrow(/closure|incomplete/i);
+      await expect(pool.query(
+        "UPDATE authoring_jobs SET execution_snapshot = $2::jsonb WHERE id = $1",
+        [tamperedJob.id, JSON.stringify(tamperedSnapshot)]
+      )).rejects.toThrow(/immutable/i);
       expect(executed).toHaveBeenCalledOnce();
     }
     const denied = vi.fn();
@@ -210,13 +358,10 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const tamperedClaim = (await repository.claim("model-tamper-initial", 60))!;
     expect(tamperedClaim.jobId).toBe(tamperedJob.id);
     await repository.initializeExecutionSnapshot(tamperedClaim, snapshot);
-    await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [tamperedClaim.stageId]);
-    await pool.query(
+    await expect(pool.query(
       "UPDATE authoring_jobs SET execution_snapshot = jsonb_set(execution_snapshot, '{frozenResponseContracts,selectionHash}', to_jsonb($2::text)) WHERE id = $1",
       [tamperedJob.id, "0".repeat(64)]
-    );
-    const tamperedReclaim = (await repository.claim("model-tamper-reclaim", 60))!;
-    await expect(repository.loadClaim(tamperedReclaim)).rejects.toThrow(/snapshot|contract|invalid|incompatible/i);
+    )).rejects.toThrow(/immutable/i);
     expect(executed).toHaveBeenCalledOnce();
 
     const missingSingle = structuredClone(snapshot) as any;
@@ -236,14 +381,12 @@ integration("durable authoring real repository and stage dispatcher", () => {
     expect(downgradeClaim.jobId).toBe(downgradeJob.id);
     await repository.initializeExecutionSnapshot(downgradeClaim, snapshot);
     await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [downgradeClaim.stageId]);
-    await pool.query(
+    await expect(pool.query(
       `UPDATE authoring_jobs
           SET execution_snapshot = execution_snapshot - ARRAY['providerType','requestConfiguration','routeBasis','frozenResponseContracts','trustedOperationPrompts']::text[]
         WHERE id = $1`,
       [downgradeJob.id]
-    );
-    const downgradeReclaim = (await repository.claim("model-downgrade-reclaim", 60))!;
-    await expect(repository.loadClaim(downgradeReclaim)).rejects.toThrow(/snapshot|invalid|version|required/i);
+    )).rejects.toThrow(/immutable/i);
     expect(missingSingleExecutor).not.toHaveBeenCalled();
   });
 

@@ -34,6 +34,9 @@ describe("System Archive portability registry", () => {
 
   it("classifies durable System Archive transfer state as operational", () => {
     expect(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS).toMatchObject({
+      generation_jobs: "operational",
+      authoring_jobs: "operational",
+      illustration_prompt_jobs: "operational",
       system_archive_jobs: "operational",
       system_archive_uploads: "operational",
       system_archive_upload_chunks: "operational"

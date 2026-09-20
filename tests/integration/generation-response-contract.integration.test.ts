@@ -181,6 +181,94 @@ integration("PostgreSQL response-contract persistence", () => {
       originalFindingsHash: generationReviewFindingsHash(reasons), retryFailure: null, decisionJournal: []
     } satisfies GenerationReviewCheckpoint;
   }
+
+  async function historicalClaim(workerId: string, leaseSeconds = 30) {
+    return pool.query<{ id: string; status: string; attempts: number; lease_owner: string; lease_expires_at: Date }>(
+      `WITH candidate AS (
+         SELECT id FROM generation_jobs
+          WHERE status IN ('queued','replacement_queued')
+             OR (status IN ('assessing','generating','validating','committing') AND lease_expires_at < now())
+          ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
+       )
+       UPDATE generation_jobs j SET status = 'assessing', attempts = attempts + 1, lease_owner = $1,
+              lease_expires_at = now() + ($2::text || ' seconds')::interval, updated_at = now()
+         FROM candidate WHERE j.id = candidate.id
+       RETURNING j.id,j.status,j.attempts,j.lease_owner,j.lease_expires_at`,
+      [workerId, leaseSeconds]
+    );
+  }
+
+  it("fences exact historical Story claims for every v2 evidence source while compatible claims remain transaction-local", async () => {
+    const makeJob = async (evidence: string, orchestration: Record<string, unknown>, streaming: Record<string, unknown> = {}) => {
+      const imported = await campaign();
+      const queued = await commands(false).enqueueAppend(
+        { ownerUserId, campaignId: imported.campaignId },
+        generationRequestSchema.parse({ action: `Fence ${evidence}.`, providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } })
+      );
+      await pool.query(
+        "UPDATE generation_jobs SET orchestration_private=$2::jsonb,streaming_segments_state=$3::jsonb WHERE id=$1",
+        [queued.id, JSON.stringify(orchestration), JSON.stringify(streaming)]
+      );
+      return queued.id;
+    };
+    const routeBasis = v2RouteBasis();
+    const cases = [
+      ["preset", { queuedResponsePolicy: v2Policy(routeBasis.routeBasisHash), textExecutionRouteBasis: routeBasis }, {}],
+      ["verified-model", { queuedResponsePolicy: v2ModelPolicy() }, {}],
+      ["streaming-marker", {}, { illustrationTextExecutionSnapshot: { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" } }],
+      ["malformed-v1", { queuedResponsePolicy: { version: 1 } }, {}],
+      ["malformed-future", { queuedResponsePolicy: { version: 99 } }, {}]
+    ] as const;
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    for (const [evidence, orchestration, streaming] of cases) {
+      const id = await makeJob(evidence, orchestration, streaming);
+      const before = (await pool.query("SELECT status,attempts,lease_owner,lease_expires_at FROM generation_jobs WHERE id=$1", [id])).rows[0];
+      expect((await historicalClaim(`old-${evidence}`)).rows).toEqual([]);
+      expect((await pool.query("SELECT status,attempts,lease_owner,lease_expires_at FROM generation_jobs WHERE id=$1", [id])).rows[0]).toEqual(before);
+      const compatible = await repository.claimNext({ workerId: `compatible-${evidence}`, leaseSeconds: 30 });
+      expect(compatible).toMatchObject({ jobId: id, attempts: 1 });
+      if (evidence === "preset") {
+        await expect(pool.query(
+          "UPDATE generation_jobs SET orchestration_private=orchestration_private-'queuedResponsePolicy' WHERE id=$1",
+          [id]
+        )).rejects.toThrow(/immutable/i);
+        await expect(repository.markGenerating({ jobId: id, ownerUserId: compatible!.ownerUserId, workerId: `compatible-${evidence}` }))
+          .resolves.toBe(true);
+      }
+      await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [id]);
+    }
+
+    const expired = await makeJob("expired-preset", { queuedResponsePolicy: v2Policy(routeBasis.routeBasisHash), textExecutionRouteBasis: routeBasis });
+    const claim = await repository.claimNext({ workerId: "compatible-v2", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(expired);
+    await pool.query("UPDATE generation_jobs SET status='generating',lease_expires_at=now()-interval '1 second' WHERE id=$1", [expired]);
+    const expiredBefore = (await pool.query("SELECT status,attempts,lease_owner,lease_expires_at FROM generation_jobs WHERE id=$1", [expired])).rows[0];
+    expect((await historicalClaim("compatible-v2")).rows).toEqual([]);
+    expect((await pool.query("SELECT status,attempts,lease_owner,lease_expires_at FROM generation_jobs WHERE id=$1", [expired])).rows[0]).toEqual(expiredBefore);
+    await expect(repository.claimNext({ workerId: "compatible-v2", leaseSeconds: 30 })).resolves.toMatchObject({ jobId: expired, attempts: 2 });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [expired]);
+
+    const transaction = await pool.connect();
+    try {
+      await transaction.query("BEGIN");
+      await transaction.query("SELECT set_config('app.text_plan_protocol','2',true)");
+      await transaction.query("COMMIT");
+      expect((await transaction.query("SELECT current_setting('app.text_plan_protocol',true) AS value")).rows[0]?.value ?? "").toBe("");
+      await transaction.query("BEGIN");
+      await transaction.query("SELECT set_config('app.text_plan_protocol','2',true)");
+      await transaction.query("ROLLBACK");
+      expect((await transaction.query("SELECT current_setting('app.text_plan_protocol',true) AS value")).rows[0]?.value ?? "").toBe("");
+    } finally {
+      transaction.release();
+    }
+    const pooled = await makeJob("pool-reset", { queuedResponsePolicy: v2ModelPolicy() });
+    expect((await historicalClaim("old-after-pool-reuse")).rows).toEqual([]);
+    await pool.query("UPDATE generation_jobs SET status='cancelled' WHERE id=$1", [pooled]);
+
+    const legacy = await makeJob("historical-v1", {});
+    expect((await historicalClaim("old-v1")).rows).toEqual([expect.objectContaining({ id: legacy, status: "assessing", attempts: 1 })]);
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [legacy]);
+  });
   it("persists a trusted queued policy privately and retains a legacy row's absent shape", async () => {
     const imported = await campaign();
     const legacyImported = await campaign();
@@ -265,10 +353,11 @@ integration("PostgreSQL response-contract persistence", () => {
     const contract = frozen.contracts["event_coverage:nonstream"];
     const altered = { ...frozen, contracts: { ...frozen.contracts, "event_coverage:nonstream": { ...contract, schema: { ...contract.schema, x_tampered: true } } } };
     const tampered = { ...altered, selectionHash: frozenResponseContractsV2SelectionHash(altered) };
-    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('frozenResponseContracts',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify(tampered)]);
-    await expect(fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim })).resolves.toBeNull();
-    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
-      .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+    await expect(pool.query(
+      "UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('frozenResponseContracts',$2::jsonb) WHERE id=$1",
+      [queued.id, JSON.stringify(tampered)]
+    )).rejects.toThrow(/immutable/i);
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
 
   it("rejects a v2 completed checkpoint that has no durable invocation", async () => {
@@ -305,18 +394,15 @@ integration("PostgreSQL response-contract persistence", () => {
       await fixture.repository.completeResponseContractInvocation!(fixture.scope, reserved!.id, { returnedModel: "contract-model", returnedProviderRoute: "route-a", diagnosticCode: null });
       expect(await fixture.repository.saveOrchestration(fixture.scope, { ...initial, primaryResult: primaryResultCheckpoint(requestBody, requestPayloadHash) } as never)).toBe(true);
       if (tamper === "missing") {
-        await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private-'textExecutionRouteBasis', lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
+        await expect(pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private-'textExecutionRouteBasis', lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]))
+          .rejects.toThrow(/immutable/i);
       } else {
         const alteredDraft = { ...routeBasis, presetSystemPrompt: "A different but valid persisted preset instruction." };
         const alteredBasis = { ...alteredDraft, routeBasisHash: textExecutionRouteBasisHash({ ...alteredDraft, routeBasisHash: hash }) };
-        await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('textExecutionRouteBasis',$2::jsonb), lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id, JSON.stringify(alteredBasis)]);
+        await expect(pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('textExecutionRouteBasis',$2::jsonb), lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id, JSON.stringify(alteredBasis)]))
+          .rejects.toThrow(/immutable/i);
       }
-      const repository = createPostgresGenerationExecutionRepository(pool); const workerId = `basis-reclaim-${tamper}-${crypto.randomUUID()}`;
-      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
-      expect(claim?.jobId).toBe(queued.id);
-      await expect(repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
-      await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
-        .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+      await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
     }
   });
 
@@ -509,12 +595,10 @@ integration("PostgreSQL response-contract persistence", () => {
       pool.query("SELECT id,content FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [imported.campaignId]),
       pool.query("SELECT id,content FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id", [imported.campaignId])
     ]);
-    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('queuedResponsePolicy',jsonb_build_object('version',99)) WHERE id=$1", [queued.id]);
-    const repository = createPostgresGenerationExecutionRepository(pool);
-    const workerId = `malformed-${crypto.randomUUID()}`;
-    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
-    expect(claim?.jobId).toBe(queued.id);
-    await expect(repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+    await expect(pool.query(
+      "UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('queuedResponsePolicy',jsonb_build_object('version',99)) WHERE id=$1",
+      [queued.id]
+    )).rejects.toThrow(/immutable/i);
     const after = await Promise.all([
       pool.query("SELECT active_turn_number FROM campaigns WHERE id=$1", [imported.campaignId]),
       pool.query("SELECT trackers,rpg_stats,event_triggers,pending_event_triggers FROM campaign_state WHERE campaign_id=$1", [imported.campaignId]),
@@ -523,7 +607,7 @@ integration("PostgreSQL response-contract persistence", () => {
       pool.query("SELECT id,content FROM chronicle_memories WHERE campaign_id=$1 ORDER BY id", [imported.campaignId])
     ]);
     expect(after.map((result) => result.rows)).toEqual(before.map((result) => result.rows));
-    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id])).resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
 
   it.each(["frozenResponseContracts", "responseContractInvocations"] as const)("fails closed on an unknown %s version without mutating derived rows", async (key) => {

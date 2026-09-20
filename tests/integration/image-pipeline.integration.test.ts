@@ -33,6 +33,7 @@ import { installIntegrationProviderTransport } from "./provider-transport-test-h
 import { supportsSecureGeneratedArchiveStaging } from "../../services/api/src/archive-io.js";
 import { createProvisionalSegment as createNativeProvisionalSegment, enqueueIllustrationBackfill as enqueueNativeIllustrationBackfill, generateTurnIllustrationSegments as generateNativeIllustrationSegments, promoteProvisionalSet as promoteNativeProvisionalSet, runIllustrationPromptJob as runNativeIllustrationPromptJob } from "../../services/runtime/src/illustration-segment-job-adapter.js";
 import { createIllustrationWorkerPorts } from "../../services/runtime/src/illustration-composition.js";
+import { createIllustrationWorkerStateMachine } from "../../services/runtime/src/illustration-worker-state-adapter.js";
 import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
 import { reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
 
@@ -1938,6 +1939,46 @@ integration("independent illustration pipeline", () => {
         frozenResponseContracts: { version: 2, contracts: { "illustration_prompt_refinement:nonstream": { admission: { basis: "preset_trusted" } } } },
         trustedOperationPrompt: expect.any(String)
       } });
+    const promptJob = (await pool.query<{ id: string; status: string; attempts: number; lease_owner: string | null; lease_expires_at: Date | null }>(
+      "SELECT id,status,attempts,lease_owner,lease_expires_at FROM illustration_prompt_jobs WHERE campaign_id=$1",
+      [imported.campaignId]
+    )).rows[0]!;
+    const historicalClaim = async (workerId: string) => pool.query<{ id: string }>(
+      `WITH candidate AS (
+         SELECT id FROM illustration_prompt_jobs
+          WHERE (status IN ('queued', 'recoverable') AND next_attempt_at <= now())
+             OR (status = 'refining' AND lease_expires_at < now())
+          ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
+       )
+       UPDATE illustration_prompt_jobs jobs
+          SET status = 'refining', attempts = attempts + 1, lease_owner = $1,
+              lease_expires_at = now() + ($2::text || ' seconds')::interval, updated_at = now()
+         FROM candidate WHERE jobs.id = candidate.id
+       RETURNING jobs.id`,
+      [workerId, 30]
+    );
+    expect((await historicalClaim("historical-illustration")).rows).toEqual([]);
+    expect((await pool.query(
+      "SELECT id,status,attempts,lease_owner,lease_expires_at FROM illustration_prompt_jobs WHERE id=$1",
+      [promptJob.id]
+    )).rows[0]).toEqual(promptJob);
+    const stateMachine = createIllustrationWorkerStateMachine(pool, {
+      prompt: async () => false,
+      resolution: async () => false,
+      image: async () => false
+    });
+    await expect(stateMachine.claimNextPromptJob({ workerId: "state-machine-v2", leaseSeconds: 30 }))
+      .resolves.toMatchObject({ jobId: promptJob.id, family: "prompt", attempts: 1 });
+    await pool.query("UPDATE illustration_prompt_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [promptJob.id]);
+    const expiredBefore = (await pool.query(
+      "SELECT id,status,attempts,lease_owner,lease_expires_at FROM illustration_prompt_jobs WHERE id=$1",
+      [promptJob.id]
+    )).rows[0];
+    expect((await historicalClaim("state-machine-v2")).rows).toEqual([]);
+    expect((await pool.query(
+      "SELECT id,status,attempts,lease_owner,lease_expires_at FROM illustration_prompt_jobs WHERE id=$1",
+      [promptJob.id]
+    )).rows[0]).toEqual(expiredBefore);
     await pool.query("UPDATE provider_profiles SET default_model='edited-after-enqueue', temperature=0.91 WHERE id=$1", [textProviderId]);
     const executionCallsBeforeClaim = frozenExecution.mock.calls.length;
     const ports = createIllustrationWorkerPorts(pool, native);
@@ -1954,39 +1995,63 @@ integration("independent illustration pipeline", () => {
     expect(discoverModels).toHaveBeenCalledTimes(1);
     const completed = await pool.query<{ status: string }>("SELECT status FROM illustration_prompt_jobs WHERE campaign_id=$1", [imported.campaignId]);
     expect(completed.rows.some((row) => row.status === "completed")).toBe(true);
+    await pool.query(
+      "UPDATE illustration_prompt_jobs SET next_attempt_at=now()+interval '1 hour' WHERE campaign_id=$1 AND status IN ('queued','recoverable')",
+      [imported.campaignId]
+    );
+    const unavailable = await pool.query<{ id: string }>(
+      `WITH source AS (
+         SELECT segments.*, prompt_jobs.provider_profile_id
+           FROM turn_illustration_segments segments
+           JOIN illustration_prompt_jobs prompt_jobs ON prompt_jobs.segment_id=segments.id
+          WHERE segments.campaign_id=$1 ORDER BY segments.ordinal LIMIT 1
+       ), inserted_segment AS (
+         INSERT INTO turn_illustration_segments (
+           owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,start_offset,end_offset,
+           start_word,end_word,source_text,source_text_hash,direct_prompt,resolved_prompt,prompt_source,status
+         ) SELECT owner_user_id,illustration_set_id,campaign_id,turn_id,
+                  (SELECT max(ordinal)+1 FROM turn_illustration_segments WHERE illustration_set_id=source.illustration_set_id),
+                  start_offset,end_offset,start_word,end_word,source_text,source_text_hash,direct_prompt,'','direct','refining'
+             FROM source RETURNING id,owner_user_id,campaign_id,turn_id
+       )
+       INSERT INTO illustration_prompt_jobs (
+         owner_user_id,campaign_id,turn_id,segment_id,provider_profile_id,requested_model,prompt_snapshot,text_execution_snapshot
+       ) SELECT inserted_segment.owner_user_id,inserted_segment.campaign_id,inserted_segment.turn_id,inserted_segment.id,$2,'','{}'::jsonb,
+                '{"version":3,"state":"unavailable","errorCode":"illustration_text_route_unavailable"}'::jsonb
+           FROM inserted_segment RETURNING id`,
+      [imported.campaignId, textProviderId]
+    );
+    expect((await historicalClaim("historical-unavailable-v3")).rows).toEqual([]);
+    await pool.query(
+      "UPDATE illustration_prompt_jobs SET lease_expires_at=now()+interval '1 hour' WHERE campaign_id=$1 AND status='refining' AND id<>$2",
+      [imported.campaignId, unavailable.rows[0]!.id]
+    );
+    await expect(stateMachine.claimNextPromptJob({ workerId: "state-machine-unavailable-v3", leaseSeconds: 30 }))
+      .resolves.toMatchObject({ jobId: unavailable.rows[0]!.id, family: "prompt", attempts: 1 });
+    await pool.query("UPDATE illustration_prompt_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [unavailable.rows[0]!.id]);
     const preparedCallsBeforeTamper = prepared.mock.calls.length;
     const authorityCallsBeforeTamper = loadAuthority.mock.calls.length;
-    await pool.query(
+    await expect(pool.query(
       `UPDATE illustration_prompt_jobs
           SET text_execution_snapshot = jsonb_set(text_execution_snapshot, '{plan,parameters,temperature}', '0.99'::jsonb),
               created_at = clock_timestamp() - interval '2 days'
         WHERE id=(SELECT id FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='queued' ORDER BY id LIMIT 1)`,
       [imported.campaignId]
-    );
-    await expect(runNativeIllustrationPromptJob(pool, "native-illustration-tamper-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    )).rejects.toThrow(/immutable/i);
     expect(prepared).toHaveBeenCalledTimes(preparedCallsBeforeTamper);
     expect(loadAuthority).toHaveBeenCalledTimes(authorityCallsBeforeTamper);
-    const tampered = await pool.query<{ status: string; error_code: string | null }>(
-      "SELECT status,error_code FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='recoverable'", [imported.campaignId]
-    );
-    expect(tampered.rows).toContainEqual(expect.objectContaining({ status: "recoverable", error_code: "illustration_text_route_unavailable" }));
 
     const preparedCallsBeforeDowngrade = prepared.mock.calls.length;
     const authorityCallsBeforeDowngrade = loadAuthority.mock.calls.length;
-    await pool.query(
+    await expect(pool.query(
       `UPDATE illustration_prompt_jobs
           SET text_execution_snapshot = text_execution_snapshot - ARRAY['providerType','requestConfiguration','routeBasis','frozenResponseContracts','trustedOperationPrompt']::text[],
               created_at = clock_timestamp() - interval '1 day'
         WHERE id=(SELECT id FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='queued' ORDER BY id LIMIT 1)`,
       [imported.campaignId]
-    );
-    await expect(runNativeIllustrationPromptJob(pool, "native-illustration-downgrade-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
+    )).rejects.toThrow(/immutable/i);
     expect(prepared).toHaveBeenCalledTimes(preparedCallsBeforeDowngrade);
     expect(loadAuthority).toHaveBeenCalledTimes(authorityCallsBeforeDowngrade);
-    const downgradeRejected = await pool.query<{ status: string; error_code: string | null }>(
-      "SELECT status,error_code FROM illustration_prompt_jobs WHERE campaign_id=$1 AND status='recoverable'", [imported.campaignId]
-    );
-    expect(downgradeRejected.rows.filter((row) => row.error_code === "illustration_text_route_unavailable").length).toBeGreaterThanOrEqual(2);
     expect(JSON.stringify(await listCampaignIllustrationSegments(pool, imported.campaignId))).not.toContain("PRIVATE_NATIVE_ILLUSTRATION_PROMPT");
   });
 
@@ -2277,14 +2342,9 @@ integration("independent illustration pipeline", () => {
       "UPDATE illustration_prompt_jobs SET status='cancelled' WHERE campaign_id=$1 AND status='queued' AND id <> $2",
       [imported.campaignId, malformed.id]
     );
-    await pool.query("UPDATE illustration_prompt_jobs SET text_execution_snapshot='{}'::jsonb WHERE id=$1", [malformed.id]);
-    const dispatchesBeforeMalformed = prepared.mock.calls.length;
-    await makeOnlyPromptClaimable(pool, malformed.id);
-    await expect(runNativeIllustrationPromptJob(pool, "native-malformed-snapshot-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
-    expect(prepared).toHaveBeenCalledTimes(dispatchesBeforeMalformed);
-    await expect(pool.query<{ status: string; error_code: string | null }>(
-      "SELECT status,error_code FROM illustration_prompt_jobs WHERE id=$1", [malformed.id]
-    )).resolves.toMatchObject({ rows: [{ status: "recoverable", error_code: "illustration_text_route_unavailable" }] });
+    await expect(pool.query(
+      "UPDATE illustration_prompt_jobs SET text_execution_snapshot='{}'::jsonb WHERE id=$1", [malformed.id]
+    )).rejects.toThrow(/immutable/i);
   });
 
   it("promotes provisional native plans and reconciles final segments with their frozen snapshot", async () => {
@@ -2416,6 +2476,45 @@ integration("independent illustration pipeline", () => {
     expect(reconciled.rows.map((row) => row.text_execution_snapshot)).toEqual(
       Array.from({ length: reconciled.rows.length }, () => frozenSnapshot)
     );
+    await pool.query("UPDATE turn_illustration_sets SET is_active=false WHERE turn_id=$1", [turns.rows[0]!.id]);
+
+    const rollbackCases = [
+      ["omitted", frozenSnapshot, undefined],
+      ["substituted", frozenSnapshot, { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" }],
+      ["malformed-parent", { version: 3, state: "prepared", routeBasis: { version: 2 }, plan: { version: 2 }, frozenResponseContracts: { version: 2 } }, frozenSnapshot],
+      ["future-parent", { version: 99, state: "unavailable", errorCode: "illustration_text_route_unavailable" }, frozenSnapshot]
+    ] as const;
+    for (const [name, parentSnapshot, childSnapshot] of rollbackCases) {
+      const candidate = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+        action: `Rollback ${name} streaming illustration.`, providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+      }));
+      await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [candidate.id]);
+      const setId = await createProvisionalSet(pool, ownerUserId, imported.campaignId, candidate.id);
+      await expect(createNativeProvisionalSegment(
+        pool, ownerUserId, imported.campaignId, candidate.id, setId!,
+        { ordinal: 0, startOffset: 0, endOffset: provisionalNarration.length, startWord: 0, endWord: 120, wordCount: 120, text: provisionalNarration },
+        config, native, undefined, frozenSnapshot as never
+      )).resolves.toBe(true);
+      await pool.query(
+        `UPDATE generation_jobs SET streaming_segments_state=$2::jsonb WHERE id=$1`,
+        [candidate.id, JSON.stringify({ provisionalSetId: setId, provisionalIllustrationReconciliation: "pending", illustrationTextExecutionSnapshot: parentSnapshot })]
+      );
+      await expect(withTransaction(pool, (client) => promoteNativeProvisionalSet(
+        client, ownerUserId, candidate.id, turns.rows[0]!.id, imported.campaignId, finalNarration,
+        config, native, undefined, childSnapshot as never
+      ))).rejects.toThrow(/snapshot|copy|invalid/i);
+      await expect(pool.query<{ status: string; turn_id: string | null; count: number }>(
+        `SELECT sets.status,sets.turn_id,count(segments.*)::int AS count
+           FROM turn_illustration_sets sets JOIN turn_illustration_segments segments ON segments.illustration_set_id=sets.id
+          WHERE sets.id=$1 GROUP BY sets.status,sets.turn_id`, [setId]
+      )).resolves.toMatchObject({ rows: [{ status: "provisional", turn_id: null, count: 1 }] });
+      await expect(pool.query<{ state: string }>(
+        "SELECT streaming_segments_state->>'provisionalIllustrationReconciliation' AS state FROM generation_jobs WHERE id=$1", [candidate.id]
+      )).resolves.toMatchObject({ rows: [{ state: "pending" }] });
+      await pool.query("DELETE FROM illustration_prompt_jobs WHERE generation_job_id=$1", [candidate.id]);
+      await pool.query("UPDATE generation_jobs SET status='cancelled' WHERE id=$1", [candidate.id]);
+    }
     const reconciledTarget = await pool.query<{ id: string }>(
       `SELECT prompt_jobs.id
          FROM illustration_prompt_jobs prompt_jobs
@@ -2448,6 +2547,20 @@ integration("independent illustration pipeline", () => {
     )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
     expect(await reconcileNextAcceptedStreamingIllustration(pool, createApiIllustrationApplication(pool).generation)).toBe(false);
     expect(JSON.stringify(await getGenerationJob(pool, deferredPromotion.id))).not.toContain("PRIVATE_STREAMING_ILLUSTRATION_PROMPT");
+  });
+
+  it("rejects an exact child copy when the streaming parent marker is malformed", async () => {
+    const malformed = {
+      version: 3,
+      state: "prepared",
+      routeBasis: { version: 2 },
+      plan: { version: 2 },
+      frozenResponseContracts: { version: 2 }
+    };
+    await expect(pool.query(
+      "SELECT valid_streaming_illustration_text_snapshot($1::jsonb) AS valid",
+      [JSON.stringify(malformed)]
+    )).resolves.toMatchObject({ rows: [{ valid: false }] });
   });
 
   it("keeps historical null snapshots on the default-off refinement path", async () => {

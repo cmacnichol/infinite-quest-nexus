@@ -1748,6 +1748,7 @@ export function createPostgresGenerationExecutionRepository(
   return {
     async claimNext(request) {
       return withTransaction(pool, async (client) => {
+        await client.query("SELECT set_config('app.text_plan_protocol', '2', true)");
         const result = await client.query<{
           id: string;
           owner_user_id: string;
