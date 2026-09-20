@@ -1,5 +1,6 @@
 import type { ResolvedPreset, TextModelSelection } from "@infinite-quest/contracts";
 import {
+  deriveTextExecutionPlan as deriveTextExecutionPlanFromContracts,
   textExecutionPlanSchema,
   textExecutionRouteBasisSchema,
   textGenerationParametersSchema,
@@ -9,7 +10,6 @@ import {
 } from "@infinite-quest/contracts";
 import { stableStringify, sha256 } from "../../../packages/domain/src/text.js";
 import { validateOpenRouterPresetConfig } from "../../../packages/story-engine/src/openrouter-presets.js";
-import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
 
 const PLAN_VERSION = 2 as const;
 
@@ -201,13 +201,6 @@ async function resolvePlanInputs(input: Omit<ResolveTextExecutionPlansInput, "op
   return freeze({ profile, selection, preset, configHash, candidates: freeze(candidates), parameters, presetSystemPrompt });
 }
 
-function readRouteBasis(value: unknown): TextExecutionRouteBasis {
-  const parsed = textExecutionRouteBasisSchema.parse(value);
-  const { routeBasisHash, ...unhashed } = parsed;
-  if (sha256(stableStringify(unhashed)) !== routeBasisHash) throw new Error("Frozen text execution route basis hash is invalid.");
-  return deepFreeze(parsed);
-}
-
 function createRouteBasis(inputs: ResolvedPlanInputs): TextExecutionRouteBasis {
   const basisWithoutHash = {
     version: PLAN_VERSION,
@@ -230,30 +223,8 @@ function createRouteBasis(inputs: ResolvedPlanInputs): TextExecutionRouteBasis {
 }
 
 /** Derives the complete, prompt-specific plan without reading mutable metadata. */
-export function deriveTextExecutionPlan(routeBasis: TextExecutionRouteBasis, operationPrompt: string): TextExecutionPlan {
-  const basis = readRouteBasis(routeBasis);
-  const prompt = composePresetPrompt({ presetPrompt: basis.presetSystemPrompt, operationPrompt });
-  const planWithoutHash = {
-    version: PLAN_VERSION,
-    selection: basis.selection,
-    preset: basis.preset,
-    candidates: basis.candidates,
-    presetSystemPrompt: basis.presetSystemPrompt,
-    parameters: basis.parameters,
-    prompt,
-    promptHash: sha256(prompt),
-    endpointReference: basis.endpointReference,
-    credentialReference: basis.credentialReference,
-    profileRevision: basis.profileRevision,
-    ...(basis.authorityRevision === undefined ? {} : { authorityRevision: basis.authorityRevision }),
-    requestTimeoutMs: basis.requestTimeoutMs,
-    protocolVersion: basis.protocolVersion
-  };
-  const parsedWithoutHash = textExecutionPlanSchema.parse({ ...planWithoutHash, routeBasisHash: basis.routeBasisHash, planHash: "0".repeat(64) });
-  const { planHash: _placeholder, ...normalizedWithoutHash } = parsedWithoutHash;
-  const planHash = sha256(stableStringify(normalizedWithoutHash));
-  return deepFreeze(textExecutionPlanSchema.parse({ ...normalizedWithoutHash, planHash }));
-}
+/** Compatibility export; all runtime and contract binding paths use the same pure derivation. */
+export const deriveTextExecutionPlan = deriveTextExecutionPlanFromContracts;
 
 /** Resolves one selected profile into an immutable prompt-independent route basis. */
 export async function resolveTextExecutionRouteBasis(input: Omit<ResolveTextExecutionPlansInput, "operationPrompts">): Promise<TextExecutionRouteBasis> {

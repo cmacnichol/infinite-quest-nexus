@@ -61,6 +61,13 @@ function canonicalJson(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  }
+  return value;
+}
 
 export function textExecutionRouteBasisHash(value: unknown): string {
   const parsed = textExecutionRouteBasisSchema.parse(value);
@@ -81,6 +88,41 @@ export function readTextExecutionPlan(value: unknown): TextExecutionPlan {
   const parsed = textExecutionPlanSchema.parse(value);
   if (parsed.planHash !== textExecutionPlanHash(parsed)) throw new Error("Text execution plan hash is invalid.");
   return parsed;
+}
+
+/** Shared pure composition for frozen route-basis consumers; no provider or runtime dependency. */
+export function composeTextExecutionPrompt(input: Readonly<{ presetPrompt: string; operationPrompt: string }>): string {
+  const presetPrompt = input.presetPrompt.trim();
+  const operationPrompt = input.operationPrompt.trim();
+  if (!operationPrompt) throw new Error("An operation prompt is required.");
+  return presetPrompt ? `${presetPrompt}\n\n${operationPrompt}` : operationPrompt;
+}
+
+/** Derives every inherited plan field from a verified saved route basis and trusted operation prompt. */
+export function deriveTextExecutionPlan(routeBasisValue: unknown, operationPrompt: string): TextExecutionPlan {
+  const basis = readTextExecutionRouteBasis(routeBasisValue);
+  const prompt = composeTextExecutionPrompt({ presetPrompt: basis.presetSystemPrompt, operationPrompt });
+  const planWithoutHash = {
+    version: basis.version,
+    selection: basis.selection,
+    preset: basis.preset,
+    candidates: basis.candidates,
+    presetSystemPrompt: basis.presetSystemPrompt,
+    parameters: basis.parameters,
+    prompt,
+    promptHash: sha256Hex(prompt),
+    endpointReference: basis.endpointReference,
+    credentialReference: basis.credentialReference,
+    profileRevision: basis.profileRevision,
+    ...(basis.authorityRevision === undefined ? {} : { authorityRevision: basis.authorityRevision }),
+    requestTimeoutMs: basis.requestTimeoutMs,
+    protocolVersion: basis.protocolVersion,
+    routeBasisHash: basis.routeBasisHash,
+    planHash: "0".repeat(64)
+  };
+  const parsedWithoutHash = textExecutionPlanSchema.parse(planWithoutHash);
+  const planHash = textExecutionPlanHash(parsedWithoutHash);
+  return deepFreeze(textExecutionPlanSchema.parse({ ...parsedWithoutHash, planHash }));
 }
 
 export function publicTextExecutionPlanSummary(plan: TextExecutionPlan): TextExecutionPlanPublicSummary {

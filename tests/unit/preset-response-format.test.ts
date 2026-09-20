@@ -18,8 +18,9 @@ import {
   readFrozenResponseContractsV2,
   readQueuedResponsePolicyV2
 } from "../../packages/contracts/src/generation-response-contract.js";
+import { preparedResponseContractV2Schema } from "../../packages/contracts/src/text-response-format.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
-import { textExecutionPlanHash, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, textExecutionPlanHash, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 
 const now = "2026-09-19T12:00:00.000Z";
 const digest = "a".repeat(64);
@@ -35,6 +36,9 @@ function independentCanonicalFixture(value: unknown): string {
 }
 function independentSchemaHash(value: unknown): string {
   return createHash("sha256").update(independentCanonicalFixture(value), "utf8").digest("hex");
+}
+function textHash(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 const profile = {
   identity: { aliases: [], pronouns: "" },
@@ -62,6 +66,24 @@ const validEnvelopeFixtures = {
   source_synthesis: { fields: [sourceField], characterFields: [], expansionCandidates: [] },
   source_character: { fields: [], characterFields: [{ selectedCharacterFactId: "fact-1", fields: [sourceField] }], expansionCandidates: [] },
   illustration_prompt_refinement: { image_prompt: "Moonlit market, watercolor." }
+} as const;
+const malformedEnvelopeFixtures = {
+  story: { ...validEnvelopeFixtures.story, choices: ["Enter", "Wait", "Leave"] },
+  choices: { ...validEnvelopeFixtures.choices, choices: ["Enter", "Wait", "Leave"] },
+  continuity_review: { ...validEnvelopeFixtures.continuity_review, findings: [null] },
+  rpg_assessment: { ...validEnvelopeFixtures.rpg_assessment, difficulty_modifier: "hard" },
+  event_trigger_before: { ...validEnvelopeFixtures.event_trigger_before, activated_trigger_ids: [3] },
+  event_trigger_after: { ...validEnvelopeFixtures.event_trigger_after, reasons: { "event-1": 3 } },
+  scene_coverage: { ...validEnvelopeFixtures.scene_coverage, missing_required_beats: [3] },
+  event_coverage: { ...validEnvelopeFixtures.event_coverage, event_results: [{ event_id: "event-1" }] },
+  world_outline: { ...validEnvelopeFixtures.world_outline, character_seeds: [validEnvelopeFixtures.world_outline.character_seeds[0]] },
+  world_seed_character: { ...validEnvelopeFixtures.world_seed_character, profile: { identity: { aliases: [], pronouns: "" } } },
+  standalone_character: { ...validEnvelopeFixtures.standalone_character, rpgStats: [{ name: "Courage", value: "50", note: "Resolve" }] },
+  character_organizer: { ...validEnvelopeFixtures.character_organizer, evidence: [{ path: "story.role", source: "legacy" }] },
+  source_extraction: { ...validEnvelopeFixtures.source_extraction, facts: [{ ...validEnvelopeFixtures.source_extraction.facts[0], citations: [{}] }] },
+  source_synthesis: { ...validEnvelopeFixtures.source_synthesis, fields: [{ path: "world.rules", value: "Keep faith." }] },
+  source_character: { ...validEnvelopeFixtures.source_character, characterFields: [{}] },
+  illustration_prompt_refinement: { image_prompt: 3 }
 } as const;
 
 describe("native response-contract admission", () => {
@@ -148,12 +170,13 @@ describe("native response-contract admission", () => {
     }
   });
 
-  it("accepts each documented wire envelope and rejects malformed envelopes before local semantic parsing", () => {
+  it("accepts each documented wire envelope and rejects operation-specific nested malformed envelopes before local semantic parsing", () => {
     const ajv = new Ajv({ strict: false });
     for (const operation of providerOutputSchemaOperationV2Schema.options) {
       const validate = ajv.compile(getProviderOutputSchemaV2(operation).schema);
       expect(validate(validEnvelopeFixtures[operation])).toBe(true);
       expect(validate({})).toBe(false);
+      expect(validate(malformedEnvelopeFixtures[operation])).toBe(false);
     }
   });
 
@@ -213,7 +236,7 @@ describe("native response-contract admission", () => {
     };
     const routeBasis = { ...routeBasisDraft, routeBasisHash: textExecutionRouteBasisHash(routeBasisDraft) };
     const planDraft = {
-      ...routeBasis, prompt: "Preset instruction.\n\nOperation instruction.", promptHash: independentSchemaHash("Preset instruction.\n\nOperation instruction."), planHash: digest
+      ...routeBasis, prompt: "Preset instruction.\n\nOperation instruction.", promptHash: textHash("Preset instruction.\n\nOperation instruction."), planHash: digest
     };
     const plan = { ...planDraft, planHash: textExecutionPlanHash(planDraft) };
     const policy = {
@@ -227,13 +250,18 @@ describe("native response-contract admission", () => {
       schemaVersion: story.version, schemaHash: story.schemaHash, schemaName: story.name, schema: story.schema,
       authority: { kind: "preset_trusted" as const, routeBasisHash: routeBasis.routeBasisHash, planHash: plan.planHash }
     };
-    expect(assertPresetResponseContractAuthorityBinding(policy, contract, routeBasis, plan)).toMatchObject({ plan: { planHash: plan.planHash } });
-    const rewrittenPlanDraft = { ...plan, prompt: "Changed prompt", promptHash: independentSchemaHash("Changed prompt") };
+    expect(plan).toEqual(deriveTextExecutionPlan(routeBasis, "Operation instruction."));
+    expect(assertPresetResponseContractAuthorityBinding(policy, contract, routeBasis, plan, "Operation instruction.")).toMatchObject({ plan: { planHash: plan.planHash } });
+    const rewrittenPlanDraft = { ...plan, prompt: "Changed prompt", promptHash: textHash("Changed prompt") };
     const rewrittenPlan = { ...rewrittenPlanDraft, planHash: textExecutionPlanHash(rewrittenPlanDraft) };
-    expect(() => assertPresetResponseContractAuthorityBinding(policy, contract, routeBasis, rewrittenPlan)).toThrow(/basis or plan identity changed/i);
+    expect(() => assertPresetResponseContractAuthorityBinding(policy, contract, routeBasis, rewrittenPlan, "Operation instruction.")).toThrow(/basis or plan identity changed/i);
     const changedAuthorityDraft = { ...routeBasis, authorityRevision: "authority-v2" };
     const changedAuthority = { ...changedAuthorityDraft, routeBasisHash: textExecutionRouteBasisHash(changedAuthorityDraft) };
-    expect(() => assertPresetResponseContractAuthorityBinding(policy, contract, changedAuthority, plan)).toThrow(/basis or plan identity changed/i);
+    expect(() => assertPresetResponseContractAuthorityBinding(policy, contract, changedAuthority, plan, "Operation instruction.")).toThrow(/basis or plan identity changed/i);
+    const changedRoutePlanDraft = { ...plan, candidates: [{ ...plan.candidates[0], modelId: "other/model" }], endpointReference: "other-endpoint" };
+    const changedRoutePlan = { ...changedRoutePlanDraft, planHash: textExecutionPlanHash(changedRoutePlanDraft) };
+    const changedRouteContract = { ...contract, authority: { ...contract.authority, planHash: changedRoutePlan.planHash } };
+    expect(() => assertPresetResponseContractAuthorityBinding(policy, changedRouteContract, routeBasis, changedRoutePlan, "Operation instruction.")).toThrow(/basis or plan identity changed/i);
   });
 
   it("rejects a direct v2 policy when its queued profile differs from its verified authority", () => {
@@ -245,8 +273,59 @@ describe("native response-contract admission", () => {
         adapterProtocol: "text-schema-adapter-v2", operation: "event_coverage", schemaHash: schema.schemaHash, streaming: false,
         verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false
       } },
-      authority: { kind: "model_verified", providerProfileId: "22222222-2222-4222-8222-222222222222", endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest },
+      authority: { kind: "model_verified", providerProfileId: "22222222-2222-4222-8222-222222222222", providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest },
       operationClosureVersion: 2, invocationKeys: ["event_coverage:nonstream"]
     })).toThrow(/invalid or incompatible/i);
+  });
+
+  it("rejects contradictory direct verification evidence and a Story contract without native tracker support", () => {
+    const eventSchema = getProviderOutputSchemaV2("event_coverage");
+    const directPolicy = {
+      version: 2, policy: "required", providerProfileId: profileId,
+      admission: { mode: "json_schema", basis: "model_verified", verification: {
+        version: 2, providerType: "openrouter", endpointIdentity: "verified-endpoint", model: "verified-model", routeConfigHash: "b".repeat(64),
+        adapterProtocol: "text-schema-adapter-v2", operation: "event_coverage", schemaHash: eventSchema.schemaHash, streaming: false,
+        verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false
+      } },
+      authority: { kind: "model_verified", providerProfileId: profileId, providerType: "openrouter", endpointIdentity: "authority-endpoint", model: "authority-model", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest },
+      operationClosureVersion: 2, invocationKeys: ["event_coverage:nonstream"]
+    };
+    expect(() => readQueuedResponsePolicyV2(directPolicy)).toThrow(/invalid or incompatible/i);
+
+    const story = getProviderOutputSchemaV2("story");
+    expect(() => preparedResponseContractV2Schema.parse({
+      version: 2, mode: "json_schema", operation: "story", streaming: false, forbidFormatFallback: true,
+      admission: { mode: "json_schema", basis: "model_verified", verification: {
+        version: 2, providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", routeConfigHash: digest,
+        adapterProtocol: "text-schema-adapter-v2", operation: "story", schemaHash: story.schemaHash, streaming: false,
+        verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false
+      } },
+      schemaVersion: story.version, schemaHash: story.schemaHash, schemaName: story.name, schema: story.schema,
+      authority: { kind: "model_verified", providerProfileId: profileId, providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest }
+    })).toThrow();
+  });
+
+  it("rejects a rehashed frozen direct closure when queued verification evidence changes", () => {
+    const schema = getProviderOutputSchemaV2("event_coverage");
+    const verification = {
+      version: 2 as const, providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a", routeConfigHash: digest,
+      adapterProtocol: "text-schema-adapter-v2" as const, operation: "event_coverage" as const, schemaHash: schema.schemaHash, streaming: false,
+      verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false
+    };
+    const authority = { kind: "model_verified" as const, providerProfileId: profileId, providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest };
+    const queuedPolicy = {
+      version: 2 as const, policy: "required" as const, providerProfileId: profileId,
+      admission: { mode: "json_schema" as const, basis: "model_verified" as const, verification }, authority,
+      operationClosureVersion: 2 as const, invocationKeys: ["event_coverage:nonstream" as const]
+    };
+    const contract = {
+      version: 2 as const, mode: "json_schema" as const, admission: queuedPolicy.admission, operation: "event_coverage" as const, streaming: false, forbidFormatFallback: true as const,
+      schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema, authority
+    };
+    const selected = { version: 2 as const, queuedPolicy, selectedAt: now, capabilityEvidenceHash: digest, contracts: { "event_coverage:nonstream": contract } };
+    const frozen = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
+    expect(readFrozenResponseContractsV2(frozen)).toMatchObject({ version: 2 });
+    const altered = { ...frozen, queuedPolicy: { ...queuedPolicy, admission: { ...queuedPolicy.admission, verification: { ...verification, endpointIdentity: "other-endpoint" } } } };
+    expect(() => readFrozenResponseContractsV2({ ...altered, selectionHash: frozenResponseContractsV2SelectionHash(altered) })).toThrow(/invalid or incompatible/i);
   });
 });

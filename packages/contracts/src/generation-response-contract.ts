@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { sha256Hex } from "./hash.js";
 import {
+  assertModelVerifiedResponseContractEvidence,
   preparedResponseContractSchema,
   preparedResponseContractV2Schema,
   responseContractAdmissionSchema,
@@ -9,7 +10,7 @@ import {
   responseInvocationKeyV2Schema
 } from "./text-response-format.js";
 import { getProviderOutputSchemaV2, stableJsonHash } from "./provider-output-schema.js";
-import { readTextExecutionPlan, readTextExecutionRouteBasis, type TextExecutionPlan, type TextExecutionRouteBasis } from "./text-execution-plan.js";
+import { deriveTextExecutionPlan, readTextExecutionPlan, readTextExecutionRouteBasis, type TextExecutionPlan, type TextExecutionRouteBasis } from "./text-execution-plan.js";
 export type { ResponseInvocationKey } from "./text-response-format.js";
 
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -157,7 +158,7 @@ const invocationKeysV2Schema = z.array(responseInvocationKeyV2Schema).min(1).max
   if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "Invocation keys must be unique." });
 });
 const directResponseContractAuthorityV2Schema = z.object({
-  kind: z.literal("model_verified"), providerProfileId: z.uuid(), endpointIdentity: z.string().trim().min(1).max(512), model: z.string().trim().min(1).max(512),
+  kind: z.literal("model_verified"), providerProfileId: z.uuid(), providerType: z.enum(["openrouter", "openai_compatible"]), endpointIdentity: z.string().trim().min(1).max(512), model: z.string().trim().min(1).max(512),
   providerConfigurationHash: hashSchema, routeConfigHash: hashSchema, verificationRegistryHash: hashSchema
 }).strict();
 const presetResponseContractAuthorityV2Schema = z.object({
@@ -183,6 +184,27 @@ export const queuedResponsePolicyV2Schema = z.object({
   if (value.admission.basis === "model_verified" && value.authority.kind === "model_verified"
     && value.providerProfileId !== value.authority.providerProfileId) {
     context.addIssue({ code: "custom", path: ["authority", "providerProfileId"], message: "Queued direct-model profile must match verified authority." });
+  }
+  const admission = value.admission;
+  const authority = value.authority;
+  if (admission.basis === "model_verified" && authority.kind === "model_verified") {
+    const key = value.invocationKeys.find((candidate) => {
+      const [operation, delivery] = candidate.split(":");
+      return operation === admission.verification.operation && (delivery === "stream") === admission.verification.streaming;
+    });
+    if (!key) context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must cover a permitted invocation." });
+    else {
+      try {
+        assertModelVerifiedResponseContractEvidence({
+          verification: admission.verification,
+          authority,
+          operation: admission.verification.operation,
+          streaming: admission.verification.streaming
+        });
+      } catch {
+        context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must bind exact authority and catalog evidence." });
+      }
+    }
   }
 });
 export type QueuedResponsePolicyV2 = Readonly<z.infer<typeof queuedResponsePolicyV2Schema>>;
@@ -224,7 +246,7 @@ export const frozenResponseContractsV2Schema = z.object({
     if (contract.authority.kind === "model_verified" && value.queuedPolicy.authority.kind === "model_verified") {
       const authority = value.queuedPolicy.authority;
       if (contract.authority.providerProfileId !== authority.providerProfileId || contract.authority.endpointIdentity !== authority.endpointIdentity
-        || contract.authority.model !== authority.model || contract.authority.providerConfigurationHash !== authority.providerConfigurationHash || contract.authority.routeConfigHash !== authority.routeConfigHash
+        || contract.authority.providerType !== authority.providerType || contract.authority.model !== authority.model || contract.authority.providerConfigurationHash !== authority.providerConfigurationHash || contract.authority.routeConfigHash !== authority.routeConfigHash
         || contract.authority.verificationRegistryHash !== authority.verificationRegistryHash) {
         context.addIssue({ code: "custom", path: ["contracts", key, "authority"], message: "Frozen model contract authority changed." });
       }
@@ -260,19 +282,22 @@ export function assertPresetResponseContractAuthorityBinding(
   policy: QueuedResponsePolicyV2,
   contract: z.infer<typeof preparedResponseContractV2Schema>,
   routeBasisValue: unknown,
-  planValue: unknown
+  planValue: unknown,
+  trustedOperationPrompt: string
 ): Readonly<{ routeBasis: TextExecutionRouteBasis; plan: TextExecutionPlan }> {
   if (policy.authority.kind !== "preset_trusted" || contract.authority.kind !== "preset_trusted") {
     throw new Error("Preset response-contract binding requires preset-trusted authority.");
   }
   const routeBasis = readTextExecutionRouteBasis(routeBasisValue);
   const plan = readTextExecutionPlan(planValue);
+  const expectedPlan = deriveTextExecutionPlan(routeBasis, trustedOperationPrompt);
   const authority = policy.authority;
   if (routeBasis.routeBasisHash !== authority.routeBasisHash || routeBasis.selection.kind !== "openrouter_preset"
     || routeBasis.selection.slug !== authority.selection.slug || routeBasis.endpointReference !== authority.endpointReference
     || routeBasis.credentialReference !== authority.credentialReference || routeBasis.authorityRevision !== authority.authorityRevision
     || routeBasis.profileRevision !== authority.profileRevision || plan.routeBasisHash !== routeBasis.routeBasisHash
-    || plan.planHash !== contract.authority.planHash || contract.authority.routeBasisHash !== routeBasis.routeBasisHash) {
+    || plan.planHash !== contract.authority.planHash || contract.authority.routeBasisHash !== routeBasis.routeBasisHash
+    || canonicalJson(plan) !== canonicalJson(expectedPlan)) {
     throw new Error("Preset response-contract basis or plan identity changed.");
   }
   return Object.freeze({ routeBasis, plan });

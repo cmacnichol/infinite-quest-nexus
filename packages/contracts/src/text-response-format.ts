@@ -41,6 +41,30 @@ export type ResponseFormatEligibilityV2 = Readonly<{
   verification: SchemaVerificationV2 | null;
 }>;
 
+export type ModelVerifiedResponseContractAuthority = Readonly<{
+  providerType: "openrouter" | "openai_compatible";
+  endpointIdentity: string;
+  model: string;
+  routeConfigHash: string;
+}>;
+
+/** Shared v2 evidence guard for queued policies and prepared invocation contracts. */
+export function assertModelVerifiedResponseContractEvidence(input: Readonly<{
+  verification: SchemaVerificationV2;
+  authority: ModelVerifiedResponseContractAuthority;
+  operation: ResponseSchemaOperationV2;
+  streaming: boolean;
+}>): void {
+  const { verification, authority, operation, streaming } = input;
+  const catalog = getProviderOutputSchemaV2(operation);
+  if (verification.providerType !== authority.providerType || verification.endpointIdentity !== authority.endpointIdentity
+    || verification.model !== authority.model || verification.routeConfigHash !== authority.routeConfigHash
+    || verification.operation !== operation || verification.schemaHash !== catalog.schemaHash || verification.streaming !== streaming
+    || (operation === "story" && !verification.nativeOpenTrackerObjects)) {
+    throw new Error("Model verification does not bind the exact v2 response-contract authority and schema.");
+  }
+}
+
 export const responseSchemaOperationSchema = z.enum(["story", "choices", "continuity_review"]);
 export const responseInvocationKeySchema = z.enum([
   "story:stream", "story:nonstream", "choices:nonstream", "continuity_review:nonstream"
@@ -74,7 +98,7 @@ const preparedResponseContractV2SchemaShape = z.object({
   operation: providerOutputSchemaOperationV2Schema, streaming: z.boolean(), forbidFormatFallback: z.literal(true),
   schemaVersion: z.string().min(1).max(200), schemaHash: sha256Schema, schemaName: z.string().min(1).max(200), schema: z.record(z.string(), z.unknown()),
   authority: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("model_verified"), providerProfileId: z.uuid(), endpointIdentity: z.string().min(1), model: z.string().min(1), providerConfigurationHash: sha256Schema, routeConfigHash: sha256Schema, verificationRegistryHash: sha256Schema }).strict(),
+    z.object({ kind: z.literal("model_verified"), providerProfileId: z.uuid(), providerType: z.enum(["openrouter", "openai_compatible"]), endpointIdentity: z.string().min(1), model: z.string().min(1), providerConfigurationHash: sha256Schema, routeConfigHash: sha256Schema, verificationRegistryHash: sha256Schema }).strict(),
     z.object({ kind: z.literal("preset_trusted"), routeBasisHash: sha256Schema, planHash: sha256Schema }).strict()
   ])
 }).strict();
@@ -86,10 +110,14 @@ export const preparedResponseContractV2Schema = preparedResponseContractV2Schema
     context.addIssue({ code: "custom", path: ["schema"], message: "Prepared v2 contract must use the exact catalog schema." });
   }
   if (value.admission.basis === "model_verified" && value.authority.kind === "model_verified") {
-    const verification = value.admission.verification;
-    if (verification.operation !== value.operation || verification.schemaHash !== value.schemaHash || verification.streaming !== value.streaming
-      || verification.model !== value.authority.model || verification.endpointIdentity !== value.authority.endpointIdentity
-      || verification.routeConfigHash !== value.authority.routeConfigHash) {
+    try {
+      assertModelVerifiedResponseContractEvidence({
+        verification: value.admission.verification,
+        authority: value.authority,
+        operation: value.operation,
+        streaming: value.streaming
+      });
+    } catch {
       context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Model verification must bind the exact v2 contract authority and schema." });
     }
   }
