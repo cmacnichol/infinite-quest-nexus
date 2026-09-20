@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import { createPostgresGenerationExecutionRepository, reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
 import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
 import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
@@ -11,7 +11,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
+import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
@@ -29,6 +29,8 @@ import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-mem
 import { getCampaignRuntimeState, importLegacyStory, updateCampaignRuntimeState } from "../helpers/memory-aware-services.js";
 import { snapshotCorrectionEvidence } from "../helpers/campaign-state-correction-fixtures.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
+import { setIllustrationConfig } from "../helpers/illustration-job-fixtures.js";
+import { loadConfig, prepareIllustrationTextExecution } from "../../services/runtime/src/illustration-segment-job-adapter.js";
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { deriveStoryContinuityRunFromExecutorCapture, evaluateStoryContinuity, type StoryContinuityEvidence } from "../../scripts/lib/story-continuity-evaluator.js";
 
@@ -82,6 +84,7 @@ integration("T17 durable continuity review", () => {
   let sceneCoverageSequence: boolean[] = [];
   let rejectSceneRewriteResponseFormat = false;
   let repairSupersedesFactId: string | null = null;
+  let primaryNarration = "Mira waits at the observatory.";
 
   function reviewResponse(body: string): string {
     const userInput = (() => { try { return JSON.parse(JSON.parse(body).messages[1].content) as Record<string, unknown>; } catch { return null; } })();
@@ -113,7 +116,7 @@ integration("T17 durable continuity review", () => {
         ? { choices: ["Wait.", "Wait."] }
         : { choices: ["Continue.", "Wait.", "Listen.", "Leave."], custom_action_suggestion: "Study the lantern." });
       if (invalidPrimary) return JSON.stringify({ narration: "Mira waits at the observatory." });
-      const story = JSON.parse(reply("Mira waits at the observatory.", nestedTrackerUpdates ?? []));
+      const story = JSON.parse(reply(primaryNarration, nestedTrackerUpdates ?? []));
       if (malformedFactFormatting) story.canonical_facts = [{ id: "keeper-arrival", content: "The keeper has arrived." }];
       if (needsChoiceRepair) story.choices = ["Wait.", "Wait.", "Listen.", "Leave."];
       return JSON.stringify(story);
@@ -204,6 +207,7 @@ integration("T17 durable continuity review", () => {
     sceneCoverageSequence = [];
     rejectSceneRewriteResponseFormat = false;
     repairSupersedesFactId = null;
+    primaryNarration = "Mira waits at the observatory.";
   });
 
   async function enqueue(
@@ -211,7 +215,8 @@ integration("T17 durable continuity review", () => {
     scene = false,
     prepareCampaign?: (campaignId: string) => Promise<void>,
     action = "Wait at the observatory.",
-    storyOnly = scene
+    storyOnly = scene,
+    textProviderProfileId = providerId
   ) {
     const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Review ${randomUUID()}`;
@@ -220,7 +225,7 @@ integration("T17 durable continuity review", () => {
     if (storyOnly) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     await prepareCampaign?.(imported.campaignId);
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
-    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
     return { job, application, campaignId: imported.campaignId };
   }
 
@@ -1392,6 +1397,159 @@ integration("T17 durable continuity review", () => {
       reviewVerdict = "pass";
       await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
     }
+  }, 60_000);
+
+  it("keeps the accepted streamed turn when promoted native illustration children roll back, then reconciles their frozen snapshot", async () => {
+    const nativeTextProviderId = (await createProvider(pool, {
+      name: `T17 native streaming illustration ${randomUUID()}`,
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+      defaultModel: "@preset/keep",
+      textSelection: { kind: "openrouter_preset", slug: "keep" },
+      contextWindowTokens: 65_536,
+      maxOutputTokens: 4_096,
+      temperature: 0.2,
+      enabled: true,
+      configuration: legacyStreamingContinuityResponseFormatConfiguration
+    }, credentialSecret)).id;
+    const imageProviderId = (await createProvider(pool, {
+      name: `T17 illustration image ${randomUUID()}`,
+      providerType: "openai_compatible",
+      providerRole: "image",
+      baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+      defaultModel: "t17-image",
+      contextWindowTokens: 16_384,
+      maxOutputTokens: 1_024,
+      temperature: 0,
+      enabled: true,
+      configuration: {}
+    }, credentialSecret)).id;
+    primaryNarration = Array.from({ length: 15 }, () =>
+      "Mira follows the lantern through the fogbound causeway while silver leaves turn slowly above the quiet observatory road."
+    ).join(" ");
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const resolvePreset = vi.fn(async () => ({
+      slug: "keep", name: "Frozen Keep", versionId: "keep-v1", version: 1,
+      configHash: "e".repeat(64), config: { model: "t17-native-frozen", temperature: 0.2 },
+      systemPrompt: "PRIVATE_STREAMED_NATIVE_PROMPT"
+    }));
+    const discoverModels = vi.fn(async () => [
+      { id: "t17-native-frozen", contextWindowTokens: 65_536, maxOutputTokens: 4_096 }
+    ]);
+    const nativeIllustration = {
+      ...providers.illustration,
+      illustrationTextPlans: {
+        nativePresetPlansEnabled: true,
+        ports: { resolvePreset, discoverModels },
+        preparedExecutor: { execute: vi.fn() },
+        loadAuthority: async ({ ownerUserId: authorityOwnerId, providerProfileId }: { ownerUserId: string; providerProfileId: string }) => {
+          const current = await providers.illustration.execution.text({ ownerUserId: authorityOwnerId }, providerProfileId, "text");
+          return { id: current.id, providerRole: current.providerRole, authorityRevision: current.authorityRevision!, endpointIdentity: current.endpointIdentity! };
+        }
+      }
+    } as never;
+    const { job, application, campaignId } = await enqueue(
+      "off",
+      false,
+      async (configuredCampaignId) => {
+        await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [configuredCampaignId, nativeTextProviderId]);
+        await setIllustrationConfig(pool, configuredCampaignId, illustrationConfigSchema.parse({
+          sourcePolicy: "library_only", providerProfileId: imageProviderId, model: "t17-image",
+          segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1
+        }));
+      },
+      "Stream a native illustrated turn.",
+      false,
+      nativeTextProviderId
+    );
+    const illustration = createApiIllustrationApplication(pool, nativeIllustration);
+    const baseCollaborators = createGenerationExecutionCollaborators(
+      pool, illustration, apiMemoryApplication(pool, credentialSecret), providers.generation
+    );
+    let frozenSnapshot: unknown;
+    const prepareIllustration = vi.fn(async ({ ownerUserId: preparationOwnerId, campaignId: preparationCampaignId, operationPrompt }: {
+      ownerUserId: string; campaignId: string; operationPrompt: string;
+    }) => {
+      const prepared = await prepareIllustrationTextExecution(
+        preparationOwnerId,
+        preparationCampaignId,
+        await loadConfig(pool, preparationOwnerId, preparationCampaignId),
+        operationPrompt,
+        nativeIllustration,
+      );
+      expect(prepared).toMatchObject({ version: 2, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMED_NATIVE_PROMPT") } });
+      frozenSnapshot = prepared;
+      return prepared;
+    });
+    const promote = baseCollaborators.illustration.promoteProvisionalSet;
+    const promotedChildWrites = vi.fn(async (...args: Parameters<typeof promote>) => {
+      await promote(...args);
+      const [database, scope] = args;
+      const childWrite = await (database as DatabaseClient).query(
+        "UPDATE turn_illustration_segments SET resolved_prompt=$2 WHERE generation_job_id=$1",
+        [scope.generationJobId, "SAVEDPOINT_ROLLBACK_CHILD_CANARY"]
+      );
+      expect(childWrite.rowCount).toBeGreaterThan(0);
+      throw new Error("Injected promoted illustration child failure after write.");
+    });
+    const collaborators = {
+      ...baseCollaborators,
+      prepareIllustrationTextExecution: prepareIllustration,
+      illustration: { ...baseCollaborators.illustration, promoteProvisionalSet: promotedChildWrites }
+    };
+
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `native-streamed-savepoint-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(job.id);
+    await expect(createGenerationExecutor({ pool, repository, collaborators })
+      .execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+
+    expect(prepareIllustration).toHaveBeenCalledTimes(1);
+    expect(resolvePreset).toHaveBeenCalledTimes(1);
+    expect(discoverModels).toHaveBeenCalledTimes(1);
+    expect(promotedChildWrites).toHaveBeenCalledTimes(1);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    const accepted = await application.getResult({ ownerUserId, jobId: job.id });
+    expect(accepted.narration.replace(/\s+/g, " ").trim()).toBe(primaryNarration.replace(/\s+/g, " ").trim());
+    const resultTurnId = (await pool.query<{ result_turn_id: string }>(
+      "SELECT result_turn_id FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.result_turn_id;
+    expect(resultTurnId).toEqual(expect.any(String));
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM chronicle_memories WHERE turn_id=$1 AND memory_kind='turn_fiction'", [resultTurnId]
+    )).resolves.toMatchObject({ rows: [{ count: 1 }] });
+    const savedState = (await pool.query<{ streaming_segments_state: Record<string, unknown> }>(
+      "SELECT streaming_segments_state FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.streaming_segments_state;
+    expect(savedState).toMatchObject({
+      provisionalIllustrationReconciliation: "pending",
+      illustrationTextExecutionSnapshot: frozenSnapshot
+    });
+    await expect(pool.query<{ turn_id: string | null; status: string }>(
+      "SELECT turn_id,status FROM turn_illustration_sets WHERE generation_job_id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ turn_id: null, status: "provisional" }] });
+    await expect(pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM turn_illustration_segments WHERE generation_job_id=$1 AND resolved_prompt='SAVEDPOINT_ROLLBACK_CHILD_CANARY'", [job.id]
+    )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+
+    expect(await reconcileNextAcceptedStreamingIllustration(pool, illustration.generation)).toBe(true);
+    const reconciled = await pool.query<{ turn_id: string; text_execution_snapshot: unknown }>(
+      `SELECT segments.turn_id,prompt_jobs.text_execution_snapshot
+         FROM turn_illustration_segments segments
+         JOIN illustration_prompt_jobs prompt_jobs ON prompt_jobs.segment_id=segments.id
+        WHERE segments.generation_job_id=$1
+        ORDER BY segments.ordinal`,
+      [job.id]
+    );
+    expect(reconciled.rows.length).toBeGreaterThan(1);
+    expect(reconciled.rows.map((row) => row.turn_id)).toEqual(
+      Array.from({ length: reconciled.rows.length }, () => resultTurnId)
+    );
+    expect(reconciled.rows.map((row) => row.text_execution_snapshot)).toEqual(
+      Array.from({ length: reconciled.rows.length }, () => frozenSnapshot)
+    );
   }, 60_000);
 
   it("re-runs an uncertain continuity reviewer before requiring a new conflict decision", async () => {

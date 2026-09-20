@@ -588,27 +588,6 @@ export async function promoteProvisionalSet(
   const setId = setResult.rows[0].id;
   const dbVisualReference = setResult.rows[0].character_visual_reference;
 
-  // Update segments
-  await client.query(
-    `UPDATE turn_illustration_segments SET turn_id = $3
-      WHERE generation_job_id = $1 AND owner_user_id = $2`,
-    [generationJobId, ownerUserId, turnId]
-  );
-
-  // Update image jobs
-  await client.query(
-    `UPDATE image_jobs SET turn_id = $3, target_type = 'turn_illustration'
-      WHERE generation_job_id = $1 AND owner_user_id = $2 AND target_type = 'streaming_illustration'`,
-    [generationJobId, ownerUserId, turnId]
-  );
-
-  // Update prompt jobs
-  await client.query(
-    `UPDATE illustration_prompt_jobs SET turn_id = $3
-      WHERE generation_job_id = $1 AND owner_user_id = $2`,
-    [generationJobId, ownerUserId, turnId]
-  );
-
   // Segment any remaining text
   const pieces = segmentIllustrationText(finalNarration, config.segment_word_count);
   const existingSegments = await client.query<{ ordinal: number }>(
@@ -627,6 +606,25 @@ export async function promoteProvisionalSet(
       );
     }
   }
+
+  // The final segmentation pass may create children after promotion. Bind all
+  // streaming children only after that pass so no prompt or segment remains
+  // provisional while its set is attached to the accepted turn.
+  await client.query(
+    `UPDATE turn_illustration_segments SET turn_id = $3
+      WHERE generation_job_id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId, turnId]
+  );
+  await client.query(
+    `UPDATE image_jobs SET turn_id = $3, target_type = 'turn_illustration'
+      WHERE generation_job_id = $1 AND owner_user_id = $2 AND target_type = 'streaming_illustration'`,
+    [generationJobId, ownerUserId, turnId]
+  );
+  await client.query(
+    `UPDATE illustration_prompt_jobs SET turn_id = $3
+      WHERE generation_job_id = $1 AND owner_user_id = $2`,
+    [generationJobId, ownerUserId, turnId]
+  );
 }
 
 export async function orphanProvisionalSet(

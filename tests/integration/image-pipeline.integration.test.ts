@@ -9,7 +9,7 @@ import { assetListQuerySchema } from "../../packages/contracts/src/assets.js";
 import { worldContentSchema, worldCreateSchema } from "../../packages/contracts/src/world-library.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
 import { createApiGenerationApplication, createApiIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
 import { createWorkerIllustrationApplication } from "../helpers/runtime-application-fixtures.js";
@@ -254,6 +254,21 @@ integration("independent illustration pipeline", () => {
       segmentPromptMode: "direct"
     }));
     return imported;
+  }
+
+  async function makeOnlyPromptClaimable(targetPool: DatabasePool, id: string) {
+    await targetPool.query(
+      `UPDATE illustration_prompt_jobs
+          SET next_attempt_at=now() + interval '1 hour'
+        WHERE id <> $1 AND status IN ('queued','recoverable')`,
+      [id]
+    );
+    await targetPool.query(
+      `UPDATE illustration_prompt_jobs
+          SET lease_expires_at=now() + interval '1 hour'
+        WHERE id <> $1 AND status='refining'`,
+      [id]
+    );
   }
 
   async function generate(campaignId: string) {
@@ -1911,20 +1926,6 @@ integration("independent illustration pipeline", () => {
       }
     } as never;
 
-    async function makeOnlyPromptClaimable(id: string) {
-      await pool.query(
-        `UPDATE illustration_prompt_jobs
-            SET next_attempt_at=now() + interval '1 hour'
-          WHERE id <> $1 AND status IN ('queued','recoverable')`,
-        [id]
-      );
-      await pool.query(
-        `UPDATE illustration_prompt_jobs
-            SET lease_expires_at=now() + interval '1 hour'
-          WHERE id <> $1 AND status='refining'`,
-        [id]
-      );
-    }
     await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "missing" }, native);
     const saved = await pool.query<{ provider_profile_id: string; requested_model: string; prompt_snapshot: Record<string, unknown>; text_execution_snapshot: Record<string, any> }>(
       "SELECT provider_profile_id,requested_model,prompt_snapshot,text_execution_snapshot FROM illustration_prompt_jobs WHERE campaign_id=$1", [imported.campaignId]
@@ -1961,6 +1962,126 @@ integration("independent illustration pipeline", () => {
     );
     expect(tampered.rows).toContainEqual(expect.objectContaining({ status: "recoverable", error_code: "illustration_text_route_unavailable" }));
     expect(JSON.stringify(await listCampaignIllustrationSegments(pool, imported.campaignId))).not.toContain("PRIVATE_NATIVE_ILLUSTRATION_PROMPT");
+  });
+
+  it("resolves native preset metadata before accepted and provisional illustration insert transactions", async () => {
+    const imported = await campaign();
+    const ownerUserId = await initialOwnerId(pool);
+    const nativeTextProviderId = (await createProvider(pool, {
+      name: `Native transaction boundary ${crypto.randomUUID()}`,
+      providerType: "openrouter",
+      providerRole: "text",
+      baseUrl,
+      defaultModel: "@preset/transaction-boundary",
+      textSelection: { kind: "openrouter_preset", slug: "transaction-boundary" },
+      contextWindowTokens: 8192,
+      maxOutputTokens: 1024,
+      temperature: 0.31,
+      enabled: true,
+      configuration: { textResponseFormatPolicy: "legacy" }
+    }, credentialSecret)).id;
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, nativeTextProviderId]);
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only", providerProfileId: imageProviderId, model: "synthetic-image-model",
+      segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1
+    }));
+    const turn = await pool.query<{ id: string }>(
+      "SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId]
+    );
+    await pool.query(
+      "UPDATE turns SET narration=repeat('Mira follows the lantern-lit road through the fog toward the observatory. ', 24) WHERE id=$1",
+      [turn.rows[0]!.id]
+    );
+
+    const events: string[] = [];
+    const activeTransactionClients = new Set<DatabaseClient>();
+    const observedPool = new Proxy(pool, {
+      get(target, property, receiver) {
+        if (property === "connect") {
+          return async () => {
+            const client = await target.connect();
+            return new Proxy(client, {
+              get(clientTarget, clientProperty, clientReceiver) {
+                if (clientProperty === "query") {
+                  return async (...args: unknown[]) => {
+                    const query = args[0];
+                    const statement = (typeof query === "string" ? query : String((query as { text?: unknown })?.text || ""))
+                      .trim().replace(/\s+/g, " ").toUpperCase();
+                    if (statement === "BEGIN") {
+                      activeTransactionClients.add(clientTarget);
+                      events.push("begin");
+                    }
+                    const result = await (clientTarget.query.bind(clientTarget) as unknown as (...queryArgs: unknown[]) => Promise<unknown>)(...args);
+                    if (statement.startsWith("INSERT INTO TURN_ILLUSTRATION_SETS")) events.push("insert-set");
+                    if (statement.startsWith("INSERT INTO TURN_ILLUSTRATION_SEGMENTS")) events.push("insert-segment");
+                    if (statement === "COMMIT" || statement === "ROLLBACK") {
+                      activeTransactionClients.delete(clientTarget);
+                      events.push(statement.toLowerCase());
+                    }
+                    return result;
+                  };
+                }
+                const value = Reflect.get(clientTarget, clientProperty, clientReceiver);
+                return typeof value === "function" ? value.bind(clientTarget) : value;
+              }
+            }) as DatabaseClient;
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as DatabasePool;
+    const graph = workerProviderGraph(pool, credentialSecret).illustration;
+    const resolvePreset = vi.fn(async () => {
+      expect(activeTransactionClients).toHaveLength(0);
+      events.push("resolve-preset");
+      return {
+        slug: "transaction-boundary", name: "Transaction boundary", versionId: "transaction-boundary-v1", version: 1,
+        configHash: "d".repeat(64), config: { model: "frozen-transaction-boundary-model", temperature: 0.21 },
+        systemPrompt: "PRIVATE_TRANSACTION_BOUNDARY_PROMPT"
+      };
+    });
+    const discoverModels = vi.fn(async () => {
+      expect(activeTransactionClients).toHaveLength(0);
+      events.push("discover-models");
+      return [{ id: "frozen-transaction-boundary-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }];
+    });
+    const native = {
+      ...graph,
+      illustrationTextPlans: {
+        nativePresetPlansEnabled: true,
+        ports: { resolvePreset, discoverModels },
+        preparedExecutor: { execute: vi.fn() },
+        loadAuthority: vi.fn()
+      }
+    } as never;
+    const assertMetadataPrecedesInsert = (insert: "insert-set" | "insert-segment") => {
+      expect(events.indexOf("resolve-preset")).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf("discover-models")).toBeGreaterThan(events.indexOf("resolve-preset"));
+      expect(events.indexOf("begin")).toBeGreaterThan(events.indexOf("discover-models"));
+      expect(events.indexOf(insert)).toBeGreaterThan(events.indexOf("begin"));
+    };
+
+    await generateNativeIllustrationSegments(observedPool, turn.rows[0]!.id, { mode: "missing" }, native);
+    assertMetadataPrecedesInsert("insert-set");
+
+    const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
+      action: "Stream a native illustration transaction boundary.", providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+      context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
+    }));
+    await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [generation.id]);
+    const provisionalSetId = await createProvisionalSet(pool, ownerUserId, imported.campaignId, generation.id);
+    expect(provisionalSetId).toEqual(expect.any(String));
+    events.length = 0;
+    await expect(createNativeProvisionalSegment(
+      observedPool, ownerUserId, imported.campaignId, generation.id, provisionalSetId!,
+      { ordinal: 0, startOffset: 0, endOffset: 300, startWord: 0, endWord: 110, wordCount: 110,
+        text: "Mira follows the lantern across the fogbound causeway toward the observatory while silver leaves turn slowly above the road.".repeat(3) },
+      await loadConfig(pool, ownerUserId, imported.campaignId), native
+    )).resolves.toBe(true);
+    assertMetadataPrecedesInsert("insert-segment");
+    expect(resolvePreset).toHaveBeenCalledTimes(2);
+    expect(discoverModels).toHaveBeenCalledTimes(2);
   });
 
   it("keeps a native refinement plan through duplicate replay and an expired-lease reclaim using current provider authority", async () => {
@@ -2020,21 +2141,6 @@ integration("independent illustration pipeline", () => {
       }
     } as never;
 
-    async function makeOnlyPromptClaimable(id: string) {
-      await pool.query(
-        `UPDATE illustration_prompt_jobs
-            SET next_attempt_at=now() + interval '1 hour'
-          WHERE id <> $1 AND status IN ('queued','recoverable')`,
-        [id]
-      );
-      await pool.query(
-        `UPDATE illustration_prompt_jobs
-            SET lease_expires_at=now() + interval '1 hour'
-          WHERE id <> $1 AND status='refining'`,
-        [id]
-      );
-    }
-
     const first = await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "missing" }, native);
     expect(first).toMatchObject({ duplicate: false, segmentCount: expect.any(Number) });
     const before = await pool.query<{ id: string; text_execution_snapshot: Record<string, unknown> }>(
@@ -2060,7 +2166,7 @@ integration("independent illustration pipeline", () => {
       [nativeTextProviderId, ownerUserId]
     );
     const ports = createIllustrationWorkerPorts(pool, native);
-    await makeOnlyPromptClaimable(target.id);
+    await makeOnlyPromptClaimable(pool, target.id);
     await expect(runNativeIllustrationPromptJob(pool, "native-reclaim-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
     expect(prepared).toHaveBeenCalledWith(expect.objectContaining({
       providerProfileId: nativeTextProviderId,
@@ -2093,7 +2199,7 @@ integration("independent illustration pipeline", () => {
     const disabledJobId = await oneFreshNativePromptJob();
     const dispatchesBeforeDisabledAuthority = prepared.mock.calls.length;
     await pool.query("UPDATE provider_profiles SET enabled=false WHERE id=$1 AND owner_user_id=$2", [nativeTextProviderId, ownerUserId]);
-    await makeOnlyPromptClaimable(disabledJobId);
+    await makeOnlyPromptClaimable(pool, disabledJobId);
     await expect(runNativeIllustrationPromptJob(pool, "native-disabled-authority-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
     expect(prepared).toHaveBeenCalledTimes(dispatchesBeforeDisabledAuthority);
     await expect(pool.query<{ status: string; error_code: string | null }>(
@@ -2104,7 +2210,7 @@ integration("independent illustration pipeline", () => {
     const endpointChangedJobId = await oneFreshNativePromptJob();
     const dispatchesBeforeEndpointChange = prepared.mock.calls.length;
     await pool.query("UPDATE provider_profiles SET base_url=$3 WHERE id=$1 AND owner_user_id=$2", [nativeTextProviderId, ownerUserId, `${baseUrl}/changed`]);
-    await makeOnlyPromptClaimable(endpointChangedJobId);
+    await makeOnlyPromptClaimable(pool, endpointChangedJobId);
     await expect(runNativeIllustrationPromptJob(pool, "native-endpoint-authority-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
     expect(prepared).toHaveBeenCalledTimes(dispatchesBeforeEndpointChange);
     await expect(pool.query<{ status: string; error_code: string | null }>(
@@ -2145,7 +2251,7 @@ integration("independent illustration pipeline", () => {
     );
     await pool.query("UPDATE illustration_prompt_jobs SET text_execution_snapshot='{}'::jsonb WHERE id=$1", [malformed.id]);
     const dispatchesBeforeMalformed = prepared.mock.calls.length;
-    await makeOnlyPromptClaimable(malformed.id);
+    await makeOnlyPromptClaimable(pool, malformed.id);
     await expect(runNativeIllustrationPromptJob(pool, "native-malformed-snapshot-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);
     expect(prepared).toHaveBeenCalledTimes(dispatchesBeforeMalformed);
     await expect(pool.query<{ status: string; error_code: string | null }>(
