@@ -27,8 +27,8 @@ import type { ProviderRequest, ProviderResult } from "../../packages/story-engin
 import { ProviderHttpError } from "../../packages/story-engine/src/providers.js";
 import { composePresetPrompt } from "../../packages/story-engine/src/preset-prompt.js";
 import { buildSourceExtractionPrompt, buildSourceWorldPrompt } from "../../packages/domain/src/authoring-prompts.js";
-import { assembleGeneratedWorld } from "../../services/runtime/src/provider-world-generation-adapter.js";
-import { createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import { assembleGeneratedWorld, generateTemplateWorld } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { createApiProviderApplicationComposition, createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { currentIntegrationProviderTransport, installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import fixture from "../fixtures/authoring/reliability.json" with { type: "json" };
@@ -563,6 +563,296 @@ integration("durable authoring real repository and stage dispatcher", () => {
       expect(body.response_format.json_schema.name).toBe("infinite_quest_world_outline_v1");
       expect(requestBodies[0]!.match(/Frozen durable preset\./g)).toHaveLength(1);
       expect(provider.textSelection).toEqual({ kind: "openrouter_preset", slug: "authoring" });
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    }
+  });
+
+  it("persists composed durable character and source initial-repair bodies under exact claims", async () => {
+    const credentialSecret = "task-5c-authoring-matrix-secret";
+    const requestBodies: string[] = [];
+    const calls = new Map<string, number>();
+    installIntegrationProviderTransport();
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/models" || request.url === "/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "native-model", context_length: 16_384, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        return;
+      }
+      if (request.url === "/v1/presets/authoring-matrix" || request.url === "/presets/authoring-matrix") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "authoring-matrix", name: "Authoring matrix", status: "active",
+          designated_version: { id: "authoring-matrix-v1", version: 1,
+            system_prompt: "Frozen authoring matrix preset.", config: { model: "native-model", temperature: 0.2 } }
+        } }));
+        return;
+      }
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        if (!request.url?.endsWith("/chat/completions")) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "fixture_route_not_found" } }));
+          return;
+        }
+        requestBodies.push(body);
+        const parsed = JSON.parse(body) as {
+          response_format?: { json_schema?: { name?: string } };
+          messages?: Array<{ role?: string; content?: string }>;
+        };
+        const schemaName = parsed.response_format?.json_schema?.name ?? "unknown";
+        const call = (calls.get(schemaName) ?? 0) + 1;
+        calls.set(schemaName, call);
+        const frames = (parsed.messages ?? []).flatMap((message) => {
+          if (message.role !== "user" || typeof message.content !== "string") return [];
+          try { return [JSON.parse(message.content) as Record<string, any>]; } catch { return []; }
+        });
+        const frame = frames.find((candidate) => candidate.seed || candidate.chunk || candidate.acceptedFacts) ?? {};
+        let content: unknown;
+        if (schemaName === "infinite_quest_world_outline_v1") {
+          content = call === 1
+            ? { ...fixture.world, character_seeds: fixture.world.character_seeds.map((seed, index) => index === 1 ? { ...seed, id: fixture.world.character_seeds[0]!.id } : seed) }
+            : fixture.world;
+        } else if (schemaName === "infinite_quest_world_seed_character_v1") {
+          const seed = frame.seed as { id: string; name: string };
+          content = call === 1
+            ? { ...fixture.character, id: "wrong-seed-id", name: seed.name }
+            : { ...fixture.character, id: seed.id, name: seed.name };
+        } else if (schemaName === "infinite_quest_source_extraction_v1") {
+          const evidenceId = frame.chunk?.paragraphSpans?.[0]?.evidenceId as string | undefined;
+          content = { facts: [{
+            category: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
+            citations: [{ evidenceId: call === 1 ? `evidence:${"0".repeat(24)}` : evidenceId }]
+          }] };
+        } else if (schemaName === "infinite_quest_source_synthesis_v1") {
+          content = call === 1
+            ? { fields: [{ path: "world.rules", value: "Unsupported", supportingFactIds: ["missing-fact"] }], characterFields: [], expansionCandidates: [] }
+            : { fields: [], characterFields: [], expansionCandidates: [] };
+        } else if (schemaName === "infinite_quest_source_character_v1") {
+          const selected = frame.selectedCharacterFactIds?.[0] as string | undefined;
+          const supporting = frame.acceptedFacts?.[0]?.id as string | undefined;
+          content = call === 1
+            ? { fields: [], characterFields: [{ selectedCharacterFactId: "missing-character", fields: [{ path: "profile.appearance.clothing", value: "Unsupported", supportingFactIds: ["missing-fact"] }] }], expansionCandidates: [] }
+            : { fields: [], characterFields: [{ selectedCharacterFactId: selected, fields: [{ path: "profile.appearance.clothing", value: "blue coat", supportingFactIds: [supporting] }] }], expansionCandidates: [] };
+        } else {
+          throw new Error(`unexpected schema ${schemaName}`);
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          id: randomUUID(), model: "native-model",
+          choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }
+        }));
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("authoring matrix fixture server did not bind");
+      await createProvider(pool, {
+        name: `task-5c-authoring-matrix-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: "@preset/authoring-matrix",
+        textSelection: { kind: "openrouter_preset", slug: "authoring-matrix" }, contextWindowTokens: 16_384,
+        maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+      }, credentialSecret);
+      const graph = createWorkerProviderApplicationComposition(pool, {
+        credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+      });
+      const repository = createPostgresAuthoringRepository(pool, { textPlanProtocol: 2 });
+      const authoring = createRuntimeAuthoringApplication(pool, sha256, { nativePresetPlansEnabled: true });
+      const worker = createRuntimeAuthoringWorkerApplication({
+        pool, repository, providers: graph.worldGeneration, nativePresetPlansEnabled: true, sha256
+      });
+
+      const world = await authoring.submit({ ownerUserId }, {
+        kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(),
+        prompt: "Create a durable world with one repaired character."
+      });
+      await expect(worker.runNext({ workerId: "task-5c-world-outline", leaseSeconds: 60 })).resolves.toBe(true);
+      await expect(worker.runNext({ workerId: "task-5c-world-character", leaseSeconds: 60 })).resolves.toBe(true);
+      const activeWorld = (await authoring.get({ ownerUserId }, world.id))!;
+      await authoring.cancel({ ownerUserId }, world.id, activeWorld.revision);
+
+      const source = await authoring.submit({ ownerUserId }, {
+        kind: "story_source", target: { kind: "new_world" }, idempotencyKey: randomUUID(),
+        name: "chapter.txt", text: "Iris wears a blue coat.", mode: "faithful",
+        boundaryParagraphId: "paragraph:0", instructions: "Keep cited facts."
+      });
+      await expect(worker.runNext({ workerId: "task-5c-source-plan", leaseSeconds: 60 })).resolves.toBe(true);
+      await expect(worker.runNext({ workerId: "task-5c-source-extraction", leaseSeconds: 60 })).resolves.toBe(true);
+      const extracted = (await authoring.get({ ownerUserId }, source.id))!;
+      if (extracted.kind !== "story_source") throw new Error("source fixture returned the wrong job kind");
+      const fact = extracted.source!.facts[0]!;
+      const reviewed = await authoring.reviewSourceFacts({ ownerUserId }, source.id, {
+        expectedRevision: extracted.revision, acceptedFactIds: [fact.id], rejectedFactIds: [], uncertainFactIds: [],
+        selectedCharacterFactIds: [fact.id], characterIdentityGroups: [{ representativeFactId: fact.id, factIds: [fact.id] }], manualFacts: []
+      });
+      await authoring.startSourceSynthesis({ ownerUserId }, source.id, reviewed.revision);
+      await expect(worker.runNext({ workerId: "task-5c-source-synthesis", leaseSeconds: 60 })).resolves.toBe(true);
+      await expect(worker.runNext({ workerId: "task-5c-source-character", leaseSeconds: 60 })).resolves.toBe(true);
+
+      const attempts = await pool.query<{
+        request_body: string; reservation_key: string; outcome: string;
+        logical_reservation: {
+          ownerUserId: string; jobId: string; stageId: string; jobGeneration: number;
+          stageGeneration: number; leaseToken: string; operation: "initial" | "repair";
+        };
+      }>(
+        `SELECT request_body,reservation_key,outcome,logical_reservation
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='authoring' AND logical_reservation->>'jobId'=ANY($1::text[])
+          ORDER BY id`,
+        [[world.id, source.id]]
+      );
+      expect(attempts.rows).toHaveLength(10);
+      expect(requestBodies).toHaveLength(10);
+      expect(attempts.rows.map((row) => row.request_body).sort()).toEqual([...requestBodies].sort());
+      expect(new Set(attempts.rows.map((row) => row.reservation_key)).size).toBe(10);
+      for (const row of attempts.rows) {
+        expect(row.outcome).toBe("succeeded");
+        expect(row.logical_reservation).toMatchObject({ ownerUserId });
+        expect(row.logical_reservation.jobGeneration).toBeGreaterThanOrEqual(0);
+        expect(row.logical_reservation.stageGeneration).toBeGreaterThan(0);
+        expect(row.logical_reservation.stageId).toMatch(/^[0-9a-f-]{36}$/u);
+        expect(row.logical_reservation.leaseToken).toMatch(/^[0-9a-f-]{36}$/u);
+      }
+      const grouped = new Map<string, typeof attempts.rows>();
+      for (const row of attempts.rows) {
+        const rows = grouped.get(row.logical_reservation.stageId) ?? [];
+        rows.push(row);
+        grouped.set(row.logical_reservation.stageId, rows);
+      }
+      const repaired = [...grouped.values()].filter((rows) => rows.length === 2);
+      expect(repaired).toHaveLength(5);
+      for (const rows of repaired) {
+        expect(new Set(rows.map((row) => row.logical_reservation.operation))).toEqual(new Set(["initial", "repair"]));
+        expect(new Set(rows.map((row) => row.logical_reservation.leaseToken)).size).toBe(1);
+        expect(new Set(rows.map((row) => row.logical_reservation.stageGeneration)).size).toBe(1);
+      }
+      const schemas = requestBodies.map((body) => JSON.parse(body).response_format.json_schema.name);
+      expect(schemas).toEqual(expect.arrayContaining([
+        "infinite_quest_world_outline_v1", "infinite_quest_world_outline_v1",
+        "infinite_quest_world_seed_character_v1", "infinite_quest_world_seed_character_v1",
+        "infinite_quest_source_extraction_v1", "infinite_quest_source_extraction_v1",
+        "infinite_quest_source_synthesis_v1", "infinite_quest_source_synthesis_v1",
+        "infinite_quest_source_character_v1", "infinite_quest_source_character_v1"
+      ]));
+      expect(requestBodies.every((body) => body.match(/Frozen authoring matrix preset\./g)?.length === 1)).toBe(true);
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    }
+  });
+
+  it("executes concurrent template-world requests and repeated seeds through composed direct physical attempts", async () => {
+    const credentialSecret = "task-5c-direct-composition-secret";
+    const marker = `DIRECT_${randomUUID()}`;
+    const requestBodies: string[] = [];
+    installIntegrationProviderTransport();
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/models" || request.url === "/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "native-model", context_length: 16_384, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        return;
+      }
+      if (request.url === "/v1/presets/direct-authoring" || request.url === "/presets/direct-authoring") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "direct-authoring", name: "Direct authoring", status: "active",
+          designated_version: { id: "direct-authoring-v1", version: 1,
+            system_prompt: "Frozen direct preset.", config: { model: "native-model", temperature: 0.2 } }
+        } }));
+        return;
+      }
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        if (!request.url?.endsWith("/chat/completions")) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "fixture_route_not_found" } }));
+          return;
+        }
+        requestBodies.push(body);
+        const parsed = JSON.parse(body);
+        const schemaName = parsed.response_format?.json_schema?.name;
+        let content: unknown = fixture.world;
+        if (schemaName === "infinite_quest_world_seed_character_v1") {
+          const inputMessage = parsed.messages.find((message: { role: string }) => message.role === "user")?.content;
+          const seed = JSON.parse(inputMessage).seed;
+          content = { ...fixture.character, id: seed.id, name: seed.name };
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          id: randomUUID(), model: "native-model",
+          choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }
+        }));
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("direct fixture server did not bind");
+      const provider = await createProvider(pool, {
+        name: `task-5c-direct-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: "@preset/direct-authoring",
+        textSelection: { kind: "openrouter_preset", slug: "direct-authoring" }, contextWindowTokens: 16_384,
+        maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+      }, credentialSecret);
+      const graph = createApiProviderApplicationComposition(pool, {
+        credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+      });
+      expect(graph.worldGeneration.authoringTextPlans?.nativePresetPlansEnabled).toBe(true);
+      const input = {
+        sourceName: "direct-composed", sourceKind: "prompt" as const, title: "Synthetic Glass Road",
+        summary: marker, keywords: [], excerpts: [], prompt: marker
+      };
+      const [first, second] = await Promise.all([
+        generateTemplateWorld(pool, ownerUserId, provider.id, input, graph.worldGeneration, `world-${randomUUID()}`),
+        generateTemplateWorld(pool, ownerUserId, provider.id, input, graph.worldGeneration, `world-${randomUUID()}`)
+      ]);
+      expect(first.content.playableCharacters).toHaveLength(3);
+      expect(second.content.playableCharacters).toHaveLength(3);
+
+      const attempts = await pool.query<{
+        request_body: string; reservation_key: string; outcome: string;
+        logical_reservation: { requestScopeId: string; invocationId: string; operation: string };
+      }>(
+        `WITH request_scopes AS (
+           SELECT DISTINCT logical_reservation->>'requestScopeId' AS request_scope_id
+             FROM prepared_text_physical_attempts
+            WHERE logical_kind='direct' AND request_body LIKE $1
+         )
+         SELECT request_body,reservation_key,outcome,logical_reservation
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='direct'
+            AND logical_reservation->>'requestScopeId' IN (SELECT request_scope_id FROM request_scopes)
+          ORDER BY id`,
+        [`%${marker}%`]
+      );
+      expect(attempts.rows).toHaveLength(8);
+      expect(requestBodies).toHaveLength(8);
+      expect(attempts.rows.map((row) => row.request_body).sort()).toEqual([...requestBodies].sort());
+      const scopes = new Map<string, typeof attempts.rows>();
+      for (const row of attempts.rows) {
+        const values = scopes.get(row.logical_reservation.requestScopeId) ?? [];
+        values.push(row);
+        scopes.set(row.logical_reservation.requestScopeId, values);
+        expect(row.outcome).toBe("succeeded");
+        expect(row.logical_reservation.operation).toBe("initial");
+        expect(row.reservation_key).toContain(row.logical_reservation.invocationId);
+      }
+      expect(scopes.size).toBe(2);
+      for (const rows of scopes.values()) {
+        expect(rows).toHaveLength(4);
+        expect(new Set(rows.map((row) => row.logical_reservation.invocationId)).size).toBe(4);
+      }
+      const bodies = requestBodies.map((body) => JSON.parse(body));
+      expect(bodies.filter((body) => body.response_format.json_schema.name === "infinite_quest_world_outline_v1")).toHaveLength(2);
+      expect(bodies.filter((body) => body.response_format.json_schema.name === "infinite_quest_world_seed_character_v1")).toHaveLength(6);
+      expect(requestBodies.every((body) => body.match(/Frozen direct preset\./g)?.length === 1)).toBe(true);
     } finally {
       await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
     }

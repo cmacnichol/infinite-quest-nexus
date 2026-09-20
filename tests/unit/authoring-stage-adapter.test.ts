@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { buildSourceExtractionPrompt, buildSourceWorldPrompt, CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
+import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
 import { planSourceChunks } from "../../packages/domain/src/source-authoring-budget.js";
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../packages/application/src/authoring/ports.js";
@@ -14,7 +15,9 @@ import { prepareAuthoringResponseContractExecution, prepareAuthoringTextExecutio
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
-import { expandWorldCharacterSeed } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { PreparedRouteTerminalError, type PresetRouteFailureReason } from "../../packages/story-engine/src/preset-route-execution.js";
+import { expandWorldCharacterSeed, generateStandalonePlayableCharacter, generateWorldOutline } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { createSourceAuthoringAdapter } from "../../services/runtime/src/source-authoring-adapter.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const descriptor = { id: "text-1", model: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024, requestTimeoutMs: 10_000, temperature: 0.7, configuration: {} };
@@ -53,6 +56,68 @@ function runtimeStage(overrides: Partial<Parameters<ReturnType<typeof createRunt
 }
 
 describe("executeAuthoringStage", () => {
+  it.each([
+    ["schema", "prepared_route_terminal", "schema_invalid"],
+    ["refusal", "prepared_route_terminal", "refusal"],
+    ["exhaustion", "prepared_route_exhausted", "provider_unavailable"],
+    ["ambiguous", "prepared_route_unknown_outcome", "ambiguous_transport"],
+    ["post-output", "prepared_route_terminal", "unknown"]
+  ] as const)("contains prepared %s terminal errors in representative world, character, and source callers", async (_label, code, reason) => {
+    const terminal = () => new PreparedRouteTerminalError(
+      code, reason as PresetRouteFailureReason, "prepared route stopped", "attempt-1"
+    );
+    const worldExecute = vi.fn(async () => { throw terminal(); });
+    const worldRepair = vi.fn();
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const worldInput = {
+      sourceName: "terminal", sourceKind: "prompt" as const, title: "Terminal world",
+      summary: "A road.", keywords: [], excerpts: [], prompt: "Build the road."
+    };
+    await expect(generateWorldOutline({
+      input: worldInput, provider: { execute: vi.fn() },
+      preparedExecution: { execute: worldExecute },
+      worldPrompt: buildTemplateWorldPrompt(worldInput, "World prompt."),
+      prompt: "World prompt.", repairPrompt: "World repair.", onRepair: worldRepair
+    })).rejects.toMatchObject({ code, reason });
+    expect(worldExecute).toHaveBeenCalledOnce();
+    expect(worldRepair).not.toHaveBeenCalled();
+    expect(timeout).not.toHaveBeenCalled();
+    timeout.mockRestore();
+
+    const characterExecute = vi.fn(async () => { throw terminal(); });
+    const characterRepair = vi.fn();
+    const characterTimeout = vi.spyOn(globalThis, "setTimeout");
+    const characterStage = runtimeStage();
+    if (characterStage.input.kind !== "character") throw new Error("character fixture is invalid");
+    await expect(generateStandalonePlayableCharacter({
+      provider: { execute: vi.fn() }, preparedExecution: { execute: characterExecute },
+      content: characterStage.input.content,
+      promptText: "Create Iris.", promptTemplate: "Character prompt.", onRepair: characterRepair
+    })).rejects.toMatchObject({ code, reason });
+    expect(characterExecute).toHaveBeenCalledOnce();
+    expect(characterRepair).not.toHaveBeenCalled();
+    expect(characterTimeout).not.toHaveBeenCalled();
+    characterTimeout.mockRestore();
+
+    const source = normalizeSourceDocument("Terminal", "Iris wears a blue coat.", "terminal-source");
+    const chunk = planSourceChunks({
+      source, boundaryParagraphId: source.paragraphs[0]!.id, systemPrompt: "Extract facts.", instructions: "",
+      budget: { contextWindowTokens: 8192, maxOutputTokens: 1024, countTokens: (value) => new TextEncoder().encode(value).length }
+    })[0]!;
+    const sourceExecute = vi.fn(async () => { throw terminal(); });
+    const sourceRepair = vi.fn(async () => { throw new Error("repair must not run"); });
+    const sourceDelay = vi.fn(async () => undefined);
+    const sourceAdapter = createSourceAuthoringAdapter({
+      plans: { initial: { prompt: "Prepared extraction." }, repair: { prompt: "Prepared extraction repair." } },
+      requestBudget: { executeInitial: sourceExecute, executeRepair: sourceRepair }, delay: sourceDelay
+    });
+    await expect(sourceAdapter.extractSourceChunk({
+      source, chunk, boundaryParagraphId: source.paragraphs[0]!.id, mode: "faithful", instructions: ""
+    })).rejects.toMatchObject({ code, reason });
+    expect(sourceExecute).toHaveBeenCalledOnce();
+    expect(sourceRepair).not.toHaveBeenCalled();
+    expect(sourceDelay).not.toHaveBeenCalled();
+  });
   it("resolves one inherited preset into every frozen authoring operation exactly once", async () => {
     const resolvePreset = vi.fn(async () => ({ slug: "story", name: "Story", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Preset rules." }));
     const discoverModels = vi.fn(async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);

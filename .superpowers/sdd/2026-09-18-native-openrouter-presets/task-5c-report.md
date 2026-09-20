@@ -48,7 +48,7 @@ Command:
 
 `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/authoring-stage-execution.integration.test.ts tests/integration/preset-generation-workflow.integration.test.ts tests/integration/image-pipeline.integration.test.ts`
 
-PASS: 3 files, 56 passed, 14 skipped. The run used the task-owned private integration configuration and dedicated test database. It covers the two matching durable authoring jobs, direct attempt persistence, illustration lifecycle origins, the real composed illustration prompt job, exact fake-wire bodies, typed claims, current-claim fences, schemas, and prompt-once behavior.
+PASS: 3 files, 56 passed, 14 skipped. The run used the task-owned private integration configuration and dedicated test database. It covers the two matching durable authoring jobs, direct attempt persistence, illustration lifecycle origins, the real composed illustration prompt job, exact fake-wire bodies, typed claims, current-claim fences, schemas, and prompt-once behavior. The 14 skips are `secureGeneratedAssetsIt` cases intentionally gated by `supportsSecureGeneratedArchiveStaging()`: that secure staging implementation is Linux-only and this run was on Windows.
 
 Harness notes:
 
@@ -64,13 +64,13 @@ Harness notes:
 
 Command: `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' test:unit`
 
-Result: FAIL, 8 failed files plus one failed suite setup, 324 passed files; 15 failed, 4,180 passed, 48 skipped tests. The Task 5C-related `runtime-main-authoring` failures were corrected and its scoped rerun is green. The remaining failures were not classified against the approved base and must remain Task 8 final gates:
+Result: FAIL, 8 failed files plus one failed suite setup, 324 passed files; 15 failed, 4,180 passed, 48 skipped tests. The Task 5C-related `runtime-main-authoring` failures were corrected and its scoped rerun is green. The remaining failures were not classified against the approved base. Physical-attempt archive classification is assigned to Task 6A; the other unresolved failures remain Task 8 final gates:
 
 - `tests/unit/chronicle-transaction-repository.test.ts`: 3 failures; mocks reject a newer provider-profile SQL projection as unexpected.
 - `tests/unit/client-api-routes.test.ts`: 1 failure; enqueue response lacks a recognized `operationKind` discriminator.
 - `tests/unit/generation-context-planner.test.ts`: 1 timeout at the 1,000,000-token case.
 - `tests/unit/generation-response-contract-operation-matrix.test.ts`: 6 failures; five frozen-v2 contract fixtures are rejected and one completion expectation lacks the returned `resultHash: null` field.
-- `tests/unit/system-archive-portability.test.ts`: 1 failure; `prepared_text_physical_attempts` is not classified in the archive registry.
+- `tests/unit/system-archive-portability.test.ts`: 1 failure; `prepared_text_physical_attempts` is not classified in the archive registry. Ownership: Task 6A.
 - `tests/unit/task-14e3g-production-binding.test.ts`: 1 timeout.
 - `tests/unit/web-build-contract.test.ts`: suite setup failed because the sandboxed web build could not read outside the worktree path.
 
@@ -118,3 +118,53 @@ No Task 5C production or test file was changed to mask these branch-wide gates.
 - Confirmed checked request bytes, operation schema, frozen preset prompt, recovery overrides, and source inputs are passed to the shared executor without a second serializer or route loop.
 - Confirmed root-owned untracked `docs/review/native-openrouter-presets/` and `scratch/` are excluded.
 - No native flag was enabled. No live/paid inference, browser/UI work, deployment, push, PR, or main-checkout integration was performed.
+
+## Independent review fix round 1
+
+Review of `e51faf05` found production composition coherent but required stronger acceptance evidence. This round changes tests and this report only; no production source changed.
+
+### Caller-level terminal containment
+
+`tests/unit/authoring-stage-adapter.test.ts` now calls the real world-outline, standalone-character, and source-extraction adapters with each typed prepared terminal class: schema invalid, refusal, exhausted provider, ambiguous transport outcome, and post-output unknown outcome. Every caller makes one prepared invocation, does not enter repair, and schedules no outer delay. The existing historical-v1 rate-limit and timeout cases remain in `tests/unit/authoring-response-adapter.test.ts` and passed in the same covering run.
+
+The first attempted run imported `buildTemplateWorldPrompt` from the wrong module. That was a test setup error; after importing it from `packages/domain/src/world-template.ts`, the first valid behavioral run passed all five parameter rows. No failing production behavior was observed and no production edit was made.
+
+Focused command:
+
+`& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run tests/unit/authoring-stage-adapter.test.ts -t "contains prepared"`
+
+PASS: 1 file, 5 passed, 52 filtered.
+
+Covering command:
+
+`& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run tests/unit/authoring-stage-adapter.test.ts tests/unit/authoring-response-adapter.test.ts`
+
+PASS: 2 files, 88 tests.
+
+### Actual composed graph and physical-body evidence
+
+The new direct integration invokes two concurrent real `generateTemplateWorld` workflows through `createApiProviderApplicationComposition`, the graph-owned prepared executor, a fake HTTP provider, and the PostgreSQL attempt repository. It proves eight physical rows equal the eight captured wire bodies: two stable request scopes, four distinct invocation pairs within each scope (outline plus three repeated seeds), exact outline/seed schemas, typed initial reservations, and one frozen preset prompt per body.
+
+The durable matrix uses the provider-free API submission surface plus `createRuntimeAuthoringWorkerApplication` over the real worker graph and repository claims. Schema-valid but semantically invalid first outputs deliberately trigger the application repair path. Ten physical rows equal ten captured wire bodies and form five initial/repair pairs with unchanged owner, job, stage, generation, and lease identity: world outline, durable seed character, source extraction, source synthesis, and selected source character. The test also performs the real source review and synthesis transition.
+
+The illustration lifecycle test now uses `createWorkerProviderApplicationComposition` and its shared prepared executor rather than a mock executor. Provisional, directly promoted, and reconciled prompt jobs each persist one physical attempt equal to the captured wire body with exact prompt-job claim identity, the refinement schema, and the frozen preset prompt once. The separate generated-segment composed test continues to cover the generated origin.
+
+Focused commands:
+
+- `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/authoring-stage-execution.integration.test.ts -t "concurrent template-world"` — PASS: 1 passed, 28 filtered at that point in the file.
+- `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/authoring-stage-execution.integration.test.ts -t "persists composed durable character"` — PASS: 1 passed, 29 filtered.
+- `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/image-pipeline.integration.test.ts -t "promotes provisional native plans"` — PASS: 1 passed, 37 filtered.
+
+Before the valid focused passes, test-only assumptions were corrected: an assertion referenced an unexposed graph property; a fixture used the wrong seed schema literal; the initial SQL marker existed only in outline bodies; durable job generation legitimately begins at zero; and UUID row order does not represent attempt order. These were setup/assertion failures, not production defects. The tests then exercised the production paths and passed without production changes.
+
+Affected complete-file integration commands:
+
+- `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/authoring-stage-execution.integration.test.ts` — PASS: 1 file, 30 tests.
+- `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/image-pipeline.integration.test.ts` — PASS: 1 file, 24 passed, 14 Linux-only secure-staging skips.
+
+### Fix-round static verification
+
+- `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec tsc -p tsconfig.json --noEmit` — PASS after narrowing two test-fixture union types; no diagnostics.
+- `git diff --check` — PASS, no output.
+
+The broader unit suite was not repeated because the review requested focused and affected covering checks. Its residual failure inventory above remains the Task 6A/Task 8 handoff.

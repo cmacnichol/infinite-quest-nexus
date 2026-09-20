@@ -185,6 +185,15 @@ integration("independent illustration pipeline", () => {
         } }));
         return;
       }
+      if (request.method === "GET" && (request.url === "/v1/presets/streaming-illustration" || request.url === "/presets/streaming-illustration")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "streaming-illustration", name: "Streaming illustration", status: "active",
+          designated_version: { id: "streaming-illustration-v1", version: 1,
+            system_prompt: "PRIVATE_STREAMING_ILLUSTRATION_PROMPT", config: { model: "synthetic-text-model", temperature: 0.27 } }
+        } }));
+        return;
+      }
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => { body += chunk; });
@@ -2568,29 +2577,42 @@ integration("independent illustration pipeline", () => {
       "SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 2", [imported.campaignId]
     );
     expect(turns.rows).toHaveLength(2);
-    const graph = workerProviderGraph(pool, credentialSecret).illustration;
-    const resolvePreset = vi.fn(async () => ({
-      slug: "streaming-illustration", name: "Streaming illustration", versionId: "streaming-illustration-v1", version: 1,
-      configHash: "c".repeat(64), config: { model: "frozen-streaming-illustration-model", temperature: 0.27 },
-      systemPrompt: "PRIVATE_STREAMING_ILLUSTRATION_PROMPT"
-    }));
-    const discoverModels = vi.fn(async () => [{ id: "frozen-streaming-illustration-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
-    const prepared = vi.fn(async () => ({
-      content: JSON.stringify({ image_prompt: "Mira follows the lantern through the fogbound causeway, cinematic fantasy illustration" }),
-      responseId: "streaming-native-prompt", finishReason: "stop", metadata: {}
-    }));
-    const native = {
-      ...graph,
-      illustrationTextPlans: {
-        nativePresetPlansEnabled: true,
-        ports: { resolvePreset, discoverModels },
-        preparedExecutor: { execute: prepared },
-        loadAuthority: async ({ ownerUserId: authorityOwnerId, providerProfileId }: { ownerUserId: string; providerProfileId: string }) => {
-          const current = await graph.execution.text({ ownerUserId: authorityOwnerId }, providerProfileId, "text");
-          return { id: current.id, providerRole: current.providerRole, authorityRevision: current.authorityRevision!, endpointIdentity: current.endpointIdentity! };
+    const composed = createWorkerProviderApplicationComposition(pool, {
+      credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+    });
+    const native = composed.illustration;
+    expect(native.illustrationTextPlans?.preparedExecutor).toBe(composed.generation.preparedTextExecutor);
+    const ports = createIllustrationWorkerPorts(pool, native);
+    async function executeOrigin(promptJobId: string, workerId: string) {
+      await makeOnlyPromptClaimable(pool, promptJobId);
+      const wireStart = nativeRefinementRequestBodies.length;
+      await expect(runNativeIllustrationPromptJob(
+        pool, workerId, 30, ports.promptRefinement, ports.costs, native
+      )).resolves.toBe(true);
+      const attempts = await pool.query<{
+        request_body: string; outcome: string;
+        logical_reservation: { kind: string; ownerUserId: string; promptJobId: string; claimAttempt: number; leaseOwner: string; operation: string };
+      }>(
+        `SELECT request_body,outcome,logical_reservation
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='illustration' AND logical_reservation->>'promptJobId'=$1`,
+        [promptJobId]
+      );
+      expect(attempts.rows).toEqual([expect.objectContaining({
+        outcome: "succeeded",
+        logical_reservation: {
+          kind: "illustration", ownerUserId, promptJobId, claimAttempt: 1, leaseOwner: workerId, operation: "initial"
         }
-      }
-    } as never;
+      })]);
+      const wireBodies = nativeRefinementRequestBodies.slice(wireStart);
+      expect(wireBodies).toEqual([attempts.rows[0]!.request_body]);
+      const body = JSON.parse(wireBodies[0]!);
+      expect(body.response_format.json_schema.name).toBe("infinite_quest_illustration_prompt_refinement_v1");
+      expect(wireBodies[0]!.match(/PRIVATE_STREAMING_ILLUSTRATION_PROMPT/g)).toHaveLength(1);
+      await expect(pool.query<{ status: string }>(
+        "SELECT status FROM illustration_prompt_jobs WHERE id=$1", [promptJobId]
+      )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
+    }
     const config = await loadConfig(pool, ownerUserId, imported.campaignId);
     const provisionalNarration = Array.from({ length: 6 }, () =>
       "Mira follows a lantern through the foggy causeway toward the quiet observatory while silver leaves turn slowly above the road."
@@ -2612,11 +2634,12 @@ integration("independent illustration pipeline", () => {
       { ordinal: 0, startOffset: 0, endOffset: provisionalNarration.length, startWord: 0, endWord: 120, wordCount: 120, text: provisionalNarration },
       config, native
     )).resolves.toBe(true);
-    const frozen = await pool.query<{ text_execution_snapshot: Record<string, unknown> }>(
-      "SELECT text_execution_snapshot FROM illustration_prompt_jobs WHERE generation_job_id=$1", [directPromotion.id]
+    const frozen = await pool.query<{ id: string; text_execution_snapshot: Record<string, unknown> }>(
+      "SELECT id,text_execution_snapshot FROM illustration_prompt_jobs WHERE generation_job_id=$1", [directPromotion.id]
     );
     const frozenSnapshot = frozen.rows[0]!.text_execution_snapshot;
     expect(frozenSnapshot).toMatchObject({ version: 3, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMING_ILLUSTRATION_PROMPT") } });
+    await executeOrigin(frozen.rows[0]!.id, "native-provisional-prompt-worker");
     const validExactCopy = fullyShapedIllustrationTextSnapshot(ownerUserId, nativeTextProviderId, true);
     const validCopyClient = await pool.connect();
     try {
@@ -2700,8 +2723,8 @@ integration("independent illustration pipeline", () => {
       pool, ownerUserId, directPromotion.id, turns.rows[0]!.id, imported.campaignId, finalNarration, config, native,
       undefined, frozenSnapshot as never
     );
-    const directlyPromoted = await pool.query<{ ordinal: number; text_execution_snapshot: Record<string, unknown> }>(
-      `SELECT segments.ordinal,prompt_jobs.text_execution_snapshot
+    const directlyPromoted = await pool.query<{ id: string; ordinal: number; text_execution_snapshot: Record<string, unknown> }>(
+      `SELECT prompt_jobs.id,segments.ordinal,prompt_jobs.text_execution_snapshot
          FROM turn_illustration_segments segments
          JOIN illustration_prompt_jobs prompt_jobs ON prompt_jobs.segment_id=segments.id
         WHERE segments.generation_job_id=$1 ORDER BY segments.ordinal`,
@@ -2711,6 +2734,7 @@ integration("independent illustration pipeline", () => {
     expect(directlyPromoted.rows.map((row) => row.text_execution_snapshot)).toEqual(
       Array.from({ length: directlyPromoted.rows.length }, () => frozenSnapshot)
     );
+    await executeOrigin(directlyPromoted.rows.find((row) => row.ordinal > 0)!.id, "native-promoted-prompt-worker");
     await pool.query(
       `UPDATE generation_jobs
           SET status='completed',result_turn_id=$2,expected_turn_number=(SELECT turn_number FROM turns WHERE id=$2),
@@ -2889,26 +2913,7 @@ integration("independent illustration pipeline", () => {
         WHERE id <> $1 AND status='refining'`,
       [reconciledTarget.rows[0]!.id]
     );
-    const ports = createIllustrationWorkerPorts(pool, native);
-    await expect(runNativeIllustrationPromptJob(
-      pool, "native-reconciled-prompt-worker", 30, ports.promptRefinement, ports.costs, native
-    )).resolves.toBe(true);
-    expect(prepared).toHaveBeenCalledWith(expect.objectContaining({
-      providerProfileId: nativeTextProviderId,
-      logicalReservation: {
-        kind: "illustration",
-        ownerUserId,
-        promptJobId: reconciledTarget.rows[0]!.id,
-        claimAttempt: 1,
-        leaseOwner: "native-reconciled-prompt-worker",
-        operation: "initial"
-      },
-      currentClaim: expect.any(Function),
-      plan: (frozenSnapshot as { plan: unknown }).plan
-    }));
-    await expect(pool.query<{ status: string }>(
-      "SELECT status FROM illustration_prompt_jobs WHERE id=$1", [reconciledTarget.rows[0]!.id]
-    )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
+    await executeOrigin(reconciledTarget.rows[0]!.id, "native-reconciled-prompt-worker");
     expect(await reconcileNextAcceptedStreamingIllustration(pool, createApiIllustrationApplication(pool).generation)).toBe(false);
     expect(JSON.stringify(await getGenerationJob(pool, deferredPromotion.id))).not.toContain("PRIVATE_STREAMING_ILLUSTRATION_PROMPT");
   });
