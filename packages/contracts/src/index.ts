@@ -5,6 +5,7 @@ export * from "./provider-selection.js";
 export * from "./provider-presets.js";
 export * from "./text-execution-plan.js";
 export * from "./text-response-format.js";
+export * from "./provider-output-schema.js";
 export * from "./generation-response-contract.js";
 export * from "./generation-response-format-projection.js";
 export * from "./generation-review.js";

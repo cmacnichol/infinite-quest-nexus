@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { textModelSelectionSchema } from "./provider-selection.js";
+import { sha256Hex } from "./hash.js";
 
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const positiveIntegerSchema = z.number().int().positive();
@@ -51,6 +52,36 @@ export type TextRouteCandidate = Readonly<z.infer<typeof textRouteCandidateSchem
 export type TextExecutionRouteBasis = Readonly<z.infer<typeof textExecutionRouteBasisSchema>>;
 export type TextExecutionPlan = Readonly<z.infer<typeof textExecutionPlanSchema>>;
 export type TextExecutionPlanPublicSummary = Readonly<z.infer<typeof textExecutionPlanPublicSummarySchema>>;
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function textExecutionRouteBasisHash(value: unknown): string {
+  const parsed = textExecutionRouteBasisSchema.parse(value);
+  const { routeBasisHash: _hash, ...unhashed } = parsed;
+  return sha256Hex(canonicalJson(unhashed));
+}
+export function readTextExecutionRouteBasis(value: unknown): TextExecutionRouteBasis {
+  const parsed = textExecutionRouteBasisSchema.parse(value);
+  if (parsed.routeBasisHash !== textExecutionRouteBasisHash(parsed)) throw new Error("Text execution route basis hash is invalid.");
+  return parsed;
+}
+export function textExecutionPlanHash(value: unknown): string {
+  const parsed = textExecutionPlanSchema.parse(value);
+  const { planHash: _hash, ...unhashed } = parsed;
+  return sha256Hex(canonicalJson(unhashed));
+}
+export function readTextExecutionPlan(value: unknown): TextExecutionPlan {
+  const parsed = textExecutionPlanSchema.parse(value);
+  if (parsed.planHash !== textExecutionPlanHash(parsed)) throw new Error("Text execution plan hash is invalid.");
+  return parsed;
+}
 
 export function publicTextExecutionPlanSummary(plan: TextExecutionPlan): TextExecutionPlanPublicSummary {
   return textExecutionPlanPublicSummarySchema.parse({ version: plan.version, selection: plan.selection, preset: plan.preset, candidates: plan.candidates, parameters: plan.parameters, planHash: plan.planHash });
