@@ -23,6 +23,7 @@ import {
   responseContractOperationV2MatchesInvocation,
   responseContractOperationSchema,
   bindFrozenResponseContractInvocationV2,
+  assertDirectResponseContractRouteBasisAuthority,
   assertPresetResponseContractRouteBasisAuthority,
   assertFrozenPresetResponseContractRouteBasisAuthority,
   type AttemptResponseContractAudit,
@@ -188,6 +189,13 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
   if (queued?.version === 2 && queued.authority.kind === "preset_trusted") {
     assertPresetResponseContractRouteBasisAuthority(queued, value.textExecutionRouteBasis);
     if (frozen?.version === 2) assertFrozenPresetResponseContractRouteBasisAuthority(frozen, value.textExecutionRouteBasis);
+  }
+  if (queued?.version === 2 && queued.authority.kind === "model_verified") {
+    if (value.textExecutionRouteBasis !== undefined) {
+      assertDirectResponseContractRouteBasisAuthority(queued, value.textExecutionRouteBasis);
+    } else if (queued.authority.routeBasisHash !== undefined) {
+      throw new Error("Direct response-contract route basis is missing.");
+    }
   }
   if (ledger && !frozen) throw new Error("Response-contract invocation ledger requires a frozen contract.");
   if (failures && !frozen) throw new Error("Prepared response failure evidence requires a frozen contract.");

@@ -120,6 +120,10 @@ export function createQueuedResponsePolicyResolver(
         selection,
         directEligibility: () => eligibility("story", false)
       });
+      const routeBasis = preparedTextExecution.routeBasis;
+      if (routeBasis && (routeBasis.selection.kind !== "model" || routeBasis.selection.modelId !== selection.modelId)) {
+        throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+      }
       return {
         version: 2 as const,
         policy: "required" as const,
@@ -140,7 +144,8 @@ export function createQueuedResponsePolicyResolver(
           }),
           routeConfigHash,
           verificationRegistryHash: providers.responseFormatCapabilities.registryDigest,
-          authorityRevision: preparedTextExecution.authorityRevision
+          authorityRevision: preparedTextExecution.authorityRevision,
+          ...(routeBasis ? { routeBasisHash: routeBasis.routeBasisHash } : {})
         },
         operationClosureVersion: 2 as const,
         invocationKeys: [...invocationKeys]

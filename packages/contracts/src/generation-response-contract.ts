@@ -162,7 +162,7 @@ const invocationKeysV2Schema = z.array(responseInvocationKeyV2Schema).min(1).max
 const directResponseContractAuthorityV2Schema = z.object({
   kind: z.literal("model_verified"), providerProfileId: z.uuid(), providerType: z.enum(["openrouter", "openai_compatible"]), endpointIdentity: z.string().trim().min(1).max(512), model: z.string().trim().min(1).max(512),
   providerConfigurationHash: hashSchema, routeConfigHash: hashSchema, verificationRegistryHash: hashSchema,
-  authorityRevision: z.string().trim().min(1).max(500)
+  authorityRevision: z.string().trim().min(1).max(500), routeBasisHash: hashSchema.optional()
 }).strict();
 const presetResponseContractAuthorityV2Schema = z.object({
   kind: z.literal("preset_trusted"), routeBasisHash: hashSchema,
@@ -236,11 +236,11 @@ export function queuedResponsePolicyVersionedHash(value: QueuedResponsePolicyVer
 }
 
 // The queue authority carries authorityRevision for current credential/
-// endpoint fencing. Frozen prepared contracts retain the Task 4A wire shape,
-// whose strict transport schema does not expose that queue-only field.
+// endpoint fencing. Frozen contracts retain any route-basis replay binding;
+// invocation binding projects queue-only fields from the transport contract.
 const frozenDirectResponseContractAuthorityV2Schema = z.object({
   kind: z.literal("model_verified"), providerProfileId: z.uuid(), providerType: z.enum(["openrouter", "openai_compatible"]), endpointIdentity: z.string().trim().min(1).max(512), model: z.string().trim().min(1).max(512),
-  providerConfigurationHash: hashSchema, routeConfigHash: hashSchema, verificationRegistryHash: hashSchema
+  providerConfigurationHash: hashSchema, routeConfigHash: hashSchema, verificationRegistryHash: hashSchema, routeBasisHash: hashSchema.optional()
 }).strict();
 const frozenResponseContractAuthorityV2Schema = z.discriminatedUnion("kind", [
   frozenDirectResponseContractAuthorityV2Schema,
@@ -306,7 +306,8 @@ export const frozenResponseContractsV2Schema = z.object({
       const authority = value.queuedPolicy.authority;
       if (contract.authority.providerProfileId !== authority.providerProfileId || contract.authority.endpointIdentity !== authority.endpointIdentity
         || contract.authority.providerType !== authority.providerType || contract.authority.model !== authority.model || contract.authority.providerConfigurationHash !== authority.providerConfigurationHash || contract.authority.routeConfigHash !== authority.routeConfigHash
-        || contract.authority.verificationRegistryHash !== authority.verificationRegistryHash) {
+        || contract.authority.verificationRegistryHash !== authority.verificationRegistryHash
+        || contract.authority.routeBasisHash !== authority.routeBasisHash) {
         context.addIssue({ code: "custom", path: ["contracts", key, "authority"], message: "Frozen model contract authority changed." });
       }
     }
@@ -460,7 +461,11 @@ export function bindFrozenResponseContractInvocationV2(input: Readonly<{
     assertPresetResponseContractAuthorityBinding(frozen.queuedPolicy, contract, routeBasis, plan, input.trustedOperationPrompt);
     return contract;
   }
-  return preparedResponseContractV2Schema.parse(closure);
+  // The direct route-basis hash is queue/frozen replay authority. Keep the
+  // established prepared transport contract shape stable while the database
+  // and executor validate the binding before this projection.
+  const { routeBasisHash: _routeBasisHash, ...transportAuthority } = closure.authority;
+  return preparedResponseContractV2Schema.parse({ ...closure, authority: transportAuthority });
 }
 
 /**
@@ -506,6 +511,26 @@ export function assertPresetResponseContractRouteBasisAuthority(
     || routeBasis.credentialReference !== authority.credentialReference || routeBasis.authorityRevision !== authority.authorityRevision
     || routeBasis.profileRevision !== authority.profileRevision) {
     throw new Error("Preset response-contract route basis identity changed.");
+  }
+  return routeBasis;
+}
+
+/** Validates an optional direct-model route basis against its queue authority.
+ * Historical basis-free model contracts remain valid only when the authority
+ * also omits the binding. */
+export function assertDirectResponseContractRouteBasisAuthority(
+  policy: QueuedResponsePolicyV2,
+  routeBasisValue: unknown
+): TextExecutionRouteBasis {
+  if (policy.authority.kind !== "model_verified" || !policy.authority.routeBasisHash) {
+    throw new Error("Direct response-contract route binding requires model authority with a route basis hash.");
+  }
+  const routeBasis = readTextExecutionRouteBasis(routeBasisValue);
+  const authority = policy.authority;
+  if (routeBasis.routeBasisHash !== authority.routeBasisHash || routeBasis.selection.kind !== "model"
+    || routeBasis.selection.modelId !== authority.model || routeBasis.endpointReference !== authority.endpointIdentity
+    || routeBasis.credentialReference !== authority.providerProfileId || routeBasis.authorityRevision !== authority.authorityRevision) {
+    throw new Error("Direct response-contract route basis identity changed.");
   }
   return routeBasis;
 }

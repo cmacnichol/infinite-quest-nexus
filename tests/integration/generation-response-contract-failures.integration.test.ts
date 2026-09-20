@@ -3,10 +3,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { generationJobSnapshotSchema, generationRequestSchema, generationRetryLatestRequestSchema, generationStreamSnapshotSchema } from "../../packages/contracts/src/generation.js";
 import { sceneCoverageReplayResultHash } from "../../packages/contracts/src/generation-response-contract.js";
-import { deriveTextExecutionPlan } from "../../packages/contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import { getProviderOutputSchemaV2, type ProviderOutputSchemaOperationV2 } from "../../packages/contracts/src/provider-output-schema.js";
@@ -26,6 +26,7 @@ import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory, syncPlayerCampaignConfig } from "../helpers/memory-aware-services.js";
 import { apiMemoryApplication } from "../helpers/memory-applications.js";
 import { installIntegrationProviderTransport, currentIntegrationProviderTransport } from "./provider-transport-test-helper.js";
+import { logger } from "../../packages/logger/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -37,11 +38,13 @@ const canary = "PRIVATE_PROVIDER_FAILURE_CANARY";
 const partialJson = `{\"narration\":\"Mira reaches the observatory.\",\"scratchpad\":\"${canary}`;
 const successfulRpgAssessment = JSON.stringify({ stat_id: "insight", difficulty_modifier: 0, rationale: "The archive must be studied carefully.", favorable_outcome: "Mira recognizes the lantern's old signal.", setback_outcome: "Dust obscures the archive's first clue." });
 
-type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "refusal" | "partial_stream" | "success" | "choice_repair";
+type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "scene_rewrite_overflow_rejection" | "historical_http_error" | "refusal" | "partial_stream" | "success" | "choice_repair";
 const successfulStory = JSON.stringify({ narration: "Mira reaches the observatory.", choices: ["Wait.", "Listen.", "Enter.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "", continuity_summary: "Mira reaches the observatory.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 const duplicateChoiceStory = JSON.stringify({ ...JSON.parse(successfulStory), choices: ["Wait.", "Wait.", "Enter.", "Leave."] });
 const successfulChoiceRepair = JSON.stringify({ choices: ["Search the archive.", "Follow the lantern.", "Call for the archivist.", "Leave a marker."], custom_action_suggestion: "Study the constellation chart." });
 const successfulEventExtension = JSON.stringify({ ...JSON.parse(successfulStory), narration: "Mira reaches the observatory. A lantern glows beside the opened archive." });
+const sceneRejectedDraftCanary = "PRIVATE_SCENE_REJECTED_DRAFT_CANARY";
+const oversizedSceneStory = JSON.stringify({ ...JSON.parse(successfulStory), scratchpad: `${sceneRejectedDraftCanary}${"x".repeat(90_000)}` });
 
 integration("response-contract provider failures", () => {
   let pool: DatabasePool;
@@ -52,6 +55,7 @@ integration("response-contract provider failures", () => {
   let continuityReviewCalls = 0;
   let presetMetadataAvailable = true;
   let sceneCoverageResults: boolean[] = [];
+  let sceneStoryRequestCount = 0;
   let streamedCallbackAccumulations: string[] = [];
   let persistedStreamCheckpoint: string | null = null;
   const requestBodies: string[] = [];
@@ -103,6 +107,18 @@ integration("response-contract provider failures", () => {
           return;
         }
         requestBodies.push(body);
+        if (scenario === "historical_http_error") {
+          response.writeHead(502, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "upstream_failure", message: canary } }));
+          return;
+        }
+        const schemaName = (JSON.parse(body) as { response_format?: { json_schema?: { name?: unknown } } }).response_format?.json_schema?.name;
+        if (scenario === "scene_rewrite_overflow_rejection" && schemaName === getProviderOutputSchemaV2("story").name
+          && ++sceneStoryRequestCount > 1) {
+          response.writeHead(400, { "content-type": "application/json", "x-generation-id": "scene-rewrite-overflow-id" });
+          response.end(JSON.stringify({ id: "scene-rewrite-overflow-id", model, provider: "preset-route", error: { code: "response_format_invalid", message: canary } }));
+          return;
+        }
         if (scenario === "schema_rejection") {
           response.writeHead(400, { "content-type": "application/json", "x-generation-id": "schema-400-id" });
           response.end(JSON.stringify({ id: "schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "response_format_invalid", message: canary } }));
@@ -151,7 +167,7 @@ integration("response-contract provider failures", () => {
           response.end(JSON.stringify({ id: "refusal-id", model: "observed-refusal-model", provider: "observed-refusal-route", choices: [{ message: { refusal: canary }, finish_reason: "content_filter" }] }));
           return;
         }
-        if (scenario === "success" || scenario === "choice_repair" || scenario === "aux_event_schema_rejection" || scenario === "aux_scene_schema_rejection" || scenario === "aux_event_coverage_schema_rejection" || scenario === "recovery_schema_rejection") {
+        if (scenario === "success" || scenario === "choice_repair" || scenario === "aux_event_schema_rejection" || scenario === "aux_scene_schema_rejection" || scenario === "aux_event_coverage_schema_rejection" || scenario === "recovery_schema_rejection" || scenario === "scene_rewrite_overflow_rejection") {
           const parsed = JSON.parse(body) as { response_format?: { json_schema?: { name?: string } }; messages?: Array<{ content?: string }> };
           const input = typeof parsed.messages?.[1]?.content === "string" ? JSON.parse(parsed.messages[1].content) as Record<string, unknown> : {};
           const evidence = Array.isArray(input.evidence) ? input.evidence[0] as { id?: unknown; content?: unknown } | undefined : undefined;
@@ -180,8 +196,12 @@ integration("response-contract provider failures", () => {
               : scenario === "recovery_schema_rejection" ? JSON.stringify({ narration: "Incomplete fixture response." })
                 : Array.isArray(input.fictional_event_instructions) ? successfulEventExtension
                 : scenario === "choice_repair" ? duplicateChoiceStory : successfulStory;
+          const selectedContent = scenario === "scene_rewrite_overflow_rejection"
+            && parsed.response_format?.json_schema?.name === getProviderOutputSchemaV2("story").name
+            ? oversizedSceneStory
+            : content;
           response.writeHead(200, { "content-type": "application/json", "x-generation-id": "success-id" });
-          response.end(JSON.stringify({ id: "success-id", model, provider: "verified-route", choices: [{ message: { content }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } }));
+          response.end(JSON.stringify({ id: "success-id", model, provider: "verified-route", choices: [{ message: { content: selectedContent }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } }));
           return;
         }
         response.writeHead(200, { "content-type": "text/event-stream", "x-generation-id": "partial-stream-id" });
@@ -203,7 +223,7 @@ integration("response-contract provider failures", () => {
       );
       ownedJobIds.length = 0;
     }
-    requestBodies.length = 0; continuityReviewCalls = 0; presetMetadataAvailable = true; sceneCoverageResults = []; streamedCallbackAccumulations = []; persistedStreamCheckpoint = null;
+    requestBodies.length = 0; continuityReviewCalls = 0; presetMetadataAvailable = true; sceneCoverageResults = []; sceneStoryRequestCount = 0; streamedCallbackAccumulations = []; persistedStreamCheckpoint = null;
   });
 
   function records(streaming: boolean) {
@@ -245,18 +265,18 @@ integration("response-contract provider failures", () => {
   }
 
   async function fixture(
-    policy: "auto" | "required",
+    policy: "legacy" | "auto" | "required",
     streaming = false,
     native = false,
     selection: "model" | "preset" = "model",
-    options: Readonly<{ storyOnly?: boolean; scene?: boolean; rpg?: boolean; triggers?: boolean; eventExtension?: boolean; continuity?: "enforce" }> = {}
+    options: Readonly<{ storyOnly?: boolean; scene?: boolean; rpg?: boolean; triggers?: boolean; eventExtension?: boolean; continuity?: "enforce"; contextWindowTokens?: number }> = {}
   ) {
     const address = server.address(); if (!address || typeof address === "string") throw new Error("failure provider did not bind");
     const configuration = { textResponseFormatPolicy: policy, ...(streaming ? { streaming: true } : {}) };
     // Keep the profile default a concrete model: imported campaigns may use it
     // for independent embedding fallback. The queued explicit selection below
     // is the preset behavior this fixture exercises.
-    const provider = await createProvider(pool, { name: `response-contract-failure-${randomUUID()}`, providerType: "openrouter", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: model, contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration, apiKey: "test" }, credentialSecret);
+    const provider = await createProvider(pool, { name: `response-contract-failure-${randomUUID()}`, providerType: "openrouter", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: model, contextWindowTokens: options.contextWindowTokens ?? 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration, apiKey: "test" }, credentialSecret);
     const legacy = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     legacy.world.title = `response-contract-failure-${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "response-contract-failure.story", story: legacy }));
@@ -744,6 +764,44 @@ integration("response-contract provider failures", () => {
     )).resolves.toMatchObject({ rows: [{ narration: "Mira reaches the observatory." }] });
   }, 60_000);
 
+  it("reserves the checked clean-regeneration scene rewrite before a provider failure", async () => {
+    scenario = "scene_rewrite_overflow_rejection";
+    sceneCoverageResults = [false];
+    const value = await fixture("required", false, true, "preset", { scene: true, continuity: "enforce", contextWindowTokens: 20_000 });
+    await executeOnce(value);
+    const review = await value.application.getReview({ ownerUserId, jobId: value.job.id });
+    expect(review).toMatchObject({ stage: "scene_coverage", state: "pending" });
+    await value.application.decideReview({ ownerUserId, jobId: value.job.id }, {
+      reviewId: review.reviewId, revision: review.revision, decision: "retry"
+    });
+
+    await executeOnce(value);
+    const row = await pool.query<{ status: string; errorCode: string | null; orchestrationPrivate: Record<string, any> }>(
+      "SELECT status,error_code AS \"errorCode\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1",
+      [value.job.id]
+    );
+    expect(row.rows[0]).toMatchObject({ status: "failed", errorCode: "provider_schema_invalid" });
+    const rewriteBody = requestBodies.find((body) => body.includes("CLEAN REGENERATION REQUIREMENT"));
+    expect(rewriteBody).toBeDefined();
+    expect(rewriteBody).not.toContain(sceneRejectedDraftCanary);
+    const rewriteInvocation = row.rows[0]!.orchestrationPrivate.responseContractInvocations.find(
+      (entry: Record<string, unknown>) => entry.operation === "scene_coverage_rewrite"
+    );
+    const rewriteFailure = row.rows[0]!.orchestrationPrivate.preparedResponseFailures.find(
+      (entry: Record<string, unknown>) => entry.invocationId === rewriteInvocation.id
+    );
+    expect(row.rows[0]!.orchestrationPrivate.sceneCoverageRepair).toMatchObject({
+      status: "dispatched",
+      repairRequestBody: rewriteBody,
+      repairRequestPayloadHash: createHash("sha256").update(rewriteBody!).digest("hex")
+    });
+    expect(rewriteInvocation).toMatchObject({
+      status: "completed",
+      requestPayloadHash: createHash("sha256").update(rewriteBody!).digest("hex")
+    });
+    expect(rewriteFailure).toMatchObject({ requestBody: rewriteBody, requestPayloadHash: rewriteInvocation.requestPayloadHash });
+  }, 60_000);
+
   it("rejects a schema-valid tampered native scene replay result before a reclaim can dispatch", async () => {
     scenario = "success";
     sceneCoverageResults = [false, true];
@@ -1031,10 +1089,51 @@ integration("response-contract provider failures", () => {
     expect(row.rows[0]).toMatchObject({ status: "completed", errorCode: null });
     expect(requestBodies).toHaveLength(1);
     expect(JSON.parse(requestBodies[0]!).temperature).toBe(0);
+    const privateState = row.rows[0]!.orchestrationPrivate;
+    expect(privateState.queuedResponsePolicy.authority.routeBasisHash).toBe(privateState.textExecutionRouteBasis.routeBasisHash);
+    expect(privateState.frozenResponseContracts.contracts["story:nonstream"].authority.routeBasisHash)
+      .toBe(privateState.textExecutionRouteBasis.routeBasisHash);
     expect(row.rows[0]!.orchestrationPrivate.primaryReservation.requestBody).toBe(requestBodies[0]);
     expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations[0].requestPayloadHash)
       .toBe(createHash("sha256").update(requestBodies[0]!).digest("hex"));
   }, 60_000);
+
+  it.each(["rehashed-temperature", "rehashed-policy", "missing-basis", "removed-binding"] as const)(
+    "rejects a native direct Model %s tamper before transport",
+    async (tamper) => {
+      scenario = "success";
+      const value = await fixture("required", false, true);
+      const saved = await pool.query<{ orchestrationPrivate: Record<string, any> }>(
+        "SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1 AND owner_user_id=$2",
+        [value.job.id, ownerUserId]
+      );
+      const privateState = saved.rows[0]!.orchestrationPrivate;
+      if (tamper === "rehashed-temperature") {
+        const basis = privateState.textExecutionRouteBasis;
+        basis.parameters = { ...basis.parameters, temperature: 0.91 };
+        basis.routeBasisHash = textExecutionRouteBasisHash(basis);
+      } else if (tamper === "rehashed-policy") {
+        const basis = privateState.textExecutionRouteBasis;
+        basis.candidates[0] = { ...basis.candidates[0], providerPolicy: { only: ["tampered-route"] } };
+        basis.routeBasisHash = textExecutionRouteBasisHash(basis);
+      } else if (tamper === "missing-basis") {
+        delete privateState.textExecutionRouteBasis;
+      } else {
+        delete privateState.queuedResponsePolicy.authority.routeBasisHash;
+      }
+      await pool.query(
+        "UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1 AND owner_user_id=$3",
+        [value.job.id, JSON.stringify(privateState), ownerUserId]
+      );
+
+      await executeOnce(value, false);
+      await expect(pool.query<{ status: string; errorCode: string | null }>(
+        "SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [value.job.id]
+      )).resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+      expect(requestBodies).toHaveLength(0);
+    },
+    60_000
+  );
 
   it("reclaims a native preset v2 job after ordinary profile edits and dispatches its saved frozen route once", async () => {
     scenario = "success";
@@ -1115,6 +1214,25 @@ integration("response-contract provider failures", () => {
     );
     expect(row.rows[0]).toEqual({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
     expect(requestBodies).toHaveLength(0);
+  }, 60_000);
+
+  it("keeps a historical provider HTTP body out of terminal generation logs", async () => {
+    scenario = "historical_http_error";
+    const errorSpy = vi.spyOn(logger, "error");
+    try {
+      const value = await fixture("legacy");
+      await executeOnce(value);
+      const terminal = errorSpy.mock.calls.map(([event]) => event).find((event) => {
+        if (!event || typeof event !== "object") return false;
+        const record = event as Record<string, unknown>;
+        return record.event === "turn_generation_failed" && record.generationJobId === value.job.id;
+      }) as Record<string, unknown> | undefined;
+      expect(terminal).toMatchObject({ errorCode: "generation_failed", errorType: "Error" });
+      expect(terminal).not.toHaveProperty("errorMessage");
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(canary);
+    } finally {
+      errorSpy.mockRestore();
+    }
   }, 60_000);
 
   it("persists an auto JSON-object refusal with finite observed provenance and never redispatches it", async () => {

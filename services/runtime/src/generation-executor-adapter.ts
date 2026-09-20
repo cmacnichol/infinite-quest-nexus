@@ -126,7 +126,7 @@ import {
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerPromptProtocolVersion } from "./provider-application-composition.js";
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
-import { bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, responseContractInvocationLedgerLimitV2, responseContractOperationV2Schema, sceneCoverageReplayResultHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type FrozenResponseContractsVersioned, type QueuedResponsePolicy, type QueuedResponsePolicyVersioned, type ResponseContractOperation, type ResponseContractOperationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
+import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, responseContractInvocationLedgerLimitV2, responseContractOperationV2Schema, sceneCoverageReplayResultHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type FrozenResponseContractsVersioned, type QueuedResponsePolicy, type QueuedResponsePolicyVersioned, type ResponseContractOperation, type ResponseContractOperationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
 import type { TextExecutionPlan, TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
@@ -1019,7 +1019,14 @@ export function bindCampaignResponseContract(
       throw Object.assign(new Error("Frozen preset response contract no longer matches its saved operation prompt."), { code: "response_contract_identity_mismatch" });
     }
   } else if (frozen.version === 2 && contract.version === 2) {
-    preparedContract = preparedResponseContractV2Schema.parse(contract);
+    preparedContract = bindFrozenResponseContractInvocationV2({
+      frozen,
+      invocationKey: identity.key,
+      operation: responseContractOperationV2Schema.parse(operation),
+      routeBasis: undefined,
+      plan: undefined,
+      trustedOperationPrompt: request.systemPrompt
+    });
   } else {
     preparedContract = preparedResponseContractSchema.parse(contract);
   }
@@ -2076,10 +2083,19 @@ async function executeLoadedGeneration(
       if (queuedResponsePolicy.authority.kind === "model_verified") {
         const authority = queuedResponsePolicy.authority;
         const current = responseContractProfile(provider, job);
-        const frozenDirectRoute = routeBasis?.selection.kind === "model"
-          && routeBasis.selection.modelId === authority.model
-          && routeBasis.credentialReference === authority.providerProfileId
-          && routeBasis.authorityRevision === authority.authorityRevision;
+        let frozenDirectRoute = false;
+        try {
+          if (routeBasis) {
+            assertDirectResponseContractRouteBasisAuthority(queuedResponsePolicy, routeBasis);
+            frozenDirectRoute = true;
+          } else if (authority.routeBasisHash !== undefined) {
+            throw new Error("The queued direct-model route basis is missing.");
+          }
+        } catch {
+          throw Object.assign(new Error("The queued direct-model route basis changed before execution."), {
+            code: "generation_checkpoint_incompatible"
+          });
+        }
         if (authority.providerProfileId !== provider.id || authority.providerType !== provider.providerType
           || authority.model !== provider.model || authority.endpointIdentity !== (provider.endpointIdentity ?? "")
           || !frozenDirectRoute && (authority.providerConfigurationHash !== current.configurationHash
@@ -3368,7 +3384,13 @@ async function executeLoadedGeneration(
           ),
           rejectedResponse
         };
-        const preparedSceneRewrite = serializeFrozenCampaignRequest(provider, job, "scene_coverage_rewrite", {
+        const checkedSceneRewrite = prepareCheckedFrozenCampaignRequest(provider, job, "scene_coverage_rewrite", {
+          systemPrompt: sceneRewriteRequest.systemPrompt,
+          input: sceneRewriteRequest.input,
+          recoveryInput: sceneRewriteRequest.recoveryInput,
+          rejectedResponse
+        });
+        const preparedSceneRewrite = checkedSceneRewrite ?? serializeFrozenCampaignRequest(provider, job, "scene_coverage_rewrite", {
           systemPrompt: sceneRewriteRequest.systemPrompt,
           input: sceneRewriteRequest.input,
           recoveryInput: sceneRewriteRequest.recoveryInput,
@@ -3396,11 +3418,11 @@ async function executeLoadedGeneration(
           sceneRewriteRequest,
           undefined
         ));
-        // The provider can canonicalize the prepared request after the
-        // reservation (for example, by retrying without response_format).
-        // Retain its returned wire identity before claiming this rewrite has
-        // a validated result.
-        const actualSceneRewrite = preparedRequestForResult(sceneRewriteResponse, provider, sceneRewriteRequest);
+        // Native v2 reserved the checked canonical request before dispatch;
+        // retain that immutable identity. Historical jobs keep their legacy
+        // post-response reconstruction behavior.
+        const actualSceneRewrite = checkedSceneRewrite
+          ?? preparedRequestForResult(sceneRewriteResponse, provider, sceneRewriteRequest);
         orchestration = await persistOrchestration(repository, scope, job, {
           sceneCoverageRepair: {
             ...orchestration.sceneCoverageRepair!,
@@ -4437,7 +4459,7 @@ async function executeLoadedGeneration(
         event: "turn_generation_failed",
         ...generationLogContext(job, workerId),
         errorCode: code,
-        errorMessage: error instanceof Error ? error.message : String(error),
+        errorType: diagnosticErrorName(error),
         durationMs: Date.now() - generationStartedAt,
         transportTimedOut: Boolean(transportError?.timedOut)
       });
