@@ -13,6 +13,7 @@ import {
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresProviderRepositories, writeEncryptedProviderCredential } from "../../packages/database/src/provider-repository.js";
+import { createPostgresChronicleConfigurationRepository } from "../../packages/database/src/chronicle-repository.js";
 import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import { promptCompatibilityRequirement } from "../../packages/contracts/src/prompt-library.js";
 import { encryptCredential } from "../../packages/story-engine/src/credentials.js";
@@ -205,6 +206,95 @@ integration("provider PostgreSQL adapters", () => {
         selectedProviderProfileId: fallbackText.id,
         allowTextFallback: false,
       })).rejects.toMatchObject({ statusCode: 400 });
+    });
+  });
+
+  it("keeps text presets out of implicit embedding fallback while rejecting explicit selection", async () => {
+    const nativeOwner = await fixture("native-preset-embedding-fallback");
+    const nativePreset = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile({
+        ...profileCommand(nativeOwner.ownerUserId, `Native preset ${crypto.randomUUID()}`),
+        providerType: "openrouter",
+        defaultModel: "",
+        textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
+        isDefault: true
+      })
+    );
+    await pool.query(
+      "UPDATE provider_profiles SET default_model=$2 WHERE id=$1",
+      [nativePreset.id, "stale/concrete-model"]
+    );
+
+    await inTransaction(async (client) => {
+      const resolution = createPostgresProviderRepositories(client).resolution;
+      await expect(resolution.resolveEmbedding({
+        ownerUserId: nativeOwner.ownerUserId,
+        allowTextFallback: true
+      })).resolves.toEqual({
+        status: "unconfigured",
+        requestedRole: "embedding",
+        resolvedRole: null,
+        source: "none"
+      });
+      await expect(resolution.resolveEmbedding({
+        ownerUserId: nativeOwner.ownerUserId,
+        selectedProviderProfileId: nativePreset.id,
+        allowTextFallback: true
+      })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/preset/i) });
+    });
+    await expect(createPostgresChronicleConfigurationRepository(pool).setEmbeddingConfig({
+      ownerUserId: nativeOwner.ownerUserId,
+      campaignId: nativeOwner.campaignId
+    }, {
+      enabled: true,
+      providerProfileId: nativePreset.id,
+      model: "stale/concrete-model",
+      batchSize: 16
+    })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/preset/i) });
+
+    const dedicated = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile({
+        ...profileCommand(nativeOwner.ownerUserId, `Dedicated embedding ${crypto.randomUUID()}`, "embedding"),
+        isDefault: true
+      })
+    );
+    await inTransaction(async (client) => {
+      await expect(createPostgresProviderRepositories(client).resolution.resolveEmbedding({
+        ownerUserId: nativeOwner.ownerUserId,
+        allowTextFallback: true
+      })).resolves.toMatchObject({
+        status: "resolved",
+        source: "dedicated_embedding",
+        providerProfileId: dedicated.id,
+        model: "embedding-model"
+      });
+    });
+
+    const legacyOwner = await fixture("legacy-preset-embedding-fallback");
+    const legacyPreset = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile({
+        ...profileCommand(legacyOwner.ownerUserId, `Legacy preset ${crypto.randomUUID()}`),
+        providerType: "openrouter",
+        defaultModel: "@preset/nexus-nsfw",
+        isDefault: true
+      })
+    );
+    await inTransaction(async (client) => {
+      const resolution = createPostgresProviderRepositories(client).resolution;
+      await expect(resolution.resolveEmbedding({
+        ownerUserId: legacyOwner.ownerUserId,
+        allowTextFallback: true
+      })).resolves.toEqual({
+        status: "unconfigured",
+        requestedRole: "embedding",
+        resolvedRole: null,
+        source: "none"
+      });
+      await expect(resolution.resolveEmbedding({
+        ownerUserId: legacyOwner.ownerUserId,
+        selectedProviderProfileId: legacyPreset.id,
+        allowTextFallback: true
+      })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/preset/i) });
     });
   });
 

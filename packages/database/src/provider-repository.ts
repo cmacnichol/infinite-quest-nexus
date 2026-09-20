@@ -7,6 +7,7 @@ import {
 import {
   normalizeTextSelection,
   selectionCompatibilityId,
+  textModelSelectionSchema,
   type TextModelSelection
 } from "../../contracts/src/provider-selection.js";
 import {
@@ -59,6 +60,12 @@ const SELECT_COLUMNS = `id, name, provider_type, provider_role, base_url, defaul
 
 function httpError(message: string, statusCode: number): Error {
   return Object.assign(new Error(message), { statusCode });
+}
+
+function isTextPresetSelection(row: Pick<ProviderRow, "default_model" | "text_selection">): boolean {
+  const selection = textModelSelectionSchema.safeParse(row.text_selection);
+  if (selection.success && selection.data.kind === "openrouter_preset") return true;
+  return row.default_model.trim().startsWith("@preset/");
 }
 
 function iso(value: Date | string): string {
@@ -437,6 +444,9 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
   const resolution: ProviderResolutionPort = {
     resolveDirect: (request) => resolve(request.ownerUserId, request.providerRole, request.selectedProviderProfileId, request.model),
     async resolveEmbedding(request): Promise<EmbeddingProviderResolution> {
+      if (request.model?.trim().startsWith("@preset/")) {
+        throw httpError("A text preset cannot be used for embedding fallback.", 400);
+      }
       const dedicated = await client.query<Pick<ProviderRow, "id" | "provider_type" | "default_model" | "is_default">>(
         `SELECT id,provider_type,default_model,is_default FROM provider_profiles
           WHERE owner_user_id=$1 AND provider_role='embedding' AND enabled=true
@@ -465,7 +475,17 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
           request.model,
         );
         if (fallback.status === "resolved") {
-          if (fallback.model.startsWith("@preset/")) throw httpError("A text preset cannot be used for embedding fallback.", 400);
+          const profile = await client.query<Pick<ProviderRow, "default_model" | "text_selection">>(
+            `SELECT default_model,text_selection FROM provider_profiles
+              WHERE id=$1 AND owner_user_id=$2 AND provider_role='text' AND enabled=true`,
+            [fallback.providerProfileId, request.ownerUserId]
+          );
+          if (profile.rows[0] && isTextPresetSelection(profile.rows[0])) {
+            if (request.selectedProviderProfileId || request.model?.trim()) {
+              throw httpError("A text preset cannot be used for embedding fallback.", 400);
+            }
+            return { status: "unconfigured", requestedRole: "embedding", resolvedRole: null, source: "none" };
+          }
           return { ...fallback, requestedRole: "embedding", source: "text_fallback" };
         }
       }

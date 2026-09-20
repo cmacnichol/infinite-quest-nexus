@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { worldContentSchema, WORLD_CONTENT_SCHEMA_VERSION } from "../../packages/contracts/src/world-library.js";
 import { worldImportRequestSchema } from "../../packages/contracts/src/world-library.js";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
@@ -20,6 +20,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { clearStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
+import { memoryGeneration } from "../helpers/memory-applications.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe.sequential : describe.skip;
@@ -60,6 +61,7 @@ integration("PostgreSQL world campaign repository adapters", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await pool.query("DROP TRIGGER IF EXISTS campaign_migration_target_race_trigger ON campaign_world_migrations");
     await pool.query("DROP FUNCTION IF EXISTS block_campaign_migration_target_race()");
     await pool.query("DELETE FROM campaigns");
@@ -966,6 +968,51 @@ integration("PostgreSQL world campaign repository adapters", () => {
       [rolledBackCampaignId]
     );
     expect(rolledBack.rows[0]).toEqual({ campaigns: "0", configs: "0", jobs: "0", chunk_jobs: "0" });
+  });
+
+  it("creates a campaign with embeddings disabled when the default text profile is a native preset", async () => {
+    const adapters = createPostgresWorldRepositoryAdapters(pool, { memory: memoryGeneration(pool) });
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model,
+         text_selection, enabled, is_default
+       ) VALUES ($1,$2,'openrouter','text','https://openrouter.ai/api/v1',$3,$4,true,true)
+       RETURNING id`,
+      [
+        ownerUserId,
+        `Native preset campaign ${crypto.randomUUID()}`,
+        "stale/concrete-model",
+        JSON.stringify({ kind: "openrouter_preset", slug: "nexus-nsfw" })
+      ]
+    );
+    const inference = vi.spyOn(globalThis, "fetch");
+    const world = await createFixtureWorld(adapters, "Native preset campaign world");
+    const version = await publishFixtureWorld(
+      adapters,
+      world.created.id,
+      world.created.draftRevision,
+      "Native preset campaign version"
+    );
+
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Native preset campaign");
+
+    expect(provider.rows[0]?.id).toBeTruthy();
+    await expect(pool.query<{
+      embedding_enabled: boolean;
+      embedding_provider_profile_id: string | null;
+    }>(
+      `SELECT embedding_enabled, embedding_provider_profile_id
+         FROM campaign_memory_configs WHERE campaign_id=$1`,
+      [campaign.created.id]
+    )).resolves.toMatchObject({ rows: [{
+      embedding_enabled: false,
+      embedding_provider_profile_id: null
+    }] });
+    await expect(pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id=$1",
+      [campaign.created.id]
+    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+    expect(inference).not.toHaveBeenCalled();
   });
 
   it("blocks campaign deletion while durable work remains active", async () => {
