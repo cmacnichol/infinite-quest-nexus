@@ -42,7 +42,7 @@ import {
   worldGenerationFailureDiagnostic,
 } from "./provider-world-generation-adapter.js";
 import { createProviderResponseFormatCapabilities, type ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
-import type { SchemaVerification } from "@infinite-quest/contracts";
+import type { SchemaVerification, SchemaVerificationV2 } from "@infinite-quest/contracts";
 import type { DirectAuthoringTextPlanOptions } from "./authoring-text-execution-preparation.js";
 
 export type ProviderApplicationTransaction = Readonly<{
@@ -171,7 +171,7 @@ export function providerPromptProtocolVersion(snapshot: PromptSnapshotVersion["s
 
 function createInternals(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly (SchemaVerification | SchemaVerificationV2)[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ) {
   const responseFormatCapabilities = createProviderResponseFormatCapabilities({
     ...(options.schemaVerifications ? { records: options.schemaVerifications } : {}),
@@ -363,7 +363,7 @@ function createInternals(
 
 export function createApiProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly (SchemaVerification | SchemaVerificationV2)[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ): ApiProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({
@@ -383,7 +383,7 @@ export function createApiProviderApplicationComposition(
 
 export function createWorkerProviderApplicationComposition(
   pool: DatabasePool,
-  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly SchemaVerification[]; schemaVerificationDigest?: string; clock?: () => number }>,
+  options: Readonly<{ credentialSecret: string; transport: ProviderTransport; schemaVerifications?: readonly (SchemaVerification | SchemaVerificationV2)[]; schemaVerificationDigest?: string; clock?: () => number }>,
 ): WorkerProviderApplicationComposition {
   const graph = createInternals(pool, options);
   return Object.freeze({

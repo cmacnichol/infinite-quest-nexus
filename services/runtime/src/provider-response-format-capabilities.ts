@@ -1,5 +1,5 @@
-import type { ModelParameterAdvertisement, SchemaVerification } from "@infinite-quest/contracts";
-import { resolveResponseFormatEligibility, type ResponseFormatEligibilityInput } from "../../../packages/application/src/providers/response-format.js";
+import type { ModelParameterAdvertisement, SchemaVerification, SchemaVerificationV2 } from "@infinite-quest/contracts";
+import { resolveResponseFormatEligibility, resolveResponseFormatEligibilityV2, type ResponseFormatEligibilityInput, type ResponseFormatEligibilityV2Input } from "../../../packages/application/src/providers/response-format.js";
 import { ProviderCapabilityCache, type ProviderCapabilityCacheKey } from "./provider-capability-cache.js";
 import type { ProviderModelInventory } from "../../../packages/application/src/providers/types.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
@@ -10,13 +10,16 @@ export type ProviderResponseFormatCapabilities = Readonly<{
   discover(key: ProviderCapabilityCacheKey, load: () => Promise<ModelParameterAdvertisement | null>, refresh?: boolean): Promise<ModelParameterAdvertisement | null>;
   discoverInventory(key: ProviderCapabilityCacheKey, load: () => Promise<ProviderModelInventory>, refresh?: boolean): Promise<ProviderModelInventory>;
   eligibility(input: Omit<ResponseFormatEligibilityInput, "verifications"> & Readonly<{ expectedRegistryDigest?: string }>): ReturnType<typeof resolveResponseFormatEligibility>;
+  eligibilityV2(input: Omit<ResponseFormatEligibilityV2Input, "verifications"> & Readonly<{ expectedRegistryDigest?: string }>): ReturnType<typeof resolveResponseFormatEligibilityV2>;
   invalidate(providerProfileId: string): void;
   transactionLocal(): ProviderResponseFormatCapabilities;
 }>;
-export function createProviderResponseFormatCapabilities(options: Readonly<{ records?: readonly SchemaVerification[]; registryDigest?: string; now?: () => number; cache?: ProviderCapabilityCache<ModelParameterAdvertisement | null>; inventoryCache?: ProviderCapabilityCache<ProviderModelInventory> }> = {}): ProviderResponseFormatCapabilities {
+export function createProviderResponseFormatCapabilities(options: Readonly<{ records?: readonly (SchemaVerification | SchemaVerificationV2)[]; registryDigest?: string; now?: () => number; cache?: ProviderCapabilityCache<ModelParameterAdvertisement | null>; inventoryCache?: ProviderCapabilityCache<ProviderModelInventory> }> = {}): ProviderResponseFormatCapabilities {
   const cache = options.cache ?? new ProviderCapabilityCache<ModelParameterAdvertisement | null>(options.now ? { now: options.now } : {});
   const inventoryCache = options.inventoryCache ?? new ProviderCapabilityCache<ProviderModelInventory>(options.now ? { now: options.now } : {});
   const records = options.records ?? [];
+  const v1Records = records.filter((record): record is SchemaVerification => record.version === 1);
+  const v2Records = records.filter((record): record is SchemaVerificationV2 => record.version === 2);
   // The file loader uses SHA-256 of zero bytes for an absent registry.  Direct
   // composition must carry that same valid identity; non-empty injected
   // records receive a deterministic identity unless an explicit file digest
@@ -29,5 +32,6 @@ export function createProviderResponseFormatCapabilities(options: Readonly<{ rec
     records,
     registryDigest,
     ...(options.now ? { now: options.now } : {})
-  }), eligibility: (input) => input.expectedRegistryDigest !== undefined && input.expectedRegistryDigest !== registryDigest ? { status: "unknown", reason: "discovery_unavailable", verification: null } : resolveResponseFormatEligibility({ ...input, verifications: records }) });
+  }), eligibility: (input) => input.expectedRegistryDigest !== undefined && input.expectedRegistryDigest !== registryDigest ? { status: "unknown", reason: "discovery_unavailable", verification: null } : resolveResponseFormatEligibility({ ...input, verifications: v1Records }),
+  eligibilityV2: (input) => input.expectedRegistryDigest !== undefined && input.expectedRegistryDigest !== registryDigest ? { status: "unknown", reason: "discovery_unavailable", verification: null } : resolveResponseFormatEligibilityV2({ ...input, verifications: v2Records }) });
 }

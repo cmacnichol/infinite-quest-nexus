@@ -3,6 +3,7 @@ import type { GenerationExecutionPayload } from "../../packages/database/src/gen
 import { sha256 } from "../../packages/domain/src/index.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import {
   bindCampaignResponseContract,
   callCampaignTextProvider,
@@ -99,6 +100,31 @@ function dependencies(ledger: ReturnType<typeof auditLedger>) {
 }
 
 describe("generation response-contract executor operation matrix", () => {
+  it.each([
+    ["RPG assessment", "rpg_assessment", "rpg_assessment:nonstream"],
+    ["before trigger", "event_trigger_before", "event_trigger_before:nonstream"],
+    ["after trigger", "event_trigger_after", "event_trigger_after:nonstream"],
+    ["scene coverage", "scene_coverage_validation", "scene_coverage:nonstream"],
+    ["event coverage", "event_coverage_validation", "event_coverage:nonstream"]
+  ] as const)("binds v2 %s calls to their distinct frozen closure key", (_name, operation, key) => {
+    const schemaOperation = key.split(":")[0] as Parameters<typeof getProviderOutputSchemaV2>[0];
+    const schema = getProviderOutputSchemaV2(schemaOperation);
+    const v2Job = job();
+    v2Job.orchestration_private.frozenResponseContracts = {
+      version: 2,
+      selectionHash: hash,
+      contracts: {
+        [key]: { version: 2, mode: "json_schema", operation: schemaOperation, streaming: false,
+          schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+          admission: { mode: "json_schema", basis: "model_verified", verification: {} },
+          authority: { kind: "model_verified", providerProfileId: "00000000-0000-4000-8000-000000000004", providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash }, forbidFormatFallback: true }
+      }
+    } as never;
+
+    expect(bindCampaignResponseContract(v2Job, operation, request()).responseContract)
+      .toMatchObject({ version: 2, operation: schemaOperation, schemaHash: schema.schemaHash });
+  });
+
   it.each([
     ["primary", "story_generation", false, "story:nonstream", "story"],
     ["primary stream", "story_generation", true, "story:stream", "story"],

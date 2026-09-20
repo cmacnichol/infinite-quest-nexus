@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { ProviderRequest, TextProviderProfile } from "./providers.js";
 import { ContextBudgetError, assertOutputFeasible } from "./context-budget.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
-import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import type { PreparedResponseContract, PreparedResponseContractV2 } from "../../contracts/src/text-response-format.js";
 import { prepareResponseContract } from "./provider-response-format.js";
 
 export type ProviderRequestOperation = "story generation";
@@ -38,7 +38,7 @@ export type ProviderRequestSerializationOptions = Readonly<{
   operation?: ProviderRequestOperation;
   budgetAudit?: ProviderRequestBudgetAudit | null;
   responseFormat?: boolean;
-  responseContract?: PreparedResponseContract;
+  responseContract?: PreparedResponseContract | PreparedResponseContractV2;
 }>;
 
 /** The legacy body serializer deliberately needs no endpoint or credential data. */
@@ -80,7 +80,7 @@ export type CheckedProviderRequestOptions = Readonly<{
   contextWindowTokens?: number;
   output: ProviderOutputBudget;
   responseFormat?: boolean;
-  responseContract?: PreparedResponseContract;
+  responseContract?: PreparedResponseContract | PreparedResponseContractV2;
 }>;
 
 /** Conservative uncertainty for a serialized body when no compatible tokenizer is available. */
@@ -155,11 +155,18 @@ export function serializeProviderRequest(
   if (responseContract && profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
     throw new Error("This provider adapter does not support prepared response contracts.");
   }
-  if (responseContract?.mode === "json_schema" && profile.providerType === "openrouter" && !responseContract.providerRoutingSlugs.length) {
+  if (responseContract?.version === 1 && responseContract.mode === "json_schema" && profile.providerType === "openrouter" && !responseContract.providerRoutingSlugs.length) {
     throw new Error("OpenRouter prepared response contracts require explicit provider routing.");
   }
-  if (responseContract?.mode === "json_schema" && profile.providerType !== "openrouter" && responseContract.providerRoutingSlugs.length) {
+  if (responseContract?.version === 1 && responseContract.mode === "json_schema" && profile.providerType !== "openrouter" && responseContract.providerRoutingSlugs.length) {
     throw new Error("Non-OpenRouter prepared response contracts cannot carry provider routing.");
+  }
+  if (responseContract?.version === 2 && responseContract.admission.basis === "preset_trusted") {
+    throw new Error("Trusted preset response contracts require the frozen route executor.");
+  }
+  if (responseContract?.version === 2 && responseContract.authority.kind === "model_verified"
+    && (profile.providerType !== responseContract.authority.providerType || profile.model !== responseContract.authority.model)) {
+    throw new Error("Prepared v2 model response contract does not match the provider identity.");
   }
   const isRecovery = Boolean(request.recoveryInput);
   const rejectedResponse = completeRejectedDraftContent(request);
@@ -187,7 +194,9 @@ export function serializeProviderRequest(
         max_tokens: profile.maxOutputTokens,
         ...(responseContract?.mode === "json_schema" ? {
           response_format: { type: "json_schema", json_schema: { name: responseContract.schemaName, strict: true, schema: responseContract.schema } },
-          ...(profile.providerType === "openrouter" ? { provider: { require_parameters: true, only: responseContract.providerRoutingSlugs } } : {})
+          ...(profile.providerType === "openrouter" && responseContract.version === 1 ? { provider: { require_parameters: true, only: responseContract.providerRoutingSlugs } }
+            : profile.providerType === "openrouter" && responseContract.version === 2 && responseContract.admission.basis === "model_verified"
+              ? { provider: { require_parameters: true, only: responseContract.admission.verification.providerRoutingSlugs } } : {})
         } : responseContract?.mode === "json_object" ? { response_format: { type: "json_object" } } : options.responseFormat === false ? {} : { response_format: { type: "json_object" } }),
         ...(request.onChunk ? { stream: true, stream_options: { include_usage: true } } : {})
       };

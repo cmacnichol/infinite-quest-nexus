@@ -1,5 +1,5 @@
 import type { ProviderType } from "../../contracts/src/generation.js";
-import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import type { PreparedResponseContract, PreparedResponseContractV2 } from "../../contracts/src/text-response-format.js";
 import { PreparedResponseContractError, classifyResponseFormatFailure } from "./provider-response-format.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
@@ -66,7 +66,7 @@ export type ProviderRequest = {
   budgetOutput?: ProviderOutputBudget;
   /** Authoring calls account for every generation request themselves. */
   responseFormatFallback?: "allow" | "forbid";
-  responseContract?: PreparedResponseContract;
+  responseContract?: PreparedResponseContract | PreparedResponseContractV2;
 };
 
 export type ProviderResult = {
