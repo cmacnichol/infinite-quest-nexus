@@ -130,6 +130,12 @@ export type IllustrationTextExecutionSnapshot = Readonly<{
   errorCode: "illustration_text_route_unavailable";
 }>;
 
+function hasExactObjectKeys(value: object, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  return actual.length === required.length && actual.every((key, index) => key === required[index]);
+}
+
 function readIllustrationTextExecutionSnapshot(
   value: unknown,
   claimedOwnerUserId: string,
@@ -140,11 +146,14 @@ function readIllustrationTextExecutionSnapshot(
   if (!value || typeof value !== "object") throw new Error("The saved illustration text execution snapshot is invalid.");
   const snapshot = value as { version?: unknown; state?: unknown; ownerUserId?: unknown; operationPrompt?: unknown; providerType?: unknown; requestConfiguration?: unknown; routeBasis?: unknown; plan?: unknown; frozenResponseContracts?: unknown; trustedOperationPrompt?: unknown; errorCode?: unknown };
   if (snapshot.version !== 2 && snapshot.version !== 3) throw new Error("The saved illustration text execution snapshot is invalid.");
-  if (snapshot.state === "unavailable" && snapshot.errorCode === "illustration_text_route_unavailable") {
+  if (snapshot.state === "unavailable" && snapshot.errorCode === "illustration_text_route_unavailable"
+    && hasExactObjectKeys(snapshot, ["version", "state", "errorCode"])) {
     return { version: snapshot.version, state: "unavailable", errorCode: snapshot.errorCode };
   }
   if (snapshot.state !== "prepared" || typeof snapshot.ownerUserId !== "string" || snapshot.ownerUserId !== claimedOwnerUserId
-    || snapshot.operationPrompt !== operationPrompt) {
+    || snapshot.operationPrompt !== operationPrompt
+    || (snapshot.version === 2 && !hasExactObjectKeys(snapshot, ["version", "state", "ownerUserId", "operationPrompt", "routeBasis", "plan"]))
+    || (snapshot.version === 3 && !hasExactObjectKeys(snapshot, ["version", "state", "ownerUserId", "operationPrompt", "providerType", "requestConfiguration", "routeBasis", "plan", "frozenResponseContracts", "trustedOperationPrompt"]))) {
     throw new Error("The saved illustration text execution snapshot is invalid.");
   }
   const routeBasis = textExecutionRouteBasisSchema.parse(snapshot.routeBasis);
@@ -186,6 +195,25 @@ function readIllustrationTextExecutionSnapshot(
     ? {}
     : { httpReferer: requestConfigurationValue.httpReferer };
   return { version: 3, state: "prepared", ownerUserId: snapshot.ownerUserId, operationPrompt, providerType: snapshot.providerType, requestConfiguration, routeBasis, plan, frozenResponseContracts, trustedOperationPrompt: operationPrompt };
+}
+
+function validateIllustrationTextExecutionSnapshotForInsert(
+  value: IllustrationTextExecutionSnapshot | undefined,
+  ownerUserId: string,
+): IllustrationTextExecutionSnapshot | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object") throw new Error("The illustration text execution snapshot is invalid.");
+  const snapshot = value as { state?: unknown; ownerUserId?: unknown; operationPrompt?: unknown; routeBasis?: { credentialReference?: unknown } };
+  if (snapshot.state === "unavailable") {
+    return readIllustrationTextExecutionSnapshot(value, ownerUserId, "", "") ?? undefined;
+  }
+  if (snapshot.ownerUserId !== ownerUserId || typeof snapshot.operationPrompt !== "string"
+    || !snapshot.operationPrompt.trim() || typeof snapshot.routeBasis?.credentialReference !== "string") {
+    throw new Error("The illustration text execution snapshot is invalid.");
+  }
+  return readIllustrationTextExecutionSnapshot(
+    value, ownerUserId, snapshot.routeBasis.credentialReference, snapshot.operationPrompt,
+  ) ?? undefined;
 }
 
 /**
@@ -678,14 +706,16 @@ async function createTurnSet(
   mode: "missing" | "rebuild",
   providers: IllustrationProviderCollaborators,
   textExecutionSnapshot?: IllustrationTextExecutionSnapshot,
+  suppliedGenerationJobId?: string,
 ) {
   const turnResult = await client.query<{
     campaign_id: string;
+    turn_number: number;
     narration: string;
     character_profile: Record<string, unknown> | null;
     character_snapshot: Record<string, unknown> | null;
   }>(
-    `SELECT turns.campaign_id, turns.narration, campaigns.character_profile, campaigns.character_snapshot
+    `SELECT turns.campaign_id, turns.turn_number, turns.narration, campaigns.character_profile, campaigns.character_snapshot
        FROM turns JOIN campaigns
          ON campaigns.id = turns.campaign_id AND campaigns.owner_user_id = turns.owner_user_id
       WHERE turns.id = $1 AND turns.owner_user_id = $2 FOR SHARE OF turns, campaigns`,
@@ -693,11 +723,6 @@ async function createTurnSet(
   );
   const turn = turnResult.rows[0];
   if (!turn) throw Object.assign(new Error("Accepted turn not found."), { statusCode: 404 });
-  const config = await loadConfig(client, ownerUserId, turn.campaign_id);
-  const promptSnapshot = promptSnapshotForTextExecution(
-    await illustrationPrompts(providers, ownerUserId, turn.campaign_id), textExecutionSnapshot,
-  );
-  const visualReference = characterVisualReference(turn.character_profile, turn.character_snapshot);
   const active = await client.query<{ id: string }>(
     `SELECT id FROM turn_illustration_sets
       WHERE turn_id = $1 AND owner_user_id = $2 AND is_active = true
@@ -705,6 +730,47 @@ async function createTurnSet(
     [turnId, ownerUserId]
   );
   if (active.rows[0] && mode === "missing") return { setId: active.rows[0].id, duplicate: true, segmentCount: 0 };
+  const generationParents = suppliedGenerationJobId
+    ? await client.query<{ id: string; parent_snapshot: unknown | null }>(
+      `SELECT id, streaming_segments_state->'illustrationTextExecutionSnapshot' AS parent_snapshot
+         FROM generation_jobs
+        WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND expected_turn_number=$4
+          AND status IN ('committing','completed') AND (result_turn_id IS NULL OR result_turn_id=$5)
+        FOR SHARE`,
+      [suppliedGenerationJobId, ownerUserId, turn.campaign_id, turn.turn_number, turnId]
+    )
+    : await client.query<{ id: string; parent_snapshot: unknown | null }>(
+      `SELECT id, streaming_segments_state->'illustrationTextExecutionSnapshot' AS parent_snapshot
+         FROM generation_jobs
+        WHERE result_turn_id=$1 AND owner_user_id=$2 AND campaign_id=$3 AND status='completed'
+        ORDER BY completed_at DESC NULLS LAST, id
+        LIMIT 2 FOR SHARE`,
+      [turnId, ownerUserId, turn.campaign_id]
+    );
+  if (suppliedGenerationJobId && generationParents.rows.length !== 1) {
+    throw new Error("The accepted illustration generation parent is invalid.");
+  }
+  if (!suppliedGenerationJobId && generationParents.rows.length > 1) {
+    throw new Error("The accepted illustration generation parent is ambiguous.");
+  }
+  const generationParent = generationParents.rows[0];
+  const generationJobId = generationParent?.id;
+  const validatedTextExecutionSnapshot = validateIllustrationTextExecutionSnapshotForInsert(
+    textExecutionSnapshot, ownerUserId,
+  );
+  if (generationParent?.parent_snapshot !== null && generationParent?.parent_snapshot !== undefined) {
+    const validatedParentSnapshot = validateIllustrationTextExecutionSnapshotForInsert(
+      generationParent.parent_snapshot as IllustrationTextExecutionSnapshot, ownerUserId,
+    );
+    if (stableStringify(validatedTextExecutionSnapshot) !== stableStringify(validatedParentSnapshot)) {
+      throw new Error("Illustration children must copy the generation text execution snapshot.");
+    }
+  }
+  const config = await loadConfig(client, ownerUserId, turn.campaign_id);
+  const promptSnapshot = promptSnapshotForTextExecution(
+    await illustrationPrompts(providers, ownerUserId, turn.campaign_id), validatedTextExecutionSnapshot,
+  );
+  const visualReference = characterVisualReference(turn.character_profile, turn.character_snapshot);
   if (active.rows[0]) {
     await client.query(
       `UPDATE turn_illustration_sets SET is_active = false, status = 'superseded'
@@ -716,11 +782,11 @@ async function createTurnSet(
   if (!pieces.length) throw Object.assign(new Error("Accepted turn narration is empty."), { statusCode: 409 });
   const setResult = await client.query<{ id: string }>(
     `INSERT INTO turn_illustration_sets (
-       owner_user_id, campaign_id, turn_id, source_text_hash, segment_word_count,
+       owner_user_id, campaign_id, turn_id, generation_job_id, source_text_hash, segment_word_count,
        images_per_segment, prompt_mode, status, character_visual_reference
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      RETURNING id`,
-    [ownerUserId, turn.campaign_id, turnId, sha256(turn.narration), config.segment_word_count,
+    [ownerUserId, turn.campaign_id, turnId, generationJobId ?? null, sha256(turn.narration), config.segment_word_count,
       config.images_per_segment, config.segment_prompt_mode,
       config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference]
   );
@@ -737,13 +803,13 @@ async function createTurnSet(
     );
     const segmentResult = await client.query<SegmentRow>(
       `INSERT INTO turn_illustration_segments (
-         owner_user_id, illustration_set_id, campaign_id, turn_id, ordinal,
+         owner_user_id, illustration_set_id, campaign_id, turn_id, generation_job_id, ordinal,
          start_offset, end_offset, start_word, end_word, source_text, source_text_hash,
          direct_prompt, resolved_prompt, prompt_source, status
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'direct',$14)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'direct',$15)
        RETURNING id, owner_user_id, campaign_id, turn_id, illustration_set_id,
-                 source_text, direct_prompt, resolved_prompt, $15::text AS character_visual_reference`,
-      [ownerUserId, setId, turn.campaign_id, turnId, piece.ordinal, piece.startOffset, piece.endOffset,
+                 source_text, direct_prompt, resolved_prompt, $16::text AS character_visual_reference`,
+      [ownerUserId, setId, turn.campaign_id, turnId, generationJobId ?? null, piece.ordinal, piece.startOffset, piece.endOffset,
         piece.startWord, piece.endWord, piece.text, sha256(piece.text), directPrompt,
         config.segment_prompt_mode === "direct" ? directPrompt : "",
         config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", visualReference]
@@ -758,7 +824,7 @@ async function createTurnSet(
       );
       continue;
     }
-    const textProvider = frozenTextProvider(textExecutionSnapshot) ?? await directProvider(
+    const textProvider = frozenTextProvider(validatedTextExecutionSnapshot) ?? await directProvider(
       providers, ownerUserId, "text", config.campaign_text_provider_id,
     );
     if (!textProvider) {
@@ -772,12 +838,12 @@ async function createTurnSet(
     }
     await client.query(
       `INSERT INTO illustration_prompt_jobs (
-         owner_user_id, campaign_id, turn_id, segment_id, provider_profile_id,
+         owner_user_id, campaign_id, turn_id, generation_job_id, segment_id, provider_profile_id,
          requested_model, max_attempts, prompt_snapshot, text_execution_snapshot
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [ownerUserId, turn.campaign_id, turnId, segment.id, textProvider.providerProfileId,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [ownerUserId, turn.campaign_id, turnId, generationJobId ?? null, segment.id, textProvider.providerProfileId,
         textProvider.model, config.max_attempts, JSON.stringify(promptSnapshot),
-        textExecutionSnapshot ? JSON.stringify(textExecutionSnapshot) : null]
+        validatedTextExecutionSnapshot ? JSON.stringify(validatedTextExecutionSnapshot) : null]
     );
   }
   return { setId, duplicate: false, segmentCount: eligiblePieces.length };
@@ -821,6 +887,7 @@ export async function enqueueAcceptedTurnIllustrationSegments(
   turnId: string,
   providers: IllustrationProviderCollaborators,
   textExecutionSnapshot?: IllustrationTextExecutionSnapshot,
+  generationJobId?: string,
 ) {
   const enabled = await client.query(
     `SELECT 1 FROM campaign_illustration_configs
@@ -828,7 +895,7 @@ export async function enqueueAcceptedTurnIllustrationSegments(
     [campaignId, ownerUserId]
   );
   if (!enabled.rows[0]) return null;
-  return createTurnSet(client, ownerUserId, turnId, "missing", providers, textExecutionSnapshot);
+  return createTurnSet(client, ownerUserId, turnId, "missing", providers, textExecutionSnapshot, generationJobId);
 }
 
 export async function previewIllustrationBackfill(

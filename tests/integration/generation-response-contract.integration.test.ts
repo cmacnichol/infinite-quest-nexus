@@ -217,6 +217,17 @@ integration("PostgreSQL response-contract persistence", () => {
       ["verified-model", { queuedResponsePolicy: v2ModelPolicy() }, {}],
       ["streaming-marker", {}, { illustrationTextExecutionSnapshot: { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" } }],
       ["malformed-v1", { queuedResponsePolicy: { version: 1 } }, {}],
+      ["shallow-queued-v1", { queuedResponsePolicy: {
+        version: 1, policy: "bogus", providerProfileId: "x", model: "x", endpointIdentity: "x",
+        providerConfigurationHash: "x", verificationRegistryHash: "x", invocationKeys: []
+      } }, {}],
+      ["shallow-frozen-v1", { frozenResponseContracts: {
+        version: 1, queuedPolicy: {}, contracts: {}, selectionHash: "x"
+      } }, {}],
+      ["shallow-invocation-v1", { responseContractInvocations: [{
+        version: 1, id: "x", logicalAttemptId: "x", invocationKey: "x", operation: "x",
+        requestPayloadHash: "x", request: {}, status: "x"
+      }] }, {}],
       ["malformed-future", { queuedResponsePolicy: { version: 99 } }, {}]
     ] as const;
     const repository = createPostgresGenerationExecutionRepository(pool);

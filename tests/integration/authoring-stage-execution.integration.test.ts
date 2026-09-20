@@ -197,6 +197,18 @@ integration("durable authoring real repository and stage dispatcher", () => {
     )).resolves.toMatchObject({ rows: [{ attempt_count: 2, lease_owner: "historical-v1-authoring" }] });
   });
 
+  it("classifies shallow malformed historical authoring snapshots as protected", async () => {
+    const malformed = {
+      version: 2, providerProfileId: "", model: "", configurationHash: "x",
+      contextWindowTokens: -1, maxOutputTokens: 0, requestTimeoutMs: -1,
+      prompts: {}, protocols: {}, textExecutionPlans: { bogus: {} }
+    };
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT authoring_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(malformed)]
+    )).resolves.toMatchObject({ rows: [{ required: true }] });
+  });
+
   it("marks native authoring intent in API composition before the first claim and permits terminal cleanup", async () => {
     const application = createRuntimeAuthoringApplication(pool, sha256, { nativePresetPlansEnabled: true });
     const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create an API-marked cartographer.", content: worldContentSchema.parse({ world: { title: "API marker" } }) });

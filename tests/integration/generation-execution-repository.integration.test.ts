@@ -221,7 +221,7 @@ integration("PostgreSQL generation execution repository", () => {
       }]
     };
     checkpoint.decisionJournal[0]!.reviewId = checkpoint.reviewId;
-    await pool.query("UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1", [queued.id, JSON.stringify({
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || $2::jsonb WHERE id=$1", [queued.id, JSON.stringify({
       generationReview: checkpoint,
       validatedMainDraft: {
         draftHash: "d".repeat(64), story, requestPayloadHash: candidate.producingRequestHash,
@@ -398,7 +398,7 @@ integration("PostgreSQL generation execution repository", () => {
 
     const missingCampaign = await campaign();
     const missingReceipt = await readyFinalKeepCommit(missingCampaign.campaignId, "final-keep-missing-worker");
-    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
       missingReceipt.scope.jobId, JSON.stringify({ ...missingReceipt.checkpoint, decisionJournal: [] })
     ]);
     await expect(missingReceipt.repository.commitAcceptedTurn(acceptedCommitInput({
@@ -416,7 +416,7 @@ integration("PostgreSQL generation execution repository", () => {
       workingCandidate: contaminatedCandidate,
       decisionJournal: mechanicsLeak.checkpoint.decisionJournal.map((entry) => ({ ...entry, candidateHash: contaminatedCandidate.storyHash, offeredCandidate: contaminatedCandidate }))
     };
-    await pool.query("UPDATE generation_jobs SET orchestration_private=jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('generationReview',$2::jsonb) WHERE id=$1", [
       mechanicsLeak.scope.jobId, JSON.stringify(contaminatedCheckpoint)
     ]);
     await expect(mechanicsLeak.repository.commitAcceptedTurn(acceptedCommitInput({
@@ -523,7 +523,7 @@ integration("PostgreSQL generation execution repository", () => {
       policyHash: finalCandidate.policyHash
     };
     await pool.query(
-      "UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1",
+      "UPDATE generation_jobs SET orchestration_private=orchestration_private || $2::jsonb WHERE id=$1",
       [keep.scope.jobId, JSON.stringify({
         generationReview: checkpoint,
         validatedMainDraft: {
@@ -1503,7 +1503,12 @@ integration("PostgreSQL generation execution repository", () => {
     const { repository, scope, job } = await readyAcceptedCommit(imported.campaignId, "event-finalization-worker");
     const finalStory = supersedingStory([]);
     finalStory.narration = "The observatory bell rings after the keeper's final warning.";
-    const acceptedDuringIllustration = vi.fn(async (database: DatabaseClient) => {
+    const acceptedDuringIllustration = vi.fn(async (
+      database: DatabaseClient,
+      _scope: unknown,
+      request: { generationJobId?: string } | undefined,
+    ) => {
+      expect(request).toMatchObject({ generationJobId: job.id });
       const result = await database.query<{ narration: string }>(
         "SELECT narration FROM turns WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY turn_number DESC LIMIT 1",
         [imported.campaignId, ownerUserId]

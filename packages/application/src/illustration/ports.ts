@@ -160,7 +160,7 @@ export interface IllustrationGenerationTransactionPort {
   enqueueAcceptedTurnIllustrationSegments(
     database: IllustrationTransactionContext,
     scope: AcceptedTurnIllustrationScope,
-    request?: Readonly<{ textExecutionSnapshot?: unknown }>,
+    request?: Readonly<{ generationJobId?: string; textExecutionSnapshot?: unknown }>,
   ): Promise<IllustrationSegmentSetResult | null>;
 }
 

@@ -203,6 +203,7 @@ export function createIllustrationGenerationTransactionPort(
       scope.turnId,
       providers,
       request?.textExecutionSnapshot as import("./illustration-segment-job-adapter.js").IllustrationTextExecutionSnapshot | undefined,
+      request?.generationJobId,
     )
   };
 }
@@ -278,6 +279,7 @@ export function createIllustrationRepositoryFactories(
           scope.turnId,
           providers,
           textExecutionSnapshot,
+          undefined,
         ));
       },
       async previewIllustrationBackfill(scope, request) {

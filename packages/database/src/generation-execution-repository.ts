@@ -1683,14 +1683,16 @@ async function commitAcceptedTurn(
         await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
           client,
           { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId },
-          input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : undefined
+          { generationJobId: job.id,
+            ...(input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : {}) }
         );
       }
     } else {
       await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
         client,
         { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId },
-        input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : undefined
+        { generationJobId: job.id,
+          ...(input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : {}) }
       );
     }
     await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
