@@ -31,6 +31,16 @@ function contract(mode: "json_object" | "json_schema", streaming = false): any {
   };
 }
 
+function trustedPresetContract(): any {
+  const schema = getProviderOutputSchemaV2("story");
+  return {
+    version: 2, mode: "json_schema", admission: { mode: "json_schema", basis: "preset_trusted" },
+    operation: "story", streaming: false, forbidFormatFallback: true,
+    schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+    authority: { kind: "preset_trusted", routeBasisHash: "a".repeat(64), planHash: "b".repeat(64) }
+  };
+}
+
 async function failure(mode: "json_object" | "json_schema", response: Response, request: Record<string, unknown> = {}) {
   const fetcher = vi.fn(async () => response);
   let error: any;
@@ -51,6 +61,18 @@ function sse(chunks: string[], terminalError?: Error): ReadableStream<Uint8Array
 }
 
 describe("prepared response-contract transport", () => {
+  it.each([
+    ["OpenRouter", profile],
+    ["OpenAI-compatible", { ...profile, providerType: "openai_compatible" as const }],
+    ["LM Studio", { ...profile, providerType: "lmstudio" as const }]
+  ])("rejects a trusted preset v2 contract before %s transport", async (_name, providerProfile) => {
+    const fetcher = vi.fn(async () => new Response("unexpected transport", { status: 500 }));
+    await expect(callTextProvider(providerProfile, {
+      systemPrompt: "system", input: "input", responseContract: trustedPresetContract()
+    }, transport(fetcher as typeof fetch))).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("pins verified v2 OpenRouter routes on the exact schema request", async () => {
     const schema = getProviderOutputSchemaV2("story");
     const v2 = { version: 2 as const, mode: "json_schema" as const, admission: { mode: "json_schema" as const, basis: "model_verified" as const,

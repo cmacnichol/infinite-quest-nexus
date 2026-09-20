@@ -1672,6 +1672,97 @@ describe("generation executor adapter", () => {
 
   });
 
+  it("dispatches main before-event coverage with its distinct operation on a v1 frozen job", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    job.orchestration_inputs.suppressEventTriggers = false;
+    // Historical v1 selections do not freeze an event-coverage schema; the
+    // invocation stays on its legacy request path but retains its operation.
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: { version: 1, selectionHash: "a".repeat(64), contracts: {
+        "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+      } },
+      beforeEvents: [{ id: "before-event", sourceTriggerId: "before-trigger", name: "Bell", timing: "before", condition: "", effect: "", instructions: "A bell rings in the hall.", reason: "", sourceTurn: 3, addTextAfter: false }]
+    } as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => { job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint }; return true; }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      reserveResponseContractInvocation: vi.fn(async (_scope, input) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+      markResponseContractInvocationDispatched: vi.fn(async (_scope, id) => ({ id, status: "dispatched" })),
+      completeResponseContractInvocation: vi.fn(async (_scope, id) => ({ id, status: "completed" })),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const story = JSON.stringify({ narration: "The hall is quiet.", choices: ["A", "B", "C", "D"], custom_action_suggestion: "Wait.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const responses = [
+      { content: story, responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} },
+      { content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: false, missing_required_beats: ["before-event"], contradictions: [] }] }), responseId: "coverage", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }
+    ];
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    provider.execute.mockImplementation(async (request: any) => {
+      const response = responses.shift()!;
+      return request.responseContract
+        ? { ...response, preparedRequest: serializeProviderRequest({ ...provider, baseUrl: "" }, request) }
+        : response;
+    });
+    const operations: string[] = [];
+    const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async (_pool, _provider, attribution) => { operations.push(attribution.operation); }), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "before-event-v1", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(operations).toEqual(["story_generation", "event_coverage_validation"]);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
+  it("dispatches scene coverage with its distinct operation on a v1 frozen job", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    job.resolved_input_mode = "scene";
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: { version: 1, selectionHash: "a".repeat(64), contracts: {
+        "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+      } }
+    } as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => { job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint }; return true; }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      reserveResponseContractInvocation: vi.fn(async (_scope, input) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+      markResponseContractInvocationDispatched: vi.fn(async (_scope, id) => ({ id, status: "dispatched" })),
+      completeResponseContractInvocation: vi.fn(async (_scope, id) => ({ id, status: "completed" })),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const story = JSON.stringify({ narration: "The hall is quiet.", choices: ["A", "B", "C", "D"], custom_action_suggestion: "Wait.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const responses = [
+      { content: story, responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} },
+      { content: JSON.stringify({ covered: false, missing_required_beats: ["scene"], contradictions: [] }), responseId: "coverage", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }
+    ];
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    provider.execute.mockImplementation(async (request: any) => {
+      const response = responses.shift()!;
+      return request.responseContract
+        ? { ...response, preparedRequest: serializeProviderRequest({ ...provider, baseUrl: "" }, request) }
+        : response;
+    });
+    const operations: string[] = [];
+    const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async (_pool, _provider, attribution) => { operations.push(attribution.operation); }), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "scene-v1", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(operations).toEqual(["story_generation", "scene_coverage_validation"]);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
   it("stops after a rewritten before-event draft still fails coverage", async () => {
     const job = completeGenerationExecutionPayload();
     job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };

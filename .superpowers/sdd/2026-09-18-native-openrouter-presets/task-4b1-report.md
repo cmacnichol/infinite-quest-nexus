@@ -6,20 +6,31 @@
 - Added v2 verification-registry parsing and capability resolution, kept separate from v1 records, and proved file-loaded exact Story evidence reaches direct-model admission.
 - Extended the provider serializer to validate v2 catalog contracts. Direct-model v2 requests preserve verified OpenRouter route restrictions and `require_parameters`; preset-trusted v2 requests fail closed until the frozen route executor exists.
 - Bound preset v2 response contracts against the saved route basis, actual derived plan, and trusted operation prompt before request serialization.
+- Corrected the two live executor call sites: the scene prompt dispatches `scene_coverage_validation`, while the before/pending-event prompt dispatches `event_coverage_validation`. This supersedes the incomplete call-site correction in `7a127a59`.
+- Added v1-compatible executor regressions that capture the actual dispatched operation for both prompts, plus a three-provider pre-transport rejection table for trusted-preset v2 contracts.
 
-## Verification
+## Baseline
 
-Passed with the task-local Corepack shim:
+At `22fdac41`, the original task-local Corepack check passed 84 tests:
 
 ```text
 corepack pnpm exec vitest run tests/unit/provider-schema-verification.test.ts tests/unit/generation-response-contract-operation-matrix.test.ts tests/unit/provider-response-contract-transport.test.ts --reporter=dot
 # 3 files, 84 tests passed
+```
+
+## Final verification
+
+Passed with the task-local Corepack shim:
+
+```text
+corepack pnpm exec vitest run tests/unit/generation-response-contract-operation-matrix.test.ts tests/unit/generation-executor-adapter.test.ts tests/unit/provider-response-contract-transport.test.ts --reporter=dot
+# 3 files, 138 tests passed
 
 corepack pnpm exec tsc -p tsconfig.json --noEmit
 git diff --check
 ```
 
-The transport suite logs exercised mocked transport failures; the suite passed.
+The final executor regression was RED with the prior main `scene_coverage_validation` operation and GREEN after the event-operation correction. The transport suite logs exercised mocked failures; they are expected test paths and the suite passed.
 
 ## Deferred to Task 4B2
 

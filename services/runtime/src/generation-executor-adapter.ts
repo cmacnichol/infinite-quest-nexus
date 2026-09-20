@@ -2975,7 +2975,7 @@ async function executeLoadedGeneration(
       let coverageOutputLimited = true;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
+          callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
             input: buildSceneCoveragePrompt(safeAction, parsedNarration)
           }));
@@ -3188,7 +3188,7 @@ async function executeLoadedGeneration(
       let mainEventCoverage: ReturnType<typeof parseSceneCoverageOutput> | null = null;
       try {
         const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
+          callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
             input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), currentMainStory.narration)
           })
