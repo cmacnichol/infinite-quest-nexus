@@ -7,6 +7,10 @@ CREATE TABLE prepared_text_physical_attempts (
   logical_kind text NOT NULL CHECK (logical_kind IN ('story','authoring','illustration','direct')),
   reservation_key text NOT NULL CHECK (btrim(reservation_key) <> '' AND length(reservation_key) <= 1000),
   logical_reservation jsonb NOT NULL CHECK (jsonb_typeof(logical_reservation) = 'object'),
+  plan_hash text NOT NULL CHECK (plan_hash ~ '^[0-9a-f]{64}$'),
+  requested_preset_slug text,
+  requested_preset_version_id text,
+  requested_preset_config_hash text,
   candidate_ordinal integer NOT NULL CHECK (candidate_ordinal BETWEEN 0 AND 31),
   requested_model text NOT NULL CHECK (btrim(requested_model) <> '' AND length(requested_model) <= 500),
   provider_policy jsonb NOT NULL CHECK (jsonb_typeof(provider_policy) = 'object'),
@@ -21,6 +25,7 @@ CREATE TABLE prepared_text_physical_attempts (
   provider_response_id text,
   returned_model text,
   returned_provider_route text,
+  emitted_output boolean NOT NULL DEFAULT false,
   usage jsonb,
   reported_cost jsonb,
   reserved_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -31,7 +36,14 @@ CREATE TABLE prepared_text_physical_attempts (
   CHECK ((status = 'reserved' AND dispatched_at IS NULL AND completed_at IS NULL AND outcome IS NULL)
       OR (status = 'dispatched' AND dispatched_at IS NOT NULL AND completed_at IS NULL AND outcome IS NULL)
       OR (status = 'completed' AND dispatched_at IS NOT NULL AND completed_at IS NOT NULL AND outcome IS NOT NULL)),
-  CHECK (outcome IS DISTINCT FROM 'succeeded' OR failure_reason IS NULL),
+  CHECK ((outcome IS NULL AND failure_reason IS NULL)
+      OR (outcome = 'succeeded' AND failure_reason IS NULL)
+      OR (outcome = 'failed' AND failure_reason IS NOT NULL)),
+  CHECK ((requested_preset_slug IS NULL AND requested_preset_version_id IS NULL AND requested_preset_config_hash IS NULL)
+      OR (requested_preset_slug IS NOT NULL AND requested_preset_version_id IS NOT NULL AND requested_preset_config_hash IS NOT NULL
+          AND btrim(requested_preset_slug) <> '' AND length(requested_preset_slug) <= 200
+          AND btrim(requested_preset_version_id) <> '' AND length(requested_preset_version_id) <= 500
+          AND requested_preset_config_hash ~ '^[0-9a-f]{64}$')),
   CHECK (usage IS NULL OR jsonb_typeof(usage) = 'object'),
   CHECK (reported_cost IS NULL OR jsonb_typeof(reported_cost) = 'object')
 );

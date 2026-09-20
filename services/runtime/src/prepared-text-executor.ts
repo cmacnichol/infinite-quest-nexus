@@ -80,6 +80,7 @@ export function createPreparedTextExecutor(input: Readonly<{
       const authorized = new Map<number, RuntimeTextExecution>();
       const result = await executePresetRoutes<ProviderResult>({
         candidates: plan.candidates,
+        planProvenance: { planHash: plan.planHash, preset: plan.preset },
         logicalReservation: execution.logicalReservation,
         attempts: input.attempts,
         totalDeadlineMs: requestTimeoutMs,

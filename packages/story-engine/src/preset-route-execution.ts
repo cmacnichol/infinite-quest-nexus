@@ -9,12 +9,18 @@ export type LogicalReservation =
 
 export type PreparedPhysicalRequest = Readonly<{ body: string; payloadHash: string }>;
 
+export type PhysicalAttemptPlanProvenance = Readonly<{
+  planHash: string;
+  preset: Readonly<{ slug: string; versionId: string; configHash: string }> | null;
+}>;
+
 export type PhysicalAttemptStatus = "reserved" | "dispatched" | "completed";
 
 export type PhysicalAttemptRecord = Readonly<{
   id: string;
   status: PhysicalAttemptStatus;
   logicalReservation: LogicalReservation;
+  planProvenance: PhysicalAttemptPlanProvenance;
   candidateOrdinal: number;
   candidate: TextRouteCandidate;
   request: PreparedPhysicalRequest;
@@ -22,6 +28,7 @@ export type PhysicalAttemptRecord = Readonly<{
   providerResponseId?: string | null;
   returnedModel?: string | null;
   returnedProviderRoute?: string | null;
+  emittedOutput: boolean;
 }>;
 
 export type PhysicalAttemptUsage = Readonly<{ inputTokens: number; outputTokens: number; totalTokens: number }> | null;
@@ -29,6 +36,7 @@ export type PhysicalAttemptUsage = Readonly<{ inputTokens: number; outputTokens:
 export type PhysicalAttemptRepository = Readonly<{
   reserve(input: Readonly<{
     logicalReservation: LogicalReservation;
+    planProvenance: PhysicalAttemptPlanProvenance;
     candidateOrdinal: number;
     candidate: TextRouteCandidate;
     request: PreparedPhysicalRequest;
@@ -39,12 +47,18 @@ export type PhysicalAttemptRepository = Readonly<{
     returnedModel?: string | null;
     returnedProviderRoute?: string | null;
   }>): Promise<PhysicalAttemptRecord | null>;
-  complete(reservation: LogicalReservation, attemptId: string, completion: Readonly<{
-    outcome: "succeeded" | "failed";
-    failureReason?: PresetRouteFailureReason;
+  recordOutput(reservation: LogicalReservation, attemptId: string): Promise<PhysicalAttemptRecord | null>;
+  complete(reservation: LogicalReservation, attemptId: string, completion: Readonly<({
+    outcome: "succeeded";
+    failureReason?: never;
+  } | {
+    outcome: "failed";
+    failureReason: PresetRouteFailureReason;
+  }) & {
     providerResponseId: string | null;
     returnedModel: string | null;
     returnedProviderRoute: string | null;
+    emittedOutput: boolean;
     usage: PhysicalAttemptUsage;
     reportedCost: ReportedProviderCost | null;
   }>): Promise<PhysicalAttemptRecord | null>;
@@ -94,13 +108,18 @@ export class PreparedRouteTerminalError extends Error {
   readonly code: string;
   readonly reason: PresetRouteFailureReason;
   readonly attemptId: string | null;
+  readonly returnedModel: string | null;
+  readonly returnedProviderRoute: string | null;
 
-  constructor(code: string, reason: PresetRouteFailureReason, message: string, attemptId: string | null = null, options?: ErrorOptions) {
+  constructor(code: string, reason: PresetRouteFailureReason, message: string, attemptId: string | null = null, options?: ErrorOptions,
+    identity?: Readonly<{ returnedModel?: string | null; returnedProviderRoute?: string | null }>) {
     super(message, options);
     this.name = "PreparedRouteTerminalError";
     this.code = code;
     this.reason = reason;
     this.attemptId = attemptId;
+    this.returnedModel = identity?.returnedModel ?? null;
+    this.returnedProviderRoute = identity?.returnedProviderRoute ?? null;
   }
 }
 
@@ -161,21 +180,44 @@ export function classifyPresetRouteFailure(error: unknown): Readonly<PresetRoute
 
 function assertReturnedIdentity(candidate: TextRouteCandidate, value: Readonly<{ returnedModel?: string | null; returnedProviderRoute?: string | null }>): void {
   if (value.returnedModel && value.returnedModel !== candidate.modelId) {
-    throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned a model outside the frozen route candidate.");
+    throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned a model outside the frozen route candidate.", null, undefined, value);
   }
   const provider = value.returnedProviderRoute;
   if (!provider) return;
   if (candidate.providerPolicy.only && !candidate.providerPolicy.only.includes(provider)) {
-    throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned a route outside the frozen provider policy.");
+    throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned a route outside the frozen provider policy.", null, undefined, value);
   }
   if (candidate.providerPolicy.ignore?.includes(provider)) {
-    throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned an ignored route.");
+    throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned an ignored route.", null, undefined, value);
   }
 }
 
-function deadlineSignal(signal: AbortSignal | undefined, remainingMs: number): AbortSignal {
-  const timeout = AbortSignal.timeout(Math.max(1, remainingMs));
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+function routeAbortSignal(signal: AbortSignal | undefined, remainingMs: number): Readonly<{
+  signal: AbortSignal;
+  timedOut(): boolean;
+  dispose(): void;
+}> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort(new PreparedRouteTerminalError(
+    "prepared_route_cancelled", "cancelled", "The prepared route was cancelled.", null, { cause: signal?.reason }
+  ));
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new PreparedRouteTerminalError(
+      "prepared_route_deadline_exceeded", "deadline", "The prepared route deadline elapsed."
+    ));
+  }, Math.max(1, remainingMs));
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    dispose() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+    }
+  };
 }
 
 export async function executePresetRoutes<T extends Readonly<{
@@ -188,6 +230,7 @@ export async function executePresetRoutes<T extends Readonly<{
   usageReported?: boolean;
 }>>(input: Readonly<{
   candidates: readonly TextRouteCandidate[];
+  planProvenance: PhysicalAttemptPlanProvenance;
   logicalReservation: LogicalReservation;
   attempts: PhysicalAttemptRepository;
   prepareCandidate(candidate: TextRouteCandidate, candidateOrdinal: number): PreparedPhysicalRequest;
@@ -198,7 +241,7 @@ export async function executePresetRoutes<T extends Readonly<{
     preparedRequest: PreparedPhysicalRequest;
     signal: AbortSignal;
     onResponseStart(evidence: Readonly<{ providerResponseId: string | null; returnedModel?: string | null; returnedProviderRoute?: string | null }>): Promise<void>;
-    onOutput(delta: string): void;
+    onOutput(delta: string): Promise<void>;
   }>): Promise<T>;
   totalDeadlineMs: number;
   signal?: AbortSignal;
@@ -222,7 +265,10 @@ export async function executePresetRoutes<T extends Readonly<{
     if (remaining <= 0) throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "The prepared route deadline elapsed.");
     if (input.signal?.aborted) throw new PreparedRouteTerminalError("prepared_route_cancelled", "cancelled", "The prepared route was cancelled.");
     const preparedRequest = input.prepareCandidate(candidate, candidateOrdinal);
-    const attempt = await input.attempts.reserve({ logicalReservation: input.logicalReservation, candidateOrdinal, candidate, request: preparedRequest });
+    const attempt = await input.attempts.reserve({
+      logicalReservation: input.logicalReservation, planProvenance: input.planProvenance,
+      candidateOrdinal, candidate, request: preparedRequest
+    });
     if (!attempt) throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled", "The logical reservation no longer has a live claim.");
     if (attempt.status !== "reserved") {
       throw new PreparedRouteTerminalError("prepared_route_unknown_outcome", "ambiguous_transport", "A dispatched physical attempt cannot be resent or advanced.", attempt.id);
@@ -253,7 +299,7 @@ export async function executePresetRoutes<T extends Readonly<{
       providerResponseId: null, returnedModel: null, returnedProviderRoute: null
     };
     const wireRemaining = input.totalDeadlineMs - (now() - startedAt);
-    const signal = deadlineSignal(input.signal, wireRemaining);
+    const routeAbort = routeAbortSignal(input.signal, wireRemaining);
     try {
       if (wireRemaining <= 0) {
         throw Object.assign(new Error("The prepared route deadline elapsed after dispatch."), { routeFailureReason: "deadline" });
@@ -262,8 +308,15 @@ export async function executePresetRoutes<T extends Readonly<{
         throw Object.assign(new Error("The prepared route was cancelled after dispatch."), { routeFailureReason: "cancelled" });
       }
       const value = await input.invoke({
-        candidate, candidateOrdinal, preparedRequest, signal,
-        onOutput(delta) { if (delta.length) emittedOutput = true; },
+        candidate, candidateOrdinal, preparedRequest, signal: routeAbort.signal,
+        async onOutput(delta) {
+          if (!delta.length || emittedOutput) return;
+          emittedOutput = true;
+          const recorded = await input.attempts.recordOutput(input.logicalReservation, attempt.id);
+          if (!recorded) throw new PreparedRouteTerminalError(
+            "prepared_route_lease_lost", "cancelled", "The output evidence lost its logical lease.", attempt.id
+          );
+        },
         async onResponseStart(evidence) {
           responseStarted = true;
           responseEvidence = {
@@ -281,14 +334,20 @@ export async function executePresetRoutes<T extends Readonly<{
         outcome: "succeeded", providerResponseId: providerResponseId ?? null,
         returnedModel: value.returnedModel ?? responseEvidence.returnedModel,
         returnedProviderRoute: value.returnedProviderRoute ?? responseEvidence.returnedProviderRoute,
+        emittedOutput,
         usage: value.usageReported === false ? null : value.usage ?? null,
         reportedCost: value.reportedCost ?? null
       });
       if (!completed) throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled", "The physical attempt completion lost its logical lease.", attempt.id);
+      routeAbort.dispose();
       return { value, attemptId: attempt.id, candidateOrdinal };
     } catch (error) {
+      routeAbort.dispose();
       if (error instanceof PreparedRouteTerminalError && error.code === "prepared_route_lease_lost") throw error;
-      const failure = classifyPresetRouteFailure(error);
+      const classified = classifyPresetRouteFailure(error);
+      const failure = routeAbort.timedOut()
+        ? { ...classified, reason: "deadline" as const }
+        : input.signal?.aborted ? { ...classified, reason: "cancelled" as const } : classified;
       const observed = {
         ...failure,
         emittedOutput: emittedOutput || failure.emittedOutput,
@@ -300,6 +359,7 @@ export async function executePresetRoutes<T extends Readonly<{
         providerResponseId: failure.providerResponseId ?? responseEvidence.providerResponseId,
         returnedModel: failure.returnedModel ?? responseEvidence.returnedModel,
         returnedProviderRoute: failure.returnedProviderRoute ?? responseEvidence.returnedProviderRoute,
+        emittedOutput: observed.emittedOutput,
         usage: null, reportedCost: null
       });
       if (!failed) {
@@ -317,7 +377,20 @@ export async function executePresetRoutes<T extends Readonly<{
       if (delay >= afterFailureRemaining) {
         throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Retry-After exceeds the prepared route deadline.", attempt.id, { cause: error });
       }
-      if (delay > 0) await sleep(delay, deadlineSignal(input.signal, afterFailureRemaining));
+      if (delay > 0) {
+        const waitAbort = routeAbortSignal(input.signal, afterFailureRemaining);
+        try {
+          await sleep(delay, waitAbort.signal);
+        } catch (waitError) {
+          const waitFailure = waitAbort.timedOut() ? "deadline" : input.signal?.aborted ? "cancelled" : classifyPresetRouteFailure(waitError).reason;
+          const code = waitFailure === "deadline" ? "prepared_route_deadline_exceeded"
+            : waitFailure === "cancelled" ? "prepared_route_cancelled" : "prepared_route_terminal";
+          throw new PreparedRouteTerminalError(code, waitFailure,
+            "The prepared route wait ended before the next candidate could dispatch.", attempt.id, { cause: waitError });
+        } finally {
+          waitAbort.dispose();
+        }
+      }
     }
   }
   throw new PreparedRouteTerminalError("prepared_route_exhausted", lastFailure, "The prepared route candidates were exhausted.");
