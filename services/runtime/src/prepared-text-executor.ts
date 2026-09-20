@@ -148,7 +148,7 @@ export function createPreparedTextExecutor(input: Readonly<{
               await execution.request.onResponseHeaders?.(headers);
             },
             ...(onChunk ? { onChunk: async (delta: string, accumulated: string) => {
-              attempt.onOutput(delta);
+              await attempt.onOutput(delta);
               await onChunk(delta, accumulated);
             } } : {})
           }, {
