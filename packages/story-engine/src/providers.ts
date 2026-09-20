@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ProviderType } from "../../contracts/src/generation.js";
 import type { PreparedResponseContract, PreparedResponseContractV2 } from "../../contracts/src/text-response-format.js";
 import { PreparedResponseContractError, classifyResponseFormatFailure } from "./provider-response-format.js";
@@ -58,7 +59,7 @@ export type ProviderRequest = {
   recoveryInput?: string;
   rejectedResponse?: string;
   /** Metadata-only observer; does not enable streaming or change the request body. */
-  onResponseHeaders?: (headers: { statusCode: number; providerResponseId?: string }) => void;
+  onResponseHeaders?: (headers: { statusCode: number; providerResponseId?: string }) => void | Promise<void>;
   onChunk?: (delta: string, accumulated: string) => void | Promise<void>;
   canonicalBudgeting?: boolean;
   /** Snapshotted job/provider ceiling; canonical generation must not exceed it. */
@@ -67,6 +68,10 @@ export type ProviderRequest = {
   /** Authoring calls account for every generation request themselves. */
   responseFormatFallback?: "allow" | "forbid";
   responseContract?: PreparedResponseContract | PreparedResponseContractV2;
+  /** Exact private body produced by the checked route executor. */
+  preparedRequest?: PreparedProviderRequest;
+  /** Caller cancellation/whole-route deadline, composed with the provider timeout. */
+  abortSignal?: AbortSignal;
 };
 
 export type ProviderResult = {
@@ -79,6 +84,8 @@ export type ProviderResult = {
   returnedModel?: string | null;
   returnedProviderRoute?: string | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+  /** False when the upstream omitted accounting; zero values then remain compatibility placeholders only. */
+  usageReported?: boolean;
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
   /** Private immutable wire evidence for the request that produced this result. */
@@ -86,6 +93,8 @@ export type ProviderResult = {
     body: string;
     payloadHash: string;
   }>;
+  /** Private stable cost/idempotency identity for the successful wire attempt. */
+  physicalAttemptId?: string;
 };
 
 export type ReportedProviderCost = {
@@ -704,14 +713,15 @@ async function providerFetch(
   operation: string,
   url: string,
   init: RequestInit,
-  transport: ProviderTransport
+  transport: ProviderTransport,
+  signal?: AbortSignal
 ): Promise<Response> {
   const timeoutMs = requestTimeoutMs(profile);
   const startedAt = Date.now();
   try {
     const response = await transport.fetch(profile, operation, url, {
       ...init,
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
     });
     responseStartTimes.set(response, startedAt);
     return response;
@@ -737,7 +747,8 @@ function openAiRoot(baseUrl: string): string {
 export async function sendPreparedProviderRequest(
   profile: TextProviderProfile,
   prepared: PreparedProviderRequest,
-  transport: ProviderTransport = defaultProviderTransport()
+  transport: ProviderTransport = defaultProviderTransport(),
+  signal?: AbortSignal
 ): Promise<Response> {
   const url = profile.providerType === "lmstudio"
     ? `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`
@@ -747,8 +758,20 @@ export async function sendPreparedProviderRequest(
     prepared.operation,
     url,
     { method: "POST", headers: headers(profile, url), body: prepared.body },
-    transport
+    transport,
+    signal
   );
+}
+
+function suppliedPreparedRequest(request: ProviderRequest): PreparedProviderRequest | null {
+  const prepared = request.preparedRequest;
+  if (!prepared) return null;
+  if (prepared.payloadHash !== createHash("sha256").update(prepared.body).digest("hex")) {
+    throw new Error("The supplied prepared provider request hash is invalid.");
+  }
+  const payload = JSON.parse(prepared.body) as { model?: unknown };
+  if (typeof payload.model !== "string" || !payload.model) throw new Error("The supplied prepared provider request has no model.");
+  return prepared;
 }
 
 function headers(profile: TextProviderProfile, endpoint?: string): Record<string, string> {
@@ -1042,10 +1065,10 @@ function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequ
   });
 }
 
-function reportResponseHeaders(request: ProviderRequest, response: Response): void {
+async function reportResponseHeaders(request: ProviderRequest, response: Response): Promise<void> {
   const id = response.headers.get("x-generation-id");
   try {
-    request.onResponseHeaders?.({ statusCode: response.status, ...(id && /^[a-zA-Z0-9_-]{1,200}$/.test(id) ? { providerResponseId: id } : {}) });
+    await request.onResponseHeaders?.({ statusCode: response.status, ...(id && /^[a-zA-Z0-9_-]{1,200}$/.test(id) ? { providerResponseId: id } : {}) });
   } catch { /* Diagnostic observers must not interrupt provider execution. */ }
 }
 
@@ -1055,7 +1078,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
   const response = await sendPreparedProviderRequest(profile, prepared, transport);
-  reportResponseHeaders(request, response);
+  await reportResponseHeaders(request, response);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
     const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
@@ -1104,15 +1127,15 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  let prepared = request.responseContract
+  let prepared = suppliedPreparedRequest(request) ?? (request.responseContract
     ? checkedStoryRequest(profile, request)
-    : request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
+    : request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request));
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
   let response: Response | undefined;
   let evidence = responseContractEvidence();
   const send = async (preparedRequest: PreparedProviderRequest) => {
-    const response = await sendPreparedProviderRequest(profile, preparedRequest, transport);
-    reportResponseHeaders(request, response);
+    const response = await sendPreparedProviderRequest(profile, preparedRequest, transport, request.abortSignal);
+    await reportResponseHeaders(request, response);
     evidence = responseContractEvidence(response);
     return response;
   };
@@ -1187,6 +1210,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
         outputTokens: Number(usageObj.completion_tokens || 0),
         totalTokens: Number(usageObj.total_tokens || 0)
       },
+      usageReported: allData.some((item) => item.usage && typeof item.usage === "object") || Boolean(finalData.usage && typeof finalData.usage === "object"),
       reportedCost: reportedProviderCost(usageObj),
       rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" },
       preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
@@ -1217,6 +1241,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       outputTokens: Number(data.usage?.completion_tokens || 0),
       totalTokens: Number(data.usage?.total_tokens || 0)
     },
+    usageReported: Boolean(data.usage && typeof data.usage === "object"),
     reportedCost: reportedProviderCost(data.usage),
     rawMetadata: { model: data.model || "", provider: data.provider || "" },
     preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }

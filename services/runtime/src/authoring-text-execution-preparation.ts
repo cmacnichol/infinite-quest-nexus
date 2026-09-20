@@ -36,6 +36,7 @@ import {
   type PreparedProviderRequest
 } from "../../../packages/story-engine/src/provider-request.js";
 import type { ProviderRequest, ProviderResult, TextProviderProfile } from "../../../packages/story-engine/src/providers.js";
+import type { LogicalReservation } from "../../../packages/story-engine/src/preset-route-execution.js";
 import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import type { ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
@@ -60,6 +61,8 @@ export type PreparedAuthoringTextExecutor = Readonly<{
     frozenResponseContracts?: FrozenResponseContractsV2;
     routeBasis?: TextExecutionRouteBasis;
     trustedOperationPrompt?: string;
+    /** Required by the production prepared executor; Task 5C binds non-Story callers. */
+    logicalReservation?: LogicalReservation;
   }>): Promise<ProviderResult>;
 }>;
 

@@ -10,6 +10,7 @@ import {
   createPostgresGenerationExecutionRepository,
   type GenerationExecutionRepository
 } from "../../../packages/database/src/generation-execution-repository.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../../packages/database/src/prepared-text-attempt-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
@@ -32,6 +33,7 @@ import {
   type GenerationExecutorDependencies
 } from "./generation-executor-adapter.js";
 import { loadConfig, prepareIllustrationTextExecution } from "./illustration-segment-job-adapter.js";
+import { createPreparedTextExecutor } from "./prepared-text-executor.js";
 
 type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutionRepository;
 
@@ -86,6 +88,12 @@ export function createGenerationExecutionCollaborators(
       "text",
       model
     ),
+    preparedTextExecutor: createPreparedTextExecutor({
+      attempts: createPostgresPreparedTextAttemptRepository(pool),
+      loadAuthority: (ownerUserId, providerProfileId, model) => providers.execution.text(
+        { ownerUserId }, providerProfileId, "text", model
+      )
+    }),
     verifyTextExecutionRouteAuthority: async (ownerUserId, routeBasis) => {
       // Route choices and prompt policy are frozen with the queued job.  A
       // resumed native job may read only the current credential authority;

@@ -10,14 +10,13 @@ import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../pack
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import { getProviderOutputSchemaV2, type ProviderOutputSchemaOperationV2 } from "../../packages/contracts/src/provider-output-schema.js";
-import { PreparedResponseContractError } from "../../packages/story-engine/src/provider-response-format.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
-import { createGenerationExecutor, responseContractInvocationDetails, type GenerationExecutionCollaborators } from "../../services/runtime/src/generation-executor-adapter.js";
+import { createGenerationExecutor, responseContractInvocationDetails } from "../../services/runtime/src/generation-executor-adapter.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { createApiProviderApplicationComposition, createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
@@ -32,13 +31,14 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "response-contract-failure-fixture-secret";
 const model = "response-contract-failure-model";
+const fallbackModels = ["response-contract-route-a", "response-contract-route-b"] as const;
 const digest = "f".repeat(64);
 const verificationNow = Date.parse("2026-09-18T12:00:00.000Z");
 const canary = "PRIVATE_PROVIDER_FAILURE_CANARY";
 const partialJson = `{\"narration\":\"Mira reaches the observatory.\",\"scratchpad\":\"${canary}`;
 const successfulRpgAssessment = JSON.stringify({ stat_id: "insight", difficulty_modifier: 0, rationale: "The archive must be studied carefully.", favorable_outcome: "Mira recognizes the lantern's old signal.", setback_outcome: "Dust obscures the archive's first clue." });
 
-type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "scene_rewrite_overflow_rejection" | "historical_http_error" | "refusal" | "partial_stream" | "success" | "choice_repair";
+type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "scene_rewrite_overflow_rejection" | "historical_http_error" | "refusal" | "partial_stream" | "route_partial_stream" | "success" | "choice_repair" | "route_fallback" | "route_exhausted";
 const successfulStory = JSON.stringify({ narration: "Mira reaches the observatory.", choices: ["Wait.", "Listen.", "Enter.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "", continuity_summary: "Mira reaches the observatory.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 const duplicateChoiceStory = JSON.stringify({ ...JSON.parse(successfulStory), choices: ["Wait.", "Wait.", "Enter.", "Leave."] });
 const successfulChoiceRepair = JSON.stringify({ choices: ["Search the archive.", "Follow the lantern.", "Call for the archivist.", "Leave a marker."], custom_action_suggestion: "Study the constellation chart." });
@@ -56,8 +56,6 @@ integration("response-contract provider failures", () => {
   let presetMetadataAvailable = true;
   let sceneCoverageResults: boolean[] = [];
   let sceneStoryRequestCount = 0;
-  let streamedCallbackAccumulations: string[] = [];
-  let persistedStreamCheckpoint: string | null = null;
   const requestBodies: string[] = [];
   const ownedJobIds: string[] = [];
 
@@ -74,7 +72,17 @@ integration("response-contract provider failures", () => {
     server = createServer((request, response) => {
       if (request.url === "/v1/models" || request.url === "/models") {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ data: [{ id: model, context_length: 65_536, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        response.end(JSON.stringify({ data: [model, ...fallbackModels].map((id) => ({ id, context_length: 65_536, supported_parameters: ["response_format", "structured_outputs"] })) }));
+        return;
+      }
+      if (request.url === "/presets/native-fallback" || request.url === "/v1/presets/native-fallback") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "native-fallback", name: "Native fallback", status: "active",
+          designated_version: { id: "native-fallback-v1", version: 1,
+            system_prompt: "Native preset fallback instruction.",
+            config: { models: fallbackModels, temperature: 0.25, provider: { only: ["preset-route"], data_collection: "deny" } } }
+        } }));
         return;
       }
       if (request.url === "/presets/native-success" || request.url === "/v1/presets/native-success") {
@@ -107,6 +115,17 @@ integration("response-contract provider failures", () => {
           return;
         }
         requestBodies.push(body);
+        if ((scenario === "route_fallback" || scenario === "route_exhausted") && JSON.parse(body).model === fallbackModels[0]) {
+          response.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
+          response.end(JSON.stringify({ error: { code: "rate_limit", message: "fixture availability rejection" } }));
+          return;
+        }
+        if (scenario === "route_exhausted" && JSON.parse(body).model === fallbackModels[1]) {
+          response.writeHead(400, { "content-type": "application/json", "x-generation-id": "fallback-schema-id" });
+          response.end(JSON.stringify({ id: "fallback-schema-id", model: fallbackModels[1], provider: "preset-route",
+            error: { code: "response_format_invalid", message: canary } }));
+          return;
+        }
         if (scenario === "historical_http_error") {
           response.writeHead(502, { "content-type": "application/json" });
           response.end(JSON.stringify({ error: { code: "upstream_failure", message: canary } }));
@@ -127,30 +146,30 @@ integration("response-contract provider failures", () => {
         if (scenario === "aux_schema_rejection"
             && JSON.parse(body).response_format?.json_schema?.name === getProviderOutputSchemaV2("rpg_assessment").name) {
           response.writeHead(400, { "content-type": "application/json", "x-generation-id": "aux-schema-400-id" });
-          response.end(JSON.stringify({ id: "aux-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "http_transport_code", message: canary } }));
+          response.end(JSON.stringify({ id: "aux-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "response_format_invalid", message: canary } }));
           return;
         }
         if (scenario === "aux_trigger_schema_rejection"
             && JSON.parse(body).response_format?.json_schema?.name === getProviderOutputSchemaV2("event_trigger_before").name) {
           response.writeHead(400, { "content-type": "application/json", "x-generation-id": "trigger-schema-400-id" });
-          response.end(JSON.stringify({ id: "trigger-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "http_transport_code", message: canary } }));
+          response.end(JSON.stringify({ id: "trigger-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "response_format_invalid", message: canary } }));
           return;
         }
         if (scenario === "aux_scene_schema_rejection"
             && JSON.parse(body).response_format?.json_schema?.name === getProviderOutputSchemaV2("scene_coverage").name) {
           response.writeHead(400, { "content-type": "application/json", "x-generation-id": "scene-schema-400-id" });
-          response.end(JSON.stringify({ id: "scene-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "http_transport_code", message: canary } }));
+          response.end(JSON.stringify({ id: "scene-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "response_format_invalid", message: canary } }));
           return;
         }
         if (scenario === "aux_event_coverage_schema_rejection"
             && JSON.parse(body).response_format?.json_schema?.name === getProviderOutputSchemaV2("event_coverage").name) {
           response.writeHead(400, { "content-type": "application/json", "x-generation-id": "event-coverage-schema-400-id" });
-          response.end(JSON.stringify({ id: "event-coverage-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "http_transport_code", message: canary } }));
+          response.end(JSON.stringify({ id: "event-coverage-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "response_format_invalid", message: canary } }));
           return;
         }
         if (scenario === "recovery_schema_rejection" && requestBodies.length > 1) {
           response.writeHead(400, { "content-type": "application/json", "x-generation-id": "recovery-schema-400-id" });
-          response.end(JSON.stringify({ id: "recovery-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "http_transport_code", message: canary } }));
+          response.end(JSON.stringify({ id: "recovery-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "response_format_invalid", message: canary } }));
           return;
         }
         if (scenario === "aux_event_schema_rejection") {
@@ -158,7 +177,7 @@ integration("response-contract provider failures", () => {
           const input = typeof parsed.messages?.[1]?.content === "string" ? JSON.parse(parsed.messages[1].content) as Record<string, unknown> : {};
           if (Array.isArray(input.fictional_event_instructions)) {
             response.writeHead(400, { "content-type": "application/json", "x-generation-id": "event-schema-400-id" });
-            response.end(JSON.stringify({ id: "event-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "http_transport_code", message: canary } }));
+            response.end(JSON.stringify({ id: "event-schema-400-id", model: "observed-schema-model", provider: "observed-schema-route", error: { code: "response_format_invalid", message: canary } }));
             return;
           }
         }
@@ -167,8 +186,13 @@ integration("response-contract provider failures", () => {
           response.end(JSON.stringify({ id: "refusal-id", model: "observed-refusal-model", provider: "observed-refusal-route", choices: [{ message: { refusal: canary }, finish_reason: "content_filter" }] }));
           return;
         }
-        if (scenario === "success" || scenario === "choice_repair" || scenario === "aux_event_schema_rejection" || scenario === "aux_scene_schema_rejection" || scenario === "aux_event_coverage_schema_rejection" || scenario === "recovery_schema_rejection" || scenario === "scene_rewrite_overflow_rejection") {
-          const parsed = JSON.parse(body) as { response_format?: { json_schema?: { name?: string } }; messages?: Array<{ content?: string }> };
+        if (scenario === "success" || scenario === "choice_repair" || scenario === "route_fallback" || scenario === "aux_event_schema_rejection" || scenario === "aux_scene_schema_rejection" || scenario === "aux_event_coverage_schema_rejection" || scenario === "recovery_schema_rejection" || scenario === "scene_rewrite_overflow_rejection") {
+          const parsed = JSON.parse(body) as {
+            model?: string;
+            response_format?: { json_schema?: { name?: string } };
+            messages?: Array<{ content?: string }>;
+            provider?: { only?: string[] };
+          };
           const input = typeof parsed.messages?.[1]?.content === "string" ? JSON.parse(parsed.messages[1].content) as Record<string, unknown> : {};
           const evidence = Array.isArray(input.evidence) ? input.evidence[0] as { id?: unknown; content?: unknown } | undefined : undefined;
           const content = parsed.response_format?.json_schema?.name === getProviderOutputSchemaV2("rpg_assessment").name
@@ -201,11 +225,22 @@ integration("response-contract provider failures", () => {
             ? oversizedSceneStory
             : content;
           response.writeHead(200, { "content-type": "application/json", "x-generation-id": "success-id" });
-          response.end(JSON.stringify({ id: "success-id", model, provider: "verified-route", choices: [{ message: { content: selectedContent }, finish_reason: "stop" }], usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110 } }));
+          response.end(JSON.stringify({
+            id: "success-id", model: parsed.model ?? model, provider: parsed.provider?.only?.[0] ?? "verified-route",
+            choices: [{ message: { content: selectedContent }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110,
+              ...(scenario === "route_fallback" ? { cost: "0.0042", currency: "USD" } : {}) }
+          }));
           return;
         }
+        const partialRequest = JSON.parse(body) as { model?: string; provider?: { only?: string[] } };
         response.writeHead(200, { "content-type": "text/event-stream", "x-generation-id": "partial-stream-id" });
-        response.end(`data: ${JSON.stringify({ id: "partial-stream-id", model: "observed-stream-model", provider: "observed-stream-route", choices: [{ delta: { content: partialJson }, finish_reason: null }] })}\n\n`);
+        response.end(`data: ${JSON.stringify({
+          id: "partial-stream-id",
+          model: scenario === "route_partial_stream" ? partialRequest.model : "observed-stream-model",
+          provider: scenario === "route_partial_stream" ? partialRequest.provider?.only?.[0] : "observed-stream-route",
+          choices: [{ delta: { content: partialJson }, finish_reason: null }]
+        })}\n\n`);
       });
     });
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -223,7 +258,7 @@ integration("response-contract provider failures", () => {
       );
       ownedJobIds.length = 0;
     }
-    requestBodies.length = 0; continuityReviewCalls = 0; presetMetadataAvailable = true; sceneCoverageResults = []; sceneStoryRequestCount = 0; streamedCallbackAccumulations = []; persistedStreamCheckpoint = null;
+    requestBodies.length = 0; continuityReviewCalls = 0; presetMetadataAvailable = true; sceneCoverageResults = []; sceneStoryRequestCount = 0;
   });
 
   function records(streaming: boolean) {
@@ -268,7 +303,7 @@ integration("response-contract provider failures", () => {
     policy: "legacy" | "auto" | "required",
     streaming = false,
     native = false,
-    selection: "model" | "preset" = "model",
+    selection: "model" | "preset" | "fallback" = "model",
     options: Readonly<{ storyOnly?: boolean; scene?: boolean; rpg?: boolean; triggers?: boolean; eventExtension?: boolean; continuity?: "enforce"; contextWindowTokens?: number }> = {}
   ) {
     const address = server.address(); if (!address || typeof address === "string") throw new Error("failure provider did not bind");
@@ -316,69 +351,12 @@ integration("response-contract provider failures", () => {
     const verification = native ? await fileLoadedV2Verification(streaming) : { records: policy === "required" ? records(streaming) : [], digest };
     const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: verification.records, schemaVerificationDigest: verification.digest, clock: () => verificationNow });
     const application = createApiGenerationApplication(pool, apiGraph.generation, undefined, { installedCapability: "r3", enforceEnabled: true }, native);
-    const request = generationRequestSchema.parse({ action: "Open the observatory archive.", providerProfileId: provider.id, ...(options.storyOnly || options.scene ? { requestedInputMode: "scene" as const, resolvedInputMode: "scene" as const, inputModeSource: "explicit" as const } : {}), ...(selection === "preset" ? { textSelection: { kind: "openrouter_preset", slug: "native-success" } } : {}), idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } });
+    const request = generationRequestSchema.parse({ action: "Open the observatory archive.", providerProfileId: provider.id, ...(options.storyOnly || options.scene ? { requestedInputMode: "scene" as const, resolvedInputMode: "scene" as const, inputModeSource: "explicit" as const } : {}), ...(selection === "preset" || selection === "fallback" ? { textSelection: { kind: "openrouter_preset", slug: selection === "fallback" ? "native-fallback" : "native-success" } } : {}), idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
     ownedJobIds.push(job.id);
     const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: verification.records, schemaVerificationDigest: verification.digest, clock: () => verificationNow });
     const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, workerGraph.illustration), apiMemoryApplication(pool, credentialSecret), workerGraph.generation);
-    // Native v2 planning is real composition; this seam supplies only the
-    // physical transport for the frozen one-candidate plan. Task 5 owns
-    // ordered candidate dispatch and accounting.
-    const composedCollaborators: GenerationExecutionCollaborators = native ? {
-      ...collaborators,
-      preparedTextExecutor: {
-        execute: async ({ preparedRequest, request }) => {
-          if (!preparedRequest) throw new Error("The frozen Story transport requires a canonical prepared request.");
-          const response = await fetch(`http://127.0.0.1:${address.port}/v1/chat/completions`, {
-            method: "POST", headers: { "content-type": "application/json" }, body: preparedRequest.body
-          });
-          const payload = await response.json() as { id?: unknown; model?: unknown; provider?: unknown; error?: { code?: unknown }; choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown } };
-          if (response.ok) {
-            const choice = payload.choices?.[0];
-            if (typeof choice?.message?.content !== "string") throw new Error("The prepared success fixture returned no content.");
-            // The injected seam replaces only physical transport. It feeds
-            // chunk deltas into the worker callback so the native stream test
-            // covers durable partial-output checkpoints as well as the
-            // frozen stream request body. SSE parsing itself is Task 5.
-            if (request.onChunk) {
-              const split = Math.max(1, Math.floor(choice.message.content.length / 2));
-              const first = choice.message.content.slice(0, split);
-              const second = choice.message.content.slice(split);
-              await request.onChunk(first, first);
-              streamedCallbackAccumulations.push(first);
-              persistedStreamCheckpoint = (await pool.query<{ partialOutput: string | null }>(
-                "SELECT partial_output AS \"partialOutput\" FROM generation_jobs WHERE campaign_id=$1 ORDER BY created_at DESC LIMIT 1", [imported.campaignId]
-              )).rows[0]?.partialOutput ?? null;
-              if (second) {
-                await request.onChunk(second, choice.message.content);
-                streamedCallbackAccumulations.push(choice.message.content);
-                persistedStreamCheckpoint = (await pool.query<{ partialOutput: string | null }>(
-                  "SELECT partial_output AS \"partialOutput\" FROM generation_jobs WHERE campaign_id=$1 ORDER BY created_at DESC LIMIT 1", [imported.campaignId]
-                )).rows[0]?.partialOutput ?? null;
-              }
-            }
-            return {
-              content: choice.message.content, responseId: typeof payload.id === "string" ? payload.id : "prepared-success-id",
-              finishReason: typeof choice.finish_reason === "string" ? choice.finish_reason : "stop", outputLimited: false,
-              modelInstanceId: typeof payload.model === "string" ? payload.model : model,
-              usage: { inputTokens: Number(payload.usage?.prompt_tokens ?? 0), outputTokens: Number(payload.usage?.completion_tokens ?? 0), totalTokens: Number(payload.usage?.total_tokens ?? 0) },
-              reportedCost: null, rawMetadata: {}, preparedRequest
-            };
-          }
-          throw new PreparedResponseContractError(
-            Object.assign(new Error("Injected schema rejection."), { code: typeof payload.error?.code === "string" ? payload.error.code : "response_format_invalid", statusCode: response.status }),
-            preparedRequest,
-            {
-              responseId: typeof payload.id === "string" ? payload.id : null,
-              returnedModel: typeof payload.model === "string" ? payload.model : null,
-              returnedProviderRoute: typeof payload.provider === "string" ? payload.provider : null,
-              diagnosticCode: "provider_schema_invalid"
-            }
-          );
-        }
-      }
-    } : collaborators;
-    return { application, campaignId: imported.campaignId, providerId: provider.id, request, job, collaborators: composedCollaborators };
+    return { application, campaignId: imported.campaignId, providerId: provider.id, request, job, collaborators };
   }
 
   async function authority(campaignId: string) {
@@ -517,10 +495,6 @@ integration("response-contract provider failures", () => {
     );
     expect(row.rows[0]!.status).toBe("completed");
     expect(requestBodies).toHaveLength(1);
-    expect(streamedCallbackAccumulations).toHaveLength(2);
-    // The worker throttles durable updates; the first emitted chunk is the
-    // checkpoint for this immediate two-chunk fixture.
-    expect(persistedStreamCheckpoint).toBe(streamedCallbackAccumulations[0]);
     expect(row.rows[0]!.partialOutput).toBeNull();
     const body = JSON.parse(requestBodies[0]!);
     expect(body.stream).toBe(true);
@@ -631,10 +605,10 @@ integration("response-contract provider failures", () => {
     scenario = "success";
     const value = await fixture("required", false, true, "preset", { triggers: true, eventExtension: true });
     await executeOnce(value);
-    const row = await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>(
-      "SELECT status,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [value.job.id]
+    const row = await pool.query<{ status: string; errorCode: string | null; errorMessage: string | null; orchestrationPrivate: Record<string, any> }>(
+      "SELECT status,error_code AS \"errorCode\",error_message AS \"errorMessage\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [value.job.id]
     );
-    expect(row.rows[0]!.status).toBe("completed");
+    expect(row.rows[0]).toMatchObject({ status: "completed", errorCode: null, errorMessage: null });
     const extensionBody = requestBodies.find((body) => {
       const input = JSON.parse(JSON.parse(body).messages[1].content);
       return Array.isArray(input.fictional_event_instructions);
@@ -846,11 +820,16 @@ integration("response-contract provider failures", () => {
     scenario = "success";
     const value = await fixture("required", false, true, "preset");
     await executeOnce(value);
-    const row = await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>(
-      "SELECT status,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [value.job.id]
+    const row = await pool.query<{ status: string; errorCode: string | null; errorMessage: string | null; orchestrationPrivate: Record<string, any> }>(
+      "SELECT status,error_code AS \"errorCode\",error_message AS \"errorMessage\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [value.job.id]
+    );
+    const attempts = await pool.query(
+      "SELECT status,outcome,failure_reason AS \"failureReason\",requested_model AS \"requestedModel\",returned_model AS \"returnedModel\",provider_policy AS \"providerPolicy\",returned_provider_route AS \"returnedProviderRoute\" FROM prepared_text_physical_attempts WHERE logical_reservation->>'generationJobId'=$1",
+      [value.job.id]
     );
     const privateState = row.rows[0]!.orchestrationPrivate;
-    expect(row.rows[0]!.status).toBe("completed");
+    expect(attempts.rows).toEqual([expect.objectContaining({ status: "completed", outcome: "succeeded", failureReason: null })]);
+    expect(row.rows[0]).toMatchObject({ status: "completed", errorCode: null, errorMessage: null });
     expect(privateState.queuedResponsePolicy).toMatchObject({ version: 2, admission: { basis: "preset_trusted" }, authority: { kind: "preset_trusted" } });
     expect(privateState.textExecutionRouteBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "native-success" }, presetSystemPrompt: "Native preset success instruction.", parameters: { temperature: 0.25 } });
     expect(requestBodies).toHaveLength(1);
@@ -859,6 +838,139 @@ integration("response-contract provider failures", () => {
     expect(body.messages[0].content).toContain("Native preset success instruction.");
     expect(privateState.primaryReservation.requestBody).toBe(requestBodies[0]);
     expect(privateState.responseContractInvocations[0].requestPayloadHash).toBe(createHash("sha256").update(requestBodies[0]!).digest("hex"));
+  }, 60_000);
+
+  it("advances one frozen preset route after a conclusive rate limit and commits one turn and logical charge", async () => {
+    scenario = "route_fallback";
+    const value = await fixture("required", false, true, "fallback");
+    const before = await authority(value.campaignId);
+    await executeOnce(value);
+    const job = (await pool.query<{ status: string; errorCode: string | null; errorMessage: string | null; recoveryMetadata: Record<string, unknown>; resultTurnId: string; orchestrationPrivate: Record<string, any> }>(
+      "SELECT status,error_code AS \"errorCode\",error_message AS \"errorMessage\",recovery_metadata AS \"recoveryMetadata\",result_turn_id AS \"resultTurnId\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1",
+      [value.job.id]
+    )).rows[0]!;
+    const attempts = await pool.query<{
+      id: string; candidateOrdinal: number; requestedModel: string; outcome: string;
+      failureReason: string | null; usage: Record<string, number> | null; reportedCost: Record<string, string> | null;
+    }>(
+      `SELECT id,candidate_ordinal AS "candidateOrdinal",requested_model AS "requestedModel",outcome,
+              failure_reason AS "failureReason",usage,reported_cost AS "reportedCost"
+         FROM prepared_text_physical_attempts
+        WHERE logical_reservation->>'generationJobId'=$1 ORDER BY candidate_ordinal`,
+      [value.job.id]
+    );
+    const costs = await pool.query<{ localCallId: string; turnId: string; amount: string; usage: Record<string, number> }>(
+      `SELECT local_call_id AS "localCallId",turn_id AS "turnId",
+              trim(trailing '.' from trim(trailing '0' from amount::text)) AS amount,usage_metadata AS usage
+         FROM provider_cost_events WHERE generation_job_id=$1 AND operation='story_generation'`,
+      [value.job.id]
+    );
+    const after = await authority(value.campaignId);
+
+    expect(job).toMatchObject({ status: "completed", errorCode: null, errorMessage: null, recoveryMetadata: {} });
+    expect(after.accepted).toBe(before.accepted + 1);
+    expect(requestBodies).toHaveLength(2);
+    for (const [index, bodyText] of requestBodies.entries()) {
+      const body = JSON.parse(bodyText);
+      expect(body).toMatchObject({
+        model: fallbackModels[index], temperature: 0.25,
+        provider: { only: ["preset-route"], data_collection: "deny", require_parameters: true }
+      });
+      expect(body.messages[0].content.split("Native preset fallback instruction.").length - 1).toBe(1);
+      expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
+        name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
+      } });
+    }
+    expect(job.orchestrationPrivate.responseContractInvocations).toEqual([
+      expect.objectContaining({ status: "completed", operation: "story_generation" })
+    ]);
+    expect(attempts.rows).toEqual([
+      expect.objectContaining({ candidateOrdinal: 0, requestedModel: fallbackModels[0], outcome: "failed", failureReason: "rate_limit", usage: null, reportedCost: null }),
+      expect.objectContaining({ candidateOrdinal: 1, requestedModel: fallbackModels[1], outcome: "succeeded", failureReason: null,
+        usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: { amount: "0.0042", currency: "USD" } })
+    ]);
+    expect(costs.rows).toEqual([
+      expect.objectContaining({ localCallId: attempts.rows[1]!.id, turnId: job.resultTurnId, amount: "0.0042",
+        usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 } })
+    ]);
+  }, 60_000);
+
+  it("attributes terminal candidate evidence to the second physical attempt after safe route exhaustion", async () => {
+    scenario = "route_exhausted";
+    const value = await fixture("required", false, true, "fallback");
+    const before = await authority(value.campaignId);
+    await executeOnce(value);
+    const job = (await pool.query<{ status: string; errorCode: string | null; orchestrationPrivate: Record<string, any> }>(
+      "SELECT status,error_code AS \"errorCode\",orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1",
+      [value.job.id]
+    )).rows[0]!;
+    const attempts = await pool.query<{
+      id: string; candidateOrdinal: number; outcome: string; failureReason: string;
+      usage: unknown; reportedCost: unknown;
+    }>(
+      `SELECT id,candidate_ordinal AS "candidateOrdinal",outcome,failure_reason AS "failureReason",usage,
+              reported_cost AS "reportedCost"
+         FROM prepared_text_physical_attempts
+        WHERE logical_reservation->>'generationJobId'=$1 ORDER BY candidate_ordinal`,
+      [value.job.id]
+    );
+    const secondBodyHash = createHash("sha256").update(requestBodies[1]!).digest("hex");
+
+    expect(job).toMatchObject({ status: "failed", errorCode: "provider_schema_invalid" });
+    expect(requestBodies).toHaveLength(2);
+    expect(attempts.rows).toEqual([
+      expect.objectContaining({ candidateOrdinal: 0, outcome: "failed", failureReason: "rate_limit", usage: null, reportedCost: null }),
+      expect.objectContaining({ candidateOrdinal: 1, outcome: "failed", failureReason: "schema_invalid", usage: null, reportedCost: null })
+    ]);
+    expect(job.orchestrationPrivate.preparedResponseFailures).toEqual([
+      expect.objectContaining({ responseId: "fallback-schema-id", diagnosticCode: "provider_schema_invalid",
+        requestBody: requestBodies[1], requestPayloadHash: secondBodyHash })
+    ]);
+    expect(job.orchestrationPrivate.responseContractInvocations).toEqual([
+      expect.objectContaining({ status: "completed", response: expect.objectContaining({
+        physicalAttemptId: attempts.rows[1]!.id, physicalRequestPayloadHash: secondBodyHash
+      }) })
+    ]);
+    expect(await authority(value.campaignId)).toEqual(before);
+  }, 60_000);
+
+  it("persists response-start and partial output evidence without advancing the frozen Story route", async () => {
+    scenario = "route_partial_stream";
+    const value = await fixture("required", true, true, "fallback");
+    const before = await authority(value.campaignId);
+    await executeOnce(value);
+    const job = (await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>(
+      "SELECT status,orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [value.job.id]
+    )).rows[0]!;
+    const attempts = await pool.query<{
+      candidateOrdinal: number; status: string; outcome: string; failureReason: string;
+      providerResponseId: string | null; responseStartedAt: Date | null; usage: unknown; reportedCost: unknown;
+    }>(
+      `SELECT candidate_ordinal AS "candidateOrdinal",status,outcome,failure_reason AS "failureReason",
+              provider_response_id AS "providerResponseId",response_started_at AS "responseStartedAt",usage,reported_cost AS "reportedCost"
+         FROM prepared_text_physical_attempts
+        WHERE logical_reservation->>'generationJobId'=$1 ORDER BY candidate_ordinal`,
+      [value.job.id]
+    );
+
+    expect(job.status).toBe("failed");
+    expect(requestBodies).toHaveLength(1);
+    expect(JSON.parse(requestBodies[0]!).model).toBe(fallbackModels[0]);
+    expect(attempts.rows).toEqual([
+      expect.objectContaining({ candidateOrdinal: 0, status: "completed", outcome: "failed", failureReason: "unknown",
+        providerResponseId: "partial-stream-id", responseStartedAt: expect.any(Date), usage: null, reportedCost: null })
+    ]);
+    expect(job.orchestrationPrivate.preparedResponseFailures).toEqual([
+      expect.objectContaining({ responseId: "partial-stream-id", partialContent: partialJson,
+        requestPayloadHash: createHash("sha256").update(requestBodies[0]!).digest("hex") })
+    ]);
+    expect(job.orchestrationPrivate.responseContractInvocations).toEqual([
+      expect.objectContaining({ status: "completed", response: expect.objectContaining({
+        physicalAttemptId: expect.any(String),
+        physicalRequestPayloadHash: createHash("sha256").update(requestBodies[0]!).digest("hex")
+      }) })
+    ]);
+    expect(await authority(value.campaignId)).toEqual(before);
   }, 60_000);
 
   it.each(["model", "preset"] as const)("executes a native v2 %s replacement using the queued frozen candidate", async (selection) => {
@@ -1099,7 +1211,7 @@ integration("response-contract provider failures", () => {
   }, 60_000);
 
   it.each(["rehashed-temperature", "rehashed-policy", "missing-basis", "removed-binding"] as const)(
-    "rejects a native direct Model %s tamper before transport",
+    "blocks a native direct Model %s tamper at the durable SQL fence before transport",
     async (tamper) => {
       scenario = "success";
       const value = await fixture("required", false, true);
@@ -1121,15 +1233,13 @@ integration("response-contract provider failures", () => {
       } else {
         delete privateState.queuedResponsePolicy.authority.routeBasisHash;
       }
-      await pool.query(
+      await expect(pool.query(
         "UPDATE generation_jobs SET orchestration_private=$2::jsonb WHERE id=$1 AND owner_user_id=$3",
         [value.job.id, JSON.stringify(privateState), ownerUserId]
-      );
-
-      await executeOnce(value, false);
+      )).rejects.toMatchObject({ message: expect.stringMatching(/immutable/) });
       await expect(pool.query<{ status: string; errorCode: string | null }>(
         "SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [value.job.id]
-      )).resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+      )).resolves.toMatchObject({ rows: [{ status: "queued", errorCode: null }] });
       expect(requestBodies).toHaveLength(0);
     },
     60_000
@@ -1174,24 +1284,24 @@ integration("response-contract provider failures", () => {
     expect(row.rows[0]!.orchestrationPrivate.textExecutionRouteBasis.presetSystemPrompt).toBe("Native preset success instruction.");
   }, 60_000);
 
-  it("rejects a tampered v2 direct authority revision before any provider dispatch", async () => {
+  it("blocks a tampered v2 direct authority revision at the durable SQL fence before any provider dispatch", async () => {
     scenario = "schema_rejection";
     const value = await fixture("required", false, true);
-    await pool.query(
+    await expect(pool.query(
       "UPDATE generation_jobs SET orchestration_private = orchestration_private #- '{queuedResponsePolicy,authority,authorityRevision}' WHERE id=$1 AND owner_user_id=$2",
       [value.job.id, ownerUserId]
-    );
-    await executeOnce(value, false);
+    )).rejects.toMatchObject({ message: expect.stringMatching(/immutable/) });
     const row = await pool.query<{ status: string; errorCode: string | null }>(
       "SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [value.job.id]
     );
-    expect(row.rows[0]).toEqual({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
+    expect(row.rows[0]).toEqual({ status: "queued", errorCode: null });
     expect(requestBodies).toHaveLength(0);
   }, 60_000);
 
   it("rejects native preset dispatch when the current endpoint authority is revoked", async () => {
     scenario = "success";
     const value = await fixture("required", false, true, "preset");
+    const before = await authority(value.campaignId);
     await pool.query("UPDATE provider_profiles SET base_url=$2 WHERE id=$1", [value.providerId, "http://127.0.0.1:1/v1"]);
     await executeOnce(value);
     const row = await pool.query<{ status: string; errorCode: string | null }>(
@@ -1199,11 +1309,13 @@ integration("response-contract provider failures", () => {
     );
     expect(row.rows[0]).toEqual({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
     expect(requestBodies).toHaveLength(0);
+    expect(await authority(value.campaignId)).toEqual(before);
   }, 60_000);
 
   it("rejects native preset dispatch when its current credential authority is revoked", async () => {
     scenario = "success";
     const value = await fixture("required", false, true, "preset");
+    const before = await authority(value.campaignId);
     await pool.query(
       "UPDATE provider_profiles SET encrypted_api_key=NULL,credential_nonce=NULL,credential_auth_tag=NULL,credential_key_version=NULL WHERE id=$1",
       [value.providerId]
@@ -1214,6 +1326,7 @@ integration("response-contract provider failures", () => {
     );
     expect(row.rows[0]).toEqual({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
     expect(requestBodies).toHaveLength(0);
+    expect(await authority(value.campaignId)).toEqual(before);
   }, 60_000);
 
   it("keeps a historical provider HTTP body out of terminal generation logs", async () => {

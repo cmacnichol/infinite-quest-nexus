@@ -109,6 +109,8 @@ export type BoundFrozenPresetProviderRequestBinding = Readonly<{
   invocationKey: ResponseInvocationKeyV2;
   operation: ResponseContractOperationV2;
   trustedOperationPrompt: string;
+  /** Zero-based frozen candidate selected by the durable route executor. */
+  candidateOrdinal?: number;
 }>;
 
 /** Conservative uncertainty for a serialized body when no compatible tokenizer is available. */
@@ -276,7 +278,7 @@ function bindFrozenPresetProviderRequest(
   profile: TextProviderProfile,
   request: CanonicalProviderRequest,
   binding: BoundFrozenPresetProviderRequestBinding
-): Readonly<{ contract: PreparedResponseContractV2; routeBasis: TextExecutionRouteBasis; plan: TextExecutionPlan }> {
+): Readonly<{ contract: PreparedResponseContractV2; routeBasis: TextExecutionRouteBasis; plan: TextExecutionPlan; candidate: TextRouteCandidate }> {
   const routeBasis = readTextExecutionRouteBasis(binding.routeBasis);
   const plan = readTextExecutionPlan(binding.plan);
   const contract = bindFrozenResponseContractInvocationV2({ ...binding, routeBasis, plan });
@@ -286,13 +288,18 @@ function bindFrozenPresetProviderRequest(
   if (routeBasis.selection.kind !== "openrouter_preset" || profile.providerType !== "openrouter") {
     throw new Error("Frozen preset serializer requires an OpenRouter preset route basis.");
   }
-  if (routeBasis.candidates[0]?.modelId !== profile.model) {
+  const candidateOrdinal = binding.candidateOrdinal ?? 0;
+  if (!Number.isSafeInteger(candidateOrdinal) || candidateOrdinal < 0) {
+    throw new Error("Frozen preset candidate ordinal is invalid.");
+  }
+  const candidate = routeBasis.candidates[candidateOrdinal];
+  if (!candidate || candidate.modelId !== profile.model) {
     throw new Error("Frozen preset serializer requires the selected frozen route candidate.");
   }
   if (request.systemPrompt !== plan.prompt) {
     throw new Error("Frozen preset request prompt does not match the derived frozen plan.");
   }
-  return { contract, routeBasis, plan };
+  return { contract, routeBasis, plan, candidate };
 }
 
 function frozenPresetProfile(profile: TextProviderProfile, candidate: TextRouteCandidate, parameters: TextGenerationParameters): TextProviderProfile {
@@ -321,7 +328,7 @@ export function serializeBoundFrozenPresetProviderRequest(
   options: Omit<ProviderRequestSerializationOptions, "responseContract"> = {}
 ): PreparedProviderRequest {
   const bound = bindFrozenPresetProviderRequest(profile, request, binding);
-  const candidate = bound.routeBasis.candidates[0]!;
+  const candidate = bound.candidate;
   const frozenProfile = frozenPresetProfile(profile, candidate, bound.plan.parameters);
   return serializeProviderRequestInternal(frozenProfile, request, options, {
     contract: bound.contract, candidate, parameters: bound.plan.parameters
@@ -462,7 +469,7 @@ export function serializeCheckedBoundFrozenPresetProviderRequest(
   options: Omit<CheckedProviderRequestOptions, "responseContract">
 ): PreparedProviderRequest {
   const bound = bindFrozenPresetProviderRequest(profile, request, binding);
-  const candidate = bound.routeBasis.candidates[0]!;
+  const candidate = bound.candidate;
   const frozenProfile = frozenPresetProfile(profile, candidate, bound.plan.parameters);
   return serializeCheckedProviderRequestWith(frozenProfile, request, options, (candidateProfile, candidateRequest, serializationOptions) => {
     if (serializationOptions?.responseContract) {

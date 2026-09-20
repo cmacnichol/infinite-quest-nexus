@@ -111,6 +111,9 @@ const responseContractInvocationResponseSchema = z.object({
   returnedModel: z.string().trim().min(1).max(256).nullable(),
   returnedProviderRoute: z.string().trim().min(1).max(256).nullable(),
   diagnosticCode: responseFormatDiagnosticCodeSchema.nullable(),
+  /** Concrete wire attempt beneath this stable logical invocation. */
+  physicalAttemptId: z.uuid().nullable().default(null),
+  physicalRequestPayloadHash: hashSchema.nullable().default(null),
   /** Semantic replay evidence is present only for operations that retain it. */
   resultHash: hashSchema.nullable().default(null)
 }).strict();

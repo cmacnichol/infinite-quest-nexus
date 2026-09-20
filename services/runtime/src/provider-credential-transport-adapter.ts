@@ -65,7 +65,7 @@ export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = R
 export type RuntimeTextExecution = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
   execute(
     request: ProviderRequest,
-    policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
+    policy?: Readonly<{ maxOutputTokens?: number; temperature?: number; requestTimeoutMs?: number }>,
   ): Promise<ProviderResult>;
 }>;
 
@@ -373,7 +373,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         ...descriptor(row, providerRole, selectedModel, contextWindowTokens),
         execute: (
           request: ProviderRequest,
-          policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
+          policy?: Readonly<{ maxOutputTokens?: number; temperature?: number; requestTimeoutMs?: number }>,
         ) => callTextProvider(
           { ...transportProfile(row, selectedModel), ...policy },
           request,

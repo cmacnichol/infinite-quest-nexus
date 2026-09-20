@@ -105,6 +105,7 @@ import {
   parseStoryOnlyOutput,
   parseChoiceRepair,
   mergeChoiceRepair,
+  PreparedRouteTerminalError,
   PreparedResponseContractError,
   performPrivateRoll,
   providerTransportErrorDetails,
@@ -211,6 +212,7 @@ type GenerationCostAttribution = Readonly<{
   generationJobId: string;
   category: "story";
   operation: StoryCostOperation;
+  localCallId?: string;
 }>;
 
 export type GenerationExecutionCollaborators = Readonly<{
@@ -568,6 +570,24 @@ function errorCodeFrom(error: unknown): string | null {
     : null;
 }
 
+function preparedResponseContractError(error: unknown): PreparedResponseContractError | null {
+  let current = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof PreparedResponseContractError) return current;
+    current = "cause" in current ? current.cause : null;
+  }
+  return null;
+}
+
+function preparedRouteTerminalError(error: unknown): PreparedRouteTerminalError | null {
+  let current = error;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof PreparedRouteTerminalError) return current;
+    current = "cause" in current ? current.cause : null;
+  }
+  return null;
+}
+
 const RECOVERABLE_INTEGRITY_ERROR_CODES = new Set([
   "authoritative_context_invalid",
   "continuity_review_unavailable",
@@ -598,18 +618,17 @@ function isRecoverableIntegrityError(error: unknown): error is ContextBudgetErro
  * Historical v1 jobs retain their existing auxiliary fallbacks.
  */
 function isV2PreparedContractFailure(error: unknown, job: { orchestration_private?: { queuedResponsePolicy?: unknown } | null }): boolean {
-  if (!(error instanceof PreparedResponseContractError)) return false;
+  const preparedError = preparedResponseContractError(error);
+  if (!preparedError) return false;
   if ((job.orchestration_private?.queuedResponsePolicy as { version?: unknown } | null)?.version !== 2) return false;
-  return error.diagnosticCode === "provider_schema_unsupported"
-    || error.diagnosticCode === "provider_schema_invalid"
-    || error.diagnosticCode === "provider_route_unavailable"
-    || error.diagnosticCode === "provider_refusal";
+  return preparedError.diagnosticCode === "provider_schema_unsupported"
+    || preparedError.diagnosticCode === "provider_schema_invalid"
+    || preparedError.diagnosticCode === "provider_route_unavailable"
+    || preparedError.diagnosticCode === "provider_refusal";
 }
 
 function v2PreparedContractDiagnostic(error: unknown, job: { orchestration_private?: { queuedResponsePolicy?: unknown } | null }): string | null {
-  return isV2PreparedContractFailure(error, job)
-    ? (error as PreparedResponseContractError).diagnosticCode
-    : null;
+  return isV2PreparedContractFailure(error, job) ? preparedResponseContractError(error)!.diagnosticCode : null;
 }
 
 function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
@@ -1569,25 +1588,37 @@ export async function callCampaignTextProvider(
         ? await requirePreparedTextExecutor(dependencies.collaborators).execute({
           plan: executionPlan, operation, ownerUserId: job.owner_user_id,
           providerProfileId: job.orchestration_private?.textExecutionRouteBasis?.credentialReference ?? job.provider_profile_id,
-          request: transportRequest, preparedRequest: checkedPrepared
+          request: transportRequest, preparedRequest: checkedPrepared,
+          logicalReservation: {
+            kind: "story", ownerUserId: job.owner_user_id, generationJobId: job.id,
+            invocationId: reserved.id, workerId: scope.workerId
+          },
+          ...(presetBinding ? {
+            frozenResponseContracts: presetBinding.frozen,
+            invocationKey: presetBinding.invocationKey,
+            routeBasis: presetBinding.routeBasis,
+            trustedOperationPrompt: presetBinding.trustedOperationPrompt
+          } : {})
         })
         : await provider.execute(transportRequest);
     } catch (error) {
       logProviderTransportError(error, {
         generationJobId: job.id, campaignId: job.campaign_id, providerProfileId: job.provider_profile_id, storyOperation: operation
       });
-      const preparedError = error instanceof PreparedResponseContractError ? error : undefined;
+      const preparedError = preparedResponseContractError(error) ?? undefined;
+      let nextPreparedResponseFailures: NonNullable<GenerationOrchestrationState["preparedResponseFailures"]> | null = null;
       if (preparedError) {
-        if (preparedError.preparedRequest.body !== checkedPrepared.body
-          || preparedError.preparedRequest.payloadHash !== checkedPrepared.payloadHash
-          || preparedError.preparedRequest.payloadHash !== sha256(preparedError.preparedRequest.body)) {
+        const routeTerminal = preparedRouteTerminalError(error);
+        if (preparedError.preparedRequest.payloadHash !== sha256(preparedError.preparedRequest.body)
+          || (!routeTerminal?.attemptId && (preparedError.preparedRequest.body !== checkedPrepared.body
+            || preparedError.preparedRequest.payloadHash !== checkedPrepared.payloadHash))) {
           throw Object.assign(new Error("The provider failure does not match the reserved response-contract request."), {
             code: "response_contract_identity_mismatch"
           });
         }
         const prior = job.orchestration_private?.preparedResponseFailures ?? [];
         const evidence = { version: reserved.version === 2 ? 2 as const : 1 as const, invocationId: reserved.id,
-          requestBody: checkedPrepared.body, requestPayloadHash: checkedPrepared.payloadHash,
+          requestBody: preparedError.preparedRequest.body, requestPayloadHash: preparedError.preparedRequest.payloadHash,
           responseId: preparedError.responseId, partialContent: preparedError.partialContent.slice(0, 1_000_000),
           partialContentTruncated: preparedError.partialContent.length > 1_000_000,
           returnedModel: preparedError.returnedModel, returnedProviderRoute: preparedError.returnedProviderRoute,
@@ -1598,21 +1629,29 @@ export async function callCampaignTextProvider(
         }
         if (!existing) {
           if (prior.length >= responseContractInvocationLedgerLimitV2) throw Object.assign(new Error("Prepared response failure evidence is full."), { code: "response_contract_unavailable" });
-          await persistOrchestration(dependencies.repository, scope, job, { preparedResponseFailures: [...prior, evidence] });
+          nextPreparedResponseFailures = [...prior, evidence];
         }
       }
+      const routeFailureAttemptId = preparedRouteTerminalError(error)?.attemptId ?? null;
       const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
         returnedModel: preparedError?.returnedModel ?? null,
         returnedProviderRoute: preparedError?.returnedProviderRoute ?? null,
-        diagnosticCode: preparedError?.diagnosticCode ?? null
+        diagnosticCode: preparedError?.diagnosticCode ?? null,
+        ...(routeFailureAttemptId ? {
+          physicalAttemptId: routeFailureAttemptId,
+          physicalRequestPayloadHash: preparedError?.preparedRequest.payloadHash ?? null
+        } : {})
       });
       if (!completed) throw Object.assign(new Error("The response-contract failure completion lost its lease."), { code: "lease_lost" });
+      if (nextPreparedResponseFailures) {
+        await persistOrchestration(dependencies.repository, scope, job, { preparedResponseFailures: nextPreparedResponseFailures });
+      }
       throw error;
     }
     const returnedPrepared = result.preparedRequest;
-    if (!returnedPrepared || returnedPrepared.body !== checkedPrepared.body
-      || returnedPrepared.payloadHash !== checkedPrepared.payloadHash
-      || returnedPrepared.payloadHash !== sha256(returnedPrepared.body)) {
+    if (!returnedPrepared || returnedPrepared.payloadHash !== sha256(returnedPrepared.body)
+      || (!result.physicalAttemptId && (returnedPrepared.body !== checkedPrepared.body
+        || returnedPrepared.payloadHash !== checkedPrepared.payloadHash))) {
       throw Object.assign(new Error("The provider result does not match the reserved response-contract request."), {
         code: "response_contract_identity_mismatch"
       });
@@ -1621,6 +1660,10 @@ export async function callCampaignTextProvider(
       returnedModel: result.returnedModel ?? null,
       returnedProviderRoute: result.returnedProviderRoute ?? null,
       diagnosticCode: null,
+      ...(result.physicalAttemptId ? {
+        physicalAttemptId: result.physicalAttemptId,
+        physicalRequestPayloadHash: returnedPrepared.payloadHash
+      } : {}),
       resultHash: operation === "scene_coverage_validation"
         ? sceneCoverageReplayResultHash({
           content: result.content,
@@ -1633,7 +1676,8 @@ export async function callCampaignTextProvider(
     if (!completed || completed.status !== "completed") throw Object.assign(new Error("The response-contract completion lost its lease."), { code: "lease_lost" });
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool, provider, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
-      generationJobId: job.id, category: "story", operation }, result
+      generationJobId: job.id, category: "story", operation,
+      ...(result.physicalAttemptId ? { localCallId: result.physicalAttemptId } : {}) }, result
     );
     logger.info({
       event: "turn_generation_provider_completed",

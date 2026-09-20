@@ -148,7 +148,8 @@ function preparedResponseFailures(value: unknown, ledger: readonly ResponseContr
       || !(item.returnedModel === null || typeof item.returnedModel === "string" && item.returnedModel.length <= 256)
       || !(item.returnedProviderRoute === null || typeof item.returnedProviderRoute === "string" && item.returnedProviderRoute.length <= 256)
       || !(item.diagnosticCode === null || responseFormatDiagnosticCodeSchema.safeParse(item.diagnosticCode).success)
-      || !ledger.some((audit) => audit.version === item.version && audit.id === item.invocationId && audit.requestPayloadHash === item.requestPayloadHash
+      || !ledger.some((audit) => audit.version === item.version && audit.id === item.invocationId
+        && (audit.requestPayloadHash === item.requestPayloadHash || audit.response?.physicalRequestPayloadHash === item.requestPayloadHash)
         && (audit.status === "dispatched" || audit.status === "completed"))) throw new Error("Prepared response failure evidence is invalid.");
     ids.add(item.invocationId);
     return item;
@@ -211,7 +212,9 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     }
     const entries = (ledger ?? []).filter((entry): entry is ResponseContractInvocationAuditV2 => entry.version === 2);
     const completedFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperationV2[]) =>
-      typeof requestPayloadHash === "string" && entries.some((entry) => entry.status === "completed" && entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation));
+      typeof requestPayloadHash === "string" && entries.some((entry) => entry.status === "completed"
+        && (entry.response?.physicalRequestPayloadHash ?? entry.requestPayloadHash) === requestPayloadHash
+        && operations.includes(entry.operation));
     if (value.primaryResult && !completedFor(value.primaryResult.requestPayloadHash, ["story_generation"])) throw new Error("Primary response checkpoint has no completed v2 invocation.");
     if (value.validatedMainDraft && !completedFor(value.validatedMainDraft.requestPayloadHash, ["story_generation", "story_recovery", "scene_coverage_rewrite", "story_continuity_repair"])) throw new Error("Validated draft checkpoint has no completed v2 invocation.");
     if (value.choiceRepair && !completedFor(value.choiceRepair.originalRequestPayloadHash, ["story_generation", "story_recovery"])) throw new Error("Choice repair original checkpoint has no completed v2 invocation.");
@@ -223,7 +226,7 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     if (replayedCoverage) {
       const coverageInvocation = entries.find((entry) => entry.status === "completed"
         && entry.operation === "scene_coverage_validation"
-        && entry.requestPayloadHash === replayedCoverage.requestPayloadHash);
+        && (entry.response?.physicalRequestPayloadHash ?? entry.requestPayloadHash) === replayedCoverage.requestPayloadHash);
       if (!coverageInvocation
         || coverageInvocation.response?.diagnosticCode !== null
         || coverageInvocation.response?.returnedModel !== replayedCoverage.result.returnedModel
@@ -364,7 +367,11 @@ async function updateResponseContractInvocation(
   invocationId: string,
   nextStatus: "dispatched" | "completed",
   expectedRequestPayloadHash?: string,
-  response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & { resultHash?: string | null }
+  response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & {
+    resultHash?: string | null;
+    physicalAttemptId?: string | null;
+    physicalRequestPayloadHash?: string | null;
+  }
 ): Promise<ResponseContractInvocationAuditVersioned | null> {
   return withTransaction(pool, async (client) => {
     const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
@@ -380,7 +387,11 @@ async function updateResponseContractInvocation(
     const existing = ledger[index]!;
     if (nextStatus === "dispatched" && existing.requestPayloadHash !== expectedRequestPayloadHash) return null;
     if (existing.status === "completed") {
-      if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null, resultHash: response?.resultHash ?? null })) return existing;
+      if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({
+        returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null,
+        diagnosticCode: response?.diagnosticCode ?? null, physicalAttemptId: response?.physicalAttemptId ?? null,
+        physicalRequestPayloadHash: response?.physicalRequestPayloadHash ?? null, resultHash: response?.resultHash ?? null
+      })) return existing;
       return null;
     }
     if (nextStatus === "dispatched" && existing.status !== "reserved") return null;
@@ -388,7 +399,11 @@ async function updateResponseContractInvocation(
     const at = new Date().toISOString();
     const updated = nextStatus === "dispatched"
       ? { ...existing, status: "dispatched", dispatchedAt: existing.dispatchedAt ?? at }
-      : { ...existing, status: "completed", completedAt: at, response: { returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null, resultHash: response?.resultHash ?? null } };
+      : { ...existing, status: "completed", completedAt: at, response: {
+        returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null,
+        diagnosticCode: response?.diagnosticCode ?? null, physicalAttemptId: response?.physicalAttemptId ?? null,
+        physicalRequestPayloadHash: response?.physicalRequestPayloadHash ?? null, resultHash: response?.resultHash ?? null
+      } };
     let parsed: ResponseContractInvocationAuditVersioned;
     try { parsed = readResponseContractInvocationAuditVersioned(updated); } catch { return null; }
     ledger[index] = parsed;
@@ -1043,7 +1058,11 @@ export type GenerationExecutionRepository = Readonly<{
   ): Promise<ResponseContractInvocationAuditVersioned | null>;
   /** Consumes a reservation once only when its prepared request hash still matches. */
   markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string, expectedRequestPayloadHash: string): Promise<ResponseContractInvocationAuditVersioned | null>;
-  completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & { resultHash?: string | null }): Promise<ResponseContractInvocationAuditVersioned | null>;
+  completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & {
+    resultHash?: string | null;
+    physicalAttemptId?: string | null;
+    physicalRequestPayloadHash?: string | null;
+  }): Promise<ResponseContractInvocationAuditVersioned | null>;
   /** Atomically publishes a pending review and releases the worker lease. */
   pauseForReview(scope: GenerationLeaseScope, checkpoint: GenerationReviewCheckpoint): Promise<boolean>;
   savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;

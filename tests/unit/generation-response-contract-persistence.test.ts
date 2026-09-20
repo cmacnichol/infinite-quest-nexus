@@ -29,7 +29,10 @@ describe("durable response-contract persistence contracts", () => {
     const routeBasisDraft = {
       version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-route" },
       preset: { slug: "night-route", versionId: "preset-v1", configHash: hash },
-      candidates: [{ modelId: "openai/gpt-5", providerPolicy: { only: ["provider/frozen"], require_parameters: false }, contextWindowTokens: 128000, maxOutputTokens: 4096 }],
+      candidates: [
+        { modelId: "openai/gpt-5", providerPolicy: { only: ["provider/frozen"], require_parameters: false }, contextWindowTokens: 128000, maxOutputTokens: 4096 },
+        { modelId: "anthropic/claude", providerPolicy: { order: ["provider/second"], allow_fallbacks: false, data_collection: "deny" as const }, contextWindowTokens: 64000, maxOutputTokens: 2048 }
+      ],
       presetSystemPrompt: "Preset instructions.", parameters: { temperature: 0.31 }, endpointReference: "openrouter-main",
       credentialReference: "credential-ref", profileRevision: "profile-v1", authorityRevision: "authority-v1",
       requestTimeoutMs: 30000, protocolVersion: "text-schema-adapter-v2"
@@ -71,6 +74,13 @@ describe("durable response-contract persistence contracts", () => {
     expect(payload).toMatchObject({ model: "openai/gpt-5", temperature: 0.31, max_tokens: 4096,
       provider: { only: ["provider/frozen"], require_parameters: true },
       response_format: { type: "json_schema", json_schema: { name: story.name, strict: true, schema: story.schema } } });
+    const second = JSON.parse(serializeBoundFrozenPresetProviderRequest({ ...profile, model: "anthropic/claude" },
+      { systemPrompt: primary.prompt, input: "Act." }, { ...binding, candidateOrdinal: 1 }).body);
+    expect(second).toMatchObject({
+      model: "anthropic/claude", max_tokens: 2048,
+      provider: { order: ["provider/second"], allow_fallbacks: false, data_collection: "deny", require_parameters: true },
+      response_format: { type: "json_schema", json_schema: { name: story.name, strict: true, schema: story.schema } }
+    });
     const boundContract = bindFrozenResponseContractInvocationV2(binding);
     expect(() => serializeProviderRequest(profile, { systemPrompt: primary.prompt, input: "Act.", responseContract: boundContract } as never))
       .toThrow("Trusted preset response contracts require the frozen route executor.");
