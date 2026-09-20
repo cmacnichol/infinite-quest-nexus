@@ -270,6 +270,52 @@ integration("provider PostgreSQL adapters", () => {
       });
     });
 
+    const configuration = createPostgresChronicleConfigurationRepository(pool);
+    await expect(configuration.setEmbeddingConfig({
+      ownerUserId: nativeOwner.ownerUserId,
+      campaignId: nativeOwner.campaignId
+    }, {
+      enabled: false,
+      providerProfileId: dedicated.id,
+      model: "embedding-model",
+      batchSize: 16
+    })).resolves.toMatchObject({
+      enabled: false,
+      providerProfileId: dedicated.id,
+      model: "embedding-model"
+    });
+    const persistedState = async () => {
+      const [config, jobs] = await Promise.all([
+        pool.query(
+          `SELECT embedding_enabled,embedding_provider_profile_id,embedding_model,embedding_batch_size,
+                  embedding_document_prefix,embedding_query_prefix,retrieval_implementation,retrieval_shadow_enabled
+             FROM campaign_memory_configs WHERE owner_user_id=$1 AND campaign_id=$2`,
+          [nativeOwner.ownerUserId, nativeOwner.campaignId]
+        ),
+        pool.query(
+          `SELECT 'embedding' AS kind,id::text,status::text,work_version::text
+             FROM chronicle_jobs WHERE owner_user_id=$1 AND campaign_id=$2
+           UNION ALL
+           SELECT 'chunk' AS kind,id::text,status::text,work_version::text
+             FROM chronicle_chunk_jobs WHERE owner_user_id=$1 AND campaign_id=$2
+           ORDER BY kind,id`,
+          [nativeOwner.ownerUserId, nativeOwner.campaignId]
+        )
+      ]);
+      return { config: config.rows, jobs: jobs.rows };
+    };
+    const beforeRejectedAlias = await persistedState();
+    await expect(configuration.setEmbeddingConfig({
+      ownerUserId: nativeOwner.ownerUserId,
+      campaignId: nativeOwner.campaignId
+    }, {
+      enabled: true,
+      providerProfileId: dedicated.id,
+      model: "@preset/nexus-nsfw",
+      batchSize: 32
+    })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/preset/i) });
+    await expect(persistedState()).resolves.toEqual(beforeRejectedAlias);
+
     const legacyOwner = await fixture("legacy-preset-embedding-fallback");
     const legacyPreset = await inTransaction((client) =>
       createPostgresProviderRepositories(client).profiles.createProfile({

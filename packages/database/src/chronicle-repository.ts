@@ -983,6 +983,9 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
     async setEmbeddingConfig(scope, input: CampaignEmbeddingConfig) {
       return withTransaction(pool, async (client) => {
         const worldVersionId = await requireCampaign(client, scope);
+        if (input.model.trim().startsWith("@preset/")) {
+          throw invalid("A text preset cannot be used as an embedding model.");
+        }
         const previous = await loadConfig(client, scope);
         const providerProfileId = await resolvePermittedEmbeddingProviderId(
           client,
