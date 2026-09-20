@@ -123,8 +123,8 @@ import {
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerPromptProtocolVersion } from "./provider-application-composition.js";
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
-import { assertPresetResponseContractAuthorityBinding, queuedResponsePolicyHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type QueuedResponsePolicy, type ResponseContractOperation } from "../../../packages/contracts/src/generation-response-contract.js";
-import type { PreparedResponseContract, PreparedResponseContractV2, ResponseInvocationKey, ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
+import { bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, responseContractOperationV2Schema, type FrozenResponseContracts, type FrozenResponseContractsV2, type QueuedResponsePolicy, type ResponseContractOperation } from "../../../packages/contracts/src/generation-response-contract.js";
+import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
 import type { TextExecutionPlan } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
 import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
@@ -910,27 +910,39 @@ export function bindCampaignResponseContract(
       code: "response_contract_unavailable"
     });
   }
-  if (v2 && contract.version === 2 && contract.operation !== identity.schemaOperation) {
+  if (frozen.version === 2 && contract.version === 2 && contract.operation !== identity.schemaOperation) {
     throw Object.assign(new Error("Frozen response contract does not match the Story operation identity."), {
       code: "response_contract_identity_mismatch"
     });
   }
-  if (request.responseContract && stableStringify(request.responseContract) !== stableStringify(contract)) {
-    throw Object.assign(new Error("Prepared response contract does not match the frozen operation selection."), {
-      code: "response_contract_identity_mismatch"
-    });
-  }
-  if (v2 && contract.version === 2 && contract.admission.basis === "preset_trusted") {
+  let preparedContract: PreparedResponseContract | ReturnType<typeof preparedResponseContractV2Schema.parse>;
+  if (frozen.version === 2 && contract.version === 2 && contract.authority.kind === "preset_trusted") {
     const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
     const plan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
     if (!routeBasis || !plan) throw Object.assign(new Error("Frozen preset response contract has no saved operation plan."), { code: "response_contract_unavailable" });
     try {
-      assertPresetResponseContractAuthorityBinding(frozen.queuedPolicy, contract as PreparedResponseContractV2, routeBasis, plan, request.systemPrompt);
+      preparedContract = bindFrozenResponseContractInvocationV2({
+        frozen,
+        invocationKey: identity.key,
+        operation: responseContractOperationV2Schema.parse(operation),
+        routeBasis,
+        plan,
+        trustedOperationPrompt: request.systemPrompt
+      });
     } catch {
       throw Object.assign(new Error("Frozen preset response contract no longer matches its saved operation prompt."), { code: "response_contract_identity_mismatch" });
     }
+  } else if (frozen.version === 2 && contract.version === 2) {
+    preparedContract = preparedResponseContractV2Schema.parse(contract);
+  } else {
+    preparedContract = preparedResponseContractSchema.parse(contract);
   }
-  return request.responseContract ? request : { ...request, responseContract: contract };
+  if (request.responseContract && stableStringify(request.responseContract) !== stableStringify(preparedContract)) {
+    throw Object.assign(new Error("Prepared response contract does not match the frozen operation selection."), {
+      code: "response_contract_identity_mismatch"
+    });
+  }
+  return request.responseContract ? request : { ...request, responseContract: preparedContract };
 }
 
 /** The reservation must be the dispatch body for contract jobs. Historical
@@ -1788,7 +1800,10 @@ async function executeLoadedGeneration(
     // Task 4 owns v2 schema/response-contract identity. A frozen native route
     // must not compare its planning descriptor against mutable profile config.
     const queuedResponsePolicy = routeBasis ? undefined : job.orchestration_private?.queuedResponsePolicy;
-    if (queuedResponsePolicy) {
+    if (queuedResponsePolicy?.version === 2) {
+      throw Object.assign(new Error("V2 response-contract execution requires the durable invocation path."), { code: "response_contract_unavailable" });
+    }
+    if (queuedResponsePolicy?.version === 1) {
       let frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
       if (!frozenResponseContracts) {
         if (!collaborators.resolveResponseContracts || !repository.saveFrozenResponseContracts) {
@@ -1797,10 +1812,11 @@ async function executeLoadedGeneration(
         const selected = await collaborators.resolveResponseContracts(job.owner_user_id, provider, queuedResponsePolicy, responseContractProfile(provider, job));
         const saved = await repository.saveFrozenResponseContracts(scope, queuedResponsePolicyHash(queuedResponsePolicy), selected);
         if (!saved) throw Object.assign(new Error("The response-contract preflight lost its lease."), { code: "lease_lost" });
+        if (saved.version !== 1) throw Object.assign(new Error("The worker received an incompatible response-contract version."), { code: "response_contract_identity_mismatch" });
         frozenResponseContracts = saved;
         job = { ...job, orchestration_private: { ...job.orchestration_private, frozenResponseContracts } };
       }
-      if (frozenResponseContracts.queuedPolicy.providerConfigurationHash !== responseContractProfile(provider, job).configurationHash) {
+      if (frozenResponseContracts.version !== 1 || frozenResponseContracts.queuedPolicy.providerConfigurationHash !== responseContractProfile(provider, job).configurationHash) {
         throw Object.assign(new Error("The frozen response-contract provider identity changed."), { code: "generation_checkpoint_incompatible" });
       }
     }

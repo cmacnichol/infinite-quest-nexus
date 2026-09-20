@@ -9,7 +9,7 @@ import {
   responseInvocationKeySchema,
   responseInvocationKeyV2Schema
 } from "./text-response-format.js";
-import { getProviderOutputSchemaV2, stableJsonHash } from "./provider-output-schema.js";
+import { getProviderOutputSchemaV2, providerOutputSchemaOperationV2Schema, stableJsonHash } from "./provider-output-schema.js";
 import { deriveTextExecutionPlan, readTextExecutionPlan, readTextExecutionRouteBasis, type TextExecutionPlan, type TextExecutionRouteBasis } from "./text-execution-plan.js";
 export type { ResponseInvocationKey } from "./text-response-format.js";
 
@@ -214,14 +214,63 @@ export function readQueuedResponsePolicyV2(value: unknown): QueuedResponsePolicy
   return parsed.data;
 }
 
-function contractV2MatchesKey(key: z.infer<typeof responseInvocationKeyV2Schema>, contract: z.infer<typeof preparedResponseContractV2Schema>): boolean {
+/**
+ * A versioned reader is the persistence boundary for new work. The v1 reader
+ * deliberately remains narrow so historical callers retain their old shape.
+ */
+export type QueuedResponsePolicyVersioned = QueuedResponsePolicy | QueuedResponsePolicyV2;
+export function readQueuedResponsePolicyVersioned(value: unknown): QueuedResponsePolicyVersioned | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object") throw new Error("Queued response policy is invalid or incompatible.");
+  const version = (value as { version?: unknown }).version;
+  if (version === 1) return readQueuedResponsePolicy(value)!;
+  if (version === 2) return readQueuedResponsePolicyV2(value);
+  throw new Error("Queued response policy is invalid or incompatible.");
+}
+/** Stable versioned identity. V1's original hash is intentionally unchanged. */
+export function queuedResponsePolicyVersionedHash(value: QueuedResponsePolicyVersioned): string {
+  return value.version === 1 ? queuedResponsePolicyHash(value) : sha256Hex(canonicalJson(queuedResponsePolicyV2Schema.parse(value)));
+}
+
+const frozenResponseContractAuthorityV2Schema = z.discriminatedUnion("kind", [
+  directResponseContractAuthorityV2Schema,
+  z.object({ kind: z.literal("preset_trusted"), routeBasisHash: hashSchema }).strict()
+]);
+/**
+ * Immutable queue-time closure. Preset plan identity is intentionally absent:
+ * one schema key may serve primary, recovery, and repair prompts.
+ */
+export const frozenResponseContractV2Schema = z.object({
+  version: z.literal(2), mode: z.literal("json_schema"), admission: responseContractAdmissionSchema,
+  operation: providerOutputSchemaOperationV2Schema,
+  streaming: z.boolean(), forbidFormatFallback: z.literal(true),
+  schemaVersion: z.string().min(1).max(200), schemaHash: hashSchema, schemaName: z.string().min(1).max(200), schema: z.record(z.string(), z.unknown()),
+  authority: frozenResponseContractAuthorityV2Schema
+}).strict().superRefine((value, context) => {
+  if (value.admission.basis !== value.authority.kind) context.addIssue({ code: "custom", path: ["authority"], message: "Response-contract admission and authority must agree." });
+  const catalog = getProviderOutputSchemaV2(value.operation);
+  if (value.schemaVersion !== catalog.version || value.schemaName !== catalog.name || value.schemaHash !== catalog.schemaHash
+    || value.schemaHash !== stableJsonHash(value.schema)) {
+    context.addIssue({ code: "custom", path: ["schema"], message: "Frozen v2 contract must use the exact catalog schema." });
+  }
+  if (value.admission.basis === "model_verified" && value.authority.kind === "model_verified") {
+    try {
+      assertModelVerifiedResponseContractEvidence({ verification: value.admission.verification, authority: value.authority, operation: value.operation, streaming: value.streaming });
+    } catch {
+      context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Model verification must bind the exact v2 contract authority and schema." });
+    }
+  }
+});
+export type FrozenResponseContractV2 = Readonly<z.infer<typeof frozenResponseContractV2Schema>>;
+
+function contractV2MatchesKey(key: z.infer<typeof responseInvocationKeyV2Schema>, contract: FrozenResponseContractV2): boolean {
   const [operation, delivery] = key.split(":") as [string, string];
   return contract.operation === operation && contract.streaming === (delivery === "stream");
 }
 
 export const frozenResponseContractsV2Schema = z.object({
   version: z.literal(2), queuedPolicy: queuedResponsePolicyV2Schema, selectedAt: z.iso.datetime(), capabilityEvidenceHash: hashSchema,
-  contracts: z.partialRecord(responseInvocationKeyV2Schema, preparedResponseContractV2Schema), selectionHash: hashSchema
+  contracts: z.partialRecord(responseInvocationKeyV2Schema, frozenResponseContractV2Schema), selectionHash: hashSchema
 }).strict().superRefine((value, context) => {
   const keys = new Set(value.queuedPolicy.invocationKeys);
   for (const [key, contract] of Object.entries(value.contracts)) {
@@ -272,6 +321,104 @@ export function readFrozenResponseContractsV2(value: unknown): FrozenResponseCon
   const parsed = frozenResponseContractsV2Schema.safeParse(value);
   if (!parsed.success) throw new Error("Frozen v2 response contracts are invalid or incompatible.");
   return parsed.data;
+}
+
+export type FrozenResponseContractsVersioned = FrozenResponseContracts | FrozenResponseContractsV2;
+export function readFrozenResponseContractsVersioned(value: unknown): FrozenResponseContractsVersioned | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object") throw new Error("Frozen response contracts are invalid or incompatible.");
+  const version = (value as { version?: unknown }).version;
+  if (version === 1) return readFrozenResponseContracts(value)!;
+  if (version === 2) return readFrozenResponseContractsV2(value);
+  throw new Error("Frozen response contracts are invalid or incompatible.");
+}
+
+export const responseContractOperationV2Schema = z.enum([
+  "story_generation", "story_recovery", "story_choice_repair", "event_extension", "scene_coverage_rewrite", "story_continuity_review", "story_continuity_repair",
+  "rpg_assessment", "event_trigger_before", "event_trigger_after", "scene_coverage_validation", "event_coverage_validation"
+]);
+export type ResponseContractOperationV2 = z.infer<typeof responseContractOperationV2Schema>;
+
+export function responseContractOperationV2MatchesInvocation(operation: ResponseContractOperationV2, invocationKey: z.infer<typeof responseInvocationKeyV2Schema>): boolean {
+  if (operation === "story_choice_repair") return invocationKey === "choices:nonstream";
+  if (operation === "story_continuity_review") return invocationKey === "continuity_review:nonstream";
+  if (operation === "rpg_assessment" || operation === "event_trigger_before" || operation === "event_trigger_after" || operation === "scene_coverage_validation" || operation === "event_coverage_validation") {
+    return invocationKey === `${operation}:nonstream` || (operation === "scene_coverage_validation" && invocationKey === "scene_coverage:nonstream") || (operation === "event_coverage_validation" && invocationKey === "event_coverage:nonstream");
+  }
+  return invocationKey === "story:nonstream" || (operation === "story_generation" && invocationKey === "story:stream");
+}
+
+/**
+ * The v2 ledger has 24 total durable entries per job. Prompt-distinct repair
+ * records and persisted logical-attempt history consume that same finite
+ * budget. Exhaustion deliberately fails closed; physical provider-route
+ * attempts remain separate Task 5 data.
+ */
+export const responseContractInvocationLedgerLimitV2 = 24;
+
+const attemptResponseContractAuditV2Schema = z.object({
+  version: z.literal(2), selectionHash: hashSchema, invocationKey: responseInvocationKeyV2Schema,
+  schemaVersion: z.string().min(1).max(200), schemaHash: hashSchema, requestedModel: z.string().trim().min(1).max(512),
+  operationPromptHash: hashSchema, planHash: hashSchema.nullable(), routeBasisHash: hashSchema.nullable(), requestPayloadHash: hashSchema,
+  returnedModel: z.string().trim().min(1).max(256).nullable(), returnedProviderRoute: z.string().trim().min(1).max(256).nullable(), diagnosticCode: responseFormatDiagnosticCodeSchema.nullable()
+}).strict();
+export type AttemptResponseContractAuditV2 = Readonly<z.infer<typeof attemptResponseContractAuditV2Schema>>;
+export function readAttemptResponseContractAuditV2(value: unknown): AttemptResponseContractAuditV2 {
+  const parsed = attemptResponseContractAuditV2Schema.safeParse(value);
+  if (!parsed.success) throw new Error("Attempt v2 response-contract audit is invalid or incompatible.");
+  return parsed.data;
+}
+
+export const responseContractInvocationAuditV2Schema = z.object({
+  version: z.literal(2), id: hashSchema, logicalAttemptId: z.uuid(), invocationKey: responseInvocationKeyV2Schema,
+  operation: responseContractOperationV2Schema, requestPayloadHash: hashSchema, request: attemptResponseContractAuditV2Schema,
+  status: z.enum(["reserved", "dispatched", "completed"]), reservedAt: z.iso.datetime(), dispatchedAt: z.iso.datetime().nullable(), completedAt: z.iso.datetime().nullable(),
+  response: responseContractInvocationResponseSchema.nullable()
+}).strict().superRefine((value, context) => {
+  if (value.request.invocationKey !== value.invocationKey || value.request.requestPayloadHash !== value.requestPayloadHash) {
+    context.addIssue({ code: "custom", path: ["request"], message: "Invocation request identity must match its ledger entry." });
+  }
+  if (!responseContractOperationV2MatchesInvocation(value.operation, value.invocationKey)) context.addIssue({ code: "custom", path: ["operation"], message: "Invocation operation does not match its v2 schema key." });
+  if (value.status === "reserved" && (value.dispatchedAt !== null || value.completedAt !== null || value.response !== null)) context.addIssue({ code: "custom", message: "Reserved invocation cannot contain dispatch or response data." });
+  if (value.status === "dispatched" && (value.dispatchedAt === null || value.completedAt !== null || value.response !== null)) context.addIssue({ code: "custom", message: "Dispatched invocation must contain only its dispatch timestamp." });
+  if (value.status === "completed" && (value.dispatchedAt === null || value.completedAt === null || value.response === null)) context.addIssue({ code: "custom", message: "Completed invocation must contain immutable response provenance." });
+});
+export type ResponseContractInvocationAuditV2 = Readonly<z.infer<typeof responseContractInvocationAuditV2Schema>>;
+export type ResponseContractInvocationAuditVersioned = ResponseContractInvocationAudit | ResponseContractInvocationAuditV2;
+export function readResponseContractInvocationAuditV2(value: unknown): ResponseContractInvocationAuditV2 {
+  const parsed = responseContractInvocationAuditV2Schema.safeParse(value);
+  if (!parsed.success) throw new Error("Response-contract v2 invocation audit is invalid or incompatible.");
+  return parsed.data;
+}
+export function readResponseContractInvocationAuditVersioned(value: unknown): ResponseContractInvocationAuditVersioned {
+  if (!value || typeof value !== "object") throw new Error("Response-contract invocation audit is invalid or incompatible.");
+  const version = (value as { version?: unknown }).version;
+  if (version === 1) return readResponseContractInvocationAudit(value);
+  if (version === 2) return readResponseContractInvocationAuditV2(value);
+  throw new Error("Response-contract invocation audit is invalid or incompatible.");
+}
+export function responseContractInvocationAuditIdV2(jobId: string, logicalAttemptId: string, invocationKey: z.infer<typeof responseInvocationKeyV2Schema>, operation: ResponseContractOperationV2, requestPayloadHash: string): string {
+  z.uuid().parse(jobId); z.uuid().parse(logicalAttemptId); responseInvocationKeyV2Schema.parse(invocationKey); responseContractOperationV2Schema.parse(operation); hashSchema.parse(requestPayloadHash);
+  return sha256Hex(canonicalJson({ version: 2, jobId, logicalAttemptId, invocationKey, operation, requestPayloadHash }));
+}
+
+/** Creates the plan-bound prepared contract only at invocation time. */
+export function bindFrozenResponseContractInvocationV2(input: Readonly<{
+  frozen: FrozenResponseContractsV2; invocationKey: z.infer<typeof responseInvocationKeyV2Schema>; operation: ResponseContractOperationV2;
+  routeBasis: unknown; plan: unknown; trustedOperationPrompt: string;
+}>): z.infer<typeof preparedResponseContractV2Schema> {
+  const frozen = readFrozenResponseContractsV2(input.frozen);
+  if (!responseContractOperationV2MatchesInvocation(input.operation, input.invocationKey)) throw new Error("Invocation operation does not match its v2 schema key.");
+  const closure = frozen.contracts[input.invocationKey];
+  if (!closure) throw new Error("Frozen v2 response contract is unavailable for this invocation.");
+  if (closure.authority.kind === "preset_trusted") {
+    const routeBasis = readTextExecutionRouteBasis(input.routeBasis);
+    const plan = readTextExecutionPlan(input.plan);
+    const contract = preparedResponseContractV2Schema.parse({ ...closure, authority: { ...closure.authority, planHash: plan.planHash } });
+    assertPresetResponseContractAuthorityBinding(frozen.queuedPolicy, contract, routeBasis, plan, input.trustedOperationPrompt);
+    return contract;
+  }
+  return preparedResponseContractV2Schema.parse(closure);
 }
 
 /**

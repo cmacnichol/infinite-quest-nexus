@@ -5,7 +5,7 @@ import type {
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../contracts/src/index.js";
-import { readQueuedResponsePolicy, type QueuedResponsePolicy } from "../../contracts/src/generation-response-contract.js";
+import { readQueuedResponsePolicyVersioned, type QueuedResponsePolicyVersioned } from "../../contracts/src/generation-response-contract.js";
 import {
   GenerationApplicationError,
   type GenerationCommandRepository,
@@ -141,7 +141,7 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
     ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string;
     modelContextWindowTokens?: number; operationKind: OperationKind; generationPolicy: GenerationPolicySnapshot;
     storyMemoryPolicy: StoryMemoryPolicySnapshot | null;
-  }>) => Promise<QueuedResponsePolicy | undefined>;
+  }>) => Promise<QueuedResponsePolicyVersioned | undefined>;
   /** Remote-capable preflight. It is deliberately called before beginning the enqueue transaction. */
   prepareTextExecutionRouteBasis?: (scope: Readonly<{
     ownerUserId: string; campaignId: string; requestedProviderProfileId: string | null; requestedModel: string;
@@ -165,12 +165,15 @@ function json(value: unknown): string {
 }
 
 function assertQueuedResponsePolicyIdentity(
-  value: QueuedResponsePolicy | undefined,
+  value: QueuedResponsePolicyVersioned | undefined,
   providerProfileId: string,
   requestedModel: string
-): QueuedResponsePolicy | undefined {
+): QueuedResponsePolicyVersioned | undefined {
   if (!value) return undefined;
-  if (value.providerProfileId !== providerProfileId || (requestedModel.length > 0 && value.model !== requestedModel)) {
+  const modelMismatch = value.version === 1
+    ? requestedModel.length > 0 && value.model !== requestedModel
+    : value.authority.kind === "model_verified" && requestedModel.length > 0 && value.authority.model !== requestedModel;
+  if (value.providerProfileId !== providerProfileId || modelMismatch) {
     throw new GenerationApplicationError("invalid_state");
   }
   return value;
@@ -465,7 +468,7 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel, ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
-        const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
+        const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicyVersioned(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel,
           ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }),
           operationKind: "append", generationPolicy, storyMemoryPolicy
@@ -607,7 +610,7 @@ export function createPostgresGenerationCommandRepository(
         const storyMemoryPolicy = dependencies.resolveStoryMemoryPolicySnapshot
           ? await dependencies.resolveStoryMemoryPolicySnapshot(client, { ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel, ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }) })
           : null;
-        const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicy(await dependencies.resolveQueuedResponsePolicy?.(client, {
+        const queuedResponsePolicy = assertQueuedResponsePolicyIdentity(readQueuedResponsePolicyVersioned(await dependencies.resolveQueuedResponsePolicy?.(client, {
           ownerUserId: scope.ownerUserId, campaignId: scope.campaignId, providerProfileId, requestedModel,
           ...(request.context.modelContextWindowTokens === undefined ? {} : { modelContextWindowTokens: request.context.modelContextWindowTokens }),
           operationKind: "replace_latest", generationPolicy, storyMemoryPolicy

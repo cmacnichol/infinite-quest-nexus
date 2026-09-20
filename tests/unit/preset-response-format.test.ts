@@ -14,6 +14,7 @@ import {
 } from "../../packages/contracts/src/provider-output-schema.js";
 import {
   assertPresetResponseContractAuthorityBinding,
+  bindFrozenResponseContractInvocationV2,
   frozenResponseContractsV2SelectionHash,
   readFrozenResponseContractsV2,
   readQueuedResponsePolicyV2
@@ -215,7 +216,7 @@ describe("native response-contract admission", () => {
           schemaHash: schema.schemaHash,
           schemaName: schema.name,
           schema: schema.schema,
-          authority: { kind: "preset_trusted" as const, routeBasisHash: digest, planHash: digest }
+          authority: { kind: "preset_trusted" as const, routeBasisHash: digest }
         }
       }
     };
@@ -325,6 +326,8 @@ describe("native response-contract admission", () => {
     const selected = { version: 2 as const, queuedPolicy, selectedAt: now, capabilityEvidenceHash: digest, contracts: { "event_coverage:nonstream": contract } };
     const frozen = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
     expect(readFrozenResponseContractsV2(frozen)).toMatchObject({ version: 2 });
+    expect(bindFrozenResponseContractInvocationV2({ frozen, invocationKey: "event_coverage:nonstream", operation: "event_coverage_validation", routeBasis: undefined, plan: undefined, trustedOperationPrompt: "Validate event coverage." }))
+      .toMatchObject({ authority: { kind: "model_verified", model: "model-a" } });
     const altered = { ...frozen, queuedPolicy: { ...queuedPolicy, admission: { ...queuedPolicy.admission, verification: { ...verification, endpointIdentity: "other-endpoint" } } } };
     expect(() => readFrozenResponseContractsV2({ ...altered, selectionHash: frozenResponseContractsV2SelectionHash(altered) })).toThrow(/invalid or incompatible/i);
   });

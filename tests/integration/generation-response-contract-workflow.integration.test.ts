@@ -102,7 +102,7 @@ integration("response-contract composed generation workflow", () => {
       maxOutputTokens: 4_096,
       temperature: 0,
       enabled: true,
-      configuration: policy === "legacy" ? {} : { textResponseFormatPolicy: policy }
+      configuration: { textResponseFormatPolicy: policy }
     }, credentialSecret);
   }
 

@@ -165,7 +165,8 @@ describe("generation response-contract production preflight collaborators", () =
     } as never);
     expect(localProfile).toHaveBeenCalledWith(transactionClient, "owner", profile.id, profile.model);
     expect(executionText).not.toHaveBeenCalled();
-    expect(result?.providerConfigurationHash).toBe(queuedPolicy(4_096).providerConfigurationHash);
+    expect(result?.version).toBe(1);
+    expect(result?.version === 1 && result.providerConfigurationHash).toBe(queuedPolicy(4_096).providerConfigurationHash);
   });
 
   it("does not discover inventory before rejecting a queued registry mismatch", async () => {

@@ -120,7 +120,11 @@ describe("generation response-contract executor operation matrix", () => {
       contracts: {
         [key]: { version: 2, mode: "json_schema", operation: schemaOperation, streaming: false,
           schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
-          admission: { mode: "json_schema", basis: "model_verified", verification: {} },
+          admission: { mode: "json_schema", basis: "model_verified", verification: {
+            version: 2, providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", routeConfigHash: hash,
+            adapterProtocol: "text-schema-adapter-v2", operation: schemaOperation, schemaHash: schema.schemaHash, streaming: false,
+            verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: schemaOperation === "story"
+          } },
           authority: { kind: "model_verified", providerProfileId: "00000000-0000-4000-8000-000000000004", providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash }, forbidFormatFallback: true }
       }
     } as never;

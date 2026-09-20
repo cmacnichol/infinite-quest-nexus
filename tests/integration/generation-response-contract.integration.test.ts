@@ -2,7 +2,9 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
-import { frozenResponseContractsSelectionHash, queuedResponsePolicyHash } from "../../packages/contracts/src/generation-response-contract.js";
+import { frozenResponseContractsSelectionHash, frozenResponseContractsV2SelectionHash, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash } from "../../packages/contracts/src/generation-response-contract.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
 import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
@@ -37,12 +39,13 @@ integration("PostgreSQL response-contract persistence", () => {
     fixture.world.title = `response-contract ${crypto.randomUUID()}`;
     return importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "response-contract.story", story: fixture }));
   }
-  function commands(withPolicy: boolean) {
+  function commands(withPolicy: boolean, responsePolicy?: ReturnType<typeof policy> | ReturnType<typeof v2Policy> | ReturnType<typeof v2ModelPolicy>, routeBasis?: ReturnType<typeof v2RouteBasis>) {
     return createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, owner, campaignId) => loadPromptSnapshotForTest(client, owner, campaignId),
       promptProtocolVersion: providerPromptProtocolVersion,
       readTurnReportedCosts: (owner, _campaign, turnIds) => readTurnReportedCostsForTest(pool, owner, [...turnIds]),
-      ...(withPolicy ? { resolveQueuedResponsePolicy: async () => ({ version: 1, policy: "auto" as const, providerProfileId, model: "contract-model", endpointIdentity: "test-endpoint", providerConfigurationHash: hash, verificationRegistryHash: hash, operationClosureVersion: 1 as const, invocationKeys: ["story:nonstream" as const] }) } : {})
+      ...(withPolicy ? { resolveQueuedResponsePolicy: async () => responsePolicy ?? ({ version: 1, policy: "auto" as const, providerProfileId, model: "contract-model", endpointIdentity: "test-endpoint", providerConfigurationHash: hash, verificationRegistryHash: hash, operationClosureVersion: 1 as const, invocationKeys: ["story:nonstream" as const] }) } : {}),
+      ...(routeBasis ? { prepareTextExecutionRouteBasis: async () => routeBasis } : {})
     });
   }
   function policy(policy: "auto" | "required" = "auto") {
@@ -77,6 +80,54 @@ integration("PostgreSQL response-contract persistence", () => {
     const contract = frozen.contracts["story:nonstream"];
     return { version: 1 as const, selectionHash: frozen.selectionHash, invocationKey: "story:nonstream" as const, mode: "json_schema" as const, schemaVersion: contract.schemaVersion, schemaHash: contract.schemaHash, requestedModel: "contract-model", providerRoutingSlugs: contract.providerRoutingSlugs, returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
   }
+  function v2RouteBasis() {
+    const draft = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "contract-preset" },
+      preset: { slug: "contract-preset", versionId: "preset-v1", configHash: hash },
+      candidates: [{ modelId: "contract-model", providerPolicy: {}, contextWindowTokens: 32768, maxOutputTokens: 4096 }],
+      presetSystemPrompt: "Contract preset instructions.", parameters: {}, endpointReference: "test-endpoint",
+      credentialReference: "contract-credential", profileRevision: "profile-v1", authorityRevision: "authority-v1",
+      requestTimeoutMs: 30000, protocolVersion: "text-schema-adapter-v2"
+    };
+    return { ...draft, routeBasisHash: textExecutionRouteBasisHash({ ...draft, routeBasisHash: hash }) };
+  }
+  function v2Policy(routeBasisHash: string) {
+    return {
+      version: 2 as const, policy: "required" as const, providerProfileId,
+      admission: { mode: "json_schema" as const, basis: "preset_trusted" as const },
+      authority: { kind: "preset_trusted" as const, routeBasisHash, selection: { kind: "openrouter_preset" as const, slug: "contract-preset" }, endpointReference: "test-endpoint", credentialReference: "contract-credential", authorityRevision: "authority-v1", profileRevision: "profile-v1" },
+      operationClosureVersion: 2 as const, invocationKeys: ["story:nonstream" as const]
+    };
+  }
+  function v2Frozen(routeBasisHash: string) {
+    const queuedPolicy = v2Policy(routeBasisHash); const story = getProviderOutputSchemaV2("story");
+    const selected = { version: 2 as const, queuedPolicy, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash,
+      contracts: { "story:nonstream": { version: 2 as const, mode: "json_schema" as const, admission: queuedPolicy.admission, operation: "story" as const, streaming: false, forbidFormatFallback: true as const, schemaVersion: story.version, schemaHash: story.schemaHash, schemaName: story.name, schema: story.schema, authority: { kind: "preset_trusted" as const, routeBasisHash } } } };
+    return { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
+  }
+  function v2Audit(frozen: ReturnType<typeof v2Frozen>, prompt: string, plan: ReturnType<typeof deriveTextExecutionPlan>, requestPayloadHash: string) {
+    const contract = frozen.contracts["story:nonstream"];
+    return { version: 2 as const, selectionHash: frozen.selectionHash, invocationKey: "story:nonstream" as const, schemaVersion: contract.schemaVersion, schemaHash: contract.schemaHash, requestedModel: "contract-model", operationPromptHash: sha256Hex(prompt), planHash: plan.planHash, routeBasisHash: plan.routeBasisHash!, requestPayloadHash, returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
+  }
+  function v2ModelPolicy() {
+    const schema = getProviderOutputSchemaV2("event_coverage");
+    const verification = { version: 2 as const, providerType: "openrouter" as const, endpointIdentity: "test-endpoint", model: "contract-model", routeConfigHash: hash,
+      adapterProtocol: "text-schema-adapter-v2" as const, operation: "event_coverage" as const, schemaHash: schema.schemaHash, streaming: false,
+      verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false };
+    const authority = { kind: "model_verified" as const, providerProfileId, providerType: "openrouter" as const, endpointIdentity: "test-endpoint", model: "contract-model", providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash };
+    return { version: 2 as const, policy: "required" as const, providerProfileId, admission: { mode: "json_schema" as const, basis: "model_verified" as const, verification }, authority,
+      operationClosureVersion: 2 as const, invocationKeys: ["event_coverage:nonstream" as const] };
+  }
+  function v2ModelFrozen() {
+    const queuedPolicy = v2ModelPolicy(); const schema = getProviderOutputSchemaV2("event_coverage");
+    const selected = { version: 2 as const, queuedPolicy, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash,
+      contracts: { "event_coverage:nonstream": { version: 2 as const, mode: "json_schema" as const, admission: queuedPolicy.admission, operation: "event_coverage" as const, streaming: false, forbidFormatFallback: true as const, schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema, authority: queuedPolicy.authority } } };
+    return { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
+  }
+  function v2ModelAudit(frozen: ReturnType<typeof v2ModelFrozen>, prompt: string, requestPayloadHash: string) {
+    const contract = frozen.contracts["event_coverage:nonstream"];
+    return { version: 2 as const, selectionHash: frozen.selectionHash, invocationKey: "event_coverage:nonstream" as const, schemaVersion: contract.schemaVersion, schemaHash: contract.schemaHash, requestedModel: "contract-model", operationPromptHash: sha256Hex(prompt), planHash: null, routeBasisHash: null, requestPayloadHash, returnedModel: null, returnedProviderRoute: null, diagnosticCode: null };
+  }
   async function claimed(queuedId: string, workerId = `matrix-${crypto.randomUUID()}`) {
     const repository = createPostgresGenerationExecutionRepository(pool);
     const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
@@ -84,6 +135,28 @@ integration("PostgreSQL response-contract persistence", () => {
     const payload = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
     expect(payload?.id).toBe(queuedId);
     return { repository, claim: claim!, payload: payload!, scope: { jobId: queuedId, ownerUserId, workerId } };
+  }
+  async function v2ModelFixture(action: string) {
+    const imported = await campaign(); const frozen = v2ModelFrozen();
+    const queued = await commands(true, frozen.queuedPolicy).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id); const logicalAttemptId = crypto.randomUUID();
+    const initial = { ...fixture.payload.orchestration_private, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } };
+    expect(await fixture.repository.saveOrchestration(fixture.scope, initial)).toBe(true);
+    expect(await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyVersionedHash(frozen.queuedPolicy), frozen)).toEqual(frozen);
+    return { queued, fixture, frozen, logicalAttemptId, initial };
+  }
+  async function v2PresetFixture(action: string) {
+    const routeBasis = v2RouteBasis(); const frozen = v2Frozen(routeBasis.routeBasisHash);
+    const imported = await campaign();
+    const queued = await commands(true, frozen.queuedPolicy, routeBasis).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id); const logicalAttemptId = crypto.randomUUID();
+    const initial = { ...fixture.payload.orchestration_private, textExecutionRouteBasis: routeBasis, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } };
+    expect(await fixture.repository.saveOrchestration(fixture.scope, initial)).toBe(true);
+    expect(await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyVersionedHash(frozen.queuedPolicy), frozen)).toEqual(frozen);
+    return { queued, fixture, frozen, routeBasis, logicalAttemptId, initial };
+  }
+  function primaryResultCheckpoint(requestBody: string, requestPayloadHash: string) {
+    return { version: 1, requestBody, requestPayloadHash, response: { content: "{}", responseId: "tampered", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {} }, sentFactIds: [], providerConfigurationHash: hash, contextFingerprint: "x", contextDiagnostics: {}, chronicleRetrieval: {} };
   }
   async function checkpointForPause(job: Awaited<ReturnType<typeof claimed>>, campaignId: string): Promise<GenerationReviewCheckpoint> {
     const world = await pool.query<{ worldId: string }>("SELECT w.id AS \"worldId\" FROM campaigns c JOIN world_versions v ON v.id=c.world_version_id JOIN worlds w ON w.id=v.world_id WHERE c.id=$1", [campaignId]);
@@ -119,6 +192,104 @@ integration("PostgreSQL response-contract persistence", () => {
     expect(stored.get(protectedJob.id)?.recoveryMetadata.queuedResponsePolicy).toBeUndefined();
     expect(stored.get(legacyJob.id)?.orchestrationPrivate.queuedResponsePolicy).toBeUndefined();
     await pool.query("UPDATE generation_jobs SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL WHERE id = ANY($1::uuid[])", [[protectedJob.id, legacyJob.id]]);
+  });
+
+  it("persists one v2 closure for prompt-distinct primary and repair reservations behind lease and owner fences", async () => {
+    const imported = await campaign();
+    const routeBasis = v2RouteBasis(); const frozen = v2Frozen(routeBasis.routeBasisHash);
+    const queued = await commands(true, frozen.queuedPolicy, routeBasis).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Persist prompt-distinct response contracts.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id); const logicalAttemptId = crypto.randomUUID();
+    const initial = { ...fixture.payload.orchestration_private, textExecutionRouteBasis: routeBasis, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } };
+    expect(await fixture.repository.saveOrchestration(fixture.scope, initial)).toBe(true);
+    expect(await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyVersionedHash(frozen.queuedPolicy), frozen)).toEqual(frozen);
+    expect(await fixture.repository.saveOrchestration(fixture.scope, initial)).toBe(true);
+    const primaryPrompt = "Write the next turn."; const repairPrompt = "Repair the rejected turn.";
+    const primaryPlan = deriveTextExecutionPlan(routeBasis, primaryPrompt); const repairPlan = deriveTextExecutionPlan(routeBasis, repairPrompt);
+    const primaryBody = "{}"; const primaryHash = sha256Hex(primaryBody); const repairHash = "c".repeat(64);
+    const primaryInput = { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "story_generation" as const, requestPayloadHash: primaryHash, request: v2Audit(frozen, primaryPrompt, primaryPlan, primaryHash), routeBasis, plan: primaryPlan, trustedOperationPrompt: primaryPrompt };
+    const repairInput = { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "story_recovery" as const, requestPayloadHash: repairHash, request: v2Audit(frozen, repairPrompt, repairPlan, repairHash), routeBasis, plan: repairPlan, trustedOperationPrompt: repairPrompt };
+    const primary = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, primaryInput);
+    expect(primary).toMatchObject({ version: 2, status: "reserved", request: { planHash: primaryPlan.planHash } });
+    await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, primaryInput)).resolves.toEqual(primary);
+    await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, { ...repairInput, request: { ...repairInput.request, requestedModel: "unrelated-model" } })).resolves.toBeNull();
+    await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, { ...repairInput, plan: primaryPlan })).resolves.toBeNull();
+    const repair = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, repairInput);
+    expect(repair).toMatchObject({ version: 2, status: "reserved", request: { planHash: repairPlan.planHash } });
+    expect(primaryPlan.planHash).not.toBe(repairPlan.planHash);
+    await expect(fixture.repository.markResponseContractInvocationDispatched!(fixture.scope, primary!.id, primaryHash)).resolves.toMatchObject({ version: 2, status: "dispatched" });
+    await expect(fixture.repository.completeResponseContractInvocation!(fixture.scope, primary!.id, { returnedModel: "contract-model", returnedProviderRoute: "route-a", diagnosticCode: null })).resolves.toMatchObject({ version: 2, status: "completed" });
+    const failure = { version: 2 as const, invocationId: primary!.id, requestBody: primaryBody, requestPayloadHash: primaryHash, responseId: "partial-id", partialContent: "private partial", partialContentTruncated: false, returnedModel: "contract-model", returnedProviderRoute: "route-a", diagnosticCode: "provider_schema_invalid" as const };
+    expect(await fixture.repository.saveOrchestration(fixture.scope, { ...initial, preparedResponseFailures: [failure] })).toBe(true);
+    for (let index = 0; index < 22; index += 1) {
+      const prompt = `Apply bounded repair evidence ${index}.`; const plan = deriveTextExecutionPlan(routeBasis, prompt);
+      const requestPayloadHash = index.toString(16).padStart(64, "0");
+      await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "event_extension" as const, requestPayloadHash, request: v2Audit(frozen, prompt, plan, requestPayloadHash), routeBasis, plan, trustedOperationPrompt: prompt })).resolves.toMatchObject({ version: 2, status: "reserved" });
+    }
+    await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, { ...repairInput, requestPayloadHash: "f".repeat(64), request: v2Audit(frozen, repairPrompt, repairPlan, "f".repeat(64)) })).resolves.toBeNull();
+    await expect(fixture.repository.reserveResponseContractInvocation!({ ...fixture.scope, ownerUserId: crypto.randomUUID() }, repairInput)).resolves.toBeNull();
+    await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
+    await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, repairInput)).resolves.toBeNull();
+    const reclaimer = await claimed(queued.id, `v2-reclaim-${crypto.randomUUID()}`);
+    await expect(reclaimer.repository.reserveResponseContractInvocation!(reclaimer.scope, repairInput)).resolves.toEqual(repair);
+    expect(reclaimer.payload.orchestration_private.frozenResponseContracts).toEqual(frozen);
+    expect(reclaimer.payload.orchestration_private.preparedResponseFailures).toEqual([failure]);
+    const stored = await pool.query<{ orchestrationPrivate: Record<string, unknown> }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [queued.id]);
+    expect(stored.rows[0]!.orchestrationPrivate.frozenResponseContracts).toEqual(frozen);
+    expect(stored.rows[0]!.orchestrationPrivate.responseContractInvocations).toHaveLength(24);
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
+  it("persists a verified Model v2 invocation without a preset route basis or plan", async () => {
+    const imported = await campaign(); const frozen = v2ModelFrozen();
+    const queued = await commands(true, frozen.queuedPolicy).enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Persist a verified Model contract.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } }));
+    const fixture = await claimed(queued.id); const logicalAttemptId = crypto.randomUUID();
+    const initial = { ...fixture.payload.orchestration_private, logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 } };
+    expect(await fixture.repository.saveOrchestration(fixture.scope, initial)).toBe(true);
+    expect(await fixture.repository.saveFrozenResponseContracts!(fixture.scope, queuedResponsePolicyVersionedHash(frozen.queuedPolicy), frozen)).toEqual(frozen);
+    const requestBody = "{}"; const requestPayloadHash = sha256Hex(requestBody); const prompt = "Validate event coverage.";
+    const input = { version: 2 as const, logicalAttemptId, invocationKey: "event_coverage:nonstream" as const, operation: "event_coverage_validation" as const, requestPayloadHash,
+      request: v2ModelAudit(frozen, prompt, requestPayloadHash), routeBasis: undefined, plan: undefined, trustedOperationPrompt: prompt };
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, input);
+    expect(reserved).toMatchObject({ version: 2, request: { planHash: null, routeBasisHash: null, requestedModel: "contract-model" } });
+    await expect(fixture.repository.markResponseContractInvocationDispatched!(fixture.scope, reserved!.id, requestPayloadHash)).resolves.toMatchObject({ status: "dispatched" });
+    await expect(fixture.repository.completeResponseContractInvocation!(fixture.scope, reserved!.id, { returnedModel: "contract-model", returnedProviderRoute: "route-a", diagnosticCode: null })).resolves.toMatchObject({ status: "completed" });
+    const reloaded = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
+    expect(reloaded?.orchestration_private.frozenResponseContracts).toEqual(frozen);
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
+  it("rejects a rehashed v2 closure whose canonical schema body was tampered", async () => {
+    const { queued, fixture, frozen } = await v2ModelFixture("Reject a rehashed v2 schema tamper.");
+    const contract = frozen.contracts["event_coverage:nonstream"];
+    const altered = { ...frozen, contracts: { ...frozen.contracts, "event_coverage:nonstream": { ...contract, schema: { ...contract.schema, x_tampered: true } } } };
+    const tampered = { ...altered, selectionHash: frozenResponseContractsV2SelectionHash(altered) };
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('frozenResponseContracts',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify(tampered)]);
+    await expect(fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+  });
+
+  it("rejects a v2 completed checkpoint that has no durable invocation", async () => {
+    const { queued, fixture } = await v2PresetFixture("Reject a v2 checkpoint without its invocation.");
+    const body = "{}"; const requestPayloadHash = sha256Hex(body);
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('primaryResult',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify(primaryResultCheckpoint(body, requestPayloadHash))]);
+    await expect(fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
+  });
+
+  it("rejects a v2 completed checkpoint whose invocation body identity differs", async () => {
+    const { queued, fixture, frozen, routeBasis, logicalAttemptId } = await v2PresetFixture("Reject a v2 checkpoint with another invocation identity.");
+    const requestBody = "{}"; const requestPayloadHash = sha256Hex(requestBody); const prompt = "Write the next turn."; const plan = deriveTextExecutionPlan(routeBasis, prompt);
+    const input = { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "story_generation" as const, requestPayloadHash,
+      request: v2Audit(frozen, prompt, plan, requestPayloadHash), routeBasis, plan, trustedOperationPrompt: prompt };
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, input);
+    await fixture.repository.markResponseContractInvocationDispatched!(fixture.scope, reserved!.id, requestPayloadHash);
+    await fixture.repository.completeResponseContractInvocation!(fixture.scope, reserved!.id, { returnedModel: "contract-model", returnedProviderRoute: "route-a", diagnosticCode: null });
+    await pool.query("UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('primaryResult',$2::jsonb) WHERE id=$1", [queued.id, JSON.stringify(primaryResultCheckpoint(requestBody, "f".repeat(64)))]);
+    await expect(fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim })).resolves.toBeNull();
+    await expect(pool.query<{ status: string; errorCode: string }>("SELECT status,error_code AS \"errorCode\" FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "recoverable", errorCode: "generation_checkpoint_incompatible" }] });
   });
 
   it("binds multiple concrete operations to the persisted logical attempt and finalizes each response once", async () => {
