@@ -48,13 +48,13 @@ const credentialSecret = "synthetic-image-integration-secret";
 const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 let imageArtifactPayloads = [tinyPng];
 
-function fullyShapedIllustrationTextSnapshot(ownerUserId: string, providerProfileId: string) {
+function fullyShapedIllustrationTextSnapshot(ownerUserId: string, providerProfileId: string, edgeNumbers = false) {
   const hash = "a".repeat(64);
   const operationPrompt = "Refine Élodie's accepted fiction into one illustration prompt.";
   const routeDraft = {
     version: 2 as const, selection: { kind: "model" as const, modelId: "illustration-contract-model" }, preset: null,
-    candidates: [{ modelId: "illustration-contract-model", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
-    presetSystemPrompt: "Return only a fiction illustration prompt.", parameters: { temperature: 0.3 },
+    candidates: [{ modelId: "illustration-contract-model", providerPolicy: edgeNumbers ? { max_price: { prompt: 1e21 } } : {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+    presetSystemPrompt: "Return only a fiction illustration prompt.", parameters: { temperature: edgeNumbers ? 1e-7 : 0.3 },
     endpointReference: "illustration-contract-endpoint", credentialReference: providerProfileId, profileRevision: "profile-v1",
     authorityRevision: "authority-v1", requestTimeoutMs: 30_000, protocolVersion: "text-schema-adapter-v2"
   };
@@ -2503,6 +2503,41 @@ integration("independent illustration pipeline", () => {
     );
     const frozenSnapshot = frozen.rows[0]!.text_execution_snapshot;
     expect(frozenSnapshot).toMatchObject({ version: 3, state: "prepared", plan: { prompt: expect.stringContaining("PRIVATE_STREAMING_ILLUSTRATION_PROMPT") } });
+    const validExactCopy = fullyShapedIllustrationTextSnapshot(ownerUserId, nativeTextProviderId, true);
+    const validCopyClient = await pool.connect();
+    try {
+      await validCopyClient.query("BEGIN");
+      await validCopyClient.query(
+        `UPDATE generation_jobs
+            SET streaming_segments_state=streaming_segments_state || jsonb_build_object('illustrationTextExecutionSnapshot',$2::jsonb)
+          WHERE id=$1`,
+        [directPromotion.id, JSON.stringify(validExactCopy)]
+      );
+      const duplicateSegment = await validCopyClient.query<{ id: string }>(
+        `INSERT INTO turn_illustration_segments (
+           owner_user_id,illustration_set_id,campaign_id,turn_id,generation_job_id,ordinal,
+           start_offset,end_offset,start_word,end_word,source_text,source_text_hash,
+           direct_prompt,resolved_prompt,prompt_source,status
+         )
+         SELECT owner_user_id,illustration_set_id,campaign_id,turn_id,generation_job_id,998,
+                start_offset,end_offset,start_word,end_word,source_text,source_text_hash,
+                direct_prompt,resolved_prompt,prompt_source,status
+           FROM turn_illustration_segments
+          WHERE illustration_set_id=$1 ORDER BY ordinal LIMIT 1
+         RETURNING id`,
+        [directSetId]
+      );
+      await expect(validCopyClient.query(
+        `INSERT INTO illustration_prompt_jobs (
+           owner_user_id,campaign_id,turn_id,segment_id,provider_profile_id,requested_model,generation_job_id,text_execution_snapshot
+         ) VALUES ($1,$2,NULL,$3,$4,$5,$6,$7::jsonb)`,
+        [ownerUserId, imported.campaignId, duplicateSegment.rows[0]!.id, nativeTextProviderId,
+          "illustration-contract-model", directPromotion.id, JSON.stringify(validExactCopy)]
+      )).resolves.toMatchObject({ rowCount: 1 });
+    } finally {
+      await validCopyClient.query("ROLLBACK");
+      validCopyClient.release();
+    }
     const invalidExactCopy = structuredClone(fullyShapedIllustrationTextSnapshot(ownerUserId, nativeTextProviderId));
     invalidExactCopy.frozenResponseContracts.queuedPolicy.providerProfileId = crypto.randomUUID();
     const { selectionHash: _invalidSelectionHash, ...invalidSelection } = invalidExactCopy.frozenResponseContracts;

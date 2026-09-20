@@ -213,8 +213,8 @@ integration("durable authoring real repository and stage dispatcher", () => {
   it("classifies a fully shaped historical authoring plan with a changed plan hash as protected", async () => {
     const routeDraft = {
       version: 2 as const, selection: { kind: "model" as const, modelId: "historical-authoring-model" }, preset: null,
-      candidates: [{ modelId: "historical-authoring-model", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
-      presetSystemPrompt: "Historical authoring system prompt.", parameters: { temperature: 0.4 },
+      candidates: [{ modelId: "historical-authoring-model", providerPolicy: { max_price: { prompt: 1e21 } }, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+      presetSystemPrompt: "Historical authoring system prompt.", parameters: { temperature: 1e-7 },
       endpointReference: "historical-authoring-endpoint", credentialReference: randomUUID(), profileRevision: "profile-v1",
       requestTimeoutMs: 30_000, protocolVersion: "text-execution-plan-v2"
     };
@@ -228,6 +228,18 @@ integration("durable authoring real repository and stage dispatcher", () => {
     };
     const tampered = { ...snapshot, textExecutionPlans: { worldOutline: { ...plan, planHash: "b".repeat(64) } } };
     const { planHash: _planHash, ...unhashedPlan } = plan;
+    const canonicalNumbers = '{"large":1e+21,"precise":0.30000000000000004,"small":1e-7}';
+    const canonicalClient = await pool.connect();
+    try {
+      await canonicalClient.query("SET extra_float_digits = -15");
+      await expect(canonicalClient.query<{ text: string; hash: string }>(
+        "SELECT canonical_jsonb_text($1::jsonb) AS text,canonical_jsonb_sha256($1::jsonb) AS hash",
+        [JSON.stringify({ small: 1e-7, precise: 0.30000000000000004, large: 1e21 })]
+      )).resolves.toMatchObject({ rows: [{ text: canonicalNumbers, hash: sha256(canonicalNumbers) }] });
+    } finally {
+      await canonicalClient.query("RESET extra_float_digits");
+      canonicalClient.release();
+    }
     await expect(pool.query<{ hash: string }>(
       "SELECT canonical_jsonb_sha256($1::jsonb) AS hash",
       [JSON.stringify(unhashedPlan)]

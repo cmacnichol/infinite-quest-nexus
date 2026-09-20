@@ -65,8 +65,70 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION javascript_utf16_sort_key(value text)
+RETURNS text LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE result text := ''; code_point integer; index integer;
+BEGIN
+  FOR index IN 1..char_length(value) LOOP
+    code_point := ascii(substr(value,index,1));
+    IF code_point <= 65535 THEN
+      result := result || lpad(to_hex(code_point),4,'0');
+    ELSE
+      code_point := code_point - 65536;
+      result := result
+        || lpad(to_hex(55296 + code_point / 1024),4,'0')
+        || lpad(to_hex(56320 + code_point % 1024),4,'0');
+    END IF;
+  END LOOP;
+  RETURN result;
+END;
+$$;
+
+CREATE FUNCTION javascript_json_number_text(value jsonb)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+SET extra_float_digits = 3
+AS $$
+DECLARE
+  rendered text; mantissa text; digits text; integer_part text; fractional_part text;
+  sign text := ''; exponent integer := 0; first_significant integer; decimal_exponent integer; decimal_position integer;
+BEGIN
+  rendered := pg_catalog.float8out((value #>> '{}')::double precision);
+  IF rendered IN ('NaN','Infinity','-Infinity') THEN RETURN 'null'; END IF;
+  IF left(rendered,1)='-' THEN sign := '-'; rendered := substr(rendered,2); END IF;
+  IF rendered ~ '[eE]' THEN
+    mantissa := split_part(lower(rendered),'e',1);
+    exponent := split_part(lower(rendered),'e',2)::integer;
+  ELSE
+    mantissa := rendered;
+  END IF;
+  integer_part := split_part(mantissa,'.',1);
+  fractional_part := CASE WHEN position('.' IN mantissa)>0 THEN split_part(mantissa,'.',2) ELSE '' END;
+  rendered := integer_part || fractional_part;
+  first_significant := length(rendered) - length(ltrim(rendered,'0')) + 1;
+  IF first_significant > length(rendered) THEN RETURN '0'; END IF;
+  digits := rtrim(substr(rendered,first_significant),'0');
+  decimal_exponent := length(integer_part) - first_significant + exponent;
+  IF decimal_exponent < -6 OR decimal_exponent >= 21 THEN
+    RETURN sign || left(digits,1)
+      || CASE WHEN length(digits)>1 THEN '.' || substr(digits,2) ELSE '' END
+      || 'e' || CASE WHEN decimal_exponent>=0 THEN '+' ELSE '' END || decimal_exponent::text;
+  END IF;
+  decimal_position := decimal_exponent + 1;
+  IF decimal_position <= 0 THEN
+    RETURN sign || '0.' || repeat('0',-decimal_position) || digits;
+  END IF;
+  IF decimal_position >= length(digits) THEN
+    RETURN sign || digits || repeat('0',decimal_position-length(digits));
+  END IF;
+  RETURN sign || left(digits,decimal_position) || '.' || substr(digits,decimal_position+1);
+END;
+$$;
+
 -- Mirrors the contracts' canonicalJson/stableStringify rules for persisted
--- JSON-compatible values: array order is retained and object keys are sorted.
+-- JSON-compatible values: array order is retained, numbers use JavaScript's
+-- finite Number rendering, and object keys are sorted by UTF-16 code units.
 CREATE FUNCTION canonical_jsonb_text(value jsonb)
 RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE kind text;
@@ -75,7 +137,7 @@ BEGIN
   kind := jsonb_typeof(value);
   IF kind='object' THEN
     RETURN '{' || COALESCE((
-      SELECT string_agg(to_json(entry.key)::text || ':' || canonical_jsonb_text(entry.value), ',' ORDER BY entry.key COLLATE "C")
+      SELECT string_agg(to_json(entry.key)::text || ':' || canonical_jsonb_text(entry.value), ',' ORDER BY javascript_utf16_sort_key(entry.key) COLLATE "C")
         FROM jsonb_each(value) entry
     ), '') || '}';
   END IF;
@@ -87,6 +149,7 @@ BEGIN
   END IF;
   IF kind='string' THEN RETURN to_json(value #>> '{}')::text; END IF;
   IF kind='null' THEN RETURN 'null'; END IF;
+  IF kind='number' THEN RETURN javascript_json_number_text(value); END IF;
   RETURN value #>> '{}';
 END;
 $$;

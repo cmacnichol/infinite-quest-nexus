@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
-import { frozenResponseContractsSelectionHash, frozenResponseContractsV2SelectionHash, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash } from "../../packages/contracts/src/generation-response-contract.js";
-import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { frozenResponseContractsSelectionHash, frozenResponseContractsV2SelectionHash, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, readFrozenResponseContracts } from "../../packages/contracts/src/generation-response-contract.js";
+import { getProviderOutputSchemaV2, stableJsonHash } from "../../packages/contracts/src/provider-output-schema.js";
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
@@ -309,6 +309,42 @@ integration("PostgreSQL response-contract persistence", () => {
       "SELECT valid_v1_frozen_response_contracts($1::jsonb) AS valid",
       [JSON.stringify(tampered)]
     )).resolves.toMatchObject({ rows: [{ valid: false }] });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
+  it("keeps a valid historical Story schema with JavaScript number and UTF-16 key ordering claimable", async () => {
+    const base = strictSelection();
+    const schema = {
+      ...base.contracts["story:nonstream"].schema,
+      "\uE000": { threshold: 1e-7 },
+      "😀": { threshold: 1e21 }
+    };
+    const contract = { ...base.contracts["story:nonstream"], schema, schemaHash: stableJsonHash(schema) };
+    const selected = { ...base, contracts: { "story:nonstream": contract } };
+    const frozen = { ...selected, selectionHash: frozenResponseContractsSelectionHash(selected) };
+    expect(() => readFrozenResponseContracts(frozen)).not.toThrow();
+
+    const canonical = '{"😀":1e+21,"\uE000":1e-7}';
+    await expect(pool.query<{ text: string; hash: string }>(
+      "SELECT canonical_jsonb_text($1::jsonb) AS text,canonical_jsonb_sha256($1::jsonb) AS hash",
+      [JSON.stringify({ "\uE000": 1e-7, "😀": 1e21 })]
+    )).resolves.toMatchObject({ rows: [{ text: canonical, hash: sha256Hex(canonical) }] });
+    await expect(pool.query<{ valid: boolean }>(
+      "SELECT valid_v1_frozen_response_contracts($1::jsonb) AS valid", [JSON.stringify(frozen)]
+    )).resolves.toMatchObject({ rows: [{ valid: true }] });
+
+    const imported = await campaign();
+    const queued = await commands(false).enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRequestSchema.parse({ action: "Claim a canonical historical schema.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16000, compression: "full", recentTurns: 8 } })
+    );
+    await pool.query(
+      "UPDATE generation_jobs SET orchestration_private=jsonb_build_object('frozenResponseContracts',$2::jsonb) WHERE id=$1",
+      [queued.id, JSON.stringify(frozen)]
+    );
+    expect((await historicalClaim("old-canonical-schema")).rows).toEqual([
+      expect.objectContaining({ id: queued.id, status: "assessing", attempts: 1 })
+    ]);
     await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
   it("persists a trusted queued policy privately and retains a legacy row's absent shape", async () => {

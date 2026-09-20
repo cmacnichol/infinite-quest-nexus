@@ -155,3 +155,46 @@ git diff --check
 Result: **migration-order 1/1 passed; TypeScript no-emit passed; diff check passed**.
 
 The SQL canonicalizer is intentionally limited to the JSON value forms used by these authoritative schemas; it is not introduced as a general replacement for application serialization. Compatibility and parity were verified with actual valid historical fixtures, including nested data and non-ASCII text. No production database or deployment was touched, no live or paid provider call was made, and native admission remains off.
+
+## Independent review round 3 fix
+
+The second re-review confirmed the earlier semantic, ancestry, and old-worker claim findings as addressed, then identified a compatibility regression inside the SQL canonicalizer itself. PostgreSQL JSONB expands scientific numbers and C collation sorts UTF-8 bytes, while the application hashes JavaScript `Number` text and sorts object keys by UTF-16 code units.
+
+The migration now uses two bounded canonical helpers:
+
+- finite JSON numbers are converted through PostgreSQL's shortest round-trip `float8out` with function-local `extra_float_digits = 3`, then normalized to JavaScript's fixed/scientific thresholds and exponent syntax; and
+- object keys receive a fixed-width UTF-16 code-unit sort key, including surrogate-pair expansion for supplementary characters, before canonical values are concatenated.
+
+This preserves the existing hash and semantic guards without restricting valid route parameters or permissive v1 schema bodies.
+
+### Review-round 3 RED evidence
+
+On the unchanged round-2 migration, the focused three-file run produced **3 failures, 1 pass, and 82 skipped**:
+
+- JavaScript expected `1e-7` and `1e+21`, while SQL emitted `0.0000001` and `1000000000000000000000`;
+- JavaScript sorted the `😀` schema key before `U+E000`, while C collation produced the reverse order; and
+- the trigger rejected an otherwise valid exact streaming child copy whose route contained those numeric values.
+
+The existing changed-plan tamper case in the same run remained GREEN.
+
+### Review-round 3 GREEN verification
+
+The same focused run passed **4/4**, with **82 skipped**. It verifies literal JavaScript/SQL canonical text and SHA-256 parity, a valid v1 schema containing `1e-7`, `1e21`, `😀`, and `U+E000`, old-worker claim eligibility for that historical selection, a valid historical authoring plan with the numeric edge values, and a committed-boundary exact streaming child insert followed by rollback. A separate focused check also passed with the session deliberately set to `extra_float_digits = -15`, preserving `0.30000000000000004` through the function-local deterministic setting. The invalid plan and authority cases remain rejected by the full matrix.
+
+The final dedicated PostgreSQL run was:
+
+```powershell
+& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config '.superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts' tests/integration/generation-response-contract.integration.test.ts tests/integration/authoring-stage-execution.integration.test.ts tests/integration/image-pipeline.integration.test.ts
+```
+
+Result: **3 files passed; 72 passed, 14 Linux-only skipped**.
+
+```powershell
+& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run tests/unit/migration-order.test.ts
+& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec tsc -p tsconfig.json --noEmit
+git diff --check
+```
+
+Result: **migration-order 1/1 passed; TypeScript no-emit passed; diff check passed**.
+
+No unsupported valid fixture was found. Non-finite JavaScript values are excluded by the route schemas and cannot be persisted as JSON numbers. No production database or deployment was touched, no live or paid provider call was made, no branch was pushed, and native admission remains off.
