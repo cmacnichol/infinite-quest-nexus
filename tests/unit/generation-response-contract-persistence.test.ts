@@ -17,6 +17,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { serializeBoundFrozenPresetProviderRequest, serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 
 const hash = "a".repeat(64);
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -28,8 +29,8 @@ describe("durable response-contract persistence contracts", () => {
     const routeBasisDraft = {
       version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-route" },
       preset: { slug: "night-route", versionId: "preset-v1", configHash: hash },
-      candidates: [{ modelId: "openai/gpt-5", providerPolicy: {}, contextWindowTokens: 128000, maxOutputTokens: 4096 }],
-      presetSystemPrompt: "Preset instructions.", parameters: {}, endpointReference: "openrouter-main",
+      candidates: [{ modelId: "openai/gpt-5", providerPolicy: { only: ["provider/frozen"], require_parameters: false }, contextWindowTokens: 128000, maxOutputTokens: 4096 }],
+      presetSystemPrompt: "Preset instructions.", parameters: { temperature: 0.31 }, endpointReference: "openrouter-main",
       credentialReference: "credential-ref", profileRevision: "profile-v1", authorityRevision: "authority-v1",
       requestTimeoutMs: 30000, protocolVersion: "text-schema-adapter-v2"
     };
@@ -60,6 +61,60 @@ describe("durable response-contract persistence contracts", () => {
     expect(bindFrozenResponseContractInvocationV2({ frozen, invocationKey: "story:nonstream", operation: "story_recovery", routeBasis, plan: repair, trustedOperationPrompt: "Repair the rejected turn." }).authority).toMatchObject({ planHash: repair.planHash });
     expect(primary.planHash).not.toBe(repair.planHash);
     expect(() => bindFrozenResponseContractInvocationV2({ frozen, invocationKey: "story:nonstream", operation: "story_recovery", routeBasis, plan: primary, trustedOperationPrompt: "Repair the rejected turn." })).toThrow(/basis or plan identity changed/i);
+
+    const profile = { providerType: "openrouter" as const, baseUrl: "https://current.example/v1", model: "openai/gpt-5",
+      contextWindowTokens: 8_192, maxOutputTokens: 99, temperature: 0.99 };
+    const binding = { frozen, routeBasis, plan: primary, invocationKey: "story:nonstream" as const,
+      operation: "story_generation" as const, trustedOperationPrompt: "Write the next turn." };
+    const prepared = serializeBoundFrozenPresetProviderRequest(profile, { systemPrompt: primary.prompt, input: "Act." }, binding);
+    const payload = JSON.parse(prepared.body);
+    expect(payload).toMatchObject({ model: "openai/gpt-5", temperature: 0.31, max_tokens: 4096,
+      provider: { only: ["provider/frozen"], require_parameters: true },
+      response_format: { type: "json_schema", json_schema: { name: story.name, strict: true, schema: story.schema } } });
+    const boundContract = bindFrozenResponseContractInvocationV2(binding);
+    expect(() => serializeProviderRequest(profile, { systemPrompt: primary.prompt, input: "Act.", responseContract: boundContract } as never))
+      .toThrow("Trusted preset response contracts require the frozen route executor.");
+    expect(() => serializeBoundFrozenPresetProviderRequest({ ...profile, model: "edited/model" }, { systemPrompt: primary.prompt, input: "Act." }, binding))
+      .toThrow(/selected frozen route candidate/i);
+    const missingClosure = { ...frozen, contracts: {}, selectionHash: frozenResponseContractsV2SelectionHash({ ...frozen, contracts: {} }) };
+    expect(() => serializeBoundFrozenPresetProviderRequest(profile, { systemPrompt: primary.prompt, input: "Act." }, { ...binding, frozen: missingClosure }))
+      .toThrow(/invalid or incompatible/i);
+    const tamperedBasis = { ...routeBasis, candidates: [{ ...routeBasis.candidates[0], maxOutputTokens: 2048 }] };
+    expect(() => serializeBoundFrozenPresetProviderRequest(profile, { systemPrompt: primary.prompt, input: "Act." }, { ...binding, routeBasis: tamperedBasis as never }))
+      .toThrow(/route basis hash is invalid/i);
+    const rehashedTamperedBasisDraft = {
+      ...routeBasis,
+      candidates: routeBasis.candidates.map((candidate) => ({ ...candidate, maxOutputTokens: 2048 })),
+      routeBasisHash: hash
+    };
+    const rehashedTamperedBasis = { ...rehashedTamperedBasisDraft,
+      routeBasisHash: textExecutionRouteBasisHash(rehashedTamperedBasisDraft) };
+    expect(() => serializeBoundFrozenPresetProviderRequest(profile, { systemPrompt: primary.prompt, input: "Act." }, { ...binding, routeBasis: rehashedTamperedBasis }))
+      .toThrow(/route basis identity changed|basis or plan identity changed/i);
+
+    const noTemperatureBasisDraft = { ...routeBasisDraft, parameters: {}, routeBasisHash: hash };
+    const noTemperatureBasis = { ...noTemperatureBasisDraft,
+      routeBasisHash: textExecutionRouteBasisHash(noTemperatureBasisDraft) };
+    const noTemperaturePolicy = { ...policy, authority: { ...policy.authority, routeBasisHash: noTemperatureBasis.routeBasisHash } };
+    const noTemperatureSelected = {
+      ...selected,
+      queuedPolicy: noTemperaturePolicy,
+      contracts: {
+        "story:nonstream": {
+          ...selected.contracts["story:nonstream"],
+          authority: { kind: "preset_trusted" as const, routeBasisHash: noTemperatureBasis.routeBasisHash }
+        }
+      }
+    };
+    const noTemperatureFrozen = { ...noTemperatureSelected,
+      selectionHash: frozenResponseContractsV2SelectionHash(noTemperatureSelected) };
+    const noTemperaturePlan = deriveTextExecutionPlan(noTemperatureBasis, "Write the next turn.");
+    const noTemperaturePayload = JSON.parse(serializeBoundFrozenPresetProviderRequest(profile,
+      { systemPrompt: noTemperaturePlan.prompt, input: "Act." }, {
+        ...binding, frozen: noTemperatureFrozen, routeBasis: noTemperatureBasis, plan: noTemperaturePlan
+      }).body);
+    expect(noTemperaturePayload.temperature).toBeUndefined();
+    expect(noTemperaturePayload.provider).toMatchObject({ only: ["provider/frozen"], require_parameters: true });
   });
 
   it("keeps v1 readers byte-compatible while rejecting unrecognized versioned records", () => {

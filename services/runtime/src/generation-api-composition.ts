@@ -5,7 +5,7 @@ import {
   type GenerationCommandRepository
 } from "../../../packages/application/src/index.js";
 import { createPostgresGenerationCommandRepository, resolveTextProviderId } from "../../../packages/database/src/generation-repository.js";
-import type { PostgresGenerationCommandRepositoryDependencies } from "../../../packages/database/src/generation-repository.js";
+import type { PostgresGenerationCommandRepositoryDependencies, PreparedQueuedTextExecution } from "../../../packages/database/src/generation-repository.js";
 import { resolveStoryMemoryPromptSnapshot, resolveStoryPromptSnapshot } from "../../../packages/database/src/prompt-repository.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { resolveStoryMemoryPolicySnapshot, type StoryMemoryOperatorConfig } from "../../../packages/database/src/story-memory-policy-repository.js";
@@ -16,6 +16,10 @@ import { queuedResponseContractPolicy, responseContractInvocationClosure } from 
 import { resolveTextExecutionRouteBasis } from "./provider-preset-resolution.js";
 import type { TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { normalizeTextSelection } from "../../../packages/contracts/src/provider-selection.js";
+import { normalizeNewTextResponsePolicy, resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
+import { getProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
+import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
+import { responseContractInvocationClosureV2 } from "./generation-response-contract.js";
 
 export type ApiGenerationCompositionFactories = Readonly<{
   createCommandRepository(pool: DatabasePool): GenerationCommandRepository;
@@ -34,10 +38,114 @@ const productionFactories: ApiGenerationCompositionFactories = {
  * selected the campaign provider.  It intentionally keeps the profile's base
  * cap separate from the caller's selected-model cap used in the fingerprint.
  */
-export function createQueuedResponsePolicyResolver(providers: ApiGenerationProviderCollaborators): NonNullable<PostgresGenerationCommandRepositoryDependencies["resolveQueuedResponsePolicy"]> {
+export function createQueuedResponsePolicyResolver(
+  providers: ApiGenerationProviderCollaborators,
+  nativeTextExecutionPlanAdmission = false
+): NonNullable<PostgresGenerationCommandRepositoryDependencies["resolveQueuedResponsePolicy"]> {
   return async (client, scope) => {
     const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId, scope.requestedModel);
-    const policy = profile.configuration.textResponseFormatPolicy as "legacy" | "auto" | "required" | undefined ?? "required";
+    const preparedTextExecution = scope.preparedTextExecution;
+    const selection = preparedTextExecution?.selection ?? profile.textSelection ?? normalizeTextSelection({
+      providerType: profile.providerType,
+      providerRole: "text",
+      defaultModel: scope.requestedModel.trim() || profile.model
+    });
+    const configuredPolicy = profile.configuration.textResponseFormatPolicy as "legacy" | "auto" | "required" | undefined;
+    // Required Model/Preset normalization belongs to the native admission
+    // path. Until that gate is enabled, preserve the profile's historical
+    // v1/legacy response-format choice rather than making a preset silently
+    // enter a partial required-contract workflow.
+    const policy = nativeTextExecutionPlanAdmission
+      ? normalizeNewTextResponsePolicy(selection, configuredPolicy)
+      : configuredPolicy;
+    if (nativeTextExecutionPlanAdmission && policy === "required") {
+      if (!preparedTextExecution || preparedTextExecution.providerProfileId !== profile.id
+        || preparedTextExecution.executionRevision !== profile.executionRevision
+        || preparedTextExecution.authorityRevision !== profile.authorityRevision
+        || preparedTextExecution.endpointIdentity !== (profile.endpointIdentity ?? profile.id)) {
+        throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+      }
+      const invocationKeys = responseContractInvocationClosureV2({
+        streamingPrimary: profile.configuration.streaming === true || profile.configuration.streamingSupport === true,
+        storyOnly: scope.generationPolicy.playMode === "story_only",
+        continuityReview: scope.storyMemoryPolicy?.policy.continuityReview ?? "off"
+      });
+      if (selection.kind === "openrouter_preset") {
+        const routeBasis = preparedTextExecution.routeBasis;
+        if (!routeBasis || !routeBasis.authorityRevision || !routeBasis.profileRevision || !profile.executionRevision || !profile.authorityRevision) {
+          throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+        }
+        return {
+          version: 2 as const,
+          policy: "required" as const,
+          providerProfileId: profile.id,
+          admission: { mode: "json_schema" as const, basis: "preset_trusted" as const },
+          authority: {
+            kind: "preset_trusted" as const,
+            routeBasisHash: routeBasis.routeBasisHash,
+            selection: { kind: "openrouter_preset" as const, slug: selection.slug },
+            endpointReference: routeBasis.endpointReference,
+            credentialReference: routeBasis.credentialReference,
+            authorityRevision: routeBasis.authorityRevision,
+            profileRevision: routeBasis.profileRevision
+          },
+          operationClosureVersion: 2 as const,
+          invocationKeys: [...invocationKeys]
+        };
+      }
+      const routeConfigHash = capabilityRouteConfigHash(profile.configuration);
+      const eligibility = (operation: Parameters<typeof getProviderOutputSchemaV2>[0], streaming: boolean) => providers.responseFormatCapabilities.eligibilityV2({
+        advertisement: preparedTextExecution.advertisement,
+        providerType: profile.providerType as "openrouter" | "openai_compatible",
+        endpointIdentity: profile.endpointIdentity ?? "",
+        model: selection.modelId,
+        routeConfigHash,
+        adapterProtocol: "text-schema-adapter-v2",
+        operation,
+        schemaHash: getProviderOutputSchemaV2(operation).schemaHash,
+        streaming,
+        now: providers.responseFormatCapabilities.now()
+      });
+      // Do not save a partial direct-model closure. Every current Story
+      // operation is checked against its advertised capability and exact file
+      // verification before the insert transaction captures its authority.
+      for (const key of invocationKeys) {
+        const [operation, delivery] = key.split(":") as [Parameters<typeof getProviderOutputSchemaV2>[0], "stream" | "nonstream"];
+        const current = eligibility(operation, delivery === "stream");
+        if (current.status !== "verified" || !current.verification) {
+          throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+        }
+      }
+      const admission = resolveResponseContractAdmission({
+        selection,
+        directEligibility: () => eligibility("story", false)
+      });
+      return {
+        version: 2 as const,
+        policy: "required" as const,
+        providerProfileId: profile.id,
+        admission,
+        authority: {
+          kind: "model_verified" as const,
+          providerProfileId: profile.id,
+          providerType: profile.providerType as "openrouter" | "openai_compatible",
+          endpointIdentity: profile.endpointIdentity ?? "",
+          model: selection.modelId,
+          providerConfigurationHash: effectiveProviderConfigurationFingerprint({
+            providerId: profile.id, providerType: profile.providerType, endpointIdentity: profile.endpointIdentity ?? "",
+            model: selection.modelId, contextWindowTokens: profile.contextWindowTokens, maxOutputTokens: profile.maxOutputTokens,
+            temperature: profile.temperature, requestTimeoutMs: profile.requestTimeoutMs, configuration: profile.configuration,
+            effectiveContextWindowTokens: resolveEffectiveContextWindowTokens(profile.contextWindowTokens, scope.modelContextWindowTokens),
+            inputSafetyPolicy: "estimated_20_percent_plus_1024"
+          }),
+          routeConfigHash,
+          verificationRegistryHash: providers.responseFormatCapabilities.registryDigest,
+          authorityRevision: preparedTextExecution.authorityRevision
+        },
+        operationClosureVersion: 2 as const,
+        invocationKeys: [...invocationKeys]
+      };
+    }
     if (policy === "legacy") return undefined;
     const effectiveContextWindowTokens = resolveEffectiveContextWindowTokens(profile.contextWindowTokens, scope.modelContextWindowTokens);
     const configurationHash = effectiveProviderConfigurationFingerprint({
@@ -65,12 +173,12 @@ export function createQueuedResponsePolicyResolver(providers: ApiGenerationProvi
  * campaign locks. The matching verifier below only performs a local profile
  * read, so an unavailable remote endpoint can never extend a DB transaction.
  */
-function createTextExecutionRouteBasisPreparation(
+function createQueuedTextExecutionPreparation(
   pool: DatabasePool,
   providers: ApiGenerationProviderCollaborators,
-): Pick<PostgresGenerationCommandRepositoryDependencies, "prepareTextExecutionRouteBasis" | "verifyTextExecutionRouteBasis"> {
+): Pick<PostgresGenerationCommandRepositoryDependencies, "prepareQueuedTextExecution" | "verifyQueuedTextExecution"> {
   return {
-    prepareTextExecutionRouteBasis: async (scope): Promise<TextExecutionRouteBasis | undefined> => {
+    prepareQueuedTextExecution: async (scope): Promise<PreparedQueuedTextExecution | undefined> => {
       const campaign = await pool.query<{ textProviderProfileId: string | null }>(
         `SELECT text_provider_profile_id AS "textProviderProfileId" FROM campaigns WHERE id=$1 AND owner_user_id=$2`,
         [scope.campaignId, scope.ownerUserId]
@@ -82,21 +190,64 @@ function createTextExecutionRouteBasisPreparation(
         scope.requestedProviderProfileId ?? campaign.rows[0]?.textProviderProfileId,
       );
       if (!providerProfileId) return undefined;
-      const profile = await providers.execution.text({ ownerUserId: scope.ownerUserId }, providerProfileId, "text", undefined);
+      const defaultProfile = await providers.execution.text({ ownerUserId: scope.ownerUserId }, providerProfileId, "text", undefined);
       // Typed request selections win. The legacy model field is normalized
       // only through its exact compatibility alias, so @preset/slug remains a
       // preset and is never mistaken for a model ID.
       const selection = scope.requestedTextSelection ?? (scope.requestedModel.trim()
-        ? normalizeTextSelection({ providerType: profile.providerType, providerRole: "text", defaultModel: scope.requestedModel })
-        : profile.textSelection ?? normalizeTextSelection({ providerType: profile.providerType, providerRole: "text", defaultModel: profile.model }));
-      // Tasks 4/5 own admission and dispatch. Ordinary model jobs retain the
-      // historical queue path; only an explicitly selected native preset gets
-      // a frozen v2 descriptor here.
-      if (selection.kind !== "openrouter_preset") return undefined;
+        ? normalizeTextSelection({ providerType: defaultProfile.providerType, providerRole: "text", defaultModel: scope.requestedModel })
+        : defaultProfile.textSelection ?? normalizeTextSelection({ providerType: defaultProfile.providerType, providerRole: "text", defaultModel: defaultProfile.model }));
+      // Loading the selected direct model is part of the capture.  In
+      // particular, a request-level selection must not inherit the profile's
+      // default-model settings while the queue persists a different model.
+      const profile = selection.kind === "model"
+        ? await providers.execution.text({ ownerUserId: scope.ownerUserId }, providerProfileId, "text", selection.modelId)
+        : defaultProfile;
       if (!profile.executionRevision || !profile.authorityRevision) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
       }
-      return resolveTextExecutionRouteBasis({
+      if (selection.kind === "model") {
+        const inventory = await providers.responseFormatInventory.listModels({
+          ownerUserId: scope.ownerUserId, providerProfileId, providerRole: "text"
+        });
+        const selected = inventory.models.find((candidate) => candidate.id === selection.modelId);
+        // A direct Model has no preset provenance, but it still needs the
+        // same immutable execution snapshot as a preset.  This canonical
+        // single-candidate basis freezes the selected model, budgets and
+        // ordinary parameters; it is not a preset route basis and does not
+        // participate in capability admission.
+        const routeBasis = await resolveTextExecutionRouteBasis({
+          profile: {
+            ownerUserId: scope.ownerUserId, providerProfileId, profileRevision: profile.executionRevision,
+            authorityRevision: profile.authorityRevision, providerType: profile.providerType, selection,
+            contextWindowTokens: profile.contextWindowTokens, maxOutputTokens: profile.maxOutputTokens,
+            endpointReference: profile.endpointIdentity ?? profile.id, credentialReference: profile.id,
+            requestTimeoutMs: profile.requestTimeoutMs, parameters: { temperature: profile.temperature },
+            protocolVersion: "text-execution-route-basis-v2"
+          },
+          ports: {
+            resolvePreset: async () => { throw new Error("A direct Model must not resolve a preset."); },
+            discoverModels: async ({ ownerUserId, providerProfileId: id, modelIds }) => {
+              const discovered = await providers.responseFormatInventory.listModels({ ownerUserId, providerProfileId: id, providerRole: "text" });
+              return discovered.models.filter((candidate) => modelIds.includes(candidate.id)).map((candidate) => ({ id: candidate.id,
+                ...(candidate.contextWindowTokens === undefined ? {} : { contextWindowTokens: candidate.contextWindowTokens }) }));
+            }
+          },
+          // Catalog advertisements need not include capacity. The selected
+          // profile cap remains the conservative, queue-frozen limit.
+          overrides: { conservativeContextWindowTokens: profile.contextWindowTokens }
+        });
+        return {
+          providerProfileId,
+          selection,
+          executionRevision: profile.executionRevision,
+          authorityRevision: profile.authorityRevision,
+          endpointIdentity: profile.endpointIdentity ?? profile.id,
+          advertisement: selected?.responseFormatAdvertisement ?? null,
+          routeBasis
+        };
+      }
+      const routeBasis = await resolveTextExecutionRouteBasis({
         profile: {
           ownerUserId: scope.ownerUserId, providerProfileId, profileRevision: profile.executionRevision,
           authorityRevision: profile.authorityRevision,
@@ -115,14 +266,32 @@ function createTextExecutionRouteBasisPreparation(
           }
         }
       });
+      return {
+        providerProfileId,
+        selection,
+        executionRevision: profile.executionRevision,
+        authorityRevision: profile.authorityRevision,
+        endpointIdentity: profile.endpointIdentity ?? profile.id,
+        advertisement: null,
+        routeBasis
+      };
     },
-    verifyTextExecutionRouteBasis: async (client, scope) => {
-      const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId, undefined);
-      return profile.executionRevision === scope.routeBasis.profileRevision
-        && profile.authorityRevision === scope.routeBasis.authorityRevision
-        && (profile.endpointIdentity ?? profile.id) === scope.routeBasis.endpointReference
-        && profile.id === scope.providerProfileId
-        && scope.routeBasis.credentialReference === profile.id;
+    verifyQueuedTextExecution: async (client, scope) => {
+      const prepared = scope.preparedTextExecution;
+      const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId,
+        prepared.selection.kind === "model" ? prepared.selection.modelId : undefined);
+      if (profile.id !== scope.providerProfileId || profile.id !== prepared.providerProfileId
+        || profile.executionRevision !== prepared.executionRevision
+        || profile.authorityRevision !== prepared.authorityRevision
+        || (profile.endpointIdentity ?? profile.id) !== prepared.endpointIdentity) return false;
+      if (!prepared.routeBasis) return false;
+      return prepared.routeBasis.profileRevision === prepared.executionRevision
+        && prepared.routeBasis.authorityRevision === prepared.authorityRevision
+        && prepared.routeBasis.endpointReference === prepared.endpointIdentity
+        && prepared.routeBasis.credentialReference === profile.id
+        && prepared.routeBasis.selection.kind === prepared.selection.kind
+        && (prepared.selection.kind !== "model" || (prepared.routeBasis.selection.kind === "model"
+          && prepared.routeBasis.selection.modelId === prepared.selection.modelId));
     }
   };
 }
@@ -148,8 +317,8 @@ export function createApiGenerationApplication(
          installedCapability: resolvedOperatorConfig.installedCapability,
          enforceEnabled: resolvedOperatorConfig.enforceEnabled
       }),
-      resolveQueuedResponsePolicy: createQueuedResponsePolicyResolver(providers),
-      ...(nativeTextExecutionPlanAdmission ? createTextExecutionRouteBasisPreparation(pool, providers) : {}),
+      resolveQueuedResponsePolicy: createQueuedResponsePolicyResolver(providers, nativeTextExecutionPlanAdmission),
+      ...(nativeTextExecutionPlanAdmission ? createQueuedTextExecutionPreparation(pool, providers) : {}),
       readTurnReportedCosts: (ownerUserId, campaignId, turnIds) => providers.reads.getTurnCosts({
         ownerUserId,
         campaignId,

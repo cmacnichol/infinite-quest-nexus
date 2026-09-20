@@ -19,6 +19,7 @@ import {
   responseContractInvocationAuditId,
   responseContractInvocationAuditIdV2,
   responseContractInvocationLedgerLimitV2,
+  sceneCoverageReplayCheckpointSchema,
   responseContractOperationV2MatchesInvocation,
   responseContractOperationSchema,
   bindFrozenResponseContractInvocationV2,
@@ -36,7 +37,8 @@ import {
   type ResponseContractInvocationAuditV2,
   type ResponseContractInvocationAuditVersioned,
   type ResponseContractOperation,
-  type ResponseContractOperationV2
+  type ResponseContractOperationV2,
+  type SceneCoverageReplayCheckpoint
 } from "../../contracts/src/generation-response-contract.js";
 import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
@@ -209,6 +211,19 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     if (value.extension && !completedFor(value.extension.producingRequestPayloadHash, [value.extension.producingOperation])) throw new Error("Extension checkpoint has no completed v2 invocation.");
     if (value.semanticRepair?.status === "validated" && !completedFor(value.semanticRepair.repairRequestPayloadHash, ["story_continuity_repair"])) throw new Error("Semantic repair checkpoint has no completed v2 invocation.");
     if (value.sceneCoverageRepair?.status === "validated" && !completedFor(value.sceneCoverageRepair.repairRequestPayloadHash, ["scene_coverage_rewrite"])) throw new Error("Scene rewrite checkpoint has no completed v2 invocation.");
+    const replayedCoverage = value.sceneCoverageRepair?.validatedCoverage;
+    if (replayedCoverage) {
+      const coverageInvocation = entries.find((entry) => entry.status === "completed"
+        && entry.operation === "scene_coverage_validation"
+        && entry.requestPayloadHash === replayedCoverage.requestPayloadHash);
+      if (!coverageInvocation
+        || coverageInvocation.response?.diagnosticCode !== null
+        || coverageInvocation.response?.returnedModel !== replayedCoverage.result.returnedModel
+        || coverageInvocation.response?.returnedProviderRoute !== replayedCoverage.result.returnedProviderRoute
+        || coverageInvocation.response?.resultHash !== replayedCoverage.resultHash) {
+        throw new Error("Scene coverage replay checkpoint does not match its completed v2 invocation.");
+      }
+    }
     if (value.continuityReview?.reviewRequestHash && value.continuityReview.status === "completed" && !completedFor(value.continuityReview.reviewRequestHash, ["story_continuity_review"])) throw new Error("Continuity review checkpoint has no completed v2 invocation.");
     return;
   }
@@ -341,7 +356,7 @@ async function updateResponseContractInvocation(
   invocationId: string,
   nextStatus: "dispatched" | "completed",
   expectedRequestPayloadHash?: string,
-  response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">
+  response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & { resultHash?: string | null }
 ): Promise<ResponseContractInvocationAuditVersioned | null> {
   return withTransaction(pool, async (client) => {
     const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
@@ -357,7 +372,7 @@ async function updateResponseContractInvocation(
     const existing = ledger[index]!;
     if (nextStatus === "dispatched" && existing.requestPayloadHash !== expectedRequestPayloadHash) return null;
     if (existing.status === "completed") {
-      if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null })) return existing;
+      if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null, resultHash: response?.resultHash ?? null })) return existing;
       return null;
     }
     if (nextStatus === "dispatched" && existing.status !== "reserved") return null;
@@ -365,7 +380,7 @@ async function updateResponseContractInvocation(
     const at = new Date().toISOString();
     const updated = nextStatus === "dispatched"
       ? { ...existing, status: "dispatched", dispatchedAt: existing.dispatchedAt ?? at }
-      : { ...existing, status: "completed", completedAt: at, response: { returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null } };
+      : { ...existing, status: "completed", completedAt: at, response: { returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null, resultHash: response?.resultHash ?? null } };
     let parsed: ResponseContractInvocationAuditVersioned;
     try { parsed = readResponseContractInvocationAuditVersioned(updated); } catch { return null; }
     ledger[index] = parsed;
@@ -523,6 +538,8 @@ export type GenerationOrchestrationState = {
     status: "reserved" | "dispatched" | "validated";
     authorizedReviewId: string;
     authorizedRevision: number;
+    /** A completed v2 coverage response is reusable only for these exact bytes. */
+    validatedCoverage?: SceneCoverageReplayCheckpoint;
   } | undefined;
   continuityReview?: ContinuityReviewCheckpoint | undefined;
   /** Private, immutable candidate and decision evidence for a user review gate. */
@@ -710,7 +727,9 @@ function hasValidSceneCoverageRepair(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const repair = value as Record<string, unknown>;
-  return repair.version === 1
+  const coverage = repair.validatedCoverage;
+  const validCoverage = coverage === undefined || sceneCoverageReplayCheckpointSchema.safeParse(coverage).success;
+  return validCoverage && repair.version === 1
     && typeof repair.rejectedMainStoryHash === "string" && repair.rejectedMainStoryHash.length > 0
     && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
     && typeof repair.repairRequestPayloadHash === "string"
@@ -1016,7 +1035,7 @@ export type GenerationExecutionRepository = Readonly<{
   ): Promise<ResponseContractInvocationAuditVersioned | null>;
   /** Consumes a reservation once only when its prepared request hash still matches. */
   markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string, expectedRequestPayloadHash: string): Promise<ResponseContractInvocationAuditVersioned | null>;
-  completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">): Promise<ResponseContractInvocationAuditVersioned | null>;
+  completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & { resultHash?: string | null }): Promise<ResponseContractInvocationAuditVersioned | null>;
   /** Atomically publishes a pending review and releases the worker lease. */
   pauseForReview(scope: GenerationLeaseScope, checkpoint: GenerationReviewCheckpoint): Promise<boolean>;
   savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;

@@ -84,6 +84,8 @@ import {
   composeStoryOnlySystemPrompt,
   buildStoryOnlyChoiceRepairInput,
   generationExecutionProtocolIdentity,
+  serializeBoundFrozenPresetProviderRequest,
+  serializeCheckedBoundFrozenPresetProviderRequest,
   serializeProviderRequest,
   serializeCheckedProviderRequest,
   fictionGuidanceForEvents,
@@ -109,7 +111,8 @@ import {
   type ActivatedEvent,
   type ProviderRequest,
   type ProviderResult,
-  type TextProviderProfile
+  type TextProviderProfile,
+  type BoundFrozenPresetProviderRequestBinding
 } from "../../../packages/story-engine/src/index.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
 import {
@@ -123,10 +126,11 @@ import {
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerPromptProtocolVersion } from "./provider-application-composition.js";
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
-import { bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, responseContractOperationV2Schema, type FrozenResponseContracts, type FrozenResponseContractsV2, type QueuedResponsePolicy, type ResponseContractOperation } from "../../../packages/contracts/src/generation-response-contract.js";
+import { bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, responseContractInvocationLedgerLimitV2, responseContractOperationV2Schema, sceneCoverageReplayResultHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type FrozenResponseContractsVersioned, type QueuedResponsePolicy, type QueuedResponsePolicyVersioned, type ResponseContractOperation, type ResponseContractOperationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
-import type { TextExecutionPlan } from "../../../packages/contracts/src/text-execution-plan.js";
+import type { TextExecutionPlan, TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
+import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 
@@ -148,7 +152,7 @@ export function deriveCampaignTextExecutionPlan(
 function prepareCampaignSystemPrompt(job: GenerationExecutionPayload, operationPrompt: string) {
   const textExecutionPlan = deriveCampaignTextExecutionPlan(job, operationPrompt);
   return textExecutionPlan
-    ? { systemPrompt: textExecutionPlan.prompt, textExecutionPlan }
+    ? { systemPrompt: operationPrompt, textExecutionPlan }
     : { systemPrompt: operationPrompt };
 }
 
@@ -244,9 +248,9 @@ export type GenerationExecutionCollaborators = Readonly<{
   resolveResponseContracts?(
     ownerUserId: string,
     profile: GenerationTextProvider,
-    queuedPolicy: QueuedResponsePolicy,
+    queuedPolicy: QueuedResponsePolicyVersioned,
     runtimeProfile: ResponseContractRuntimeProfile
-  ): Promise<FrozenResponseContracts>;
+  ): Promise<FrozenResponseContractsVersioned>;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
     ownerUserId: string,
@@ -328,11 +332,56 @@ export function responseContractInvocationDetails(
   operation: StoryCostOperation,
   streaming: boolean,
   requestPayloadHash: string,
-  provider: Pick<GenerationTextProvider, "model">
+  provider: Pick<GenerationTextProvider, "model">,
+  trustedOperationPrompt?: string,
+  plan?: TextExecutionPlan
 ) {
   const frozen = job.orchestration_private?.frozenResponseContracts;
   const contract = responseContractForOperation(job, operation, streaming);
   if (!frozen || !contract) return undefined;
+  if ((frozen as { version?: unknown }).version === 2) {
+    const v2Frozen = frozen as FrozenResponseContractsV2;
+    const v2Contract = contract as FrozenResponseContractsV2["contracts"][ResponseInvocationKeyV2];
+    if (!v2Contract) throw Object.assign(new Error("The v2 response-contract invocation is outside the frozen closure."), {
+      code: "response_contract_unavailable"
+    });
+    const identity = responseContractIdentity(operation, streaming);
+    const v2Operation = responseContractOperationV2Schema.parse(operation) as ResponseContractOperationV2;
+    const operationPrompt = trustedOperationPrompt ?? "";
+    if (!operationPrompt) throw Object.assign(new Error("A v2 response-contract invocation requires its trusted operation prompt."), {
+      code: "response_contract_unavailable"
+    });
+    const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+    const preset = v2Contract.authority.kind === "preset_trusted";
+    if (preset && (!routeBasis || !plan || plan.routeBasisHash !== routeBasis.routeBasisHash)) {
+      throw Object.assign(new Error("A v2 preset invocation has no matching frozen plan."), { code: "response_contract_identity_mismatch" });
+    }
+    return {
+      version: 2 as const,
+      logicalAttemptId: job.orchestration_private.logicalAttempt?.id ?? job.id,
+      invocationKey: identity.key,
+      operation: v2Operation,
+      requestPayloadHash,
+      request: {
+        version: 2 as const,
+        selectionHash: v2Frozen.selectionHash,
+        invocationKey: identity.key,
+        schemaVersion: v2Contract.schemaVersion,
+        schemaHash: v2Contract.schemaHash,
+        requestedModel: provider.model,
+        operationPromptHash: sha256(operationPrompt),
+        planHash: preset ? plan!.planHash : null,
+        routeBasisHash: preset ? routeBasis!.routeBasisHash : null,
+        requestPayloadHash,
+        returnedModel: null,
+        returnedProviderRoute: null,
+        diagnosticCode: null
+      },
+      routeBasis: preset ? routeBasis : undefined,
+      plan: preset ? plan : undefined,
+      trustedOperationPrompt: operationPrompt
+    };
+  }
   const invocationKey: ResponseInvocationKey = operation === "story_choice_repair" ? "choices:nonstream"
     : operation === "story_continuity_review" ? "continuity_review:nonstream"
       : streaming ? "story:stream" : "story:nonstream";
@@ -540,6 +589,29 @@ function isRecoverableIntegrityError(error: unknown): error is ContextBudgetErro
       && RECOVERABLE_INTEGRITY_ERROR_CODES.has(errorCodeFrom(error) || ""));
 }
 
+/**
+ * A v2 prepared invocation has already reserved and durably recorded an
+ * exact request.  Its contract diagnostic is authoritative even when the
+ * underlying HTTP transport supplied a generic status/code.  Auxiliary
+ * stages must therefore reach the job-level failure path instead of silently
+ * substituting a local assessment, coverage result, or later inference.
+ * Historical v1 jobs retain their existing auxiliary fallbacks.
+ */
+function isV2PreparedContractFailure(error: unknown, job: { orchestration_private?: { queuedResponsePolicy?: unknown } | null }): boolean {
+  if (!(error instanceof PreparedResponseContractError)) return false;
+  if ((job.orchestration_private?.queuedResponsePolicy as { version?: unknown } | null)?.version !== 2) return false;
+  return error.diagnosticCode === "provider_schema_unsupported"
+    || error.diagnosticCode === "provider_schema_invalid"
+    || error.diagnosticCode === "provider_route_unavailable"
+    || error.diagnosticCode === "provider_refusal";
+}
+
+function v2PreparedContractDiagnostic(error: unknown, job: { orchestration_private?: { queuedResponsePolicy?: unknown } | null }): string | null {
+  return isV2PreparedContractFailure(error, job)
+    ? (error as PreparedResponseContractError).diagnosticCode
+    : null;
+}
+
 function recoverableIntegrityDiagnostic(error: unknown): Readonly<{
   errorCode: string;
   errorMessage: string;
@@ -607,22 +679,24 @@ function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): stri
   return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
 }
 
-function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: string): GenerationFailureDiagnostic {
+function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: string, responseContractDiagnostic: string | null = null): GenerationFailureDiagnostic {
   const transport = providerTransportErrorDetails(error);
-  const code = transport
+  const code = responseContractDiagnostic
+    ?? (transport
     ? (transport.timedOut ? "provider_request_timeout" : "provider_transport_error")
-    : safeLogErrorCode(errorCodeFrom(error) || "generation_failed", "generation_failed");
+    : safeLogErrorCode(errorCodeFrom(error) || "generation_failed", "generation_failed"));
   const category = code === "provider_request_timeout" ? "provider_timeout"
     : code === "provider_transport_error" ? "provider_transport"
     : code === "mechanics_leak" ? "mechanics"
     : code === "scene_coverage" ? "continuity"
-    : code === "invalid_schema" || code === "invalid_json" ? "format"
+    : code === "invalid_schema" || code === "invalid_json" || code === "provider_schema_invalid" || code === "provider_schema_unsupported" || code === "provider_refusal" ? "format"
     : code === "output_limit" ? "output_incomplete"
     : code === "stale_campaign" ? "authority"
     : "unknown";
   const supportedCode = code === "provider_request_timeout" || code === "provider_transport_error"
     || code === "mechanics_leak" || code === "scene_coverage" || code === "invalid_schema"
     || code === "invalid_json" || code === "output_limit" || code === "stale_campaign"
+    || code === "provider_schema_invalid" || code === "provider_schema_unsupported" || code === "provider_route_unavailable" || code === "provider_refusal"
     ? code : "generation_failed";
   return {
     version: 1,
@@ -846,17 +920,29 @@ function preparedRequestForResult(
 
 function choiceRepairPreparedRequest(
   provider: GenerationTextProvider,
+  job: GenerationExecutionPayload,
   systemPrompt: string,
   base: Omit<StoryTurnOutput, "choices" | "custom_action_suggestion">,
   responseFormat: "json_object" | "json_schema" | "none",
-  responseContract?: ProviderRequest["responseContract"]
+  responseContract?: ProviderRequest["responseContract"],
+  textExecutionPlan?: TextExecutionPlan
 ): Readonly<{ body: string; payloadHash: string }> {
-  const prepared = serializeProviderRequest({ ...provider, baseUrl: "" }, {
+  const request = {
+    // Keep the trusted operation prompt uncomposed here. The frozen
+    // serializer validates it against `textExecutionPlan` and composes the
+    // preset prompt exactly once; precomposing it makes the v2 plan binder
+    // treat the preset prefix as operation content.
     systemPrompt,
     input: buildStoryOnlyChoiceRepairInput(base),
-    budgetOutput: { kind: "story_choice_repair" },
+    budgetOutput: { kind: "story_choice_repair" as const },
     ...(responseContract ? { responseContract } : {})
-  }, responseContract ? {} : { responseFormat: responseFormat === "json_object" });
+  };
+  // Legacy choice repair records can still opt out of a response format.  A
+  // bound contract, including a v2 preset contract, always uses the common
+  // frozen serializer so reservation and dispatch have identical bytes.
+  const prepared = responseContract
+    ? serializeFrozenCampaignRequest(provider, job, "story_choice_repair", request, textExecutionPlan)
+    : serializeProviderRequest({ ...provider, baseUrl: "" }, request, { responseFormat: responseFormat === "json_object" });
   return { body: prepared.body, payloadHash: prepared.payloadHash };
 }
 
@@ -945,15 +1031,172 @@ export function bindCampaignResponseContract(
   return request.responseContract ? request : { ...request, responseContract: preparedContract };
 }
 
+/**
+ * Builds the sole executor capability accepted by the bound preset serializer.
+ * The serializer repeats the pure closure/basis/plan validation immediately
+ * before producing transport bytes, so this descriptor cannot mint trust.
+ */
+function boundFrozenPresetRequestBinding(
+  job: GenerationExecutionPayload,
+  operation: StoryCostOperation,
+  streaming: boolean,
+  trustedOperationPrompt: string,
+  plan: TextExecutionPlan | undefined
+): BoundFrozenPresetProviderRequestBinding | undefined {
+  const frozen = job.orchestration_private?.frozenResponseContracts;
+  if (!frozen || frozen.version !== 2) return undefined;
+  const identity = responseContractIdentity(operation, streaming);
+  const contract = frozen.contracts[identity.key];
+  if (!contract || contract.authority.kind !== "preset_trusted") return undefined;
+  const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+  if (!routeBasis || !plan) {
+    throw Object.assign(new Error("Frozen preset response contract has no saved operation plan."), {
+      code: "response_contract_unavailable"
+    });
+  }
+  return {
+    frozen,
+    routeBasis: routeBasis as TextExecutionRouteBasis,
+    plan,
+    invocationKey: identity.key,
+    operation: responseContractOperationV2Schema.parse(operation) as ResponseContractOperationV2,
+    trustedOperationPrompt
+  };
+}
+
+/** Uses the exact frozen preset serializer for pre-dispatch measurements made
+ * by continuity helpers.  The later callCampaign path repeats this binding
+ * and must therefore produce identical body bytes. */
+function serializeFrozenCampaignRequest(
+  provider: GenerationTextProvider,
+  job: GenerationExecutionPayload,
+  operation: StoryCostOperation,
+  request: ProviderRequest,
+  preboundPlan?: TextExecutionPlan
+) {
+  const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
+  const preparedRequest = bindCampaignTextExecutionPlan(job,
+    bindCampaignResponseContract(job, operation, request, executionPlan), executionPlan);
+  const presetBinding = boundFrozenPresetRequestBinding(job, operation, typeof request.onChunk === "function", request.systemPrompt, executionPlan);
+  return presetBinding
+    ? serializeBoundFrozenPresetProviderRequest({ ...provider, baseUrl: "" }, preparedRequest, presetBinding)
+    : serializeProviderRequest({ ...provider, baseUrl: "" }, preparedRequest);
+}
+
+/** Uses the same checked canonical boundary as dispatch when a durable replay
+ * must decide whether a newly assembled auxiliary request is identical. */
+function prepareCheckedFrozenCampaignRequest(
+  provider: GenerationTextProvider,
+  job: GenerationExecutionPayload,
+  operation: StoryCostOperation,
+  request: ProviderRequest,
+  preboundPlan?: TextExecutionPlan
+) {
+  const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
+  const preparedRequest = bindCampaignTextExecutionPlan(job,
+    bindCampaignResponseContract(job, operation, request, executionPlan), executionPlan);
+  const presetBinding = boundFrozenPresetRequestBinding(job, operation, typeof request.onChunk === "function", request.systemPrompt, executionPlan);
+  const canonicalRequest = {
+    systemPrompt: preparedRequest.systemPrompt,
+    input: preparedRequest.input,
+    ...(preparedRequest.recoveryInput ? { recoveryInput: preparedRequest.recoveryInput } : {}),
+    ...(preparedRequest.rejectedResponse ? { completeRejectedDraft: { content: preparedRequest.rejectedResponse, complete: true as const } } : {}),
+    ...(preparedRequest.onChunk ? { onChunk: preparedRequest.onChunk } : {})
+  };
+  const checkedOptions = {
+    inputLimit: effectiveContextWindowTokens(provider, job) - effectiveMaxOutputTokens(provider, job),
+    count: estimateStoryTokens,
+    countMode: "estimated" as const,
+    safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
+    contextWindowTokens: effectiveContextWindowTokens(provider, job),
+    output: preparedRequest.budgetOutput ?? { kind: "story_append" as const }
+  };
+  const frozenContract = preparedRequest.responseContract;
+  return frozenContract ? presetBinding
+    ? serializeCheckedBoundFrozenPresetProviderRequest({ ...provider, baseUrl: "" }, canonicalRequest, presetBinding, checkedOptions)
+    : serializeCheckedProviderRequest({ ...provider, baseUrl: "" }, canonicalRequest, { ...checkedOptions, responseContract: frozenContract })
+    : undefined;
+}
+
+/** A completed v2 scene-coverage invocation has no transport retry path.  A
+ * later worker may reuse it only when the freshly frozen request is byte-for-
+ * byte identical and the saved response still agrees with the invocation
+ * ledger.  Different narration produces a different body and remains a new
+ * logical invocation. */
+type ReplayedSceneCoverageResult = Readonly<{ content: string; outputLimited: boolean }>;
+
+function replayValidatedSceneCoverage(
+  provider: GenerationTextProvider,
+  job: GenerationExecutionPayload,
+  request: ProviderRequest
+): ReplayedSceneCoverageResult | undefined {
+  const frozen = job.orchestration_private?.frozenResponseContracts;
+  const replay = job.orchestration_private?.sceneCoverageRepair?.validatedCoverage;
+  if (frozen?.version !== 2 || !replay) return undefined;
+  const prepared = prepareCheckedFrozenCampaignRequest(provider, job, "scene_coverage_validation", request);
+  if (!prepared) return undefined;
+  if (prepared.body !== replay.requestBody || prepared.payloadHash !== replay.requestPayloadHash) return undefined;
+  const invocation = (job.orchestration_private?.responseContractInvocations ?? []).find((entry) => entry.version === 2
+    && entry.operation === "scene_coverage_validation"
+    && entry.requestPayloadHash === replay.requestPayloadHash);
+  if (!invocation || invocation.status !== "completed"
+    || invocation.response?.diagnosticCode !== null
+    || invocation.response?.returnedModel !== replay.result.returnedModel
+    || invocation.response?.returnedProviderRoute !== replay.result.returnedProviderRoute
+    || invocation.response?.resultHash !== replay.resultHash) {
+    throw Object.assign(new Error("The saved scene coverage result does not match its completed invocation."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  const parsed = parseSceneCoverageOutput(replay.result.content);
+  if (replay.result.outputLimited || !parsed?.covered) {
+    throw Object.assign(new Error("The saved scene coverage replay result is not a completed passing validation."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
+  return replay.result;
+}
+
 /** The reservation must be the dispatch body for contract jobs. Historical
  * jobs intentionally retain their pre-contract, callback-free reservation. */
 export function preparePrimaryReservation(
   provider: GenerationTextProvider,
   request: ProviderRequest,
   hasFrozenContracts: boolean
+): ReturnType<typeof serializeProviderRequest>;
+export function preparePrimaryReservation(
+  provider: GenerationTextProvider,
+  job: GenerationExecutionPayload,
+  operation: StoryCostOperation,
+  request: ProviderRequest,
+  hasFrozenContracts: boolean,
+  preboundPlan?: TextExecutionPlan
+): ReturnType<typeof serializeProviderRequest>;
+export function preparePrimaryReservation(
+  provider: GenerationTextProvider,
+  jobOrRequest: GenerationExecutionPayload | ProviderRequest,
+  operationOrHasFrozenContracts: StoryCostOperation | boolean,
+  request?: ProviderRequest,
+  hasFrozenContracts?: boolean,
+  preboundPlan?: TextExecutionPlan
 ) {
-  return serializeProviderRequest({ ...provider, baseUrl: "" }, hasFrozenContracts
-    ? request
+  // Kept for historical v1 reservation readers and tests. New runtime calls
+  // the second overload so a trusted preset can only use the bound path.
+  if (!request) {
+    const legacyRequest = jobOrRequest as ProviderRequest;
+    return serializeProviderRequest({ ...provider, baseUrl: "" }, operationOrHasFrozenContracts
+      ? legacyRequest
+      : { systemPrompt: legacyRequest.systemPrompt, input: legacyRequest.input });
+  }
+  const job = jobOrRequest as GenerationExecutionPayload;
+  const operation = operationOrHasFrozenContracts as StoryCostOperation;
+  const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
+  const preparedRequest = bindCampaignTextExecutionPlan(job, request, executionPlan);
+  const presetBinding = boundFrozenPresetRequestBinding(job, operation, typeof request.onChunk === "function", request.systemPrompt, executionPlan);
+  return presetBinding
+    ? serializeBoundFrozenPresetProviderRequest({ ...provider, baseUrl: "" }, preparedRequest, presetBinding)
+    : serializeProviderRequest({ ...provider, baseUrl: "" }, hasFrozenContracts
+    ? preparedRequest
     : { systemPrompt: request.systemPrompt, input: request.input });
 }
 
@@ -985,12 +1228,19 @@ function requirePreparedTextExecutor(collaborators: GenerationExecutionCollabora
 }
 
 function effectiveProviderConfigurationHash(provider: GenerationTextProvider, job: GenerationExecutionPayload): string {
+  const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+  const frozenCandidate = routeBasis?.candidates[0];
   return effectiveProviderConfigurationFingerprint({
-    providerId: provider.id, providerType: provider.providerType, model: provider.model,
-    endpointIdentity: provider.endpointIdentity ?? "",
-    contextWindowTokens: provider.contextWindowTokens, maxOutputTokens: provider.maxOutputTokens,
-    temperature: provider.temperature, requestTimeoutMs: provider.requestTimeoutMs,
-    configuration: provider.configuration,
+    providerId: provider.id, providerType: provider.providerType, model: frozenCandidate?.modelId ?? provider.model,
+    endpointIdentity: routeBasis?.endpointReference ?? provider.endpointIdentity ?? "",
+    contextWindowTokens: frozenCandidate?.contextWindowTokens ?? provider.contextWindowTokens,
+    maxOutputTokens: frozenCandidate?.maxOutputTokens ?? provider.maxOutputTokens,
+    // A frozen route must preserve an intentional omitted temperature rather
+    // than reading a later profile default. Historical no-basis jobs still
+    // fingerprint the live provider setting.
+    temperature: routeBasis ? routeBasis.parameters.temperature ?? 0 : provider.temperature,
+    requestTimeoutMs: routeBasis?.requestTimeoutMs ?? provider.requestTimeoutMs,
+    configuration: frozenCandidate ? { parameters: routeBasis!.parameters, providerPolicy: frozenCandidate.providerPolicy } : provider.configuration,
     effectiveContextWindowTokens: effectiveContextWindowTokens(provider, job),
     inputSafetyPolicy: "estimated_20_percent_plus_1024"
   });
@@ -1232,28 +1482,34 @@ export async function callCampaignTextProvider(
   const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
   const preparedRequest = bindCampaignTextExecutionPlan(job,
     bindCampaignResponseContract(job, operation, request, executionPlan), executionPlan);
+  const presetBinding = boundFrozenPresetRequestBinding(job, operation, typeof request.onChunk === "function", request.systemPrompt, executionPlan);
   const scope = dependencies.responseContractScope;
   const frozenContract = preparedRequest.responseContract;
   // Historical requests remain byte-for-byte on their legacy transport path.
   // Contract requests must pass the same checked canonical serializer before a
   // ledger entry can become dispatchable.
-  const prepared = frozenContract ? serializeCheckedProviderRequest({ ...provider, baseUrl: "" }, {
+  const canonicalRequest = {
     systemPrompt: preparedRequest.systemPrompt,
     input: preparedRequest.input,
     ...(preparedRequest.recoveryInput ? { recoveryInput: preparedRequest.recoveryInput } : {}),
     ...(preparedRequest.rejectedResponse ? { completeRejectedDraft: { content: preparedRequest.rejectedResponse, complete: true as const } } : {}),
     ...(preparedRequest.onChunk ? { onChunk: preparedRequest.onChunk } : {})
-  }, {
+  };
+  const checkedOptions = {
     inputLimit: effectiveContextWindowTokens(provider, job) - effectiveMaxOutputTokens(provider, job),
     count: estimateStoryTokens,
     countMode: "estimated",
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
     contextWindowTokens: effectiveContextWindowTokens(provider, job),
-    output: preparedRequest.budgetOutput ?? { kind: "story_append" },
-    responseContract: frozenContract
-  }) : undefined;
+    output: preparedRequest.budgetOutput ?? { kind: "story_append" }
+  } as const;
+  const prepared = frozenContract ? presetBinding
+    ? serializeCheckedBoundFrozenPresetProviderRequest({ ...provider, baseUrl: "" }, canonicalRequest, presetBinding, checkedOptions)
+    : serializeCheckedProviderRequest({ ...provider, baseUrl: "" }, canonicalRequest, { ...checkedOptions, responseContract: frozenContract })
+    : undefined;
   const invocation = prepared ? responseContractInvocationDetails(
-    job, operation, typeof preparedRequest.onChunk === "function", prepared.payloadHash, provider
+    job, operation, typeof preparedRequest.onChunk === "function", prepared.payloadHash, provider,
+    request.systemPrompt, executionPlan
   ) : undefined;
   if (invocation) {
     const checkedPrepared = prepared!;
@@ -1306,7 +1562,7 @@ export async function callCampaignTextProvider(
         ? await requirePreparedTextExecutor(dependencies.collaborators).execute({
           plan: executionPlan, operation, ownerUserId: job.owner_user_id,
           providerProfileId: job.orchestration_private?.textExecutionRouteBasis?.credentialReference ?? job.provider_profile_id,
-          request: transportRequest
+          request: transportRequest, preparedRequest: checkedPrepared
         })
         : await provider.execute(transportRequest);
     } catch (error) {
@@ -1323,7 +1579,7 @@ export async function callCampaignTextProvider(
           });
         }
         const prior = job.orchestration_private?.preparedResponseFailures ?? [];
-        const evidence = { version: 1 as const, invocationId: reserved.id,
+        const evidence = { version: reserved.version === 2 ? 2 as const : 1 as const, invocationId: reserved.id,
           requestBody: checkedPrepared.body, requestPayloadHash: checkedPrepared.payloadHash,
           responseId: preparedError.responseId, partialContent: preparedError.partialContent.slice(0, 1_000_000),
           partialContentTruncated: preparedError.partialContent.length > 1_000_000,
@@ -1334,7 +1590,7 @@ export async function callCampaignTextProvider(
           throw Object.assign(new Error("The provider failure evidence conflicts with the reserved invocation."), { code: "response_contract_identity_mismatch" });
         }
         if (!existing) {
-          if (prior.length >= 24) throw Object.assign(new Error("Prepared response failure evidence is full."), { code: "response_contract_unavailable" });
+          if (prior.length >= responseContractInvocationLedgerLimitV2) throw Object.assign(new Error("Prepared response failure evidence is full."), { code: "response_contract_unavailable" });
           await persistOrchestration(dependencies.repository, scope, job, { preparedResponseFailures: [...prior, evidence] });
         }
       }
@@ -1357,7 +1613,15 @@ export async function callCampaignTextProvider(
     const completed = await dependencies.repository.completeResponseContractInvocation(scope, reserved.id, {
       returnedModel: result.returnedModel ?? null,
       returnedProviderRoute: result.returnedProviderRoute ?? null,
-      diagnosticCode: null
+      diagnosticCode: null,
+      resultHash: operation === "scene_coverage_validation"
+        ? sceneCoverageReplayResultHash({
+          content: result.content,
+          outputLimited: result.outputLimited,
+          returnedModel: result.returnedModel ?? null,
+          returnedProviderRoute: result.returnedProviderRoute ?? null
+        })
+        : null
     });
     if (!completed || completed.status !== "completed") throw Object.assign(new Error("The response-contract completion lost its lease."), { code: "lease_lost" });
     await dependencies.collaborators.recordProfileCost(
@@ -1470,13 +1734,15 @@ async function evaluateTriggers(
   narration = ""
 ): Promise<ActivatedEvent[]> {
   if (!triggers.length) return [];
+  const operationPrompt = dependencies.collaborators.promptFromSnapshot(job.prompt_snapshot, "event_trigger");
+  const textExecutionPlan = deriveCampaignTextExecutionPlan(job, operationPrompt);
   const response = await callCampaignTextProvider(
     dependencies,
     provider,
     job,
     phase === "before" ? "event_trigger_before" : "event_trigger_after",
     {
-      systemPrompt: dependencies.collaborators.promptFromSnapshot(job.prompt_snapshot, "event_trigger"),
+      systemPrompt: operationPrompt,
       input: buildEventTriggerPrompt(
         phase,
         context,
@@ -1485,7 +1751,8 @@ async function evaluateTriggers(
         triggers,
         narration
       )
-    }
+    },
+    textExecutionPlan
   );
   if (response.outputLimited) throw new Error("The private event evaluation reached its output limit.");
   return activatedEventsFromResponse(response.content, triggers, job.expected_turn_number);
@@ -1785,7 +2052,12 @@ async function executeLoadedGeneration(
       } satisfies GenerationTextProvider;
     });
 
-    if (!routeBasis && frozenStoryMemoryPolicySnapshot && effectiveProviderConfigurationHash(provider, job) !== frozenStoryMemoryPolicySnapshot.providerConfigurationFingerprint) {
+    // A route-basis snapshot alone does not make a historical job native v2.
+    // Legacy jobs can now retain a basis for compatibility, but preserve their
+    // established profile-fingerprint reclaim guard. Native v2 instead uses
+    // the frozen route plan and current credential/endpoint authority above.
+    const isV2FrozenDelivery = job.orchestration_private?.frozenResponseContracts?.version === 2;
+    if (!isV2FrozenDelivery && frozenStoryMemoryPolicySnapshot && effectiveProviderConfigurationHash(provider, job) !== frozenStoryMemoryPolicySnapshot.providerConfigurationFingerprint) {
       assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
         errorCode: "generation_checkpoint_incompatible", errorMessage: "The provider configuration changed after this job was queued.",
         recoveryMetadata: { reason: "provider_configuration_changed", diagnostic: {
@@ -1799,11 +2071,42 @@ async function executeLoadedGeneration(
     // text operation, including mechanics and trigger assessments below.
     // Task 4 owns v2 schema/response-contract identity. A frozen native route
     // must not compare its planning descriptor against mutable profile config.
-    const queuedResponsePolicy = routeBasis ? undefined : job.orchestration_private?.queuedResponsePolicy;
+    const queuedResponsePolicy = job.orchestration_private?.queuedResponsePolicy as QueuedResponsePolicyVersioned | undefined;
     if (queuedResponsePolicy?.version === 2) {
-      throw Object.assign(new Error("V2 response-contract execution requires the durable invocation path."), { code: "response_contract_unavailable" });
-    }
-    if (queuedResponsePolicy?.version === 1) {
+      if (queuedResponsePolicy.authority.kind === "model_verified") {
+        const authority = queuedResponsePolicy.authority;
+        const current = responseContractProfile(provider, job);
+        const frozenDirectRoute = routeBasis?.selection.kind === "model"
+          && routeBasis.selection.modelId === authority.model
+          && routeBasis.credentialReference === authority.providerProfileId
+          && routeBasis.authorityRevision === authority.authorityRevision;
+        if (authority.providerProfileId !== provider.id || authority.providerType !== provider.providerType
+          || authority.model !== provider.model || authority.endpointIdentity !== (provider.endpointIdentity ?? "")
+          || !frozenDirectRoute && (authority.providerConfigurationHash !== current.configurationHash
+            || authority.routeConfigHash !== capabilityRouteConfigHash(provider.configuration))
+          || !frozenDirectRoute && authority.authorityRevision !== provider.authorityRevision) {
+          throw Object.assign(new Error("The queued direct-model authority changed before execution."), {
+            code: "generation_checkpoint_incompatible"
+          });
+        }
+      }
+      let frozenResponseContracts = job.orchestration_private?.frozenResponseContracts as FrozenResponseContractsVersioned | undefined;
+      if (!frozenResponseContracts) {
+        if (!collaborators.resolveResponseContracts || !repository.saveFrozenResponseContracts) {
+          throw Object.assign(new Error("This worker cannot preflight the queued response contract."), { code: "response_contract_unavailable" });
+        }
+        const selected = await collaborators.resolveResponseContracts(job.owner_user_id, provider, queuedResponsePolicy, responseContractProfile(provider, job));
+        const saved = await repository.saveFrozenResponseContracts(scope, queuedResponsePolicyVersionedHash(queuedResponsePolicy), selected);
+        if (!saved) throw Object.assign(new Error("The response-contract preflight lost its lease."), { code: "lease_lost" });
+        if (saved.version !== 2) throw Object.assign(new Error("The worker received an incompatible response-contract version."), { code: "response_contract_identity_mismatch" });
+        frozenResponseContracts = saved;
+        job = { ...job, orchestration_private: { ...job.orchestration_private, frozenResponseContracts } };
+      }
+      if (frozenResponseContracts.version !== 2
+        || frozenResponseContracts.selectionHash !== job.orchestration_private?.frozenResponseContracts?.selectionHash) {
+        throw Object.assign(new Error("The frozen v2 response-contract selection changed."), { code: "generation_checkpoint_incompatible" });
+      }
+    } else if (queuedResponsePolicy?.version === 1) {
       let frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
       if (!frozenResponseContracts) {
         if (!collaborators.resolveResponseContracts || !repository.saveFrozenResponseContracts) {
@@ -1851,8 +2154,9 @@ async function executeLoadedGeneration(
       // Bind the preset before fixed-envelope accounting so it reduces the
       // Chronicle/context budget rather than causing a late transport overflow.
       const storyTextExecutionPlan = deriveCampaignTextExecutionPlan(job, storyBaseSystemPrompt);
-      const storySystemPrompt = storyTextExecutionPlan?.prompt ?? storyBaseSystemPrompt;
-      const fixedPromptEnvelope = estimateStoryTokens(storySystemPrompt)
+      const storySystemPrompt = storyBaseSystemPrompt;
+      const effectiveStorySystemPrompt = storyTextExecutionPlan?.prompt ?? storyBaseSystemPrompt;
+      const fixedPromptEnvelope = estimateStoryTokens(effectiveStorySystemPrompt)
         + estimateStoryTokens((hasFrozenStoryMemoryPolicy ? buildStoryMemoryUserPrompt : buildStoryUserPrompt)(
           emptyPromptContext,
           safeAction,
@@ -2050,7 +2354,7 @@ async function executeLoadedGeneration(
             if (response.outputLimited) throw new Error("The private RPG assessment reached its output limit.");
             assessment = parseRpgAssessment(response.content);
           } catch (error) {
-            if (isRecoverableIntegrityError(error)) throw error;
+            if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
             assessmentError = error instanceof Error ? error.message : String(error);
             assessment = localRpgAssessment(job.action, inputs.rpgStats);
           }
@@ -2072,7 +2376,7 @@ async function executeLoadedGeneration(
           const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "before" && !pendingTriggerIds.has(trigger.id));
           try {
             activated = await evaluateTriggers(
-              dependencies,
+              ledgerDependencies,
               provider,
               "before",
               promptContext,
@@ -2080,7 +2384,7 @@ async function executeLoadedGeneration(
               triggers
             );
           } catch (error) {
-            if (isRecoverableIntegrityError(error)) throw error;
+            if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }
@@ -2290,10 +2594,11 @@ async function executeLoadedGeneration(
           || (savedChoiceRepair.status === "validated" && savedChoiceRepair.resultHash !== sha256(stableStringify(savedChoiceRepair.fields)))
           || savedChoiceRepair.originalRequestPayloadHash !== sha256(savedChoiceRepair.originalRequestBody)
           || savedChoiceRepair.repairRequestPayloadHash !== sha256(savedChoiceRepair.repairRequestBody)
-          || stableStringify(choiceRepairPreparedRequest(provider,
+          || stableStringify(choiceRepairPreparedRequest(provider, job,
             storyOnlyChoiceRepairSystemPrompt ?? "",
             savedChoiceRepair.base, savedChoiceRepair.repairResponseFormat,
-            frozenContractForOperation(job, "story_choice_repair")))
+            frozenContractForOperation(job, "story_choice_repair"),
+            deriveCampaignTextExecutionPlan(job, storyOnlyChoiceRepairSystemPrompt ?? "")))
             !== stableStringify({ body: savedChoiceRepair.repairRequestBody, payloadHash: savedChoiceRepair.repairRequestPayloadHash })
           || (job.orchestration_private?.frozenResponseContracts !== undefined
             && (savedChoiceRepair.repairResponseContract === undefined
@@ -2365,41 +2670,45 @@ async function executeLoadedGeneration(
     let lastStreamPersistWarningAt = 0;
     const onChunk = async (_delta: string, accumulated: string) => {
       const now = Date.now();
-      if (now - lastPartialUpdate < 350 || accumulated === lastPartialContent) return;
-      lastPartialUpdate = now;
-      lastPartialContent = accumulated;
-      try {
-        assertActiveGenerationUpdate(
-          await repository.savePartialNarration(scope, accumulated),
-          "persisting streamed output"
-        );
-        if (lastStreamLogAt === 0 || now - lastStreamLogAt >= 5000
-            || accumulated.length - lastStreamLogChars >= 4096) {
-          const narration = extractPartialNarration(accumulated);
-          logger.info({
-            event: "turn_generation_stream_progress",
-            ...generationLogContext(job, workerId),
-            storyOperation: "story_generation",
-            accumulatedChars: accumulated.length,
-            narrationChars: narration.length,
-            streamDurationMs: now - generationStartedAt
-          });
-          lastStreamLogAt = now;
-          lastStreamLogChars = accumulated.length;
-        }
-      } catch (error) {
-        if (errorCodeFrom(error) === "generation_cancelled") throw error;
-        if (now - lastStreamPersistWarningAt >= 5000) {
-          const rawErrorCode = errorCodeFrom(error);
-          const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
-          logger.warn({
-            event: "turn_generation_stream_persist_failed",
-            ...generationLogContext(job, workerId),
-            storyOperation: "story_generation",
-            errorName: error instanceof Error ? error.name : "Error",
-            ...(errorCode ? { errorCode } : {})
-          });
-          lastStreamPersistWarningAt = now;
+      // Persisting progress is throttled, but segment detection must inspect
+      // every changed chunk. A fast final chunk can complete the narration
+      // before the throttle window closes.
+      if (accumulated !== lastPartialContent && now - lastPartialUpdate >= 350) {
+        lastPartialUpdate = now;
+        lastPartialContent = accumulated;
+        try {
+          assertActiveGenerationUpdate(
+            await repository.savePartialNarration(scope, accumulated),
+            "persisting streamed output"
+          );
+          if (lastStreamLogAt === 0 || now - lastStreamLogAt >= 5000
+              || accumulated.length - lastStreamLogChars >= 4096) {
+            const narration = extractPartialNarration(accumulated);
+            logger.info({
+              event: "turn_generation_stream_progress",
+              ...generationLogContext(job, workerId),
+              storyOperation: "story_generation",
+              accumulatedChars: accumulated.length,
+              narrationChars: narration.length,
+              streamDurationMs: now - generationStartedAt
+            });
+            lastStreamLogAt = now;
+            lastStreamLogChars = accumulated.length;
+          }
+        } catch (error) {
+          if (errorCodeFrom(error) === "generation_cancelled") throw error;
+          if (now - lastStreamPersistWarningAt >= 5000) {
+            const rawErrorCode = errorCodeFrom(error);
+            const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
+            logger.warn({
+              event: "turn_generation_stream_persist_failed",
+              ...generationLogContext(job, workerId),
+              storyOperation: "story_generation",
+              errorName: error instanceof Error ? error.name : "Error",
+              ...(errorCode ? { errorCode } : {})
+            });
+            lastStreamPersistWarningAt = now;
+          }
         }
       }
 
@@ -2508,12 +2817,8 @@ async function executeLoadedGeneration(
       }
     };
 
-    const supportsStreaming = Boolean(
-      provider.configuration
-      && (provider.configuration.streaming === true
-        || provider.configuration.streamingSupport === true)
-    );
-    const frozenContracts = job.orchestration_private?.frozenResponseContracts?.contracts;
+    const frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
+    const frozenContracts = frozenResponseContracts?.contracts;
     const unboundStoryRequest = {
       systemPrompt: storySystemPrompt,
       input: storyInput
@@ -2521,7 +2826,18 @@ async function executeLoadedGeneration(
     // A frozen selection follows its durable logical attempt, never a lease
     // reclaim counter. Legacy jobs retain their historical first-claim rule.
     const initialLogicalAttempt = (orchestration.logicalAttempt?.id ?? job.id) === job.id;
-    const streamsPrimary = supportsStreaming && (frozenContracts ? initialLogicalAttempt : job.attempts === 1);
+    // For a v2 frozen contract, the queued invocation closure is the durable
+    // delivery decision. Re-reading profile configuration here would let a
+    // later ordinary settings edit turn a reserved stream body into a
+    // non-stream request (or vice versa). Legacy jobs retain their historical
+    // live-profile stream selection.
+    const usesV2FrozenDelivery = frozenResponseContracts?.version === 2 && frozenContracts !== undefined;
+    const supportsStreaming = usesV2FrozenDelivery
+      ? frozenContracts["story:stream"] !== undefined
+      : Boolean(provider.configuration
+        && (provider.configuration.streaming === true
+          || provider.configuration.streamingSupport === true));
+    const streamsPrimary = supportsStreaming && (usesV2FrozenDelivery ? initialLogicalAttempt : job.attempts === 1);
     const storyRequest = bindCampaignResponseContract(job, "story_generation", unboundStoryRequest);
     const primaryRequest = bindCampaignResponseContract(job, "story_generation", streamsPrimary
       ? { ...unboundStoryRequest, onChunk }
@@ -2540,7 +2856,8 @@ async function executeLoadedGeneration(
     if (!validatedDraft && !savedChoiceRepair?.originalResponse && !orchestration.primaryResult && !orchestration.primaryReservation) {
       // Historical reservations intentionally reconstructed only the old
       // system/input pair. Contract jobs reserve the complete eventual body.
-      const preparedReservation = preparePrimaryReservation(provider, primaryRequest, Boolean(frozenContracts));
+      const preparedReservation = preparePrimaryReservation(provider,
+        job, "story_generation", primaryRequest, Boolean(frozenContracts), storyTextExecutionPlan);
       orchestration = await persistOrchestration(repository, scope, job, {
         primaryReservation: {
           version: 1, requestBody: preparedReservation.body, requestPayloadHash: preparedReservation.payloadHash,
@@ -2801,14 +3118,14 @@ async function executeLoadedGeneration(
           return true;
         } else {
           const choiceRepairPlan = deriveCampaignTextExecutionPlan(job, storyOnlyChoiceRepairSystemPrompt!);
-          const choiceRepairSystemPrompt = choiceRepairPlan?.prompt ?? storyOnlyChoiceRepairSystemPrompt!;
+          const choiceRepairSystemPrompt = storyOnlyChoiceRepairSystemPrompt!;
           const repairRequest = bindCampaignResponseContract(job, "story_choice_repair", {
             systemPrompt: choiceRepairSystemPrompt,
             input: buildStoryOnlyChoiceRepairInput(choiceOnly.base),
             budgetOutput: { kind: "story_choice_repair" as const }
-          });
-          const initialRepairRequest = choiceRepairPreparedRequest(provider, choiceRepairSystemPrompt, choiceOnly.base,
-            repairRequest.responseContract?.mode ?? "json_object", repairRequest.responseContract);
+          }, choiceRepairPlan);
+          const initialRepairRequest = choiceRepairPreparedRequest(provider, job, choiceRepairSystemPrompt, choiceOnly.base,
+            repairRequest.responseContract?.mode ?? "json_object", repairRequest.responseContract, choiceRepairPlan);
           const repairResponseContract = choiceRepairResponseContractIdentity(job);
           const pendingCheckpoint = existing?.status === "pending" ? existing : null;
           const originalPrepared = pendingCheckpoint
@@ -2853,7 +3170,7 @@ async function executeLoadedGeneration(
             parsed = { ok: true, story };
             firstReason = null;
           } catch (error) {
-            if (isRecoverableIntegrityError(error)) throw error;
+            if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
             if (await reofferFailedAuthorizedRetry("choices", "The authorized choice repair did not produce usable choices.")) return true;
             assertActiveGenerationUpdate(await repository.markRecoverable({
               ...scope, providerResponseId: null, providerFinishReason: null,
@@ -2974,7 +3291,8 @@ async function executeLoadedGeneration(
     if (reservedSceneRewrite && sceneRetryReceipt
         && reservedSceneRewrite.rejectedMainStoryHash === sceneCandidateHash
         && reservedSceneRewrite.authorizedReviewId === sceneRetryReceipt.reviewId
-        && reservedSceneRewrite.authorizedRevision === sceneRetryReceipt.revision) {
+        && reservedSceneRewrite.authorizedRevision === sceneRetryReceipt.revision
+        && reservedSceneRewrite.status !== "validated") {
       // A provider may have accepted this rewrite before a worker died. The
       // reservation is the durable consumption record, so reclaim must not
       // send the same user-authorized destructive request again.
@@ -2989,19 +3307,31 @@ async function executeLoadedGeneration(
     if (stages.allowSceneCoverage && job.resolved_input_mode === "scene" && !activeSceneKeep) {
       let coverage;
       let coverageOutputLimited = true;
-      try {
-        const coverageResponse = await phase("scene_coverage_validation", () =>
-          callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", {
+      const authorizedSceneRetry = Boolean(sceneRetryReceipt && savedReview.success
+        && savedReview.data.gateCandidate.storyHash === sha256(canonicalEvidenceJson(sceneStory)));
+      if (authorizedSceneRetry) {
+        // The approved review already binds the failed candidate and findings.
+        // Re-running its identical coverage request could only redispatch a
+        // completed invocation; use the authorization to proceed directly to
+        // the one permitted rewrite.
+        coverage = { covered: false, missing_required_beats: ["The approved scene coverage review requires the authorized rewrite."], contradictions: [] };
+      } else {
+        try {
+          const coverageRequest = {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
             input: buildSceneCoveragePrompt(safeAction, parsedNarration)
-          }));
-        coverageOutputLimited = coverageResponse.outputLimited;
-        coverage = coverageResponse.outputLimited
-          ? null
-          : parseSceneCoverageOutput(coverageResponse.content);
-      } catch (error) {
-        if (isRecoverableIntegrityError(error)) throw error;
-        coverage = null;
+          };
+          const replay = replayValidatedSceneCoverage(provider, job, coverageRequest);
+          const coverageResponse = replay ?? await phase("scene_coverage_validation", () =>
+            callCampaignTextProvider(ledgerDependencies, provider, job, "scene_coverage_validation", coverageRequest));
+          coverageOutputLimited = coverageResponse.outputLimited;
+          coverage = coverageResponse.outputLimited
+            ? null
+            : parseSceneCoverageOutput(coverageResponse.content);
+        } catch (error) {
+          if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
+          coverage = null;
+        }
       }
       logger.info({
         event: "turn_generation_scene_coverage_completed",
@@ -3013,8 +3343,6 @@ async function executeLoadedGeneration(
         contradictionCount: coverage?.contradictions.length || 0
       });
       if (!coverage?.covered) {
-        const authorizedSceneRetry = Boolean(sceneRetryReceipt && savedReview.success
-          && savedReview.data.gateCandidate.storyHash === sha256(canonicalEvidenceJson(sceneStory)));
         if (!authorizedSceneRetry) return pauseSceneCoverage();
         const rejectedResponse = result.content;
         logger.warn({
@@ -3040,11 +3368,11 @@ async function executeLoadedGeneration(
           ),
           rejectedResponse
         };
-        const preparedSceneRewrite = serializeProviderRequest({ ...provider, baseUrl: "" }, {
+        const preparedSceneRewrite = serializeFrozenCampaignRequest(provider, job, "scene_coverage_rewrite", {
           systemPrompt: sceneRewriteRequest.systemPrompt,
           input: sceneRewriteRequest.input,
           recoveryInput: sceneRewriteRequest.recoveryInput,
-          completeRejectedDraft: { content: rejectedResponse, complete: true as const }
+          rejectedResponse
         });
         orchestration = await persistOrchestration(repository, scope, job, {
           sceneCoverageRepair: {
@@ -3066,7 +3394,7 @@ async function executeLoadedGeneration(
           job,
           "scene_coverage_rewrite",
           sceneRewriteRequest,
-          storyTextExecutionPlan
+          undefined
         ));
         // The provider can canonicalize the prepared request after the
         // reservation (for example, by retrying without response_format).
@@ -3087,24 +3415,47 @@ async function executeLoadedGeneration(
         let repairedCoverageOutputLimited = true;
         if (parsed.ok && !result.outputLimited) {
           const repairedNarration = parsed.story.narration;
+          const repairedCoverageRequest = {
+            systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
+            input: buildSceneCoveragePrompt(safeAction, repairedNarration)
+          };
           try {
-            const coverageResponse = await phase("scene_coverage_validation", () =>
-              callCampaignTextProvider(
+            const replay = replayValidatedSceneCoverage(provider, job, repairedCoverageRequest);
+            const coverageResponse = replay ?? await phase("scene_coverage_validation", () => callCampaignTextProvider(
                 ledgerDependencies,
                 provider,
                 job,
                 "scene_coverage_validation",
-                {
-                  systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-                  input: buildSceneCoveragePrompt(safeAction, repairedNarration)
-                }
+                repairedCoverageRequest
               ));
             repairedCoverageOutputLimited = coverageResponse.outputLimited;
             repairedCoverage = coverageResponse.outputLimited
               ? null
               : parseSceneCoverageOutput(coverageResponse.content);
+            if (repairedCoverage?.covered && !replay) {
+              const observedCoverage = coverageResponse as ProviderResult;
+              const actualCoverage = preparedRequestForResult(observedCoverage, provider, repairedCoverageRequest);
+              const result = {
+                content: observedCoverage.content,
+                outputLimited: observedCoverage.outputLimited,
+                returnedModel: observedCoverage.returnedModel ?? null,
+                returnedProviderRoute: observedCoverage.returnedProviderRoute ?? null
+              };
+              orchestration = await persistOrchestration(repository, scope, job, {
+                sceneCoverageRepair: {
+                  ...orchestration.sceneCoverageRepair!,
+                  validatedCoverage: {
+                    version: 1,
+                    requestBody: actualCoverage.body,
+                    requestPayloadHash: actualCoverage.payloadHash,
+                    result,
+                    resultHash: sceneCoverageReplayResultHash(result)
+                  }
+                }
+              });
+            }
           } catch (error) {
-            if (isRecoverableIntegrityError(error)) throw error;
+            if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
             repairedCoverage = null;
           }
         }
@@ -3180,7 +3531,7 @@ async function executeLoadedGeneration(
           const triggers = inputs.eventTriggers.filter((trigger) => trigger.timing === "after" && !pendingTriggerIds.has(trigger.id));
           try {
             activated = await evaluateTriggers(
-              dependencies,
+              ledgerDependencies,
               provider,
               "after",
               promptContext,
@@ -3189,7 +3540,7 @@ async function executeLoadedGeneration(
               currentMainStory.narration
             );
           } catch (error) {
-            if (isRecoverableIntegrityError(error)) throw error;
+            if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
             triggerError = error instanceof Error ? error.message : String(error);
           }
         }
@@ -3211,7 +3562,7 @@ async function executeLoadedGeneration(
         );
         mainEventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, dueBeforeOrPendingEvents);
       } catch (error) {
-        if (isRecoverableIntegrityError(error)) throw error;
+        if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
       }
       const eventRetryAuthorized = Boolean(eventRetryReceipt && savedReview.success
         && savedReview.data.candidateScope === "main"
@@ -3304,13 +3655,13 @@ async function executeLoadedGeneration(
         let repairedMain: ReturnType<typeof parseStoryOutput>;
         try {
           repairResult = await phase("scene_coverage_rewrite", () => callCampaignTextProvider(
-            ledgerDependencies, provider, job, "scene_coverage_rewrite", repairRequest, storyTextExecutionPlan
+            ledgerDependencies, provider, job, "scene_coverage_rewrite", repairRequest
           ));
           repairedMain = (repairResult.outputLimited
             ? { ok: false as const, code: "output_limit", errors: ["The event-coverage rewrite reached its output limit."] }
             : parseStoryOutput(repairResult.content, storyMemoryDefaults)) as ReturnType<typeof parseStoryOutput>;
         } catch (error) {
-          if (isRecoverableIntegrityError(error)) throw error;
+          if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
           repairedMain = { ok: false as const, code: "invalid_schema", errors: ["The event-coverage rewrite could not be validated."] };
         }
         if (!repairedMain.ok) {
@@ -3347,7 +3698,7 @@ async function executeLoadedGeneration(
             ? null
             : parseRequiredEventCoverage(coverageResponse.content, dueBeforeOrPendingEvents);
         } catch (error) {
-          if (isRecoverableIntegrityError(error)) throw error;
+          if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
         }
         if (!coveragePassed(repairedCoverage)) {
           if (await reofferFailedAuthorizedRetry("event_coverage", "The authorized before-event rewrite did not satisfy event coverage.")) return true;
@@ -3475,7 +3826,7 @@ async function executeLoadedGeneration(
             extensionError: undefined
           });
         } catch (error) {
-          if (isRecoverableIntegrityError(error)) throw error;
+          if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
           extensionFailure = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
           orchestration = await persistOrchestration(repository, scope, job, {
             extensionError: extensionFailure
@@ -3510,7 +3861,7 @@ async function executeLoadedGeneration(
         );
         eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
       } catch (error) {
-        if (isRecoverableIntegrityError(error)) throw error;
+        if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
       }
       if (coveragePassed(eventCoverage) && orchestration.extension) {
         const appendedNarration = formatNarrationParagraphs(committedStory.narration)
@@ -3524,7 +3875,7 @@ async function executeLoadedGeneration(
           );
           eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
         } catch (error) {
-          if (isRecoverableIntegrityError(error)) throw error;
+          if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
           eventCoverage = null;
         }
       }
@@ -3646,7 +3997,7 @@ async function executeLoadedGeneration(
             job,
             "scene_coverage_rewrite",
             repairRequest,
-            storyTextExecutionPlan
+            undefined
           ));
           if (!repairResponse.outputLimited) {
             // A coverage rewrite may replace a rejected extension suffix.  Only the
@@ -3658,7 +4009,7 @@ async function executeLoadedGeneration(
             if (!mechanicsLeakFields(repaired).length) repairedStory = repaired;
           }
         } catch (error) {
-          if (isRecoverableIntegrityError(error)) throw error;
+          if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
         }
         if (repairedStory) {
           const repairedFinalStoryHash = stableStringify(repairedStory);
@@ -3709,7 +4060,7 @@ async function executeLoadedGeneration(
                 : parseRequiredEventCoverage(appendedCoverageResponse.content, immediateEvents);
             }
           } catch (error) {
-            if (isRecoverableIntegrityError(error)) throw error;
+            if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
             eventCoverage = null;
           }
         }
@@ -3770,11 +4121,12 @@ async function executeLoadedGeneration(
         checkpoint = { version: 1, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null };
         try {
           if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
-          const continuityContract = frozenContractForOperation(job, "story_continuity_review");
           const prepared = prepareContinuityReview({ provider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
             promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory, effectiveContextWindowTokens: effectiveContextWindow,
             prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
-            ...(continuityContract ? { responseContract: continuityContract } : {}) });
+            ...(job.orchestration_private?.frozenResponseContracts ? {
+              serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan)
+            } : {}) });
           const priorLedger = orchestration.logicalAttempt ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0,
             reviewsConsumed: 0, automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0,
             choiceRepairsConsumed: orchestration.choiceRepair ? 1 : 0, eventCoverageRepairsConsumed: orchestration.eventCoverageRepair ? 1 : 0 };
@@ -3788,7 +4140,7 @@ async function executeLoadedGeneration(
           const validated = validatePreparedContinuityReviewResult(prepared, reviewed);
           checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"] };
         } catch (error) {
-          if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "")) throw error;
+          if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "") || isV2PreparedContractFailure(error, job)) throw error;
           checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null };
         }
       }
@@ -3864,12 +4216,13 @@ async function executeLoadedGeneration(
             const extensionOnly = repairScope === "extension_only";
             let preparedRepair;
             try {
-              const continuityRepairContract = frozenContractForOperation(job, "story_continuity_repair");
               preparedRepair = prepareContinuityRepair({ provider, manifest: finalManifest, promptSnapshot: frozenPromptEnvelope,
                 direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
                 effectiveContextWindowTokens: effectiveContextWindow,
                 prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
-                ...(continuityRepairContract ? { responseContract: continuityRepairContract } : {}) });
+                ...(job.orchestration_private?.frozenResponseContracts ? {
+                  serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_repair", request, plan)
+                } : {}) });
             } catch (error) {
               if (await reofferFailedAuthorizedRetry("continuity", "The authorized continuity repair request could not be prepared.")) return true;
               assertActiveGenerationUpdate(await repository.markRecoverable({ ...scope, providerResponseId: null, providerFinishReason: null,
@@ -3917,7 +4270,7 @@ async function executeLoadedGeneration(
                 }
               }
             } catch (error) {
-              if (isRecoverableIntegrityError(error)) throw error;
+              if (isRecoverableIntegrityError(error) || isV2PreparedContractFailure(error, job)) throw error;
               repairResponse = null as unknown as ProviderResult;
             }
             if (!repairedStory) {
@@ -3941,6 +4294,7 @@ async function executeLoadedGeneration(
                 sentFactIds: sentCanonicalFactIds(repairedPrepared.body)
               },
               extensionError: undefined, eventCoverageRepair: undefined, continuityReview: undefined,
+              ...(orchestration.sceneCoverageRepair ? { sceneCoverageRepair: orchestration.sceneCoverageRepair } : {}),
               ...(savedReview.success ? { generationReview: savedReview.data } : {})
             } : {
               semanticRepair: repairedCheckpoint,
@@ -3954,6 +4308,7 @@ async function executeLoadedGeneration(
               },
               afterEvents: undefined, afterTriggerError: "", extension: undefined, extensionError: undefined,
               eventCoverageRepair: undefined, choiceRepair: undefined, continuityReview: undefined,
+              ...(orchestration.sceneCoverageRepair ? { sceneCoverageRepair: orchestration.sceneCoverageRepair } : {}),
               ...(savedReview.success ? { generationReview: savedReview.data } : {})
             };
             orchestration = await persistOrchestration(repository, scope, job, repairRestart);
@@ -4061,23 +4416,28 @@ async function executeLoadedGeneration(
       }
       return true;
     }
-    const transportError = providerTransportErrorDetails(error);
-    const rawCode = transportError
+    const responseContractDiagnostic = v2PreparedContractDiagnostic(error, job);
+    const transportError = responseContractDiagnostic ? null : providerTransportErrorDetails(error);
+    const rawCode = responseContractDiagnostic ?? (transportError
       ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
-      : errorCodeFrom(error) || "generation_failed";
+      : errorCodeFrom(error) || "generation_failed");
     const code = safeLogErrorCode(rawCode, "generation_failed");
     const failed = await repository.markFailed({
       ...scope,
-      errorCode: PUBLIC_GENERATION_FAILURE_CODE,
+      // V2 prepared-contract diagnostics are finite, user-actionable contract
+      // failures. Keep their durable code visible rather than flattening it
+      // behind the historical generic public failure projection.
+      errorCode: responseContractDiagnostic ?? PUBLIC_GENERATION_FAILURE_CODE,
       errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
       recoveryMetadata: transportError ? { transportError } : {},
-      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, activePhase)
+      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, activePhase, responseContractDiagnostic)
     });
     if (failed) {
       logger.error({
         event: "turn_generation_failed",
         ...generationLogContext(job, workerId),
         errorCode: code,
+        errorMessage: error instanceof Error ? error.message : String(error),
         durationMs: Date.now() - generationStartedAt,
         transportTimedOut: Boolean(transportError?.timedOut)
       });

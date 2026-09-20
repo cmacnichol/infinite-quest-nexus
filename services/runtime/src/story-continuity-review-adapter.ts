@@ -45,6 +45,10 @@ export function prepareContinuityRepair(input: Readonly<{
   direction: string; rejectedDraft: StoryTurnOutput; originalMain?: StoryTurnOutput; scope?: "main" | "extension_only";
   findings: unknown; effectiveContextWindowTokens?: number; responseContract?: PreparedResponseContract;
   prepareSystemPrompt?: (operationPrompt: string) => PreparedContinuitySystemPrompt;
+  /** Applies a frozen operation contract before this helper measures its body. */
+  bindRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => ProviderRequest;
+  /** Serializes the same bound request at the earliest continuity budget boundary. */
+  serializeRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => Readonly<{ body: string; payloadHash: string }>;
 }>): PreparedContinuityRepair {
   const manifest = generationEvidenceManifestSchema.parse(input.manifest);
   const prompts = assertContinuityReviewPromptSnapshot(input.promptSnapshot, "enforce");
@@ -63,7 +67,7 @@ export function prepareContinuityRepair(input: Readonly<{
       `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.`,
       input.prepareSystemPrompt
     );
-    const request: ProviderRequest = {
+    const unboundRequest: ProviderRequest = {
       systemPrompt: systemPrompt.systemPrompt,
       input: stableStringify({ protocol: "story-continuity-repair-v1", scope: input.scope ?? "main", direction: input.direction,
         protected_authority: entries.map((entry) => ({ id: entry.id, content: entry.content, required: required.has(entry.id), role: entry.semanticRole,
@@ -73,7 +77,9 @@ export function prepareContinuityRepair(input: Readonly<{
       canonicalBudgeting: true, responseFormatFallback: "forbid", budgetOutput: { kind: "story_replace" },
       ...(input.responseContract ? { responseContract: input.responseContract } : {})
     };
-    const serialized = serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
+    const request = input.bindRequest?.(unboundRequest, systemPrompt.textExecutionPlan) ?? unboundRequest;
+    const serialized = input.serializeRequest?.(request, systemPrompt.textExecutionPlan)
+      ?? serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
     const tokens = estimateStoryTokens(serialized.body);
     if (!Number.isSafeInteger(limit) || tokens + estimatedInputSafetyAllowanceTokens(tokens) + input.provider.maxOutputTokens > limit) return null;
     const rebound = { ...manifest, entries, requiredReviewEvidenceIds: [...required], producingRequestHash: serialized.payloadHash };
@@ -96,6 +102,10 @@ export function prepareContinuityReview(input: Readonly<{
   promptSnapshot: unknown; reviewMode: "observe" | "enforce"; direction: string; draft: StoryTurnOutput; effectiveContextWindowTokens?: number;
   responseContract?: PreparedResponseContract;
   prepareSystemPrompt?: (operationPrompt: string) => PreparedContinuitySystemPrompt;
+  /** Applies a frozen operation contract before this helper measures its body. */
+  bindRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => ProviderRequest;
+  /** Serializes the same bound request at the earliest continuity budget boundary. */
+  serializeRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => Readonly<{ body: string; payloadHash: string }>;
 }>): PreparedContinuityReview {
   const parsed = generationEvidenceManifestSchema.safeParse(input.manifest);
   if (!parsed.success || parsed.data.producingRequestHash !== input.producingRequestHash) throw new ContinuityReviewUnavailableError();
@@ -111,12 +121,14 @@ export function prepareContinuityReview(input: Readonly<{
   const systemPrompt = prepareSystemPrompt(`${reviewPrompt.content}
 
 ${CONTINUITY_REVIEW_CONTRACT}`, input.prepareSystemPrompt);
-  const request: ProviderRequest = { systemPrompt: systemPrompt.systemPrompt,
+  const unboundRequest: ProviderRequest = { systemPrompt: systemPrompt.systemPrompt,
     input: stableStringify({ protocol: "story-continuity-review-v1", producingRequestHash: input.producingRequestHash, manifestHash: manifest.manifestHash, ...projection }),
     canonicalBudgeting: true, responseFormatFallback: "forbid",
     ...(input.responseContract ? { responseContract: input.responseContract, budgetOutput: { kind: "continuity_review" as const } } : {})
   };
-  const prepared = serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
+  const request = input.bindRequest?.(unboundRequest, systemPrompt.textExecutionPlan) ?? unboundRequest;
+  const prepared = input.serializeRequest?.(request, systemPrompt.textExecutionPlan)
+    ?? serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
   const requestTokens = estimateStoryTokens(prepared.body);
   const safetyAllowanceTokens = estimatedInputSafetyAllowanceTokens(requestTokens);
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);

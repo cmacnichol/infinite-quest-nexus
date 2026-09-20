@@ -313,15 +313,16 @@ describe("native response-contract admission", () => {
       adapterProtocol: "text-schema-adapter-v2" as const, operation: "event_coverage" as const, schemaHash: schema.schemaHash, streaming: false,
       verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false
     };
-    const authority = { kind: "model_verified" as const, providerProfileId: profileId, providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest };
+    const authority = { kind: "model_verified" as const, providerProfileId: profileId, providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest, authorityRevision: "authority-r1" };
     const queuedPolicy = {
       version: 2 as const, policy: "required" as const, providerProfileId: profileId,
       admission: { mode: "json_schema" as const, basis: "model_verified" as const, verification }, authority,
       operationClosureVersion: 2 as const, invocationKeys: ["event_coverage:nonstream" as const]
     };
+    const { authorityRevision: _authorityRevision, ...frozenAuthority } = authority;
     const contract = {
       version: 2 as const, mode: "json_schema" as const, admission: queuedPolicy.admission, operation: "event_coverage" as const, streaming: false, forbidFormatFallback: true as const,
-      schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema, authority
+      schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema, authority: frozenAuthority
     };
     const selected = { version: 2 as const, queuedPolicy, selectedAt: now, capabilityEvidenceHash: digest, contracts: { "event_coverage:nonstream": contract } };
     const frozen = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };

@@ -1690,10 +1690,11 @@ integration("T17 durable continuity review", () => {
     reviewVerdict = "conflict";
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
-    const preparedTextExecutor = vi.fn(async ({ plan, operation, request }: { plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string; request: { input: string; systemPrompt: string } }) => ({
+    const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest }: { plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string; request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string } }) => ({
       content: reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] })),
       responseId: randomUUID(), finishReason: "stop", outputLimited: false, modelInstanceId: plan.candidates[0]!.modelId,
-      usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {}
+      usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
+      ...(preparedRequest ? { preparedRequest } : {})
     }));
     const composedCollaborators = createGenerationExecutionCollaborators(
       pool,
@@ -1720,7 +1721,14 @@ integration("T17 durable continuity review", () => {
     for (const [input] of preparedTextExecutor.mock.calls) {
       expect(input.request.systemPrompt).toBe(input.plan.prompt);
       expect(input.plan.prompt).toContain("Native frozen preset instruction.");
+      expect(input.preparedRequest?.body).toBeDefined();
     }
+    const durableNativeRequests = (await pool.query<{
+      orchestrationPrivate: { primaryReservation: { requestBody: string }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
+    }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestrationPrivate;
+    const preparedBodies = preparedTextExecutor.mock.calls.map(([input]) => input.preparedRequest!.body);
+    expect(preparedBodies[0]).toBe(durableNativeRequests.primaryReservation.requestBody);
+    expect(preparedBodies.map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
     expect(verifyTextExecutionRouteAuthority).toHaveBeenCalled();
     const candidate = (await pool.query<{ candidate: { storyHash: string; story: { narration: string } } }>(
       "SELECT orchestration_private->'generationReview'->'gateCandidate' AS candidate FROM generation_jobs WHERE id=$1", [job.id]
@@ -2127,7 +2135,13 @@ integration("T17 durable continuity review", () => {
     expect(requests.length).toBeGreaterThanOrEqual(before);
   });
 
-  it.each([{ crashAt: "dispatched", mutation: "none" }, { crashAt: "completed", mutation: "none" }, { crashAt: "completed", mutation: "provider" }, { crashAt: "completed", mutation: "authority" }] as const)("reclaims $crashAt review with $mutation change without duplicating calls", async ({ crashAt, mutation }) => {
+  it.each([
+    { crashAt: "dispatched", mutation: "none" },
+    { crashAt: "completed", mutation: "none", initialTemperature: 0.37 },
+    { crashAt: "completed", mutation: "provider", initialTemperature: 0.37 },
+    { crashAt: "completed", mutation: "authority" }
+  ] as const)("reclaims $crashAt review with $mutation change without duplicating calls", async ({ crashAt, mutation, initialTemperature }) => {
+    if (initialTemperature !== undefined) await pool.query("UPDATE provider_profiles SET temperature=$2 WHERE id=$1", [providerId, initialTemperature]);
     const { job, application, campaignId } = await enqueue("enforce");
     reviewVerdict = "pass"; requests.length = 0;
     const repository = createPostgresGenerationExecutionRepository(pool);
@@ -2155,7 +2169,7 @@ integration("T17 durable continuity review", () => {
     await runGenerationJob(pool, `reclaim-${randomUUID()}`, 30, credentialSecret);
     expect(requests).toHaveLength(before);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: crashAt === "completed" && mutation === "none" ? "completed" : "recoverable" });
-    if (mutation === "provider") await pool.query("UPDATE provider_profiles SET temperature=0 WHERE id=$1", [providerId]);
+    if (mutation === "provider" || initialTemperature !== undefined) await pool.query("UPDATE provider_profiles SET temperature=0 WHERE id=$1", [providerId]);
     expect(loadIllustration).not.toHaveBeenCalled();
     expect(await runGenerationJob(pool, `duplicate-${randomUUID()}`, 30, credentialSecret)).toBe(false);
   });

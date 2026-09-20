@@ -104,7 +104,9 @@ export type ResponseContractOperation = z.infer<typeof responseContractOperation
 const responseContractInvocationResponseSchema = z.object({
   returnedModel: z.string().trim().min(1).max(256).nullable(),
   returnedProviderRoute: z.string().trim().min(1).max(256).nullable(),
-  diagnosticCode: responseFormatDiagnosticCodeSchema.nullable()
+  diagnosticCode: responseFormatDiagnosticCodeSchema.nullable(),
+  /** Semantic replay evidence is present only for operations that retain it. */
+  resultHash: hashSchema.nullable().default(null)
 }).strict();
 
 export const responseContractInvocationAuditSchema = z.object({
@@ -159,7 +161,8 @@ const invocationKeysV2Schema = z.array(responseInvocationKeyV2Schema).min(1).max
 });
 const directResponseContractAuthorityV2Schema = z.object({
   kind: z.literal("model_verified"), providerProfileId: z.uuid(), providerType: z.enum(["openrouter", "openai_compatible"]), endpointIdentity: z.string().trim().min(1).max(512), model: z.string().trim().min(1).max(512),
-  providerConfigurationHash: hashSchema, routeConfigHash: hashSchema, verificationRegistryHash: hashSchema
+  providerConfigurationHash: hashSchema, routeConfigHash: hashSchema, verificationRegistryHash: hashSchema,
+  authorityRevision: z.string().trim().min(1).max(500)
 }).strict();
 const presetResponseContractAuthorityV2Schema = z.object({
   kind: z.literal("preset_trusted"), routeBasisHash: hashSchema,
@@ -232,8 +235,15 @@ export function queuedResponsePolicyVersionedHash(value: QueuedResponsePolicyVer
   return value.version === 1 ? queuedResponsePolicyHash(value) : sha256Hex(canonicalJson(queuedResponsePolicyV2Schema.parse(value)));
 }
 
+// The queue authority carries authorityRevision for current credential/
+// endpoint fencing. Frozen prepared contracts retain the Task 4A wire shape,
+// whose strict transport schema does not expose that queue-only field.
+const frozenDirectResponseContractAuthorityV2Schema = z.object({
+  kind: z.literal("model_verified"), providerProfileId: z.uuid(), providerType: z.enum(["openrouter", "openai_compatible"]), endpointIdentity: z.string().trim().min(1).max(512), model: z.string().trim().min(1).max(512),
+  providerConfigurationHash: hashSchema, routeConfigHash: hashSchema, verificationRegistryHash: hashSchema
+}).strict();
 const frozenResponseContractAuthorityV2Schema = z.discriminatedUnion("kind", [
-  directResponseContractAuthorityV2Schema,
+  frozenDirectResponseContractAuthorityV2Schema,
   z.object({ kind: z.literal("preset_trusted"), routeBasisHash: hashSchema }).strict()
 ]);
 /**
@@ -400,6 +410,38 @@ export function readResponseContractInvocationAuditVersioned(value: unknown): Re
 export function responseContractInvocationAuditIdV2(jobId: string, logicalAttemptId: string, invocationKey: z.infer<typeof responseInvocationKeyV2Schema>, operation: ResponseContractOperationV2, requestPayloadHash: string): string {
   z.uuid().parse(jobId); z.uuid().parse(logicalAttemptId); responseInvocationKeyV2Schema.parse(invocationKey); responseContractOperationV2Schema.parse(operation); hashSchema.parse(requestPayloadHash);
   return sha256Hex(canonicalJson({ version: 2, jobId, logicalAttemptId, invocationKey, operation, requestPayloadHash }));
+}
+
+/** The only durable result shape that may satisfy a repeated v2 scene
+ * coverage invocation.  It retains the operation's semantic output and
+ * observed provider identity without treating arbitrary provider metadata as
+ * replay authority. */
+const sceneCoverageReplayResultSchema = z.object({
+  content: z.string().max(1_000_000),
+  outputLimited: z.boolean(),
+  returnedModel: z.string().trim().min(1).max(256).nullable(),
+  returnedProviderRoute: z.string().trim().min(1).max(256).nullable()
+}).strict();
+export const sceneCoverageReplayCheckpointSchema = z.object({
+  version: z.literal(1),
+  requestBody: z.string().min(1).max(1_000_000),
+  requestPayloadHash: hashSchema,
+  result: sceneCoverageReplayResultSchema,
+  resultHash: hashSchema
+}).strict().superRefine((value, context) => {
+  if (value.requestPayloadHash !== sha256Hex(value.requestBody)) {
+    context.addIssue({ code: "custom", path: ["requestPayloadHash"], message: "Scene coverage replay request hash is invalid." });
+  }
+  if (value.resultHash !== sha256Hex(canonicalJson(value.result))) {
+    context.addIssue({ code: "custom", path: ["resultHash"], message: "Scene coverage replay result hash is invalid." });
+  }
+});
+export type SceneCoverageReplayCheckpoint = Readonly<z.infer<typeof sceneCoverageReplayCheckpointSchema>>;
+export function readSceneCoverageReplayCheckpoint(value: unknown): SceneCoverageReplayCheckpoint {
+  return sceneCoverageReplayCheckpointSchema.parse(value);
+}
+export function sceneCoverageReplayResultHash(value: z.input<typeof sceneCoverageReplayResultSchema>): string {
+  return sha256Hex(canonicalJson(sceneCoverageReplayResultSchema.parse(value)));
 }
 
 /** Creates the plan-bound prepared contract only at invocation time. */

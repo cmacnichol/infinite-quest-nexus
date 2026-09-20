@@ -4,6 +4,20 @@ import { ContextBudgetError, assertOutputFeasible } from "./context-budget.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
 import type { PreparedResponseContract, PreparedResponseContractV2 } from "../../contracts/src/text-response-format.js";
 import { prepareResponseContract } from "./provider-response-format.js";
+import {
+  bindFrozenResponseContractInvocationV2,
+  type FrozenResponseContractsV2,
+  type ResponseContractOperationV2
+} from "../../contracts/src/generation-response-contract.js";
+import type { ResponseInvocationKeyV2 } from "../../contracts/src/text-response-format.js";
+import {
+  readTextExecutionPlan,
+  readTextExecutionRouteBasis,
+  type TextExecutionPlan,
+  type TextExecutionRouteBasis,
+  type TextGenerationParameters,
+  type TextRouteCandidate
+} from "../../contracts/src/text-execution-plan.js";
 
 export type ProviderRequestOperation = "story generation";
 
@@ -83,6 +97,20 @@ export type CheckedProviderRequestOptions = Readonly<{
   responseContract?: PreparedResponseContract | PreparedResponseContractV2;
 }>;
 
+/**
+ * The only serializer entry point that can emit a preset-trusted v2 contract.
+ * It binds the entire durable closure, route basis, and derived plan at the
+ * same request-preparation boundary that creates the transport bytes.
+ */
+export type BoundFrozenPresetProviderRequestBinding = Readonly<{
+  frozen: FrozenResponseContractsV2;
+  routeBasis: TextExecutionRouteBasis;
+  plan: TextExecutionPlan;
+  invocationKey: ResponseInvocationKeyV2;
+  operation: ResponseContractOperationV2;
+  trustedOperationPrompt: string;
+}>;
+
 /** Conservative uncertainty for a serialized body when no compatible tokenizer is available. */
 export function estimatedInputSafetyAllowanceTokens(requestTokens: number): number {
   return Math.ceil(requestTokens * 0.2) + 1_024;
@@ -141,16 +169,38 @@ function cleanRegenerationRequest(request: CanonicalProviderRequest): CanonicalP
  * Produces the body used for both budgeting and transport. Recovery is
  * self-contained: remote response-chain IDs and callback functions are omitted.
  */
-export function serializeProviderRequest(
+function serializeProviderRequestInternal(
   profile: TextProviderProfile,
   request: CanonicalProviderRequest,
-  options: ProviderRequestSerializationOptions = {}
+  options: ProviderRequestSerializationOptions = {},
+  boundPreset?: Readonly<{
+    contract: PreparedResponseContractV2;
+    candidate: TextRouteCandidate;
+    parameters: TextGenerationParameters;
+  }>
 ): PreparedProviderRequest {
+  const boundPresetContract = boundPreset?.contract;
   if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) throw new Error("A prepared response contract cannot use legacy response-format options.");
   if (options.responseContract && request.responseContract) throw new Error("A prepared response contract may be supplied only once.");
-  const responseContract = options.responseContract || request.responseContract
+  const responseContract = boundPresetContract ?? (options.responseContract || request.responseContract
     ? prepareResponseContract(options.responseContract ?? request.responseContract)
-    : null;
+    : null);
+  if (boundPresetContract && (options.responseContract || request.responseContract)) {
+    const supplied = prepareResponseContract(options.responseContract ?? request.responseContract);
+    if (boundPresetContract.authority.kind !== "preset_trusted") {
+      throw new Error("Bound frozen preset serialization requires preset-trusted authority.");
+    }
+    const boundAuthority = boundPresetContract.authority;
+    const sameBoundPreset = supplied.version === 2 && supplied.admission.basis === "preset_trusted"
+      && supplied.operation === boundPresetContract.operation && supplied.streaming === boundPresetContract.streaming
+      && supplied.schemaHash === boundPresetContract.schemaHash && supplied.schemaVersion === boundPresetContract.schemaVersion
+      && supplied.schemaName === boundPresetContract.schemaName && supplied.authority.kind === "preset_trusted"
+      && supplied.authority.routeBasisHash === boundAuthority.routeBasisHash
+      && supplied.authority.planHash === boundAuthority.planHash;
+    if (!sameBoundPreset) {
+      throw new Error("Prepared response contract does not match the bound frozen preset contract.");
+    }
+  }
   if (responseContract && responseContract.streaming !== Boolean(request.onChunk)) throw new Error("Prepared response contract streaming does not match the request.");
   if (responseContract && profile.providerType !== "openrouter" && profile.providerType !== "openai_compatible") {
     throw new Error("This provider adapter does not support prepared response contracts.");
@@ -161,7 +211,7 @@ export function serializeProviderRequest(
   if (responseContract?.version === 1 && responseContract.mode === "json_schema" && profile.providerType !== "openrouter" && responseContract.providerRoutingSlugs.length) {
     throw new Error("Non-OpenRouter prepared response contracts cannot carry provider routing.");
   }
-  if (responseContract?.version === 2 && responseContract.admission.basis === "preset_trusted") {
+  if (responseContract?.version === 2 && responseContract.admission.basis === "preset_trusted" && !boundPresetContract) {
     throw new Error("Trusted preset response contracts require the frozen route executor.");
   }
   if (responseContract?.version === 2 && responseContract.authority.kind === "model_verified"
@@ -169,6 +219,12 @@ export function serializeProviderRequest(
     throw new Error("Prepared v2 model response contract does not match the provider identity.");
   }
   const isRecovery = Boolean(request.recoveryInput);
+  const frozenParameters = boundPreset?.parameters;
+  const { temperature: frozenTemperature, max_tokens: _frozenMaxTokens, max_completion_tokens: _frozenMaxCompletionTokens,
+    ...frozenOpenAiParameters } = frozenParameters ?? {};
+  // An absent frozen value deliberately omits temperature and lets the
+  // provider default apply; it never reads a later mutable profile default.
+  const temperature = isRecovery ? 0.2 : frozenParameters ? frozenTemperature : profile.temperature;
   const rejectedResponse = completeRejectedDraftContent(request);
   const payload = profile.providerType === "lmstudio"
     ? {
@@ -176,7 +232,7 @@ export function serializeProviderRequest(
         input: recoveryInput(request),
         store: true,
         stream: Boolean(request.onChunk),
-        temperature: isRecovery ? 0.2 : profile.temperature,
+        ...(temperature === undefined ? {} : { temperature }),
         max_output_tokens: profile.maxOutputTokens,
         system_prompt: request.systemPrompt
       }
@@ -190,17 +246,86 @@ export function serializeProviderRequest(
             : []),
           ...(isRecovery ? [{ role: "user", content: request.recoveryInput! }] : [])
         ],
-        temperature: isRecovery ? 0.2 : profile.temperature,
+        ...(temperature === undefined ? {} : { temperature }),
         max_tokens: profile.maxOutputTokens,
+        ...frozenOpenAiParameters,
         ...(responseContract?.mode === "json_schema" ? {
           response_format: { type: "json_schema", json_schema: { name: responseContract.schemaName, strict: true, schema: responseContract.schema } },
           ...(profile.providerType === "openrouter" && responseContract.version === 1 ? { provider: { require_parameters: true, only: responseContract.providerRoutingSlugs } }
             : profile.providerType === "openrouter" && responseContract.version === 2 && responseContract.admission.basis === "model_verified"
-              ? { provider: { require_parameters: true, only: responseContract.admission.verification.providerRoutingSlugs } } : {})
+              ? { provider: { require_parameters: true, only: responseContract.admission.verification.providerRoutingSlugs } } : {}),
+          ...(profile.providerType === "openrouter" && responseContract.version === 2 && responseContract.admission.basis === "preset_trusted"
+            && boundPreset
+            ? { provider: { ...boundPreset.candidate.providerPolicy, require_parameters: true } } : {})
         } : responseContract?.mode === "json_object" ? { response_format: { type: "json_object" } } : options.responseFormat === false ? {} : { response_format: { type: "json_object" } }),
         ...(request.onChunk ? { stream: true, stream_options: { include_usage: true } } : {})
       };
   return prepare(payload, options);
+}
+
+/** Generic callers cannot serialize a bare preset-trusted response contract. */
+export function serializeProviderRequest(
+  profile: TextProviderProfile,
+  request: CanonicalProviderRequest,
+  options: ProviderRequestSerializationOptions = {}
+): PreparedProviderRequest {
+  return serializeProviderRequestInternal(profile, request, options);
+}
+
+function bindFrozenPresetProviderRequest(
+  profile: TextProviderProfile,
+  request: CanonicalProviderRequest,
+  binding: BoundFrozenPresetProviderRequestBinding
+): Readonly<{ contract: PreparedResponseContractV2; routeBasis: TextExecutionRouteBasis; plan: TextExecutionPlan }> {
+  const routeBasis = readTextExecutionRouteBasis(binding.routeBasis);
+  const plan = readTextExecutionPlan(binding.plan);
+  const contract = bindFrozenResponseContractInvocationV2({ ...binding, routeBasis, plan });
+  if (contract.authority.kind !== "preset_trusted" || contract.admission.basis !== "preset_trusted") {
+    throw new Error("Frozen preset serializer requires preset-trusted v2 authority.");
+  }
+  if (routeBasis.selection.kind !== "openrouter_preset" || profile.providerType !== "openrouter") {
+    throw new Error("Frozen preset serializer requires an OpenRouter preset route basis.");
+  }
+  if (routeBasis.candidates[0]?.modelId !== profile.model) {
+    throw new Error("Frozen preset serializer requires the selected frozen route candidate.");
+  }
+  if (request.systemPrompt !== plan.prompt) {
+    throw new Error("Frozen preset request prompt does not match the derived frozen plan.");
+  }
+  return { contract, routeBasis, plan };
+}
+
+function frozenPresetProfile(profile: TextProviderProfile, candidate: TextRouteCandidate, parameters: TextGenerationParameters): TextProviderProfile {
+  return {
+    ...profile,
+    model: candidate.modelId,
+    contextWindowTokens: candidate.contextWindowTokens,
+    maxOutputTokens: candidate.maxOutputTokens,
+    // This required internal profile field is never read for a bound preset:
+    // serializeProviderRequestInternal uses `parameters` and omits an absent
+    // frozen temperature. Keep a neutral value here rather than reviving the
+    // caller's mutable default.
+    temperature: parameters.temperature ?? 0
+  };
+}
+
+/**
+ * Serializes one already-derived frozen preset candidate.  The generic
+ * serializer remains fail-closed for preset-trusted contracts; this function
+ * is deliberately the narrow executor-only alternative.
+ */
+export function serializeBoundFrozenPresetProviderRequest(
+  profile: TextProviderProfile,
+  request: CanonicalProviderRequest,
+  binding: BoundFrozenPresetProviderRequestBinding,
+  options: Omit<ProviderRequestSerializationOptions, "responseContract"> = {}
+): PreparedProviderRequest {
+  const bound = bindFrozenPresetProviderRequest(profile, request, binding);
+  const candidate = bound.routeBasis.candidates[0]!;
+  const frozenProfile = frozenPresetProfile(profile, candidate, bound.plan.parameters);
+  return serializeProviderRequestInternal(frozenProfile, request, options, {
+    contract: bound.contract, candidate, parameters: bound.plan.parameters
+  });
 }
 
 const MINIMUM_EVENT_EXTENSION_NARRATION = "x";
@@ -252,11 +377,18 @@ function outputSkeleton(output: ProviderOutputBudget): unknown {
   };
 }
 
-/** Serializes once for measurement and again for transport, preserving identical canonical bytes. */
-export function serializeCheckedProviderRequest(
+type ProviderRequestSerializer = (
   profile: TextProviderProfile,
   request: CanonicalProviderRequest,
-  options: CheckedProviderRequestOptions
+  options?: ProviderRequestSerializationOptions
+) => PreparedProviderRequest;
+
+/** Serializes once for measurement and again for transport, preserving identical canonical bytes. */
+function serializeCheckedProviderRequestWith(
+  profile: TextProviderProfile,
+  request: CanonicalProviderRequest,
+  options: CheckedProviderRequestOptions,
+  serialize: ProviderRequestSerializer
 ): PreparedProviderRequest {
   if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) {
     throw new Error("A prepared response contract cannot use legacy response-format options.");
@@ -267,7 +399,7 @@ export function serializeCheckedProviderRequest(
   const serializationOptions = options.responseContract ? { responseContract: options.responseContract }
     : options.responseFormat === undefined ? {} : { responseFormat: options.responseFormat };
   let serializedRequest = request;
-  let candidate = serializeProviderRequest(profile, serializedRequest, serializationOptions);
+  let candidate = serialize(profile, serializedRequest, serializationOptions);
   let requestTokens = options.count(candidate.body);
   const safetyAllowanceFor = (tokens: number) => typeof options.safetyAllowanceTokens === "function"
     ? options.safetyAllowanceTokens(tokens)
@@ -279,7 +411,7 @@ export function serializeCheckedProviderRequest(
   }
   if (requestTokens + safetyAllowanceTokens > options.inputLimit && completeRejectedDraftContent(request)) {
     serializedRequest = cleanRegenerationRequest(request);
-    candidate = serializeProviderRequest(profile, serializedRequest, serializationOptions);
+    candidate = serialize(profile, serializedRequest, serializationOptions);
     requestTokens = options.count(candidate.body);
     safetyAllowanceTokens = safetyAllowanceFor(requestTokens);
     if (!Number.isFinite(requestTokens) || requestTokens < 0 || !Number.isInteger(safetyAllowanceTokens) || safetyAllowanceTokens < 0) {
@@ -302,7 +434,7 @@ export function serializeCheckedProviderRequest(
     output: outputSkeleton(options.output),
     ...(extension ? { extension } : {})
   });
-  return serializeProviderRequest(profile, serializedRequest, {
+  return serialize(profile, serializedRequest, {
     ...serializationOptions,
     budgetAudit: {
       countMode: options.countMode ?? "exact",
@@ -311,6 +443,34 @@ export function serializeCheckedProviderRequest(
       outputReserveTokens: profile.maxOutputTokens,
       safetyAllowanceTokens
     }
+  });
+}
+
+export function serializeCheckedProviderRequest(
+  profile: TextProviderProfile,
+  request: CanonicalProviderRequest,
+  options: CheckedProviderRequestOptions
+): PreparedProviderRequest {
+  return serializeCheckedProviderRequestWith(profile, request, options, serializeProviderRequest);
+}
+
+/** The checked counterpart keeps budgeting and dispatch on the same bound preset bytes. */
+export function serializeCheckedBoundFrozenPresetProviderRequest(
+  profile: TextProviderProfile,
+  request: CanonicalProviderRequest,
+  binding: BoundFrozenPresetProviderRequestBinding,
+  options: Omit<CheckedProviderRequestOptions, "responseContract">
+): PreparedProviderRequest {
+  const bound = bindFrozenPresetProviderRequest(profile, request, binding);
+  const candidate = bound.routeBasis.candidates[0]!;
+  const frozenProfile = frozenPresetProfile(profile, candidate, bound.plan.parameters);
+  return serializeCheckedProviderRequestWith(frozenProfile, request, options, (candidateProfile, candidateRequest, serializationOptions) => {
+    if (serializationOptions?.responseContract) {
+      throw new Error("Bound frozen preset serialization cannot accept a caller-supplied response contract.");
+    }
+    return serializeProviderRequestInternal(candidateProfile, candidateRequest, serializationOptions, {
+      contract: bound.contract, candidate, parameters: bound.plan.parameters
+    });
   });
 }
 

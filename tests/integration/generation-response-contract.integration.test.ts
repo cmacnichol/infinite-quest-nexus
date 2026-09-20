@@ -114,14 +114,15 @@ integration("PostgreSQL response-contract persistence", () => {
     const verification = { version: 2 as const, providerType: "openrouter" as const, endpointIdentity: "test-endpoint", model: "contract-model", routeConfigHash: hash,
       adapterProtocol: "text-schema-adapter-v2" as const, operation: "event_coverage" as const, schemaHash: schema.schemaHash, streaming: false,
       verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false };
-    const authority = { kind: "model_verified" as const, providerProfileId, providerType: "openrouter" as const, endpointIdentity: "test-endpoint", model: "contract-model", providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash };
+    const authority = { kind: "model_verified" as const, providerProfileId, providerType: "openrouter" as const, endpointIdentity: "test-endpoint", model: "contract-model", providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash, authorityRevision: "authority-r1" };
     return { version: 2 as const, policy: "required" as const, providerProfileId, admission: { mode: "json_schema" as const, basis: "model_verified" as const, verification }, authority,
       operationClosureVersion: 2 as const, invocationKeys: ["event_coverage:nonstream" as const] };
   }
   function v2ModelFrozen() {
     const queuedPolicy = v2ModelPolicy(); const schema = getProviderOutputSchemaV2("event_coverage");
+    const { authorityRevision: _authorityRevision, ...frozenAuthority } = queuedPolicy.authority;
     const selected = { version: 2 as const, queuedPolicy, selectedAt: "2026-09-18T00:00:00.000Z", capabilityEvidenceHash: hash,
-      contracts: { "event_coverage:nonstream": { version: 2 as const, mode: "json_schema" as const, admission: queuedPolicy.admission, operation: "event_coverage" as const, streaming: false, forbidFormatFallback: true as const, schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema, authority: queuedPolicy.authority } } };
+      contracts: { "event_coverage:nonstream": { version: 2 as const, mode: "json_schema" as const, admission: queuedPolicy.admission, operation: "event_coverage" as const, streaming: false, forbidFormatFallback: true as const, schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema, authority: frozenAuthority } } };
     return { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
   }
   function v2ModelAudit(frozen: ReturnType<typeof v2ModelFrozen>, prompt: string, requestPayloadHash: string) {
@@ -225,6 +226,7 @@ integration("PostgreSQL response-contract persistence", () => {
       const requestPayloadHash = index.toString(16).padStart(64, "0");
       await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "event_extension" as const, requestPayloadHash, request: v2Audit(frozen, prompt, plan, requestPayloadHash), routeBasis, plan, trustedOperationPrompt: prompt })).resolves.toMatchObject({ version: 2, status: "reserved" });
     }
+    await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, repairInput)).resolves.toEqual(repair);
     await expect(fixture.repository.reserveResponseContractInvocation!(fixture.scope, { ...repairInput, requestPayloadHash: "f".repeat(64), request: v2Audit(frozen, repairPrompt, repairPlan, "f".repeat(64)) })).resolves.toBeNull();
     await expect(fixture.repository.reserveResponseContractInvocation!({ ...fixture.scope, ownerUserId: crypto.randomUUID() }, repairInput)).resolves.toBeNull();
     await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);

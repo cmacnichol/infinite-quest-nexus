@@ -10,6 +10,8 @@ export type PreparedAuthoringTextExecutor = Readonly<{
     ownerUserId: string;
     providerProfileId: string;
     request: ProviderRequest;
+    /** Exact canonical body already measured and durably reserved by the caller. */
+    preparedRequest?: Readonly<{ body: string; payloadHash: string }>;
     currentClaim?: () => Promise<boolean>;
   }>): Promise<ProviderResult>;
 }>;
