@@ -197,3 +197,101 @@ Task 5 must:
 
 Optional embedding auto-enable/import behavior remains the separately assigned
 future correction. It is not folded into Task 4C2.
+
+## Fix round 1: independent review corrections
+
+Reviewed task-4c2-review.md in full and addressed all three confirmed
+findings together.
+
+### Historical plan-only v2 execution
+
+The dispatcher now selects operation keys by snapshot version. Historical v2
+source synthesis and source-character stages use the persisted
+sourceWorld/sourceWorldRepair plans, while historical standalone character
+repair reuses the single persisted standaloneCharacter plan. Bound v3 keeps
+its distinct synthesis, character, and repair operation identities.
+
+Actual caller regressions force malformed initial output and successful repair
+for historical source synthesis, source character, and standalone character.
+They assert the frozen legacy plan and prompt used on both attempts.
+
+### Bound v3 closure integrity
+
+Reclaim now treats the validated frozen-contract invocation keys as the
+authoritative closure. It derives the required saved operation set from the
+static authoring operation identity catalog, then requires:
+
+- exact plan and trusted-prompt operation equality;
+- exact unique plan invocation-key equality with frozen contract keys; and
+- the complete initial/repair operation pair for each authoring invocation.
+
+Validation runs before current-authority loading or prepared execution. Unit
+and real PostgreSQL reclaim regressions remove both operations for an unused
+invocation and remove only its repair half; both cases make zero additional
+prepared-executor calls. Existing Preset and verified-Model positive paths
+remain covered.
+
+### Oversized selected native source chunks
+
+The source-budget suite now covers both trusted Preset and verified Model
+routes. Capacity-unchecked canonical rendering retains the JSON Schema and
+proves the rendered token count plus safety allowance exceeds the selected
+input limit. Checked admission rejects the selected chunk before the prepared
+executor is called.
+
+### Fix-round RED and GREEN evidence
+
+- First unit RED:
+
+  corepack pnpm exec vitest run tests/unit/authoring-stage-adapter.test.ts tests/unit/source-authoring-runtime-budget.test.ts --reporter=dot
+
+  **7 failed, 59 passed in 2 files.** Five failures reproduced the reviewed
+  runtime defects: v2 source synthesis, v2 source character, v2 standalone
+  repair, and both v3 closure-removal variants. Two source-budget cases first
+  failed from a missing test import; after correcting the test wiring, those
+  two new regression cases passed immediately, confirming that checked
+  selected-chunk rejection already existed and the review gap was missing
+  explicit coverage.
+
+- PostgreSQL RED:
+
+  corepack pnpm exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/authoring-stage-execution.integration.test.ts --reporter=dot
+
+  **1 failed, 20 passed in 1 file.** A persisted snapshot with the complete
+  unused organizer invocation removed reached the prepared executor.
+
+- Focused unit GREEN:
+
+  corepack pnpm exec vitest run tests/unit/authoring-stage-adapter.test.ts tests/unit/source-authoring-runtime-budget.test.ts --reporter=dot
+
+  **66 passed in 2 files.**
+
+- PostgreSQL GREEN:
+
+  corepack pnpm exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/authoring-stage-execution.integration.test.ts --reporter=dot
+
+  **21 passed in 1 file.** Both persisted closure-removal variants reject
+  before any additional prepared execution.
+
+- No-emit initially found two TypeScript union-index errors in the combined
+  v2/v3 source-plan lookup. Splitting the lookup into explicit version
+  branches retained the tested behavior. The subsequent no-emit run passed.
+
+No Task 5 transport, UI, embedding, native-production enablement, live-provider
+call, push, PR, or main-checkout work is included in this correction.
+### Final fix-round verification
+
+- corepack pnpm exec vitest run tests/unit/durable-authoring-response-contract.test.ts tests/unit/authoring-stage-adapter.test.ts tests/unit/source-authoring-runtime-budget.test.ts --reporter=dot
+
+  **67 passed in 3 files.**
+
+- The dedicated PostgreSQL command above was rerun after the final production
+  edit: **21 passed in 1 file.**
+
+- corepack pnpm exec tsc --noEmit --incremental false --pretty false
+
+  **Passed** with the task PATH shim.
+
+- git diff --check
+
+  **Passed**; Git reported only line-ending conversion notices.

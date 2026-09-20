@@ -80,7 +80,14 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000011", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result(JSON.stringify(fixture.character)) };
     const resolvePreset = vi.fn(async () => ({ slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset system." }));
     const discoverModels = vi.fn(async () => [{ id: "native-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
-    const prepared = await prepareAuthoringResponseContractExecution({ ownerUserId, execution: provider, operationPrompts: { standaloneCharacter: "Create a cartographer.", standaloneCharacterRepair: "Create a cartographer." }, ports: { resolvePreset, discoverModels } });
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId, execution: provider,
+      operationPrompts: {
+        standaloneCharacter: "Create a cartographer.", standaloneCharacterRepair: "Create a cartographer.",
+        organizer: "Organize the character.", organizerRepair: "Repair the organization."
+      },
+      ports: { resolvePreset, discoverModels }
+    });
     const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
     if (!("routeBasis" in snapshot)) throw new Error("Expected a bound authoring snapshot.");
     await repository.initializeExecutionSnapshot(claim, snapshot);
@@ -108,6 +115,28 @@ integration("durable authoring real repository and stage dispatcher", () => {
     const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ({ ...provider, executionRevision: "ordinary-edited" }) } as never, sha256, preparedExecutor: { execute: executed } });
     await expect(executeAuthoringStage({ claim: reclaimed, repository, dispatch })).resolves.toMatchObject({ kind: "character" });
     expect(executed).toHaveBeenCalledWith(expect.objectContaining({ ownerUserId, providerProfileId: provider.id }));
+    for (const tamper of ["whole-unused-invocation", "unused-repair-half"] as const) {
+      const tamperedInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+      const tamperedJob = await repository.submit({ ownerUserId }, tamperedInput, sha256(JSON.stringify(tamperedInput)));
+      const tamperedClaim = (await repository.claim("closure-" + tamper + "-initial", 60))!;
+      expect(tamperedClaim.jobId).toBe(tamperedJob.id);
+      await repository.initializeExecutionSnapshot(tamperedClaim, snapshot);
+      const tamperedSnapshot = structuredClone(snapshot) as any;
+      const removed = tamper === "whole-unused-invocation" ? ["organizer", "organizerRepair"] : ["organizerRepair"];
+      for (const operation of removed) {
+        delete tamperedSnapshot.textExecutionPlans[operation];
+        delete tamperedSnapshot.trustedOperationPrompts[operation];
+      }
+      await pool.query("UPDATE authoring_jobs SET execution_snapshot = $2::jsonb WHERE id = $1", [tamperedJob.id, JSON.stringify(tamperedSnapshot)]);
+      await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [tamperedClaim.stageId]);
+      const tamperedReclaim = (await repository.claim("closure-" + tamper + "-reclaim", 60))!;
+      const tamperedLoaded = (await repository.loadClaim(tamperedReclaim))!;
+      await expect(dispatch({
+        ...tamperedLoaded, jobId: tamperedReclaim.jobId, stageId: tamperedReclaim.stageId,
+        stageGeneration: tamperedReclaim.stageGeneration, ownerUserId
+      })).rejects.toThrow(/closure|incomplete/i);
+      expect(executed).toHaveBeenCalledOnce();
+    }
     const denied = vi.fn();
     const authorityChanged = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ({ ...provider, authorityRevision: "authority-revoked" }) } as never, sha256, preparedExecutor: { execute: denied } });
     await expect(authorityChanged({ ...loaded, jobId: reclaimed.jobId, stageId: reclaimed.stageId, stageGeneration: reclaimed.stageGeneration, ownerUserId })).rejects.toMatchObject({ authoringFailure: { code: "authoring_provider_unavailable" } });

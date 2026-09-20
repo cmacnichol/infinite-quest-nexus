@@ -157,7 +157,7 @@ function planMatchesHash(plan: TextExecutionPlan, sha256: (value: string) => str
   return sha256(stableStringify(withoutHash)) === planHash;
 }
 
-function operationFor(stage: LoadedAuthoringStage, repair: boolean): AuthoringTextOperationV2 {
+function boundOperationFor(stage: LoadedAuthoringStage, repair: boolean): AuthoringTextOperationV2 {
   if (stage.stageKey === "world") return repair ? "worldOutlineRepair" : "worldOutline";
   if (stage.stageKey.startsWith("character:")) {
     return stage.parentOutputs.some((output) => output.kind === "outline")
@@ -169,14 +169,54 @@ function operationFor(stage: LoadedAuthoringStage, repair: boolean): AuthoringTe
   return repair ? "sourceExtractionRepair" : "sourceExtraction";
 }
 
+function legacyV2OperationFor(stage: LoadedAuthoringStage, repair: boolean): AuthoringTextOperation {
+  if (stage.stageKey === "world") return repair ? "worldOutlineRepair" : "worldOutline";
+  if (stage.stageKey.startsWith("character:")) {
+    if (stage.parentOutputs.some((output) => output.kind === "outline")) {
+      return repair ? "seedCharacterRepair" : "seedCharacter";
+    }
+    return "standaloneCharacter";
+  }
+  if (stage.stageKey === "source:synthesis" || stage.stageKey.startsWith("source:character:")) {
+    return repair ? "sourceWorldRepair" : "sourceWorld";
+  }
+  return repair ? "sourceExtractionRepair" : "sourceExtraction";
+}
+
 function sourcePlansFor(stage: LoadedAuthoringStage, sourceWorld: boolean): Readonly<{ initial: TextExecutionPlan; repair: TextExecutionPlan }> | undefined {
-  if (!v2Snapshot(stage.snapshot) && !v3Snapshot(stage.snapshot)) return undefined;
+  if (v2Snapshot(stage.snapshot)) {
+    const initial = stage.snapshot.textExecutionPlans[sourceWorld ? "sourceWorld" : "sourceExtraction"];
+    const repair = stage.snapshot.textExecutionPlans[sourceWorld ? "sourceWorldRepair" : "sourceExtractionRepair"];
+    return initial && repair ? { initial, repair } : undefined;
+  }
+  if (!v3Snapshot(stage.snapshot)) return undefined;
   const sourceCharacter = stage.stageKey.startsWith("source:character:");
-  const initialKey = sourceWorld ? sourceCharacter ? "sourceCharacter" : "sourceSynthesis" : "sourceExtraction";
-  const repairKey = sourceWorld ? sourceCharacter ? "sourceCharacterRepair" : "sourceSynthesisRepair" : "sourceExtractionRepair";
-  const initial = stage.snapshot.textExecutionPlans[initialKey];
-  const repair = stage.snapshot.textExecutionPlans[repairKey];
+  const initial = stage.snapshot.textExecutionPlans[
+    sourceWorld ? sourceCharacter ? "sourceCharacter" : "sourceSynthesis" : "sourceExtraction"
+  ];
+  const repair = stage.snapshot.textExecutionPlans[
+    sourceWorld ? sourceCharacter ? "sourceCharacterRepair" : "sourceSynthesisRepair" : "sourceExtractionRepair"
+  ];
   return initial && repair ? { initial, repair } : undefined;
+}
+
+function validateBoundAuthoringOperationClosure(
+  frozenResponseContracts: FrozenResponseContractsV2,
+  planOperations: readonly string[],
+  promptOperations: readonly string[]
+): void {
+  const frozenInvocationKeys = Object.keys(frozenResponseContracts.contracts).sort();
+  const expectedOperations = authoringTextOperationV2Schema.options
+    .filter((operation) => frozenInvocationKeys.includes(authoringResponseContractIdentity(operation).invocationKey))
+    .sort();
+  const plannedInvocationKeys = [...new Set(planOperations.map((operation) =>
+    authoringResponseContractIdentity(operation).invocationKey
+  ))].sort();
+  if (stableStringify(planOperations) !== stableStringify(promptOperations)
+    || stableStringify(plannedInvocationKeys) !== stableStringify(frozenInvocationKeys)
+    || stableStringify(planOperations) !== stableStringify(expectedOperations)) {
+    throw new Error("The saved authoring response contract operation closure is incomplete.");
+  }
 }
 
 /**
@@ -253,9 +293,11 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
       })) as Partial<Record<AuthoringTextOperationV2, string>>;
       const planOperations = Object.keys(textExecutionPlans).sort();
       const promptOperations = Object.keys(trustedOperationPrompts).sort();
-      if (stableStringify(planOperations) !== stableStringify(promptOperations)) {
-        throw new Error("The saved authoring response contract operation closure is incomplete.");
-      }
+      validateBoundAuthoringOperationClosure(
+        frozenResponseContracts,
+        planOperations,
+        promptOperations
+      );
       for (const [operationValue, trustedOperationPrompt] of Object.entries(trustedOperationPrompts)) {
         const operation = authoringTextOperationV2Schema.parse(operationValue);
         const plan = textExecutionPlans[operation];
@@ -270,8 +312,8 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
           trustedOperationPrompt: trustedOperationPrompt!
         });
       }
-      const initialOperation = operationFor(stage, false);
-      const repairOperation = operationFor(stage, true);
+      const initialOperation = boundOperationFor(stage, false);
+      const repairOperation = boundOperationFor(stage, true);
       if (!textExecutionPlans[initialOperation] || !textExecutionPlans[repairOperation]
         || !trustedOperationPrompts[initialOperation] || !trustedOperationPrompts[repairOperation]
         || !options.preparedExecutor) {
@@ -342,25 +384,25 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         requestTimeoutMs: routeBasis.requestTimeoutMs,
         endpointIdentity: routeBasis.endpointReference,
         configuration: snapshot.requestConfiguration,
-        execute: async (request) => executeBound(request, operationFor(stage, request.rejectedResponse !== undefined))
+        execute: async (request) => executeBound(request, boundOperationFor(stage, request.rejectedResponse !== undefined))
       };
       nativeSourceExecution = {
         renderInitial: (request) => renderPreparedAuthoringRequest({
           execution: { providerType: snapshot.providerType, configuration: snapshot.requestConfiguration },
-          prepared, operation: operationFor(stage, false), request
+          prepared, operation: boundOperationFor(stage, false), request
         }),
         renderRepair: (request) => renderPreparedAuthoringRequest({
           execution: { providerType: snapshot.providerType, configuration: snapshot.requestConfiguration },
-          prepared, operation: operationFor(stage, true), request
+          prepared, operation: boundOperationFor(stage, true), request
         }),
-        prepareInitial: (request) => prepareOperation(operationFor(stage, false), request),
-        prepareRepair: (request) => prepareOperation(operationFor(stage, true), request),
-        executeInitial: (request, preparedRequest) => executeBound(request, operationFor(stage, false), preparedRequest),
-        executeRepair: (request, preparedRequest) => executeBound(request, operationFor(stage, true), preparedRequest)
+        prepareInitial: (request) => prepareOperation(boundOperationFor(stage, false), request),
+        prepareRepair: (request) => prepareOperation(boundOperationFor(stage, true), request),
+        executeInitial: (request, preparedRequest) => executeBound(request, boundOperationFor(stage, false), preparedRequest),
+        executeRepair: (request, preparedRequest) => executeBound(request, boundOperationFor(stage, true), preparedRequest)
       };
     } else if (v2Snapshot(stage.snapshot)) {
       const snapshot = stage.snapshot;
-      const initialOperation = operationFor(stage, false);
+      const initialOperation = legacyV2OperationFor(stage, false);
       const initialPlan = snapshot.textExecutionPlans[initialOperation as keyof typeof snapshot.textExecutionPlans];
       const plans = Object.values(snapshot.textExecutionPlans);
       if (!initialPlan || !plans.length || !plans.every((plan) => plan !== undefined && plan.authorityRevision !== undefined && plan.profileRevision === initialPlan.profileRevision && plan.authorityRevision === initialPlan.authorityRevision && planMatchesHash(textExecutionPlanSchema.parse(plan), options.sha256)) || !options.preparedExecutor) {
@@ -389,7 +431,7 @@ export function createRuntimeAuthoringStageDispatcher(options: Readonly<{
         requestTimeoutMs: stage.snapshot.requestTimeoutMs,
         configuration: {},
         execute: async (request) => {
-          const operation = operationFor(stage, request.rejectedResponse !== undefined);
+          const operation = legacyV2OperationFor(stage, request.rejectedResponse !== undefined);
           const plan = snapshot.textExecutionPlans[operation as keyof typeof snapshot.textExecutionPlans];
           if (!plan || !planMatchesHash(textExecutionPlanSchema.parse(plan), options.sha256)) {
             throw new AuthoringResponseError({ code: "authoring_provider_unavailable", stage: providerFailureStage(stage), retryable: true, issues: [] });

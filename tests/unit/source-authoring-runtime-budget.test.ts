@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { getProviderOutputSchemaV2 } from "@infinite-quest/contracts";
+import { getProviderOutputSchemaV2, type SchemaVerificationV2 } from "@infinite-quest/contracts";
 import { logger } from "../../packages/logger/src/index.js";
 import { ProviderTransportError, type ProviderRequest, type ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { serializeLegacyProviderRequest } from "../../packages/story-engine/src/provider-request.js";
@@ -15,6 +15,8 @@ import {
   renderPreparedAuthoringRequest,
   serializePreparedAuthoringRequest
 } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import {
   createRuntimeSourceAuthoringRequestBudget,
   resolveSourceAuthoringTextExecution,
@@ -145,6 +147,59 @@ describe("runtime source authoring request budget", () => {
     expect(dispatched.at(-1)).toBe(checkedRepair.body);
   });
 
+  it.each(["preset", "model"] as const)("rejects an oversized selected native %s chunk before prepared execution", async (routeKind) => {
+    const provider = execution({
+      id: "22222222-2222-4222-8222-222222222222",
+      providerType: "openrouter", contextWindowTokens: 1_200, maxOutputTokens: 256,
+      endpointIdentity: "oversize-endpoint", executionRevision: "oversize-profile", authorityRevision: "oversize-authority",
+      textSelection: routeKind === "preset"
+        ? { kind: "openrouter_preset", slug: "source-authoring" }
+        : { kind: "model", modelId: "authoring-model" }
+    });
+    const schema = getProviderOutputSchemaV2("source_extraction");
+    const verification: SchemaVerificationV2 = {
+      version: 2, providerType: "openrouter", endpointIdentity: "oversize-endpoint", model: "authoring-model",
+      routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+      operation: "source_extraction", schemaHash: schema.schemaHash, streaming: false,
+      verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+      providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+    };
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId: "owner-1", execution: provider,
+      operationPrompts: { sourceExtraction: "Extract cited facts.", sourceExtractionRepair: "Repair cited facts." },
+      ports: {
+        resolvePreset: async () => ({ slug: "source-authoring", name: "Source authoring", versionId: "v1", version: 1, configHash: "e".repeat(64), config: { models: ["authoring-model"] }, systemPrompt: "Frozen source contract." }),
+        discoverModels: async () => [{
+          id: "authoring-model", contextWindowTokens: 1_200, maxOutputTokens: 256,
+          ...(routeKind === "model" ? { responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" } } : {})
+        }]
+      },
+      ...(routeKind === "model" ? {
+        responseFormatCapabilities: createProviderResponseFormatCapabilities({
+          records: [verification], now: () => Date.parse("2026-09-20T00:00:00.000Z")
+        })
+      } : {})
+    });
+    const preparedExecutor = vi.fn(async () => ({ content: "{}", responseId: "must-not-run", finishReason: "stop", outputLimited: false, modelInstanceId: "authoring-model", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {} } satisfies ProviderResult));
+    const requestBudget = createRuntimeSourceAuthoringRequestBudget(provider, undefined, undefined, {
+      renderInitial: (request) => renderPreparedAuthoringRequest({ execution: provider, prepared, operation: "sourceExtraction", request }),
+      renderRepair: (request) => renderPreparedAuthoringRequest({ execution: provider, prepared, operation: "sourceExtractionRepair", request }),
+      prepareInitial: (request) => serializePreparedAuthoringRequest({ execution: provider, prepared, operation: "sourceExtraction", request }),
+      prepareRepair: (request) => serializePreparedAuthoringRequest({ execution: provider, prepared, operation: "sourceExtractionRepair", request }),
+      executeInitial: preparedExecutor,
+      executeRepair: preparedExecutor
+    });
+    const oversizedSelectedChunk = {
+      systemPrompt: prepared.plans.sourceExtraction!.prompt,
+      input: "Selected source chunk: " + "oversized evidence ".repeat(300)
+    };
+    const uncheckedSearchBody = requestBudget.render(oversizedSelectedChunk);
+    expect(JSON.parse(uncheckedSearchBody).response_format.json_schema.name).toBe(schema.name);
+    const uncheckedTokens = estimateStoryTokens(uncheckedSearchBody);
+    expect(uncheckedTokens + estimatedInputSafetyAllowanceTokens(uncheckedTokens)).toBeGreaterThan(requestBudget.inputLimit);
+    await expect(requestBudget.executeInitial(oversizedSelectedChunk)).rejects.toThrow(/context|budget|requires/i);
+    expect(preparedExecutor).not.toHaveBeenCalled();
+  });
   it("records the completed response ID when the provider sends no generation header", async () => {
     const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
     try {

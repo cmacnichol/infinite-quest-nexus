@@ -549,6 +549,128 @@ describe("executeAuthoringStage", () => {
     expect(resolvePreset).toHaveBeenCalledTimes(routeKind === "preset" ? 1 : 0);
   });
 
+  it.each(["synthesis", "character"] as const)("reclaims historical v2 source %s initial and repair plans through the actual caller", async (consumer) => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris wears a blue coat.", "legacy-" + consumer);
+    const iris = {
+      id: "source-fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const,
+      citations: [{ sourceId: source.id, paragraphId: source.paragraphs[0]!.id, start: 0, end: source.paragraphs[0]!.end, quote: source.text }]
+    };
+    const legacyProvider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000041", name: "Legacy source", providerRole: "text" as const,
+      providerType: "openrouter" as const, model: "legacy-source-model", endpointIdentity: "legacy-source-endpoint",
+      executionRevision: "legacy-source-profile", authorityRevision: "legacy-source-authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "legacy-source" },
+      execute: async () => { throw new Error("legacy provider execute must not run"); }
+    };
+    const prepared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: legacyProvider,
+      operationPrompts: { sourceWorld: "Frozen legacy source prompt.", sourceWorldRepair: "Frozen legacy source repair prompt." },
+      ports: {
+        resolvePreset: async () => ({ slug: "legacy-source", name: "Legacy source", versionId: "legacy-v1", version: 1, configHash: "b".repeat(64), config: { models: ["legacy-source-model"] }, systemPrompt: "Legacy source preset." }),
+        discoverModels: async () => [{ id: "legacy-source-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+      }
+    });
+    const legacySnapshot = createAuthoringExecutionSnapshot(legacyProvider, {}, {
+      source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION
+    }, sha256, prepared.plans as never);
+    expect(legacySnapshot).toMatchObject({ version: 2, textExecutionPlans: { sourceWorld: {}, sourceWorldRepair: {} } });
+    const calls: any[] = [];
+    const preparedExecutor = vi.fn(async (input: any) => {
+      calls.push(input);
+      if (calls.length === 1) return providerResult("not json");
+      return consumer === "synthesis"
+        ? providerResult(JSON.stringify({ fields: [], characterFields: [] }))
+        : providerResult(JSON.stringify({ fields: [], characterFields: [{ selectedCharacterFactId: iris.id, fields: [{ path: "profile.appearance.clothing", value: "blue coat", supportingFactIds: [iris.id] }] }] }));
+    });
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => legacyProvider } as never, sha256,
+      preparedExecutor: { execute: preparedExecutor }
+    });
+    const output = await dispatch(runtimeStage({
+      input: { kind: "story_source", idempotencyKey: "legacy-" + consumer, target: { kind: "new_world" }, name: source.name, text: source.text, mode: "faithful", boundaryParagraphId: source.paragraphs[0]!.id, instructions: "" },
+      snapshot: legacySnapshot,
+      stageKey: consumer === "synthesis" ? "source:synthesis" : "source:character:" + iris.id,
+      sourceSelection: {
+        source, boundaryParagraphId: source.paragraphs[0]!.id, acceptedFacts: [iris], selectedCharacterFactIds: [iris.id],
+        characterIdentityGroups: [{ representativeFactId: iris.id, factIds: [iris.id] }], mode: "faithful", reviewGeneration: 1
+      },
+      jobId: "legacy-" + consumer
+    }));
+    expect(output.kind).toBe("source_world");
+    expect(calls.map((call) => call.operation)).toEqual(["sourceWorld", "sourceWorldRepair"]);
+    expect(calls.map((call) => call.request.systemPrompt)).toEqual([
+      prepared.plans.sourceWorld!.prompt, prepared.plans.sourceWorldRepair!.prompt
+    ]);
+  });
+
+  it("reclaims a historical v2 standalone repair through its single frozen operation plan", async () => {
+    const legacyProvider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000042", name: "Legacy standalone", providerRole: "text" as const,
+      providerType: "openrouter" as const, endpointIdentity: "legacy-character-endpoint",
+      executionRevision: "legacy-character-profile", authorityRevision: "legacy-character-authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "legacy-character" },
+      execute: async () => { throw new Error("legacy provider execute must not run"); }
+    };
+    const prepared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: legacyProvider,
+      operationPrompts: { standaloneCharacter: "Frozen legacy standalone prompt." },
+      ports: {
+        resolvePreset: async () => ({ slug: "legacy-character", name: "Legacy character", versionId: "legacy-v1", version: 1, configHash: "c".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Legacy standalone preset." }),
+        discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+      }
+    });
+    const legacySnapshot = createAuthoringExecutionSnapshot(legacyProvider, {}, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared.plans as never);
+    const calls: any[] = [];
+    const preparedExecutor = vi.fn(async (input: any) => {
+      calls.push(input);
+      return calls.length === 1 ? providerResult("not json") : providerResult(JSON.stringify(characterContent()));
+    });
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => legacyProvider } as never, sha256,
+      preparedExecutor: { execute: preparedExecutor }
+    });
+    await expect(dispatch(runtimeStage({ snapshot: legacySnapshot }))).resolves.toMatchObject({ kind: "character", character: { name: "Iris" } });
+    expect(calls.map((call) => call.operation)).toEqual(["standaloneCharacter", "standaloneCharacter"]);
+    expect(calls.map((call) => call.request.systemPrompt)).toEqual([
+      prepared.plans.standaloneCharacter!.prompt, prepared.plans.standaloneCharacter!.prompt
+    ]);
+  });
+
+  it.each(["whole-unused-invocation", "unused-repair-half"] as const)("rejects v3 closure tampering before actual dispatch: %s", async (tamper) => {
+    const provider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000043", name: "Closure provider", providerRole: "text" as const,
+      providerType: "openrouter" as const, endpointIdentity: "closure-endpoint",
+      executionRevision: "closure-profile", authorityRevision: "closure-authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "closure" },
+      execute: async () => { throw new Error("legacy execution must not run"); }
+    };
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId: "owner-1", execution: provider,
+      operationPrompts: {
+        standaloneCharacter: "Create the character.", standaloneCharacterRepair: "Repair the character.",
+        organizer: "Organize the character.", organizerRepair: "Repair the organization."
+      },
+      ports: {
+        resolvePreset: async () => ({ slug: "closure", name: "Closure", versionId: "closure-v1", version: 1, configHash: "d".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Closure preset." }),
+        discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+      }
+    });
+    const fullSnapshot = createAuthoringExecutionSnapshot(provider, {}, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
+    const tampered = structuredClone(fullSnapshot) as any;
+    const removed = tamper === "whole-unused-invocation" ? ["organizer", "organizerRepair"] : ["organizerRepair"];
+    for (const operation of removed) {
+      delete tampered.textExecutionPlans[operation];
+      delete tampered.trustedOperationPrompts[operation];
+    }
+    const execute = vi.fn(async () => providerResult(JSON.stringify(characterContent())));
+    const text = vi.fn(async () => provider);
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text } as never, sha256, preparedExecutor: { execute }
+    });
+    await expect(dispatch(runtimeStage({ snapshot: tampered }))).rejects.toThrow(/closure|incomplete/i);
+    expect(text).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
   it.each(["source:plan", "source:chunk:source-chunk:0"])("classifies an unavailable resumed %s provider as a source failure", async (stageKey) => {
     const dispatch = createRuntimeAuthoringStageDispatcher({
       execution: { text: async () => { throw new Error("pinned provider unavailable"); } } as never,
