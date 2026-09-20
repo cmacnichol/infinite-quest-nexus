@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { getProviderOutputSchemaV2, type SchemaVerificationV2 } from "@infinite-quest/contracts";
 import { bindFrozenResponseContractInvocationV2 } from "../../packages/contracts/src/generation-response-contract.js";
+import { estimatedInputSafetyAllowanceTokens } from "../../packages/story-engine/src/provider-request.js";
+import { estimateStoryTokens } from "../../packages/story-engine/src/token-estimate.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import { prepareDirectAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
@@ -37,10 +39,11 @@ function providerResult(): ProviderResult {
   };
 }
 
-function execution(selection: { kind: "model"; modelId: string } | { kind: "openrouter_preset"; slug: string } | undefined) {
+function execution(selection: { kind: "model"; modelId: string } | { kind: "openrouter_preset"; slug: string } | undefined,
+  limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }> = { contextWindowTokens: 16_384, maxOutputTokens: 2_048 }) {
   return {
     id: PROFILE_ID, name: "Text", providerRole: "text" as const, providerType: "openrouter" as const,
-    model: MODEL_ID, contextWindowTokens: 16_384, maxOutputTokens: 2_048, temperature: 0.4,
+    model: MODEL_ID, ...limits, temperature: 0.4,
     requestTimeoutMs: 30_000, endpointIdentity: ENDPOINT_ID, configuration: CONFIGURATION,
     executionRevision: "profile-revision", authorityRevision: "authority-revision",
     ...(selection === undefined ? {} : { textSelection: selection }),
@@ -70,14 +73,15 @@ function operationPrompts() {
   return Object.fromEntries(operationCases.map(([operation]) => [operation, `Operation prompt for ${operation}.`]));
 }
 
-function discoveryPorts(preset = false) {
+function discoveryPorts(preset = false,
+  limits: Readonly<{ contextWindowTokens: number; maxOutputTokens: number }> = { contextWindowTokens: 16_384, maxOutputTokens: 2_048 }) {
   return {
     resolvePreset: vi.fn(async () => ({
       slug: "authoring", name: "Authoring", versionId: "preset-v1", version: 1,
       configHash: "a".repeat(64), config: { models: [MODEL_ID] }, systemPrompt: "Preset instructions."
     })),
     discoverModels: vi.fn(async () => [{
-      id: MODEL_ID, contextWindowTokens: 16_384, maxOutputTokens: 2_048,
+      id: MODEL_ID, ...limits,
       ...(preset ? {} : { responseFormatAdvertisement: ADVERTISEMENT })
     }])
   };
@@ -118,6 +122,11 @@ describe("direct authoring v2 response contracts", () => {
         json_schema: { name: schemaName, strict: true, schema: getProviderOutputSchemaV2(schemaOperation).schema }
       });
       expect(invocation.preparedRequest.payloadHash).toBe(createHash("sha256").update(invocation.preparedRequest.body).digest("hex"));
+      const requestTokens = estimateStoryTokens(invocation.preparedRequest.body);
+      expect(invocation.preparedRequest.budgetAudit).toEqual({
+        countMode: "estimated", requestTokens, inputLimit: 14_336, outputReserveTokens: 2_048,
+        safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens(requestTokens)
+      });
       expect(invocation.request.systemPrompt).toBe(`Operation prompt for ${operation}.`);
     }
     expect(provider.execute).not.toHaveBeenCalled();
@@ -150,6 +159,11 @@ describe("direct authoring v2 response contracts", () => {
       expect(body.response_format.json_schema.name).toBe(schemaName);
       expect(bodyText.match(/Preset instructions\./g)).toHaveLength(1);
       expect(bodyText.match(new RegExp(`Operation prompt for ${operation}\\.`, "g"))).toHaveLength(1);
+      const requestTokens = estimateStoryTokens(bodyText);
+      expect(invocation.preparedRequest.budgetAudit).toEqual({
+        countMode: "estimated", requestTokens, inputLimit: 14_336, outputReserveTokens: 2_048,
+        safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens(requestTokens)
+      });
     }
     expect(eligibilityV2).not.toHaveBeenCalled();
     expect(ports.resolvePreset).toHaveBeenCalledTimes(1);
@@ -192,5 +206,74 @@ describe("direct authoring v2 response contracts", () => {
     })).rejects.toThrow(/verified response contract|required response contract/i);
     expect(preparedExecute).not.toHaveBeenCalled();
     expect(provider.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Model", { kind: "model" as const, modelId: MODEL_ID }, false],
+    ["Preset", { kind: "openrouter_preset" as const, slug: "authoring" }, true]
+  ])("checks complete rejected-response bytes and forwards the exact audited %s repair", async (_label, selection, preset) => {
+    const execute = vi.fn(async (_input: unknown) => providerResult());
+    const ports = discoveryPorts(preset);
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: execution(selection),
+      operationPrompts: { worldOutlineRepair: "Repair the world." },
+      options: {
+        nativePresetPlansEnabled: true, preparedExecutor: { execute },
+        loadAuthority: async () => ({ id: PROFILE_ID, providerRole: "text", authorityRevision: "authority-revision", endpointIdentity: ENDPOINT_ID }),
+        ports, responseFormatCapabilities: directCapabilities()
+      } as never
+    });
+    const rejectedCanary = `REJECTED-${"x".repeat(80_000)}`;
+
+    await prepared!.execute({
+      operation: "worldOutlineRepair",
+      request: {
+        systemPrompt: "untrusted", input: "protected input", recoveryInput: "repair the response",
+        rejectedResponse: JSON.stringify({ rejectedCanary }), responseFormatFallback: "forbid"
+      }
+    });
+
+    const invocation = execute.mock.calls[0]![0] as any;
+    expect(invocation.preparedRequest.body).not.toContain("REJECTED-");
+    expect(invocation.preparedRequest.body).toContain("CLEAN REGENERATION REQUIREMENT");
+    expect(invocation.preparedRequest.body.match(/Repair the world\./g)).toHaveLength(1);
+    expect(invocation.preparedRequest.body.match(/Preset instructions\./g) ?? []).toHaveLength(preset ? 1 : 0);
+    expect(JSON.parse(invocation.preparedRequest.body).response_format.json_schema.name)
+      .toBe("infinite_quest_world_outline_v1");
+    expect(invocation.preparedRequest.payloadHash)
+      .toBe(createHash("sha256").update(invocation.preparedRequest.body).digest("hex"));
+    expect(invocation.preparedRequest.budgetAudit).toMatchObject({
+      countMode: "estimated", inputLimit: 14_336, outputReserveTokens: 2_048
+    });
+  });
+
+  it.each([
+    ["Model", { kind: "model" as const, modelId: MODEL_ID }, false],
+    ["Preset", { kind: "openrouter_preset" as const, slug: "authoring" }, true]
+  ])("blocks over-budget %s initial and repair bodies before prepared execution", async (_label, selection, preset) => {
+    const limits = { contextWindowTokens: 512, maxOutputTokens: 128 };
+    const execute = vi.fn(async (_input: unknown) => providerResult());
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: execution(selection, limits),
+      operationPrompts: { worldOutline: "Create the world.", worldOutlineRepair: "Repair the world." },
+      options: {
+        nativePresetPlansEnabled: true, preparedExecutor: { execute },
+        loadAuthority: async () => ({ id: PROFILE_ID, providerRole: "text", authorityRevision: "authority-revision", endpointIdentity: ENDPOINT_ID }),
+        ports: discoveryPorts(preset, limits), responseFormatCapabilities: directCapabilities()
+      } as never
+    });
+
+    await expect(prepared!.execute({
+      operation: "worldOutline",
+      request: { systemPrompt: "untrusted", input: "small input", responseFormatFallback: "forbid" }
+    })).rejects.toMatchObject({ code: "context_budget_exceeded", scope: "provider_request" });
+    await expect(prepared!.execute({
+      operation: "worldOutlineRepair",
+      request: {
+        systemPrompt: "untrusted", input: "small input", recoveryInput: "repair",
+        rejectedResponse: JSON.stringify({ rejected: "x".repeat(4_000) }), responseFormatFallback: "forbid"
+      }
+    })).rejects.toMatchObject({ code: "context_budget_exceeded", scope: "provider_request" });
+    expect(execute).not.toHaveBeenCalled();
   });
 });

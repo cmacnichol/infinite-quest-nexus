@@ -22,8 +22,16 @@ import {
   type QueuedResponsePolicyV2
 } from "../../../packages/contracts/src/generation-response-contract.js";
 import { effectiveProviderConfigurationFingerprint } from "../../../packages/contracts/src/story-memory-policy.js";
-import { serializeBoundFrozenPresetProviderRequest, serializeProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
+import {
+  estimatedInputSafetyAllowanceTokens,
+  serializeCheckedBoundFrozenPresetProviderRequest,
+  serializeCheckedProviderRequest,
+  validateCompleteRejectedDraft,
+  type CanonicalProviderRequest,
+  type PreparedProviderRequest
+} from "../../../packages/story-engine/src/provider-request.js";
 import type { ProviderRequest, ProviderResult, TextProviderProfile } from "../../../packages/story-engine/src/providers.js";
+import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import type { ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
 import { resolveGenerationResponseContractsV2 } from "./generation-response-contract.js";
@@ -41,7 +49,7 @@ export type PreparedAuthoringTextExecutor = Readonly<{
     providerProfileId: string;
     request: ProviderRequest;
     /** Exact canonical body already measured and durably reserved by the caller. */
-    preparedRequest?: Readonly<{ body: string; payloadHash: string }>;
+    preparedRequest?: PreparedProviderRequest;
     currentClaim?: () => Promise<boolean>;
     invocationKey?: ResponseInvocationKeyV2;
     frozenResponseContracts?: FrozenResponseContractsV2;
@@ -102,6 +110,17 @@ function frozenProfile(execution: RuntimeTextExecution, routeBasis: TextExecutio
     temperature: routeBasis.parameters.temperature ?? 0,
     requestTimeoutMs: routeBasis.requestTimeoutMs,
     configuration: execution.configuration
+  };
+}
+
+function canonicalDirectAuthoringRequest(request: ProviderRequest): CanonicalProviderRequest {
+  const completeRejectedDraft = validateCompleteRejectedDraft(request.rejectedResponse);
+  return {
+    systemPrompt: request.systemPrompt,
+    input: request.input,
+    ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
+    ...(completeRejectedDraft ? { completeRejectedDraft } : {}),
+    ...(request.onChunk ? { onChunk: request.onChunk } : {})
   };
 }
 
@@ -239,8 +258,18 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
         || authority.endpointIdentity !== input.execution.endpointIdentity) {
         throw new Error("Native authoring provider authority is unavailable.");
       }
-      const canonicalRequest = { ...request, systemPrompt: plan.prompt };
+      const executorRequest = { ...request, systemPrompt: plan.prompt };
+      const canonicalRequest = canonicalDirectAuthoringRequest(executorRequest);
       const profile = frozenProfile(input.execution, prepared.routeBasis);
+      const candidate = prepared.routeBasis.candidates[0]!;
+      const checkedOptions = {
+        inputLimit: candidate.contextWindowTokens - candidate.maxOutputTokens,
+        count: estimateStoryTokens,
+        countMode: "estimated" as const,
+        safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
+        contextWindowTokens: candidate.contextWindowTokens,
+        output: request.budgetOutput ?? { kind: "story_append" as const }
+      };
       if (selection.kind === "model") {
         assertDirectResponseContractRouteBasisAuthority(frozenResponseContracts.queuedPolicy, prepared.routeBasis);
         if (deriveTextExecutionPlan(prepared.routeBasis, trustedOperationPrompt).planHash !== plan.planHash) {
@@ -248,12 +277,13 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
         }
       }
       const preparedRequest = selection.kind === "openrouter_preset"
-        ? serializeBoundFrozenPresetProviderRequest(profile, canonicalRequest, {
+        ? serializeCheckedBoundFrozenPresetProviderRequest(profile, canonicalRequest, {
           frozen: frozenResponseContracts, routeBasis: prepared.routeBasis, plan,
           invocationKey: identity.invocationKey, operation: identity.operation,
           trustedOperationPrompt
-        })
-        : serializeProviderRequest(profile, canonicalRequest, {
+        }, checkedOptions)
+        : serializeCheckedProviderRequest(profile, canonicalRequest, {
+          ...checkedOptions,
           responseContract: bindFrozenResponseContractInvocationV2({
             frozen: frozenResponseContracts, routeBasis: prepared.routeBasis, plan,
             invocationKey: identity.invocationKey, operation: identity.operation,
@@ -264,7 +294,7 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
         plan, operation: identity.operation, invocationKey: identity.invocationKey,
         frozenResponseContracts, routeBasis: prepared.routeBasis, trustedOperationPrompt,
         ownerUserId: input.ownerUserId, providerProfileId: input.execution.id,
-        request: canonicalRequest, preparedRequest
+        request: executorRequest, preparedRequest
       });
     }
   });

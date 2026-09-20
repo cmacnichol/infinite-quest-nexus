@@ -248,6 +248,9 @@ it("prepares one inherited preset workflow for the direct CYOA world and seed pi
   ]);
   for (const invocation of invocations) {
     expect(invocation.preparedRequest.payloadHash).toBe(createHash("sha256").update(invocation.preparedRequest.body).digest("hex"));
+    expect(invocation.preparedRequest.budgetAudit).toMatchObject({
+      countMode: "estimated", inputLimit: 7_168, outputReserveTokens: 1_024
+    });
     expect(invocation.preparedRequest.body.match(/Preset instructions\./g)).toHaveLength(1);
   }
 });
@@ -296,6 +299,9 @@ it("dispatches standalone character repair through one prepared preset workflow"
     .toEqual(["infinite_quest_standalone_character_v1", "infinite_quest_standalone_character_v1"]);
   for (const invocation of invocations) {
     expect(invocation.preparedRequest.payloadHash).toBe(createHash("sha256").update(invocation.preparedRequest.body).digest("hex"));
+    expect(invocation.preparedRequest.budgetAudit).toMatchObject({
+      countMode: "estimated", inputLimit: 7_168, outputReserveTokens: 1_024
+    });
     expect(invocation.preparedRequest.body.match(/Preset character instructions\./g)).toHaveLength(1);
   }
 });
