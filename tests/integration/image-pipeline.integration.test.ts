@@ -2469,7 +2469,7 @@ integration("independent illustration pipeline", () => {
     )).rejects.toThrow(/immutable/i);
   });
 
-  it("dispatches a claimed illustration prompt through the composed shared executor and physical attempt repository", async () => {
+  it("dispatches generated and regenerated prompts through the composed shared executor and physical attempt repository", async () => {
     const imported = await campaign();
     const ownerUserId = await initialOwnerId(pool);
     const nativeTextProviderId = (await createProvider(pool, {
@@ -2549,6 +2549,51 @@ integration("independent illustration pipeline", () => {
     expect(wireBodies[0]!.match(/PRIVATE_COMPOSED_ILLUSTRATION_PROMPT/g)).toHaveLength(1);
     await expect(pool.query<{ status: string }>(
       "SELECT status FROM illustration_prompt_jobs WHERE id=$1", [target.id]
+    )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
+
+    const rebuildWireStart = nativeRefinementRequestBodies.length;
+    const rebuilt = await generateNativeIllustrationSegments(pool, turn.rows[0]!.id, { mode: "rebuild" }, graph.illustration);
+    const rebuiltPromptJobs = await pool.query<{ id: string }>(
+      `SELECT prompt_jobs.id FROM illustration_prompt_jobs prompt_jobs
+         JOIN turn_illustration_segments segments ON segments.id=prompt_jobs.segment_id
+        WHERE segments.illustration_set_id=$1 ORDER BY prompt_jobs.created_at,prompt_jobs.id`, [rebuilt.setId]
+    );
+    const rebuiltTarget = rebuiltPromptJobs.rows[0]!;
+    await pool.query(
+      `UPDATE illustration_prompt_jobs SET status='cancelled'
+        WHERE segment_id IN (SELECT id FROM turn_illustration_segments WHERE illustration_set_id=$1) AND id <> $2`,
+      [rebuilt.setId, rebuiltTarget.id]
+    );
+    await makeOnlyPromptClaimable(pool, rebuiltTarget.id);
+    await expect(runNativeIllustrationPromptJob(
+      pool, "task-5c-composed-regenerated", 30, ports.promptRefinement, ports.costs, graph.illustration
+    )).resolves.toBe(true);
+    const rebuiltAttempts = await pool.query<{
+      request_body: string; outcome: string;
+      logical_reservation: { kind: string; ownerUserId: string; promptJobId: string; claimAttempt: number; leaseOwner: string; operation: string };
+    }>(
+      `SELECT request_body,outcome,logical_reservation
+         FROM prepared_text_physical_attempts
+        WHERE logical_kind='illustration' AND logical_reservation->>'promptJobId'=$1`,
+      [rebuiltTarget.id]
+    );
+    const rebuiltOutcome = await pool.query<{ status: string; error_code: string | null }>(
+      "SELECT status,error_code FROM illustration_prompt_jobs WHERE id=$1", [rebuiltTarget.id]
+    );
+    expect(rebuiltAttempts.rows, JSON.stringify(rebuiltOutcome.rows)).toEqual([expect.objectContaining({
+      outcome: "succeeded",
+      logical_reservation: {
+        kind: "illustration", ownerUserId, promptJobId: rebuiltTarget.id, claimAttempt: 1,
+        leaseOwner: "task-5c-composed-regenerated", operation: "initial"
+      }
+    })]);
+    const rebuildWireBodies = nativeRefinementRequestBodies.slice(rebuildWireStart);
+    expect(rebuildWireBodies).toEqual([rebuiltAttempts.rows[0]!.request_body]);
+    const rebuildWireBody = JSON.parse(rebuildWireBodies[0]!);
+    expect(rebuildWireBody.response_format.json_schema.name).toBe("infinite_quest_illustration_prompt_refinement_v1");
+    expect(rebuildWireBodies[0]!.match(/PRIVATE_COMPOSED_ILLUSTRATION_PROMPT/g)).toHaveLength(1);
+    await expect(pool.query<{ status: string }>(
+      "SELECT status FROM illustration_prompt_jobs WHERE id=$1", [rebuiltTarget.id]
     )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
   });
 

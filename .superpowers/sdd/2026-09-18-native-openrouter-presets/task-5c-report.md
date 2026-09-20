@@ -168,3 +168,30 @@ Affected complete-file integration commands:
 - `git diff --check` — PASS, no output.
 
 The broader unit suite was not repeated because the review requested focused and affected covering checks. Its residual failure inventory above remains the Task 6A/Task 8 handoff.
+
+## Independent re-review fix round 2
+
+The scoped re-review accepted the caller containment, direct/durable/source matrix, and generated/provisional/promoted/reconciled illustration evidence. One acceptance gap remained: successful regenerated (`mode: "rebuild"`) illustration execution still appeared only behind a mocked prepared executor or authority-rejection cases.
+
+`tests/integration/image-pipeline.integration.test.ts` now extends the existing real composed illustration test. After completing the generated-origin prompt, it queues a fresh `mode: "rebuild"` set, claims one regenerated prompt job through `createWorkerProviderApplicationComposition`, and completes the request against the fake HTTP provider. The test proves the regenerated job has one succeeded PostgreSQL physical attempt equal byte-for-byte to the one new captured wire body, uses `infinite_quest_illustration_prompt_refinement_v1`, includes `PRIVATE_COMPOSED_ILLUSTRATION_PROMPT` exactly once, carries the exact owner/prompt-job/claim-attempt/lease-owner/initial-operation reservation, and reaches `completed`.
+
+This was a missing-evidence finding against already-correct production composition. The first valid focused run passed; no production defect was reproduced and no production file changed.
+
+Focused command:
+
+`& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/image-pipeline.integration.test.ts -t "generated and regenerated"`
+
+PASS: 1 file, 1 passed, 37 filtered.
+
+Affected complete-file command:
+
+`& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec vitest run --config .superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts tests/integration/image-pipeline.integration.test.ts`
+
+PASS: 1 file, 24 passed, 14 skipped. All 14 skips are the Windows run's expected `secureGeneratedAssetsIt` cases because secure generated-archive staging is implemented only on Linux.
+
+Static checks:
+
+- `& '.superpowers/sdd/2026-09-18-native-openrouter-presets/bin/pnpm.cmd' exec tsc -p tsconfig.json --noEmit` — PASS, exit 0, no diagnostics.
+- `git diff --check` — PASS, exit 0, no output.
+
+Round 2 changes only this integration test and this report. No broader suite was repeated, and the Task 6A/Task 8 residual inventory remains unchanged.
