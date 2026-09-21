@@ -141,6 +141,19 @@ integration("provider route configuration redaction", () => {
     expect(response.json()).not.toHaveProperty("apiKey");
   });
 
+  it("lists a valid unconfigured text profile without invalid capability metadata", async () => {
+    const name = `${baseProviderInput.name} EMPTY MODEL ${crypto.randomUUID()}`;
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name, providerType: "openai_compatible", providerRole: "text", defaultModel: "", configuration: {}
+    } });
+    expect(created.statusCode).toBe(201);
+    const response = await app.inject({ method: "GET", url: "/api/v1/providers" });
+    expect(response.statusCode, response.body).toBe(200);
+    const profile = response.json().providers.find((candidate: { name: string }) => candidate.name === name);
+    expect(profile).toMatchObject({ defaultModel: "", textSelection: { kind: "model", modelId: "" } });
+    expect(profile).not.toHaveProperty("responseFormatCapability");
+  });
+
   it("round-trips strict text overrides with PATCH preserve and explicit clear semantics", async () => {
     const overrides = {
       parameters: { temperature: 0.31, max_completion_tokens: 654 },

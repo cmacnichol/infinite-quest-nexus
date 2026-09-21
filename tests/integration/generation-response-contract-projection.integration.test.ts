@@ -62,4 +62,32 @@ integration("generation response-contract SQL projection", () => {
     expect(JSON.stringify(result.rows[0]?.projected)).not.toContain(privateCanary);
     expect(JSON.stringify(projected)).not.toContain("requested-route");
   });
+
+  test.each([
+    ["choices:nonstream", "choices"],
+    ["continuity_review:nonstream", "continuity_review"]
+  ] as const)("projects the latest v2 %s contract through actual PostgreSQL JSONB", async (invocationKey, operation) => {
+    const privateCanary = `PRIVATE_${operation.toUpperCase()}_SCHEMA`;
+    const source = {
+      queuedResponsePolicy: {
+        version: 2, policy: "required", admission: { mode: "json_schema", basis: "model_verified" },
+        authority: { kind: "model_verified", model: "requested-model" }
+      },
+      frozenResponseContracts: { version: 2, contracts: {
+        "story:stream": { mode: "json_schema", operation: "story", streaming: true, schemaVersion: "story-v2", schemaHash: "a".repeat(64) },
+        [invocationKey]: { mode: "json_schema", operation, streaming: false, schemaVersion: `${operation}-v2`, schemaHash: "b".repeat(64), schema: { privateCanary } }
+      } },
+      responseContractInvocations: [{
+        version: 2, invocationKey,
+        request: { schemaVersion: `${operation}-v2`, schemaHash: "b".repeat(64), requestedModel: "requested-model" },
+        response: { returnedModel: "served-model", returnedProviderRoute: null, diagnosticCode: null }
+      }]
+    };
+    const result = await pool.query<{ projected: unknown }>(`SELECT ${generationResponseFormatProjection("source")} AS projected FROM (SELECT $1::jsonb AS source) item`, [JSON.stringify(source)]);
+    expect(projectGenerationResponseFormat(result.rows[0]?.projected)).toMatchObject({
+      version: 2, operation, streaming: false, schemaVersion: `${operation}-v2`, schemaHash: "b".repeat(64),
+      actualServedIdentity: { status: "known", model: "served-model", providerRoute: null }
+    });
+    expect(JSON.stringify(result.rows[0]?.projected)).not.toContain(privateCanary);
+  });
 });

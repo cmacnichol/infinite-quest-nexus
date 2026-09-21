@@ -106,7 +106,9 @@ function profileResponse(
     hasApiKey: profile.hasCredential,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
-    ...(profile.providerRole === "text" ? { responseFormatCapability: responseFormatCapability(profile, profile.defaultModel, null, capabilities) } : {})
+    ...(profile.providerRole === "text" && profile.defaultModel.trim().length > 0
+      ? { responseFormatCapability: responseFormatCapability(profile, profile.defaultModel, null, capabilities) }
+      : {})
   };
 }
 

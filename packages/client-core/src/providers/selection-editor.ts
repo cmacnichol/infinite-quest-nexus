@@ -82,9 +82,11 @@ function mergePresets(existing: readonly SafePresetSummary[], next: readonly Saf
 
 export function reduceSelectionEditor(state: SelectionEditorState, event: SelectionEditorEvent): SelectionEditorState {
   switch (event.type) {
-    case "modeChanged": return { ...state, mode: event.mode };
+    case "modeChanged": return event.mode === state.mode ? state : { ...state, mode: event.mode, detail: emptyDetail };
     case "modelDraftChanged": return { ...state, modelDraft: { ...state.modelDraft, modelId: event.modelId, responseFormatPolicy: event.responseFormatPolicy } };
-    case "presetDraftChanged": return { ...state, presetDraft: { ...state.presetDraft, slug: event.slug } };
+    case "presetDraftChanged": return event.slug === state.presetDraft.slug
+      ? state
+      : { ...state, presetDraft: { ...state.presetDraft, slug: event.slug }, detail: emptyDetail };
     case "modelOverrideIntentChanged": return { ...state, modelDraft: { ...state.modelDraft, overrideIntent: event.intent } };
     case "presetOverrideIntentChanged": return { ...state, presetDraft: { ...state.presetDraft, overrideIntent: event.intent } };
     case "requestStarted": return { ...state, list: { ...state.list, requestId: event.requestId, busy: true, requestedOffset: event.offset, error: null } };

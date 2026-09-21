@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { textModelSelectionSchema } from "./provider-selection.js";
 import { providerOutputSchemaOperationV2Schema } from "./provider-output-schema.js";
+import { responseInvocationKeyV2Schema } from "./text-response-format.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const boundedIdentifier = z.string().trim().min(1).max(256);
@@ -30,11 +31,18 @@ export const generationResponseFormatProjectionV2Schema = z.object({
   operation: providerOutputSchemaOperationV2Schema.nullable(),
   requestedSelection: textModelSelectionSchema.nullable(),
   assurance: z.enum(["verified_model", "trusted_preset"]).nullable(),
-  actualServedIdentity: z.object({
-    status: z.enum(["known", "unknown"]),
-    model: z.string().trim().min(1).max(500).nullable(),
-    providerRoute: z.string().trim().min(1).max(500).nullable()
-  }).strict()
+  actualServedIdentity: z.discriminatedUnion("status", [
+    z.object({
+      status: z.literal("known"),
+      model: z.string().trim().min(1).max(500).nullable(),
+      providerRoute: z.string().trim().min(1).max(500).nullable()
+    }).strict(),
+    z.object({ status: z.literal("unknown"), model: z.null(), providerRoute: z.null() }).strict()
+  ]).superRefine((identity, context) => {
+    if (identity.status === "known" && identity.model === null && identity.providerRoute === null) {
+      context.addIssue({ code: "custom", message: "Known served identity requires an observed model or provider route." });
+    }
+  })
 }).strict();
 
 export const generationResponseFormatProjectionSchema = z.discriminatedUnion("version", [
@@ -91,11 +99,12 @@ function projectV2(source: Record<string, unknown>, queued: Record<string, unkno
   const assurance = requestedSelection === null ? null
     : authority?.kind === "preset_trusted" ? "trusted_preset" as const : "verified_model" as const;
 
-  const invocationKey = nullableIdentifier(entry?.invocationKey);
+  const invocationKeyResult = responseInvocationKeyV2Schema.safeParse(nullableIdentifier(entry?.invocationKey));
+  const invocationKey = invocationKeyResult.success ? invocationKeyResult.data : null;
   const contracts = record(frozen?.contracts);
-  const contract = record(invocationKey ? contracts?.[invocationKey] : null)
-    ?? record(contracts?.["story:stream"])
-    ?? record(contracts?.["story:nonstream"]);
+  const contract = ledger === null || ledger === undefined
+    ? record(contracts?.["story:stream"]) ?? record(contracts?.["story:nonstream"])
+    : invocationKey === null ? null : record(contracts?.[invocationKey]);
   const request = record(entry?.request);
   const response = record(entry?.response);
   const admission = record(queued.admission);

@@ -179,4 +179,55 @@ PASS: contracts/application/client package checks, server TypeScript build, lega
 - Native admission remains disabled by default. No deployment, push, PR, or main-checkout integration was performed.
 - Root-owned untracked `docs/review/native-openrouter-presets/` and `scratch/` were excluded.
 
-Independent review is required before Task 7 begins.
+## Independent-review fix round 1
+
+The first independent review of commit `0abb59ce3583f1a0c7e5acf2777a409faec5afbd` found four bounded defects. This round fixes all four without adding visible controls, native enablement, persistence, or provider execution changes.
+
+- The SQL boundary now selects the latest v2 frozen contract through the finite shared `responseInvocationKeyV2Schema`. The TypeScript projector uses the same finite identity and does not fall back to a Story contract when a latest invocation exists. `choices:nonstream` and `continuity_review:nonstream` therefore retain their real operation, nonstream delivery, and schema metadata. Missing or malformed latest identities remain unknown and never substitute the requested model/route for observed serving identity.
+- A valid text provider profile with an empty `defaultModel` remains listable. The adapter omits `responseFormatCapability` until a nonempty model exists rather than emitting an invalid capability object.
+- Changing the Preset slug or changing from Preset to Model mode clears detail request identity and evidence. Late success, failure, and finally callbacks from the invalidated request are identity no-ops; both drafts and their override intents remain intact.
+- `actualServedIdentity` is now a strict discriminated union. `known` requires at least one bounded observed field, `unknown` requires both fields to be `null`, and either model-only or provider-route-only partial known evidence remains valid.
+
+### Fix-round RED
+
+Focused unit command:
+
+`& "$taskBin\pnpm.cmd" exec vitest run tests/unit/generation-response-format-projection.test.ts tests/unit/generation-response-format-sql-projection.test.ts tests/unit/provider-selection-editor.test.ts`
+
+RED: 3 files failed; 6 failed and 14 passed. The failures showed both non-Story operations incorrectly reported Story state, the SQL omitted those invocation keys, the impossible known-null/null identity parsed, and both editor transitions retained the old detail request.
+
+Focused private PostgreSQL command:
+
+`& "$taskBin\pnpm.cmd" exec vitest run --config '.superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts' tests/integration/generation-response-contract-projection.integration.test.ts tests/integration/provider-routes.integration.test.ts -t 'latest v2|valid unconfigured text profile'`
+
+RED: 2 files failed; 3 failed, with 12 filtered by the explicit test selector. The private task database authenticated. Both non-Story SQL projections returned Story/stream state, and the production-composed provider list returned 500 because the empty-model capability failed the public schema.
+
+An additional boundary RED used:
+
+`& "$taskBin\pnpm.cmd" exec vitest run tests/unit/generation-response-format-projection.test.ts -t 'malformed latest v2 invocation key'`
+
+RED: 1 file failed; 2 failed and 9 filtered. A malformed prefix still reported `story`, while an overlong key fell back to the frozen Story contract. Both now remain operation/streaming unknown and omit the request-only route.
+
+### Fix-round GREEN and covering checks
+
+Final focused units used the pinned bin on `PATH`:
+
+`& "$taskBin\pnpm.cmd" exec vitest run tests/unit/generation-response-format-projection.test.ts tests/unit/generation-response-format-sql-projection.test.ts tests/unit/provider-selection-editor.test.ts`
+
+PASS: 3 files, 22 tests. This includes the new latest-operation, malformed-identity, strict known/unknown union, and reducer transition coverage, plus the existing v1 projection and partial-known observed identity cases.
+
+The complete affected private PostgreSQL files used only the task-private URL and explicit integration config:
+
+`& "$taskBin\pnpm.cmd" exec vitest run --config '.superpowers/sdd/2026-09-18-native-openrouter-presets/vitest.integration.config.ts' tests/integration/generation-response-contract-projection.integration.test.ts tests/integration/provider-routes.integration.test.ts`
+
+PASS: 2 files, 15 tests with no skips. This retains the historical v1 legacy/selected/unavailable projections, v2 partial-known model evidence, route redaction, safe Preset routes, and override semantics while proving actual PostgreSQL parity for both newly covered non-Story operations and a real list route composed with the capability service.
+
+`& "$taskBin\pnpm.cmd" check` — PASS, including repository/data-safety checks and full `tsc -p tsconfig.json --noEmit`.
+
+`& "$taskBin\pnpm.cmd" build` — PASS for server TypeScript and both web builds. The management bundle remains side-effect-free and present. Existing replacement-font resolution and large-chunk messages remained non-failing warnings.
+
+`git diff --check` — PASS, exit 0, no output.
+
+Self-review confirmed the SQL and TypeScript public boundaries use the shared finite v2 key set and consistent observed-identity bounds. Only bounded contract metadata is projected; raw schema bodies, prompts, credentials, endpoint authority, and raw errors remain private. Requested selection remains distinct from verified observed serving identity, and Preset trust remains distinct from Model verification. Native admission is still disabled by default, and this round adds no visible UI, live-provider calls, deployment, or main-checkout integration.
+
+Scoped independent re-review is required before Task 7 begins.

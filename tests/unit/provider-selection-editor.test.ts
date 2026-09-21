@@ -5,9 +5,15 @@ import {
   serializeSelectionEditorPatch,
   type SelectionEditorState
 } from "../../packages/client-core/src/providers/selection-editor.js";
-import type { SafePresetPage } from "../../packages/contracts/src/provider-presets.js";
+import type { SafePresetDetail, SafePresetPage } from "../../packages/contracts/src/provider-presets.js";
 
 const emptyPage: SafePresetPage = { presets: [], totalCount: 0, offset: 0, nextOffset: null };
+const detailA = {
+  slug: "preset-a", name: "Preset A", versionId: "v1", version: 1, standardPrompt: "Owner-visible prompt.",
+  candidateModelIds: ["route/model"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {},
+  limits: { configuredMaxTokens: null, configuredMaxCompletionTokens: null, effectiveMaxOutputTokens: null, contextWindowTokens: { status: "unknown", value: null } },
+  responseFormat: { mode: "json_schema", assurance: "trusted_preset" }
+} satisfies SafePresetDetail;
 
 function initialPresetState(): SelectionEditorState {
   return createSelectionEditorState({
@@ -109,6 +115,20 @@ describe("provider selection editor", () => {
     expect(reduceSelectionEditor(state, { type: "detailFailed", requestId: "old", error: "preset_missing" })).toEqual(state);
     expect(reduceSelectionEditor(state, { type: "detailRequestFinished", requestId: "old" })).toEqual(state);
     expect(reduceSelectionEditor(state, { type: "detailRequestFinished", requestId: "new" }).detail.busy).toBe(false);
+  });
+
+  it.each([
+    ["changes the Preset draft", { type: "presetDraftChanged", slug: "preset-b" } as const],
+    ["switches to Model mode", { type: "modeChanged", mode: "model" } as const]
+  ])("invalidates detail identity when the user %s", (_name, transition) => {
+    const started = reduceSelectionEditor(initialPresetState(), { type: "detailRequestStarted", requestId: "detail-a", slug: "preset-a" });
+    const transitioned = reduceSelectionEditor(started, transition);
+    expect(transitioned.detail).toEqual({ requestId: null, busy: false, slug: null, value: null, error: null });
+    expect(reduceSelectionEditor(transitioned, { type: "detailLoaded", requestId: "detail-a", detail: detailA })).toEqual(transitioned);
+    expect(reduceSelectionEditor(transitioned, { type: "detailFailed", requestId: "detail-a", error: "preset_missing" })).toEqual(transitioned);
+    expect(reduceSelectionEditor(transitioned, { type: "detailRequestFinished", requestId: "detail-a" })).toEqual(transitioned);
+    expect(transitioned.presetDraft.overrideIntent).toEqual(started.presetDraft.overrideIntent);
+    expect(transitioned.modelDraft).toEqual(started.modelDraft);
   });
 
   it("serializes preserve, inherit, and explicit override intent without moving drafts between selections", () => {

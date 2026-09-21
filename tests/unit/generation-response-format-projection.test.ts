@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { projectGenerationResponseFormat } from "../../packages/contracts/src/generation-response-format-projection.js";
+import {
+  generationResponseFormatProjectionV2Schema,
+  projectGenerationResponseFormat
+} from "../../packages/contracts/src/generation-response-format-projection.js";
 
 describe("generation response-format public projection", () => {
   test("projects only finite saved selection and latest invocation audit", () => {
@@ -85,5 +88,54 @@ describe("generation response-format public projection", () => {
     expect(projected.version).toBe(2);
     if (projected.version !== 2) throw new Error("Expected a v2 projection.");
     expect(projected.actualServedIdentity).toEqual({ status: "known", model: returnedModel, providerRoute: returnedProviderRoute });
+  });
+
+  test.each([
+    ["choices:nonstream", "choices"],
+    ["continuity_review:nonstream", "continuity_review"]
+  ] as const)("derives the latest %s operation instead of falling back to a Story contract", (invocationKey, operation) => {
+    expect(projectGenerationResponseFormat({
+      queuedResponsePolicy: {
+        version: 2, policy: "required", admission: { mode: "json_schema", basis: "model_verified" },
+        authority: { kind: "model_verified", model: "requested-model" }
+      },
+      frozenResponseContracts: { version: 2, contracts: {
+        "story:stream": { mode: "json_schema", operation: "story", streaming: true, schemaVersion: "story-v2", schemaHash: "a".repeat(64) }
+      } },
+      responseContractInvocations: [{
+        version: 2, invocationKey,
+        request: { schemaVersion: `${operation}-v2`, schemaHash: "b".repeat(64) },
+        response: null
+      }]
+    })).toMatchObject({ version: 2, operation, streaming: false, schemaVersion: `${operation}-v2`, schemaHash: "b".repeat(64) });
+  });
+
+  test.each([
+    "story:unexpected",
+    "x".repeat(257)
+  ])("keeps malformed latest v2 invocation key %s unknown without Story or requested-route substitution", (invocationKey) => {
+    const projected = projectGenerationResponseFormat({
+      queuedResponsePolicy: {
+        version: 2, policy: "required", admission: { mode: "json_schema", basis: "preset_trusted" },
+        authority: { kind: "preset_trusted", selection: { kind: "openrouter_preset", slug: "night-shift" } }
+      },
+      frozenResponseContracts: { version: 2, contracts: {
+        "story:stream": { mode: "json_schema", operation: "story", streaming: true, schemaVersion: "story-v2", schemaHash: "a".repeat(64) }
+      } },
+      responseContractInvocations: [{ version: 2, invocationKey, request: { requestedModel: "private-request-route" }, response: null }]
+    });
+    expect(projected).toMatchObject({ version: 2, operation: null, streaming: null });
+    expect(JSON.stringify(projected)).not.toContain("private-request-route");
+  });
+
+  test("enforces consistent known and unknown actual served identity variants", () => {
+    const base = {
+      version: 2, savedPolicy: "required", effectiveMode: "json_schema", schemaVersion: null, schemaHash: null,
+      operation: "story", streaming: true, requestedSelection: { kind: "model", modelId: "model" }, assurance: "verified_model",
+      preflight: "selected", preflightDiagnostic: null, diagnosticCode: null
+    } as const;
+    expect(generationResponseFormatProjectionV2Schema.safeParse({ ...base, actualServedIdentity: { status: "known", model: null, providerRoute: null } }).success).toBe(false);
+    expect(generationResponseFormatProjectionV2Schema.safeParse({ ...base, actualServedIdentity: { status: "unknown", model: "observed", providerRoute: null } }).success).toBe(false);
+    expect(generationResponseFormatProjectionV2Schema.safeParse({ ...base, actualServedIdentity: { status: "known", model: "observed", providerRoute: null } }).success).toBe(true);
   });
 });
