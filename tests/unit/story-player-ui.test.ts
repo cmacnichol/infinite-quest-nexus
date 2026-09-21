@@ -206,10 +206,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
       window.location.pathname = "/story/campaign-2";
       document.dispatchEvent(new window.Event("DOMContentLoaded"));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(true);
+      await vi.waitFor(() => {
+        expect(document.getElementById("storyTitle")?.textContent).toBe("Clean campaign");
+        expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(true);
+      });
       expect(document.getElementById("generationRecoveryPanel")?.getAttribute("data-job-id")).toBe("");
       const resumesAfterCleanLoad = workflow.resume.mock.calls.length;
       document.getElementById("btnRetryGeneration")?.dispatchEvent(new window.Event("click", { bubbles: true }));
