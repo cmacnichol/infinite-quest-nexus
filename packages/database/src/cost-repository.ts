@@ -41,6 +41,42 @@ function assertAmount(amount: string): string {
   return amount;
 }
 
+// Physical prepared-route attempts are the durable authority for provider-reported
+// charges, including rejected responses. A successful attempt may also have a
+// campaign cost event, so its stable local call ID excludes that duplicate.
+const CAMPAIGN_COST_ROWS = `WITH ledger_scope AS (
+  SELECT attempt.id, job.result_turn_id AS turn_id, 'story'::text AS category,
+         attempt.reported_cost, attempt.completed_at
+    FROM prepared_text_physical_attempts attempt
+    JOIN generation_jobs job ON job.id::text=attempt.logical_reservation->>'generationJobId'
+      AND job.owner_user_id=attempt.owner_user_id
+   WHERE attempt.owner_user_id=$1 AND attempt.logical_kind='story' AND job.campaign_id=$2
+     AND attempt.status='completed'
+  UNION ALL
+  SELECT attempt.id, job.turn_id, 'image'::text AS category,
+         attempt.reported_cost, attempt.completed_at
+    FROM prepared_text_physical_attempts attempt
+    JOIN illustration_prompt_jobs job ON job.id::text=attempt.logical_reservation->>'promptJobId'
+      AND job.owner_user_id=attempt.owner_user_id
+   WHERE attempt.owner_user_id=$1 AND attempt.logical_kind='illustration' AND job.campaign_id=$2
+     AND attempt.status='completed'
+), ledger_costs AS (
+  SELECT id, turn_id, category, completed_at AS occurred_at,
+         reported_cost->>'currency' AS currency,
+         CASE WHEN length(reported_cost->>'amount') <= 64
+                     AND reported_cost->>'amount' ~ '^\\d+(\\.\\d+)?$'
+                   THEN (reported_cost->>'amount')::numeric ELSE NULL END AS amount
+    FROM ledger_scope
+   WHERE reported_cost->>'currency' ~ '^[A-Z]{3}$'
+), all_costs AS (
+  SELECT cost.turn_id, cost.currency, cost.category, cost.amount, cost.occurred_at
+    FROM provider_cost_events cost
+   WHERE cost.owner_user_id=$1 AND cost.campaign_id=$2
+     AND NOT EXISTS (SELECT 1 FROM ledger_costs ledger WHERE ledger.id=cost.local_call_id AND ledger.amount IS NOT NULL)
+  UNION ALL
+  SELECT turn_id, currency, category, amount, occurred_at FROM ledger_costs WHERE amount IS NOT NULL
+)`;
+
 export function createProviderCostRepository(readDatabase: Database): ProviderCostPort {
   return {
     async recordCost(context, command) {
@@ -99,13 +135,12 @@ export function createProviderCostRepository(readDatabase: Database): ProviderCo
         amount: string;
         total_amount: string;
       }>(
-        `WITH category_totals AS (
+        `${CAMPAIGN_COST_ROWS}, category_totals AS (
            SELECT cost.turn_id, cost.currency, cost.category, sum(cost.amount) AS amount
-             FROM provider_cost_events cost
+             FROM all_costs cost
              JOIN turns turn_row ON turn_row.id = cost.turn_id
-               AND turn_row.campaign_id = cost.campaign_id AND turn_row.owner_user_id = cost.owner_user_id
-            WHERE cost.owner_user_id = $1 AND cost.campaign_id = $2
-              AND cost.turn_id = ANY($3::uuid[])
+               AND turn_row.campaign_id = $2 AND turn_row.owner_user_id = $1
+            WHERE cost.turn_id = ANY($3::uuid[])
             GROUP BY cost.turn_id, cost.currency, cost.category
          )
          SELECT turn_id, currency, category, amount::text,
@@ -145,13 +180,12 @@ export function createProviderCostRepository(readDatabase: Database): ProviderCo
         total_other_amount: string;
         last_reported_at: Date | string;
       }>(
-        `WITH category_totals AS (
+        `${CAMPAIGN_COST_ROWS}, category_totals AS (
            SELECT currency, category, sum(amount) AS amount,
                   coalesce(sum(amount) FILTER (WHERE turn_id IS NOT NULL),0) AS attributed_amount,
                   coalesce(sum(amount) FILTER (WHERE turn_id IS NULL),0) AS other_amount,
                   max(occurred_at) AS last_reported_at
-             FROM provider_cost_events
-            WHERE owner_user_id = $1 AND campaign_id = $2
+             FROM all_costs
             GROUP BY currency, category
          )
          SELECT currency, category, amount::text, attributed_amount::text, other_amount::text,

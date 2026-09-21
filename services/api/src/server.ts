@@ -93,6 +93,7 @@ import {
   worldCreateResponseSchema
 } from "../../../packages/contracts/src/client-api.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
+import { OpenRouterPresetError } from "../../../packages/story-engine/src/openrouter-presets.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { readTurnPage } from "../../../packages/database/src/play-loop-read-repository.js";
 import { createWorldShareLinkService } from "../../../packages/database/src/world-share-repository.js";
@@ -254,6 +255,16 @@ function isSafeAppNavigation(url: string): boolean {
 }
 
 function statusCode(error: unknown): number {
+  if (error instanceof OpenRouterPresetError) {
+    switch (error.diagnosticCode) {
+      case "authentication": return 401;
+      case "preset_missing": return 404;
+      case "preset_inactive": return 409;
+      case "preset_config_unsupported": return 422;
+      case "invalid_response": return 502;
+      case "discovery_unavailable": return 503;
+    }
+  }
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     const value = Number((error as { statusCode: unknown }).statusCode);
     if (Number.isInteger(value) && value >= 400 && value <= 599) return value;
@@ -264,6 +275,18 @@ function statusCode(error: unknown): number {
 }
 
 function errorDetails(error: unknown): { name: string; message: string; code?: string; issues?: unknown; details?: unknown } {
+  if (error instanceof OpenRouterPresetError) {
+    const messages = {
+      authentication: "Preset credentials were rejected.",
+      discovery_unavailable: "Preset discovery is unavailable.",
+      preset_missing: "The selected preset was not found.",
+      preset_inactive: "The selected preset is inactive.",
+      preset_config_unsupported: "The selected preset has unsupported configuration.",
+      invalid_response: "Preset discovery returned an invalid response."
+    } as const;
+    return { name: "OpenRouterPresetError", message: messages[error.diagnosticCode], code: error.diagnosticCode,
+      details: { code: error.diagnosticCode, ...(error.field ? { field: error.field } : {}) } };
+  }
   if (typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "22P02") {
     return { name: "InvalidUuidError", message: "The provided ID is not a valid UUID." };
   }
@@ -297,11 +320,13 @@ function safeErrorDetails(value: unknown): Record<string, unknown> {
 
 function exposeError(error: unknown, code: number): boolean {
   return code < 500
+    || error instanceof OpenRouterPresetError
     || isSanitizedSystemArchiveServerError(error)
     || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
 }
 
 function isKnownSafeFiveXX(error: unknown, details: ReturnType<typeof errorDetails>, transport: unknown): boolean {
+  if (error instanceof OpenRouterPresetError) return true;
   if (transport || isSanitizedSystemArchiveServerError(error)) return true;
   if (!details.details || typeof details.details !== "object") return false;
   const code = (details.details as { code?: unknown }).code;

@@ -131,8 +131,8 @@ describe("preset execution-plan resolution", () => {
   });
 
   it("rejects unsupported config and conflicting provider sort/order without silent drops", async () => {
-    await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toThrow("stop");
-    await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], provider: { order: ["openai"], sort: "price" } } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toThrow("provider.sort");
+    await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "config" });
+    await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], provider: { order: ["openai"], sort: "price" } } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "provider.sort" });
   });
 
   it("requires an explicit conservative cap if discovered context capacity is unknown", async () => {
@@ -288,6 +288,6 @@ describe("preset execution-plan resolution", () => {
         resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })),
         discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }])
       }
-    })).rejects.toThrow("stop");
+    })).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "config" });
   });
 });

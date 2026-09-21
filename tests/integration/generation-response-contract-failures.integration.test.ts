@@ -13,6 +13,7 @@ import { getProviderOutputSchemaV2, type ProviderOutputSchemaOperationV2 } from 
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import { createProviderCostRepository } from "../../packages/database/src/cost-repository.js";
 import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
 import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
@@ -38,7 +39,7 @@ const canary = "PRIVATE_PROVIDER_FAILURE_CANARY";
 const partialJson = `{\"narration\":\"Mira reaches the observatory.\",\"scratchpad\":\"${canary}`;
 const successfulRpgAssessment = JSON.stringify({ stat_id: "insight", difficulty_modifier: 0, rationale: "The archive must be studied carefully.", favorable_outcome: "Mira recognizes the lantern's old signal.", setback_outcome: "Dust obscures the archive's first clue." });
 
-type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "scene_rewrite_overflow_rejection" | "historical_http_error" | "refusal" | "partial_stream" | "route_partial_stream" | "success" | "choice_repair" | "route_fallback" | "route_exhausted";
+type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "scene_rewrite_overflow_rejection" | "historical_http_error" | "refusal" | "partial_stream" | "route_partial_stream" | "success" | "choice_repair" | "route_fallback" | "route_exhausted" | "route_invalid_identity" | "route_refusal";
 const successfulStory = JSON.stringify({ narration: "Mira reaches the observatory.", choices: ["Wait.", "Listen.", "Enter.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "", continuity_summary: "Mira reaches the observatory.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 const duplicateChoiceStory = JSON.stringify({ ...JSON.parse(successfulStory), choices: ["Wait.", "Wait.", "Enter.", "Leave."] });
 const successfulChoiceRepair = JSON.stringify({ choices: ["Search the archive.", "Follow the lantern.", "Call for the archivist.", "Leave a marker."], custom_action_suggestion: "Study the constellation chart." });
@@ -115,6 +116,14 @@ integration("response-contract provider failures", () => {
           return;
         }
         requestBodies.push(body);
+        if (scenario === "route_invalid_identity" || scenario === "route_refusal") {
+          const requestedModel = JSON.parse(body).model as string;
+          response.writeHead(200, { "content-type": "application/json", "x-generation-id": "charged-terminal-id" });
+          response.end(JSON.stringify({ id: "charged-terminal-id", model: scenario === "route_invalid_identity" ? "wrong-served-model" : requestedModel,
+            provider: "preset-route", choices: [{ message: scenario === "route_refusal" ? { refusal: "No response." } : { content: successfulStory }, finish_reason: scenario === "route_refusal" ? "content_filter" : "stop" }],
+            usage: { prompt_tokens: 21, cost: "0.0064", currency: "USD" } }));
+          return;
+        }
         if ((scenario === "route_fallback" || scenario === "route_exhausted") && JSON.parse(body).model === fallbackModels[0]) {
           response.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
           response.end(JSON.stringify({ error: { code: "rate_limit", message: "fixture availability rejection" } }));
@@ -274,25 +283,25 @@ integration("response-contract provider failures", () => {
     }));
   }
 
-  function v2Records(streaming = false) {
+  function v2Records(streaming = false, providerType: "openrouter" | "openai_compatible" = "openrouter") {
     const operations: readonly ProviderOutputSchemaOperationV2[] = [
       "story", "choices", "continuity_review", "rpg_assessment", "event_trigger_before", "event_trigger_after", "scene_coverage", "event_coverage"
     ];
     const base = operations.map((operation) => ({
-      version: 2 as const, providerType: "openrouter" as const, endpointIdentity, model,
+      version: 2 as const, providerType, endpointIdentity, model,
       routeConfigHash: capabilityRouteConfigHash({ textResponseFormatPolicy: "required", ...(streaming ? { streaming: true } : {}) }),
       adapterProtocol: "text-schema-adapter-v2" as const, operation,
       schemaHash: getProviderOutputSchemaV2(operation).schemaHash, streaming: false,
-      verifiedAt: "2026-09-01T00:00:00.000Z", expiresAt: "2026-09-30T00:00:00.000Z", providerRoutingSlugs: ["verified-route"], nativeOpenTrackerObjects: true
+      verifiedAt: "2026-09-01T00:00:00.000Z", expiresAt: "2026-09-30T00:00:00.000Z", providerRoutingSlugs: providerType === "openrouter" ? ["verified-route"] : [], nativeOpenTrackerObjects: true
     }));
     return streaming ? [...base, { ...base[0]!, streaming: true }] : base;
   }
 
-  async function fileLoadedV2Verification(streaming = false) {
+  async function fileLoadedV2Verification(streaming = false, providerType: "openrouter" | "openai_compatible" = "openrouter") {
     const directory = await mkdtemp(join(tmpdir(), "infinitequest-v2-schema-"));
     const path = join(directory, "verification.json");
     try {
-      await writeFile(path, JSON.stringify(v2Records(streaming)), "utf8");
+      await writeFile(path, JSON.stringify(v2Records(streaming, providerType)), "utf8");
       return loadSchemaVerificationFile(path);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -304,14 +313,14 @@ integration("response-contract provider failures", () => {
     streaming = false,
     native = false,
     selection: "model" | "preset" | "fallback" = "model",
-    options: Readonly<{ storyOnly?: boolean; scene?: boolean; rpg?: boolean; triggers?: boolean; eventExtension?: boolean; continuity?: "enforce"; contextWindowTokens?: number }> = {}
+    options: Readonly<{ storyOnly?: boolean; scene?: boolean; rpg?: boolean; triggers?: boolean; eventExtension?: boolean; continuity?: "enforce"; contextWindowTokens?: number; providerType?: "openrouter" | "openai_compatible"; verificationProviderType?: "openrouter" | "openai_compatible" }> = {}
   ) {
     const address = server.address(); if (!address || typeof address === "string") throw new Error("failure provider did not bind");
     const configuration = { textResponseFormatPolicy: policy, ...(streaming ? { streaming: true } : {}) };
     // Keep the profile default a concrete model: imported campaigns may use it
     // for independent embedding fallback. The queued explicit selection below
     // is the preset behavior this fixture exercises.
-    const provider = await createProvider(pool, { name: `response-contract-failure-${randomUUID()}`, providerType: "openrouter", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: model, contextWindowTokens: options.contextWindowTokens ?? 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration, apiKey: "test" }, credentialSecret);
+    const provider = await createProvider(pool, { name: `response-contract-failure-${randomUUID()}`, providerType: options.providerType ?? "openrouter", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: model, contextWindowTokens: options.contextWindowTokens ?? 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration, apiKey: "test" }, credentialSecret);
     const legacy = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     legacy.world.title = `response-contract-failure-${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "response-contract-failure.story", story: legacy }));
@@ -348,7 +357,7 @@ integration("response-contract provider failures", () => {
         ], pendingEventTriggers: []
       });
     }
-    const verification = native ? await fileLoadedV2Verification(streaming) : { records: policy === "required" ? records(streaming) : [], digest };
+    const verification = native ? await fileLoadedV2Verification(streaming, options.verificationProviderType ?? options.providerType) : { records: policy === "required" ? records(streaming) : [], digest };
     const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: verification.records, schemaVerificationDigest: verification.digest, clock: () => verificationNow });
     const application = createApiGenerationApplication(pool, apiGraph.generation, undefined, { installedCapability: "r3", enforceEnabled: true }, native);
     const request = generationRequestSchema.parse({ action: "Open the observatory archive.", providerProfileId: provider.id, ...(options.storyOnly || options.scene ? { requestedInputMode: "scene" as const, resolvedInputMode: "scene" as const, inputModeSource: "explicit" as const } : {}), ...(selection === "preset" || selection === "fallback" ? { textSelection: { kind: "openrouter_preset", slug: selection === "fallback" ? "native-fallback" : "native-success" } } : {}), idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } });
@@ -530,6 +539,30 @@ integration("response-contract provider failures", () => {
     expect(JSON.parse(requestBodies[0]!).response_format).toEqual({ type: "json_schema", json_schema: {
       name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
     } });
+  }, 60_000);
+
+  it("executes an OpenAI-compatible direct Model with exact v2 authority", async () => {
+    scenario = "success";
+    const value = await fixture("required", false, true, "model", { providerType: "openai_compatible" });
+    await executeOnce(value);
+    const row = await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>(
+      'SELECT status,orchestration_private AS "orchestrationPrivate" FROM generation_jobs WHERE id=$1', [value.job.id]
+    );
+    expect(row.rows[0]!.status).toBe("completed");
+    expect(row.rows[0]!.orchestrationPrivate.queuedResponsePolicy.authority).toMatchObject({
+      kind: "model_verified", providerType: "openai_compatible"
+    });
+    expect(requestBodies).toHaveLength(1);
+  }, 60_000);
+
+  it("blocks an OpenAI-compatible Model when verification names another provider type", async () => {
+    scenario = "success";
+    const before = (await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs")).rows[0]!.count;
+    await expect(fixture("required", false, true, "model", {
+      providerType: "openai_compatible", verificationProviderType: "openrouter"
+    })).rejects.toBeDefined();
+    expect((await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs")).rows[0]!.count).toBe(before);
+    expect(requestBodies).toHaveLength(0);
   }, 60_000);
 
   it("executes a file-verified native v2 stream with the exact frozen stream schema and reserved body", async () => {
@@ -945,6 +978,9 @@ integration("response-contract provider failures", () => {
       expect.objectContaining({ localCallId: attempts.rows[1]!.id, turnId: job.resultTurnId, amount: "0.0042",
         usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 } })
     ]);
+    expect(await createProviderCostRepository(pool).getCampaignCostSummary({ ownerUserId, campaignId: value.campaignId })).toMatchObject({
+      totals: [{ currency: "USD", amount: "0.0042", byCategory: { story: "0.0042" } }]
+    });
   }, 60_000);
 
   it("attributes terminal candidate evidence to the second physical attempt after safe route exhaustion", async () => {
@@ -983,6 +1019,29 @@ integration("response-contract provider failures", () => {
         physicalAttemptId: attempts.rows[1]!.id, physicalRequestPayloadHash: secondBodyHash
       }) })
     ]);
+    expect(await authority(value.campaignId)).toEqual(before);
+  }, 60_000);
+
+  it.each(["route_invalid_identity", "route_refusal"] as const)("retains partial usage and reported cost for charged 2xx %s without fallback or state mutation", async (failureScenario) => {
+    scenario = failureScenario;
+    const value = await fixture("required", false, true, "fallback");
+    const before = await authority(value.campaignId);
+    await executeOnce(value);
+    const attempts = await pool.query<{ outcome: string; failure_reason: string; usage: unknown; reported_cost: unknown }>(
+      `SELECT outcome,failure_reason,usage,reported_cost FROM prepared_text_physical_attempts
+         WHERE owner_user_id=$1 AND logical_reservation->>'generationJobId'=$2 ORDER BY candidate_ordinal`,
+      [ownerUserId, value.job.id]
+    );
+    expect(requestBodies).toHaveLength(1);
+    expect(attempts.rows).toEqual([{ outcome: "failed", failure_reason: failureScenario === "route_refusal" ? "refusal" : "invalid_identity",
+      usage: { inputTokens: 21 }, reported_cost: { amount: "0.0064", currency: "USD" } }]);
+    const costs = createProviderCostRepository(pool);
+    for (let replay = 0; replay < 2; replay += 1) {
+      expect(await costs.getCampaignCostSummary({ ownerUserId, campaignId: value.campaignId })).toMatchObject({
+        hasReportedCosts: true,
+        totals: [{ currency: "USD", amount: "0.0064", turnAttributed: "0", byCategory: { story: "0.0064" } }]
+      });
+    }
     expect(await authority(value.campaignId)).toEqual(before);
   }, 60_000);
 

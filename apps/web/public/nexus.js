@@ -77,6 +77,8 @@ let responseFormatCapabilityProfile = null;
 let nativeTextExecutionPlansSupportState = "loading";
 let providerSelectionEditor = null;
 let providerSelectionRequestSequence = 0;
+let providerPresetListController = null;
+let providerPresetDetailController = null;
 let providerSelectionCredentialRevision = 0;
 const embeddingJobMonitors = new Map();
 let worldCoverJobPollSequence = 0;
@@ -4217,6 +4219,7 @@ function providerSelectionAuthority(provider = null) {
 }
 
 function initializeProviderSelectionEditor(provider = null) {
+  abortProviderPresetRequests();
   const authority = providerSelectionAuthority(provider);
   providerSelectionEditor = createSelectionEditorState({
     savedSelection: providerTextSelection(provider),
@@ -4248,8 +4251,15 @@ function syncProviderSelectionSupport() {
 
 function setProviderSelectionState(event) {
   if (!providerSelectionEditor) return;
+  if (event.type === "modeChanged" || event.type === "authorityChanged") abortProviderPresetRequests();
+  if (event.type === "presetDraftChanged") abortProviderPresetRequests({ list: false });
   providerSelectionEditor = reduceSelectionEditor(providerSelectionEditor, event);
   renderProviderSelectionEditor();
+}
+
+function abortProviderPresetRequests({ list = true, detail = true } = {}) {
+  if (list) { providerPresetListController?.abort(); providerPresetListController = null; }
+  if (detail) { providerPresetDetailController?.abort(); providerPresetDetailController = null; }
 }
 
 function formatPresetObject(value) {
@@ -4268,7 +4278,7 @@ function renderProviderPresetDetail() {
     return;
   }
   if (providerSelectionEditor.detail.error) {
-    elements.providerPresetPrompt.textContent = `Preset details are unavailable (${providerSelectionEditor.detail.error}).`;
+    elements.providerPresetPrompt.textContent = `Preset details are unavailable (${providerSelectionEditor.detail.error}${providerSelectionEditor.detail.errorField ? `: ${providerSelectionEditor.detail.errorField}` : ""}).`;
     return;
   }
   if (!detail) {
@@ -4340,7 +4350,7 @@ function renderProviderSelectionEditor() {
     elements.loadMoreProviderPresets.hidden = providerSelectionEditor.list.nextOffset === null;
     elements.loadMoreProviderPresets.disabled = providerSelectionEditor.list.busy;
     if (providerSelectionEditor.list.busy) elements.providerPresetStatus.textContent = "Loading OpenRouter presets…";
-    else if (providerSelectionEditor.list.error) elements.providerPresetStatus.textContent = `Preset discovery failed (${providerSelectionEditor.list.error}). Your selection is unchanged.`;
+    else if (providerSelectionEditor.list.error) elements.providerPresetStatus.textContent = `Preset discovery failed (${providerSelectionEditor.list.error}${providerSelectionEditor.list.errorField ? `: ${providerSelectionEditor.list.errorField}` : ""}). Your selection is unchanged.`;
     else if (providerSelectionEditor.savedChoiceAvailability === "unavailable") elements.providerPresetStatus.textContent = `Saved preset ${draftSlug} is unavailable. It remains selected until you explicitly change it.`;
     else if (providerSelectionEditor.list.presets.length) elements.providerPresetStatus.textContent = `${providerSelectionEditor.list.presets.length} of ${providerSelectionEditor.list.totalCount} presets loaded.`;
     else elements.providerPresetStatus.textContent = "No presets loaded. Choose Refresh to query OpenRouter.";
@@ -4371,10 +4381,11 @@ function providerPresetCandidate() {
 }
 
 function providerPresetDiagnostic(error) {
-  if (error?.statusCode === 401 || error?.statusCode === 403) return "authentication";
-  if (error?.statusCode === 404) return "preset_missing";
-  if (String(error?.message || "").includes("unsupported")) return "preset_config_unsupported";
-  return "discovery_unavailable";
+  const code = error?.details?.code;
+  const knownCodes = ["authentication", "discovery_unavailable", "preset_missing", "preset_inactive", "preset_config_unsupported", "invalid_response"];
+  const diagnostic = knownCodes.includes(code) ? code : error?.statusCode === 401 || error?.statusCode === 403 ? "authentication" : error?.statusCode === 404 ? "preset_missing" : "discovery_unavailable";
+  const field = error?.details?.field;
+  return { error: diagnostic, ...(diagnostic === "preset_config_unsupported" && typeof field === "string" && field.length <= 64 && /^[a-z_]+(?:\.[a-z_]+){0,2}$/u.test(field) ? { field } : {}) };
 }
 
 function useSavedProviderPresetApi() {
@@ -4384,32 +4395,40 @@ function useSavedProviderPresetApi() {
 
 async function loadProviderPresets({ offset = 0, refresh = false } = {}) {
   if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset") return;
+  providerPresetListController?.abort();
+  const controller = new AbortController();
+  providerPresetListController = controller;
   const requestId = `preset-list-${++providerSelectionRequestSequence}`;
   setProviderSelectionState({ type: "requestStarted", requestId, mode: "preset", offset });
   try {
     const page = useSavedProviderPresetApi()
-      ? await providerPresetsApi.listSaved(editingProviderId, { offset, limit: 25, refresh })
-      : await providerPresetsApi.listCandidate(providerPresetCandidate(), { offset, limit: 25 });
+      ? await providerPresetsApi.listSaved(editingProviderId, { offset, limit: 25, refresh }, controller.signal)
+      : await providerPresetsApi.listCandidate(providerPresetCandidate(), { offset, limit: 25 }, controller.signal);
     setProviderSelectionState({ type: "listLoaded", requestId, page });
   } catch (error) {
-    setProviderSelectionState({ type: "requestFailed", requestId, error: providerPresetDiagnostic(error) });
+    if (!controller.signal.aborted) setProviderSelectionState({ type: "requestFailed", requestId, ...providerPresetDiagnostic(error) });
   } finally {
+    if (providerPresetListController === controller) providerPresetListController = null;
     setProviderSelectionState({ type: "requestFinished", requestId });
   }
 }
 
 async function loadProviderPresetDetail(slug) {
   if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset" || !slug) return;
+  providerPresetDetailController?.abort();
+  const controller = new AbortController();
+  providerPresetDetailController = controller;
   const requestId = `preset-detail-${++providerSelectionRequestSequence}`;
   setProviderSelectionState({ type: "detailRequestStarted", requestId, slug });
   try {
     const detail = useSavedProviderPresetApi()
-      ? await providerPresetsApi.detailSaved(editingProviderId, slug)
-      : await providerPresetsApi.detailCandidate(providerPresetCandidate(), slug);
+      ? await providerPresetsApi.detailSaved(editingProviderId, slug, controller.signal)
+      : await providerPresetsApi.detailCandidate(providerPresetCandidate(), slug, controller.signal);
     setProviderSelectionState({ type: "detailLoaded", requestId, detail });
   } catch (error) {
-    setProviderSelectionState({ type: "detailFailed", requestId, error: providerPresetDiagnostic(error) });
+    if (!controller.signal.aborted) setProviderSelectionState({ type: "detailFailed", requestId, ...providerPresetDiagnostic(error) });
   } finally {
+    if (providerPresetDetailController === controller) providerPresetDetailController = null;
     setProviderSelectionState({ type: "detailRequestFinished", requestId });
   }
 }
@@ -5183,7 +5202,7 @@ for (const control of [elements.providerBaseUrl, elements.providerApiKey, elemen
   control.addEventListener("change", clearResponseFormatCapability);
 }
 for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming]) {
-  control.addEventListener("change", () => {
+  control.addEventListener("input", () => {
     providerSelectionCredentialRevision += 1;
     if (providerSelectionEditor) setProviderSelectionState({ type: "authorityChanged", ...providerSelectionAuthority(providers.find((item) => item.id === editingProviderId) || null) });
   });
@@ -6675,6 +6694,8 @@ elements.cancelProviderEdit.addEventListener("click", () => {
   resetProviderForm();
   if (elements.providerDialog) elements.providerDialog.close();
 });
+elements.providerDialog.addEventListener("close", abortProviderPresetRequests);
+window.addEventListener("pagehide", abortProviderPresetRequests);
 
 // Setup tab behavior for world editor
 document.querySelectorAll(".tab-button").forEach(button => {

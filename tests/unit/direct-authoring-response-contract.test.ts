@@ -88,6 +88,28 @@ function discoveryPorts(preset = false,
 }
 
 describe("direct authoring v2 response contracts", () => {
+  it("rejects a preset when native preparation is unavailable, including an explicit alias override", async () => {
+    const provider = execution({ kind: "openrouter_preset", slug: "authoring" });
+    await expect(prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: provider, operationPrompts: { organizer: "Organize." }
+    })).rejects.toMatchObject({ code: "native_text_execution_unavailable" });
+    await expect(prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: execution(undefined),
+      selectionOverride: { kind: "openrouter_preset", slug: "authoring" },
+      operationPrompts: { organizer: "Organize." }
+    })).rejects.toMatchObject({ code: "native_text_execution_unavailable" });
+    expect(provider.execute).not.toHaveBeenCalled();
+  });
+
+  it("reports a finite native-unavailable conflict when the executor is absent despite admission", async () => {
+    const provider = execution({ kind: "openrouter_preset", slug: "authoring" });
+    await expect(prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: provider, operationPrompts: { organizer: "Organize." },
+      options: { nativePresetPlansEnabled: true, ports: discoveryPorts() }
+    })).rejects.toMatchObject({ code: "native_text_execution_unavailable", statusCode: 409 });
+    expect(provider.execute).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["inherited concrete Model", undefined],
     ["explicit concrete Model", { kind: "model" as const, modelId: MODEL_ID }]

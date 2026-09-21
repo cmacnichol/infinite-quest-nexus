@@ -1,5 +1,13 @@
 # Native OpenRouter Presets acceptance status
 
+## Consolidated final review fixes
+
+F1–F9 have been implemented and locally verified against the exact final executable source described in [verification](verification.md). New Preset work is blocked at Story, authoring, illustration, and generic text boundaries while native admission is off; historical v1 replay and explicit concrete Model compatibility retain their original authority. Save requires exact current preset detail, diagnostics stay bounded, both legacy clients cancel stale discovery, and OpenAI-compatible direct Models use their verified provider type. Failed physical attempts retain observed partial usage/cost and feed owner-scoped logical/job and applicable campaign reads without double counting. The mobile inherited policy label is visible, and post-response accounting failure has its own log event. Independent scoped review of this fix range is still pending; this is not deployment approval.
+
+The final wave passed check/build, the full Windows unit suite, 13 selected complete real-PostgreSQL files, both legacy browser suites, and the final-source Linux affected integration/platform unit lanes. Exact counts and skipped-case boundaries are in [verification](verification.md). Admission remains production-default-off; no live inference, deployment, or new UI work occurred.
+
+## Prior Task8 acceptance (earlier source)
+
 This branch implements native preset support in the API/runtime/persistence and both legacy browser entrypoints. The Task1–7 slices were independently approved through commit `6e67cc7a9cc8dd167d37df9cd2f68506a3949fc7`. Task8 composed verification is recorded in [verification](verification.md); independent Task8 and whole-branch reviews still follow this handoff. This document is evidence status, not deployment approval. Production admission remains off; no paid inference or deployment occurred.
 
 | Requirement | Current evidence and status |

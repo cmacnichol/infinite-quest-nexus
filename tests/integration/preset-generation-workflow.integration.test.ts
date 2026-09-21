@@ -91,6 +91,31 @@ integration("durable preset physical attempts", () => {
     });
   });
 
+  it("aggregates each charged direct request attempt once across logical invocations and currency boundaries", async () => {
+    const attempts = createPostgresPreparedTextAttemptRepository(pool);
+    const requestScopeId = crypto.randomUUID();
+    const firstScope = { kind: "direct", ownerUserId, requestScopeId, invocationId: crypto.randomUUID(), operation: "initial" } as const;
+    const secondScope = { ...firstScope, invocationId: crypto.randomUUID(), operation: "repair" as const };
+    const execute = (logicalReservation: LogicalReservation, invoke: Parameters<typeof executePresetRoutes>[0]["invoke"]) => executePresetRoutes({
+      candidates: candidates.slice(0, 1), planProvenance, logicalReservation, attempts,
+      prepareCandidate: () => ({ body: "{}", payloadHash: "f".repeat(64) }), invoke, totalDeadlineMs: 2_000
+    });
+    await expect(execute(firstScope, async () => ({ returnedModel: "wrong-model", observedUsage: { inputTokens: 5 },
+      reportedCost: { amount: "0.1", currency: "USD" } }))).rejects.toMatchObject({ reason: "invalid_identity" });
+    await execute(secondScope, async () => ({ returnedModel: "route/model-a", returnedProviderRoute: "route-a",
+      observedUsage: { outputTokens: 7 }, reportedCost: { amount: "0.2", currency: "EUR" } }));
+    const scope = { kind: "job", ownerUserId, logicalKind: "direct", scopeId: requestScopeId } as const;
+    expect(await attempts.summarize(scope)).toMatchObject({
+      attemptCount: 2, completedCount: 2,
+      observedUsage: { inputTokens: 5, outputTokens: 7, totalTokens: null },
+      usageCoverage: { inputTokens: 1, outputTokens: 1, totalTokens: 0 },
+      reportedCosts: [{ amount: "0.2", currency: "EUR" }, { amount: "0.1", currency: "USD" }]
+    });
+    await expect(execute(firstScope, async () => { throw new Error("must not redispatch"); })).rejects.toMatchObject({ code: "prepared_route_unknown_outcome" });
+    expect((await attempts.summarize(scope)).attemptCount).toBe(2);
+    expect((await attempts.summarize({ ...scope, ownerUserId: crypto.randomUUID() })).attemptCount).toBe(0);
+  });
+
   it("rejects late completion after durable lease loss and records no accounting", async () => {
     const attempts = createPostgresPreparedTextAttemptRepository(pool);
     const fixture = await authoringReservation();

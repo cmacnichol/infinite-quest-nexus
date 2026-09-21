@@ -11,6 +11,7 @@ export type GenerationApplicationErrorKind =
 export type GenerationApplicationErrorReason =
   | "idempotency_mismatch"
   | "provider_profile_changed_refresh_required"
+  | "native_text_execution_unavailable"
   | "action_only_mode"
   | "explicit_input_mode_mismatch"
   | "classification_id_forbidden"

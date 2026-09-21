@@ -50,6 +50,7 @@ function mapAuthoringError(error: unknown): AuthoringRouteError | null {
     case "authoring_idempotency_conflict": return new AuthoringRouteError(409, error.code, "This idempotency key was already used for a different request.");
     case "authoring_input_too_large": return new AuthoringRouteError(413, error.code, "The authoring request exceeds the durable input limit.");
     case "authoring_active_job_limit": return new AuthoringRouteError(429, error.code, "Finish, cancel, or discard an existing proposal before creating another.");
+    case "authoring_native_text_execution_unavailable": return new AuthoringRouteError(409, error.code, "This OpenRouter preset requires native text execution, which is unavailable for new authoring jobs.");
     case "choose_source_facts": return new AuthoringRouteError(409, error.code, "Choose at least one supported source fact before synthesis.");
     case "authoring_apply_unavailable": return new AuthoringRouteError(409, error.code, "Applying authoring proposals is not available yet.");
     default: return new AuthoringRouteError(409, error.code, "The authoring job cannot accept that command now.");

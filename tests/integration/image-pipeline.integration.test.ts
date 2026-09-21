@@ -1961,6 +1961,29 @@ integration("independent illustration pipeline", () => {
     });
   });
 
+  it("does not queue generic refinement for a newly selected preset when native preparation is disabled", async () => {
+    const imported = await campaign();
+    await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
+      sourcePolicy: "library_only", providerProfileId: imageProviderId, model: "synthetic-image-model",
+      segmentPromptMode: "ai_refined", segmentWordCount: 100, imagesPerSegment: 1
+    }));
+    const ownerUserId = await initialOwnerId(pool);
+    const original = (await pool.query<{ provider_type: string; default_model: string; text_selection: unknown }>("SELECT provider_type,default_model,text_selection FROM provider_profiles WHERE id=$1", [textProviderId])).rows[0]!;
+    try {
+      await pool.query("UPDATE provider_profiles SET provider_type='openrouter',default_model='@preset/composed-illustration',text_selection=$2::jsonb WHERE id=$1", [textProviderId, JSON.stringify({ kind: "openrouter_preset", slug: "composed-illustration" })]);
+      await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, textProviderId]);
+      const turn = (await pool.query<{ id: string }>("SELECT id FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [imported.campaignId])).rows[0]!;
+      await pool.query("UPDATE turns SET narration=repeat('Mira follows the lantern-lit road through the fog toward the observatory. ', 24) WHERE id=$1", [turn.id]);
+      const before = refinementRequests.length;
+      await generateNativeIllustrationSegments(pool, turn.id, { mode: "missing" }, workerProviderGraph(pool, credentialSecret).illustration);
+      const jobs = await pool.query("SELECT id FROM illustration_prompt_jobs WHERE campaign_id=$1 AND owner_user_id=$2", [imported.campaignId, ownerUserId]);
+      expect(jobs.rowCount).toBe(0);
+      expect(refinementRequests.length).toBe(before);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET provider_type=$2,default_model=$3,text_selection=$4::jsonb WHERE id=$1", [textProviderId, original.provider_type, original.default_model, JSON.stringify(original.text_selection)]);
+    }
+  });
+
   it("persists and dispatches a native refinement plan after ordinary profile edits before its first claim", async () => {
     const imported = await campaign();
     await setIllustrationConfig(pool, imported.campaignId, illustrationConfigSchema.parse({
@@ -2270,7 +2293,8 @@ integration("independent illustration pipeline", () => {
     assertMetadataPrecedesInsert("insert-set");
 
     const generation = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
-      action: "Stream a native illustration transaction boundary.", providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+      action: "Stream a native illustration transaction boundary.", providerProfileId: nativeTextProviderId,
+      model: "historical-concrete-story-model", idempotencyKey: crypto.randomUUID(),
       context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
     }));
     await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [generation.id]);
@@ -2668,7 +2692,8 @@ integration("independent illustration pipeline", () => {
     await pool.query("UPDATE turns SET narration=$2 WHERE id IN ($1,$3)", [turns.rows[0]!.id, finalNarration, turns.rows[1]!.id]);
 
     const directPromotion = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
-      action: "Promote a provisional native illustration.", providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+      action: "Promote a provisional native illustration.", providerProfileId: nativeTextProviderId,
+      model: "historical-concrete-story-model", idempotencyKey: crypto.randomUUID(),
       context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
     }));
     await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [directPromotion.id]);
@@ -2764,6 +2789,12 @@ integration("independent illustration pipeline", () => {
     await expect(pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM illustration_prompt_jobs WHERE generation_job_id=$1", [directPromotion.id]
     )).resolves.toMatchObject({ rows: [{ count: promptCountBeforeInvalidCopy }] });
+    await pool.query(
+      `UPDATE generation_jobs
+          SET streaming_segments_state=streaming_segments_state || jsonb_build_object('illustrationTextExecutionSnapshot',$2::jsonb)
+        WHERE id=$1`,
+      [directPromotion.id, JSON.stringify(frozenSnapshot)]
+    );
     await promoteNativeProvisionalSet(
       pool, ownerUserId, directPromotion.id, turns.rows[0]!.id, imported.campaignId, finalNarration, config, native,
       undefined, frozenSnapshot as never
@@ -2866,7 +2897,8 @@ integration("independent illustration pipeline", () => {
     }
 
     const deferredPromotion = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
-      action: "Reconcile a provisional native illustration.", providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+      action: "Reconcile a provisional native illustration.", providerProfileId: nativeTextProviderId,
+      model: "historical-concrete-story-model", idempotencyKey: crypto.randomUUID(),
       context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
     }));
     await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [deferredPromotion.id]);
@@ -2905,12 +2937,14 @@ integration("independent illustration pipeline", () => {
     const rollbackCases = [
       ["omitted", frozenSnapshot, undefined],
       ["substituted", frozenSnapshot, { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" }],
+      ["unexpected-child", null, frozenSnapshot],
       ["malformed-parent", { version: 3, state: "prepared", routeBasis: { version: 2 }, plan: { version: 2 }, frozenResponseContracts: { version: 2 } }, frozenSnapshot],
       ["future-parent", { version: 99, state: "unavailable", errorCode: "illustration_text_route_unavailable" }, frozenSnapshot]
     ] as const;
     for (const [name, parentSnapshot, childSnapshot] of rollbackCases) {
       const candidate = await enqueueGeneration(pool, imported.campaignId, generationRequestSchema.parse({
-        action: `Rollback ${name} streaming illustration.`, providerProfileId: nativeTextProviderId, idempotencyKey: crypto.randomUUID(),
+        action: `Rollback ${name} streaming illustration.`, providerProfileId: nativeTextProviderId,
+        model: "historical-concrete-story-model", idempotencyKey: crypto.randomUUID(),
         context: { budgetTokens: 16000, compression: "full", recentTurns: 8 }
       }));
       await pool.query("UPDATE generation_jobs SET status='generating' WHERE id=$1", [candidate.id]);
@@ -2924,10 +2958,13 @@ integration("independent illustration pipeline", () => {
         `UPDATE generation_jobs SET streaming_segments_state=$2::jsonb WHERE id=$1`,
         [candidate.id, JSON.stringify({ provisionalSetId: setId, provisionalIllustrationReconciliation: "pending", illustrationTextExecutionSnapshot: parentSnapshot })]
       );
-      await expect(withTransaction(pool, (client) => promoteNativeProvisionalSet(
+      const promotion = await withTransaction(pool, (client) => promoteNativeProvisionalSet(
         client, ownerUserId, candidate.id, turns.rows[0]!.id, imported.campaignId, finalNarration,
         config, native, undefined, childSnapshot as never
-      ))).rejects.toThrow(/snapshot|copy|invalid/i);
+      )).then(() => null, (error: unknown) => error);
+      if (!promotion) throw new Error(`Rollback case ${name} unexpectedly promoted.`);
+      if (name === "unexpected-child") expect(promotion).toMatchObject({ message: "Illustration children must copy the generation text execution snapshot." });
+      expect(promotion).toMatchObject({ message: expect.stringMatching(/snapshot|copy|invalid/i) });
       await expect(pool.query<{ status: string; turn_id: string | null; count: number }>(
         `SELECT sets.status,sets.turn_id,count(segments.*)::int AS count
            FROM turn_illustration_sets sets JOIN turn_illustration_segments segments ON segments.illustration_set_id=sets.id

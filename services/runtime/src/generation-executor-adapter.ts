@@ -1564,6 +1564,19 @@ export async function callCampaignTextProvider(
       durationMs: Date.now() - startedAt
     });
   };
+  const logAccountingFailure = (error: unknown, startedAt: number) => {
+    const rawErrorCode = errorCodeFrom(error);
+    logger.warn({
+      event: "turn_generation_accounting_failed",
+      ...generationLogContext(job),
+      storyOperation: operation,
+      streaming: typeof request.onChunk === "function",
+      recovery: Boolean(request.recoveryInput),
+      errorName: diagnosticErrorName(error),
+      ...(rawErrorCode ? { errorCode: safeLogErrorCode(rawErrorCode) } : {}),
+      durationMs: Date.now() - startedAt
+    });
+  };
   if (invocation) {
     const checkedPrepared = prepared!;
     if (checkedPrepared.body.length > responseContractPreparedFailureRequestBodyCharacterLimit) {
@@ -1706,7 +1719,7 @@ export async function callCampaignTextProvider(
         ...(result.physicalAttemptId ? { localCallId: result.physicalAttemptId } : {}) }, result
       );
     } catch (error) {
-      logV2ProviderFailure(error, startedAt);
+      logAccountingFailure(error, startedAt);
       throw error;
     }
     logger.info({
@@ -1729,6 +1742,7 @@ export async function callCampaignTextProvider(
     streaming: typeof request.onChunk === "function",
     recovery: Boolean(request.recoveryInput)
   });
+  let providerReturned = false;
   try {
     dependencies.collaborators.onProviderDispatch?.(operation);
     const transportRequest = {
@@ -1745,6 +1759,7 @@ export async function callCampaignTextProvider(
         request: transportRequest
       })
       : await provider.execute(transportRequest);
+    providerReturned = true;
     await dependencies.collaborators.recordProfileCost(
       dependencies.pool,
       provider,
@@ -1776,6 +1791,10 @@ export async function callCampaignTextProvider(
     });
     return result;
   } catch (error) {
+    if (providerReturned) {
+      logAccountingFailure(error, startedAt);
+      throw error;
+    }
     logProviderTransportError(error, {
       generationJobId: job.id,
       campaignId: job.campaign_id,
@@ -2115,11 +2134,15 @@ async function executeLoadedGeneration(
       if (!routeBasis) return collaborators.loadTextExecution(job.owner_user_id, job.provider_profile_id, job.requested_model);
       requirePreparedTextExecutor(collaborators);
       const limits = frozenRouteLimits(job)!;
+      const queued = job.orchestration_private?.queuedResponsePolicy as QueuedResponsePolicyVersioned | undefined;
+      const providerType = routeBasis.selection.kind === "model" && queued?.version === 2
+        && queued.authority.kind === "model_verified"
+        ? queued.authority.providerType : "openrouter";
       return {
         id: routeBasis.credentialReference ?? job.provider_profile_id,
         name: "Frozen Story route basis",
         providerRole: "text" as const,
-        providerType: "openrouter" as const,
+        providerType,
         // This descriptor supports local planning and auditing only. Task 5's
         // prepared executor receives the full ordered candidate set.
         model: routeBasis.candidates[0]!.modelId,

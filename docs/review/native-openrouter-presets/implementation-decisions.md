@@ -1,5 +1,7 @@
 # Native OpenRouter preset implementation decisions
 
+The consolidated F1–F9 review established two further binding boundaries. First, an operationless generic text request cannot claim Preset trust or a Required Model's verified operation/schema; it must fail before dispatch. Second, physical-attempt accounting is separate from output acceptance. The durable attempt ledger stores each observed charge once, including partial usage after terminal 2xx rejection; an owner-scoped logical/job projection serves direct and authoring work without inventing campaign ownership. Applicable Story/illustration campaign cost reads include those ledger charges and deduplicate a matching successful cost event by stable call identity. Missing usage and currency distinctions remain explicit. These rules are covered by unit and real-PostgreSQL tests indexed in [verification](verification.md).
+
 This record captures final product and operational decisions. Earlier choices about agent models, task splitting, and review process were implementation logistics and are not product authority.
 
 | Decision | Rationale and cost if wrong | Final evidence |

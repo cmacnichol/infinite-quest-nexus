@@ -20,7 +20,7 @@ type CancellableRequestSignal = Readonly<{
 }>;
 
 export class OpenRouterPresetError extends Error {
-  constructor(readonly diagnosticCode: ProviderPresetDiagnosticCode, message = "Preset discovery is unavailable.") {
+  constructor(readonly diagnosticCode: ProviderPresetDiagnosticCode, message = "Preset discovery is unavailable.", readonly field?: string) {
     super(message);
   }
 }
@@ -98,7 +98,11 @@ function positiveInt(value: unknown): number {
 }
 
 function unsupported(field: string): never {
-  throw new OpenRouterPresetError("preset_config_unsupported", `Preset config field '${field}' is unsupported or invalid.`);
+  const safeField = PRESET_PARAMETERS.has(field) || field === "provider" ||
+    (field.startsWith("provider.") && PROVIDER_PARAMETERS.has(field.slice("provider.".length))) ||
+    (field.startsWith("provider.max_price.") && MAX_PRICE_PARAMETERS.has(field.slice("provider.max_price.".length)))
+    ? field : "config";
+  throw new OpenRouterPresetError("preset_config_unsupported", "Preset configuration is unsupported or invalid.", safeField);
 }
 
 function finiteNumber(value: unknown, field: string, minimum: number, maximum = Number.MAX_VALUE): number {
@@ -195,7 +199,7 @@ export async function discoverOpenRouterPreset(profile: ProviderTransportProfile
   if (source.status !== "active") throw new OpenRouterPresetError("preset_inactive");
   const version = record(source.designated_version);
   const systemPrompt = text(version.system_prompt);
-  if (systemPrompt.length > MAX_PROMPT_LENGTH) throw new OpenRouterPresetError("preset_config_unsupported");
+  if (systemPrompt.length > MAX_PROMPT_LENGTH) throw new OpenRouterPresetError("preset_config_unsupported", "Preset configuration is unsupported or invalid.", "system_prompt");
   const config = validateOpenRouterPresetConfig(version.config);
   const serialized = stableStringify(config);
   return Object.freeze({ slug: text(source.slug), name: text(source.name), versionId: text(version.id), version: positiveInt(version.version), systemPrompt, config, configHash: createHash("sha256").update(serialized).digest("hex") });

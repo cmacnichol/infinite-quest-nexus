@@ -250,7 +250,32 @@ test("settings preserve a saved preset while native capability metadata is still
   releaseMetadata();
 });
 
+test("settings show bounded preset field diagnostics without remote private text", async ({ page }) => {
+  const api = await installSettingsApi(page);
+  await page.route(`**/api/v1/providers/${api.provider.id}/presets/nexus-story`, (route) => route.fulfill({
+    status: 422, contentType: "application/json",
+    body: JSON.stringify({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "config" },
+      message: "PRIVATE_REMOTE_CANARY" })
+  }));
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
+  await page.getByRole("radio", { name: "Preset", exact: true }).check();
+  await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
+  await expect(page.locator("#providerPresetPrompt")).toContainText("preset_config_unsupported: config");
+  await expect(page.locator("#providerPresetDetail")).not.toContainText("PRIVATE_REMOTE_CANARY");
+  expect(api.writes).toHaveLength(0);
+});
+
 test("stale preset list and detail completions cannot replace newer credential or profile state", async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window);
+    const signals: AbortSignal[] = [];
+    Object.assign(window, { __presetRequestSignals: signals });
+    window.fetch = (input, init) => {
+      if (String(input).includes("/presets")) signals.push(init?.signal as AbortSignal);
+      return originalFetch(input, init);
+    };
+  });
   const api = await installSettingsApi(page);
   const second = { ...providerFixture(), id: "33333333-3333-4333-8333-333333333333", name: "Second OpenRouter" };
   api.providers.push(second);
@@ -267,6 +292,7 @@ test("stale preset list and detail completions cannot replace newer credential o
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
   await expect(page.locator("#providerPresetStatus")).toContainText("Loading OpenRouter presets");
   await page.getByRole("radio", { name: "Model", exact: true }).check();
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __presetRequestSignals: AbortSignal[] }).__presetRequestSignals[0]?.aborted)).toBe(true);
   releaseList();
   await page.unroute(listPattern, delayedList);
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
@@ -283,6 +309,7 @@ test("stale preset list and detail completions cannot replace newer credential o
   await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
   await expect(page.locator("#providerPresetPrompt")).toContainText("Loading preset details");
   await page.locator("#providerDialog").evaluate((dialog: HTMLDialogElement) => dialog.close());
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __presetRequestSignals: AbortSignal[] }).__presetRequestSignals.at(-1)?.aborted)).toBe(true);
   await page.locator("#providerProfileList .provider-profile").filter({ hasText: "Second OpenRouter" }).getByRole("button", { name: "Edit" }).click();
   await expect(page.locator("#providerName")).toHaveValue("Second OpenRouter");
   await expect(page.getByRole("radio", { name: "Model", exact: true })).toBeChecked();
@@ -293,7 +320,63 @@ test("stale preset list and detail completions cannot replace newer credential o
   await expect(page.locator("#providerPresetDetail")).toBeHidden();
 });
 
+test("settings abort list and detail requests when endpoint or credential authority changes", async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window);
+    const signals: AbortSignal[] = [];
+    Object.assign(window, { __authoritySignals: signals });
+    window.fetch = (input, init) => {
+      if (String(input).includes("/presets")) signals.push(init?.signal as AbortSignal);
+      return originalFetch(input, init);
+    };
+  });
+  const api = await installSettingsApi(page);
+  let releaseList!: () => void;
+  const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+  const listPattern = `**/api/v1/providers/${api.provider.id}/presets?*`;
+  const delayedList = async (route: import("@playwright/test").Route) => {
+    await listGate;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ presets: [], totalCount: 0, offset: 0, nextOffset: null }) });
+  };
+  await page.route(listPattern, delayedList);
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
+  await page.getByRole("radio", { name: "Preset", exact: true }).check();
+  await expect(page.locator("#providerPresetStatus")).toContainText("Loading OpenRouter presets");
+  await page.locator("#providerBaseUrl").fill("https://changed.example.test/api/v1");
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __authoritySignals: AbortSignal[] }).__authoritySignals[0]?.aborted)).toBe(true);
+  releaseList();
+  await page.unroute(listPattern, delayedList);
+  await page.locator("#providerBaseUrl").fill(api.provider.baseUrl as string);
+  await page.getByRole("radio", { name: "Model", exact: true }).check();
+  await page.getByRole("radio", { name: "Preset", exact: true }).check();
+  await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toContainText("Nexus Story");
+  let releaseDetail!: () => void;
+  const detailGate = new Promise<void>((resolve) => { releaseDetail = resolve; });
+  const detailPattern = `**/api/v1/providers/${api.provider.id}/presets/nexus-story`;
+  const delayedDetail = async (route: import("@playwright/test").Route) => {
+    await detailGate;
+    await route.fulfill({ contentType: "application/json", body: "{}" });
+  };
+  await page.route(detailPattern, delayedDetail);
+  await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
+  await expect(page.locator("#providerPresetPrompt")).toContainText("Loading preset details");
+  await page.locator("#providerApiKey").fill("new-candidate-secret");
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __authoritySignals: AbortSignal[] }).__authoritySignals.at(-1)?.aborted)).toBe(true);
+  releaseDetail();
+  await expect(page.locator("#providerPresetPrompt")).not.toContainText("private");
+});
+
 test("Story per-request selection keeps Use profile separate and submits a typed native preset", async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window);
+    const signals: AbortSignal[] = [];
+    Object.assign(window, { __storyPresetSignals: signals });
+    window.fetch = (input, init) => {
+      if (String(input).includes("/presets")) signals.push(init?.signal as AbortSignal);
+      return originalFetch(input, init);
+    };
+  });
   const runtimeErrors: string[] = [];
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
   const fixture = quietLeafApiPayloads({ turnControlStyle: "flexible_action" });
@@ -305,6 +388,10 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   let delayPresetList = false;
   let releasePresetList!: () => void;
   const presetListGate = new Promise<void>((resolve) => { releasePresetList = resolve; });
+  let delayPresetDetail = false;
+  let unsupportedPresetDetail = false;
+  let releasePresetDetail!: () => void;
+  const presetDetailGate = new Promise<void>((resolve) => { releasePresetDetail = resolve; });
   await page.addInitScript(() => Object.defineProperty(window, "EventSource", { configurable: true, value: undefined }));
   await page.route("**/vendor/photoswipe/photoswipe.css", (route) => route.fulfill({ contentType: "text/css", body: "" }));
   await page.route("**/api/v1/**", async (route) => {
@@ -321,7 +408,11 @@ test("Story per-request selection keeps Use profile separate and submits a typed
       }
       return send({ presets: [{ slug: "nexus-story", name: "Nexus Story", status: "active", designatedVersionId: "version-1", updatedAt: now }], totalCount: 1, offset: 0, nextOffset: null });
     }
-    if (path === `/api/v1/providers/${provider.id}/presets/nexus-story`) return send({ slug: "nexus-story", name: "Nexus Story", versionId: "version-1", version: 3, standardPrompt: "Write with restrained tension.", candidateModelIds: ["vendor/primary"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {}, limits: { configuredMaxTokens: 2400, configuredMaxCompletionTokens: 1800, effectiveMaxOutputTokens: 1600, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } });
+    if (path === `/api/v1/providers/${provider.id}/presets/nexus-story`) {
+      if (delayPresetDetail) await presetDetailGate;
+      if (unsupportedPresetDetail) return send({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "config" }, message: "PRIVATE_REMOTE_CANARY" }, 422);
+      return send({ slug: "nexus-story", name: "Nexus Story", versionId: "version-1", version: 3, standardPrompt: "Write with restrained tension.", candidateModelIds: ["vendor/primary"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {}, limits: { configuredMaxTokens: 2400, configuredMaxCompletionTokens: 1800, effectiveMaxOutputTokens: 1600, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } });
+    }
     if (path === `/api/v1/providers/${provider.id}/models`) return send({ models: [{ id: "vendor/direct-model", displayName: "Direct model", loaded: true, instanceId: "vendor/direct-model", contextLength: 32768, responseFormatCapability: { version: 1, model: "vendor/direct-model", expectedRegistryDigest: "fixture-digest", advertisedAt: now, operations: [{ operation: "story", streaming: false, status: "verified", reason: "available", schemaVersion: exactCapability ? CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaVersion : "story-v1", schemaHash: exactCapability ? CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaHash : "a".repeat(64), verifiedAt: now, expiresAt: new Date(Date.now() + 60_000).toISOString() }] } }] });
     if (path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`) return send({ ...fixture.syncStatus, campaign: { ...fixture.syncStatus.campaign, textProviderProfileId: provider.id }, pendingGeneration: null, generationRecovery: null });
     if (path === `/api/v1/campaigns/${fixture.campaignId}/turns`) return send(fixture.turns);
@@ -350,7 +441,23 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await expect(page.locator("#storyTitle")).toHaveText(fixture.syncStatus.campaign.title);
   await expect(page.locator("#turnTextSelectionPanel")).toHaveCount(1);
   await expect(page.getByRole("combobox", { name: "Text selection" })).toHaveValue("profile");
-  await expect(page.getByRole("combobox", { name: "Text selection" }).locator("option:checked")).toContainText("Model vendor/direct-model · Auto schema");
+  await expect(page.getByRole("combobox", { name: "Text selection" }).locator("option:checked")).toContainText("Auto schema · Use profile · Model vendor/direct-model");
+  const originalModel = provider.defaultModel;
+  provider.defaultModel = `vendor/${"very-long-model-identifier".repeat(12)}`;
+  provider.textSelection = { kind: "model", modelId: provider.defaultModel };
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  const profileChoice = page.getByRole("combobox", { name: "Text selection" });
+  await expect(profileChoice).toHaveValue("profile");
+  await expect(profileChoice.locator("option:checked")).toContainText(/^Auto schema · Use profile · Model vendor\//);
+  await profileChoice.focus();
+  await page.locator("#turnTextSelectionPanel").screenshot({ path: `${screenshots}/story-mobile-profile.png` });
+  await profileChoice.press("ArrowDown");
+  await expect(profileChoice).toHaveValue("model");
+  provider.defaultModel = originalModel;
+  provider.textSelection = { kind: "model", modelId: originalModel };
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.reload();
   await page.locator("#freeAction").fill("Use the profile selection.");
   await page.locator("#btnTakeAction").click();
   await expect.poll(() => writes.length).toBe(1);
@@ -363,12 +470,29 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("preset");
   await expect(page.locator("#turnPresetStatus")).toContainText("Loading OpenRouter presets");
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("model");
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __storyPresetSignals: AbortSignal[] }).__storyPresetSignals[0]?.aborted)).toBe(true);
   releasePresetList();
   delayPresetList = false;
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("preset");
   await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toContainText("Nexus Story");
   await expect(page.locator("#turnPresetStatus")).not.toContainText("failed");
 
+  delayPresetDetail = true;
+  await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
+  await expect(page.locator("#turnPresetStatus")).toContainText("presets loaded");
+  await page.getByRole("combobox", { name: "Text selection" }).selectOption("model");
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __storyPresetSignals: AbortSignal[] }).__storyPresetSignals.at(-1)?.aborted)).toBe(true);
+  releasePresetDetail();
+  delayPresetDetail = false;
+  await page.getByRole("combobox", { name: "Text selection" }).selectOption("preset");
+  await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toContainText("Nexus Story");
+  unsupportedPresetDetail = true;
+  await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
+  await expect(page.locator("#turnPresetStatus")).toContainText("preset_config_unsupported: config");
+  await expect(page.locator("#turnPresetStatus")).not.toContainText("PRIVATE_REMOTE_CANARY");
+  await page.getByRole("combobox", { name: "Text selection" }).selectOption("model");
+  unsupportedPresetDetail = false;
+  await page.getByRole("combobox", { name: "Text selection" }).selectOption("preset");
   await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
   await expect(page.locator("#turnPresetPrompt")).toHaveText("Write with restrained tension.");
   await expect(page.locator("#turnPresetVersion")).toHaveText("3 · version-1");

@@ -88,6 +88,8 @@ let storySelectionMode = "profile";
 let storySelectionEditor = null;
 let storyPresetsApi = null;
 let storySelectionRequestSequence = 0;
+let storyPresetListController = null;
+let storyPresetDetailController = null;
 let storyModelCapabilities = new Map();
 
 // ── DOM Helpers ────────────────────────────────────────────────
@@ -172,6 +174,7 @@ function createStorySelectionDom() {
   $("loadMoreTurnPresets").addEventListener("click", () => { if (storySelectionEditor?.list.nextOffset !== null) void loadStoryPresets({ offset: storySelectionEditor.list.nextOffset }); });
   $("turnPresetSelect").addEventListener("change", () => {
     if (!storySelectionEditor) return;
+    abortStoryPresetRequests({ list: false });
     const slug = $("turnPresetSelect").value;
     storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "presetDraftChanged", slug });
     renderStoryTextSelection();
@@ -193,7 +196,7 @@ function storyPresetsHttpClient() {
       }
       const response = await fetch(`/api/v1${specification.path}`, options);
       const value = await response.json().catch(() => ({}));
-      if (!response.ok) throw Object.assign(new Error(value.error || `Request failed (${response.status}).`), { statusCode: response.status });
+      if (!response.ok) throw Object.assign(new Error(value.message || `Request failed (${response.status}).`), { statusCode: response.status, details: value.details || null });
       return specification.responseSchema.parse(value);
     }
   };
@@ -215,6 +218,7 @@ async function initializeStoryTextSelection() {
 }
 
 function resetStorySelectionEditor() {
+  abortStoryPresetRequests();
   const provider = storyTextProvider();
   if (!selectionTools || !provider || provider.providerType !== "openrouter") {
     storySelectionEditor = null;
@@ -236,6 +240,7 @@ function resetStorySelectionEditor() {
 
 function onStorySelectionModeChanged() {
   const mode = $("turnTextSelectionMode").value;
+  abortStoryPresetRequests();
   storySelectionMode = mode;
   if (storySelectionEditor && mode !== "profile") {
     storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "modeChanged", mode });
@@ -244,25 +249,37 @@ function onStorySelectionModeChanged() {
   if (mode === "preset" && !storySelectionEditor?.list.presets.length) void loadStoryPresets();
 }
 
+function abortStoryPresetRequests({ list = true, detail = true } = {}) {
+  if (list) { storyPresetListController?.abort(); storyPresetListController = null; }
+  if (detail) { storyPresetDetailController?.abort(); storyPresetDetailController = null; }
+}
+window.addEventListener("pagehide", () => abortStoryPresetRequests());
+
 function storyPresetError(error) {
-  if (error?.statusCode === 401 || error?.statusCode === 403) return "authentication";
-  if (error?.statusCode === 404) return "preset_missing";
-  return "discovery_unavailable";
+  const code = error?.details?.code;
+  const knownCodes = ["authentication", "discovery_unavailable", "preset_missing", "preset_inactive", "preset_config_unsupported", "invalid_response"];
+  const diagnostic = knownCodes.includes(code) ? code : error?.statusCode === 401 || error?.statusCode === 403 ? "authentication" : error?.statusCode === 404 ? "preset_missing" : "discovery_unavailable";
+  const field = error?.details?.field;
+  return { error: diagnostic, ...(diagnostic === "preset_config_unsupported" && typeof field === "string" && field.length <= 64 && /^[a-z_]+(?:\.[a-z_]+){0,2}$/u.test(field) ? { field } : {}) };
 }
 
 async function loadStoryPresets({ offset = 0, refresh = false } = {}) {
   const provider = storyTextProvider();
   if (!provider || !storyPresetsApi || !storySelectionEditor || storySelectionMode !== "preset") return;
+  storyPresetListController?.abort();
+  const controller = new AbortController();
+  storyPresetListController = controller;
   const requestId = `story-preset-list-${++storySelectionRequestSequence}`;
   storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "requestStarted", requestId, mode: "preset", offset });
   renderStoryTextSelection();
   try {
-    const page = await storyPresetsApi.listSaved(provider.id, { offset, limit: 25, refresh });
-    storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "listLoaded", requestId, page });
+    const page = await storyPresetsApi.listSaved(provider.id, { offset, limit: 25, refresh }, controller.signal);
+    if (storySelectionEditor) storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "listLoaded", requestId, page });
   } catch (error) {
-    storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "requestFailed", requestId, error: storyPresetError(error) });
+    if (!controller.signal.aborted && storySelectionEditor) storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "requestFailed", requestId, ...storyPresetError(error) });
   } finally {
-    storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "requestFinished", requestId });
+    if (storyPresetListController === controller) storyPresetListController = null;
+    if (storySelectionEditor) storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "requestFinished", requestId });
     renderStoryTextSelection();
   }
 }
@@ -270,16 +287,20 @@ async function loadStoryPresets({ offset = 0, refresh = false } = {}) {
 async function loadStoryPresetDetail(slug) {
   const provider = storyTextProvider();
   if (!provider || !storyPresetsApi || !storySelectionEditor || storySelectionMode !== "preset") return;
+  storyPresetDetailController?.abort();
+  const controller = new AbortController();
+  storyPresetDetailController = controller;
   const requestId = `story-preset-detail-${++storySelectionRequestSequence}`;
   storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "detailRequestStarted", requestId, slug });
   renderStoryTextSelection();
   try {
-    const detail = await storyPresetsApi.detailSaved(provider.id, slug);
-    storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "detailLoaded", requestId, detail });
+    const detail = await storyPresetsApi.detailSaved(provider.id, slug, controller.signal);
+    if (storySelectionEditor) storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "detailLoaded", requestId, detail });
   } catch (error) {
-    storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "detailFailed", requestId, error: storyPresetError(error) });
+    if (!controller.signal.aborted && storySelectionEditor) storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "detailFailed", requestId, ...storyPresetError(error) });
   } finally {
-    storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "detailRequestFinished", requestId });
+    if (storyPresetDetailController === controller) storyPresetDetailController = null;
+    if (storySelectionEditor) storySelectionEditor = selectionTools.reduceSelectionEditor(storySelectionEditor, { type: "detailRequestFinished", requestId });
     renderStoryTextSelection();
   }
 }
@@ -357,7 +378,7 @@ function renderStoryTextSelection() {
   const policy = provider.configuration?.textResponseFormatPolicy || "required";
   $("turnTextSelectionMode").options[0].textContent = saved.kind === "openrouter_preset"
     ? `Use profile · Preset ${saved.slug}`
-    : `Use profile · Model ${saved.modelId || "unspecified"} · ${policy === "legacy" ? "Legacy JSON" : policy === "auto" ? "Auto schema" : "Required schema"}`;
+    : `${policy === "legacy" ? "Legacy JSON" : policy === "auto" ? "Auto schema" : "Required schema"} · Use profile · Model ${saved.modelId || "unspecified"}`;
   $("turnTextSelectionMode").value = storySelectionMode;
   $("turnModelSelection").classList.toggle("hidden", storySelectionMode !== "model");
   $("turnPresetSelection").classList.toggle("hidden", storySelectionMode !== "preset");
@@ -379,7 +400,8 @@ function renderStoryTextSelection() {
     $("refreshTurnPresets").disabled = storySelectionEditor.list.busy;
     $("loadMoreTurnPresets").classList.toggle("hidden", storySelectionEditor.list.nextOffset === null);
     if (storySelectionEditor.list.busy) $("turnPresetStatus").textContent = "Loading OpenRouter presets…";
-    else if (storySelectionEditor.list.error) $("turnPresetStatus").textContent = `Preset discovery failed (${storySelectionEditor.list.error}).`;
+    else if (storySelectionEditor.detail.error) $("turnPresetStatus").textContent = `Preset details are unavailable (${storySelectionEditor.detail.error}${storySelectionEditor.detail.errorField ? `: ${storySelectionEditor.detail.errorField}` : ""}).`;
+    else if (storySelectionEditor.list.error) $("turnPresetStatus").textContent = `Preset discovery failed (${storySelectionEditor.list.error}${storySelectionEditor.list.errorField ? `: ${storySelectionEditor.list.errorField}` : ""}).`;
     else if (storySelectionEditor.savedChoiceAvailability === "unavailable") $("turnPresetStatus").textContent = `Saved preset ${slug} is unavailable and remains selected.`;
     else $("turnPresetStatus").textContent = storySelectionEditor.list.presets.length ? `${storySelectionEditor.list.presets.length} presets loaded.` : "No presets loaded.";
     const detail = storySelectionEditor.detail.value;

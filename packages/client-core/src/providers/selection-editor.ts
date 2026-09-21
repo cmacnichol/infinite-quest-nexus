@@ -24,8 +24,8 @@ export type SelectionEditorState = Readonly<{
   presetDraft: PresetDraft;
   authority: AuthorityRevision;
   savedChoiceAvailability: "unknown" | "available" | "unavailable";
-  list: Readonly<{ requestId: string | null; busy: boolean; requestedOffset: number; presets: readonly SafePresetSummary[]; totalCount: number; nextOffset: number | null; error: ProviderPresetDiagnosticCode | null }>;
-  detail: Readonly<{ requestId: string | null; busy: boolean; slug: string | null; value: SafePresetDetail | null; error: ProviderPresetDiagnosticCode | null }>;
+  list: Readonly<{ requestId: string | null; busy: boolean; requestedOffset: number; presets: readonly SafePresetSummary[]; totalCount: number; nextOffset: number | null; error: ProviderPresetDiagnosticCode | null; errorField: string | null }>;
+  detail: Readonly<{ requestId: string | null; busy: boolean; slug: string | null; value: SafePresetDetail | null; error: ProviderPresetDiagnosticCode | null; errorField: string | null }>;
 }>;
 
 export type SelectionEditorInput = AuthorityRevision & Readonly<{
@@ -41,11 +41,11 @@ export type SelectionEditorEvent =
   | Readonly<{ type: "modelOverrideIntentChanged" | "presetOverrideIntentChanged"; intent: OverrideIntent }>
   | Readonly<{ type: "requestStarted"; requestId: string; mode: "preset"; offset: number }>
   | Readonly<{ type: "listLoaded"; requestId: string; page: import("@infinite-quest/contracts").SafePresetPage }>
-  | Readonly<{ type: "requestFailed"; requestId: string; error: ProviderPresetDiagnosticCode }>
+  | Readonly<{ type: "requestFailed"; requestId: string; error: ProviderPresetDiagnosticCode; field?: string | null }>
   | Readonly<{ type: "requestFinished"; requestId: string }>
   | Readonly<{ type: "detailRequestStarted"; requestId: string; slug: string }>
   | Readonly<{ type: "detailLoaded"; requestId: string; detail: SafePresetDetail }>
-  | Readonly<{ type: "detailFailed"; requestId: string; error: ProviderPresetDiagnosticCode }>
+  | Readonly<{ type: "detailFailed"; requestId: string; error: ProviderPresetDiagnosticCode; field?: string | null }>
   | Readonly<{ type: "detailRequestFinished"; requestId: string }>
   | (Readonly<{ type: "authorityChanged" }> & AuthorityRevision);
 
@@ -58,8 +58,8 @@ export type SelectionEditorPatch = Readonly<{
   }>;
 }>;
 
-const emptyList = { requestId: null, busy: false, requestedOffset: 0, presets: [], totalCount: 0, nextOffset: null, error: null } as const;
-const emptyDetail = { requestId: null, busy: false, slug: null, value: null, error: null } as const;
+const emptyList = { requestId: null, busy: false, requestedOffset: 0, presets: [], totalCount: 0, nextOffset: null, error: null, errorField: null } as const;
+const emptyDetail = { requestId: null, busy: false, slug: null, value: null, error: null, errorField: null } as const;
 
 export function createSelectionEditorState(input: SelectionEditorInput): SelectionEditorState {
   const savedOverrides: OverrideIntent = input.textExecutionOverrides === undefined
@@ -94,19 +94,19 @@ export function reduceSelectionEditor(state: SelectionEditorState, event: Select
       : { ...state, presetDraft: { ...state.presetDraft, slug: event.slug, overrideIntent: { mode: "inherit" } }, detail: emptyDetail };
     case "modelOverrideIntentChanged": return { ...state, modelDraft: { ...state.modelDraft, overrideIntent: event.intent } };
     case "presetOverrideIntentChanged": return { ...state, presetDraft: { ...state.presetDraft, overrideIntent: event.intent } };
-    case "requestStarted": return { ...state, list: { ...state.list, requestId: event.requestId, busy: true, requestedOffset: event.offset, error: null } };
+    case "requestStarted": return { ...state, list: { ...state.list, requestId: event.requestId, busy: true, requestedOffset: event.offset, error: null, errorField: null } };
     case "listLoaded": {
       if (state.list.requestId !== event.requestId) return state;
       const presets = event.page.offset === 0 ? event.page.presets : mergePresets(state.list.presets, event.page.presets);
       const savedSlug = state.savedSelection.kind === "openrouter_preset" ? state.savedSelection.slug : null;
       const complete = event.page.nextOffset === null;
-      return { ...state, savedChoiceAvailability: savedSlug === null ? "unknown" : presets.some((preset) => preset.slug === savedSlug) ? "available" : complete ? "unavailable" : "unknown", list: { ...state.list, presets, totalCount: event.page.totalCount, nextOffset: event.page.nextOffset, error: null } };
+      return { ...state, savedChoiceAvailability: savedSlug === null ? "unknown" : presets.some((preset) => preset.slug === savedSlug) ? "available" : complete ? "unavailable" : "unknown", list: { ...state.list, presets, totalCount: event.page.totalCount, nextOffset: event.page.nextOffset, error: null, errorField: null } };
     }
-    case "requestFailed": return state.list.requestId === event.requestId ? { ...state, list: { ...state.list, error: event.error } } : state;
+    case "requestFailed": return state.list.requestId === event.requestId ? { ...state, list: { ...state.list, error: event.error, errorField: event.field ?? null } } : state;
     case "requestFinished": return state.list.requestId === event.requestId ? { ...state, list: { ...state.list, busy: false } } : state;
-    case "detailRequestStarted": return { ...state, detail: { requestId: event.requestId, busy: true, slug: event.slug, value: null, error: null } };
-    case "detailLoaded": return state.detail.requestId === event.requestId ? { ...state, detail: { ...state.detail, value: event.detail, error: null } } : state;
-    case "detailFailed": return state.detail.requestId === event.requestId ? { ...state, detail: { ...state.detail, error: event.error } } : state;
+    case "detailRequestStarted": return { ...state, detail: { requestId: event.requestId, busy: true, slug: event.slug, value: null, error: null, errorField: null } };
+    case "detailLoaded": return state.detail.requestId === event.requestId ? { ...state, detail: { ...state.detail, value: event.detail, error: null, errorField: null } } : state;
+    case "detailFailed": return state.detail.requestId === event.requestId ? { ...state, detail: { ...state.detail, error: event.error, errorField: event.field ?? null } } : state;
     case "detailRequestFinished": return state.detail.requestId === event.requestId ? { ...state, detail: { ...state.detail, busy: false } } : state;
     case "authorityChanged": return { ...state, authority: { profileRevision: event.profileRevision, configurationRevision: event.configurationRevision, credentialRevision: event.credentialRevision }, savedChoiceAvailability: "unknown", list: emptyList, detail: emptyDetail };
   }

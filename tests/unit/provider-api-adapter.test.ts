@@ -14,11 +14,31 @@ function adapter(responseFormatCapabilities?: object) {
   const application = {
     createProfile: vi.fn(), updateProfile: vi.fn(), listProfiles: vi.fn(), listModels: vi.fn()
   };
-  const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn() };
+  const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn(),
+    resolveCandidatePresetWithCredential: vi.fn(async () => ({ preset: {} })),
+    resolveCandidatePresetWithProfileCredential: vi.fn(async () => ({ preset: {} })),
+    presetSaveRevision: vi.fn(async () => "fixture-revision") };
   return { application, runtime, adapter: createProviderApplicationAdapter({ application, runtime, responseFormatCapabilities, transaction: async (work: (binding: never) => Promise<unknown>) => work({ application, runtime } as never) } as never) };
 }
 
 describe("provider API configuration boundary", () => {
+  it.each([
+    [{ kind: "openrouter_preset", slug: "night-shift" }, "legacy"],
+    [{ kind: "model", modelId: "model" }, "required"]
+  ] as const)("rejects generic text generation without an operation contract for %j", async (selection, policy) => {
+    const value = adapter();
+    const execute = vi.fn();
+    (value.application as never as { resolveDirect: ReturnType<typeof vi.fn> }).resolveDirect = vi.fn(async () => ({
+      status: "resolved", providerProfileId: id, model: selection.kind === "model" ? selection.modelId : `@preset/${selection.slug}`
+    }));
+    value.application.listProfiles.mockResolvedValue([{ ...input, id, textSelection: selection,
+      configuration: { textResponseFormatPolicy: policy } }]);
+    (value.runtime as never as { execution: unknown }).execution = { text: vi.fn(async () => ({ model: "model", execute })) };
+    await expect(value.adapter.generateText(owner, { messages: [{ role: "user", content: "Hello" }] } as never))
+      .rejects.toMatchObject({ code: "unsupported_operation", statusCode: 409 });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it.each(["create", "update", "candidate"] as const)("rejects an invalid raw response format policy for %s before safe projection", async (operation) => {
     const value = adapter();
     const invalid = { ...input, configuration: { textResponseFormatPolicy: "schema", ignoredClaim: true } };
@@ -125,6 +145,8 @@ describe("provider API configuration boundary", () => {
 
   it("preserves an explicit compatibility policy when a rename-only patch omits it", async () => {
     const value = adapter();
+    value.application.listProfiles.mockResolvedValue([{ ...input, id, configuration: { textResponseFormatPolicy: "legacy" },
+      textSelection: { kind: "model", modelId: "model" } }]);
     value.application.updateProfile.mockResolvedValue({
       profile: {
         ...input, id, name: "Renamed", configuration: { textResponseFormatPolicy: "legacy" },

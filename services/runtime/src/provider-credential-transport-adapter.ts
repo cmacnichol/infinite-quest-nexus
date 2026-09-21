@@ -111,6 +111,8 @@ export type RuntimeProviderAdapter = Readonly<{
   ): Promise<ProviderModelInventory>;
   discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number; signal?: AbortSignal }>, credential: string | null): Promise<ProviderPresetInventory>;
   resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
+  resolveCandidatePresetWithProfileCredential(ownerUserId: string, providerProfileId: string, candidate: ProviderCandidate, slug: string): Promise<ProviderPresetDetail>;
+  presetSaveRevision(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<string | null>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
@@ -432,6 +434,24 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
       const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
       return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport, signal) });
+    },
+    async resolveCandidatePresetWithProfileCredential(ownerUserId, providerProfileId, candidate, slug) {
+      const result = await options.database.query<{
+        encrypted_api_key: string | null; credential_nonce: string | null; credential_auth_tag: string | null; credential_key_version: number | null;
+      }>("SELECT encrypted_api_key,credential_nonce,credential_auth_tag,credential_key_version FROM provider_profiles WHERE id=$1 AND owner_user_id=$2", [providerProfileId, ownerUserId]);
+      const row = result.rows[0];
+      if (!row) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      const credential = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version
+        ? decryptCredential({ ciphertext: row.encrypted_api_key, nonce: row.credential_nonce, authTag: row.credential_auth_tag, keyVersion: row.credential_key_version }, options.credentialSecret)
+        : null;
+      return this.resolveCandidatePresetWithCredential(candidate, slug, credential);
+    },
+    async presetSaveRevision(ownerUserId, providerProfileId, lock) {
+      const result = await options.database.query(
+        `SELECT updated_at,provider_type,provider_role,base_url,default_model,text_selection,enabled,encrypted_api_key,credential_nonce,credential_auth_tag,credential_key_version FROM provider_profiles WHERE id=$1 AND owner_user_id=$2${lock ? " FOR UPDATE" : ""}`,
+        [providerProfileId, ownerUserId]
+      );
+      return result.rows[0] ? createHash("sha256").update(JSON.stringify(result.rows[0])).digest("hex") : null;
     },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()

@@ -1,5 +1,24 @@
 # Native OpenRouter preset verification
 
+## Final F1–F9 fix wave (2026-09-21)
+
+The consolidated review fixes were verified on executable source diff SHA256 `D184F880DD7DB0ED5B1021811962FF00BE7B6EC638F67DC20B851DB80B69838B` against base `1018c88ff5c519291a3d3333e59e9fbf342fc52c`. The versioned Linux harness digest was `635288DD6C0154DB73F73B80815C01AF917784CDABBB0D7C2AC3C0962362275A`; the final Docker image ID was `sha256:1169d5c89854493b63ad69c9f5b8df39e39e5ee4c5c839ad5166af1b85a7912c`. The older Task8 identities and counts below describe the earlier source only.
+
+| Fix-wave gate | Result |
+| --- | --- |
+| Pinned `pnpm check` and `pnpm build` | Both exit 0; check inspected 1,835 boundary/data candidates; build retained existing font/chunk advisories. |
+| Complete Windows unit suite | 337 files, 4,262 passed, 44 platform skips, zero failures. |
+| Selected affected real PostgreSQL integration files | 13 complete files, 313 passed, 14 Windows platform skips, zero failures. The image-pipeline file was rerun on final source (25 pass/14 skips); the other 12 passed on the preceding source, which differs only by the null-parent illustration guard/test. This is not a rerun of the earlier 110-file sweep. |
+| Both legacy Chromium suites | 12/12 passed on the preceding source, including actual request cancellation, finite diagnostics, keyboard and mobile label. The final edit did not touch browser code. No live provider call. |
+| Final-source Linux affected integration harness | 13 files, 212/212 passed, zero skips. The harness uses the actual compiled service and clients, Chromium, and isolated real PostgreSQL. |
+| Final-source Linux platform units | Seven files, 181 passed, one intentional inverse-platform skip, zero failures. |
+
+The first complete final-source unit run had one recovery-panel clean-load assertion fail after two fixed timer ticks (4,261 pass/44 skips); the focused test and then the complete suite passed on unchanged source. The private report preserves that failure.
+
+The private `final-fix-report.md` in the task's SDD folder indexes raw logs, RED/GREEN evidence, exact file inventory, and source identity. The refreshed [mobile Story capture](../assets/native-openrouter-presets/story-mobile-profile.png) shows the inherited policy ahead of a long model ID. The task-owned Linux test network was removed after the run; the task database was retained. The 136 unrelated Linux-gated Windows cases and opt-in baseline/benchmark skips from Task8 remain outside this selected final wave. Neither offline fixture evidence nor these tests establish live OpenRouter compatibility or authorize activation.
+
+## Prior Task8 evidence (earlier source)
+
 Task1–7 approved code base: `6e67cc7a9cc8dd167d37df9cd2f68506a3949fc7`. The broad Task8 gates below used commit `d7e366151c14a6c58c1d5bc8117c5fef6662b827` (its precommit executable diff SHA256 was `217d59c96bfbb726689de213e7a29ef66f8b0408a83f94c49b57aad61e19842c`). A later scoped review fix changed the v2 failure-log error-name projection and added two durable PostgreSQL regressions. Its focused evidence is recorded below; the earlier full unit/PG, browser and Linux image results remain evidence for their exact earlier source, not reruns after this fix. The private Task8 report preserves RED/GREEN and log paths. Independent scoped and whole-branch audits remain pending. Production native admission is off; these results do not establish live OpenRouter compatibility.
 
 All local commands ran from the isolated feature worktree with the repository-pinned pnpm 12.4.1 shim at the front of PATH. PostgreSQL used the dedicated task-owned `infinitequest-native-presets-test` container, an ignored private `TEST_DATABASE_URL`, and the repository's per-file isolated database setup. No production or shared database was reset.

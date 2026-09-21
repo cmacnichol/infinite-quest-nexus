@@ -2439,7 +2439,7 @@ integration("durable Story Engine integration", () => {
         .map(([event]) => event)
         .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
       expect(events).toEqual(expect.arrayContaining([
-        expect.objectContaining({ event: "turn_generation_provider_failed", errorCode: "unclassified_error" })
+        expect.objectContaining({ event: "turn_generation_accounting_failed", errorCode: "unclassified_error" })
       ]));
       expect(events).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ event: "turn_generation_failed" })

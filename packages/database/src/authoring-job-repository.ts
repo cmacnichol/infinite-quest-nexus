@@ -37,6 +37,7 @@ import type {
   AuthoringWorldApplyPort
 } from "../../application/src/authoring/ports.js";
 import { AuthoringRepositoryError } from "../../application/src/authoring/types.js";
+import { normalizeTextSelection, type TextModelSelection } from "../../contracts/src/provider-selection.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
 import { retryAuthoringStage, type AuthoringStageLifecycle } from "../../domain/src/authoring-jobs.js";
 import { projectAuthoringFailure, validateGeneratedCharacter, validateGeneratedWorldFiction } from "../../domain/src/authoring-output.js";
@@ -808,6 +809,18 @@ export function createPostgresAuthoringRepository(
           if (replay.requestHash !== hash) throw new AuthoringRepositoryError("idempotency_conflict");
           if (isDiscardedInput(replay.input)) throw new AuthoringRepositoryError("invalid_state");
           return replay;
+        }
+        if (options.textPlanProtocol !== 2) {
+          const profiles = await client.query<{ provider_type: string; provider_role: string; default_model: string; text_selection: TextModelSelection | null; is_default: boolean }>(
+            `SELECT provider_type,provider_role,default_model,text_selection,is_default FROM provider_profiles
+               WHERE owner_user_id=$1 AND provider_role='text' AND enabled=true
+               ORDER BY is_default DESC,name,id LIMIT 2 FOR SHARE`, [scope.ownerUserId]
+          );
+          const profile = profiles.rows.length === 1 || profiles.rows[0]?.is_default ? profiles.rows[0] : null;
+          if (profile && normalizeTextSelection({ providerType: profile.provider_type, providerRole: profile.provider_role,
+            defaultModel: profile.default_model, ...(profile.text_selection ? { textSelection: profile.text_selection } : {}) }).kind === "openrouter_preset") {
+            throw new AuthoringRepositoryError("native_text_execution_unavailable");
+          }
         }
         // The replay check deliberately runs before this count. An existing
         // durable request remains safe to resume even when the owner is at cap.

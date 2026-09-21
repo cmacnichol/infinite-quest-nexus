@@ -6,7 +6,7 @@ import {
   type TextExecutionRouteBasis
 } from "@infinite-quest/contracts";
 import type { PhysicalAttemptRepository } from "../../../packages/story-engine/src/preset-route-execution.js";
-import { executePresetRoutes } from "../../../packages/story-engine/src/preset-route-execution.js";
+import { executePresetRoutes, PreparedRouteTerminalError } from "../../../packages/story-engine/src/preset-route-execution.js";
 import {
   estimatedInputSafetyAllowanceTokens,
   serializeCheckedBoundFrozenPresetProviderRequest,
@@ -78,7 +78,9 @@ export function createPreparedTextExecutor(input: Readonly<{
       const canonical = canonicalRequest(execution.request);
       const requestTimeoutMs = plan.requestTimeoutMs ?? 300_000;
       const authorized = new Map<number, RuntimeTextExecution>();
-      const result = await executePresetRoutes<ProviderResult>({
+      let result: Awaited<ReturnType<typeof executePresetRoutes<ProviderResult>>>;
+      try {
+        result = await executePresetRoutes<ProviderResult>({
         candidates: plan.candidates,
         planProvenance: { planHash: plan.planHash, preset: plan.preset },
         logicalReservation: execution.logicalReservation,
@@ -158,8 +160,19 @@ export function createPreparedTextExecutor(input: Readonly<{
           });
           return value;
         }
-      });
-      return { ...result.value, physicalAttemptId: result.attemptId };
+        });
+      } catch (error) {
+        if (error instanceof PreparedRouteTerminalError) {
+          try {
+            error.physicalAccounting = await input.attempts.summarize({ kind: "logical", reservation: execution.logicalReservation });
+          } catch {
+            // The terminal route error remains authoritative if accounting reads fail.
+          }
+        }
+        throw error;
+      }
+      const physicalAccounting = await input.attempts.summarize({ kind: "logical", reservation: execution.logicalReservation });
+      return { ...result.value, physicalAttemptId: result.attemptId, physicalAccounting };
     }
   };
 }

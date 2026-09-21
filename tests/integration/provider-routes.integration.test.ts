@@ -34,6 +34,8 @@ integration("provider route configuration redaction", () => {
   let pool: DatabasePool;
   let app: Awaited<ReturnType<typeof buildServer>>;
   let transport: ProviderTransport;
+  let routeConfig: RuntimeConfig;
+  let routeProviders: ReturnType<typeof createProviderApplicationAdapter>;
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 3);
@@ -102,6 +104,8 @@ integration("provider route configuration redaction", () => {
       credentialSecret: config.credentialEncryptionKey,
       transport
     }));
+    routeConfig = config;
+    routeProviders = providers;
     app = await buildServer(serverOptions({ config, pool, providers }));
   });
 
@@ -154,6 +158,181 @@ integration("provider route configuration redaction", () => {
     const profile = response.json().providers.find((candidate: { name: string }) => candidate.name === name);
     expect(profile).toMatchObject({ defaultModel: "", textSelection: { kind: "model", modelId: "" } });
     expect(profile).not.toHaveProperty("responseFormatCapability");
+  });
+
+  it("projects unsupported remote preset fields as finite safe API diagnostics", async () => {
+    const originalFetch = transport.fetch;
+    transport.fetch = async () => new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "version-2", version: 2, system_prompt: "private preset prompt", config: { "api_key-private-canary": "secret-canary" } } } }), { status: 200 });
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/providers/resolve-preset?slug=night-shift", payload: {
+        ...baseProviderInput, name: `${baseProviderInput.name} DIAGNOSTIC ${crypto.randomUUID()}`,
+        providerType: "openrouter", providerRole: "text", defaultModel: "@preset/night-shift", configuration: {}
+      } });
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toMatchObject({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "config" } });
+      expect(response.body).not.toContain("api_key-private-canary");
+      expect(response.body).not.toContain("secret-canary");
+    } finally {
+      transport.fetch = originalFetch;
+    }
+  });
+
+  it("keeps generic text generation operationless with native admission off and on", async () => {
+    const preset = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name: `${baseProviderInput.name} GENERIC PRESET ${crypto.randomUUID()}`,
+      providerType: "openrouter", providerRole: "text", defaultModel: "@preset/night-shift",
+      textSelection: { kind: "openrouter_preset", slug: "night-shift" }, configuration: {}
+    } });
+    expect(preset.statusCode).toBe(201);
+    const required = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name: `${baseProviderInput.name} GENERIC REQUIRED ${crypto.randomUUID()}`,
+      providerRole: "text", defaultModel: "historical-model", configuration: { textResponseFormatPolicy: "required" }
+    } });
+    expect(required.statusCode).toBe(201);
+    const historical = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name: `${baseProviderInput.name} GENERIC LEGACY ${crypto.randomUUID()}`,
+      providerRole: "text", defaultModel: "historical-model", configuration: { textResponseFormatPolicy: "legacy" }
+    } });
+    expect(historical.statusCode).toBe(201);
+    const originalFetch = transport.fetch;
+    let dispatches = 0;
+    transport.fetch = async () => {
+      dispatches += 1;
+      return new Response(JSON.stringify({ id: "historical-response", model: "historical-model",
+        choices: [{ message: { content: "Historical concrete response." }, finish_reason: "stop" }] }), { status: 200 });
+    };
+    const enabled = await buildServer(serverOptions({ config: { ...routeConfig, nativeTextExecutionPlanAdmission: true }, pool, providers: routeProviders }));
+    try {
+      for (const server of [app, enabled]) {
+        const before = dispatches;
+        for (const profileId of [preset.json().id, required.json().id]) {
+          const rejected = await server.inject({ method: "POST", url: "/api/v1/provider-text/generate",
+            payload: { providerProfileId: profileId, messages: [{ role: "user", content: "Hello" }] } });
+          expect(rejected.statusCode).toBe(409);
+          expect(rejected.json()).toMatchObject({ code: "unsupported_operation" });
+        }
+        expect(dispatches).toBe(before);
+        const allowed = await server.inject({ method: "POST", url: "/api/v1/provider-text/generate",
+          payload: { providerProfileId: historical.json().id, messages: [{ role: "user", content: "Hello" }] } });
+        expect(allowed.statusCode, allowed.body).toBe(200);
+      }
+      expect(dispatches).toBe(2);
+    } finally {
+      transport.fetch = originalFetch;
+      await enabled.close();
+    }
+  });
+
+  it("rejects an inactive preset on provider creation before writing the profile", async () => {
+    const name = `${baseProviderInput.name} INACTIVE ${crypto.randomUUID()}`;
+    const originalFetch = transport.fetch;
+    transport.fetch = async () => new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "inactive", designated_version: { id: "version-2", version: 2, system_prompt: "private", config: {} } } }), { status: 200 });
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+        ...baseProviderInput, name, providerType: "openrouter", providerRole: "text",
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }, configuration: {}
+      } });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ code: "preset_inactive" });
+      const profiles = await app.inject({ method: "GET", url: "/api/v1/providers" });
+      expect(profiles.json().providers.some((profile: { name: string }) => profile.name === name)).toBe(false);
+    } finally {
+      transport.fetch = originalFetch;
+    }
+  });
+
+  it.each([
+    ["missing", 404, "preset_missing"],
+    ["auth", 401, "authentication"],
+    ["unsupported", 422, "preset_config_unsupported"]
+  ] as const)("rejects %s preset detail on provider creation without writing", async (condition, status, code) => {
+    const name = `${baseProviderInput.name} ${condition} ${crypto.randomUUID()}`;
+    const originalFetch = transport.fetch;
+    transport.fetch = async () => condition === "missing" ? new Response("{}", { status: 404 })
+      : condition === "auth" ? new Response("{}", { status: 401 })
+      : new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "private", config: { tools: [{ type: "function" }] } } } }), { status: 200 });
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+        ...baseProviderInput, name, providerType: "openrouter", providerRole: "text", defaultModel: "@preset/night-shift",
+        textSelection: { kind: "openrouter_preset", slug: "night-shift" }, configuration: {}
+      } });
+      expect(response.statusCode).toBe(status);
+      expect(response.json()).toMatchObject({ code });
+      const profiles = await app.inject({ method: "GET", url: "/api/v1/providers" });
+      expect(profiles.json().providers.some((profile: { name: string }) => profile.name === name)).toBe(false);
+    } finally { transport.fetch = originalFetch; }
+  });
+
+  it.each([
+    ["inactive", 409, "preset_inactive"],
+    ["missing", 404, "preset_missing"],
+    ["auth", 401, "authentication"],
+    ["unsupported", 422, "preset_config_unsupported"]
+  ] as const)("rejects %s preset detail on PATCH without changing selection", async (condition, status, code) => {
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name: `${baseProviderInput.name} PATCH ${condition} ${crypto.randomUUID()}`,
+      providerType: "openrouter", providerRole: "text", defaultModel: "concrete-model", configuration: {}
+    } });
+    expect(created.statusCode).toBe(201);
+    const originalFetch = transport.fetch;
+    transport.fetch = async () => condition === "missing" ? new Response("{}", { status: 404 })
+      : condition === "auth" ? new Response("{}", { status: 401 })
+        : new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift",
+          status: condition === "inactive" ? "inactive" : "active",
+          designated_version: { id: "v", version: 1, system_prompt: "private",
+            config: condition === "unsupported" ? { tools: [{ type: "function" }] } : { model: "vendor/model" } } } }), { status: 200 });
+    try {
+      const rejected = await app.inject({ method: "PATCH", url: `/api/v1/providers/${created.json().id}`, payload: {
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+      } });
+      expect(rejected.statusCode).toBe(status);
+      expect(rejected.json()).toMatchObject({ code });
+      const current = (await app.inject({ method: "GET", url: "/api/v1/providers" })).json().providers
+        .find((profile: { id: string }) => profile.id === created.json().id);
+      expect(current.textSelection).toEqual({ kind: "model", modelId: "concrete-model" });
+    } finally { transport.fetch = originalFetch; }
+  });
+
+  it("rejects stale preset PATCH evidence after concurrent authority change and preserves a historical unavailable selection on rename or switch-away", async () => {
+    const name = `${baseProviderInput.name} PATCH-PRESET ${crypto.randomUUID()}`;
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name, providerType: "openrouter", providerRole: "text", baseUrl: "https://openrouter.test/api/v1",
+      defaultModel: "concrete-model", apiKey: "saved-secret", configuration: {}
+    } });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id;
+    const originalFetch = transport.fetch;
+    let observed: { url: string; credential: string | undefined } | null = null;
+    transport.fetch = async (profile, _operation, url) => {
+      observed = { url, credential: profile.apiKey };
+      await pool.query("UPDATE provider_profiles SET base_url=$2,updated_at=now() WHERE id=$1", [id, "https://changed.test/api/v1"]);
+      return new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "private", config: { model: "vendor/model" } } } }), { status: 200 });
+    };
+    try {
+      const stale = await app.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: {
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+      } });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json()).toMatchObject({ code: "preset_save_stale" });
+      expect(observed).toEqual({ url: "https://openrouter.test/api/v1/presets/night-shift", credential: "saved-secret" });
+      const afterStale = (await app.inject({ method: "GET", url: "/api/v1/providers" })).json().providers.find((profile: { id: string }) => profile.id === id);
+      expect(afterStale.textSelection).toEqual({ kind: "model", modelId: "concrete-model" });
+
+      transport.fetch = originalFetch;
+      const selected = await app.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: {
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+      } });
+      expect(selected.statusCode).toBe(200);
+      transport.fetch = async () => new Response("{}", { status: 404 });
+      const renamed = await app.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: { name: `${name} renamed` } });
+      expect(renamed.statusCode).toBe(200);
+      expect(renamed.json().textSelection).toEqual({ kind: "openrouter_preset", slug: "night-shift" });
+      const switched = await app.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: {
+        defaultModel: "concrete-model", textSelection: { kind: "model", modelId: "concrete-model" }
+      } });
+      expect(switched.statusCode).toBe(200);
+      expect(switched.json().textSelection).toEqual({ kind: "model", modelId: "concrete-model" });
+    } finally { transport.fetch = originalFetch; }
   });
 
   it("round-trips strict text overrides with PATCH preserve and explicit clear semantics", async () => {

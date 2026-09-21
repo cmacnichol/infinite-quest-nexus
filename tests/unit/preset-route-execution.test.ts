@@ -19,6 +19,11 @@ const storyReservation = {
 function attempts(): PhysicalAttemptRepository {
   const rows = new Map<number, any>();
   return {
+    async summarize() {
+      return { attemptCount: rows.size, completedCount: [...rows.values()].filter((row) => row.status === "completed").length,
+        observedUsage: { inputTokens: null, outputTokens: null, totalTokens: null },
+        usageCoverage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCosts: [] };
+    },
     async reserve(input) {
       const prior = rows.get(input.candidateOrdinal);
       if (prior) return prior;
@@ -133,11 +138,29 @@ describe("preset route execution", () => {
     await expect(executePresetRoutes({
       candidates: candidates.slice(0, 1), planProvenance, logicalReservation: storyReservation, attempts: repository,
       prepareCandidate: () => ({ body: "{}", payloadHash: "hash-0" }),
-      invoke: async () => ({ content: "wrong", returnedModel: "model-x", returnedProviderRoute: "x", usage: null, reportedCost: null }),
+      invoke: async () => ({ content: "wrong", returnedModel: "model-x", returnedProviderRoute: "x", usage: null,
+        observedUsage: { inputTokens: 11 }, reportedCost: { amount: "0.002", currency: "USD" } }),
       totalDeadlineMs: 1_000
     })).rejects.toMatchObject({ reason: "invalid_identity" });
     expect(complete).toHaveBeenCalledWith(storyReservation, "attempt-0", expect.objectContaining({
-      outcome: "failed", failureReason: "invalid_identity", returnedModel: "model-x", returnedProviderRoute: "x"
+      outcome: "failed", failureReason: "invalid_identity", returnedModel: "model-x", returnedProviderRoute: "x",
+      usage: { inputTokens: 11 }, reportedCost: { amount: "0.002", currency: "USD" }
+    }));
+  });
+
+  it("retains observed refusal accounting without advancing to a fallback candidate", async () => {
+    const repository = attempts();
+    const complete = vi.spyOn(repository, "complete");
+    const invoke = vi.fn(async () => { throw Object.assign(new Error("refusal"), {
+      routeFailureReason: "refusal", responseId: "response-refusal", observedUsage: { outputTokens: 7 },
+      observedReportedCost: { amount: "0.003", currency: "USD" }
+    }); });
+    await expect(executePresetRoutes({ candidates, planProvenance, logicalReservation: storyReservation, attempts: repository,
+      prepareCandidate: (_candidate, index) => ({ body: "{}", payloadHash: `hash-${index}` }), invoke, totalDeadlineMs: 1_000
+    })).rejects.toMatchObject({ reason: "refusal" });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledWith(storyReservation, "attempt-0", expect.objectContaining({
+      outcome: "failed", failureReason: "refusal", usage: { outputTokens: 7 }, reportedCost: { amount: "0.003", currency: "USD" }
     }));
   });
 

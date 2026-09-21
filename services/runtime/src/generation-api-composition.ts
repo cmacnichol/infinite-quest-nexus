@@ -46,11 +46,18 @@ export function createQueuedResponsePolicyResolver(
   return async (client, scope) => {
     const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId, scope.requestedModel);
     const preparedTextExecution = scope.preparedTextExecution;
-    const selection = preparedTextExecution?.selection ?? profile.textSelection ?? normalizeTextSelection({
+    const selection = preparedTextExecution?.selection ?? (scope.requestedModel.trim() ? normalizeTextSelection({
+      providerType: profile.providerType,
+      providerRole: "text",
+      defaultModel: scope.requestedModel
+    }) : profile.textSelection) ?? normalizeTextSelection({
       providerType: profile.providerType,
       providerRole: "text",
       defaultModel: scope.requestedModel.trim() || profile.model
     });
+    if (!nativeTextExecutionPlanAdmission && selection.kind === "openrouter_preset") {
+      throw new GenerationApplicationError("conflict", { reason: "native_text_execution_unavailable" });
+    }
     const configuredPolicy = profile.configuration.textResponseFormatPolicy as "legacy" | "auto" | "required" | undefined;
     // Required Model/Preset normalization belongs to the native admission
     // path. Until that gate is enabled, preserve the profile's historical

@@ -63,6 +63,7 @@ integration("durable authoring real repository and stage dispatcher", () => {
   afterEach(async () => {
     await pool.query("DELETE FROM authoring_jobs WHERE owner_user_id = $1", [ownerUserId]);
     await pool.query("DELETE FROM worlds WHERE owner_user_id = $1", [ownerUserId]);
+    await pool.query("DELETE FROM provider_profiles WHERE owner_user_id = $1 AND name LIKE 'task-5c-%'", [ownerUserId]);
   });
   afterAll(async () => { await pool?.end(); });
 
@@ -464,6 +465,23 @@ integration("durable authoring real repository and stage dispatcher", () => {
     expect("version" in persisted).toBe(nativePresetPlansEnabled);
     expect(getPreset).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
     expect(listModels).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
+  });
+
+  it("rejects newly submitted durable preset authoring with native admission off before queue mutation", async () => {
+    const provider = await createProvider(pool, {
+      name: `authoring-off-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.test/api/v1", defaultModel: "@preset/authoring-off",
+      textSelection: { kind: "openrouter_preset", slug: "authoring-off" }, contextWindowTokens: 16_384,
+      maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+    }, "authoring-off-test-secret");
+    try {
+      const application = createRuntimeAuthoringApplication(pool, sha256, { nativePresetPlansEnabled: false });
+      const before = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM authoring_jobs WHERE owner_user_id=$1", [ownerUserId]);
+      const input = authoringSubmitSchema.parse({ kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "A closed gate." });
+      await expect(application.submit({ ownerUserId }, input)).rejects.toMatchObject({ code: "authoring_native_text_execution_unavailable" });
+      const after = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM authoring_jobs WHERE owner_user_id=$1", [ownerUserId]);
+      expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+    } finally { await pool.query("DELETE FROM provider_profiles WHERE id=$1", [provider.id]); }
   });
 
   it("isolates two matching durable jobs through the composed prepared executor and exact provider body", async () => {

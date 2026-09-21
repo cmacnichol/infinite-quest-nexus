@@ -413,7 +413,11 @@ integration("PostgreSQL generation command repository", () => {
       }, promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() } } as never;
     const disabledCampaign = await campaign();
     const disabled = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, false);
-    await disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, appendRequest("Keep admission disabled."));
+    await expect(disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, appendRequest("Keep admission disabled.")))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "native_text_execution_unavailable" } });
+    await expect(disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, generationRequestSchema.parse({
+      ...appendRequest("Use the historical direct model."), model: "direct-model"
+    }))).resolves.toMatchObject({ status: "queued" });
     expect(profileCalls).toBe(0);
     expect(presetCalls).toBe(0);
     expect(modelCalls).toBe(0);

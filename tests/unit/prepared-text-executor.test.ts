@@ -46,6 +46,11 @@ function result(): ProviderResult {
 function repository(recordOutput: PhysicalAttemptRepository["recordOutput"]): PhysicalAttemptRepository {
   let row: PhysicalAttemptRecord | null = null;
   return {
+    async summarize() {
+      return { attemptCount: row ? 1 : 0, completedCount: row?.status === "completed" ? 1 : 0,
+        observedUsage: { inputTokens: null, outputTokens: null, totalTokens: null },
+        usageCoverage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCosts: [] };
+    },
     async reserve(input) {
       row = {
         id: `attempt-${input.candidateOrdinal}`, status: "reserved", logicalReservation: input.logicalReservation,
@@ -106,7 +111,8 @@ describe("prepared text executor stream durability", () => {
     await vi.waitFor(() => expect(recordOutput).toHaveBeenCalledOnce());
     expect(externalChunk).not.toHaveBeenCalled();
     release({} as PhysicalAttemptRecord);
-    await expect(pending).resolves.toMatchObject({ content: "accepted", physicalAttemptId: "attempt-0" });
+    await expect(pending).resolves.toMatchObject({ content: "accepted", physicalAttemptId: "attempt-0",
+      physicalAccounting: { attemptCount: 1, completedCount: 1 } });
     expect(externalChunk).toHaveBeenCalledWith("delta", "accumulated");
   });
 
@@ -121,7 +127,8 @@ describe("prepared text executor stream durability", () => {
     const executor = createPreparedTextExecutor({ attempts: repository(recordOutput), loadAuthority });
 
     await expect(executor.execute(executionInput(externalChunk))).rejects.toMatchObject({
-      name: "PreparedRouteTerminalError", reason: "unknown", attemptId: "attempt-0"
+      name: "PreparedRouteTerminalError", reason: "unknown", attemptId: "attempt-0",
+      physicalAccounting: { attemptCount: 1, completedCount: 1 }
     });
     expect(externalChunk).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledOnce();

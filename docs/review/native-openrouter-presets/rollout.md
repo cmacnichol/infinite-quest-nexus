@@ -1,5 +1,7 @@
 # Native OpenRouter preset rollout and rollback
 
+The final F1–F9 fix wave closes additional admission paths before activation. With native admission off, newly selected Presets cannot dispatch through Story, direct/durable/source authoring, organizer, illustration refinement, or the operationless generic text endpoint. The generic endpoint also rejects new Required Models; explicit historical Legacy/Auto concrete Models and persisted v1 replay keep their distinct compatibility path. Preset Save now requires current detail for the exact selected authority. A 2xx provider result rejected after receipt may still incur a real charge: inspect the physical-attempt ledger and owner-scoped logical/job accounting, and use the campaign cost read for applicable Story/illustration charges. Unknown or partial usage must remain unknown or partial. The `turn_generation_accounting_failed` event identifies a post-response accounting write failure separately from provider failure.
+
 Native text execution is controlled by one runtime setting, `NATIVE_TEXT_EXECUTION_PLAN_ADMISSION`, which defaults to `false`. The API reports the same state as `capabilities.nativeTextExecutionPlans`. This branch leaves admission off and does not deploy or enable it.
 
 ## Deployment order

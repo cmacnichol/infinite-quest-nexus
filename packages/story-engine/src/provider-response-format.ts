@@ -20,10 +20,14 @@ export class PreparedResponseContractError extends Error {
   readonly returnedProviderRoute: string | null;
   readonly partialContent: string;
   readonly diagnosticCode: ResponseFormatDiagnosticCode | null;
+  readonly observedUsage: Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
+  readonly observedReportedCost: Readonly<{ amount: string; currency: string }> | null;
 
   constructor(error: unknown, preparedRequest: Readonly<{ body: string; payloadHash: string }>, details: {
     responseId?: string | null; returnedModel?: string | null; returnedProviderRoute?: string | null;
     partialContent?: string; diagnosticCode?: ResponseFormatDiagnosticCode | null;
+    observedUsage?: Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
+    observedReportedCost?: Readonly<{ amount: string; currency: string }> | null;
   } = {}) {
     super("The provider response could not be used for the prepared response contract.");
     this.name = "PreparedResponseContractError";
@@ -37,6 +41,8 @@ export class PreparedResponseContractError extends Error {
     this.returnedProviderRoute = details.returnedProviderRoute ?? null;
     this.partialContent = details.partialContent ?? "";
     this.diagnosticCode = details.diagnosticCode ?? (error as any)?.responseFormatDiagnosticCode ?? null;
+    this.observedUsage = details.observedUsage ?? null;
+    this.observedReportedCost = details.observedReportedCost ?? null;
   }
 }
 

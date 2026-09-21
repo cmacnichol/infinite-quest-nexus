@@ -36,6 +36,7 @@ import {
 } from "@infinite-quest/contracts";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
 import { bindFrozenResponseContractInvocationV2, readFrozenResponseContractsV2 } from "../../../packages/contracts/src/generation-response-contract.js";
+import { normalizeTextSelection } from "../../../packages/contracts/src/provider-selection.js";
 
 function promptContent(snapshot: Record<string, any> | undefined, key: string): string {
   const entry = snapshot?.[key];
@@ -229,7 +230,13 @@ export async function prepareIllustrationTextExecution(
   providers: Pick<IllustrationProviderCollaborators, "execution" | "resolution" | "illustrationTextPlans">,
 ): Promise<IllustrationTextExecutionSnapshot | undefined> {
   const options = providers.illustrationTextPlans;
-  if (config.segment_prompt_mode !== "ai_refined" || options?.nativePresetPlansEnabled !== true) return undefined;
+  if (config.segment_prompt_mode !== "ai_refined") return undefined;
+  if (options?.nativePresetPlansEnabled !== true) {
+    const selected = await directProvider(providers, ownerUserId, "text", config.campaign_text_provider_id);
+    return selected && normalizeTextSelection({ providerType: selected.providerType, providerRole: "text", defaultModel: selected.model }).kind === "openrouter_preset"
+      ? { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" }
+      : undefined;
+  }
   try {
     const selected = await directProvider(providers, ownerUserId, "text", config.campaign_text_provider_id);
     if (!selected) return { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
@@ -542,7 +549,7 @@ async function createProvisionalSegmentInTransaction(
   const segment = segmentResult.rows[0];
   if (!segment) return true; // Already exists
 
-  if (config.segment_prompt_mode === "direct") {
+  if (config.segment_prompt_mode === "direct" || textExecutionSnapshot?.state === "unavailable") {
     const providerPrompt = composeIllustrationProviderPrompt(
       directPrompt.trim(),
       (visualReference || "").trim(),
@@ -635,7 +642,27 @@ export async function promoteProvisionalSet(
   providers: IllustrationProviderCollaborators,
   visualReference?: string,
   textExecutionSnapshot?: IllustrationTextExecutionSnapshot,
-) {
+): Promise<void> {
+  if (isDatabasePool(client)) {
+    return withTransaction(client, (transaction) => promoteProvisionalSet(
+      transaction, ownerUserId, generationJobId, turnId, campaignId, finalNarration,
+      config, providers, visualReference, textExecutionSnapshot
+    ));
+  }
+  const parent = await client.query<{ text_execution_snapshot: unknown | null }>(
+    `SELECT streaming_segments_state->'illustrationTextExecutionSnapshot' AS text_execution_snapshot
+       FROM generation_jobs WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3 FOR SHARE`,
+    [generationJobId, ownerUserId, campaignId]
+  );
+  if (!parent.rows[0]) throw new Error("The generation text execution snapshot is unavailable.");
+  const frozen = parent.rows[0].text_execution_snapshot == null ? undefined
+    : validateIllustrationTextExecutionSnapshotForInsert(
+      parent.rows[0].text_execution_snapshot as IllustrationTextExecutionSnapshot, ownerUserId
+    );
+  const child = validateIllustrationTextExecutionSnapshotForInsert(textExecutionSnapshot, ownerUserId);
+  if (stableStringify(frozen) !== stableStringify(child)) {
+    throw new Error("Illustration children must copy the generation text execution snapshot.");
+  }
   // Update the set
   const setResult = await client.query<{ id: string, character_visual_reference: string }>(
     `UPDATE turn_illustration_sets
@@ -824,9 +851,11 @@ async function createTurnSet(
       );
       continue;
     }
-    const textProvider = frozenTextProvider(validatedTextExecutionSnapshot) ?? await directProvider(
-      providers, ownerUserId, "text", config.campaign_text_provider_id,
-    );
+    const textProvider = validatedTextExecutionSnapshot?.state === "unavailable"
+      ? null
+      : frozenTextProvider(validatedTextExecutionSnapshot) ?? await directProvider(
+        providers, ownerUserId, "text", config.campaign_text_provider_id,
+      );
     if (!textProvider) {
       await queueSegmentDelivery(
         client, ownerUserId, segment, config, directPrompt, "ai_fallback",

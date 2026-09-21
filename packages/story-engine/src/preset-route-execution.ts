@@ -31,9 +31,38 @@ export type PhysicalAttemptRecord = Readonly<{
   emittedOutput: boolean;
 }>;
 
-export type PhysicalAttemptUsage = Readonly<{ inputTokens: number; outputTokens: number; totalTokens: number }> | null;
+export type PhysicalAttemptUsage = Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
+export type PhysicalAttemptAccountingScope =
+  | Readonly<{ kind: "logical"; reservation: LogicalReservation }>
+  | Readonly<{ kind: "job"; ownerUserId: string; logicalKind: LogicalReservation["kind"]; scopeId: string }>;
+export type PhysicalAttemptAccountingSummary = Readonly<{
+  attemptCount: number;
+  completedCount: number;
+  observedUsage: Readonly<{ inputTokens: number | null; outputTokens: number | null; totalTokens: number | null }>;
+  usageCoverage: Readonly<{ inputTokens: number; outputTokens: number; totalTokens: number }>;
+  reportedCosts: readonly ReportedProviderCost[];
+}>;
+
+function observedUsage(value: unknown): PhysicalAttemptUsage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const usage = Object.fromEntries((["inputTokens", "outputTokens", "totalTokens"] as const).flatMap((key) => {
+    const tokens = source[key];
+    return Number.isSafeInteger(tokens) && Number(tokens) >= 0 ? [[key, tokens]] : [];
+  }));
+  return Object.keys(usage).length ? usage : null;
+}
+
+function observedCost(value: unknown): ReportedProviderCost | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  return typeof source.amount === "string" && source.amount.length <= 64 && /^\d+(?:\.\d+)?$/u.test(source.amount)
+    && typeof source.currency === "string" && /^[A-Z]{3}$/u.test(source.currency)
+    ? { amount: source.amount, currency: source.currency } : null;
+}
 
 export type PhysicalAttemptRepository = Readonly<{
+  summarize(scope: PhysicalAttemptAccountingScope): Promise<PhysicalAttemptAccountingSummary>;
   reserve(input: Readonly<{
     logicalReservation: LogicalReservation;
     planProvenance: PhysicalAttemptPlanProvenance;
@@ -110,6 +139,7 @@ export class PreparedRouteTerminalError extends Error {
   readonly attemptId: string | null;
   readonly returnedModel: string | null;
   readonly returnedProviderRoute: string | null;
+  physicalAccounting: PhysicalAttemptAccountingSummary | null = null;
 
   constructor(code: string, reason: PresetRouteFailureReason, message: string, attemptId: string | null = null, options?: ErrorOptions,
     identity?: Readonly<{ returnedModel?: string | null; returnedProviderRoute?: string | null }>) {
@@ -226,6 +256,7 @@ export async function executePresetRoutes<T extends Readonly<{
   returnedModel?: string | null;
   returnedProviderRoute?: string | null;
   usage?: PhysicalAttemptUsage;
+  observedUsage?: PhysicalAttemptUsage;
   reportedCost?: ReportedProviderCost | null;
   usageReported?: boolean;
 }>>(input: Readonly<{
@@ -300,6 +331,7 @@ export async function executePresetRoutes<T extends Readonly<{
     };
     const wireRemaining = input.totalDeadlineMs - (now() - startedAt);
     const routeAbort = routeAbortSignal(input.signal, wireRemaining);
+    let receivedValue: T | null = null;
     try {
       if (wireRemaining <= 0) {
         throw Object.assign(new Error("The prepared route deadline elapsed after dispatch."), { routeFailureReason: "deadline" });
@@ -328,6 +360,7 @@ export async function executePresetRoutes<T extends Readonly<{
           if (!recorded) throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled", "The response-start evidence lost its logical lease.", attempt.id);
         }
       });
+      receivedValue = value;
       assertReturnedIdentity(candidate, value);
       const providerResponseId = value.providerResponseId ?? value.responseId ?? responseEvidence.providerResponseId;
       const completed = await input.attempts.complete(input.logicalReservation, attempt.id, {
@@ -335,8 +368,8 @@ export async function executePresetRoutes<T extends Readonly<{
         returnedModel: value.returnedModel ?? responseEvidence.returnedModel,
         returnedProviderRoute: value.returnedProviderRoute ?? responseEvidence.returnedProviderRoute,
         emittedOutput,
-        usage: value.usageReported === false ? null : value.usage ?? null,
-        reportedCost: value.reportedCost ?? null
+        usage: observedUsage(value.observedUsage ?? (value.usageReported === false ? null : value.usage)),
+        reportedCost: observedCost(value.reportedCost)
       });
       if (!completed) throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled", "The physical attempt completion lost its logical lease.", attempt.id);
       routeAbort.dispose();
@@ -353,14 +386,17 @@ export async function executePresetRoutes<T extends Readonly<{
         emittedOutput: emittedOutput || failure.emittedOutput,
         responseStarted: responseStarted || failure.responseStarted
       };
+      const source = receivedValue ?? (error && typeof error === "object" ? error as RouteFailureCarrier : {});
+      const accounting = source as { observedUsage?: unknown; usage?: unknown; usageReported?: unknown; observedReportedCost?: unknown; reportedCost?: unknown; responseId?: unknown; providerResponseId?: unknown };
       lastFailure = observed.reason;
       const failed = await input.attempts.complete(input.logicalReservation, attempt.id, {
         outcome: "failed", failureReason: observed.reason,
-        providerResponseId: failure.providerResponseId ?? responseEvidence.providerResponseId,
+        providerResponseId: failure.providerResponseId ?? safeIdentity(accounting.providerResponseId ?? accounting.responseId) ?? responseEvidence.providerResponseId,
         returnedModel: failure.returnedModel ?? responseEvidence.returnedModel,
         returnedProviderRoute: failure.returnedProviderRoute ?? responseEvidence.returnedProviderRoute,
         emittedOutput: observed.emittedOutput,
-        usage: null, reportedCost: null
+        usage: observedUsage(accounting.observedUsage ?? (accounting.usageReported === false ? null : accounting.usage)),
+        reportedCost: observedCost(accounting.observedReportedCost ?? accounting.reportedCost)
       });
       if (!failed) {
         throw new PreparedRouteTerminalError("prepared_route_lease_lost", "cancelled", "The failed physical attempt lost its logical lease.", attempt.id, { cause: error });

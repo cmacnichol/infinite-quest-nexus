@@ -165,7 +165,7 @@ describe("generation response-contract production preflight collaborators", () =
     } as never)).resolves.toBeUndefined();
   });
 
-  it("keeps a legacy preset historical while native admission is disabled, then captures its trusted v2 closure when enabled", async () => {
+  it("rejects newly queued presets while native admission is disabled, then captures its trusted v2 closure when enabled", async () => {
     const presetProfile = {
       ...profile,
       model: "@preset/keep",
@@ -193,7 +193,9 @@ describe("generation response-contract production preflight collaborators", () =
       }
     } as never;
 
-    await expect(createQueuedResponsePolicyResolver(apiProviders)({} as never, scope)).resolves.toBeUndefined();
+    await expect(createQueuedResponsePolicyResolver(apiProviders)({} as never, scope)).rejects.toMatchObject({
+      kind: "conflict", details: { reason: "native_text_execution_unavailable" }
+    });
     await expect(createQueuedResponsePolicyResolver(apiProviders, true)({} as never, scope)).resolves.toMatchObject({
       version: 2,
       policy: "required",

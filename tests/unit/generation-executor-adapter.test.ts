@@ -32,6 +32,7 @@ import { providerPromptProtocolVersion } from "../../services/runtime/src/provid
 import { prepareGenerationReview } from "../../services/runtime/src/generation-review-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
+import { logger } from "../../packages/logger/src/index.js";
 
 const claim: ClaimedGeneration = {
   jobId: "00000000-0000-4000-8000-000000000001",
@@ -381,6 +382,7 @@ describe("generation executor adapter", () => {
   });
 
   it("does not replace completed response provenance when a post-success cost write fails", async () => {
+    const warnings = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
     const { job, provider, dependencies, completed } = contractDispatchFixture();
     provider.execute = vi.fn(async (request: any) => {
       const preparedRequest = serializeProviderRequest({ ...provider, baseUrl: "" }, request);
@@ -395,6 +397,35 @@ describe("generation executor adapter", () => {
       diagnosticCode: null,
       resultHash: null
     });
+    expect(warnings.mock.calls.map(([event]) => event)).toContainEqual(expect.objectContaining({
+      event: "turn_generation_accounting_failed"
+    }));
+    expect(warnings.mock.calls.map(([event]) => event)).not.toContainEqual(expect.objectContaining({
+      event: "turn_generation_provider_failed"
+    }));
+    warnings.mockRestore();
+  });
+
+  it("labels historical v1 post-response cost failure as accounting failure", async () => {
+    const warnings = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const job = completeGenerationExecutionPayload();
+    const provider = { id: job.provider_profile_id, name: "Historical", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content: "{}", responseId: "response", finishReason: "stop",
+        outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        reportedCost: null, rawMetadata: {} })) };
+    await expect(callCampaignTextProvider({ pool: {} as DatabasePool, collaborators: {
+      recordProfileCost: vi.fn(async () => { throw new Error("cost write failed"); })
+    } } as never, provider, job, "story_generation", { systemPrompt: "Rules", input: "Act" }))
+      .rejects.toThrow("cost write failed");
+    expect(warnings.mock.calls.map(([event]) => event)).toContainEqual(expect.objectContaining({
+      event: "turn_generation_accounting_failed"
+    }));
+    expect(warnings.mock.calls.map(([event]) => event)).not.toContainEqual(expect.objectContaining({
+      event: "turn_generation_provider_failed"
+    }));
+    warnings.mockRestore();
   });
 
   it("persists bounded private partial prepared-response evidence before completing the failed invocation", async () => {

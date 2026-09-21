@@ -75,7 +75,7 @@ describe("provider selection editor", () => {
   it("invalidates list success, failure, and finally callbacks when mode changes", () => {
     const started = reduceSelectionEditor(initialPresetState(), { type: "requestStarted", requestId: "list-a", mode: "preset", offset: 0 });
     const model = reduceSelectionEditor(started, { type: "modeChanged", mode: "model" });
-    expect(model.list).toEqual({ requestId: null, busy: false, requestedOffset: 0, presets: [], totalCount: 0, nextOffset: null, error: null });
+    expect(model.list).toEqual({ requestId: null, busy: false, requestedOffset: 0, presets: [], totalCount: 0, nextOffset: null, error: null, errorField: null });
     expect(reduceSelectionEditor(model, { type: "listLoaded", requestId: "list-a", page: emptyPage })).toEqual(model);
     expect(reduceSelectionEditor(model, { type: "requestFailed", requestId: "list-a", error: "discovery_unavailable" })).toEqual(model);
     expect(reduceSelectionEditor(model, { type: "requestFinished", requestId: "list-a" })).toEqual(model);
@@ -149,7 +149,7 @@ describe("provider selection editor", () => {
   ])("invalidates detail identity when the user %s", (_name, transition, expectedOverride) => {
     const started = reduceSelectionEditor(initialPresetState(), { type: "detailRequestStarted", requestId: "detail-a", slug: "preset-a" });
     const transitioned = reduceSelectionEditor(started, transition);
-    expect(transitioned.detail).toEqual({ requestId: null, busy: false, slug: null, value: null, error: null });
+    expect(transitioned.detail).toEqual({ requestId: null, busy: false, slug: null, value: null, error: null, errorField: null });
     expect(reduceSelectionEditor(transitioned, { type: "detailLoaded", requestId: "detail-a", detail: detailA })).toEqual(transitioned);
     expect(reduceSelectionEditor(transitioned, { type: "detailFailed", requestId: "detail-a", error: "preset_missing" })).toEqual(transitioned);
     expect(reduceSelectionEditor(transitioned, { type: "detailRequestFinished", requestId: "detail-a" })).toEqual(transitioned);

@@ -353,10 +353,24 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
   textExecutionOverrides?: TextExecutionOverrides | null;
 }>): Promise<PreparedDirectAuthoringTextExecution | null> {
   const options = input.options;
-  if (options?.nativePresetPlansEnabled !== true) return null;
   const selection = input.selectionOverride ?? input.execution.textSelection
     ?? { kind: "model" as const, modelId: input.execution.model };
-  if (!options.preparedExecutor || !options.loadAuthority) throw new Error("Native authoring execution is unavailable.");
+  if (options?.nativePresetPlansEnabled !== true) {
+    if (selection.kind === "openrouter_preset") {
+      throw Object.assign(new Error("Native text execution is unavailable for this OpenRouter preset."), {
+        code: "native_text_execution_unavailable", statusCode: 409
+      });
+    }
+    return null;
+  }
+  if (!options.preparedExecutor || !options.loadAuthority) {
+    if (selection.kind === "openrouter_preset") {
+      throw Object.assign(new Error("Native text execution is unavailable for this OpenRouter preset."), {
+        code: "native_text_execution_unavailable", statusCode: 409
+      });
+    }
+    throw new Error("Native authoring execution is unavailable.");
+  }
   const promptEntries = Object.entries(input.operationPrompts).map(([operation, prompt]) => {
     const typedOperation = directAuthoringTextOperationV2Schema.parse(operation);
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error(`Native authoring prompt is missing operation '${operation}'.`);

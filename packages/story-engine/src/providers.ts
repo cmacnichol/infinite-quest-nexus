@@ -86,6 +86,8 @@ export type ProviderResult = {
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
   /** False when the upstream omitted accounting; zero values then remain compatibility placeholders only. */
   usageReported?: boolean;
+  /** Only fields actually reported by the provider; used by the physical-attempt ledger. */
+  observedUsage?: Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
   /** Private immutable wire evidence for the request that produced this result. */
@@ -95,6 +97,8 @@ export type ProviderResult = {
   }>;
   /** Private stable cost/idempotency identity for the successful wire attempt. */
   physicalAttemptId?: string;
+  /** Owner-scoped durable accounting for every physical route attempt in this logical invocation. */
+  physicalAccounting?: import("./preset-route-execution.js").PhysicalAttemptAccountingSummary;
 };
 
 export type ReportedProviderCost = {
@@ -860,6 +864,16 @@ export function reportedProviderCost(usage: unknown): ReportedProviderCost | nul
   return { amount, currency };
 }
 
+function observedProviderUsage(value: unknown): Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const fields = Object.fromEntries(([ ["prompt_tokens", "inputTokens"], ["completion_tokens", "outputTokens"], ["total_tokens", "totalTokens"] ] as const).flatMap(([remote, local]) => {
+    const tokens = source[remote];
+    return Number.isSafeInteger(tokens) && Number(tokens) >= 0 ? [[local, tokens]] : [];
+  }));
+  return Object.keys(fields).length ? fields : null;
+}
+
 export async function ensureLmStudioModelLoaded(
   profile: TextProviderProfile,
   operation: string,
@@ -963,7 +977,9 @@ async function readSseStream(
     const failure = transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
     Object.assign(failure, {
       ...responseContractStreamEvidence(response, allData, finalData, accumulated),
-      partialContent: accumulated
+      partialContent: accumulated,
+      observedUsage: observedProviderUsage(allData.findLast((item) => item.usage)?.usage ?? finalData.usage),
+      observedReportedCost: reportedProviderCost(allData.findLast((item) => item.usage)?.usage ?? finalData.usage)
     });
     throw failure;
   } finally {
@@ -1174,23 +1190,26 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     const streamed = await readSseStream(response, request.onChunk, profile, "story generation", url, Boolean(request.responseContract));
     const { content, finalData, allData } = streamed;
     evidence = responseContractStreamEvidence(response, allData, finalData, content);
+    const streamUsage = allData.findLast((item) => item.usage)?.usage ?? finalData.usage;
     const sseError = request.responseContract ? structuredSseError(allData) : null;
     if (sseError) {
       const error = new Error("Provider returned an SSE error event for the prepared response contract.");
       Object.assign(error, {
         ...evidence,
-        responseFormatDiagnosticCode: classifyResponseFormatFailure(200, sseError)
+        responseFormatDiagnosticCode: classifyResponseFormatFailure(200, sseError),
+        observedUsage: observedProviderUsage(streamUsage), observedReportedCost: reportedProviderCost(streamUsage)
       });
       throw error;
     }
     if (request.responseContract && responseRefusal(finalData, allData)) {
       const error = new Error("Provider refused the prepared response contract.");
-      Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal" });
+      Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal",
+        observedUsage: observedProviderUsage(streamUsage), observedReportedCost: reportedProviderCost(streamUsage) });
       throw error;
     }
     if (request.responseContract && !streamed.terminalSignal) {
       const error = new Error("Provider stream ended before the prepared response contract completed.");
-      Object.assign(error, evidence);
+      Object.assign(error, { ...evidence, observedUsage: observedProviderUsage(streamUsage), observedReportedCost: reportedProviderCost(streamUsage) });
       throw error;
     }
     const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
@@ -1211,6 +1230,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
         totalTokens: Number(usageObj.total_tokens || 0)
       },
       usageReported: allData.some((item) => item.usage && typeof item.usage === "object") || Boolean(finalData.usage && typeof finalData.usage === "object"),
+      observedUsage: observedProviderUsage(usageObj),
       reportedCost: reportedProviderCost(usageObj),
       rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" },
       preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
@@ -1220,7 +1240,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
   evidence = responseContractEvidence(response, data);
   if (request.responseContract && responseRefusal(data)) {
     const error = new Error("Provider refused the prepared response contract.");
-    Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal" });
+    Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal",
+      observedUsage: observedProviderUsage(data.usage), observedReportedCost: reportedProviderCost(data.usage) });
     throw error;
   }
   const choice = data.choices?.[0] || {};
@@ -1242,6 +1263,7 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       totalTokens: Number(data.usage?.total_tokens || 0)
     },
     usageReported: Boolean(data.usage && typeof data.usage === "object"),
+    observedUsage: observedProviderUsage(data.usage),
     reportedCost: reportedProviderCost(data.usage),
     rawMetadata: { model: data.model || "", provider: data.provider || "" },
     preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
@@ -1254,7 +1276,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       returnedModel: safeObservedIdentity(source.returnedModel) ?? evidence.returnedModel,
       returnedProviderRoute: safeObservedIdentity(source.returnedProviderRoute) ?? evidence.returnedProviderRoute,
       partialContent: typeof source.partialContent === "string" ? source.partialContent : evidence.partialContent,
-      diagnosticCode: source.responseFormatDiagnosticCode ?? source.diagnosticCode ?? evidence.diagnosticCode
+      diagnosticCode: source.responseFormatDiagnosticCode ?? source.diagnosticCode ?? evidence.diagnosticCode,
+      observedUsage: source.observedUsage ?? null, observedReportedCost: source.observedReportedCost ?? null
     });
   }
 }

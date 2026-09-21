@@ -1,5 +1,6 @@
 import type {
   LogicalReservation,
+  PhysicalAttemptAccountingSummary,
   PhysicalAttemptRecord,
   PhysicalAttemptRepository,
   PresetRouteFailureReason
@@ -33,6 +34,47 @@ function reservationKey(value: LogicalReservation): string {
   if (value.kind === "authoring") return `${value.jobId}:${value.stageId}:${value.jobGeneration}:${value.stageGeneration}:${value.operation}`;
   if (value.kind === "illustration") return `${value.promptJobId}:${value.claimAttempt}:${value.operation}`;
   return `${value.requestScopeId}:${value.invocationId}:${value.operation}`;
+}
+
+function decimalTotal(amounts: readonly string[]): string {
+  const scale = Math.max(0, ...amounts.map((amount) => amount.split(".")[1]?.length ?? 0));
+  const total = amounts.reduce((sum, amount) => {
+    const [whole, fraction = ""] = amount.split(".");
+    return sum + BigInt(`${whole}${fraction.padEnd(scale, "0")}`);
+  }, 0n);
+  if (scale === 0) return total.toString();
+  const padded = total.toString().padStart(scale + 1, "0");
+  return `${padded.slice(0, -scale)}.${padded.slice(-scale)}`.replace(/\.0+$/u, "").replace(/(\.\d*?)0+$/u, "$1");
+}
+
+function accountingSummary(rows: readonly Readonly<{ status: string; usage: unknown; reported_cost: unknown }>[]): PhysicalAttemptAccountingSummary {
+  const keys = ["inputTokens", "outputTokens", "totalTokens"] as const;
+  const coverage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const totals = { inputTokens: 0n, outputTokens: 0n, totalTokens: 0n };
+  const costs = new Map<string, string[]>();
+  for (const row of rows) {
+    if (row.status !== "completed") continue;
+    const usage = row.usage && typeof row.usage === "object" && !Array.isArray(row.usage) ? row.usage as Record<string, unknown> : {};
+    for (const key of keys) {
+      const amount = usage[key];
+      if (Number.isSafeInteger(amount) && Number(amount) >= 0) {
+        coverage[key] += 1;
+        totals[key] += BigInt(amount as number);
+      }
+    }
+    const cost = row.reported_cost && typeof row.reported_cost === "object" && !Array.isArray(row.reported_cost)
+      ? row.reported_cost as Record<string, unknown> : {};
+    if (typeof cost.currency === "string" && /^[A-Z]{3}$/u.test(cost.currency)
+      && typeof cost.amount === "string" && /^\d+(?:\.\d+)?$/u.test(cost.amount)) {
+      costs.set(cost.currency, [...(costs.get(cost.currency) ?? []), cost.amount]);
+    }
+  }
+  return Object.freeze({
+    attemptCount: rows.length, completedCount: rows.filter((row) => row.status === "completed").length,
+    observedUsage: Object.freeze(Object.fromEntries(keys.map((key) => [key, coverage[key] && totals[key] <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(totals[key]) : null])) as PhysicalAttemptAccountingSummary["observedUsage"]),
+    usageCoverage: Object.freeze(coverage),
+    reportedCosts: Object.freeze([...costs].sort(([left], [right]) => left.localeCompare(right)).map(([currency, amounts]) => Object.freeze({ currency, amount: decimalTotal(amounts) })))
+  });
 }
 
 function record(row: AttemptRow): PhysicalAttemptRecord {
@@ -113,6 +155,21 @@ async function loadAttempt(client: DatabaseClient, attemptId: string): Promise<P
 
 export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool): PhysicalAttemptRepository {
   return {
+    async summarize(scope) {
+      const logicalKind = scope.kind === "logical" ? scope.reservation.kind : scope.logicalKind;
+      const ownerUserId = scope.kind === "logical" ? scope.reservation.ownerUserId : scope.ownerUserId;
+      const scopeField = { story: "generationJobId", authoring: "jobId", illustration: "promptJobId", direct: "requestScopeId" }[logicalKind];
+      const result = scope.kind === "logical"
+        ? await pool.query<{ status: string; usage: unknown; reported_cost: unknown }>(
+          `SELECT status,usage,reported_cost FROM prepared_text_physical_attempts
+             WHERE owner_user_id=$1 AND logical_kind=$2 AND reservation_key=$3 ORDER BY candidate_ordinal`,
+          [ownerUserId, logicalKind, reservationKey(scope.reservation)])
+        : await pool.query<{ status: string; usage: unknown; reported_cost: unknown }>(
+          `SELECT status,usage,reported_cost FROM prepared_text_physical_attempts
+             WHERE owner_user_id=$1 AND logical_kind=$2 AND logical_reservation->>$3=$4 ORDER BY reserved_at,id`,
+          [ownerUserId, logicalKind, scopeField, scope.scopeId]);
+      return accountingSummary(result.rows);
+    },
     async reserve(input) {
       return withTransaction(pool, async (client) => {
         if (!await hasLiveReservation(client, input.logicalReservation)) return null;
