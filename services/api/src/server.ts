@@ -70,6 +70,7 @@ import {
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
 import { apiErrorEnvelopeSchema } from "../../../packages/contracts/src/http.js";
+import { physicalTextAccountingSchema } from "../../../packages/contracts/src/physical-text-accounting.js";
 import { authoringFailureSchema } from "../../../packages/contracts/src/authoring.js";
 import { projectAuthoringFailure } from "../../../packages/contracts/src/authoring-error-projection.js";
 import {
@@ -516,6 +517,16 @@ export async function buildServer({
       ? authoringFailureSchema.safeParse((error as { authoringFailure?: unknown }).authoringFailure)
       : null;
     const safeAuthoringFailure = authoringFailure?.success ? projectAuthoringFailure(authoringFailure.data) : null;
+    let physicalAccounting: ReturnType<typeof physicalTextAccountingSchema.safeParse> | null = null;
+    if (request.routeOptions.url === "/api/v1/worlds/generate-preview" && typeof error === "object" && error !== null) {
+      try {
+        physicalAccounting = physicalTextAccountingSchema.safeParse(
+          (error as { requestPhysicalAccounting?: unknown }).requestPhysicalAccounting
+        );
+      } catch {
+        // A malformed error carrier must not replace its original failure.
+      }
+    }
     const safeFiveXX = safeAuthoringFailure !== null || isKnownSafeFiveXX(error, details, transport);
     const exposedError = (details.name === "ArchiveError" || details.name === "OriginNotAllowedError") && details.code
       ? details.code
@@ -545,6 +556,7 @@ export async function buildServer({
         : exposed && (code < 500 || safeFiveXX) ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
       ...(safeAuthoringFailure ? { code: safeAuthoringFailure.code } : !exposed || details.code === undefined ? {} : { code: details.code }),
+      ...(physicalAccounting?.success ? { physicalAccounting: physicalAccounting.data } : {}),
       details: transport
         ? { code: providerErrorCode, category: transport.causeCategory, retryable: true }
         : safeAuthoringFailure ? { ...safeAuthoringFailure, correlationId: request.id }

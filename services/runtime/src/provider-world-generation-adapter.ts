@@ -740,60 +740,73 @@ export async function generateTemplateWorld(
       defaultModel: model
     }) })
   });
-  const converted = await generateWorldOutline({
-    input, provider, ...(preparedExecution === null ? {} : { preparedExecution }), worldPrompt, prompt: worldPromptTemplate, repairPrompt: worldRepairPrompt,
-    onRepair: async () => {
-      await onProgress?.("recovering_world", 35, "Generated world was incomplete. Requesting a complete replacement…");
-    }
-  });
-  let validationResult: ProviderResult | undefined;
-
-  const rawCharacters: z.infer<typeof completeConvertedPlayableCharacterSchema>[] = [];
-  for (const [characterIndex, seed] of converted.seeds.entries()) {
-    const safeSeedName = seed.name.slice(0, 200);
-    const percent = 40 + Math.round((characterIndex / converted.seeds.length) * 45);
-    await onProgress?.(
-      "generating_character",
-      percent,
-      `Generating character ${characterIndex + 1} of ${converted.seeds.length}: ${safeSeedName}…`
-    );
-    const generatedCharacter = await expandWorldCharacterSeed({
-      provider,
-      outline: converted,
-      seed,
-      characterIndex,
-      acceptedCharacterNames: rawCharacters.map((character) => character.name),
-      ...(preparedExecution === null ? {} : { preparedExecution }), prompt: seedPrompt, repairPrompt: seedRepairPrompt,
+  try {
+    const converted = await generateWorldOutline({
+      input, provider, ...(preparedExecution === null ? {} : { preparedExecution }), worldPrompt, prompt: worldPromptTemplate, repairPrompt: worldRepairPrompt,
       onRepair: async () => {
-        await onProgress?.("recovering_character", percent, `Character ${characterIndex + 1} was incomplete. Requesting a complete replacement…`);
+        await onProgress?.("recovering_world", 35, "Generated world was incomplete. Requesting a complete replacement…");
       }
     });
-    rawCharacters.push(generatedCharacter);
-  }
+    let validationResult: ProviderResult | undefined;
 
-  await onProgress?.("formatting", 85, "Formatting character roster and world attributes…");
-  let content: WorldContent;
-  try {
-    content = assembleGeneratedWorld({ input, outline: converted, characters: rawCharacters });
+    const rawCharacters: z.infer<typeof completeConvertedPlayableCharacterSchema>[] = [];
+    for (const [characterIndex, seed] of converted.seeds.entries()) {
+      const safeSeedName = seed.name.slice(0, 200);
+      const percent = 40 + Math.round((characterIndex / converted.seeds.length) * 45);
+      await onProgress?.(
+        "generating_character",
+        percent,
+        `Generating character ${characterIndex + 1} of ${converted.seeds.length}: ${safeSeedName}…`
+      );
+      const generatedCharacter = await expandWorldCharacterSeed({
+        provider,
+        outline: converted,
+        seed,
+        characterIndex,
+        acceptedCharacterNames: rawCharacters.map((character) => character.name),
+        ...(preparedExecution === null ? {} : { preparedExecution }), prompt: seedPrompt, repairPrompt: seedRepairPrompt,
+        onRepair: async () => {
+          await onProgress?.("recovering_character", percent, `Character ${characterIndex + 1} was incomplete. Requesting a complete replacement…`);
+        }
+      });
+      rawCharacters.push(generatedCharacter);
+    }
+
+    await onProgress?.("formatting", 85, "Formatting character roster and world attributes…");
+    let content: WorldContent;
+    try {
+      content = assembleGeneratedWorld({ input, outline: converted, characters: rawCharacters });
+    } catch (error) {
+      if (!isGeneratedWorldValidationError(error)) throw error;
+      logger.error({
+        responseId: validationResult?.responseId,
+        finishReason: validationResult?.finishReason,
+        outputLimited: validationResult?.outputLimited,
+        issues: generatedWorldIssues(error)
+      }, "Generated world completion validation failed");
+      throw incompleteGeneratedWorldError(error);
+    }
+
+    await onProgress?.("completed", 100, "World and character generation completed.");
+    logger.info({ characterCount: content.playableCharacters.length }, "Completed template world generation successfully");
+    const physicalAccounting = await preparedExecution?.readAccounting?.();
+    return {
+      title: content.world.title,
+      content,
+      ...(physicalAccounting ? { physicalAccounting } : {})
+    };
   } catch (error) {
-    if (!isGeneratedWorldValidationError(error)) throw error;
-    logger.error({
-      responseId: validationResult?.responseId,
-      finishReason: validationResult?.finishReason,
-      outputLimited: validationResult?.outputLimited,
-      issues: generatedWorldIssues(error)
-    }, "Generated world completion validation failed");
-    throw incompleteGeneratedWorldError(error);
+    if (error instanceof Error) {
+      try {
+        const physicalAccounting = await preparedExecution?.readAccounting?.();
+        if (physicalAccounting) Object.assign(error, { requestPhysicalAccounting: physicalAccounting });
+      } catch {
+        // Projection is optional. Preserve the original terminal error and
+        // the physical attempts already recorded in the durable ledger.
+      }
+    }
+    throw error;
   }
-
-  await onProgress?.("completed", 100, "World and character generation completed.");
-  logger.info({ characterCount: content.playableCharacters.length }, "Completed template world generation successfully");
-  const physicalAccounting = await preparedExecution?.readAccounting?.();
-  return {
-    title: content.world.title,
-    content,
-    ...(physicalAccounting ? { physicalAccounting } : {})
-  };
 }
 
 export type WorldGenerationProviderDependencies = {

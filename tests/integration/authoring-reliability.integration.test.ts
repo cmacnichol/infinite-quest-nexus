@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions } from "../helpers/build-server-options.js";
 import { createApiProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
@@ -12,6 +13,7 @@ import { createApiWorldCampaignApplication } from "../../services/runtime/src/wo
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { worldContentSchema, playableCharacterSchema } from "../../packages/contracts/src/world-library.js";
+import { apiErrorEnvelopeSchema } from "../../packages/contracts/src/http.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { parseAuthoringFailure } from "../../apps/web-next/src/authoring-errors.js";
 import fixture from "../fixtures/authoring/reliability.json" with { type: "json" };
@@ -26,20 +28,45 @@ integration("authoring reliability API, runtime provider and PostgreSQL", () => 
   let server: Server;
   let transport: ReturnType<typeof installIntegrationProviderTransport>;
   let providerId: string;
+  let config: RuntimeConfig;
   let worldId: string;
   let campaignId: string;
   let replies: string[] = [];
   let requests: unknown[] = [];
   let apiLogs: unknown[] = [];
+  let nativeAccountingFixture = false;
+  let nativeRequests: unknown[] = [];
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
     await migrateDatabase(pool, resolve("database/migrations"));
     transport = installIntegrationProviderTransport();
     server = createServer((request, response) => {
+      if (nativeAccountingFixture && request.method === "GET" && request.url?.includes("/models")) {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "native-model", context_length: 16_384, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        return;
+      }
+      if (nativeAccountingFixture && request.method === "GET" && request.url?.includes("/presets/charged-terminal")) {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ data: { slug: "charged-terminal", name: "Charged terminal", status: "active",
+          designated_version: { id: "charged-terminal-v1", version: 1, system_prompt: "Synthetic native prompt.", config: { model: "native-model" } } } }));
+        return;
+      }
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
+        if (nativeAccountingFixture) {
+          const parsed = JSON.parse(body);
+          nativeRequests.push(parsed);
+          const outline = parsed.response_format?.json_schema?.name === "infinite_quest_world_outline_v1";
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ id: crypto.randomUUID(), model: outline ? "native-model" : "unapproved-model",
+            choices: [{ message: { content: JSON.stringify(outline ? fixture.world : fixture.character) }, finish_reason: "stop" }],
+            usage: outline ? { prompt_tokens: 5, cost: "0.1", currency: "USD" }
+              : { completion_tokens: 7, cost: "0.2", currency: "EUR" } }));
+          return;
+        }
         requests.push(JSON.parse(body));
         const reply = replies.shift();
         response.writeHead(reply === undefined ? 500 : 200, { "Content-Type": "application/json" });
@@ -49,7 +76,7 @@ integration("authoring reliability API, runtime provider and PostgreSQL", () => 
     await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Synthetic provider did not listen");
-    const config: RuntimeConfig = {
+    config = {
       role: "all",
       host: "127.0.0.1",
       port: 8080,
@@ -120,7 +147,7 @@ integration("authoring reliability API, runtime provider and PostgreSQL", () => 
     campaignId = campaign.json().id;
   });
   beforeEach(async () => {
-    replies = []; requests = []; apiLogs = [];
+    replies = []; requests = []; apiLogs = []; nativeRequests = []; nativeAccountingFixture = false;
     await pool.query("UPDATE provider_profiles SET enabled = true, is_default = true WHERE id = $1", [providerId]);
   });
   afterAll(async () => { await app?.close(); await transport?.close(); if (server) await new Promise<void>((done) => server.close(() => done())); await pool?.end(); });
@@ -153,6 +180,94 @@ integration("authoring reliability API, runtime provider and PostgreSQL", () => 
     expect(response.json().content.playableCharacters).toHaveLength(3);
     expect(requests).toHaveLength(5);
     expect(await snapshot()).toEqual(before);
+  });
+  it("reports charged native attempts across successful outline and terminal seed in the actual preview error", async () => {
+    const marker = `PRIVATE_CHARGED_${crypto.randomUUID()}`;
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await createProvider(pool, {
+      name: `task-accounting-charged-${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, defaultModel: "@preset/charged-terminal",
+      textSelection: { kind: "openrouter_preset", slug: "charged-terminal" }, contextWindowTokens: 16_384,
+      maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+    }, config.credentialEncryptionKey);
+    const nativeConfig = { ...config, nativeTextExecutionPlanAdmission: true };
+    const graph = createApiProviderApplicationComposition(pool, {
+      credentialSecret: config.credentialEncryptionKey, transport, nativeTextExecutionPlanAdmission: true
+    });
+    const openNativeApp = (worldGenerationGraph: typeof graph) => buildServer(inertStorageServerOptions({
+      config: nativeConfig, pool, providers: createProviderApplicationAdapter(worldGenerationGraph),
+      worldCampaign: createApiWorldCampaignApplication(pool, worldGenerationGraph)
+    }));
+    nativeAccountingFixture = true;
+    try {
+      const before = await snapshot();
+      const nativeApp = await openNativeApp(graph);
+      let first;
+      try {
+        first = await nativeApp.inject({ method: "POST", url: "/api/v1/worlds/generate-preview", payload: { prompt: marker } });
+      } finally { await nativeApp.close(); }
+      expect(first.statusCode).toBe(500);
+      const firstError = apiErrorEnvelopeSchema.parse(first.json());
+      expect(firstError.error).toBe("Internal server error");
+      expect(firstError.details).toEqual({});
+      expect(firstError.physicalAccounting).toEqual({
+        attemptCount: 2, completedCount: 2,
+        observedUsage: { inputTokens: 5, outputTokens: 7, totalTokens: null },
+        usageCoverage: { inputTokens: 1, outputTokens: 1, totalTokens: 0 },
+        reportedCosts: [{ amount: "0.2", currency: "EUR" }, { amount: "0.1", currency: "USD" }]
+      });
+      expect(nativeRequests).toHaveLength(2);
+      expect(first.body).not.toContain(marker);
+      expect(first.body).not.toContain("Synthetic native prompt.");
+      expect(first.body).not.toContain("unapproved-model");
+      expect(await snapshot()).toEqual(before);
+      const scopes = await pool.query<{ request_scope_id: string }>(
+        `SELECT DISTINCT logical_reservation->>'requestScopeId' AS request_scope_id
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='direct' AND request_body LIKE $1`, [`%${marker}%`]
+      );
+      expect(scopes.rows).toHaveLength(1);
+      const attempts = await pool.query<{ outcome: string; usage: unknown; reported_cost: unknown }>(
+        `SELECT outcome, usage, reported_cost FROM prepared_text_physical_attempts
+          WHERE owner_user_id=$1 AND logical_kind='direct' AND logical_reservation->>'requestScopeId'=$2 ORDER BY id`,
+        [ownerUserId, scopes.rows[0]!.request_scope_id]
+      );
+      expect(attempts.rows.map((row) => row.outcome).sort()).toEqual(["failed", "succeeded"]);
+      expect(attempts.rows).toHaveLength(2);
+      const accounting = createPostgresPreparedTextAttemptRepository(pool);
+      const accountScope = { kind: "job", ownerUserId, logicalKind: "direct", scopeId: scopes.rows[0]!.request_scope_id } as const;
+      expect(await accounting.summarize(accountScope)).toEqual(firstError.physicalAccounting);
+      expect(await accounting.summarize(accountScope)).toEqual(firstError.physicalAccounting);
+      expect((await accounting.summarize({ ...accountScope, ownerUserId: crypto.randomUUID() })).attemptCount).toBe(0);
+
+      const preparedExecutor = graph.worldGeneration.authoringTextPlans?.preparedExecutor;
+      if (!preparedExecutor?.summarize) throw new Error("Prepared summary fixture unavailable");
+      const originalSummarize = preparedExecutor.summarize;
+      const faultGraph = { ...graph, worldGeneration: { ...graph.worldGeneration,
+        authoringTextPlans: { ...graph.worldGeneration.authoringTextPlans!, preparedExecutor: {
+          ...preparedExecutor,
+          summarize: (scope: Parameters<typeof originalSummarize>[0]) => scope.kind === "job"
+            ? Promise.reject(new Error("summary read unavailable")) : originalSummarize(scope)
+        } }
+      } };
+      const faultApp = await openNativeApp(faultGraph);
+      let second;
+      try {
+        second = await faultApp.inject({ method: "POST", url: "/api/v1/worlds/generate-preview", payload: { prompt: marker } });
+      } finally { await faultApp.close(); }
+      expect(second.statusCode).toBe(first.statusCode);
+      const secondError = apiErrorEnvelopeSchema.parse(second.json());
+      expect(secondError.error).toBe(firstError.error);
+      expect(secondError.code).toBe(firstError.code);
+      expect(secondError.message).toBe(firstError.message);
+      expect(secondError.details).toEqual(firstError.details);
+      expect(secondError.physicalAccounting).toBeUndefined();
+      expect(nativeRequests).toHaveLength(4);
+      expect(await snapshot()).toEqual(before);
+    } finally {
+      nativeAccountingFixture = false;
+      await pool.query("DELETE FROM provider_profiles WHERE id=$1", [provider.id]);
+    }
   });
   it.each(["world", "character", "organizer"] as const)("exhausted %s repair is sanitized 502, logs safe, and database revisions unchanged", async (stage) => {
     const spies = ["info", "warn", "error", "debug"].map((method) => vi.spyOn(logger, method as "info").mockImplementation(() => logger));
