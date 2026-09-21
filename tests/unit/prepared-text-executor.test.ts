@@ -6,7 +6,12 @@ import type {
   PhysicalAttemptRecord,
   PhysicalAttemptRepository
 } from "../../packages/story-engine/src/preset-route-execution.js";
-import type { ProviderRequest, ProviderResult } from "../../packages/story-engine/src/providers.js";
+import {
+  callTextProvider,
+  createProviderTransport,
+  type ProviderRequest,
+  type ProviderResult
+} from "../../packages/story-engine/src/providers.js";
 import { createPreparedTextExecutor } from "../../services/runtime/src/prepared-text-executor.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -104,6 +109,7 @@ describe("prepared text executor stream durability", () => {
     const recordOutput = vi.fn(() => persisted);
     const externalChunk = vi.fn();
     const provider = authority(async (request) => {
+      expect(request.responseFormatFallback).toBe("forbid");
       await request.onChunk?.("delta", "accumulated");
       return result();
     });
@@ -147,5 +153,60 @@ describe("prepared text executor stream durability", () => {
     expect(execute).toHaveBeenCalledOnce();
     await expect(executor.execute(input)).rejects.toMatchObject({ code: "prepared_route_unknown_outcome" });
     expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a prepared illustration schema request intact after a response-format rejection", async () => {
+    const sentBodies: string[] = [];
+    const completions: unknown[] = [];
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      sentBodies.push(String(init?.body));
+      if (sentBodies.length === 1) {
+        return new Response(JSON.stringify({ error: { code: "response_format_unsupported", message: "response_format unsupported" } }), {
+          status: 400
+        });
+      }
+      return new Response(JSON.stringify({
+        id: "must-not-accept", model: "model-a", provider: "route-a",
+        choices: [{ message: { content: '{"image_prompt":"must not accept"}' }, finish_reason: "stop" }], usage: {}
+      }), { status: 200 });
+    });
+    const transport = createProviderTransport({
+      fetcher: fetcher as typeof fetch,
+      dispatcherFactory: () => ({ close: async () => undefined, destroy: () => undefined }) as never,
+      policy: {
+        async approve(url) {
+          return { url, origin: url.origin, address: "127.0.0.1", family: 4, port: 443, servername: url.hostname };
+        }
+      }
+    });
+    const originalBody = JSON.stringify({
+      model: "model-a",
+      messages: [{ role: "system", content: "Frozen illustration instructions." }, { role: "user", content: "Refine the image prompt." }],
+      response_format: { type: "json_schema", json_schema: { name: "infinite_quest_illustration_prompt_refinement_v1", strict: true, schema: { type: "object" } } },
+      provider: { only: ["route-a"], require_parameters: true }
+    });
+    const attempts = repository(vi.fn());
+    const complete = attempts.complete;
+    const trackedAttempts: PhysicalAttemptRepository = {
+      ...attempts,
+      complete: async (reservation, attemptId, completion) => {
+        completions.push(completion);
+        return complete(reservation, attemptId, completion);
+      }
+    };
+    const provider = authority((request) => callTextProvider({
+      providerType: "openrouter", baseUrl: "https://openrouter.example.test/api/v1", model: "model-a",
+      contextWindowTokens: 8_000, maxOutputTokens: 1_000, temperature: 0.2
+    }, request, transport));
+    const executor = createPreparedTextExecutor({ attempts: trackedAttempts, loadAuthority: async () => provider });
+    const input = {
+      ...executionInput(vi.fn()),
+      preparedRequest: { body: originalBody, payloadHash: hash(originalBody), operation: "story generation" as const, budgetAudit: null }
+    };
+
+    await expect(executor.execute(input)).rejects.toMatchObject({ name: "PreparedRouteTerminalError", attemptId: "attempt-0" });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(JSON.parse(sentBodies[0]!)).toEqual(JSON.parse(originalBody));
+    expect(completions).toEqual([expect.objectContaining({ outcome: "failed" })]);
   });
 });

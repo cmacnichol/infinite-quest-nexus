@@ -141,6 +141,9 @@ export function createPreparedTextExecutor(input: Readonly<{
           const onChunk = execution.request.onChunk;
           const value = await current.execute({
             ...execution.request,
+            // Prepared bodies are frozen authority evidence. A provider must
+            // reject the contract rather than retrying a downgraded body.
+            responseFormatFallback: "forbid",
             canonicalBudgeting: true,
             preparedRequest: { ...attempt.preparedRequest, operation: "story generation", budgetAudit: null },
             abortSignal: attempt.signal,
