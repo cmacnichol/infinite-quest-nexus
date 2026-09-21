@@ -327,7 +327,8 @@ export function createIllustrationPromptRefinementAdapter(
             responseId: result.responseId,
             finishReason: result.finishReason,
             usage: result.usage,
-            reportedCost: result.reportedCost
+            reportedCost: result.reportedCost,
+            ...(result.physicalAttemptId ? { physicalAttemptId: result.physicalAttemptId } : {})
           })
         };
       } catch (error) {

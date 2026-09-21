@@ -118,8 +118,9 @@ integration("response-contract provider failures", () => {
         requestBodies.push(body);
         if (scenario === "route_invalid_identity" || scenario === "route_refusal") {
           const requestedModel = JSON.parse(body).model as string;
-          response.writeHead(200, { "content-type": "application/json", "x-generation-id": "charged-terminal-id" });
-          response.end(JSON.stringify({ id: "charged-terminal-id", model: scenario === "route_invalid_identity" ? "wrong-served-model" : requestedModel,
+          const responseId = `charged-terminal-${scenario}-${requestBodies.length}`;
+          response.writeHead(200, { "content-type": "application/json", "x-generation-id": responseId });
+          response.end(JSON.stringify({ id: responseId, model: scenario === "route_invalid_identity" ? "wrong-served-model" : requestedModel,
             provider: "preset-route", choices: [{ message: scenario === "route_refusal" ? { refusal: "No response." } : { content: successfulStory }, finish_reason: scenario === "route_refusal" ? "content_filter" : "stop" }],
             usage: { prompt_tokens: 21, cost: "0.0064", currency: "USD" } }));
           return;
@@ -1027,14 +1028,32 @@ integration("response-contract provider failures", () => {
     const value = await fixture("required", false, true, "fallback");
     const before = await authority(value.campaignId);
     await executeOnce(value);
-    const attempts = await pool.query<{ outcome: string; failure_reason: string; usage: unknown; reported_cost: unknown }>(
-      `SELECT outcome,failure_reason,usage,reported_cost FROM prepared_text_physical_attempts
+    const attempts = await pool.query<{ id: string; outcome: string; failure_reason: string; usage: unknown; reported_cost: unknown }>(
+      `SELECT id,outcome,failure_reason,usage,reported_cost FROM prepared_text_physical_attempts
          WHERE owner_user_id=$1 AND logical_reservation->>'generationJobId'=$2 ORDER BY candidate_ordinal`,
       [ownerUserId, value.job.id]
     );
     expect(requestBodies).toHaveLength(1);
-    expect(attempts.rows).toEqual([{ outcome: "failed", failure_reason: failureScenario === "route_refusal" ? "refusal" : "invalid_identity",
-      usage: { inputTokens: 21 }, reported_cost: { amount: "0.0064", currency: "USD" } }]);
+    expect(attempts.rows).toEqual([expect.objectContaining({ outcome: "failed", failure_reason: failureScenario === "route_refusal" ? "refusal" : "invalid_identity",
+      usage: { inputTokens: 21 }, reported_cost: { amount: "0.0064", currency: "USD" } })]);
+    const event = await pool.query<{
+      localCallId: string; generationJobId: string | null; providerProfileId: string | null;
+      amount: string; currency: string; usage: Record<string, unknown>;
+    }>(
+      `SELECT local_call_id AS "localCallId",generation_job_id AS "generationJobId",
+              provider_profile_id AS "providerProfileId",amount::text,currency,usage_metadata AS usage
+         FROM provider_cost_events WHERE owner_user_id=$1 AND local_call_id=$2`,
+      [ownerUserId, attempts.rows[0]!.id]
+    );
+    expect(event.rows).toEqual([{
+      localCallId: attempts.rows[0]!.id, generationJobId: value.job.id, providerProfileId: value.providerId,
+      amount: "0.0064", currency: "USD", usage: { inputTokens: 21 }
+    }]);
+    await pool.query("DELETE FROM generation_jobs WHERE id=$1 AND owner_user_id=$2", [value.job.id, ownerUserId]);
+    await expect(pool.query(
+      "SELECT generation_job_id,provider_profile_id FROM provider_cost_events WHERE owner_user_id=$1 AND local_call_id=$2",
+      [ownerUserId, attempts.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ generation_job_id: null, provider_profile_id: value.providerId }] });
     const costs = createProviderCostRepository(pool);
     for (let replay = 0; replay < 2; replay += 1) {
       expect(await costs.getCampaignCostSummary({ ownerUserId, campaignId: value.campaignId })).toMatchObject({

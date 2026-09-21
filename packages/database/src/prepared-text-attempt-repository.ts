@@ -29,6 +29,16 @@ type AttemptRow = Readonly<{
   emitted_output: boolean;
 }>;
 
+type CampaignCostAttribution = Readonly<{
+  campaignId: string;
+  providerProfileId: string;
+  providerType: string;
+  generationJobId: string | null;
+  turnId: string | null;
+  category: "story" | "image";
+  operation: string;
+}>;
+
 function reservationKey(value: LogicalReservation): string {
   if (value.kind === "story") return `${value.generationJobId}:${value.invocationId}`;
   if (value.kind === "authoring") return `${value.jobId}:${value.stageId}:${value.jobGeneration}:${value.stageGeneration}:${value.operation}`;
@@ -140,6 +150,92 @@ async function hasLiveReservation(client: DatabaseClient, value: LogicalReservat
     [value.promptJobId, value.ownerUserId, value.claimAttempt, value.leaseOwner]
   );
   return Boolean(result.rows[0]);
+}
+
+async function lockCampaignCostAttribution(
+  client: DatabaseClient,
+  reservation: LogicalReservation,
+): Promise<CampaignCostAttribution | null> {
+  if (reservation.kind !== "story" && reservation.kind !== "illustration") return null;
+  const parent = reservation.kind === "story"
+    ? await client.query<{ provider_profile_id: string | null }>(
+      "SELECT provider_profile_id FROM generation_jobs WHERE id=$1 AND owner_user_id=$2",
+      [reservation.generationJobId, reservation.ownerUserId]
+    )
+    : await client.query<{ provider_profile_id: string | null }>(
+      "SELECT provider_profile_id FROM illustration_prompt_jobs WHERE id=$1 AND owner_user_id=$2",
+      [reservation.promptJobId, reservation.ownerUserId]
+    );
+  const providerProfileId = parent.rows[0]?.provider_profile_id;
+  if (!providerProfileId) return null;
+  const profile = await client.query<{ provider_type: string }>(
+    "SELECT provider_type FROM provider_profiles WHERE id=$1 AND owner_user_id=$2 FOR KEY SHARE",
+    [providerProfileId, reservation.ownerUserId]
+  );
+  if (!profile.rows[0]) return null;
+  if (reservation.kind === "story") {
+    const locked = await client.query<{
+      campaign_id: string; provider_profile_id: string; operation: string;
+    }>(
+      `SELECT job.campaign_id,job.provider_profile_id,invocation->>'operation' AS operation
+         FROM generation_jobs job
+         CROSS JOIN LATERAL jsonb_array_elements(coalesce(job.orchestration_private->'responseContractInvocations','[]'::jsonb)) invocation
+        WHERE job.id=$1 AND job.owner_user_id=$2 AND job.lease_owner=$3
+          AND job.status IN ('assessing','generating','validating','committing')
+          AND job.lease_expires_at > now() AND job.provider_profile_id=$4
+          AND invocation->>'id'=$5 AND invocation->>'status'='dispatched'
+        FOR UPDATE OF job`,
+      [reservation.generationJobId, reservation.ownerUserId, reservation.workerId, providerProfileId, reservation.invocationId]
+    );
+    const row = locked.rows[0];
+    return row ? {
+      campaignId: row.campaign_id, providerProfileId: row.provider_profile_id, providerType: profile.rows[0].provider_type,
+      generationJobId: reservation.generationJobId, turnId: null, category: "story", operation: row.operation
+    } : null;
+  }
+  const locked = await client.query<{
+    campaign_id: string; turn_id: string; provider_profile_id: string;
+  }>(
+    `SELECT campaign_id,turn_id,provider_profile_id FROM illustration_prompt_jobs
+      WHERE id=$1 AND owner_user_id=$2 AND status='refining' AND attempts=$3
+        AND lease_owner=$4 AND lease_expires_at > now() AND provider_profile_id=$5
+      FOR UPDATE`,
+    [reservation.promptJobId, reservation.ownerUserId, reservation.claimAttempt, reservation.leaseOwner, providerProfileId]
+  );
+  const row = locked.rows[0];
+  return row ? {
+    campaignId: row.campaign_id, providerProfileId: row.provider_profile_id, providerType: profile.rows[0].provider_type,
+    generationJobId: null, turnId: row.turn_id, category: "image", operation: "illustration_prompt_refinement"
+  } : null;
+}
+
+function hasRecordableCost(value: unknown): value is Readonly<{ amount: string; currency: string }> {
+  return Boolean(value) && typeof value === "object"
+    && typeof (value as { amount?: unknown }).amount === "string"
+    && /^\d+(?:\.\d+)?$/u.test((value as { amount: string }).amount)
+    && typeof (value as { currency?: unknown }).currency === "string"
+    && /^[A-Z]{3}$/u.test((value as { currency: string }).currency);
+}
+
+async function materializeCampaignCost(
+  client: DatabaseClient,
+  attemptId: string,
+  attempt: AttemptRow,
+  attribution: CampaignCostAttribution,
+  completion: Parameters<PhysicalAttemptRepository["complete"]>[2],
+): Promise<void> {
+  if (!hasRecordableCost(completion.reportedCost)) return;
+  await client.query(
+    `INSERT INTO provider_cost_events (
+       owner_user_id,campaign_id,turn_id,provider_profile_id,generation_job_id,local_call_id,
+       provider_type,provider_response_id,category,operation,requested_model,resolved_model,amount,currency,usage_metadata
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+     ON CONFLICT DO NOTHING`,
+    [attempt.logical_reservation.ownerUserId, attribution.campaignId, attribution.turnId, attribution.providerProfileId,
+      attribution.generationJobId, attemptId, attribution.providerType, completion.providerResponseId ?? null,
+      attribution.category, attribution.operation, attempt.requested_model, completion.returnedModel ?? attempt.requested_model,
+      completion.reportedCost.amount, completion.reportedCost.currency, JSON.stringify(completion.usage ?? {})]
+  );
 }
 
 async function loadAttempt(client: DatabaseClient, attemptId: string): Promise<PhysicalAttemptRecord | null> {
@@ -262,6 +358,8 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
     async complete(reservation, attemptId, completion) {
       return withTransaction(pool, async (client) => {
         if (!await hasLiveReservation(client, reservation)) return null;
+        const attribution = await lockCampaignCostAttribution(client, reservation);
+        if ((reservation.kind === "story" || reservation.kind === "illustration") && !attribution) return null;
         const updated = await client.query<{ id: string }>(
           `UPDATE prepared_text_physical_attempts
               SET status='completed',outcome=$5,failure_reason=$6,provider_response_id=coalesce(provider_response_id,$7),
@@ -277,7 +375,17 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
             completion.returnedProviderRoute, completion.usage === null ? null : JSON.stringify(completion.usage),
             completion.reportedCost === null ? null : JSON.stringify(completion.reportedCost), completion.emittedOutput]
         );
-        return updated.rows[0] ? loadAttempt(client, attemptId) : null;
+        if (!updated.rows[0]) return null;
+        const attempt = await client.query<AttemptRow>(
+          `SELECT id,status,logical_reservation,plan_hash,requested_preset_slug,requested_preset_version_id,
+                  requested_preset_config_hash,candidate_ordinal,requested_model,provider_policy,
+                  request_payload_hash,request_body,provider_response_id,returned_model,returned_provider_route,emitted_output
+             FROM prepared_text_physical_attempts WHERE id=$1`,
+          [attemptId]
+        );
+        if (!attempt.rows[0]) return null;
+        if (attribution) await materializeCampaignCost(client, attemptId, attempt.rows[0], attribution, completion);
+        return record(attempt.rows[0]);
       });
     }
   };

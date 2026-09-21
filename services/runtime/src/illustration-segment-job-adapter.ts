@@ -1500,7 +1500,8 @@ export async function runIllustrationPromptJob(
           WHERE id = $1 AND lease_owner = $2 AND status = 'refining'`,
         [claimed.id, workerId, responseId]
       );
-      if (portMetadata) {
+      const physicalAttemptId = typeof portMetadata?.physicalAttemptId === "string" ? portMetadata.physicalAttemptId : null;
+      if (portMetadata && !physicalAttemptId) {
         const profile = await client.query<{ provider_type: string }>(
           "SELECT provider_type FROM provider_profiles WHERE id = $1 AND owner_user_id = $2",
           [claimed.provider_profile_id, claimed.owner_user_id]
