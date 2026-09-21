@@ -691,6 +691,7 @@ export async function generateTemplateWorld(
   worldId: string,
   model?: string,
   onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void,
+  textExecutionOverrides?: import("@infinite-quest/contracts").TextExecutionOverrides | null,
 ): Promise<{ title: string; content: WorldContent }> {
   if (!providerProfileId) {
     logger.error({ ownerUserId, sourceKind: input.sourceKind }, "World generation failed: missing provider profile ID");
@@ -725,6 +726,7 @@ export async function generateTemplateWorld(
     ownerUserId,
     execution: provider,
     ...(providers.authoringTextPlans === undefined ? {} : { options: providers.authoringTextPlans }),
+    ...(textExecutionOverrides === undefined ? {} : { textExecutionOverrides }),
     operationPrompts: {
       worldOutline: effectiveAuthoringPrompt("world", worldPromptTemplate).content,
       worldOutlineRepair: effectiveAuthoringPrompt("world", worldRepairPrompt).content,

@@ -3,7 +3,7 @@ import type {
   PromptCatalogKey,
   ProviderType
 } from "@infinite-quest/contracts";
-import type { TextModelSelection } from "@infinite-quest/contracts";
+import type { TextExecutionOverrides, TextModelSelection } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
 import type { ModelParameterAdvertisement, TextResponseFormatPolicy } from "@infinite-quest/contracts";
 import type { PresetPage, ResolvedPreset } from "@infinite-quest/contracts";
@@ -52,6 +52,7 @@ export type SafeProviderConfigurationFields = Readonly<{
   embeddingDimensions?: number;
   embeddingMaxRetries?: number;
   textResponseFormatPolicy?: TextResponseFormatPolicy;
+  textExecutionOverrides?: TextExecutionOverrides;
 }>;
 
 declare const safeProviderConfigurationBrand: unique symbol;
@@ -157,6 +158,8 @@ export type ProviderProfileChanges = Readonly<{
   temperature?: number;
   requestTimeoutMs?: number;
   configuration?: SafeProviderConfiguration;
+  /** Separate patch intent preserves omission versus explicit clear after safe projection. */
+  textExecutionOverrides?: TextExecutionOverrides | null;
   enabled?: boolean;
   isDefault?: boolean;
 }>;

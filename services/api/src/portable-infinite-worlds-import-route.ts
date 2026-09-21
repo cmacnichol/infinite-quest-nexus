@@ -64,6 +64,7 @@ function providerSelection(request: InfiniteWorldsImportRequest) {
   return request.providerProfileId === undefined ? undefined : {
     providerProfileId: request.providerProfileId,
     ...(request.model === undefined ? {} : { model: request.model }),
+    ...(request.textExecutionOverrides === undefined ? {} : { textExecutionOverrides: request.textExecutionOverrides }),
   };
 }
 

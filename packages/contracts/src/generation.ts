@@ -16,6 +16,7 @@ import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
 import { generationFailureDiagnosticProjectionSchema, generationReviewTransportSchema } from "./generation-review.js";
+import { textExecutionOverridesSchema } from "./text-execution-plan.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -94,6 +95,8 @@ export const generationRequestSchema = z.object({
   model: z.string().trim().max(500).optional(),
   /** Typed native selection. The legacy model field remains its exact compatibility alias. */
   textSelection: textModelSelectionSchema.optional(),
+  /** Omitted inherits same-selection saved intent; null restores profile/Preset inheritance. */
+  textExecutionOverrides: textExecutionOverridesSchema.nullable().optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   context: z.object({
     budgetTokens: z.coerce.number().int().min(512).max(4_000_000).default(32000),

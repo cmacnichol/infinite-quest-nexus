@@ -11,7 +11,7 @@ import { normalizeTextSelection } from "../../packages/contracts/src/provider-se
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import type { SchemaVerificationV2 } from "../../packages/contracts/src/text-response-format.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
-import { prepareAuthoringResponseContractExecution, prepareAuthoringTextExecution, prepareDirectAuthoringTextExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { prepareAuthoringResponseContractExecution, prepareAuthoringTextExecution, prepareDirectAuthoringTextExecution, serializePreparedAuthoringRequest } from "../../services/runtime/src/authoring-text-execution-preparation.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
@@ -133,6 +133,176 @@ describe("executeAuthoringStage", () => {
     expect(prepared.plans.worldOutline!.prompt).toBe("Preset rules.\n\nCreate a world.");
     expect(prepared.plans.standaloneCharacter!.authorityRevision).toBe("authority");
     expect(prepared.plans.standaloneCharacter!.requestTimeoutMs).toBe(10_000);
+  });
+
+  it("maps saved and request text overrides once while keeping them scoped to the effective selection", async () => {
+    const execution = {
+      ...descriptor,
+      id: "00000000-0000-4000-8000-000000000061",
+      name: "Text",
+      providerRole: "text" as const,
+      providerType: "openrouter" as const,
+      executionRevision: "ordinary",
+      authorityRevision: "authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "story" },
+      configuration: {
+        textExecutionOverrides: {
+          parameters: { temperature: 0.19, max_tokens: 700 },
+          conservativeContextWindowTokens: 6_000
+        }
+      },
+      execute: async () => providerResult("{}")
+    };
+    const ports = {
+      resolvePreset: vi.fn(async ({ slug }: { slug: string }) => ({
+        slug, name: slug, versionId: `v-${slug}`, version: 1, configHash: "a".repeat(64),
+        config: { models: ["model-pinned"], temperature: 0.8, max_tokens: 900 }, systemPrompt: "Preset rules."
+      })),
+      discoverModels: vi.fn(async () => [{ id: "model-pinned", contextWindowTokens: 12_000, maxOutputTokens: 1_000 }])
+    };
+
+    const operationPrompts = {
+      worldOutline: "Create the world.",
+      standaloneCharacter: "Create the character.",
+      organizer: "Organize the character.",
+      sourceExtraction: "Extract source facts.",
+      sourceSynthesis: "Synthesize the world.",
+      sourceCharacter: "Synthesize the source character.",
+      illustrationPromptRefinement: "Refine the illustration prompt."
+    };
+    const inherited = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts, ports
+    });
+    expect(inherited.routeBasis.parameters).toMatchObject({ temperature: 0.19, max_tokens: 700 });
+    expect(inherited.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 6_000, maxOutputTokens: 700 });
+    for (const operation of Object.keys(operationPrompts)) {
+      expect(inherited.plans[operation]).toMatchObject({
+        parameters: { temperature: 0.19, max_tokens: 700 }
+      });
+    }
+
+    const cleared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports,
+      textExecutionOverrides: null
+    });
+    expect(cleared.routeBasis.parameters).toMatchObject({ temperature: 0.8, max_tokens: 900 });
+    expect(cleared.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 8_192, maxOutputTokens: 900 });
+
+    const replaced = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports,
+      textExecutionOverrides: { parameters: { top_p: 0.44 }, conservativeContextWindowTokens: 7_000 }
+    });
+    expect(replaced.routeBasis.parameters).toMatchObject({ temperature: 0.8, top_p: 0.44, max_tokens: 900 });
+    expect(replaced.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 7_000, maxOutputTokens: 900 });
+
+    const changedSelection = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports,
+      selectionOverride: { kind: "openrouter_preset", slug: "other" }
+    });
+    expect(changedSelection.routeBasis.parameters).toMatchObject({ temperature: 0.8, max_tokens: 900 });
+    expect(changedSelection.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 8_192, maxOutputTokens: 900 });
+  });
+
+  it("serializes effective temperature and output bytes while enforcing conservative and hard caps", async () => {
+    const execution = {
+      ...descriptor,
+      id: "00000000-0000-4000-8000-000000000062",
+      name: "Text",
+      providerRole: "text" as const,
+      providerType: "openrouter" as const,
+      executionRevision: "ordinary",
+      authorityRevision: "authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "story" },
+      configuration: {
+        textExecutionOverrides: {
+          parameters: { temperature: 0.19, max_tokens: 5_000 },
+          conservativeContextWindowTokens: 6_000
+        }
+      },
+      execute: async () => providerResult("{}")
+    };
+    const ports = {
+      resolvePreset: async () => ({
+        slug: "story", name: "Story", versionId: "v1", version: 1, configHash: "a".repeat(64),
+        config: { model: "model-pinned", temperature: 0.8, max_tokens: 900 }, systemPrompt: "Preset rules."
+      }),
+      discoverModels: async () => [{ id: "model-pinned" }]
+    };
+    const prepare = (textExecutionOverrides?: null, discovery = ports) => prepareAuthoringResponseContractExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports: discovery,
+      ...(textExecutionOverrides === undefined ? {} : { textExecutionOverrides })
+    });
+    const overridden = await prepare();
+    const overriddenRequest = serializePreparedAuthoringRequest({
+      execution, prepared: overridden, operation: "worldOutline",
+      request: { systemPrompt: "ignored", input: "small input" }
+    });
+    expect(JSON.parse(overriddenRequest.body)).toMatchObject({ temperature: 0.19, max_tokens: 1_024 });
+    expect(overriddenRequest.budgetAudit).toMatchObject({ inputLimit: 4_976, outputReserveTokens: 1_024 });
+
+    const cleared = await prepare(null, {
+      ...ports,
+      discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8_192, maxOutputTokens: 1_000 }]
+    });
+    const clearedRequest = serializePreparedAuthoringRequest({
+      execution, prepared: cleared, operation: "worldOutline",
+      request: { systemPrompt: "ignored", input: "small input" }
+    });
+    expect(JSON.parse(clearedRequest.body)).toMatchObject({ temperature: 0.8, max_tokens: 900 });
+    expect(clearedRequest.budgetAudit).toMatchObject({ inputLimit: 7_292, outputReserveTokens: 900 });
+  });
+
+  it("carries saved overrides into actual direct world and organizer request bytes", async () => {
+    const execution = {
+      ...descriptor,
+      id: "00000000-0000-4000-8000-000000000064",
+      name: "Text",
+      providerRole: "text" as const,
+      providerType: "openrouter" as const,
+      executionRevision: "ordinary",
+      authorityRevision: "authority",
+      endpointIdentity: "endpoint",
+      textSelection: { kind: "openrouter_preset" as const, slug: "story" },
+      configuration: {
+        textExecutionOverrides: {
+          parameters: { temperature: 0.19, max_tokens: 5_000 },
+          conservativeContextWindowTokens: 6_000
+        }
+      },
+      execute: async () => providerResult("{}")
+    };
+    const execute = vi.fn(async (_input: unknown) => providerResult("{}"));
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution,
+      operationPrompts: { worldOutline: "Create.", organizer: "Organize." },
+      options: {
+        nativePresetPlansEnabled: true,
+        preparedExecutor: { execute },
+        loadAuthority: async () => ({
+          id: execution.id,
+          providerRole: "text" as const,
+          authorityRevision: execution.authorityRevision,
+          endpointIdentity: execution.endpointIdentity
+        }),
+        ports: {
+          resolvePreset: async () => ({
+            slug: "story", name: "Story", versionId: "v1", version: 1,
+            configHash: "a".repeat(64), config: { model: "model-pinned", temperature: 0.8, max_tokens: 900 },
+            systemPrompt: "Preset rules."
+          }),
+          discoverModels: async () => [{ id: "model-pinned" }]
+        }
+      } as never
+    });
+
+    await prepared!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "small world" } });
+    await prepared!.execute({ operation: "organizer", request: { systemPrompt: "ignored", input: "small character" } });
+    for (const [call] of execute.mock.calls) {
+      const request = (call as { preparedRequest: { body: string; budgetAudit: unknown } }).preparedRequest;
+      expect(JSON.parse(request.body)).toMatchObject({ temperature: 0.19, max_tokens: 1_024 });
+      expect(request.budgetAudit).toMatchObject({ inputLimit: 4_976, outputReserveTokens: 1_024 });
+    }
   });
 
   it("rejects v2 preparation without current authority evidence", async () => {

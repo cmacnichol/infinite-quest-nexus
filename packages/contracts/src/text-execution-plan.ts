@@ -10,6 +10,12 @@ export const textGenerationParametersSchema = z.object({
   temperature: finiteNumberSchema.min(0).max(2).optional(), top_p: finiteNumberSchema.min(0).max(1).optional(), top_k: z.number().int().min(0).optional(), frequency_penalty: finiteNumberSchema.min(-2).max(2).optional(), presence_penalty: finiteNumberSchema.min(-2).max(2).optional(), repetition_penalty: finiteNumberSchema.positive().optional(), min_p: finiteNumberSchema.min(0).max(1).optional(), top_a: finiteNumberSchema.min(0).max(1).optional(), seed: z.number().int().min(0).optional(), max_tokens: positiveIntegerSchema.optional(), max_completion_tokens: positiveIntegerSchema.optional()
 }).strict();
 
+/** Public saved/request-scoped intent layered over a selected Model or Preset. */
+export const textExecutionOverridesSchema = z.object({
+  parameters: textGenerationParametersSchema.optional(),
+  conservativeContextWindowTokens: positiveIntegerSchema.max(4_000_000).optional()
+}).strict();
+
 export const providerRoutingPolicySchema = z.object({
   order: z.array(z.string().trim().min(1)).max(64).optional(), only: z.array(z.string().trim().min(1)).max(64).optional(), ignore: z.array(z.string().trim().min(1)).max(64).optional(), allow_fallbacks: z.boolean().optional(), require_parameters: z.boolean().optional(), data_collection: z.enum(["allow", "deny"]).optional(), sort: z.enum(["price", "throughput", "latency"]).optional(), quantizations: z.array(z.string().trim().min(1)).max(64).optional(), enforce_distillable_text: z.boolean().optional(), preferred_min_throughput: finiteNumberSchema.min(0).optional(), preferred_max_latency: finiteNumberSchema.min(0).optional(), max_price: z.object({ prompt: finiteNumberSchema.min(0).optional(), completion: finiteNumberSchema.min(0).optional(), image: finiteNumberSchema.min(0).optional(), request: finiteNumberSchema.min(0).optional() }).strict().refine((value) => Object.keys(value).length > 0).optional(), zdr: z.boolean().optional()
 }).strict().superRefine((value, context) => {
@@ -47,6 +53,7 @@ export const textExecutionPlanSchema = z.object({
 export const textExecutionPlanPublicSummarySchema = z.object({ version: z.literal(2), selection: textModelSelectionSchema, preset: z.object({ slug: z.string().trim().min(1), versionId: z.string().trim().min(1), configHash: hashSchema }).strict().nullable(), candidates: z.array(textRouteCandidateSchema).min(1), parameters: textGenerationParametersSchema, planHash: hashSchema }).strict();
 
 export type TextGenerationParameters = Readonly<z.infer<typeof textGenerationParametersSchema>>;
+export type TextExecutionOverrides = Readonly<z.infer<typeof textExecutionOverridesSchema>>;
 export type ProviderRoutingPolicy = Readonly<z.infer<typeof providerRoutingPolicySchema>>;
 export type TextRouteCandidate = Readonly<z.infer<typeof textRouteCandidateSchema>>;
 export type TextExecutionRouteBasis = Readonly<z.infer<typeof textExecutionRouteBasisSchema>>;

@@ -679,7 +679,7 @@ async function insertLogicalRecord(
             record.authority.providerRole,
             record.baseUrl ?? "http://disabled.invalid",
             record.authority.defaultModel,
-            json(record.authority.textSelection ?? null),
+            record.authority.textSelection ?? null,
             record.authority.contextWindowTokens,
             record.authority.maxOutputTokens,
             record.authority.temperature,

@@ -2,6 +2,7 @@ import type {
   CampaignArchivePreviewResponse,
   CyoaImportPreviewResult,
   StoryImportResult,
+  TextExecutionOverrides,
   WorldImportRequest
 } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
@@ -97,6 +98,7 @@ export type PortablePreviewDestination =
 export type PortableTemplateProviderSelection = Readonly<{
   providerProfileId: string;
   model?: string;
+  textExecutionOverrides?: TextExecutionOverrides | null;
 }>;
 
 /**

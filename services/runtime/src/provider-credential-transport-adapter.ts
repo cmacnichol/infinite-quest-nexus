@@ -314,12 +314,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     },
     async discoverCandidatePresets(candidate, request) {
       if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
-      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration) };
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole) };
       return Object.freeze({ providerProfileId: null, page: await discoverOpenRouterPresets(profile, request, options.transport) });
     },
     async resolveCandidatePreset(candidate, slug, signal) {
       if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
-      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration) };
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole) };
       return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport, signal) });
     }
   };
@@ -328,7 +328,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory> {
-    const configuration = validateProviderConfiguration(candidate.providerType, candidate.configuration);
+    const configuration = validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole);
     const profile: TextProviderProfile = {
       providerType: candidate.providerType,
       baseUrl: candidate.baseUrl.replace(/\/+$/, ""),
@@ -425,12 +425,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     discoverCandidateModelsWithCredential: discoverCandidateModels,
     async discoverCandidatePresetsWithCredential(candidate, request, credential) {
       if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
-      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
       return Object.freeze({ providerProfileId: null, page: await discoverOpenRouterPresets(profile, request, options.transport) });
     },
     async resolveCandidatePresetWithCredential(candidate, slug, credential, signal) {
       if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
-      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
       return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport, signal) });
     },
     async storeCredential(ownerUserId, providerProfileId, credential) {

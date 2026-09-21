@@ -38,6 +38,58 @@ describe("provider API configuration boundary", () => {
     expect(value.application.createProfile.mock.calls[0]?.[0].configuration).toEqual({ textResponseFormatPolicy: "auto" });
   });
 
+  it.each(["create", "update", "candidate"] as const)("rejects malformed text execution overrides for %s before safe projection", async (operation) => {
+    const value = adapter();
+    const invalid = { ...input, configuration: { textExecutionOverrides: { parameters: { temperature: 99 } }, ignoredClaim: true } };
+    const call = operation === "create" ? () => value.adapter.create(owner, invalid as never)
+      : operation === "update" ? () => value.adapter.update(owner, id, { configuration: invalid.configuration } as never)
+        : () => value.adapter.discoverModels(owner, invalid as never);
+    await expect(call()).rejects.toMatchObject({ statusCode: 400 });
+    expect(value.application.createProfile).not.toHaveBeenCalled();
+    expect(value.application.updateProfile).not.toHaveBeenCalled();
+    expect(value.runtime.discoverCandidateModelsWithCredential).not.toHaveBeenCalled();
+  });
+
+  it.each(["image", "embedding"] as const)("rejects text execution overrides for a %s profile", async (providerRole) => {
+    const value = adapter();
+    await expect(value.adapter.create(owner, {
+      ...input,
+      providerRole,
+      configuration: { textExecutionOverrides: { parameters: { temperature: 0.4 } } }
+    } as never)).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/text execution overrides/i) });
+    expect(value.application.createProfile).not.toHaveBeenCalled();
+  });
+
+  it("returns the repository Required default on create while retaining safe same-request fields", async () => {
+    const value = adapter();
+    value.application.createProfile.mockResolvedValue({
+      profile: {
+        ...input, id,
+        configuration: {
+          textResponseFormatPolicy: "required",
+          textExecutionOverrides: { parameters: { temperature: 0.2 } }
+        },
+        hasCredential: false,
+        health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null },
+        createdAt: "now", updatedAt: "now"
+      },
+      configurationProjection: {
+        kind: "same_request_echo",
+        configuration: { textExecutionOverrides: { parameters: { temperature: 0.2 } } }
+      }
+    });
+
+    const result = await value.adapter.create(owner, {
+      ...input,
+      configuration: { textExecutionOverrides: { parameters: { temperature: 0.2 } } }
+    } as never);
+
+    expect(result.configuration).toEqual({
+      textResponseFormatPolicy: "required",
+      textExecutionOverrides: { parameters: { temperature: 0.2 } }
+    });
+  });
+
   it("accepts a native OpenRouter preset and derives its legacy default model", async () => {
     const value = adapter();
     const textSelection = { kind: "openrouter_preset" as const, slug: "nexus-nsfw" };

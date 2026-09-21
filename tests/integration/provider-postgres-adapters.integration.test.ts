@@ -877,6 +877,72 @@ integration("provider PostgreSQL adapters", () => {
     });
   });
 
+  it("persists, preserves, clears, and selection-scopes explicit text execution overrides", async () => {
+    const scoped = await fixture("text-execution-overrides");
+    const initialOverrides = {
+      parameters: { temperature: 0.23, max_tokens: 777 },
+      conservativeContextWindowTokens: 12_345
+    };
+    const created = await inTransaction((client) => createPostgresProviderRepositories(client).profiles.createProfile({
+      ...profileCommand(scoped.ownerUserId, `Overrides ${crypto.randomUUID()}`),
+      providerType: "openrouter",
+      defaultModel: "@preset/night-shift",
+      textSelection: { kind: "openrouter_preset", slug: "night-shift" },
+      configuration: toSafeProviderConfiguration({ textExecutionOverrides: initialOverrides })
+    }));
+    expect(created.configuration).toMatchObject({
+      textResponseFormatPolicy: "required",
+      textExecutionOverrides: initialOverrides
+    });
+
+    const preserved = await inTransaction((client) => createPostgresProviderRepositories(client).profiles.updateProfile({
+      ownerUserId: scoped.ownerUserId,
+      providerProfileId: created.id,
+      changes: { configuration: toSafeProviderConfiguration({ httpReferer: "https://nexus.example.test" }) }
+    }));
+    expect(preserved.configuration).toMatchObject({
+      httpReferer: "https://nexus.example.test",
+      textExecutionOverrides: initialOverrides
+    });
+
+    const equivalentSelection = await inTransaction((client) => createPostgresProviderRepositories(client).profiles.updateProfile({
+      ownerUserId: scoped.ownerUserId,
+      providerProfileId: created.id,
+      changes: { defaultModel: "@preset/night-shift" }
+    }));
+    expect(equivalentSelection.configuration.textExecutionOverrides).toEqual(initialOverrides);
+
+    const switched = await inTransaction((client) => createPostgresProviderRepositories(client).profiles.updateProfile({
+      ownerUserId: scoped.ownerUserId,
+      providerProfileId: created.id,
+      changes: { textSelection: { kind: "model", modelId: "openai/new-model" } }
+    }));
+    expect(switched.configuration).not.toHaveProperty("textExecutionOverrides");
+
+    const explicitlyReplaced = await inTransaction((client) => createPostgresProviderRepositories(client).profiles.updateProfile({
+      ownerUserId: scoped.ownerUserId,
+      providerProfileId: created.id,
+      changes: {
+        textSelection: { kind: "openrouter_preset", slug: "night-shift" },
+        configuration: toSafeProviderConfiguration({ httpReferer: "https://nexus.example.test", textExecutionOverrides: { parameters: { top_p: 0.4 } } }),
+        textExecutionOverrides: { parameters: { top_p: 0.4 } }
+      }
+    }));
+    expect(explicitlyReplaced.configuration.textExecutionOverrides).toEqual({ parameters: { top_p: 0.4 } });
+
+    const cleared = await inTransaction((client) => createPostgresProviderRepositories(client).profiles.updateProfile({
+      ownerUserId: scoped.ownerUserId,
+      providerProfileId: created.id,
+      changes: { textExecutionOverrides: null }
+    }));
+    expect(cleared.configuration).not.toHaveProperty("textExecutionOverrides");
+
+    await expect(inTransaction((client) => createPostgresProviderRepositories(client).profiles.createProfile({
+      ...profileCommand(scoped.ownerUserId, `Image overrides ${crypto.randomUUID()}`, "image"),
+      configuration: toSafeProviderConfiguration({ textExecutionOverrides: { parameters: { temperature: 0.2 } } })
+    }))).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/text execution overrides/i) });
+  });
+
   it("keeps cost writes caller-transaction-owned and reads isolated by owner, campaign, turn, category, and currency", async () => {
     const profile = await inTransaction((client) =>
       createPostgresProviderRepositories(client).profiles.createProfile(profileCommand(first.ownerUserId, `Cost ${crypto.randomUUID()}`))

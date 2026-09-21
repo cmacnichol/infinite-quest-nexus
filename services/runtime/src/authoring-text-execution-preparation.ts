@@ -16,6 +16,7 @@ import {
   type ResponseInvocationKeyV2,
   type TextExecutionPlan,
   type TextExecutionRouteBasis,
+  type TextExecutionOverrides,
   type TextModelSelection
 } from "@infinite-quest/contracts";
 import { randomUUID } from "node:crypto";
@@ -44,6 +45,7 @@ import type { ProviderResponseFormatCapabilities } from "./provider-response-for
 import { resolveGenerationResponseContractsV2 } from "./generation-response-contract.js";
 import { resolveTextExecutionPlans, type TextExecutionPlanDiscoveryPorts } from "./provider-preset-resolution.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
+import { resolveEffectiveTextExecutionOverrides } from "./text-execution-overrides.js";
 
 export type PreparedTextExecutionOperation = ResponseContractOperationV2 | AuthoringTextOperation
   | "organizer" | "organizerRepair" | "illustrationPromptRefinement";
@@ -94,14 +96,21 @@ export async function prepareAuthoringTextExecution(input: Readonly<{
   operationPrompts: Readonly<Record<string, string>>;
   ports: TextExecutionPlanDiscoveryPorts;
   selectionOverride?: TextModelSelection;
+  textExecutionOverrides?: TextExecutionOverrides | null;
 }>): Promise<PreparedAuthoringTextPlans> {
   if (!input.execution.authorityRevision || !input.execution.executionRevision) {
     throw new Error("Authoring v2 preparation requires current execution and authority revisions.");
   }
   const selection = input.selectionOverride ?? input.execution.textSelection ?? { kind: "model" as const, modelId: input.execution.model };
+  const overrides = resolveEffectiveTextExecutionOverrides({
+    execution: input.execution,
+    selection,
+    ...(input.textExecutionOverrides === undefined ? {} : { requestOverrides: input.textExecutionOverrides })
+  });
   const resolved = await resolveTextExecutionPlans({
     profile: { ownerUserId: input.ownerUserId, providerProfileId: input.execution.id, profileRevision: input.execution.executionRevision, authorityRevision: input.execution.authorityRevision, providerType: input.execution.providerType, selection, contextWindowTokens: input.execution.contextWindowTokens, maxOutputTokens: input.execution.maxOutputTokens, requestTimeoutMs: input.execution.requestTimeoutMs, parameters: { temperature: input.execution.temperature }, endpointReference: input.execution.endpointIdentity ?? input.execution.id, credentialReference: input.execution.id, protocolVersion: "authoring-text-plan-v2" },
     operationPrompts: input.operationPrompts,
+    ...(overrides === undefined ? {} : { overrides }),
     ports: input.ports
   });
   return resolved;
@@ -230,6 +239,7 @@ export async function prepareAuthoringResponseContractExecution(input: Readonly<
   operationPrompts: Readonly<Partial<Record<AuthoringTextOperationV2, string>>>;
   ports: TextExecutionPlanDiscoveryPorts;
   selectionOverride?: TextModelSelection;
+  textExecutionOverrides?: TextExecutionOverrides | null;
   responseFormatCapabilities?: DirectAuthoringTextPlanOptions["responseFormatCapabilities"];
 }>): Promise<PreparedAuthoringResponseContractExecution> {
   const selection = input.selectionOverride ?? input.execution.textSelection
@@ -245,7 +255,8 @@ export async function prepareAuthoringResponseContractExecution(input: Readonly<
     execution: input.execution,
     operationPrompts: Object.fromEntries(promptEntries),
     ports: input.ports,
-    selectionOverride: selection
+    selectionOverride: selection,
+    ...(input.textExecutionOverrides === undefined ? {} : { textExecutionOverrides: input.textExecutionOverrides })
   });
   const invocationKeys = [...new Set(promptEntries.map(([operation]) => authoringResponseContractIdentity(operation).invocationKey))];
   const contractPreparation = directContractPreparation({
@@ -339,6 +350,7 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
   operationPrompts: Readonly<Partial<Record<DirectAuthoringTextOperationV2, string>>>;
   options?: DirectAuthoringTextPlanOptions;
   selectionOverride?: TextModelSelection;
+  textExecutionOverrides?: TextExecutionOverrides | null;
 }>): Promise<PreparedDirectAuthoringTextExecution | null> {
   const options = input.options;
   if (options?.nativePresetPlansEnabled !== true) return null;
@@ -354,7 +366,8 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
   const prepared = await prepareAuthoringTextExecution({
     ownerUserId: input.ownerUserId, execution: input.execution,
     operationPrompts: Object.fromEntries(promptEntries), ports: options.ports,
-    selectionOverride: selection
+    selectionOverride: selection,
+    ...(input.textExecutionOverrides === undefined ? {} : { textExecutionOverrides: input.textExecutionOverrides })
   });
   const invocationKeys = [...new Set(promptEntries.map(([operation]) => directAuthoringResponseContractIdentity(operation).invocationKey))];
   const contractPreparation = directContractPreparation({

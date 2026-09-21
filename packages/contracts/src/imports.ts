@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { textExecutionOverridesSchema } from "./text-execution-plan.js";
 import { campaignCharacterProfileSchema } from "./world-library.js";
 
 const coerceToString = (val: unknown): string | undefined => {
@@ -108,6 +109,7 @@ export const infiniteWorldsImportRequestSchema = z.object({
   targetWorldVersionId: z.uuid().optional(),
   providerProfileId: z.uuid().optional(),
   model: z.string().trim().max(500).optional(),
+  textExecutionOverrides: textExecutionOverridesSchema.nullable().optional(),
   enrichFinalTurn: z.boolean().default(false)
 });
 

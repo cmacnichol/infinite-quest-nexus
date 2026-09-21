@@ -6,7 +6,7 @@ import type {
 } from "../../../packages/contracts/src/index.js";
 import {
   toSafeProviderConfiguration,
-  assertResponseFormatPolicy,
+  assertProviderConfiguration,
   type ProviderApplication,
   type ProviderCandidate,
   type ProviderModelInventory,
@@ -81,7 +81,7 @@ function profileResponse(
   capabilities?: ProviderApiComposition["responseFormatCapabilities"],
 ) {
   const configuration = mutation?.configurationProjection.kind === "same_request_echo"
-    ? mutation.configurationProjection.configuration
+    ? Object.freeze({ ...profile.configuration, ...mutation.configurationProjection.configuration })
     : profile.configuration;
   return {
     id: profile.id,
@@ -125,7 +125,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async create(ownerUserId: string, input: ProviderProfileInput) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration, input.providerRole);
       assertTextSelectionRole(input);
       const textSelection = input.providerRole === "text" || input.providerRole === "intent"
         ? normalizeTextSelection(input)
@@ -159,7 +159,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration);
       const textSelection = input.textSelection;
       return composition.transaction(async ({ application, runtime }) => {
         const mutation = await application.updateProfile({
@@ -177,7 +177,12 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
             ...(input.temperature === undefined ? {} : { temperature: input.temperature }),
             ...(input.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: input.requestTimeoutMs }),
             ...(input.configuration === undefined ? {} : {
-              configuration: toSafeProviderConfiguration(input.configuration)
+              configuration: toSafeProviderConfiguration(input.configuration),
+              ...(!Object.prototype.hasOwnProperty.call(input.configuration, "textExecutionOverrides") ? {} : {
+                textExecutionOverrides: input.configuration.textExecutionOverrides === null
+                  ? null
+                  : toSafeProviderConfiguration(input.configuration).textExecutionOverrides
+              })
             }),
             ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
             ...(input.isDefault === undefined ? {} : { isDefault: input.isDefault })
@@ -252,7 +257,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async discoverModels(ownerUserId: string, input: ProviderProfileInput) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration, input.providerRole);
       assertTextSelectionRole(input);
       const textSelection = input.providerRole === "text" || input.providerRole === "intent"
         ? normalizeTextSelection(input)
@@ -285,7 +290,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async discoverPresets(ownerUserId: string, input: ProviderProfileInput, offset: number, limit: number, signal?: AbortSignal) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration, input.providerRole);
       assertTextSelectionRole(input);
       const textSelection = input.providerRole === "text" || input.providerRole === "intent" ? normalizeTextSelection(input) : undefined;
       const candidate: ProviderCandidate = { ownerUserId, name: input.name, providerType: input.providerType, providerRole: input.providerRole, baseUrl: input.baseUrl, defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel, ...(textSelection ? { textSelection } : {}), contextWindowTokens: input.contextWindowTokens, maxOutputTokens: input.maxOutputTokens, temperature: input.temperature, requestTimeoutMs: input.requestTimeoutMs, configuration: toSafeProviderConfiguration(input.configuration), enabled: input.enabled, isDefault: input.isDefault };
@@ -293,7 +298,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async resolvePreset(ownerUserId: string, input: ProviderProfileInput, slug: string, signal?: AbortSignal) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration, input.providerRole);
       assertTextSelectionRole(input);
       const textSelection = input.providerRole === "text" || input.providerRole === "intent" ? normalizeTextSelection(input) : undefined;
       const candidate: ProviderCandidate = { ownerUserId, name: input.name, providerType: input.providerType, providerRole: input.providerRole, baseUrl: input.baseUrl, defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel, ...(textSelection ? { textSelection } : {}), contextWindowTokens: input.contextWindowTokens, maxOutputTokens: input.maxOutputTokens, temperature: input.temperature, requestTimeoutMs: input.requestTimeoutMs, configuration: toSafeProviderConfiguration(input.configuration), enabled: input.enabled, isDefault: input.isDefault };

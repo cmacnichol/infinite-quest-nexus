@@ -77,6 +77,7 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   portable_import_operations: "operational",
   portable_import_work: "operational",
   portable_staged_inputs: "operational",
+  prepared_text_physical_attempts: "operational",
   private_filesystem_delivery_grants: "security_authority",
   private_finalized_asset_delivery_grants: "security_authority",
   private_legacy_asset_read_capabilities: "security_authority",
@@ -279,7 +280,8 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
   provider_profiles: sourceColumns({
     portable_exact: [
       "id", "name", "provider_type", "provider_role", "default_model", "context_window_tokens",
-      "max_output_tokens", "temperature", "created_at", "updated_at", "is_default", "request_timeout_ms"
+      "max_output_tokens", "temperature", "created_at", "updated_at", "is_default", "request_timeout_ms",
+      "text_selection"
     ],
     portable_sanitized: ["base_url", "configuration"],
     portable_normalized: ["enabled"],

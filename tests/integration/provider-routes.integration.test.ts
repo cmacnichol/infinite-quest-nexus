@@ -141,6 +141,63 @@ integration("provider route configuration redaction", () => {
     expect(response.json()).not.toHaveProperty("apiKey");
   });
 
+  it("round-trips strict text overrides with PATCH preserve and explicit clear semantics", async () => {
+    const overrides = {
+      parameters: { temperature: 0.31, max_completion_tokens: 654 },
+      conservativeContextWindowTokens: 9_999
+    };
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput,
+      name: `${baseProviderInput.name} OVERRIDES ${crypto.randomUUID()}`,
+      providerType: "openrouter", providerRole: "text", defaultModel: "@preset/night-shift",
+      textSelection: { kind: "openrouter_preset", slug: "night-shift" },
+      configuration: { textExecutionOverrides: overrides }
+    } });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().configuration).toEqual({
+      textResponseFormatPolicy: "required",
+      textExecutionOverrides: overrides
+    });
+
+    const renamed = await app.inject({ method: "PATCH", url: `/api/v1/providers/${created.json().id}`, payload: {
+      name: `${baseProviderInput.name} OVERRIDES renamed ${crypto.randomUUID()}`
+    } });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json().configuration.textExecutionOverrides).toEqual(overrides);
+
+    const cleared = await app.inject({ method: "PATCH", url: `/api/v1/providers/${created.json().id}`, payload: {
+      configuration: { textExecutionOverrides: null }
+    } });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().configuration).not.toHaveProperty("textExecutionOverrides");
+    expect(cleared.json().configuration.textResponseFormatPolicy).toBe("required");
+
+    const invalid = await app.inject({ method: "PATCH", url: `/api/v1/providers/${created.json().id}`, payload: {
+      configuration: { textExecutionOverrides: { parameters: { top_p: 2 } } }
+    } });
+    expect(invalid.statusCode).toBe(400);
+
+    const image = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput,
+      name: `${baseProviderInput.name} IMAGE OVERRIDES ${crypto.randomUUID()}`,
+      configuration: { textExecutionOverrides: overrides }
+    } });
+    expect(image.statusCode).toBe(400);
+
+    const savedImage = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput,
+      name: `${baseProviderInput.name} IMAGE PATCH ${crypto.randomUUID()}`,
+      configuration: {}
+    } });
+    expect(savedImage.statusCode).toBe(201);
+    const imagePatch = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/providers/${savedImage.json().id}`,
+      payload: { configuration: { textExecutionOverrides: overrides } }
+    });
+    expect(imagePatch.statusCode).toBe(400);
+  });
+
   it("discovers saved OpenRouter preset summaries and owner-only detail without returning credentials", async () => {
     const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
       ...baseProviderInput, name: `${baseProviderInput.name} PRESET ${crypto.randomUUID()}`,

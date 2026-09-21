@@ -20,6 +20,7 @@ import { normalizeNewTextResponsePolicy, resolveResponseContractAdmission } from
 import { getProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { responseContractInvocationClosureV2 } from "./generation-response-contract.js";
+import { resolveEffectiveTextExecutionOverrides } from "./text-execution-overrides.js";
 
 export type ApiGenerationCompositionFactories = Readonly<{
   createCommandRepository(pool: DatabasePool): GenerationCommandRepository;
@@ -60,7 +61,6 @@ export function createQueuedResponsePolicyResolver(
       : configuredPolicy;
     if (nativeTextExecutionPlanAdmission && policy === "required") {
       if (!preparedTextExecution || preparedTextExecution.providerProfileId !== profile.id
-        || preparedTextExecution.executionRevision !== profile.executionRevision
         || preparedTextExecution.authorityRevision !== profile.authorityRevision
         || preparedTextExecution.endpointIdentity !== (profile.endpointIdentity ?? profile.id)) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
@@ -211,6 +211,13 @@ function createQueuedTextExecutionPreparation(
       if (!profile.executionRevision || !profile.authorityRevision) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
       }
+      const overrides = resolveEffectiveTextExecutionOverrides({
+        execution: defaultProfile,
+        selection,
+        ...(scope.requestedTextExecutionOverrides === undefined
+          ? {}
+          : { requestOverrides: scope.requestedTextExecutionOverrides })
+      });
       if (selection.kind === "model") {
         const inventory = await providers.responseFormatInventory.listModels({
           ownerUserId: scope.ownerUserId, providerProfileId, providerRole: "text"
@@ -240,7 +247,10 @@ function createQueuedTextExecutionPreparation(
           },
           // Catalog advertisements need not include capacity. The selected
           // profile cap remains the conservative, queue-frozen limit.
-          overrides: { conservativeContextWindowTokens: profile.contextWindowTokens }
+          overrides: {
+            ...(profile.contextWindowTokens === undefined ? {} : { conservativeContextWindowTokens: profile.contextWindowTokens }),
+            ...(overrides ?? {})
+          }
         });
         return {
           providerProfileId,
@@ -269,7 +279,8 @@ function createQueuedTextExecutionPreparation(
             return inventory.models.filter((model) => modelIds.includes(model.id)).map((model) => ({ id: model.id,
               ...(model.contextWindowTokens === undefined ? {} : { contextWindowTokens: model.contextWindowTokens }) }));
           }
-        }
+        },
+        ...(overrides === undefined ? {} : { overrides })
       });
       return {
         providerProfileId,
@@ -286,7 +297,6 @@ function createQueuedTextExecutionPreparation(
       const profile = await providers.loadQueuedTextProfile(client, scope.ownerUserId, scope.providerProfileId,
         prepared.selection.kind === "model" ? prepared.selection.modelId : undefined);
       if (profile.id !== scope.providerProfileId || profile.id !== prepared.providerProfileId
-        || profile.executionRevision !== prepared.executionRevision
         || profile.authorityRevision !== prepared.authorityRevision
         || (profile.endpointIdentity ?? profile.id) !== prepared.endpointIdentity) return false;
       if (!prepared.routeBasis) return false;

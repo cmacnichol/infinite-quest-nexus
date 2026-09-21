@@ -38,6 +38,7 @@ import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummar
 import { generationResponseFormatProjection } from "./generation-response-format-projection.js";
 import { projectGenerationResponseFormat } from "../../contracts/src/generation-response-format-projection.js";
 import { textExecutionRouteBasisSchema, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
+import type { TextExecutionOverrides } from "../../contracts/src/text-execution-plan.js";
 import { selectionCompatibilityId, type TextModelSelection } from "../../contracts/src/provider-selection.js";
 import type { ModelParameterAdvertisement } from "../../contracts/src/text-response-format.js";
 
@@ -153,6 +154,7 @@ export type PostgresGenerationCommandRepositoryDependencies = Readonly<{
   prepareQueuedTextExecution?: (scope: Readonly<{
     ownerUserId: string; campaignId: string; requestedProviderProfileId: string | null; requestedModel: string;
     requestedTextSelection?: TextModelSelection;
+    requestedTextExecutionOverrides?: TextExecutionOverrides | null;
     operationKind: OperationKind;
   }>) => Promise<PreparedQueuedTextExecution | undefined>;
   /** Transaction-local revision and authority fence for metadata already resolved by preflight. */
@@ -453,13 +455,21 @@ export function createPostgresGenerationCommandRepository(
       const preparedTextExecution = dependencies.prepareQueuedTextExecution
         ? await dependencies.prepareQueuedTextExecution({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
           requestedProviderProfileId: request.providerProfileId || null, requestedModel,
-          ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}), operationKind: "append" })
+          ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}),
+          ...(request.textExecutionOverrides === undefined ? {} : { requestedTextExecutionOverrides: request.textExecutionOverrides }),
+          operationKind: "append" })
         : undefined;
-      const legacyPreparedBasis = !preparedTextExecution && dependencies.prepareTextExecutionRouteBasis
+      const legacyPreparedValue = !preparedTextExecution && dependencies.prepareTextExecutionRouteBasis
         ? await dependencies.prepareTextExecutionRouteBasis({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
           requestedProviderProfileId: request.providerProfileId || null, requestedModel,
           ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}), operationKind: "append" })
         : undefined;
+      const legacyPreparedBasis = legacyPreparedValue === undefined
+        ? undefined
+        : readTextExecutionRouteBasis(legacyPreparedValue);
+      if (legacyPreparedValue !== undefined && legacyPreparedBasis === undefined) {
+        throw new GenerationApplicationError("invalid_state");
+      }
       const preparedBasis = preparedTextExecution?.routeBasis
         ? readTextExecutionRouteBasis(preparedTextExecution.routeBasis)
         : legacyPreparedBasis;
@@ -580,13 +590,21 @@ export function createPostgresGenerationCommandRepository(
       const preparedTextExecution = dependencies.prepareQueuedTextExecution
         ? await dependencies.prepareQueuedTextExecution({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
           requestedProviderProfileId: request.providerProfileId || null, requestedModel,
-          ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}), operationKind: "replace_latest" })
+          ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}),
+          ...(request.textExecutionOverrides === undefined ? {} : { requestedTextExecutionOverrides: request.textExecutionOverrides }),
+          operationKind: "replace_latest" })
         : undefined;
-      const legacyPreparedBasis = !preparedTextExecution && dependencies.prepareTextExecutionRouteBasis
+      const legacyPreparedValue = !preparedTextExecution && dependencies.prepareTextExecutionRouteBasis
         ? await dependencies.prepareTextExecutionRouteBasis({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId,
           requestedProviderProfileId: request.providerProfileId || null, requestedModel,
           ...(request.textSelection ? { requestedTextSelection: request.textSelection } : {}), operationKind: "replace_latest" })
         : undefined;
+      const legacyPreparedBasis = legacyPreparedValue === undefined
+        ? undefined
+        : readTextExecutionRouteBasis(legacyPreparedValue);
+      if (legacyPreparedValue !== undefined && legacyPreparedBasis === undefined) {
+        throw new GenerationApplicationError("invalid_state");
+      }
       const preparedBasis = preparedTextExecution?.routeBasis
         ? readTextExecutionRouteBasis(preparedTextExecution.routeBasis)
         : legacyPreparedBasis;

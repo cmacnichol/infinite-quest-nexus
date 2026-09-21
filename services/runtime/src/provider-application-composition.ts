@@ -137,6 +137,7 @@ export type InfiniteWorldsProviderCollaborators = ProviderConsumerRuntime & Read
     input: TemplateWorldInput;
     worldId: string;
     model?: string;
+    textExecutionOverrides?: import("@infinite-quest/contracts").TextExecutionOverrides | null;
     onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void;
   }>): Promise<Readonly<{ title: string; content: WorldContent }>>;
   diagnoseWorldGenerationFailure: typeof worldGenerationFailureDiagnostic;
@@ -366,6 +367,7 @@ function createInternals(
         command.worldId,
         command.model,
         command.onProgress,
+        command.textExecutionOverrides,
       ),
     diagnoseWorldGenerationFailure: worldGenerationFailureDiagnostic,
   });

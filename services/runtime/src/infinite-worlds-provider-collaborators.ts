@@ -6,6 +6,7 @@ import type {
   ProviderResolutionPort,
   PromptSnapshotVersion,
 } from "../../../packages/application/src/providers/index.js";
+import type { TextExecutionOverrides } from "@infinite-quest/contracts";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
 
 /**
@@ -38,6 +39,7 @@ export type InfiniteWorldsImportProviderCollaborators = Readonly<{
     input: TemplateWorldInput;
     worldId: string;
     model?: string;
+    textExecutionOverrides?: TextExecutionOverrides | null;
     onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void;
   }>): Promise<Readonly<{ title: string; content: WorldContent }>>;
   diagnoseWorldGenerationFailure(error: unknown): Readonly<{

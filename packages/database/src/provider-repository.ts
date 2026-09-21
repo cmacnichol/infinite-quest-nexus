@@ -11,6 +11,7 @@ import {
   type TextModelSelection
 } from "../../contracts/src/provider-selection.js";
 import {
+  assertProviderConfiguration,
   toSafeProviderConfiguration,
   type CreateProviderProfileCommand,
   type DirectProviderResolution,
@@ -123,7 +124,9 @@ function profileView(row: ProviderRow): ProviderProfileView {
 export function validateProviderConfiguration(
   providerType: ProviderType,
   configuration: unknown,
+  providerRole?: ProviderRole,
 ): SafeProviderConfiguration {
+  assertProviderConfiguration(configuration, providerRole);
   const validated = providerType === "sogni"
     ? sogniIllustrationProviderConfigSchema.parse(configuration)
     : providerType === "sogni_sdk"
@@ -133,7 +136,7 @@ export function validateProviderConfiguration(
 }
 
 function validateCreate(command: CreateProviderProfileCommand): CreateProviderProfileCommand {
-  const configuration = validateProviderConfiguration(command.providerType, command.configuration);
+  const configuration = validateProviderConfiguration(command.providerType, command.configuration, command.providerRole);
   const parsed = providerProfileInputSchema.parse({ ...command, configuration });
   if (parsed.isDefault && !parsed.enabled) throw httpError("A disabled provider cannot be the default.", 400);
   if (parsed.textSelection !== undefined && parsed.providerRole !== "text" && parsed.providerRole !== "intent") {
@@ -164,6 +167,16 @@ function withRequiredTextResponseFormat(
     return toSafeProviderConfiguration({ ...configuration, textResponseFormatPolicy: "required" });
   }
   return configuration;
+}
+
+function withTextExecutionOverrides(
+  configuration: SafeProviderConfiguration,
+  value: SafeProviderConfiguration["textExecutionOverrides"] | null | undefined,
+): SafeProviderConfiguration {
+  const { textExecutionOverrides: _current, ...rest } = configuration;
+  return value === null || value === undefined
+    ? toSafeProviderConfiguration(rest)
+    : toSafeProviderConfiguration({ ...rest, textExecutionOverrides: value });
 }
 
 async function lockRole(client: DatabaseClient, ownerUserId: string, role: ProviderRole): Promise<void> {
@@ -331,11 +344,28 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
         maxOutputTokens: changes.maxOutputTokens ?? row.max_output_tokens,
         temperature: changes.temperature ?? row.temperature,
         requestTimeoutMs: changes.requestTimeoutMs ?? row.request_timeout_ms,
-        configuration: changes.configuration === undefined
-          ? (changes.defaultModel === undefined && changes.textSelection === undefined
-              ? toSafeProviderConfiguration(row.configuration)
-              : withRequiredTextResponseFormat(row.provider_role, toSafeProviderConfiguration(row.configuration), selectionChanged))
-          : validateProviderConfiguration(row.provider_type, changes.configuration),
+        configuration: (() => {
+          const currentConfiguration = toSafeProviderConfiguration(row.configuration);
+          const suppliedConfigurationBase = changes.configuration === undefined
+            ? currentConfiguration
+            : validateProviderConfiguration(row.provider_type, changes.configuration, row.provider_role);
+          const suppliedConfiguration = changes.configuration !== undefined
+            && suppliedConfigurationBase.textResponseFormatPolicy === undefined
+            && currentConfiguration.textResponseFormatPolicy !== undefined
+            ? toSafeProviderConfiguration({
+                ...suppliedConfigurationBase,
+                textResponseFormatPolicy: currentConfiguration.textResponseFormatPolicy
+              })
+            : suppliedConfigurationBase;
+          const effectiveOverridePatch = changes.textExecutionOverrides === undefined
+            ? (selectionChanged ? null : currentConfiguration.textExecutionOverrides)
+            : changes.textExecutionOverrides;
+          const overrideAware = withTextExecutionOverrides(suppliedConfiguration, effectiveOverridePatch);
+          const explicitResponsePolicy = changes.configuration?.textResponseFormatPolicy !== undefined;
+          return !selectionChanged || explicitResponsePolicy
+            ? overrideAware
+            : withRequiredTextResponseFormat(row.provider_role, overrideAware, true);
+        })(),
         enabled: changes.enabled ?? row.enabled,
         isDefault: changes.isDefault ?? row.is_default
       });
