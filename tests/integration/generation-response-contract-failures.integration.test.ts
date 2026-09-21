@@ -467,6 +467,52 @@ integration("response-contract provider failures", () => {
     expect(requestBodies).toHaveLength(1);
   }, 60_000);
 
+  it.each(["unsafe", "throwing"] as const)("sanitizes a %s provider error name and completes the v2 invocation", async (nameKind) => {
+    scenario = "success";
+    const value = await fixture("required", false, true);
+    const before = await authority(value.campaignId);
+    const privateName = "PRIVATE_PROVIDER_NAME_CANARY";
+    const providerError = Object.assign(new Error("Synthetic provider failure."), { code: "provider_transport_error" });
+    Object.defineProperty(providerError, "name", {
+      get: () => {
+        if (nameKind === "throwing") throw new Error(privateName);
+        return privateName;
+      }
+    });
+    const infoSpy = vi.spyOn(logger, "info");
+    const warnSpy = vi.spyOn(logger, "warn");
+    const errorSpy = vi.spyOn(logger, "error");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `response-contract-unsafe-name-${randomUUID()}`;
+    try {
+      const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+      expect(claim?.jobId).toBe(value.job.id);
+      await expect(createGenerationExecutor({
+        pool, repository,
+        collaborators: { ...value.collaborators, onProviderDispatch: () => { throw providerError; } }
+      }).execute({ claim: claim!, workerId, leaseSeconds: 30 })).resolves.toBe(true);
+
+      const row = await pool.query<{ status: string; orchestrationPrivate: Record<string, any> }>(
+        'SELECT status,orchestration_private AS "orchestrationPrivate" FROM generation_jobs WHERE id=$1', [value.job.id]
+      );
+      expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([
+        expect.objectContaining({ version: 2, status: "completed" })
+      ]);
+      expect(row.rows[0]!.status).not.toBe("completed");
+      expect(requestBodies).toHaveLength(0);
+      expect(await authority(value.campaignId)).toEqual(before);
+      const failureLogs = warnSpy.mock.calls.map(([event]) => event)
+        .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event)
+        .filter((event) => event.event === "turn_generation_provider_failed");
+      expect(failureLogs).toEqual([expect.objectContaining({ errorName: "Error", errorCode: "provider_transport_error" })]);
+      expect(JSON.stringify([...infoSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls])).not.toContain(privateName);
+    } finally {
+      infoSpy.mockRestore();
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  }, 60_000);
+
   it("executes a file-verified direct Model v2 append through the prepared transport with one canonical durable body", async () => {
     scenario = "success";
     const value = await fixture("required", false, true);

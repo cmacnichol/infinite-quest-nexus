@@ -1556,7 +1556,7 @@ export async function callCampaignTextProvider(
       storyOperation: operation,
       streaming: typeof request.onChunk === "function",
       recovery: Boolean(request.recoveryInput),
-      errorName: error instanceof Error ? error.name : "Error",
+      errorName: diagnosticErrorName(error),
       ...(errorCode ? { errorCode } : {}),
       ...(budgetScope ? { budgetScope } : {}),
       ...(transportError ? { providerCategory: transportError.causeCategory } : {}),
