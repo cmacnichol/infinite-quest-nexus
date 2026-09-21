@@ -1,7 +1,10 @@
 import {
   frozenResponseContractsSelectionHash,
+  frozenResponseContractsV2SelectionHash,
   type FrozenResponseContracts,
-  type QueuedResponsePolicy
+  type FrozenResponseContractsV2,
+  type QueuedResponsePolicy,
+  type QueuedResponsePolicyV2
 } from "../../../packages/contracts/src/generation-response-contract.js";
 import type {
   PreparedResponseContract,
@@ -12,6 +15,10 @@ import type {
   TextResponseFormatPolicy
 } from "../../../packages/contracts/src/text-response-format.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
+import type { ResponseInvocationKeyV2, ResponseFormatEligibilityV2 } from "../../../packages/contracts/src/text-response-format.js";
+import type { TextModelSelection } from "../../../packages/contracts/src/provider-selection.js";
+import { resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
 
 export type ResponseContractRuntimeProfile = Readonly<{
   id: string;
@@ -43,6 +50,93 @@ export function responseContractInvocationClosure(input: Readonly<{
     ...(input.storyOnly ? ["choices:nonstream" as const] : []),
     ...(input.continuityReview === "off" ? [] : ["continuity_review:nonstream" as const])
   ];
+}
+
+/** The v2 Story closure names every schema-producing call before the worker
+ * measures, reserves, or dispatches its first provider body.  Repair calls
+ * deliberately reuse the Story schema key but retain distinct invocation
+ * audit operations. */
+export function responseContractInvocationClosureV2(input: Readonly<{
+  streamingPrimary: boolean;
+  storyOnly: boolean;
+  continuityReview: "off" | "observe" | "enforce";
+}>): readonly ResponseInvocationKeyV2[] {
+  return [
+    "story:nonstream",
+    ...(input.streamingPrimary ? ["story:stream" as const] : []),
+    ...(input.storyOnly ? ["choices:nonstream" as const] : []),
+    ...(input.continuityReview === "off" ? [] : ["continuity_review:nonstream" as const]),
+    "rpg_assessment:nonstream",
+    "event_trigger_before:nonstream",
+    "event_trigger_after:nonstream",
+    "scene_coverage:nonstream",
+    "event_coverage:nonstream"
+  ];
+}
+
+function v2OperationForKey(key: ResponseInvocationKeyV2): Readonly<{ operation: Parameters<typeof getProviderOutputSchemaV2>[0]; streaming: boolean }> {
+  const [operation, delivery] = key.split(":") as [Parameters<typeof getProviderOutputSchemaV2>[0], "stream" | "nonstream"];
+  return { operation, streaming: delivery === "stream" };
+}
+
+/** Creates a complete immutable v2 schema closure.  Model work proves every
+ * operation through the exact v2 tuple; trusted presets intentionally do not
+ * consult discovery or the verification registry. */
+export function resolveGenerationResponseContractsV2(input: Readonly<{
+  queuedPolicy: QueuedResponsePolicyV2;
+  eligible?(operation: Parameters<typeof getProviderOutputSchemaV2>[0], streaming: boolean): ResponseFormatEligibilityV2;
+  selectedAt?: string;
+  capabilityEvidenceHash: string | (() => string);
+}>): FrozenResponseContractsV2 {
+  const contracts: Record<string, unknown> = {};
+  for (const key of input.queuedPolicy.invocationKeys) {
+    const { operation, streaming } = v2OperationForKey(key);
+    const schema = getProviderOutputSchemaV2(operation);
+    const admission = input.queuedPolicy.authority.kind === "preset_trusted"
+      ? input.queuedPolicy.admission
+      : resolveResponseContractAdmission({
+        selection: { kind: "model", modelId: input.queuedPolicy.authority.model } satisfies TextModelSelection,
+        directEligibility: () => {
+          const eligibility = input.eligible?.(operation, streaming);
+          if (!eligibility) throw new ResponseContractPreflightError("response_contract_unavailable", `The required response contract is unavailable for ${key}.`);
+          return eligibility;
+        }
+      });
+    contracts[key] = {
+      version: 2,
+      mode: "json_schema",
+      admission,
+      operation,
+      streaming,
+      forbidFormatFallback: true,
+      schemaVersion: schema.version,
+      schemaHash: schema.schemaHash,
+      schemaName: schema.name,
+      schema: schema.schema,
+      authority: input.queuedPolicy.authority.kind === "preset_trusted"
+        ? { kind: "preset_trusted", routeBasisHash: input.queuedPolicy.authority.routeBasisHash }
+        : (() => {
+          // authorityRevision fences new queued work and current credential
+          // authority. Prepared transport contracts intentionally retain the
+          // stable v2 wire authority shape from Task 4A.
+          const { authorityRevision: _authorityRevision, ...authority } = input.queuedPolicy.authority;
+          return authority;
+        })()
+    };
+  }
+  const selected = {
+    version: 2 as const,
+    queuedPolicy: input.queuedPolicy,
+    selectedAt: input.selectedAt ?? new Date().toISOString(),
+    capabilityEvidenceHash: typeof input.capabilityEvidenceHash === "function"
+      ? input.capabilityEvidenceHash()
+      : input.capabilityEvidenceHash,
+    contracts
+  };
+  return {
+    ...selected,
+    selectionHash: frozenResponseContractsV2SelectionHash(selected)
+  } as FrozenResponseContractsV2;
 }
 
 function operationForKey(key: ResponseInvocationKey): Readonly<{ operation: ResponseSchemaOperation; streaming: boolean }> {

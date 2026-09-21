@@ -3,6 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadSchemaVerificationFile } from "../../services/runtime/src/provider-schema-verification.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { resolveResponseContractAdmission } from "../../packages/application/src/providers/response-format.js";
 const now = "2026-09-18T12:00:00.000Z";
 const digest = "a".repeat(64);
 const valid = {
@@ -19,7 +22,7 @@ const valid = {
   expiresAt: "2026-09-19T12:00:00.000Z",
   providerRoutingSlugs: ["openai/gpt-4o"],
   nativeOpenTrackerObjects: true
-};
+} as const;
 const directories: string[] = [];
 function file(value: unknown) {
   const directory = mkdtempSync(join(tmpdir(), "schema-verification-"));
@@ -47,13 +50,46 @@ describe("schema verification file", () => {
     expect(Object.isFrozen(result.records[0])).toBe(true);
     expect(Object.isFrozen(result.records[0]?.providerRoutingSlugs)).toBe(true);
   });
+  it("keeps v2 catalog evidence separate from v1 and exposes it to the v2 capability gate", () => {
+    const v2 = { ...valid, version: 2, adapterProtocol: "text-schema-adapter-v2", operation: "event_coverage", schemaHash: "d".repeat(64) };
+    const loaded = load(file([valid, v2]));
+    expect(loaded.records.map((record) => record.version)).toEqual([1, 2]);
+    const result = createProviderResponseFormatCapabilities({ records: loaded.records, registryDigest: loaded.digest, now: () => Date.parse(now) })
+      .eligibilityV2({ advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: now }, providerType: "openrouter",
+        endpointIdentity: digest, model: valid.model, routeConfigHash: valid.routeConfigHash, adapterProtocol: "text-schema-adapter-v2",
+        operation: "event_coverage", schemaHash: "d".repeat(64), streaming: false, now });
+    expect(result).toMatchObject({ status: "verified", verification: { version: 2, operation: "event_coverage" } });
+    const storyV2 = { ...valid, version: 2 as const, adapterProtocol: "text-schema-adapter-v2" as const };
+    const v1Only = createProviderResponseFormatCapabilities({ records: [valid], now: () => Date.parse(now) });
+    expect(v1Only.eligibilityV2({ advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: now }, providerType: "openrouter",
+      endpointIdentity: digest, model: valid.model, routeConfigHash: valid.routeConfigHash, adapterProtocol: "text-schema-adapter-v2",
+      operation: "story", schemaHash: valid.schemaHash, streaming: false, now })).toMatchObject({ reason: "missing_verification" });
+    const v2Only = createProviderResponseFormatCapabilities({ records: [storyV2], now: () => Date.parse(now) });
+    expect(v2Only.eligibility({ advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: now }, providerType: "openrouter",
+      endpointIdentity: digest, model: valid.model, routeConfigHash: valid.routeConfigHash, adapterProtocol: "text-schema-adapter-v1",
+      operation: "story", schemaHash: valid.schemaHash, streaming: false, now })).toMatchObject({ reason: "missing_verification" });
+  });
+  it("carries a file-loaded exact Story v2 record into direct-model admission", () => {
+    const story = getProviderOutputSchemaV2("story");
+    const v2 = { ...valid, version: 2, adapterProtocol: "text-schema-adapter-v2", operation: "story", schemaHash: story.schemaHash };
+    const loaded = load(file([v2]));
+    const capabilities = createProviderResponseFormatCapabilities({ records: loaded.records, registryDigest: loaded.digest, now: () => Date.parse(now) });
+    const admission = resolveResponseContractAdmission({ selection: { kind: "model", modelId: valid.model }, directEligibility: () => capabilities.eligibilityV2({
+      advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: now }, providerType: "openrouter",
+      endpointIdentity: digest, model: valid.model, routeConfigHash: valid.routeConfigHash, adapterProtocol: "text-schema-adapter-v2",
+      operation: "story", schemaHash: story.schemaHash, streaming: false, now, nativeOpenTrackerObjects: true
+    }) });
+    expect(admission).toMatchObject({ basis: "model_verified", verification: { version: 2, schemaHash: story.schemaHash, operation: "story" } });
+  });
   it("returns an empty immutable registry when no path is configured", () => expect(load(undefined)).toEqual({ records: [], digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }));
   it("loads expired records so the resolver can report expiry", () => expect(load(file([{ ...valid, expiresAt: "2026-09-18T11:59:59.999Z" }])).records[0]?.expiresAt).toBe("2026-09-18T11:59:59.999Z"));
   it("allows empty routing only for OpenAI-compatible records", () => expect(load(file([{ ...valid, providerType: "openai_compatible", providerRoutingSlugs: [] }])).records[0]?.providerRoutingSlugs).toEqual([]));
   it.each([
     { ...valid, ignored: "untrusted" }, { ...valid, endpointIdentity: "endpoint" }, { ...valid, endpointIdentity: [digest] }, { ...valid, operation: ["story"] }, { ...valid, routeConfigHash: "route" }, { ...valid, schemaHash: "schema" },
     { ...valid, model: " ".repeat(257) }, { ...valid, model: "provider/auto" }, { ...valid, providerRoutingSlugs: [] }, { ...valid, providerRoutingSlugs: ["not a route"] },
-    { ...valid, verifiedAt: "2026-09-18T12:00:00.001Z" }, { ...valid, expiresAt: "2026-11-19T12:00:00.000Z" }, { ...valid, expiresAt: "not-a-date" }
+    { ...valid, verifiedAt: "2026-09-18T12:00:00.001Z" }, { ...valid, expiresAt: "2026-11-19T12:00:00.000Z" }, { ...valid, expiresAt: "not-a-date" },
+    { ...valid, version: 2, adapterProtocol: "text-schema-adapter-v1" }, { ...valid, version: 1, adapterProtocol: "text-schema-adapter-v2" },
+    { ...valid, version: 2, adapterProtocol: "text-schema-adapter-v2", operation: "not_a_catalog_operation" }
   ])("rejects malformed or unsafe records", (value) => expect(() => load(file([value]))).toThrow("TEXT_SCHEMA_VERIFICATION_FILE is invalid."));
   it("rejects unreadable and oversized configured files with the same safe error", () => {
     const directory = mkdtempSync(join(tmpdir(), "schema-verification-")); directories.push(directory);

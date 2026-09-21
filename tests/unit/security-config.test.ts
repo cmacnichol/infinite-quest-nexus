@@ -24,6 +24,7 @@ const securitySettingNames = [
   "WORKER_GENERATION_CONCURRENCY",
   "AI_AUTHORING_JOBS_ENABLED",
   "AI_STORY_SOURCE_AUTHORING_ENABLED",
+  "NATIVE_TEXT_EXECUTION_PLAN_ADMISSION",
   "SYSTEM_ARCHIVE_ENABLED",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
@@ -120,6 +121,15 @@ describe("runtime security configuration", () => {
 });
 
 describe("worker concurrency configuration", () => {
+  it("keeps native text execution admission off unless the same operator flag enables it", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig().nativeTextExecutionPlanAdmission).toBe(false);
+    process.env.NATIVE_TEXT_EXECUTION_PLAN_ADMISSION = "true";
+    expect(loadRuntimeConfig().nativeTextExecutionPlanAdmission).toBe(true);
+    process.env.NATIVE_TEXT_EXECUTION_PLAN_ADMISSION = "maybe";
+    expect(() => loadRuntimeConfig()).toThrow("NATIVE_TEXT_EXECUTION_PLAN_ADMISSION must be true or false.");
+  });
+
   it("keeps durable authoring jobs disabled until an operator enables them", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig().aiAuthoringJobsEnabled).toBe(false);

@@ -214,7 +214,7 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       maxOutputTokens: 4096,
       temperature: 0,
       enabled: true,
-      configuration: {}
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret);
     textProviderId = textProvider.id;
 

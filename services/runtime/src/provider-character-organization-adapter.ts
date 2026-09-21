@@ -10,7 +10,7 @@ import {
   type CharacterProfileOrganizationResult,
   type WorldContent
 } from "../../../packages/contracts/src/world-library.js";
-import { extractJsonObject } from "../../../packages/story-engine/src/index.js";
+import { extractJsonObject, type ProviderRequest } from "../../../packages/story-engine/src/index.js";
 import type { CharacterOrganizationProviderCollaborators } from "./provider-application-composition.js";
 import {
   effectiveAuthoringPrompt,
@@ -19,6 +19,7 @@ import {
 import { validateCharacterProfileFiction } from "../../../packages/domain/src/authoring-output.js";
 import { projectAuthoringIssues } from "../../../packages/domain/src/authoring-output.js";
 import { AuthoringResponseError, runAuthoringResponse } from "./authoring-response-adapter.js";
+import { prepareDirectAuthoringTextExecution } from "./authoring-text-execution-preparation.js";
 
 export const CHARACTER_PROFILE_ORGANIZER_PROTOCOL_VERSION = CHARACTER_PROFILE_ORGANIZER_PROMPT_PROTOCOL_VERSION;
 
@@ -321,23 +322,35 @@ async function organize(
     worldId,
     characterId: character.id,
   })).snapshot;
+  const organizerPrompt = characterProfileOrganizerPrompt(providers.promptTools.content(promptSnapshot, "character_profile_organizer"));
+  const organizerRepairPrompt = characterProfileOrganizerRepairPrompt(
+    providers.promptTools.content(promptSnapshot, "character_profile_organizer"),
+    providers.promptTools.content(promptSnapshot, "character_profile_repair"),
+  );
+  const preparedExecution = await prepareDirectAuthoringTextExecution({
+    ownerUserId,
+    execution: provider,
+    ...(providers.authoringTextPlans === undefined ? {} : { options: providers.authoringTextPlans }),
+    operationPrompts: { organizer: organizerPrompt, organizerRepair: organizerRepairPrompt }
+  });
   const sources = characterProfileOrganizerSources(character, content);
   return runAuthoringResponse({
     stage: "organizer",
     delay: providerRetryDelay,
-    request: async (attempt) => provider.execute({
-      systemPrompt: attempt.repair
-        ? characterProfileOrganizerRepairPrompt(
-          providers.promptTools.content(promptSnapshot, "character_profile_organizer"),
-          providers.promptTools.content(promptSnapshot, "character_profile_repair"),
-        )
-        : characterProfileOrganizerPrompt(providers.promptTools.content(promptSnapshot, "character_profile_organizer")),
-      input: JSON.stringify(attempt.repair
-        ? characterProfileOrganizerRepairInput(character.name, sources, attempt.rejectedResponse || "", attempt.issues)
-        : characterProfileOrganizerInput(character.name, sources)),
-      responseFormatFallback: "forbid"
-    }),
-    parse: (content) => validateOrganizerResult(extractJsonObject(content), sources)
+    request: async (attempt) => {
+      const request: ProviderRequest = {
+        systemPrompt: attempt.repair ? organizerRepairPrompt : organizerPrompt,
+        input: JSON.stringify(attempt.repair
+          ? characterProfileOrganizerRepairInput(character.name, sources, attempt.rejectedResponse || "", attempt.issues)
+          : characterProfileOrganizerInput(character.name, sources)),
+        responseFormatFallback: "forbid"
+      };
+      return preparedExecution
+        ? preparedExecution.execute({ operation: attempt.repair ? "organizerRepair" : "organizer", request })
+        : provider.execute(request);
+    },
+    parse: (content) => validateOrganizerResult(extractJsonObject(content), sources),
+    transportRetryOwner: preparedExecution ? "prepared_executor" : "outer"
   });
 }
 

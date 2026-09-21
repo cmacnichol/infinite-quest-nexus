@@ -201,6 +201,59 @@ integration("legacy import and Chronicle integration", () => {
       .resolves.toMatchObject({ rows: [{ id: imported.campaignId }] });
   });
 
+  it("commits a legacy import with embeddings unconfigured when the default text profile is a preset alias", async () => {
+    const ownerUserId = await initialOwnerId(pool);
+    const provider = await pool.query<{ id: string }>(
+      `INSERT INTO provider_profiles (
+         owner_user_id, name, provider_type, provider_role, base_url, default_model,
+         enabled, is_default
+       ) VALUES ($1,$2,'openrouter','text','https://openrouter.ai/api/v1',$3,true,true)
+       RETURNING id`,
+      [ownerUserId, `Legacy preset import ${crypto.randomUUID()}`, "@preset/nexus-nsfw"]
+    );
+    const inference = vi.fn(async () => {
+      throw new Error("optional embedding discovery must not dispatch inference");
+    });
+    vi.stubGlobal("fetch", inference);
+    try {
+      const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
+      fixture.world.title = `Legacy preset import ${crypto.randomUUID()}`;
+      const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({
+        sourceName: `legacy-preset-import-${crypto.randomUUID()}.story`,
+        story: fixture
+      }));
+
+      await expect(pool.query<{
+        id: string;
+        import_status: string;
+        embedding_enabled: boolean;
+        embedding_provider_profile_id: string | null;
+      }>(
+        `SELECT campaign.id, imports.status AS import_status,
+                coalesce(config.embedding_enabled, false) AS embedding_enabled,
+                config.embedding_provider_profile_id
+           FROM campaigns campaign
+           JOIN imports ON imports.campaign_id=campaign.id AND imports.owner_user_id=campaign.owner_user_id
+           LEFT JOIN campaign_memory_configs config
+             ON config.campaign_id=campaign.id AND config.owner_user_id=campaign.owner_user_id
+          WHERE campaign.id=$1`,
+        [imported.campaignId]
+      )).resolves.toMatchObject({ rows: [{
+        id: imported.campaignId,
+        import_status: "completed",
+        embedding_enabled: false,
+        embedding_provider_profile_id: null
+      }] });
+      await expect(pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM chronicle_jobs WHERE campaign_id=$1",
+        [imported.campaignId]
+      )).resolves.toMatchObject({ rows: [{ count: "0" }] });
+      expect(inference).not.toHaveBeenCalled();
+    } finally {
+      await pool.query("DELETE FROM provider_profiles WHERE id=$1", [provider.rows[0]!.id]);
+    }
+  });
+
   it("deletes an embedding provider without deleting Chronicle text and falls back lexically", async () => {
     const fixture = JSON.parse(await readFile(resolve("tests/fixtures/legacy-story.json"), "utf8"));
     fixture.world.title = `Provider lifecycle ${crypto.randomUUID()}`;

@@ -78,7 +78,11 @@ function dependencies(): ProviderApplicationDependencies {
         providerProfileId: null,
         providerRole: candidate.providerRole,
         models: []
-      }))
+      })),
+      listPresets: vi.fn(),
+      getPreset: vi.fn(),
+      discoverCandidatePresets: vi.fn(),
+      resolveCandidatePreset: vi.fn()
     },
     health: {
       recordHealth: vi.fn(async () => undefined)

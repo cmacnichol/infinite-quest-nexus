@@ -5,7 +5,9 @@ import { createGenerationExecutionCollaborators } from "../../services/runtime/s
 import { responseContractInvocationClosure } from "../../services/runtime/src/generation-response-contract.js";
 import { createApiProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
 import type { WorkerGenerationProviderCollaborators } from "../../services/runtime/src/provider-application-composition.js";
-import { readFrozenResponseContracts, readQueuedResponsePolicy } from "../../packages/contracts/src/generation-response-contract.js";
+import { readFrozenResponseContracts, readQueuedResponsePolicy, readQueuedResponsePolicyV2 } from "../../packages/contracts/src/generation-response-contract.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 
 const profile = {
   id: "11111111-1111-4111-8111-111111111111", providerType: "openrouter", model: "model-a",
@@ -51,6 +53,74 @@ function collaborators(input: Readonly<{ inventory?: () => Promise<unknown>; reg
 }
 
 describe("generation response-contract production preflight collaborators", () => {
+  it("queues a required v2 direct-model policy without a preset route basis", async () => {
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => ({
+        ...profile,
+        textSelection: { kind: "model" as const, modelId: profile.model },
+        executionRevision: "execution",
+        authorityRevision: "authority",
+        configuration: {}
+      })),
+      responseFormatCapabilities: {
+        registryDigest,
+        now: () => "2026-09-19T00:00:00.000Z",
+        eligibilityV2: vi.fn((input) => ({
+          status: "verified",
+          verification: {
+            version: 2, providerType: "openrouter", endpointIdentity: profile.endpointIdentity,
+            model: profile.model, routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+            operation: input.operation, schemaHash: getProviderOutputSchemaV2(input.operation).schemaHash, streaming: input.streaming,
+            verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+            providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+          }
+        }))
+      }
+    } as never;
+
+    const queued = await createQueuedResponsePolicyResolver(apiProviders, true)({} as never, {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: profile.model,
+      operationKind: "append", generationPolicy: { playMode: "legacy" }, storyMemoryPolicy: null,
+      preparedTextExecution: {
+        providerProfileId: profile.id, selection: { kind: "model", modelId: profile.model },
+        executionRevision: "execution", authorityRevision: "authority", endpointIdentity: profile.endpointIdentity,
+        advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-19T00:00:00.000Z" }
+      }
+    } as never);
+
+    expect(readQueuedResponsePolicyV2(queued)).toMatchObject({
+      version: 2,
+      policy: "required",
+      providerProfileId: profile.id,
+      admission: { basis: "model_verified" },
+      authority: { kind: "model_verified", model: profile.model },
+      invocationKeys: expect.arrayContaining([
+        "story:nonstream", "rpg_assessment:nonstream", "event_trigger_before:nonstream",
+        "event_trigger_after:nonstream", "scene_coverage:nonstream", "event_coverage:nonstream"
+      ])
+    });
+  });
+
+  it("checks only current owner-scoped authority for a resumed frozen route", async () => {
+    const { result, providers } = collaborators();
+    const basis = {
+      authorityRevision: "frozen-authority", credentialReference: profile.id, endpointReference: profile.endpointIdentity,
+      candidates: [{ modelId: "frozen-model" }]
+    };
+    (providers.execution.text as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...profile, providerRole: "text", model: "ordinary-profile-edit", temperature: 1.2, requestTimeoutMs: 5_000,
+      configuration: { textResponseFormatPolicy: "legacy" }, authorityRevision: "frozen-authority"
+    });
+
+    await expect(result.verifyTextExecutionRouteAuthority!("owner", basis as never)).resolves.toBe(true);
+    expect(providers.execution.text).toHaveBeenCalledWith({ ownerUserId: "owner" }, profile.id, "text", "frozen-model");
+
+    (providers.execution.text as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...profile, providerRole: "text", authorityRevision: "rotated-authority"
+    });
+    await expect(result.verifyTextExecutionRouteAuthority!("owner", basis as never)).resolves.toBe(false);
+  });
+
   it.each([
     ["append action non-streaming without review", "append", "legacy", false, "off", ["story:nonstream"]],
     ["replacement action streaming with observe review", "replacement", "legacy", true, "observe", ["story:nonstream", "story:stream", "continuity_review:nonstream"]],
@@ -95,6 +165,57 @@ describe("generation response-contract production preflight collaborators", () =
     } as never)).resolves.toBeUndefined();
   });
 
+  it("rejects newly queued presets while native admission is disabled, then captures its trusted v2 closure when enabled", async () => {
+    const presetProfile = {
+      ...profile,
+      model: "@preset/keep",
+      textSelection: { kind: "openrouter_preset" as const, slug: "keep" },
+      executionRevision: "preset-execution",
+      authorityRevision: "preset-authority",
+      configuration: { textResponseFormatPolicy: "legacy" as const }
+    };
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => presetProfile),
+      responseFormatCapabilities: { registryDigest, now: () => "2026-09-19T00:00:00.000Z" }
+    } as never;
+    const scope = {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: "@preset/keep",
+      operationKind: "append", generationPolicy: { playMode: "legacy" }, storyMemoryPolicy: null,
+      preparedTextExecution: {
+        providerProfileId: profile.id, selection: presetProfile.textSelection,
+        executionRevision: "preset-execution", authorityRevision: "preset-authority", endpointIdentity: profile.endpointIdentity,
+        advertisement: null,
+        routeBasis: {
+          routeBasisHash: "a".repeat(64), selection: presetProfile.textSelection,
+          authorityRevision: "preset-authority", profileRevision: "preset-execution",
+          endpointReference: profile.endpointIdentity, credentialReference: profile.id
+        }
+      }
+    } as never;
+
+    await expect(createQueuedResponsePolicyResolver(apiProviders)({} as never, scope)).rejects.toMatchObject({
+      kind: "conflict", details: { reason: "native_text_execution_unavailable" }
+    });
+    await expect(createQueuedResponsePolicyResolver(apiProviders, true)({} as never, scope)).resolves.toMatchObject({
+      version: 2,
+      policy: "required",
+      admission: { basis: "preset_trusted" },
+      authority: { kind: "preset_trusted", selection: presetProfile.textSelection }
+    });
+  });
+
+  it("captures a required policy when the queued profile carries the new-work default", async () => {
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => ({ ...profile, configuration: { textResponseFormatPolicy: "required" } })),
+      responseFormatCapabilities: { registryDigest }
+    } as never;
+    const queued = await createQueuedResponsePolicyResolver(apiProviders)({} as never, {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: profile.model,
+      operationKind: "append", generationPolicy: { playMode: "legacy" }, storyMemoryPolicy: null
+    } as never);
+    expect(readQueuedResponsePolicy(queued)?.policy).toBe("required");
+  });
+
   it("uses the supplied composition client for queue-time profile loading without borrowing from the pool", async () => {
     const row = {
       id: profile.id, name: "Text", provider_type: "openrouter", provider_role: "text", base_url: "https://provider.example/v1",
@@ -133,7 +254,8 @@ describe("generation response-contract production preflight collaborators", () =
     } as never);
     expect(localProfile).toHaveBeenCalledWith(transactionClient, "owner", profile.id, profile.model);
     expect(executionText).not.toHaveBeenCalled();
-    expect(result?.providerConfigurationHash).toBe(queuedPolicy(4_096).providerConfigurationHash);
+    expect(result?.version).toBe(1);
+    expect(result?.version === 1 && result.providerConfigurationHash).toBe(queuedPolicy(4_096).providerConfigurationHash);
   });
 
   it("does not discover inventory before rejecting a queued registry mismatch", async () => {

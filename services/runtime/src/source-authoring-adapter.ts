@@ -17,6 +17,7 @@ import {
 } from "../../../packages/domain/src/source-world-proposal.js";
 import { projectAuthoringIssues } from "../../../packages/domain/src/authoring-output.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/providers.js";
+import type { TextExecutionPlan } from "@infinite-quest/contracts";
 import { AuthoringResponseError, runAuthoringResponse, type AuthoringDiagnosticContext } from "./authoring-response-adapter.js";
 
 const MAX_SOURCE_FACTS_PER_CHUNK = 200;
@@ -62,7 +63,7 @@ function sourceChunkText(source: SourceDocument, chunk: SourceChunk): string {
 }
 
 /** Pure request frame: P3.4 can serialize this exact metadata while planning candidate chunks. */
-export function renderSourceExtractionRequest(input: SourceExtractionInput, repair: boolean, issues: unknown, rejectedResponse?: string): ProviderRequest {
+export function renderSourceExtractionRequest(input: SourceExtractionInput, repair: boolean, issues: unknown, rejectedResponse?: string, plan?: Pick<TextExecutionPlan, "prompt">): ProviderRequest {
   return renderSourceExtractionProviderRequest({
     instructions: input.instructions,
     sourceText: sourceChunkText(input.source, input.chunk),
@@ -72,10 +73,10 @@ export function renderSourceExtractionRequest(input: SourceExtractionInput, repa
     repair,
     issues,
     ...(rejectedResponse === undefined ? {} : { rejectedResponse })
-  });
+  }, plan);
 }
 
-export function renderSourceExtractionProviderRequest(input: SourceExtractionRequestFrame): ProviderRequest {
+export function renderSourceExtractionProviderRequest(input: SourceExtractionRequestFrame, plan?: Pick<TextExecutionPlan, "prompt">): ProviderRequest {
   const prompt = buildSourceExtractionPrompt({
     instructions: input.instructions,
     sourceText: input.sourceText,
@@ -84,7 +85,7 @@ export function renderSourceExtractionProviderRequest(input: SourceExtractionReq
     repair: input.repair
   });
   return {
-    systemPrompt: prompt.systemPrompt,
+    systemPrompt: plan?.prompt ?? prompt.systemPrompt,
     input: prompt.input,
     responseFormatFallback: "forbid",
     ...(input.repair ? { recoveryInput: JSON.stringify({ issues: input.issues ?? [] }) } : {}),
@@ -209,6 +210,7 @@ function hasOutputLimitIssue(error: unknown): boolean {
 
 export function createSourceAuthoringAdapter(options: Readonly<{
   requestBudget: SourceExtractionRequestBudget;
+  plans?: Readonly<{ initial: Pick<TextExecutionPlan, "prompt">; repair: Pick<TextExecutionPlan, "prompt"> }>;
   diagnosticContext?: AuthoringDiagnosticContext;
   delay(milliseconds: number): Promise<void>;
 }>): Readonly<{ extractSourceChunk(input: SourceExtractionInput, currentClaim?: () => Promise<boolean>): Promise<SourceFact[]> }> {
@@ -227,7 +229,8 @@ export function createSourceAuthoringAdapter(options: Readonly<{
           request: async (attempt) => {
             requestAttempt += 1;
             repair = attempt.repair;
-            const request = renderSourceExtractionRequest(input, attempt.repair, attempt.issues, attempt.rejectedResponse);
+            const request = renderSourceExtractionRequest(input, attempt.repair, attempt.issues, attempt.rejectedResponse,
+              attempt.repair ? options.plans?.repair : options.plans?.initial);
             const result = await (attempt.repair
               ? options.requestBudget.executeRepair(request)
               : options.requestBudget.executeInitial(request));
@@ -238,6 +241,7 @@ export function createSourceAuthoringAdapter(options: Readonly<{
             ? { ...options.diagnosticContext, requestAttempt, repair }
             : undefined),
           delay: options.delay,
+          transportRetryOwner: options.plans ? "prepared_executor" : "outer",
           ...(currentClaim === undefined ? {} : { currentClaim })
         });
       } catch (error) {
@@ -306,7 +310,8 @@ export function renderSourceWorldProviderRequest(
   input: SourceWorldSynthesisInput,
   repair: boolean,
   issues: unknown,
-  rejectedResponse?: string
+  rejectedResponse?: string,
+  plan?: Pick<TextExecutionPlan, "prompt">
 ): ProviderRequest {
   const prompt = buildSourceWorldPrompt({
     instructions: input.instructions,
@@ -315,7 +320,7 @@ export function renderSourceWorldProviderRequest(
     repair
   });
   return {
-    systemPrompt: prompt.systemPrompt,
+    systemPrompt: plan?.prompt ?? prompt.systemPrompt,
     input: prompt.input,
     responseFormatFallback: "forbid",
     ...(repair ? { recoveryInput: JSON.stringify({ issues }) } : {}),
@@ -325,6 +330,7 @@ export function renderSourceWorldProviderRequest(
 
 export function createSourceWorldAuthoringAdapter(options: Readonly<{
   requestBudget: SourceExtractionRequestBudget;
+  plans?: Readonly<{ initial: Pick<TextExecutionPlan, "prompt">; repair: Pick<TextExecutionPlan, "prompt"> }>;
   diagnosticContext?: AuthoringDiagnosticContext;
   delay(milliseconds: number): Promise<void>;
 }>): Readonly<{ synthesizeSourceWorld(input: SourceWorldSynthesisInput, currentClaim?: () => Promise<boolean>): Promise<SourceWorldProposalAssembly> }> {
@@ -347,13 +353,15 @@ export function createSourceWorldAuthoringAdapter(options: Readonly<{
         stage: "source",
         ...(options.diagnosticContext === undefined ? {} : { diagnosticContext: options.diagnosticContext }),
         request: async (attempt) => {
-          const request = renderSourceWorldProviderRequest(input, attempt.repair, attempt.issues, attempt.rejectedResponse);
+          const request = renderSourceWorldProviderRequest(input, attempt.repair, attempt.issues, attempt.rejectedResponse,
+            attempt.repair ? options.plans?.repair : options.plans?.initial);
           return attempt.repair
             ? options.requestBudget.executeRepair(request)
             : options.requestBudget.executeInitial(request);
         },
         parse: (content) => parseSourceWorldResponse(input, content),
         delay: options.delay,
+        transportRetryOwner: options.plans ? "prepared_executor" : "outer",
         ...(currentClaim === undefined ? {} : { currentClaim })
       });
     }

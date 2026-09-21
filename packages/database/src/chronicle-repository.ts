@@ -19,6 +19,7 @@ import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/inde
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
+import { textModelSelectionSchema } from "../../contracts/src/provider-selection.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
   chronicleHealthSchema,
@@ -925,14 +926,26 @@ async function resolvePermittedEmbeddingProviderId(
     [scope.ownerUserId]
   );
   if (selectedProviderProfileId) {
-    const selected = await database.query<{ provider_role: string }>(
-      `SELECT provider_role FROM provider_profiles
+    const selected = await database.query<{
+      provider_role: string;
+      default_model: string;
+      text_selection: unknown;
+    }>(
+      `SELECT provider_role,default_model,text_selection FROM provider_profiles
         WHERE id = $1 AND owner_user_id = $2 AND enabled = true`,
       [selectedProviderProfileId, scope.ownerUserId]
     );
-    const role = selected.rows[0]?.provider_role;
-    if (role !== "embedding" && role !== "text") {
+    const selectedRow = selected.rows[0];
+    const role = selectedRow?.provider_role;
+    if (!selectedRow || (role !== "embedding" && role !== "text")) {
       throw invalid("Select an enabled embedding provider. Text fallback is available only when no embedding provider is enabled.");
+    }
+    const selection = textModelSelectionSchema.safeParse(selectedRow.text_selection);
+    if (role === "text" && (
+      (selection.success && selection.data.kind === "openrouter_preset")
+      || selectedRow.default_model.trim().startsWith("@preset/")
+    )) {
+      throw invalid("A text preset cannot be used as an embedding provider.");
     }
     if (role === "text" && dedicated.rows.length) {
       throw invalid("Select an enabled embedding provider. Text fallback is available only when no embedding provider is enabled.");
@@ -970,6 +983,9 @@ export function createPostgresChronicleConfigurationRepository(pool: DatabasePoo
     async setEmbeddingConfig(scope, input: CampaignEmbeddingConfig) {
       return withTransaction(pool, async (client) => {
         const worldVersionId = await requireCampaign(client, scope);
+        if (input.model.trim().startsWith("@preset/")) {
+          throw invalid("A text preset cannot be used as an embedding model.");
+        }
         const previous = await loadConfig(client, scope);
         const providerProfileId = await resolvePermittedEmbeddingProviderId(
           client,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   characterProfileSchema,
@@ -444,7 +445,17 @@ describe("strict character profile organizer validation", () => {
   });
 
   it("sends the effective organizer contract on initial and repair provider calls", async () => {
+    const providerProfileId = "33333333-3333-4333-8333-333333333333";
     const requests: Array<{ systemPrompt: string; input: string }> = [];
+    const invocations: any[] = [];
+    const executePrepared = vi.fn(async (invocation: any) => {
+      const { request } = invocation;
+      invocations.push(invocation);
+      requests.push(request);
+      return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} };
+    });
+    const getPreset = vi.fn(async () => ({ slug: "organizer", name: "Organizer", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset instructions." }));
+    const listModels = vi.fn(async () => [{ id: "native-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
     const responses = [
       { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "wrong quote" }], unassignedText: [], conflicts: [], warnings: [] },
       { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }], unassignedText: [], conflicts: [], warnings: [] }
@@ -454,18 +465,23 @@ describe("strict character profile organizer validation", () => {
       { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
       "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
       {
-        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
-        execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string; input: string }); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
+        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId, model: "model" }) },
+        execution: { text: async () => ({ id: providerProfileId, name: "Native", providerRole: "text", providerType: "openrouter", model: "model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, configuration: {}, executionRevision: "execution", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "organizer" }, execute: async () => { throw new Error("legacy execute must not receive enabled native work"); } }) },
         prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
-        promptTools: { content: () => "Organize supplied character facts." }
+        promptTools: { content: (_snapshot: unknown, key: string) => key === "character_profile_repair" ? "Repair organizer response." : "Organize supplied character facts." },
+        authoringTextPlans: { nativePresetPlansEnabled: true, preparedExecutor: { execute: executePrepared }, loadAuthority: async () => ({ id: providerProfileId, providerRole: "text", authorityRevision: "authority" }), ports: { resolvePreset: async () => getPreset(), discoverModels: async () => listModels() } }
       } as never
     );
     expect(result.candidate.appearance.clothing).toBe("weathered blue cloak");
     expect(requests).toHaveLength(2);
+    expect(getPreset).toHaveBeenCalledTimes(1);
+    expect(listModels).toHaveBeenCalledTimes(1);
+    expect(executePrepared.mock.calls.map(([input]) => input.operation)).toEqual(["character_organizer", "character_organizer_repair"]);
     for (const request of requests) {
       expect(request.systemPrompt).toContain('"path":"appearance.clothing","source":"legacyGuidance","quote":"exact source excerpt"');
       expect(request.systemPrompt).toContain("character-profile-organizer-v3");
       expect(request.systemPrompt).toContain("untrusted reference");
+      expect(request.systemPrompt).toContain("Preset instructions.");
       expect((request as Record<string, unknown>).responseFormatFallback).toBe("forbid");
       expect(request).not.toHaveProperty("previousResponseId");
     }
@@ -474,6 +490,38 @@ describe("strict character profile organizer validation", () => {
       code: "custom",
       message: "Organizer evidence does not support a populated profile field."
     }]);
+    expect(requests[0]?.systemPrompt).not.toBe(requests[1]?.systemPrompt);
+    expect(invocations.map((invocation) => JSON.parse(invocation.preparedRequest.body).response_format.json_schema.name))
+      .toEqual(["infinite_quest_character_organizer_v1", "infinite_quest_character_organizer_v1"]);
+    for (const invocation of invocations) {
+      expect(invocation.preparedRequest.payloadHash).toBe(createHash("sha256").update(invocation.preparedRequest.body).digest("hex"));
+      expect(invocation.preparedRequest.budgetAudit).toMatchObject({
+        countMode: "estimated", inputLimit: 7_168, outputReserveTokens: 1_024
+      });
+      expect(invocation.preparedRequest.body.match(/Preset instructions\./g)).toHaveLength(1);
+    }
+  });
+
+  it("retains the legacy organizer request and repair path", async () => {
+    const requests: Array<{ systemPrompt: string; input: string }> = [];
+    const responses = [
+      { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "wrong quote" }], unassignedText: [], conflicts: [], warnings: [] },
+      { candidate: { appearance: { clothing: "weathered blue cloak" } }, evidence: [{ path: "appearance.clothing", source: "legacyGuidance", quote: "weathered blue cloak" }], unassignedText: [], conflicts: [], warnings: [] }
+    ];
+    const content = worldContentSchema.parse({ world: { title: "Organizer world" } });
+    await organizeWorldCharacterProfileForOwner(
+      { query: async () => ({ rows: [{ status: "draft", revision: 1, content }] }) } as never,
+      "owner", "world", { expectedRevision: 1, character: { id: "mira", name: "Mira", characterText: "Mira wears a weathered blue cloak.", rpgStats: [], defaultTriggers: [], source: {} } },
+      {
+        resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: "provider", model: "model" }) },
+        execution: { text: async () => ({ execute: async (request: unknown) => { requests.push(request as { systemPrompt: string; input: string }); return { content: JSON.stringify(responses.shift()), responseId: "response", finishReason: "stop", outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} }; } }) },
+        prompts: { loadCharacterOrganizationPromptSnapshot: async () => ({ snapshot: {} }) },
+        promptTools: { content: () => "Organize supplied character facts." }
+      } as never
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.systemPrompt).toContain("character-profile-organizer-v3");
+    expect(JSON.parse(requests[1]!.input).validationFailures).toEqual([{ path: "evidence.0.source", code: "custom", message: "Organizer evidence does not support a populated profile field." }]);
   });
 
   it("repairs malformed organizer output once and fails safely when the replacement is malformed", async () => {

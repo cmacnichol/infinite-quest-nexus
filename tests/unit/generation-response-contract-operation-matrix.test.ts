@@ -3,11 +3,13 @@ import type { GenerationExecutionPayload } from "../../packages/database/src/gen
 import { sha256 } from "../../packages/domain/src/index.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import {
   bindCampaignResponseContract,
   callCampaignTextProvider,
   responseContractInvocationDetails
 } from "../../services/runtime/src/generation-executor-adapter.js";
+import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
 
 const hash = "a".repeat(64);
 const scope = {
@@ -66,6 +68,33 @@ function request(streaming = false) {
   };
 }
 
+function v2FrozenContracts(key: `${Parameters<typeof getProviderOutputSchemaV2>[0]}:nonstream`) {
+  const [operation] = key.split(":") as [Parameters<typeof getProviderOutputSchemaV2>[0]];
+  const streaming = false;
+  const schema = getProviderOutputSchemaV2(operation);
+  const verification = {
+    version: 2 as const, providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a",
+    routeConfigHash: hash, adapterProtocol: "text-schema-adapter-v2" as const, operation, schemaHash: schema.schemaHash,
+    streaming, verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+    providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects
+  };
+  const authority = {
+    kind: "model_verified" as const, providerProfileId: "00000000-0000-4000-8000-000000000004",
+    providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a",
+    providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash,
+    authorityRevision: "authority-v1"
+  };
+  return resolveGenerationResponseContractsV2({
+    queuedPolicy: {
+      version: 2, policy: "required", providerProfileId: authority.providerProfileId,
+      admission: { mode: "json_schema", basis: "model_verified", verification }, authority,
+      operationClosureVersion: 2, invocationKeys: [key]
+    },
+    eligible: () => ({ status: "verified", reason: "verified", verification }),
+    selectedAt: "2026-09-19T00:00:00.000Z", capabilityEvidenceHash: hash
+  });
+}
+
 function auditLedger() {
   let status: "reserved" | "dispatched" | "completed" = "reserved";
   let invocation: any;
@@ -99,6 +128,26 @@ function dependencies(ledger: ReturnType<typeof auditLedger>) {
 }
 
 describe("generation response-contract executor operation matrix", () => {
+  it("preserves historical v1 event coverage without a contract", () => {
+    const legacy = job();
+    expect(bindCampaignResponseContract(legacy, "event_coverage_validation", request()).responseContract).toBeUndefined();
+  });
+  it.each([
+    ["RPG assessment", "rpg_assessment", "rpg_assessment:nonstream"],
+    ["before trigger", "event_trigger_before", "event_trigger_before:nonstream"],
+    ["after trigger", "event_trigger_after", "event_trigger_after:nonstream"],
+    ["scene coverage", "scene_coverage_validation", "scene_coverage:nonstream"],
+    ["event coverage", "event_coverage_validation", "event_coverage:nonstream"]
+  ] as const)("binds v2 %s calls to their distinct frozen closure key", (_name, operation, key) => {
+    const schemaOperation = key.split(":")[0] as Parameters<typeof getProviderOutputSchemaV2>[0];
+    const v2Job = job();
+    v2Job.orchestration_private.frozenResponseContracts = v2FrozenContracts(key) as never;
+    const schema = getProviderOutputSchemaV2(schemaOperation);
+
+    expect(bindCampaignResponseContract(v2Job, operation, request()).responseContract)
+      .toMatchObject({ version: 2, operation: schemaOperation, schemaHash: schema.schemaHash });
+  });
+
   it.each([
     ["primary", "story_generation", false, "story:nonstream", "story"],
     ["primary stream", "story_generation", true, "story:stream", "story"],
@@ -134,7 +183,7 @@ describe("generation response-contract executor operation matrix", () => {
     expect(providerPrepared).toBeDefined();
     expect(reserved.requestPayloadHash).toBe(providerPrepared!.payloadHash);
     expect(reserved.requestPayloadHash).toBe(sha256(providerPrepared!.body));
-    expect(ledger.complete.mock.calls[0]![2]).toEqual({ returnedModel: "model-a", returnedProviderRoute: "strict-route", diagnosticCode: null });
+    expect(ledger.complete.mock.calls[0]![2]).toEqual({ returnedModel: "model-a", returnedProviderRoute: "strict-route", diagnosticCode: null, resultHash: null });
     expect(execute).toHaveBeenCalledOnce();
   });
 

@@ -539,6 +539,14 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("if (dialog === elements.characterDialog && characterModalBusy) return;");
   });
 
+  it("treats only a direct click outside dialog bounds as a backdrop click", () => {
+    const clickedDialogBackdrop = managementFunction<(dialog: { getBoundingClientRect: () => DOMRect }, event: { target: unknown; clientX: number; clientY: number }) => boolean>("clickedDialogBackdrop");
+    const dialog = { getBoundingClientRect: () => ({ left: 20, right: 120, top: 30, bottom: 130 } as DOMRect) };
+    expect(clickedDialogBackdrop(dialog, { target: {}, clientX: 10, clientY: 20 })).toBe(false);
+    expect(clickedDialogBackdrop(dialog, { target: dialog, clientX: 60, clientY: 70 })).toBe(false);
+    expect(clickedDialogBackdrop(dialog, { target: dialog, clientX: 10, clientY: 20 })).toBe(true);
+  });
+
   it("does not offer a classifier provider role in legacy Nexus", () => {
     expect(managementHtml).not.toContain('<option value="intent">Turn intent classification</option>');
     expect(managementHtml).not.toContain("Auto turn-intent classification");
@@ -565,6 +573,8 @@ describe("Nexus management UI contracts", () => {
       loadProviders: vi.fn(),
       providerMessage: vi.fn(),
       editingProviderId: "",
+      createProviderPresetsApi: () => ({}),
+      providerTextSelection: (provider: { defaultModel: string }) => ({ kind: "model", modelId: provider.defaultModel }),
       window: { confirm: () => false }
     });
 

@@ -7,6 +7,7 @@ import type {
   IllustrationSegmentRequest,
   WorldCoverRequest
 } from "@infinite-quest/contracts";
+import type { FrozenResponseContractsV2, TextExecutionPlan, TextExecutionRouteBasis } from "@infinite-quest/contracts";
 
 export type IllustrationOwnerScope = Readonly<{
   ownerUserId: string;
@@ -267,12 +268,16 @@ export type ProvisionalIllustrationSegmentRequest = Readonly<{
   segment: IllustrationSegmentSlice;
   config: StreamingIllustrationConfig;
   visualReference?: string;
+  /** Private preflight evidence supplied by the streaming executor. */
+  textExecutionSnapshot?: unknown;
 }>;
 
 export type PromoteProvisionalIllustrationRequest = Readonly<{
   finalNarration: string;
   config: StreamingIllustrationConfig;
   visualReference?: string;
+  /** Private preflight evidence for final segments absent from the stream. */
+  textExecutionSnapshot?: unknown;
 }>;
 
 export type IllustrationWorkerRequest = Readonly<{
@@ -376,11 +381,26 @@ export type IllustrationImageExecutionResult =
     }>);
 
 export type IllustrationPromptRefinementRequest = IllustrationSegmentExecutionScope & Readonly<{
+  /** Private durable prompt-job claim identity for prepared text attempts. */
+  promptJobId?: string;
+  claimAttempt?: number;
+  leaseOwner?: string;
+  currentClaim?(): Promise<boolean>;
   providerProfileId: string;
   model: string;
   systemPrompt: string;
   fictionText: string;
   storyContext: string;
+  /** Private durable v2 plan; never include this in a serving projection. */
+  textExecutionPlan?: TextExecutionPlan;
+  /** Full private contract binding for new durable prompt jobs. */
+  textExecutionContract?: Readonly<{
+    providerType: "openrouter" | "openai_compatible";
+    requestConfiguration: Readonly<{ httpReferer?: string }>;
+    routeBasis: TextExecutionRouteBasis;
+    frozenResponseContracts: FrozenResponseContractsV2;
+    trustedOperationPrompt: string;
+  }>;
 }>;
 
 export type IllustrationPromptRefinementResult = Readonly<{

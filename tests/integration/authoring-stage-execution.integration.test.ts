@@ -1,31 +1,59 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import Fastify from "fastify";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { authoringRuntimeFixture, deferred } from "../helpers/authoring-runtime.js";
 import { runWorker } from "../../services/worker/src/worker.js";
 import { runRuntimeLifecycle } from "../../services/runtime/src/lifecycle.js";
 import { inertWorkerIllustration, inertWorkerMemory } from "../helpers/memory-applications.js";
-import { authoringSubmitSchema, playableCharacterSchema, worldContentSchema } from "../../packages/contracts/src/index.js";
+import { authoringSubmitSchema, getProviderOutputSchemaV2, playableCharacterSchema, worldContentSchema, type SchemaVerificationV2 } from "../../packages/contracts/src/index.js";
 import { createAuthoringApplication } from "../../packages/application/src/authoring/use-cases.js";
 import { createAuthoringWorkerApplication } from "../../packages/application/src/authoring/worker.js";
 import type { AuthoringClaim } from "../../packages/application/src/authoring/ports.js";
 import { createPostgresAuthoringRepository, createPostgresAuthoringTargetPort } from "../../packages/database/src/authoring-job-repository.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 import { AuthoringResponseError } from "../../services/runtime/src/authoring-response-adapter.js";
-import { createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
+import { registerAuthoringRoutes } from "../../services/api/src/authoring-routes.js";
+import { createRuntimeAuthoringApplication, createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
+import { prepareAuthoringResponseContractExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { RuntimeProviderExecutionPort, RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 import type { ProviderRequest, ProviderResult } from "../../packages/story-engine/src/providers.js";
 import { ProviderHttpError } from "../../packages/story-engine/src/providers.js";
-import { assembleGeneratedWorld } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { composePresetPrompt } from "../../packages/story-engine/src/preset-prompt.js";
+import { buildSourceExtractionPrompt, buildSourceWorldPrompt } from "../../packages/domain/src/authoring-prompts.js";
+import { assembleGeneratedWorld, generateTemplateWorld, generateWorldPreviewForOwner } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { createApiProviderApplicationComposition, createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
+import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { currentIntegrationProviderTransport, installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import fixture from "../fixtures/authoring/reliability.json" with { type: "json" };
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const result = (content: string): ProviderResult => ({ content, responseId: "synthetic", finishReason: "stop", outputLimited: false, modelInstanceId: "synthetic", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} });
+
+function standaloneModelCapabilities(input: Readonly<{ endpointIdentity: string; model: string; configuration: Record<string, unknown> }>) {
+  const schema = getProviderOutputSchemaV2("standalone_character");
+  const verification: SchemaVerificationV2 = {
+    version: 2, providerType: "openrouter", endpointIdentity: input.endpointIdentity, model: input.model,
+    routeConfigHash: capabilityRouteConfigHash(input.configuration), adapterProtocol: "text-schema-adapter-v2",
+    operation: "standalone_character", schemaHash: schema.schemaHash, streaming: false,
+    verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+    providerRoutingSlugs: ["openai"], nativeOpenTrackerObjects: true
+  };
+  return createProviderResponseFormatCapabilities({
+    records: [verification], registryDigest: sha256("authoring-model-registry"),
+    now: () => Date.parse("2026-09-20T00:00:00.000Z")
+  });
+}
 
 integration("durable authoring real repository and stage dispatcher", () => {
   let pool: DatabasePool;
@@ -38,6 +66,7 @@ integration("durable authoring real repository and stage dispatcher", () => {
   afterEach(async () => {
     await pool.query("DELETE FROM authoring_jobs WHERE owner_user_id = $1", [ownerUserId]);
     await pool.query("DELETE FROM worlds WHERE owner_user_id = $1", [ownerUserId]);
+    await pool.query("DELETE FROM provider_profiles WHERE owner_user_id = $1 AND name LIKE 'task-5c-%'", [ownerUserId]);
   });
   afterAll(async () => { await pool?.end(); });
 
@@ -51,6 +80,873 @@ integration("durable authoring real repository and stage dispatcher", () => {
     };
     return { snapshot, loads, dispatch: createRuntimeAuthoringStageDispatcher({ execution, sha256 }) };
   }
+
+  async function historicalAuthoringClaim(workerId: string, seconds = 60): Promise<AuthoringClaim | null> {
+    return (await (async () => {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const jobs = await client.query<any>(`SELECT jobs.id,jobs.owner_user_id,jobs.execution_generation,jobs.review_generation
+          FROM authoring_jobs jobs WHERE jobs.kind = ANY($1::text[]) AND jobs.status IN ('queued','running')
+            AND jobs.expires_at > clock_timestamp() AND EXISTS (
+              SELECT 1 FROM authoring_job_stages stages WHERE stages.job_id = jobs.id
+                AND stages.owner_user_id = jobs.owner_user_id
+                AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key)
+                AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency
+                  LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key
+                    AND parent.generation = dependency.value::int AND parent.status = 'validated'
+                    AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key)
+                  WHERE parent.id IS NULL)
+                AND (stages.status = 'queued' AND ((stages.attempt_count = 0 AND stages.retry_count = 0) OR stages.next_attempt_at <= clock_timestamp())
+                  OR stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3))
+          ORDER BY jobs.created_at,jobs.id FOR UPDATE SKIP LOCKED LIMIT 1`, [["world_concept", "character", "story_source"]]);
+        const job = jobs.rows[0];
+        if (!job) { await client.query("COMMIT"); return null; }
+        const stages = await client.query<any>(`SELECT stages.id,stages.generation,stages.lease_token,stages.lease_expires_at
+          FROM authoring_job_stages stages WHERE stages.job_id = $1 AND stages.owner_user_id = $2
+            AND (stages.source_review_generation IS NULL OR stages.source_review_generation = $3)
+            AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key)
+            AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency
+              LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key
+                AND parent.generation = dependency.value::int AND parent.status = 'validated'
+                AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key)
+              WHERE parent.id IS NULL)
+            AND ((stages.status = 'queued' AND ((stages.attempt_count = 0 AND stages.retry_count = 0) OR stages.next_attempt_at <= clock_timestamp()))
+              OR (stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3))
+          ORDER BY stages.next_attempt_at,stages.created_at,stages.id FOR UPDATE SKIP LOCKED LIMIT 1`, [job.id, job.owner_user_id, job.review_generation]);
+        const stage = stages.rows[0];
+        if (!stage) { await client.query("COMMIT"); return null; }
+        await client.query("UPDATE authoring_job_stages SET status = 'running', attempt_count = attempt_count + 1, lease_token = gen_random_uuid(), lease_owner = $2, lease_expires_at = clock_timestamp() + make_interval(secs => $3::int), started_at = COALESCE(started_at, clock_timestamp()), updated_at = clock_timestamp() WHERE id = $1", [stage.id, workerId, seconds]);
+        const row = (await client.query<any>("SELECT id,generation,lease_token,lease_expires_at FROM authoring_job_stages WHERE id=$1", [stage.id])).rows[0]!;
+        await client.query("UPDATE authoring_jobs SET status = 'running', last_activity_at = clock_timestamp(), expires_at = clock_timestamp() + interval '7 days', updated_at = clock_timestamp() WHERE id = $1", [job.id]);
+        await client.query("COMMIT");
+        return { jobId: job.id, stageId: row.id, ownerUserId: job.owner_user_id, jobGeneration: job.execution_generation,
+          stageGeneration: row.generation, leaseToken: row.lease_token, leaseExpiresAt: row.lease_expires_at.toISOString() };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    })());
+  }
+
+  it.each(["queued", "expired"] as const)("fences an exact historical authoring %s claim before snapshot initialization and dispatch", async (state) => {
+    const protocolRepository = (createPostgresAuthoringRepository as unknown as (
+      value: DatabasePool,
+      options: { textPlanProtocol: 2 }
+    ) => ReturnType<typeof createPostgresAuthoringRepository>)(pool, { textPlanProtocol: 2 });
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a fenced cartographer.", content: worldContentSchema.parse({ world: { title: "Fenced authoring" } }) });
+    const job = await protocolRepository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    await expect(pool.query<{ text_plan_protocol: number | null }>(
+      "SELECT text_plan_protocol FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: 2 }] });
+    let priorClaim: AuthoringClaim | null = null;
+    if (state === "expired") {
+      priorClaim = await protocolRepository.claim("compatible-authoring", 60);
+      expect(priorClaim?.jobId).toBe(job.id);
+      await pool.query("UPDATE authoring_job_stages SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [priorClaim!.stageId]);
+    }
+    const before = (await pool.query(
+      `SELECT jobs.status AS job_status,jobs.last_activity_at,jobs.expires_at,jobs.execution_generation,
+              stages.id AS stage_id,stages.generation AS stage_generation,
+              stages.status AS stage_status,stages.attempt_count,stages.lease_token,stages.lease_owner,stages.lease_expires_at
+         FROM authoring_jobs jobs JOIN authoring_job_stages stages ON stages.job_id=jobs.id WHERE jobs.id=$1`,
+      [job.id]
+    )).rows[0];
+    let synthetic: AuthoringClaim;
+    if (state === "queued") {
+      await expect(historicalAuthoringClaim("old-authoring")).rejects.toThrow(TypeError);
+      synthetic = {
+        jobId: job.id,
+        stageId: before.stage_id,
+        ownerUserId,
+        jobGeneration: before.execution_generation,
+        stageGeneration: before.stage_generation,
+        leaseToken: randomUUID(),
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+      };
+    } else {
+      synthetic = (await historicalAuthoringClaim("compatible-authoring"))!;
+      expect(synthetic.jobId).toBe(job.id);
+    }
+    expect((await pool.query(
+      `SELECT jobs.status AS job_status,jobs.last_activity_at,jobs.expires_at,jobs.execution_generation,
+              stages.id AS stage_id,stages.generation AS stage_generation,
+              stages.status AS stage_status,stages.attempt_count,stages.lease_token,stages.lease_owner,stages.lease_expires_at
+         FROM authoring_jobs jobs JOIN authoring_job_stages stages ON stages.job_id=jobs.id WHERE jobs.id=$1`,
+      [job.id]
+    )).rows[0]).toEqual(before);
+    const runtimeFixture = runtime(async () => result(JSON.stringify(fixture.character)));
+    expect(await protocolRepository.loadClaim(synthetic!)).toBeNull();
+    expect(await protocolRepository.initializeExecutionSnapshot(synthetic!, runtimeFixture.snapshot)).toBeNull();
+    expect(await protocolRepository.heartbeat(synthetic!, 60)).toBe(false);
+    const dispatch = vi.fn(async () => ({ kind: "character", character: fixture.character } as const));
+    await expect(executeAuthoringStage({ claim: synthetic, repository: protocolRepository, dispatch: dispatch as never })).resolves.toBeNull();
+    expect(dispatch).not.toHaveBeenCalled();
+    const compatible = await protocolRepository.claim("compatible-authoring-reclaim", 60);
+    expect(compatible).toMatchObject({ jobId: job.id, stageId: synthetic.stageId });
+    expect(compatible?.stageGeneration).toBe(synthetic.stageGeneration);
+  });
+
+  it("keeps genuine v1 authoring snapshots on the historical claim path", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a historical cartographer.", content: worldContentSchema.parse({ world: { title: "Historical authoring" } }) });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const claim = (await repository.claim("v1-snapshot-initial", 60))!;
+    const historical = runtime(async () => result(JSON.stringify(fixture.character))).snapshot;
+    expect("version" in historical).toBe(false);
+    await expect(repository.initializeExecutionSnapshot(claim, historical)).resolves.toEqual(historical);
+    await expect(pool.query<{ text_plan_protocol: number | null }>(
+      "SELECT text_plan_protocol FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: null }] });
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [claim.stageId]);
+    await expect(historicalAuthoringClaim("historical-v1-authoring"))
+      .resolves.toMatchObject({ jobId: job.id, stageId: claim.stageId });
+    await expect(pool.query<{ attempt_count: number; lease_owner: string }>(
+      "SELECT attempt_count,lease_owner FROM authoring_job_stages WHERE id=$1", [claim.stageId]
+    )).resolves.toMatchObject({ rows: [{ attempt_count: 2, lease_owner: "historical-v1-authoring" }] });
+  });
+
+  it("classifies shallow malformed historical authoring snapshots as protected", async () => {
+    const malformed = {
+      version: 2, providerProfileId: "", model: "", configurationHash: "x",
+      contextWindowTokens: -1, maxOutputTokens: 0, requestTimeoutMs: -1,
+      prompts: {}, protocols: {}, textExecutionPlans: { bogus: {} }
+    };
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT authoring_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(malformed)]
+    )).resolves.toMatchObject({ rows: [{ required: true }] });
+  });
+
+  it("classifies a fully shaped historical authoring plan with a changed plan hash as protected", async () => {
+    const routeDraft = {
+      version: 2 as const, selection: { kind: "model" as const, modelId: "historical-authoring-model" }, preset: null,
+      candidates: [{ modelId: "historical-authoring-model", providerPolicy: { max_price: { prompt: 1e21 } }, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+      presetSystemPrompt: "Historical authoring system prompt.", parameters: { temperature: 1e-7 },
+      endpointReference: "historical-authoring-endpoint", credentialReference: randomUUID(), profileRevision: "profile-v1",
+      requestTimeoutMs: 30_000, protocolVersion: "text-execution-plan-v2"
+    };
+    const routeBasis = { ...routeDraft, routeBasisHash: textExecutionRouteBasisHash({ ...routeDraft, routeBasisHash: "0".repeat(64) }) };
+    const plan = deriveTextExecutionPlan(routeBasis, "Create Élodie's historical world outline.");
+    const snapshot = {
+      version: 2 as const, providerProfileId: routeDraft.credentialReference, model: "historical-authoring-model",
+      configurationHash: "a".repeat(64), contextWindowTokens: 8192, maxOutputTokens: 1024, requestTimeoutMs: 30_000,
+      prompts: { world_generation: "Historical authoring system prompt." }, protocols: { world: "world-authoring-v1" },
+      textExecutionPlans: { worldOutline: plan }
+    };
+    const tampered = { ...snapshot, textExecutionPlans: { worldOutline: { ...plan, planHash: "b".repeat(64) } } };
+    const { planHash: _planHash, ...unhashedPlan } = plan;
+    const canonicalNumbers = '{"large":1e+21,"precise":0.30000000000000004,"small":1e-7}';
+    const canonicalClient = await pool.connect();
+    try {
+      await canonicalClient.query("SET extra_float_digits = -15");
+      await expect(canonicalClient.query<{ text: string; hash: string }>(
+        "SELECT canonical_jsonb_text($1::jsonb) AS text,canonical_jsonb_sha256($1::jsonb) AS hash",
+        [JSON.stringify({ small: 1e-7, precise: 0.30000000000000004, large: 1e21 })]
+      )).resolves.toMatchObject({ rows: [{ text: canonicalNumbers, hash: sha256(canonicalNumbers) }] });
+    } finally {
+      await canonicalClient.query("RESET extra_float_digits");
+      canonicalClient.release();
+    }
+    await expect(pool.query<{ hash: string }>(
+      "SELECT canonical_jsonb_sha256($1::jsonb) AS hash",
+      [JSON.stringify(unhashedPlan)]
+    )).resolves.toMatchObject({ rows: [{ hash: plan.planHash }] });
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT authoring_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(snapshot)]
+    )).resolves.toMatchObject({ rows: [{ required: false }] });
+    await expect(pool.query<{ required: boolean }>(
+      "SELECT authoring_snapshot_requires_text_plan_protocol($1::jsonb) AS required",
+      [JSON.stringify(tampered)]
+    )).resolves.toMatchObject({ rows: [{ required: true }] });
+  });
+
+  it("marks native authoring intent in API composition before the first claim and permits terminal cleanup", async () => {
+    const application = createRuntimeAuthoringApplication(pool, sha256, { nativePresetPlansEnabled: true });
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create an API-marked cartographer.", content: worldContentSchema.parse({ world: { title: "API marker" } }) });
+    const job = await application.submit({ ownerUserId }, input);
+    await expect(pool.query<{ text_plan_protocol: number | null; status: string; execution_snapshot: unknown }>(
+      "SELECT text_plan_protocol,status,execution_snapshot FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: 2, status: "queued", execution_snapshot: null }] });
+    await expect(application.cancel({ ownerUserId }, job.id, job.revision)).resolves.toMatchObject({ status: "cancelled" });
+    await expect(pool.query<{ text_plan_protocol: number | null; status: string }>(
+      "SELECT text_plan_protocol,status FROM authoring_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ text_plan_protocol: 2, status: "cancelled" }] });
+  });
+
+  it("persists one private bound-v3 contract and reclaims it after ordinary edits without metadata reload", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a cartographer.", content: worldContentSchema.parse({ world: { title: "V2" } }) });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const claim = (await repository.claim("v2-initial", 60))!;
+    const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000011", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result(JSON.stringify(fixture.character)) };
+    const resolvePreset = vi.fn(async () => ({ slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset system." }));
+    const discoverModels = vi.fn(async () => [{ id: "native-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId, execution: provider,
+      operationPrompts: {
+        standaloneCharacter: "Create a cartographer.", standaloneCharacterRepair: "Create a cartographer.",
+        organizer: "Organize the character.", organizerRepair: "Repair the organization."
+      },
+      ports: { resolvePreset, discoverModels }
+    });
+    const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
+    if (!("routeBasis" in snapshot)) throw new Error("Expected a bound authoring snapshot.");
+    const planOnlySnapshot = createAuthoringExecutionSnapshot(
+      provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256,
+      { standaloneCharacter: snapshot.textExecutionPlans.standaloneCharacter! }
+    );
+    expect(planOnlySnapshot).toMatchObject({ version: 2, textExecutionPlans: { standaloneCharacter: expect.any(Object) } });
+    const planOnlyInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+    const planOnlyJob = await repository.submit({ ownerUserId }, planOnlyInput, sha256(JSON.stringify(planOnlyInput)));
+    const planOnlyClaim = (await repository.claim("plan-v2-initial", 60))!;
+    expect(planOnlyClaim.jobId).toBe(planOnlyJob.id);
+    await repository.initializeExecutionSnapshot(planOnlyClaim, planOnlySnapshot);
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [planOnlyClaim.stageId]);
+    await expect(historicalAuthoringClaim("historical-plan-v2")).resolves.toMatchObject({ jobId: planOnlyJob.id, stageId: planOnlyClaim.stageId });
+    await pool.query("UPDATE authoring_jobs SET status='cancelled' WHERE id=$1", [planOnlyJob.id]);
+    await pool.query("UPDATE authoring_job_stages SET status='cancelled',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE job_id=$1", [planOnlyJob.id]);
+    await repository.initializeExecutionSnapshot(claim, snapshot);
+    const conflicting = createAuthoringExecutionSnapshot(provider, { character_generation: "conflicting" }, { character: "conflicting" }, sha256);
+    expect(await repository.initializeExecutionSnapshot(claim, conflicting)).toEqual(snapshot);
+    const publicView = (await repository.read({ ownerUserId }, job.id))!;
+    expect(publicView).not.toHaveProperty("executionSnapshot");
+    expect(JSON.stringify(publicView)).not.toContain("Preset system.");
+    expect(resolvePreset).toHaveBeenCalledOnce();
+    expect(discoverModels).toHaveBeenCalledOnce();
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [claim.stageId]);
+    const reclaimed = (await repository.claim("v2-reclaim", 60))!;
+    const loaded = (await repository.loadClaim(reclaimed))!;
+    expect(loaded.snapshot).toEqual(snapshot);
+    const executed = vi.fn(async ({ request, preparedRequest, frozenResponseContracts, routeBasis, trustedOperationPrompt }: any) => {
+      expect(request.systemPrompt).toBe("Preset system.\n\nCreate a cartographer.");
+      expect(JSON.parse(preparedRequest.body).response_format.json_schema.name).toBe("infinite_quest_standalone_character_v1");
+      expect(preparedRequest.body.match(/Preset system\./g)).toHaveLength(1);
+      expect(preparedRequest.budgetAudit).toMatchObject({ countMode: "estimated", outputReserveTokens: 1024 });
+      expect(frozenResponseContracts.version).toBe(2);
+      expect(routeBasis.routeBasisHash).toBe(snapshot.routeBasis.routeBasisHash);
+      expect(trustedOperationPrompt).toBe("Create a cartographer.");
+      return result(JSON.stringify(fixture.character));
+    });
+    const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ({ ...provider, executionRevision: "ordinary-edited" }) } as never, sha256, preparedExecutor: { execute: executed } });
+    await expect(executeAuthoringStage({ claim: reclaimed, repository, dispatch })).resolves.toMatchObject({ kind: "character" });
+    expect(executed).toHaveBeenCalledWith(expect.objectContaining({ ownerUserId, providerProfileId: provider.id }));
+    for (const tamper of ["whole-unused-invocation", "unused-repair-half"] as const) {
+      const tamperedInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+      const tamperedJob = await repository.submit({ ownerUserId }, tamperedInput, sha256(JSON.stringify(tamperedInput)));
+      const tamperedClaim = (await repository.claim("closure-" + tamper + "-initial", 60))!;
+      expect(tamperedClaim.jobId).toBe(tamperedJob.id);
+      await repository.initializeExecutionSnapshot(tamperedClaim, snapshot);
+      const tamperedSnapshot = structuredClone(snapshot) as any;
+      const removed = tamper === "whole-unused-invocation" ? ["organizer", "organizerRepair"] : ["organizerRepair"];
+      for (const operation of removed) {
+        delete tamperedSnapshot.textExecutionPlans[operation];
+        delete tamperedSnapshot.trustedOperationPrompts[operation];
+      }
+      await expect(pool.query(
+        "UPDATE authoring_jobs SET execution_snapshot = $2::jsonb WHERE id = $1",
+        [tamperedJob.id, JSON.stringify(tamperedSnapshot)]
+      )).rejects.toThrow(/immutable/i);
+      expect(executed).toHaveBeenCalledOnce();
+    }
+    const denied = vi.fn();
+    const authorityChanged = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ({ ...provider, authorityRevision: "authority-revoked" }) } as never, sha256, preparedExecutor: { execute: denied } });
+    await expect(authorityChanged({ ...loaded, jobId: reclaimed.jobId, stageId: reclaimed.stageId, stageGeneration: reclaimed.stageGeneration, ownerUserId })).rejects.toMatchObject({ authoringFailure: { code: "authoring_provider_unavailable" } });
+    expect(denied).not.toHaveBeenCalled();
+    expect(resolvePreset).toHaveBeenCalledOnce();
+    expect(discoverModels).toHaveBeenCalledOnce();
+  });
+
+  it("reclaims a complete inherited-Model contract after ordinary edits and rejects current authority drift", async () => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a model-bound cartographer.", content: worldContentSchema.parse({ world: { title: "Model V2" } }) });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const claim = (await repository.claim("model-initial", 60))!;
+    const configuration = { providerRouting: { only: ["openai"] } };
+    const provider: RuntimeTextExecution = {
+      id: "00000000-0000-4000-8000-000000000021", name: "Native model", providerRole: "text",
+      providerType: "openrouter", model: "openai/model-authoring", contextWindowTokens: 8192,
+      maxOutputTokens: 1024, temperature: 0.6, requestTimeoutMs: 30_000,
+      endpointIdentity: "endpoint-model", executionRevision: "ordinary-model-a", authorityRevision: "authority-model-a",
+      configuration, execute: async () => { throw new Error("legacy model execution must not run"); }
+    };
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId, execution: provider,
+      operationPrompts: { standaloneCharacter: "Create a model-bound cartographer.", standaloneCharacterRepair: "Repair the model-bound cartographer." },
+      ports: {
+        resolvePreset: async () => { throw new Error("inherited Model must not resolve a preset"); },
+        discoverModels: async () => [{
+          id: provider.model, contextWindowTokens: provider.contextWindowTokens, maxOutputTokens: provider.maxOutputTokens,
+          responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" }
+        }]
+      },
+      responseFormatCapabilities: standaloneModelCapabilities({ endpointIdentity: provider.endpointIdentity!, model: provider.model, configuration })
+    });
+    const snapshot = createAuthoringExecutionSnapshot(provider, { character_generation: "legacy" }, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
+    if (!("routeBasis" in snapshot)) throw new Error("Expected a bound authoring snapshot.");
+    expect(snapshot).toMatchObject({ version: 3, providerType: "openrouter", routeBasis: { selection: { kind: "model", modelId: provider.model } } });
+    expect(JSON.stringify(snapshot)).not.toContain("presetSlug");
+    await repository.initializeExecutionSnapshot(claim, snapshot);
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [claim.stageId]);
+    const reclaimed = (await repository.claim("model-reclaim", 60))!;
+    const loaded = (await repository.loadClaim(reclaimed))!;
+    expect(loaded.snapshot).toEqual(snapshot);
+    const executed = vi.fn(async ({ preparedRequest, frozenResponseContracts, routeBasis, trustedOperationPrompt }: any) => {
+      const body = JSON.parse(preparedRequest.body);
+      expect(body.response_format.json_schema.name).toBe(getProviderOutputSchemaV2("standalone_character").name);
+      expect(body.provider).toEqual({ require_parameters: true, only: ["openai"] });
+      expect(preparedRequest.budgetAudit).toMatchObject({ countMode: "estimated", outputReserveTokens: 1024 });
+      expect(frozenResponseContracts.contracts["standalone_character:nonstream"].admission.basis).toBe("model_verified");
+      expect(routeBasis.routeBasisHash).toBe(snapshot.routeBasis.routeBasisHash);
+      expect(trustedOperationPrompt).toBe("Create a model-bound cartographer.");
+      return result(JSON.stringify(fixture.character));
+    });
+    const ordinaryEdited = {
+      ...provider, executionRevision: "ordinary-model-edited", temperature: 1.4,
+      requestTimeoutMs: 5_000, contextWindowTokens: 4096, maxOutputTokens: 512,
+      configuration: { providerRouting: { only: ["changed-later"] } }
+    };
+    const dispatch = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ordinaryEdited } as never, sha256, preparedExecutor: { execute: executed } });
+    const output = await executeAuthoringStage({ claim: reclaimed, repository, dispatch });
+    expect(output).toMatchObject({ kind: "character" });
+    await expect(repository.checkpoint(reclaimed, output!)).resolves.toBe(true);
+    expect(executed).toHaveBeenCalledOnce();
+    const denied = vi.fn();
+    const authorityChanged = createRuntimeAuthoringStageDispatcher({ execution: { text: async () => ({ ...ordinaryEdited, authorityRevision: "authority-model-revoked" }) } as never, sha256, preparedExecutor: { execute: denied } });
+    await expect(authorityChanged({ ...loaded, jobId: reclaimed.jobId, stageId: reclaimed.stageId, stageGeneration: reclaimed.stageGeneration, ownerUserId })).rejects.toMatchObject({ authoringFailure: { code: "authoring_provider_unavailable" } });
+    expect(denied).not.toHaveBeenCalled();
+    expect((await repository.read({ ownerUserId }, job.id))!.status).toBe("awaiting_review");
+
+    const tamperedInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+    const tamperedJob = await repository.submit({ ownerUserId }, tamperedInput, sha256(JSON.stringify(tamperedInput)));
+    const tamperedClaim = (await repository.claim("model-tamper-initial", 60))!;
+    expect(tamperedClaim.jobId).toBe(tamperedJob.id);
+    await repository.initializeExecutionSnapshot(tamperedClaim, snapshot);
+    await expect(pool.query(
+      "UPDATE authoring_jobs SET execution_snapshot = jsonb_set(execution_snapshot, '{frozenResponseContracts,selectionHash}', to_jsonb($2::text)) WHERE id = $1",
+      [tamperedJob.id, "0".repeat(64)]
+    )).rejects.toThrow(/immutable/i);
+    expect(executed).toHaveBeenCalledOnce();
+
+    const missingSingle = structuredClone(snapshot) as any;
+    delete missingSingle.requestConfiguration;
+    const missingSingleExecutor = vi.fn();
+    const missingSingleDispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => ordinaryEdited } as never, sha256,
+      preparedExecutor: { execute: missingSingleExecutor }
+    });
+    await expect(missingSingleDispatch({ ...loaded, snapshot: missingSingle, jobId: reclaimed.jobId, stageId: reclaimed.stageId, stageGeneration: reclaimed.stageGeneration, ownerUserId }))
+      .rejects.toThrow(/invalid|required|snapshot/i);
+    expect(missingSingleExecutor).not.toHaveBeenCalled();
+
+    const downgradeInput = authoringSubmitSchema.parse({ ...input, idempotencyKey: randomUUID() });
+    const downgradeJob = await repository.submit({ ownerUserId }, downgradeInput, sha256(JSON.stringify(downgradeInput)));
+    const downgradeClaim = (await repository.claim("model-downgrade-initial", 60))!;
+    expect(downgradeClaim.jobId).toBe(downgradeJob.id);
+    await repository.initializeExecutionSnapshot(downgradeClaim, snapshot);
+    await pool.query("UPDATE authoring_job_stages SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1", [downgradeClaim.stageId]);
+    await expect(pool.query(
+      `UPDATE authoring_jobs
+          SET execution_snapshot = execution_snapshot - ARRAY['providerType','requestConfiguration','routeBasis','frozenResponseContracts','trustedOperationPrompts']::text[]
+        WHERE id = $1`,
+      [downgradeJob.id]
+    )).rejects.toThrow(/immutable/i);
+    expect(missingSingleExecutor).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("composition captures native plans only when admission is enabled: %s", async (nativePresetPlansEnabled) => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "character", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create a cartographer.", content: worldContentSchema.parse({ world: { title: "Gate" } }) });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000012", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result(JSON.stringify(fixture.character)) };
+    const getPreset = vi.fn(async (_input?: unknown) => ({ preset: { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: "Preset system." } }));
+    const listModels = vi.fn(async (_input?: unknown) => ({ models: [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }] }));
+    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset, listModels }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: { character_generation: { content: "Character template." } } }) }, promptTools: { content: (snapshot: any, key: string) => snapshot[key]?.content ?? "" }, authoringTextPlans: { nativePresetPlansEnabled, preparedExecutor: { execute: async () => result("{}") }, loadAuthority: async () => provider, ports: { resolvePreset: async (input: any) => (await getPreset(input)).preset, discoverModels: async (input: any) => (await listModels(input)).models } } } as never, dispatch: (async (stage: { stageKey: string }) => ({ kind: "character", character: { ...fixture.character, id: stage.stageKey.slice("character:".length) } })) as never });
+    await expect(worker.runNext({ workerId: "gate", leaseSeconds: 60 })).resolves.toBe(true);
+    const persisted = (await pool.query<{ execution_snapshot: unknown }>("SELECT execution_snapshot FROM authoring_jobs WHERE id = $1", [job.id])).rows[0]!.execution_snapshot as Record<string, unknown>;
+    expect("version" in persisted).toBe(nativePresetPlansEnabled);
+    expect(getPreset).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
+    expect(listModels).toHaveBeenCalledTimes(nativePresetPlansEnabled ? 1 : 0);
+  });
+
+  it("rejects newly submitted durable preset authoring with native admission off before queue mutation", async () => {
+    const provider = await createProvider(pool, {
+      name: `authoring-off-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.test/api/v1", defaultModel: "@preset/authoring-off",
+      textSelection: { kind: "openrouter_preset", slug: "authoring-off" }, contextWindowTokens: 16_384,
+      maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+    }, "authoring-off-test-secret");
+    try {
+      const application = createRuntimeAuthoringApplication(pool, sha256, { nativePresetPlansEnabled: false });
+      const before = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM authoring_jobs WHERE owner_user_id=$1", [ownerUserId]);
+      const input = authoringSubmitSchema.parse({ kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "A closed gate." });
+      await expect(application.submit({ ownerUserId }, input)).rejects.toMatchObject({ code: "authoring_native_text_execution_unavailable" });
+      const after = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM authoring_jobs WHERE owner_user_id=$1", [ownerUserId]);
+      expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+    } finally { await pool.query("DELETE FROM provider_profiles WHERE id=$1", [provider.id]); }
+  });
+
+  it("isolates two matching durable jobs through the composed prepared executor and exact provider body", async () => {
+    const credentialSecret = "task-5c-authoring-composition-secret";
+    const requestBodies: string[] = [];
+    installIntegrationProviderTransport();
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/models" || request.url === "/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "native-model", context_length: 16_384, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        return;
+      }
+      if (request.url === "/v1/presets/authoring" || request.url === "/presets/authoring") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "authoring", name: "Authoring", status: "active",
+          designated_version: { id: "authoring-v1", version: 1, system_prompt: "Frozen durable preset.", config: { model: "native-model", temperature: 0.2 } }
+        } }));
+        return;
+      }
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        if (!request.url?.endsWith("/chat/completions")) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "fixture_route_not_found" } }));
+          return;
+        }
+        requestBodies.push(body);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          id: randomUUID(), model: "native-model",
+          choices: [{ message: { content: JSON.stringify(fixture.world) }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }
+        }));
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("authoring fixture server did not bind");
+      const provider = await createProvider(pool, {
+        name: `task-5c-authoring-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: "@preset/authoring",
+        textSelection: { kind: "openrouter_preset", slug: "authoring" }, contextWindowTokens: 16_384,
+        maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+      }, credentialSecret);
+      const repository = createPostgresAuthoringRepository(pool, { textPlanProtocol: 2 });
+      const makeInput = () => authoringSubmitSchema.parse({
+        kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(), prompt: "Create the same durable world."
+      });
+      const firstInput = makeInput();
+      const secondInput = makeInput();
+      const first = await repository.submit({ ownerUserId }, firstInput, sha256(JSON.stringify(firstInput)));
+      const second = await repository.submit({ ownerUserId }, secondInput, sha256(JSON.stringify(secondInput)));
+      const graph = createWorkerProviderApplicationComposition(pool, {
+        credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+      });
+      expect(graph.worldGeneration.authoringTextPlans?.preparedExecutor).toBe(graph.generation.preparedTextExecutor);
+      const worker = createRuntimeAuthoringWorkerApplication({
+        pool, repository, providers: graph.worldGeneration, nativePresetPlansEnabled: true, sha256
+      });
+      const [firstRun, secondRun] = await Promise.all([
+        worker.runNext({ workerId: "task-5c-authoring-a", leaseSeconds: 60 }),
+        worker.runNext({ workerId: "task-5c-authoring-b", leaseSeconds: 60 })
+      ]);
+      const jobOutcomes = await pool.query<{ id: string; status: string; stage_status: string; failure: unknown }>(
+        `SELECT jobs.id,jobs.status,stages.status AS stage_status,stages.failure
+           FROM authoring_jobs jobs
+           JOIN authoring_job_stages stages ON stages.job_id=jobs.id
+          WHERE jobs.id=ANY($1::uuid[])
+          ORDER BY jobs.id`,
+        [[first.id, second.id]]
+      );
+      expect([firstRun, secondRun], JSON.stringify(jobOutcomes.rows)).toEqual([true, true]);
+
+      const attempts = await pool.query<{
+        id: string; reservation_key: string; request_body: string; outcome: string;
+        logical_reservation: { jobId: string; operation: string };
+      }>(
+        `SELECT id,reservation_key,request_body,outcome,logical_reservation
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='authoring' AND logical_reservation->>'jobId'=ANY($1::text[])
+          ORDER BY logical_reservation->>'jobId'`,
+        [[first.id, second.id]]
+      );
+      expect(attempts.rows).toHaveLength(2);
+      expect(new Set(attempts.rows.map((row) => row.id)).size).toBe(2);
+      expect(new Set(attempts.rows.map((row) => row.reservation_key)).size).toBe(2);
+      expect(new Set(attempts.rows.map((row) => row.logical_reservation.jobId))).toEqual(new Set([first.id, second.id]));
+      expect(attempts.rows.every((row) => row.logical_reservation.operation === "initial" && row.outcome === "succeeded")).toBe(true);
+      expect(attempts.rows[0]!.request_body).toBe(attempts.rows[1]!.request_body);
+      expect(requestBodies).toHaveLength(2);
+      expect(requestBodies[0]).toBe(requestBodies[1]);
+      const body = JSON.parse(requestBodies[0]!);
+      expect(body.response_format.json_schema.name).toBe("infinite_quest_world_outline_v1");
+      expect(requestBodies[0]!.match(/Frozen durable preset\./g)).toHaveLength(1);
+      expect(provider.textSelection).toEqual({ kind: "openrouter_preset", slug: "authoring" });
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    }
+  });
+
+  it("persists composed durable character and source initial-repair bodies under exact claims", async () => {
+    const credentialSecret = "task-5c-authoring-matrix-secret";
+    const requestBodies: string[] = [];
+    const calls = new Map<string, number>();
+    installIntegrationProviderTransport();
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/models" || request.url === "/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "native-model", context_length: 16_384, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        return;
+      }
+      if (request.url === "/v1/presets/authoring-matrix" || request.url === "/presets/authoring-matrix") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "authoring-matrix", name: "Authoring matrix", status: "active",
+          designated_version: { id: "authoring-matrix-v1", version: 1,
+            system_prompt: "Frozen authoring matrix preset.", config: { model: "native-model", temperature: 0.2 } }
+        } }));
+        return;
+      }
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        if (!request.url?.endsWith("/chat/completions")) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "fixture_route_not_found" } }));
+          return;
+        }
+        requestBodies.push(body);
+        const parsed = JSON.parse(body) as {
+          response_format?: { json_schema?: { name?: string } };
+          messages?: Array<{ role?: string; content?: string }>;
+        };
+        const schemaName = parsed.response_format?.json_schema?.name ?? "unknown";
+        const call = (calls.get(schemaName) ?? 0) + 1;
+        calls.set(schemaName, call);
+        const frames = (parsed.messages ?? []).flatMap((message) => {
+          if (message.role !== "user" || typeof message.content !== "string") return [];
+          try { return [JSON.parse(message.content) as Record<string, any>]; } catch { return []; }
+        });
+        const frame = frames.find((candidate) => candidate.seed || candidate.chunk || candidate.acceptedFacts) ?? {};
+        let content: unknown;
+        if (schemaName === "infinite_quest_world_outline_v1") {
+          content = call === 1
+            ? { ...fixture.world, character_seeds: fixture.world.character_seeds.map((seed, index) => index === 1 ? { ...seed, id: fixture.world.character_seeds[0]!.id } : seed) }
+            : fixture.world;
+        } else if (schemaName === "infinite_quest_world_seed_character_v1") {
+          const seed = frame.seed as { id: string; name: string };
+          content = call === 1
+            ? { ...fixture.character, id: "wrong-seed-id", name: seed.name }
+            : { ...fixture.character, id: seed.id, name: seed.name };
+        } else if (schemaName === "infinite_quest_source_extraction_v1") {
+          const evidenceId = frame.chunk?.paragraphSpans?.[0]?.evidenceId as string | undefined;
+          content = { facts: [{
+            category: "character", subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated",
+            citations: [{ evidenceId: call === 1 ? `evidence:${"0".repeat(24)}` : evidenceId }]
+          }] };
+        } else if (schemaName === "infinite_quest_source_synthesis_v1") {
+          content = call === 1
+            ? { fields: [{ path: "world.rules", value: "Unsupported", supportingFactIds: ["missing-fact"] }], characterFields: [], expansionCandidates: [] }
+            : { fields: [], characterFields: [], expansionCandidates: [] };
+        } else if (schemaName === "infinite_quest_source_character_v1") {
+          const selected = frame.selectedCharacterFactIds?.[0] as string | undefined;
+          const supporting = frame.acceptedFacts?.[0]?.id as string | undefined;
+          content = call === 1
+            ? { fields: [], characterFields: [{ selectedCharacterFactId: "missing-character", fields: [{ path: "profile.appearance.clothing", value: "Unsupported", supportingFactIds: ["missing-fact"] }] }], expansionCandidates: [] }
+            : { fields: [], characterFields: [{ selectedCharacterFactId: selected, fields: [{ path: "profile.appearance.clothing", value: "blue coat", supportingFactIds: [supporting] }] }], expansionCandidates: [] };
+        } else {
+          throw new Error(`unexpected schema ${schemaName}`);
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          id: randomUUID(), model: "native-model",
+          choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
+          ...(schemaName === "infinite_quest_world_outline_v1"
+            ? { usage: call === 1 ? { prompt_tokens: 5, cost: "0.1", currency: "USD" }
+              : { completion_tokens: 7, cost: "0.2", currency: "EUR" } }
+            : {})
+        }));
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("authoring matrix fixture server did not bind");
+      await createProvider(pool, {
+        name: `task-5c-authoring-matrix-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: "@preset/authoring-matrix",
+        textSelection: { kind: "openrouter_preset", slug: "authoring-matrix" }, contextWindowTokens: 16_384,
+        maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+      }, credentialSecret);
+      const graph = createWorkerProviderApplicationComposition(pool, {
+        credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+      });
+      const repository = createPostgresAuthoringRepository(pool, { textPlanProtocol: 2 });
+      const authoring = createRuntimeAuthoringApplication(pool, sha256, { nativePresetPlansEnabled: true });
+      const worker = createRuntimeAuthoringWorkerApplication({
+        pool, repository, providers: graph.worldGeneration, nativePresetPlansEnabled: true, sha256
+      });
+
+      const world = await authoring.submit({ ownerUserId }, {
+        kind: "world_concept", target: { kind: "new_world" }, idempotencyKey: randomUUID(),
+        prompt: "Create a durable world with one repaired character."
+      });
+      await expect(worker.runNext({ workerId: "task-5c-world-outline", leaseSeconds: 60 })).resolves.toBe(true);
+      await expect(worker.runNext({ workerId: "task-5c-world-character", leaseSeconds: 60 })).resolves.toBe(true);
+      const activeWorld = (await authoring.get({ ownerUserId }, world.id))!;
+      expect(activeWorld.physicalAccounting).toEqual({
+        attemptCount: 4, completedCount: 4,
+        observedUsage: { inputTokens: 5, outputTokens: 7, totalTokens: null },
+        usageCoverage: { inputTokens: 1, outputTokens: 1, totalTokens: 0 },
+        reportedCosts: [{ amount: "0.2", currency: "EUR" }, { amount: "0.1", currency: "USD" }]
+      });
+      expect((await authoring.get({ ownerUserId }, world.id))?.physicalAccounting).toEqual(activeWorld.physicalAccounting);
+      expect(await authoring.get({ ownerUserId: randomUUID() }, world.id)).toBeNull();
+      const api = Fastify();
+      try {
+        await registerAuthoringRoutes(api, {
+          application: authoring, enabled: true, resolveOwner: async () => ({ ownerUserId }),
+          acquireAdmission: async () => ({ allowed: true })
+        });
+        const detail = await api.inject({ method: "GET", url: `/api/v1/authoring/jobs/${world.id}` });
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().physicalAccounting).toEqual(activeWorld.physicalAccounting);
+      } finally {
+        await api.close();
+      }
+      await authoring.cancel({ ownerUserId }, world.id, activeWorld.revision);
+
+      const source = await authoring.submit({ ownerUserId }, {
+        kind: "story_source", target: { kind: "new_world" }, idempotencyKey: randomUUID(),
+        name: "chapter.txt", text: "Iris wears a blue coat.", mode: "faithful",
+        boundaryParagraphId: "paragraph:0", instructions: "Keep cited facts."
+      });
+      await expect(worker.runNext({ workerId: "task-5c-source-plan", leaseSeconds: 60 })).resolves.toBe(true);
+      await expect(worker.runNext({ workerId: "task-5c-source-extraction", leaseSeconds: 60 })).resolves.toBe(true);
+      const extracted = (await authoring.get({ ownerUserId }, source.id))!;
+      if (extracted.kind !== "story_source") throw new Error("source fixture returned the wrong job kind");
+      const fact = extracted.source!.facts[0]!;
+      const reviewed = await authoring.reviewSourceFacts({ ownerUserId }, source.id, {
+        expectedRevision: extracted.revision, acceptedFactIds: [fact.id], rejectedFactIds: [], uncertainFactIds: [],
+        selectedCharacterFactIds: [fact.id], characterIdentityGroups: [{ representativeFactId: fact.id, factIds: [fact.id] }], manualFacts: []
+      });
+      await authoring.startSourceSynthesis({ ownerUserId }, source.id, reviewed.revision);
+      await expect(worker.runNext({ workerId: "task-5c-source-synthesis", leaseSeconds: 60 })).resolves.toBe(true);
+      await expect(worker.runNext({ workerId: "task-5c-source-character", leaseSeconds: 60 })).resolves.toBe(true);
+      expect((await authoring.get({ ownerUserId }, source.id))?.physicalAccounting).toMatchObject({
+        attemptCount: 6, completedCount: 6,
+        observedUsage: { inputTokens: null, outputTokens: null, totalTokens: null },
+        usageCoverage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCosts: []
+      });
+
+      const attempts = await pool.query<{
+        request_body: string; reservation_key: string; outcome: string;
+        logical_reservation: {
+          ownerUserId: string; jobId: string; stageId: string; jobGeneration: number;
+          stageGeneration: number; leaseToken: string; operation: "initial" | "repair";
+        };
+      }>(
+        `SELECT request_body,reservation_key,outcome,logical_reservation
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='authoring' AND logical_reservation->>'jobId'=ANY($1::text[])
+          ORDER BY id`,
+        [[world.id, source.id]]
+      );
+      expect(attempts.rows).toHaveLength(10);
+      expect(requestBodies).toHaveLength(10);
+      expect(attempts.rows.map((row) => row.request_body).sort()).toEqual([...requestBodies].sort());
+      expect(new Set(attempts.rows.map((row) => row.reservation_key)).size).toBe(10);
+      for (const row of attempts.rows) {
+        expect(row.outcome).toBe("succeeded");
+        expect(row.logical_reservation).toMatchObject({ ownerUserId });
+        expect(row.logical_reservation.jobGeneration).toBeGreaterThanOrEqual(0);
+        expect(row.logical_reservation.stageGeneration).toBeGreaterThan(0);
+        expect(row.logical_reservation.stageId).toMatch(/^[0-9a-f-]{36}$/u);
+        expect(row.logical_reservation.leaseToken).toMatch(/^[0-9a-f-]{36}$/u);
+      }
+      const grouped = new Map<string, typeof attempts.rows>();
+      for (const row of attempts.rows) {
+        const rows = grouped.get(row.logical_reservation.stageId) ?? [];
+        rows.push(row);
+        grouped.set(row.logical_reservation.stageId, rows);
+      }
+      const repaired = [...grouped.values()].filter((rows) => rows.length === 2);
+      expect(repaired).toHaveLength(5);
+      for (const rows of repaired) {
+        expect(new Set(rows.map((row) => row.logical_reservation.operation))).toEqual(new Set(["initial", "repair"]));
+        expect(new Set(rows.map((row) => row.logical_reservation.leaseToken)).size).toBe(1);
+        expect(new Set(rows.map((row) => row.logical_reservation.stageGeneration)).size).toBe(1);
+      }
+      const schemas = requestBodies.map((body) => JSON.parse(body).response_format.json_schema.name);
+      expect(schemas).toEqual(expect.arrayContaining([
+        "infinite_quest_world_outline_v1", "infinite_quest_world_outline_v1",
+        "infinite_quest_world_seed_character_v1", "infinite_quest_world_seed_character_v1",
+        "infinite_quest_source_extraction_v1", "infinite_quest_source_extraction_v1",
+        "infinite_quest_source_synthesis_v1", "infinite_quest_source_synthesis_v1",
+        "infinite_quest_source_character_v1", "infinite_quest_source_character_v1"
+      ]));
+      expect(requestBodies.every((body) => body.match(/Frozen authoring matrix preset\./g)?.length === 1)).toBe(true);
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    }
+  });
+
+  it("executes concurrent template-world requests and repeated seeds through composed direct physical attempts", async () => {
+    const credentialSecret = "task-5c-direct-composition-secret";
+    const marker = `DIRECT_${randomUUID()}`;
+    const requestBodies: string[] = [];
+    installIntegrationProviderTransport();
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/models" || request.url === "/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: [{ id: "native-model", context_length: 16_384, supported_parameters: ["response_format", "structured_outputs"] }] }));
+        return;
+      }
+      if (request.url === "/v1/presets/direct-authoring" || request.url === "/presets/direct-authoring") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "direct-authoring", name: "Direct authoring", status: "active",
+          designated_version: { id: "direct-authoring-v1", version: 1,
+            system_prompt: "Frozen direct preset.", config: { model: "native-model", temperature: 0.2 } }
+        } }));
+        return;
+      }
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        if (!request.url?.endsWith("/chat/completions")) {
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { code: "fixture_route_not_found" } }));
+          return;
+        }
+        requestBodies.push(body);
+        const parsed = JSON.parse(body);
+        const schemaName = parsed.response_format?.json_schema?.name;
+        let content: unknown = fixture.world;
+        if (schemaName === "infinite_quest_world_seed_character_v1") {
+          const inputMessage = parsed.messages.find((message: { role: string }) => message.role === "user")?.content;
+          const seed = JSON.parse(inputMessage).seed;
+          content = { ...fixture.character, id: seed.id, name: seed.name };
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          id: randomUUID(), model: "native-model",
+          choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
+          usage: schemaName === "infinite_quest_world_outline_v1"
+            ? { prompt_tokens: 12, cost: "0.1", currency: "USD" }
+            : { completion_tokens: 8, cost: "0.2", currency: "EUR" }
+        }));
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("direct fixture server did not bind");
+      const provider = await createProvider(pool, {
+        name: `task-5c-direct-${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`, defaultModel: "@preset/direct-authoring",
+        textSelection: { kind: "openrouter_preset", slug: "direct-authoring" }, contextWindowTokens: 16_384,
+        maxOutputTokens: 2_048, temperature: 0.2, enabled: true, isDefault: true, configuration: {}, apiKey: "test"
+      }, credentialSecret);
+      const graph = createApiProviderApplicationComposition(pool, {
+        credentialSecret, transport: currentIntegrationProviderTransport(), nativeTextExecutionPlanAdmission: true
+      });
+      expect(graph.worldGeneration.authoringTextPlans?.nativePresetPlansEnabled).toBe(true);
+      const input = {
+        sourceName: "direct-composed", sourceKind: "prompt" as const, title: "Synthetic Glass Road",
+        summary: marker, keywords: [], excerpts: [], prompt: marker
+      };
+      const [first, second] = await Promise.all([
+        generateWorldPreviewForOwner(pool, ownerUserId, { title: input.title, prompt: marker }, graph.worldGeneration, {
+          createWorldGenerationProgress: async () => undefined,
+          updateWorldGenerationProgress: async () => undefined
+        }),
+        generateTemplateWorld(pool, ownerUserId, provider.id, input, graph.worldGeneration, `world-${randomUUID()}`)
+      ]);
+      expect(first.content.playableCharacters).toHaveLength(3);
+      expect(second.content.playableCharacters).toHaveLength(3);
+      expect(first.physicalAccounting).toEqual({
+        attemptCount: 4, completedCount: 4,
+        observedUsage: { inputTokens: 12, outputTokens: 24, totalTokens: null },
+        usageCoverage: { inputTokens: 1, outputTokens: 3, totalTokens: 0 },
+        reportedCosts: [{ amount: "0.6", currency: "EUR" }, { amount: "0.1", currency: "USD" }]
+      });
+      expect(second.physicalAccounting).toEqual(first.physicalAccounting);
+
+      const attempts = await pool.query<{
+        request_body: string; reservation_key: string; outcome: string;
+        logical_reservation: { requestScopeId: string; invocationId: string; operation: string };
+      }>(
+        `WITH request_scopes AS (
+           SELECT DISTINCT logical_reservation->>'requestScopeId' AS request_scope_id
+             FROM prepared_text_physical_attempts
+            WHERE logical_kind='direct' AND request_body LIKE $1
+         )
+         SELECT request_body,reservation_key,outcome,logical_reservation
+           FROM prepared_text_physical_attempts
+          WHERE logical_kind='direct'
+            AND logical_reservation->>'requestScopeId' IN (SELECT request_scope_id FROM request_scopes)
+          ORDER BY id`,
+        [`%${marker}%`]
+      );
+      expect(attempts.rows).toHaveLength(8);
+      expect(requestBodies).toHaveLength(8);
+      expect(attempts.rows.map((row) => row.request_body).sort()).toEqual([...requestBodies].sort());
+      const scopes = new Map<string, typeof attempts.rows>();
+      for (const row of attempts.rows) {
+        const values = scopes.get(row.logical_reservation.requestScopeId) ?? [];
+        values.push(row);
+        scopes.set(row.logical_reservation.requestScopeId, values);
+        expect(row.outcome).toBe("succeeded");
+        expect(row.logical_reservation.operation).toBe("initial");
+        expect(row.reservation_key).toContain(row.logical_reservation.invocationId);
+      }
+      expect(scopes.size).toBe(2);
+      for (const rows of scopes.values()) {
+        expect(rows).toHaveLength(4);
+        expect(new Set(rows.map((row) => row.logical_reservation.invocationId)).size).toBe(4);
+      }
+      const accounting = createPostgresPreparedTextAttemptRepository(pool);
+      for (const requestScopeId of scopes.keys()) {
+        const scope = { kind: "job", ownerUserId, logicalKind: "direct", scopeId: requestScopeId } as const;
+        expect(await accounting.summarize(scope)).toEqual(first.physicalAccounting);
+        expect(await accounting.summarize(scope)).toEqual(first.physicalAccounting);
+        expect((await accounting.summarize({ ...scope, ownerUserId: randomUUID() })).attemptCount).toBe(0);
+      }
+      const bodies = requestBodies.map((body) => JSON.parse(body));
+      expect(bodies.filter((body) => body.response_format.json_schema.name === "infinite_quest_world_outline_v1")).toHaveLength(2);
+      expect(bodies.filter((body) => body.response_format.json_schema.name === "infinite_quest_world_seed_character_v1")).toHaveLength(6);
+      expect(requestBodies.every((body) => body.match(/Frozen direct preset\./g)?.length === 1)).toBe(true);
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    }
+  });
+
+  it.each(["faithful", "expand"] as const)("composition freezes exact native source prompts for %s mode", async (mode) => {
+    const repository = createPostgresAuthoringRepository(pool);
+    const input = authoringSubmitSchema.parse({ kind: "story_source", target: { kind: "new_world" }, idempotencyKey: randomUUID(), name: "chapter.txt", text: "Iris wears a blue coat.", mode, boundaryParagraphId: "paragraph:0", instructions: "Keep evidence." });
+    const job = await repository.submit({ ownerUserId }, input, sha256(JSON.stringify(input)));
+    const provider: RuntimeTextExecution = { id: "00000000-0000-4000-8000-000000000013", name: "Native", providerRole: "text", providerType: "openrouter", model: "default-model", contextWindowTokens: 8192, maxOutputTokens: 1024, temperature: 0.7, requestTimeoutMs: 30_000, endpointIdentity: "endpoint-a", executionRevision: "ordinary-a", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "authoring" }, configuration: {}, execute: async () => result('{"facts":[]}') };
+    const preset = "Preset system.";
+    const resolvedPreset = { slug: "authoring", name: "Authoring", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["native-model"] }, systemPrompt: preset };
+    const models = [{ id: "native-model", name: "Native", contextWindowTokens: 8192 }];
+    const worker = createRuntimeAuthoringWorkerApplication({ repository, nativePresetPlansEnabled: true, sha256, providers: { resolution: { resolveDirect: async () => ({ status: "resolved", providerProfileId: provider.id, model: provider.model }) }, execution: { text: async () => provider }, inventory: { getPreset: async () => ({ preset: resolvedPreset }), listModels: async () => ({ models }) }, prompts: { loadWorldGenerationPromptSnapshot: async () => ({ snapshot: {} }) }, promptTools: { content: () => "" }, authoringTextPlans: { nativePresetPlansEnabled: true, preparedExecutor: { execute: async () => result("{}") }, loadAuthority: async () => provider, ports: { resolvePreset: async () => resolvedPreset, discoverModels: async () => models } } } as never, dispatch: (async () => ({ kind: "source_plan", chunks: [{ id: "chunk", sourceId: "source", sourceRange: { start: 0, end: 1 }, contentHash: "a".repeat(64), spans: [{ paragraphId: "paragraph:0", start: 0, end: 1 }] }] })) as never });
+    await expect(worker.runNext({ workerId: "source-plans", leaseSeconds: 60 })).resolves.toBe(true);
+    const row = (await pool.query<{ execution_snapshot: any }>("SELECT execution_snapshot FROM authoring_jobs WHERE id = $1", [job.id])).rows[0]!.execution_snapshot;
+    const plans = row.textExecutionPlans;
+    const extraction = (repair: boolean) => buildSourceExtractionPrompt({ instructions: "", sourceText: "", mode, chunk: { sourceRange: { start: 0, end: 0 }, paragraphSpans: [] }, repair }).systemPrompt;
+    const world = (repair: boolean) => buildSourceWorldPrompt({ instructions: "", reviewGeneration: 0, selection: { source: { id: "snapshot", name: "snapshot", sha256: "0".repeat(64) }, boundaryParagraphId: "snapshot", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: [], mode }, repair }).systemPrompt;
+    expect(plans.sourceExtraction.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: extraction(false) }));
+    expect(plans.sourceExtractionRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: extraction(true) }));
+    expect(plans.sourceSynthesis.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(false) }));
+    expect(plans.sourceSynthesisRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(true) }));
+    expect(plans.sourceCharacter.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(false) }));
+    expect(plans.sourceCharacterRepair.prompt).toBe(composePresetPrompt({ presetPrompt: preset, operationPrompt: world(true) }));
+  });
 
   it.each(["heartbeat false", "heartbeat error", "shutdown"])("leaves a real job resumable after %s, drains and resumes its pinned snapshot after expiry", async (mode) => {
     const repository = createPostgresAuthoringRepository(pool);

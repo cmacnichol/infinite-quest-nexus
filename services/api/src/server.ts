@@ -70,6 +70,7 @@ import {
   worldStatusUpdateSchema
 } from "../../../packages/contracts/src/world-library.js";
 import { apiErrorEnvelopeSchema } from "../../../packages/contracts/src/http.js";
+import { physicalTextAccountingSchema } from "../../../packages/contracts/src/physical-text-accounting.js";
 import { authoringFailureSchema } from "../../../packages/contracts/src/authoring.js";
 import { projectAuthoringFailure } from "../../../packages/contracts/src/authoring-error-projection.js";
 import {
@@ -93,6 +94,7 @@ import {
   worldCreateResponseSchema
 } from "../../../packages/contracts/src/client-api.js";
 import { providerTransportErrorDetails } from "../../../packages/story-engine/src/providers.js";
+import { OpenRouterPresetError } from "../../../packages/story-engine/src/openrouter-presets.js";
 import { formatNarrationParagraphs } from "../../../packages/story-engine/src/narration-formatting.js";
 import { readTurnPage } from "../../../packages/database/src/play-loop-read-repository.js";
 import { createWorldShareLinkService } from "../../../packages/database/src/world-share-repository.js";
@@ -254,6 +256,16 @@ function isSafeAppNavigation(url: string): boolean {
 }
 
 function statusCode(error: unknown): number {
+  if (error instanceof OpenRouterPresetError) {
+    switch (error.diagnosticCode) {
+      case "authentication": return 401;
+      case "preset_missing": return 404;
+      case "preset_inactive": return 409;
+      case "preset_config_unsupported": return 422;
+      case "invalid_response": return 502;
+      case "discovery_unavailable": return 503;
+    }
+  }
   if (typeof error === "object" && error !== null && "statusCode" in error) {
     const value = Number((error as { statusCode: unknown }).statusCode);
     if (Number.isInteger(value) && value >= 400 && value <= 599) return value;
@@ -264,6 +276,18 @@ function statusCode(error: unknown): number {
 }
 
 function errorDetails(error: unknown): { name: string; message: string; code?: string; issues?: unknown; details?: unknown } {
+  if (error instanceof OpenRouterPresetError) {
+    const messages = {
+      authentication: "Preset credentials were rejected.",
+      discovery_unavailable: "Preset discovery is unavailable.",
+      preset_missing: "The selected preset was not found.",
+      preset_inactive: "The selected preset is inactive.",
+      preset_config_unsupported: "The selected preset has unsupported configuration.",
+      invalid_response: "Preset discovery returned an invalid response."
+    } as const;
+    return { name: "OpenRouterPresetError", message: messages[error.diagnosticCode], code: error.diagnosticCode,
+      details: { code: error.diagnosticCode, ...(error.field ? { field: error.field } : {}) } };
+  }
   if (typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "22P02") {
     return { name: "InvalidUuidError", message: "The provided ID is not a valid UUID." };
   }
@@ -297,11 +321,13 @@ function safeErrorDetails(value: unknown): Record<string, unknown> {
 
 function exposeError(error: unknown, code: number): boolean {
   return code < 500
+    || error instanceof OpenRouterPresetError
     || isSanitizedSystemArchiveServerError(error)
     || (typeof error === "object" && error !== null && "expose" in error && (error as { expose?: unknown }).expose === true);
 }
 
 function isKnownSafeFiveXX(error: unknown, details: ReturnType<typeof errorDetails>, transport: unknown): boolean {
+  if (error instanceof OpenRouterPresetError) return true;
   if (transport || isSanitizedSystemArchiveServerError(error)) return true;
   if (!details.details || typeof details.details !== "object") return false;
   const code = (details.details as { code?: unknown }).code;
@@ -491,6 +517,16 @@ export async function buildServer({
       ? authoringFailureSchema.safeParse((error as { authoringFailure?: unknown }).authoringFailure)
       : null;
     const safeAuthoringFailure = authoringFailure?.success ? projectAuthoringFailure(authoringFailure.data) : null;
+    let physicalAccounting: ReturnType<typeof physicalTextAccountingSchema.safeParse> | null = null;
+    if (request.routeOptions.url === "/api/v1/worlds/generate-preview" && typeof error === "object" && error !== null) {
+      try {
+        physicalAccounting = physicalTextAccountingSchema.safeParse(
+          (error as { requestPhysicalAccounting?: unknown }).requestPhysicalAccounting
+        );
+      } catch {
+        // A malformed error carrier must not replace its original failure.
+      }
+    }
     const safeFiveXX = safeAuthoringFailure !== null || isKnownSafeFiveXX(error, details, transport);
     const exposedError = (details.name === "ArchiveError" || details.name === "OriginNotAllowedError") && details.code
       ? details.code
@@ -520,6 +556,7 @@ export async function buildServer({
         : exposed && (code < 500 || safeFiveXX) ? `${details.message} Correlation ID: ${request.id}.` : "The request failed. Use the correlation ID to locate server diagnostics.",
       correlationId: request.id,
       ...(safeAuthoringFailure ? { code: safeAuthoringFailure.code } : !exposed || details.code === undefined ? {} : { code: details.code }),
+      ...(physicalAccounting?.success ? { physicalAccounting: physicalAccounting.data } : {}),
       details: transport
         ? { code: providerErrorCode, category: transport.causeCategory, retryable: true }
         : safeAuthoringFailure ? { ...safeAuthoringFailure, correlationId: request.id }
@@ -680,7 +717,10 @@ export async function buildServer({
 
   app.get("/api/v1/meta", async () => parseResponseProjection(metaResponseSchema, {
     application: applicationMetadata(),
-    capabilities: { systemArchive: config.systemArchiveEnabled === true },
+    capabilities: {
+      systemArchive: config.systemArchiveEnabled === true,
+      nativeTextExecutionPlans: config.nativeTextExecutionPlanAdmission === true
+    },
   }));
 
   app.get("/api/v1/dashboard/stats", async () => {
@@ -771,6 +811,15 @@ export async function buildServer({
     return reply.code(201).send(provider);
   });
 
+  function providerRequestSignal(request: any, reply: any): Readonly<{ signal: AbortSignal; dispose(): void }> {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const close = () => { if (!reply.raw.writableEnded) controller.abort(); };
+    request.raw.once("aborted", abort);
+    reply.raw.once("close", close);
+    return { signal: controller.signal, dispose: () => { request.raw.off("aborted", abort); reply.raw.off("close", close); } };
+  }
+
   app.get<{
     Params: { providerId: string };
     Querystring: { providerRole?: string; refresh?: string };
@@ -786,6 +835,24 @@ export async function buildServer({
       query.refresh === "true"
     )
     };
+  });
+
+  app.get<{
+    Params: { providerId: string };
+    Querystring: { offset?: string; limit?: string; refresh?: string };
+  }>("/api/v1/providers/:providerId/presets", async (request, reply) => {
+    const query = z.object({
+      offset: z.coerce.number().int().min(0).default(0),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      refresh: z.enum(["true", "false"]).optional()
+    }).parse(request.query);
+    const cancellation = providerRequestSignal(request, reply);
+    try { return await providers.presets(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId), query.offset, query.limit, query.refresh === "true", cancellation.signal); } finally { cancellation.dispose(); }
+  });
+
+  app.get<{ Params: { providerId: string; slug: string } }>("/api/v1/providers/:providerId/presets/:slug", async (request, reply) => {
+    const cancellation = providerRequestSignal(request, reply);
+    try { return await providers.preset(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId), z.string().min(1).max(200).parse(request.params.slug), cancellation.signal); } finally { cancellation.dispose(); }
   });
 
   app.put<{ Params: { providerId: string } }>("/api/v1/providers/:providerId/default", async (request) => (
@@ -807,6 +874,16 @@ export async function buildServer({
   app.post("/api/v1/providers/discover-models", async (request) => ({
     models: await providers.discoverModels(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body))
   }));
+
+  app.post<{ Querystring: { offset?: string; limit?: string } }>("/api/v1/providers/discover-presets", async (request, reply) => {
+    const query = z.object({ offset: z.coerce.number().int().min(0).default(0), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(request.query);
+    const cancellation = providerRequestSignal(request, reply); try { return await providers.discoverPresets(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body), query.offset, query.limit, cancellation.signal); } finally { cancellation.dispose(); }
+  });
+
+  app.post<{ Querystring: { slug?: string } }>("/api/v1/providers/resolve-preset", async (request, reply) => {
+    const slug = z.string().min(1).max(200).parse(request.query.slug);
+    const cancellation = providerRequestSignal(request, reply); try { return await providers.resolvePreset(await initialOwnerId(pool), providerProfileInputSchema.parse(request.body), slug, cancellation.signal); } finally { cancellation.dispose(); }
+  });
 
   app.delete<{ Params: { providerId: string } }>("/api/v1/providers/:providerId", async (request) => (
     providers.delete(await initialOwnerId(pool), uuidSchema.parse(request.params.providerId))

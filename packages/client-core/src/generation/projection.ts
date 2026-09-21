@@ -226,12 +226,27 @@ export function generationResponseFormatPresentation(value: unknown): Generation
     unavailable: "Unavailable",
     unknown: "Unknown"
   };
-  const mode = modeLabels[format.effectiveMode] ?? "Unknown";
+  const mode = format.version === 2 && format.effectiveMode === "json_schema"
+    ? format.assurance === "trusted_preset" ? "Trusted preset schema"
+      : format.assurance === "verified_model" ? "Verified Model schema"
+        : "Schema (assurance unknown)"
+    : modeLabels[format.effectiveMode] ?? "Unknown";
   const details = [
     operation === null
       ? `Effective mode: ${mode}.`
       : `Effective mode: ${mode} for the saved ${operation} operation.`
   ];
+  if (format.version === 2) {
+    const requested = format.requestedSelection;
+    details.push(requested === null
+      ? "Requested selection: Unknown."
+      : requested.kind === "model"
+        ? `Requested selection: Model ${requested.modelId}.`
+        : `Requested selection: Preset ${requested.slug}.`);
+    const actual = format.actualServedIdentity;
+    details.push(`Actual served model: ${actual.status === "known" && actual.model !== null ? actual.model : "Unknown"}.`);
+    details.push(`Actual provider route: ${actual.status === "known" && actual.providerRoute !== null ? actual.providerRoute : "Unknown"}.`);
+  }
   if (format.preflightDiagnostic === "unsupported_adapter") {
     details.push("The saved provider adapter does not support response formats. Review the provider settings before starting a new generation.");
   } else if (format.preflight === "unavailable") {

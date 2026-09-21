@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import type { ProviderType } from "../../contracts/src/generation.js";
-import type { PreparedResponseContract } from "../../contracts/src/text-response-format.js";
+import type { PreparedResponseContract, PreparedResponseContractV2 } from "../../contracts/src/text-response-format.js";
 import { PreparedResponseContractError, classifyResponseFormatFailure } from "./provider-response-format.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
@@ -58,7 +59,7 @@ export type ProviderRequest = {
   recoveryInput?: string;
   rejectedResponse?: string;
   /** Metadata-only observer; does not enable streaming or change the request body. */
-  onResponseHeaders?: (headers: { statusCode: number; providerResponseId?: string }) => void;
+  onResponseHeaders?: (headers: { statusCode: number; providerResponseId?: string }) => void | Promise<void>;
   onChunk?: (delta: string, accumulated: string) => void | Promise<void>;
   canonicalBudgeting?: boolean;
   /** Snapshotted job/provider ceiling; canonical generation must not exceed it. */
@@ -66,7 +67,11 @@ export type ProviderRequest = {
   budgetOutput?: ProviderOutputBudget;
   /** Authoring calls account for every generation request themselves. */
   responseFormatFallback?: "allow" | "forbid";
-  responseContract?: PreparedResponseContract;
+  responseContract?: PreparedResponseContract | PreparedResponseContractV2;
+  /** Exact private body produced by the checked route executor. */
+  preparedRequest?: PreparedProviderRequest;
+  /** Caller cancellation/whole-route deadline, composed with the provider timeout. */
+  abortSignal?: AbortSignal;
 };
 
 export type ProviderResult = {
@@ -79,6 +84,10 @@ export type ProviderResult = {
   returnedModel?: string | null;
   returnedProviderRoute?: string | null;
   usage: { inputTokens: number; outputTokens: number; totalTokens: number };
+  /** False when the upstream omitted accounting; zero values then remain compatibility placeholders only. */
+  usageReported?: boolean;
+  /** Only fields actually reported by the provider; used by the physical-attempt ledger. */
+  observedUsage?: Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
   reportedCost: ReportedProviderCost | null;
   rawMetadata: Record<string, unknown>;
   /** Private immutable wire evidence for the request that produced this result. */
@@ -86,6 +95,10 @@ export type ProviderResult = {
     body: string;
     payloadHash: string;
   }>;
+  /** Private stable cost/idempotency identity for the successful wire attempt. */
+  physicalAttemptId?: string;
+  /** Owner-scoped durable accounting for every physical route attempt in this logical invocation. */
+  physicalAccounting?: import("./preset-route-execution.js").PhysicalAttemptAccountingSummary;
 };
 
 export type ReportedProviderCost = {
@@ -704,14 +717,15 @@ async function providerFetch(
   operation: string,
   url: string,
   init: RequestInit,
-  transport: ProviderTransport
+  transport: ProviderTransport,
+  signal?: AbortSignal
 ): Promise<Response> {
   const timeoutMs = requestTimeoutMs(profile);
   const startedAt = Date.now();
   try {
     const response = await transport.fetch(profile, operation, url, {
       ...init,
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
     });
     responseStartTimes.set(response, startedAt);
     return response;
@@ -737,7 +751,8 @@ function openAiRoot(baseUrl: string): string {
 export async function sendPreparedProviderRequest(
   profile: TextProviderProfile,
   prepared: PreparedProviderRequest,
-  transport: ProviderTransport = defaultProviderTransport()
+  transport: ProviderTransport = defaultProviderTransport(),
+  signal?: AbortSignal
 ): Promise<Response> {
   const url = profile.providerType === "lmstudio"
     ? `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`
@@ -747,8 +762,20 @@ export async function sendPreparedProviderRequest(
     prepared.operation,
     url,
     { method: "POST", headers: headers(profile, url), body: prepared.body },
-    transport
+    transport,
+    signal
   );
+}
+
+function suppliedPreparedRequest(request: ProviderRequest): PreparedProviderRequest | null {
+  const prepared = request.preparedRequest;
+  if (!prepared) return null;
+  if (prepared.payloadHash !== createHash("sha256").update(prepared.body).digest("hex")) {
+    throw new Error("The supplied prepared provider request hash is invalid.");
+  }
+  const payload = JSON.parse(prepared.body) as { model?: unknown };
+  if (typeof payload.model !== "string" || !payload.model) throw new Error("The supplied prepared provider request has no model.");
+  return prepared;
 }
 
 function headers(profile: TextProviderProfile, endpoint?: string): Record<string, string> {
@@ -835,6 +862,16 @@ export function reportedProviderCost(usage: unknown): ReportedProviderCost | nul
   const currency = String((usage as { currency?: unknown }).currency || "USD").trim().toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) return null;
   return { amount, currency };
+}
+
+function observedProviderUsage(value: unknown): Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const fields = Object.fromEntries(([ ["prompt_tokens", "inputTokens"], ["completion_tokens", "outputTokens"], ["total_tokens", "totalTokens"] ] as const).flatMap(([remote, local]) => {
+    const tokens = source[remote];
+    return Number.isSafeInteger(tokens) && Number(tokens) >= 0 ? [[local, tokens]] : [];
+  }));
+  return Object.keys(fields).length ? fields : null;
 }
 
 export async function ensureLmStudioModelLoaded(
@@ -940,7 +977,9 @@ async function readSseStream(
     const failure = transportFailure(profile, operation, url, error, responseStartTimes.get(response) ?? Date.now());
     Object.assign(failure, {
       ...responseContractStreamEvidence(response, allData, finalData, accumulated),
-      partialContent: accumulated
+      partialContent: accumulated,
+      observedUsage: observedProviderUsage(allData.findLast((item) => item.usage)?.usage ?? finalData.usage),
+      observedReportedCost: reportedProviderCost(allData.findLast((item) => item.usage)?.usage ?? finalData.usage)
     });
     throw failure;
   } finally {
@@ -1042,10 +1081,10 @@ function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequ
   });
 }
 
-function reportResponseHeaders(request: ProviderRequest, response: Response): void {
+async function reportResponseHeaders(request: ProviderRequest, response: Response): Promise<void> {
   const id = response.headers.get("x-generation-id");
   try {
-    request.onResponseHeaders?.({ statusCode: response.status, ...(id && /^[a-zA-Z0-9_-]{1,200}$/.test(id) ? { providerResponseId: id } : {}) });
+    await request.onResponseHeaders?.({ statusCode: response.status, ...(id && /^[a-zA-Z0-9_-]{1,200}$/.test(id) ? { providerResponseId: id } : {}) });
   } catch { /* Diagnostic observers must not interrupt provider execution. */ }
 }
 
@@ -1055,7 +1094,7 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
   await ensureLmStudioModelLoaded(profile, "story generation model loading", transport);
   const url = `${lmStudioRoot(profile.baseUrl)}/api/v1/chat`;
   const response = await sendPreparedProviderRequest(profile, prepared, transport);
-  reportResponseHeaders(request, response);
+  await reportResponseHeaders(request, response);
   if (response.ok && request.onChunk && response.headers.get("content-type")?.includes("event-stream")) {
     const { content, finalData, allData } = await readSseStream(response, request.onChunk, profile, "story generation", url);
     const stats = allData.findLast((item) => item.stats)?.stats || finalData.stats || {};
@@ -1104,15 +1143,15 @@ async function callLmStudio(profile: TextProviderProfile, request: ProviderReque
 }
 
 async function callOpenAiCompatible(profile: TextProviderProfile, request: ProviderRequest, transport: ProviderTransport): Promise<ProviderResult> {
-  let prepared = request.responseContract
+  let prepared = suppliedPreparedRequest(request) ?? (request.responseContract
     ? checkedStoryRequest(profile, request)
-    : request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request);
+    : request.canonicalBudgeting ? checkedStoryRequest(profile, request) : serializeLegacyProviderRequest(profile, request));
   const url = `${openAiRoot(profile.baseUrl)}/chat/completions`;
   let response: Response | undefined;
   let evidence = responseContractEvidence();
   const send = async (preparedRequest: PreparedProviderRequest) => {
-    const response = await sendPreparedProviderRequest(profile, preparedRequest, transport);
-    reportResponseHeaders(request, response);
+    const response = await sendPreparedProviderRequest(profile, preparedRequest, transport, request.abortSignal);
+    await reportResponseHeaders(request, response);
     evidence = responseContractEvidence(response);
     return response;
   };
@@ -1151,23 +1190,26 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
     const streamed = await readSseStream(response, request.onChunk, profile, "story generation", url, Boolean(request.responseContract));
     const { content, finalData, allData } = streamed;
     evidence = responseContractStreamEvidence(response, allData, finalData, content);
+    const streamUsage = allData.findLast((item) => item.usage)?.usage ?? finalData.usage;
     const sseError = request.responseContract ? structuredSseError(allData) : null;
     if (sseError) {
       const error = new Error("Provider returned an SSE error event for the prepared response contract.");
       Object.assign(error, {
         ...evidence,
-        responseFormatDiagnosticCode: classifyResponseFormatFailure(200, sseError)
+        responseFormatDiagnosticCode: classifyResponseFormatFailure(200, sseError),
+        observedUsage: observedProviderUsage(streamUsage), observedReportedCost: reportedProviderCost(streamUsage)
       });
       throw error;
     }
     if (request.responseContract && responseRefusal(finalData, allData)) {
       const error = new Error("Provider refused the prepared response contract.");
-      Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal" });
+      Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal",
+        observedUsage: observedProviderUsage(streamUsage), observedReportedCost: reportedProviderCost(streamUsage) });
       throw error;
     }
     if (request.responseContract && !streamed.terminalSignal) {
       const error = new Error("Provider stream ended before the prepared response contract completed.");
-      Object.assign(error, evidence);
+      Object.assign(error, { ...evidence, observedUsage: observedProviderUsage(streamUsage), observedReportedCost: reportedProviderCost(streamUsage) });
       throw error;
     }
     const usageObj = allData.findLast((item) => item.usage)?.usage || finalData.usage || {};
@@ -1187,6 +1229,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
         outputTokens: Number(usageObj.completion_tokens || 0),
         totalTokens: Number(usageObj.total_tokens || 0)
       },
+      usageReported: allData.some((item) => item.usage && typeof item.usage === "object") || Boolean(finalData.usage && typeof finalData.usage === "object"),
+      observedUsage: observedProviderUsage(usageObj),
       reportedCost: reportedProviderCost(usageObj),
       rawMetadata: { model: modelInstanceId, provider: finalData.provider || "" },
       preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
@@ -1196,7 +1240,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
   evidence = responseContractEvidence(response, data);
   if (request.responseContract && responseRefusal(data)) {
     const error = new Error("Provider refused the prepared response contract.");
-    Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal" });
+    Object.assign(error, { ...evidence, responseFormatDiagnosticCode: "provider_refusal",
+      observedUsage: observedProviderUsage(data.usage), observedReportedCost: reportedProviderCost(data.usage) });
     throw error;
   }
   const choice = data.choices?.[0] || {};
@@ -1217,6 +1262,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       outputTokens: Number(data.usage?.completion_tokens || 0),
       totalTokens: Number(data.usage?.total_tokens || 0)
     },
+    usageReported: Boolean(data.usage && typeof data.usage === "object"),
+    observedUsage: observedProviderUsage(data.usage),
     reportedCost: reportedProviderCost(data.usage),
     rawMetadata: { model: data.model || "", provider: data.provider || "" },
     preparedRequest: { body: prepared.body, payloadHash: prepared.payloadHash }
@@ -1229,7 +1276,8 @@ async function callOpenAiCompatible(profile: TextProviderProfile, request: Provi
       returnedModel: safeObservedIdentity(source.returnedModel) ?? evidence.returnedModel,
       returnedProviderRoute: safeObservedIdentity(source.returnedProviderRoute) ?? evidence.returnedProviderRoute,
       partialContent: typeof source.partialContent === "string" ? source.partialContent : evidence.partialContent,
-      diagnosticCode: source.responseFormatDiagnosticCode ?? source.diagnosticCode ?? evidence.diagnosticCode
+      diagnosticCode: source.responseFormatDiagnosticCode ?? source.diagnosticCode ?? evidence.diagnosticCode,
+      observedUsage: source.observedUsage ?? null, observedReportedCost: source.observedReportedCost ?? null
     });
   }
 }

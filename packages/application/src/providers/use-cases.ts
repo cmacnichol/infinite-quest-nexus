@@ -9,6 +9,7 @@ import type {
   SafeProviderConfiguration,
   SafeProviderConfigurationFields
 } from "./types.js";
+import { textExecutionOverridesSchema } from "@infinite-quest/contracts";
 
 function freezeConfiguration(configuration: SafeProviderConfiguration): SafeProviderConfiguration {
   return Object.freeze({ ...configuration }) as SafeProviderConfiguration;
@@ -64,6 +65,7 @@ function isSafeConfigurationEntry(key: string, value: unknown): boolean {
   if (key === "tokenType") return value === "auto" || value === "sogni" || value === "spark";
   if (key === "contentFilter") return value === "enabled" || value === "disabled";
   if (key === "textResponseFormatPolicy") return value === "legacy" || value === "auto" || value === "required";
+  if (key === "textExecutionOverrides") return textExecutionOverridesSchema.safeParse(value).success;
   if (key === "defaultOutputFormat") return value === "png" || value === "jpeg" || value === "webp";
   if (key === "defaultQuality") {
     return value === "auto" || value === "low" || value === "medium" || value === "high";
@@ -91,6 +93,25 @@ export function assertResponseFormatPolicy(configuration: unknown): void {
   }
 }
 
+/** Reject malformed explicit override intent before the safe allowlist can drop it. */
+export function assertTextExecutionOverrides(configuration: unknown, providerRole?: string): void {
+  if (!configuration || typeof configuration !== "object" || Array.isArray(configuration)) return;
+  const source = configuration as Record<string, unknown>;
+  if (!("textExecutionOverrides" in source) || source.textExecutionOverrides === undefined) return;
+  if (providerRole !== undefined && providerRole !== "text" && providerRole !== "intent") {
+    throw Object.assign(new Error("Text execution overrides are available only for text or intent provider profiles."), { statusCode: 400 });
+  }
+  if (source.textExecutionOverrides === null) return;
+  if (!textExecutionOverridesSchema.safeParse(source.textExecutionOverrides).success) {
+    throw Object.assign(new Error("textExecutionOverrides must match the strict text generation override contract."), { statusCode: 400 });
+  }
+}
+
+export function assertProviderConfiguration(configuration: unknown, providerRole?: string): void {
+  assertResponseFormatPolicy(configuration);
+  assertTextExecutionOverrides(configuration, providerRole);
+}
+
 function immutablePromptSnapshot(version: PromptSnapshotVersion): PromptSnapshotVersion {
   const snapshot = Object.fromEntries(Object.entries(version.snapshot).map(([key, entry]) => [
     key,
@@ -110,7 +131,7 @@ export function createProviderApplication(
   return {
     listProfiles: (scope) => dependencies.profiles.listProfiles(scope),
     createProfile: async (command) => {
-      assertResponseFormatPolicy(command.configuration);
+      assertProviderConfiguration(command.configuration, command.providerRole);
       return ({ profile: await dependencies.profiles.createProfile(command),
       configurationProjection: {
         kind: "same_request_echo",
@@ -118,7 +139,7 @@ export function createProviderApplication(
       } });
     },
     updateProfile: async (command) => {
-      assertResponseFormatPolicy(command.changes.configuration);
+      assertProviderConfiguration(command.changes.configuration);
       const profile = await dependencies.profiles.updateProfile(command);
       return {
         profile,
@@ -133,7 +154,11 @@ export function createProviderApplication(
     deleteProfile: (command) => dependencies.profiles.deleteProfile(command),
     setDefaultProfile: (command) => dependencies.profiles.setDefaultProfile(command),
     listModels: (request) => dependencies.inventory.listModels(request),
-    discoverCandidateModels: (candidate) => { assertResponseFormatPolicy(candidate.configuration); return dependencies.inventory.discoverCandidateModels(candidate); },
+    discoverCandidateModels: (candidate) => { assertProviderConfiguration(candidate.configuration, candidate.providerRole); return dependencies.inventory.discoverCandidateModels(candidate); },
+    listPresets: (request) => dependencies.inventory.listPresets(request),
+    getPreset: (request) => dependencies.inventory.getPreset(request),
+    discoverCandidatePresets: (candidate, request) => dependencies.inventory.discoverCandidatePresets(candidate, request),
+    resolveCandidatePreset: (candidate, slug) => dependencies.inventory.resolveCandidatePreset(candidate, slug),
     recordHealth: (record) => dependencies.health.recordHealth(record),
     resolveDirect: (request) => dependencies.resolution.resolveDirect(request),
     resolveEmbedding: (request) => dependencies.resolution.resolveEmbedding(request),

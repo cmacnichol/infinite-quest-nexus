@@ -145,6 +145,8 @@ export async function runAuthoringResponse<T>(options: {
   delay(milliseconds: number): Promise<void>;
   /** Durable callers fence each paid request and accepted response to a live claim. */
   currentClaim?(): Promise<boolean>;
+  /** Native route execution owns its physical retries and terminal contract failures. */
+  transportRetryOwner?: "outer" | "prepared_executor";
 }): Promise<T> {
   let generationCalls = 0;
   let repair = false;
@@ -170,8 +172,10 @@ export async function runAuthoringResponse<T>(options: {
       } catch (error) {
         const decision = retryDecision(error);
         if (!decision) throw error;
-        if (!decision.retry || transportAttempts >= MAX_TRANSPORT_ATTEMPTS_PER_RESPONSE || generationCalls >= MAX_GENERATION_CALLS) {
-          throw failure(options.stage, decision.code, decision.retry);
+        if (options.transportRetryOwner === "prepared_executor" || !decision.retry
+          || transportAttempts >= MAX_TRANSPORT_ATTEMPTS_PER_RESPONSE || generationCalls >= MAX_GENERATION_CALLS) {
+          throw failure(options.stage, decision.code,
+            options.transportRetryOwner === "prepared_executor" ? false : decision.retry);
         }
         if (options.diagnosticContext) logger.warn({ event: "authoring_transport_retry", ...options.diagnosticContext, requestAttempt: generationCalls, repair, code: decision.code, delayMs: decision.delayMs });
         await options.delay(decision.delayMs);

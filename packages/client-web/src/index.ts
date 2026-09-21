@@ -29,6 +29,17 @@ export type {
   WorldApi
 } from "./api-client.js";
 export {
+  ProviderPresetsUnsupportedError,
+  createProviderPresetsApi,
+  nativePresetSupport
+} from "./provider-presets-api.js";
+export type {
+  NativePresetSupport,
+  ProviderPresetCandidateListOptions,
+  ProviderPresetListOptions,
+  ProviderPresetsApi
+} from "./provider-presets-api.js";
+export {
   createIllustrationApi
 } from "./illustration-api.js";
 export type {

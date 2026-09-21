@@ -63,6 +63,8 @@ function mapRepositoryError(error: unknown): never {
           ? "authoring_not_found"
           : error.code === "active_job_limit"
             ? "authoring_active_job_limit"
+            : error.code === "native_text_execution_unavailable"
+              ? "authoring_native_text_execution_unavailable"
             : error.code === "choose_source_facts"
               ? "choose_source_facts"
             : "authoring_invalid_state";

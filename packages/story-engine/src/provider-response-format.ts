@@ -1,12 +1,16 @@
 import {
   preparedResponseContractSchema,
+  preparedResponseContractV2Schema,
   type PreparedResponseContract,
+  type PreparedResponseContractV2,
   type ResponseFormatDiagnosticCode
 } from "../../contracts/src/text-response-format.js";
+import { getProviderOutputSchemaV2 } from "../../contracts/src/provider-output-schema.js";
 import { getProviderOutputSchema } from "./provider-output-schema.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 
-export { type PreparedResponseContract, type ResponseFormatDiagnosticCode };
+export type AnyPreparedResponseContract = PreparedResponseContract | PreparedResponseContractV2;
+export { type PreparedResponseContract, type PreparedResponseContractV2, type ResponseFormatDiagnosticCode };
 
 /** Private transport evidence for durable recovery; the message never contains provider text. */
 export class PreparedResponseContractError extends Error {
@@ -16,10 +20,14 @@ export class PreparedResponseContractError extends Error {
   readonly returnedProviderRoute: string | null;
   readonly partialContent: string;
   readonly diagnosticCode: ResponseFormatDiagnosticCode | null;
+  readonly observedUsage: Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
+  readonly observedReportedCost: Readonly<{ amount: string; currency: string }> | null;
 
   constructor(error: unknown, preparedRequest: Readonly<{ body: string; payloadHash: string }>, details: {
     responseId?: string | null; returnedModel?: string | null; returnedProviderRoute?: string | null;
     partialContent?: string; diagnosticCode?: ResponseFormatDiagnosticCode | null;
+    observedUsage?: Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
+    observedReportedCost?: Readonly<{ amount: string; currency: string }> | null;
   } = {}) {
     super("The provider response could not be used for the prepared response contract.");
     this.name = "PreparedResponseContractError";
@@ -33,6 +41,8 @@ export class PreparedResponseContractError extends Error {
     this.returnedProviderRoute = details.returnedProviderRoute ?? null;
     this.partialContent = details.partialContent ?? "";
     this.diagnosticCode = details.diagnosticCode ?? (error as any)?.responseFormatDiagnosticCode ?? null;
+    this.observedUsage = details.observedUsage ?? null;
+    this.observedReportedCost = details.observedReportedCost ?? null;
   }
 }
 
@@ -44,10 +54,11 @@ function freezeDeep<T>(value: T): T {
   return value;
 }
 
-export function prepareResponseContract(value: unknown): PreparedResponseContract {
-  const contract = preparedResponseContractSchema.parse(value);
+export function prepareResponseContract(value: unknown): AnyPreparedResponseContract {
+  const contract = (value && typeof value === "object" && (value as { version?: unknown }).version === 2
+    ? preparedResponseContractV2Schema : preparedResponseContractSchema).parse(value);
   if (contract.mode === "json_schema") {
-    const source = getProviderOutputSchema(contract.operation);
+    const source = contract.version === 2 ? getProviderOutputSchemaV2(contract.operation) : getProviderOutputSchema(contract.operation);
     if (contract.schemaHash !== source.schemaHash || contract.schemaVersion !== source.version || contract.schemaName !== source.name) {
       throw new Error("Prepared response contract does not match the registered schema identity.");
     }
@@ -57,7 +68,7 @@ export function prepareResponseContract(value: unknown): PreparedResponseContrac
   }
   return freezeDeep({ ...contract, ...(contract.mode === "json_schema" ? {
     schema: JSON.parse(stableStringify(contract.schema)) as Record<string, unknown>,
-    providerRoutingSlugs: [...contract.providerRoutingSlugs]
+    ...(contract.version === 1 ? { providerRoutingSlugs: [...contract.providerRoutingSlugs] } : {})
   } : {}) });
 }
 

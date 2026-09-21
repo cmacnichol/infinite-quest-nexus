@@ -1,12 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
+import { getProviderOutputSchemaV2 } from "@infinite-quest/contracts";
+import type { SchemaVerificationV2 } from "../../packages/contracts/src/text-response-format.js";
 import type { DatabaseClient, DatabasePool } from "../../packages/database/src/pool.js";
 import {
   createIllustrationArtifactDownloadAdapter,
   createIllustrationImageProviderAdapter,
   createIllustrationPromptRefinementAdapter
 } from "../../services/runtime/src/illustration-platform-adapter.js";
+import { parseRefinedPrompt } from "../../services/runtime/src/illustration-segment-job-adapter.js";
+import { prepareAuthoringResponseContractExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
 import { createIllustrationGenerationTransactionPort } from "../../services/runtime/src/illustration-repository-bindings.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -188,6 +194,169 @@ describe("illustration provider adapters", () => {
     expect(recordProviderHealth).toHaveBeenCalledWith(
       expect.anything(), ownerUserId, providerProfileId, true
     );
+  });
+
+  it("dispatches a frozen refinement plan through the prepared text executor without loading mutable text execution", async () => {
+    const legacyExecution = vi.fn(async () => {
+      throw new Error("legacy text execution must not receive a frozen refinement plan");
+    });
+    const preparedExecute = vi.fn(async () => ({
+      content: "Moonlit observatory, silver lens, cinematic fantasy illustration",
+      responseId: "prepared-response-1",
+      finishReason: "stop",
+      outputLimited: false,
+      modelInstanceId: "prepared-model",
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      reportedCost: null,
+      rawMetadata: {}
+    }));
+    const adapter = createIllustrationPromptRefinementAdapter(
+      {} as DatabasePool,
+      {
+        loadTextExecution: legacyExecution as never,
+        preparedTextExecutor: { execute: preparedExecute },
+        recordProviderHealth: vi.fn(async () => undefined) as never,
+        buildRefinementInput: (fictionText, storyContext) => `${fictionText}\n${storyContext}`,
+        parseRefinedPrompt: (content) => content
+      }
+    );
+
+    await expect(adapter.refinePrompt({
+      ownerUserId,
+      campaignId,
+      turnId: "33333333-3333-4333-8333-333333333333",
+      segmentId: "44444444-4444-4444-8444-444444444444",
+      promptJobId: "55555555-5555-4555-8555-555555555555",
+      claimAttempt: 3,
+      leaseOwner: "illustration-worker-1",
+      providerProfileId,
+      model: "text-model",
+      systemPrompt: "Return only a fiction-only visual prompt.",
+      fictionText: "Moonlight fills the observatory.",
+      storyContext: "A quiet night beneath a violet sky.",
+      textExecutionPlan: {
+        version: 2,
+        selection: { kind: "openrouter_preset", slug: "illustration" },
+        preset: { slug: "illustration", versionId: "v1", configHash: "a".repeat(64) },
+        candidates: [{ modelId: "prepared-model", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+        presetSystemPrompt: "Preset instructions.",
+        parameters: { temperature: 0.2 },
+        prompt: "Preset instructions.\n\nReturn only a fiction-only visual prompt.",
+        promptHash: "b".repeat(64),
+        endpointReference: "endpoint-1",
+        credentialReference: providerProfileId,
+        profileRevision: "profile-1",
+        authorityRevision: "authority-1",
+        requestTimeoutMs: 30_000,
+        protocolVersion: "illustration-refinement-v2",
+        routeBasisHash: "c".repeat(64),
+        planHash: "d".repeat(64)
+      }
+    })).resolves.toMatchObject({ prompt: "Moonlit observatory, silver lens, cinematic fantasy illustration" });
+
+    expect(legacyExecution).not.toHaveBeenCalled();
+    expect(preparedExecute).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "illustration_prompt_refinement",
+      ownerUserId,
+      providerProfileId,
+      logicalReservation: {
+        kind: "illustration", ownerUserId,
+        promptJobId: "55555555-5555-4555-8555-555555555555",
+        claimAttempt: 3, leaseOwner: "illustration-worker-1", operation: "initial"
+      },
+      request: {
+        systemPrompt: "Preset instructions.\n\nReturn only a fiction-only visual prompt.",
+        input: expect.stringContaining("Moonlight fills the observatory.")
+      }
+    }));
+  });
+
+  it.each(["preset", "model"] as const)("dispatches the full frozen %s illustration contract with a typed one-field envelope and preserves local fiction validation", async (routeKind) => {
+    const provider = {
+      id: providerProfileId, name: "Illustration text", providerRole: "text" as const,
+      providerType: "openrouter" as const, model: "illustration-model", contextWindowTokens: 8192,
+      maxOutputTokens: 1024, temperature: 0.4, requestTimeoutMs: 30_000,
+      endpointIdentity: "endpoint-illustration", executionRevision: "profile-1", authorityRevision: "authority-1",
+      textSelection: routeKind === "preset" ? { kind: "openrouter_preset" as const, slug: "illustration" } : { kind: "model" as const, modelId: "illustration-model" }, configuration: {},
+      execute: vi.fn(async () => { throw new Error("legacy execution must not run"); })
+    };
+    const verification: SchemaVerificationV2 = {
+      version: 2, providerType: "openrouter", endpointIdentity: "endpoint-illustration", model: "illustration-model",
+      routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+      operation: "illustration_prompt_refinement", schemaHash: getProviderOutputSchemaV2("illustration_prompt_refinement").schemaHash,
+      streaming: false, verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+      providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+    };
+    const resolvePreset = vi.fn(async () => ({
+      slug: "illustration", name: "Illustration", versionId: "v1", version: 1,
+      configHash: "a".repeat(64), config: { models: ["illustration-model"] },
+      systemPrompt: "Frozen illustration instructions."
+    }));
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId, execution: provider,
+      operationPrompts: { illustrationPromptRefinement: "Return one fiction-only image prompt." },
+      ports: {
+        resolvePreset,
+        discoverModels: async () => [{ id: "illustration-model", contextWindowTokens: 8192, maxOutputTokens: 1024,
+          ...(routeKind === "model" ? { responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" } } : {}) }]
+      },
+      ...(routeKind === "model" ? { responseFormatCapabilities: createProviderResponseFormatCapabilities({ records: [verification], now: () => Date.parse("2026-09-20T00:00:00.000Z") }) } : {})
+    });
+    const outputs = [
+      '{"image_prompt":"Moonlit observatory, silver lens, cinematic fantasy illustration"}',
+      "Moonlit observatory, silver lens",
+      '{"prompt":"Moonlit observatory, silver lens"}',
+      '{"image_prompt":"A hero succeeds on a d20 roll of 19"}'
+    ];
+    const preparedExecute = vi.fn(async () => ({
+      content: outputs.shift()!, responseId: "prepared-response", finishReason: "stop", outputLimited: false,
+      modelInstanceId: "illustration-model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      reportedCost: null, rawMetadata: {}
+    }));
+    const adapter = createIllustrationPromptRefinementAdapter({} as DatabasePool, {
+      loadTextExecution: provider.execute as never,
+      preparedTextExecutor: { execute: preparedExecute },
+      recordProviderHealth: vi.fn(async () => undefined) as never,
+      buildRefinementInput: (fictionText, storyContext) => `${fictionText}\n${storyContext}`,
+      parseRefinedPrompt
+    });
+    const request = {
+      ownerUserId, campaignId, turnId: null, segmentId, providerProfileId,
+      promptJobId: "66666666-6666-4666-8666-666666666666", claimAttempt: 4, leaseOwner: "illustration-worker-2",
+      model: "illustration-model", systemPrompt: "untrusted mutable prompt",
+      fictionText: "Moonlight fills the observatory.", storyContext: "A quiet night beneath a violet sky.",
+      textExecutionPlan: prepared.plans.illustrationPromptRefinement!,
+      textExecutionContract: {
+        providerType: provider.providerType, requestConfiguration: {}, routeBasis: prepared.routeBasis,
+        frozenResponseContracts: prepared.frozenResponseContracts,
+        trustedOperationPrompt: prepared.trustedOperationPrompts.illustrationPromptRefinement!
+      }
+    };
+
+    await expect(adapter.refinePrompt(request)).resolves.toMatchObject({
+      prompt: "Moonlit observatory, silver lens, cinematic fantasy illustration"
+    });
+    const invocation = (preparedExecute.mock.calls as unknown as any[][])[0]![0];
+    const body = JSON.parse(invocation.preparedRequest.body);
+    expect(invocation).toMatchObject({
+      operation: "illustration_prompt_refinement", invocationKey: "illustration_prompt_refinement:nonstream",
+      trustedOperationPrompt: "Return one fiction-only image prompt.",
+      logicalReservation: {
+        kind: "illustration", ownerUserId,
+        promptJobId: "66666666-6666-4666-8666-666666666666",
+        claimAttempt: 4, leaseOwner: "illustration-worker-2", operation: "initial"
+      }
+    });
+    expect(body.response_format.json_schema.name).toBe(getProviderOutputSchemaV2("illustration_prompt_refinement").name);
+    expect(body.messages[0].content).toBe(routeKind === "preset" ? "Frozen illustration instructions.\n\nReturn one fiction-only image prompt." : "Return one fiction-only image prompt.");
+    expect(invocation.preparedRequest.budgetAudit).toMatchObject({ countMode: "estimated", outputReserveTokens: 1024 });
+    expect(invocation.frozenResponseContracts.contracts["illustration_prompt_refinement:nonstream"].admission.basis).toBe(routeKind === "model" ? "model_verified" : "preset_trusted");
+    expect(resolvePreset).toHaveBeenCalledTimes(routeKind === "preset" ? 1 : 0);
+    expect(provider.execute).not.toHaveBeenCalled();
+
+    await expect(adapter.refinePrompt(request)).rejects.toThrow(/JSON envelope/i);
+    await expect(adapter.refinePrompt(request)).rejects.toThrow(/image_prompt envelope/i);
+    await expect(adapter.refinePrompt(request)).rejects.toThrow(/fiction-only boundary/i);
   });
 });
 

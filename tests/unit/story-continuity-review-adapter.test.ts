@@ -23,6 +23,43 @@ describe("exact continuity review provider request", () => {
     expect(prepared.request.responseFormatFallback).toBe("forbid");
     expect(prepared.request.budgetOutput).toBeUndefined();
   });
+  it("composes a frozen execution prompt before review and repair bodies are measured", () => {
+    const compose = vi.fn((operationPrompt: string) => ({
+      systemPrompt: `Frozen preset instruction.\n\n${operationPrompt}`
+    }));
+    const review = prepare({ prepareSystemPrompt: compose });
+    const repair = prepareContinuityRepair({
+      provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
+      findings: [{ code: "conflict", evidence_ids: [entry.id] }],
+      prepareSystemPrompt: compose
+    });
+
+    expect(review.request.systemPrompt).toContain("Frozen preset instruction.");
+    expect(review.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, review.request).body);
+    expect(review.requestHash).toBe(sha256(review.body));
+    expect(repair.request.systemPrompt).toContain("Frozen preset instruction.");
+    expect(repair.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, repair.request).body);
+    expect(repair.requestHash).toBe(sha256(repair.body));
+    expect(compose).toHaveBeenCalledTimes(2);
+  });
+  it("binds a frozen response contract before review and repair bodies are measured", () => {
+    const bind = vi.fn((request: any) => ({
+      ...request,
+      responseContract: { version: 1 as const, mode: "json_object" as const, operation: "continuity_review" as const,
+        streaming: false, forbidFormatFallback: true }
+    }));
+    const review = prepare({ bindRequest: bind });
+    const repair = prepareContinuityRepair({
+      provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
+      findings: [{ code: "conflict", evidence_ids: [entry.id] }], bindRequest: bind
+    });
+
+    expect(bind).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(review.body).response_format).toEqual({ type: "json_object" });
+    expect(JSON.parse(repair.body).response_format).toEqual({ type: "json_object" });
+    expect(review.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, review.request).body);
+    expect(repair.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, repair.request).body);
+  });
   it("rejects missing manifest entries, changed producing request and overflow before dispatch", () => {
     expect(() => prepare({ manifest: { ...manifest, entries: [] } })).toThrow();
     expect(() => prepare({ producingRequestHash: "a".repeat(64) })).toThrow();

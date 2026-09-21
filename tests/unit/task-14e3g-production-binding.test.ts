@@ -130,6 +130,10 @@ describe("Task 14e3g production binding", () => {
       selectedCharacterIndex: 0,
       providerProfileId: "44444444-4444-4444-8444-444444444444",
       model: "text-model",
+      textExecutionOverrides: {
+        parameters: { temperature: 0.28, max_tokens: 640 },
+        conservativeContextWindowTokens: 8_000,
+      },
       enrichFinalTurn: false,
     };
     const progress = {
@@ -186,6 +190,7 @@ describe("Task 14e3g production binding", () => {
       providerSelection: {
         providerProfileId: request.providerProfileId,
         model: request.model,
+        textExecutionOverrides: request.textExecutionOverrides,
       },
     }));
     expect(progress.begin).toHaveBeenCalledWith(expect.objectContaining({ key: `${request.sourceName}:${request.sourceText.length}` }), {
@@ -410,7 +415,14 @@ describe("Task 14e3g production binding", () => {
     const conversion = (captured as { provider: { convertTemplate(input: unknown): Promise<unknown> } }).provider;
     const converted = await conversion.convertTemplate({
       ownerUserId: "22222222-2222-4222-8222-222222222222",
-      providerSelection: { providerProfileId: "11111111-1111-4111-8111-111111111111", model: "text-model" },
+      providerSelection: {
+        providerProfileId: "11111111-1111-4111-8111-111111111111",
+        model: "text-model",
+        textExecutionOverrides: {
+          parameters: { temperature: 0.28, max_tokens: 640 },
+          conservativeContextWindowTokens: 8_000,
+        },
+      },
       progress: {
         owner: { ownerUserId: "22222222-2222-4222-8222-222222222222" },
         key: "world.txt:11",
@@ -430,6 +442,10 @@ describe("Task 14e3g production binding", () => {
       ownerUserId: "22222222-2222-4222-8222-222222222222",
       providerProfileId: "11111111-1111-4111-8111-111111111111",
       model: "text-model",
+      textExecutionOverrides: {
+        parameters: { temperature: 0.28, max_tokens: 640 },
+        conservativeContextWindowTokens: 8_000,
+      },
     }));
     expect(converted).toMatchObject({
       world: { format: "infinite-quest-world", formatVersion: 1, title: "Generated world" },

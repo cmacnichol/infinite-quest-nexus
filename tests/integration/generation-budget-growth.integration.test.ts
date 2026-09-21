@@ -106,7 +106,7 @@ integration("generation budget grows the actual provider Chronicle context", () 
       maxOutputTokens: providerMaxOutputTokens,
       temperature: 0,
       enabled: true,
-      configuration: {}
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret)).id;
     embeddingProviderId = (await createProvider(pool, {
       name: `Budget growth embedding ${crypto.randomUUID()}`,

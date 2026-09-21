@@ -17,9 +17,11 @@ vi.mock("../../services/runtime/src/lifecycle.js", () => ({ runRuntimeLifecycle:
 vi.mock("../../services/runtime/src/runtime-role.js", () => ({ dispatchRuntimeRole: seams.dispatch }));
 
 describe("production main authoring binding", () => {
-  it("exposes only execution, model inventory, direct resolution and prompt capabilities to worker authoring", () => {
+  it("exposes the shared prepared-text plans with the worker authoring capabilities", () => {
     const graph = createWorkerProviderApplicationComposition({} as never, { credentialSecret: "synthetic-test-secret", transport: {} as never });
-    expect(Object.keys(graph.worldGeneration).sort()).toEqual(["execution", "inventory", "promptTools", "prompts", "resolution"]);
+    expect(Object.keys(graph.worldGeneration).sort()).toEqual(["authoringTextPlans", "execution", "inventory", "promptTools", "prompts", "resolution"]);
+    expect(graph.worldGeneration.authoringTextPlans?.preparedExecutor).toBe(graph.generation.preparedTextExecutor);
+    expect(graph.worldGeneration.authoringTextPlans?.nativePresetPlansEnabled).toBe(false);
     expect(Object.keys(graph.worldGeneration.inventory).sort()).toEqual(["discoverCandidateModels", "listModels"]);
     expect(Object.keys(graph.worldGeneration.resolution)).toEqual(["resolveDirect"]);
     expect(graph).not.toHaveProperty("application");
@@ -39,7 +41,7 @@ describe("production main authoring binding", () => {
       const runtime = authoringRuntimeFixture(async () => authoringResult("unused"));
       const application = roles.createWorkerAuthoring(pool, runtime.providers as never, controller.signal);
       await expect(application.runNext({ workerId: "main-worker", leaseSeconds: 17 })).resolves.toBe(false);
-      expect(seams.repository).toHaveBeenCalledWith(pool);
+      expect(seams.repository).toHaveBeenCalledWith(pool, {});
       expect(seams.claim).toHaveBeenCalledWith("main-worker", 17);
       controller.abort();
       await expect(application.runNext({ workerId: "main-worker", leaseSeconds: 17 })).resolves.toBe(false);

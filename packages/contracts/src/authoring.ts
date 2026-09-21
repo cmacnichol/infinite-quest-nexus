@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { physicalTextAccountingSchema } from "./physical-text-accounting.js";
+import { frozenResponseContractsV2Schema } from "./generation-response-contract.js";
+import { authoringTextOperationV2Schema } from "./provider-output-schema.js";
+import { textExecutionPlanSchema, textExecutionRouteBasisSchema } from "./text-execution-plan.js";
 import { apiTimestampSchema } from "./http.js";
 import {
   playableCharacterSchema,
@@ -164,7 +168,7 @@ export const authoringStageOutputSchema = z.discriminatedUnion("kind", [
 ]);
 
 /** Safe pinned execution fields only; endpoint URLs and credentials are deliberately absent. */
-export const authoringExecutionSnapshotSchema = z.object({
+const authoringExecutionSnapshotV1Schema = z.object({
   providerProfileId: z.string().trim().min(1).max(200),
   model: z.string().trim().min(1).max(500),
   configurationHash: z.string().regex(/^[0-9a-f]{64}$/u),
@@ -174,6 +178,52 @@ export const authoringExecutionSnapshotSchema = z.object({
   prompts: z.record(z.string().min(1).max(200), z.string().max(200_000)),
   protocols: z.record(z.string().min(1).max(200), z.string().min(1).max(1_000))
 }).strict();
+
+/** Each durable stage has a separately composed, frozen v2 plan. */
+export const authoringTextOperationSchema = z.enum([
+  "worldOutline",
+  "worldOutlineRepair",
+  "seedCharacter",
+  "seedCharacterRepair",
+  "standaloneCharacter",
+  "standaloneCharacterRepair",
+  "sourceExtraction",
+  "sourceExtractionRepair",
+  "sourceWorld",
+  "sourceWorldRepair",
+  "sourceSynthesis",
+  "sourceSynthesisRepair",
+  "sourceCharacter",
+  "sourceCharacterRepair"
+]);
+
+const authoringExecutionSnapshotV2LegacySchema = authoringExecutionSnapshotV1Schema.extend({
+  version: z.literal(2),
+  textExecutionPlans: z.partialRecord(authoringTextOperationSchema, textExecutionPlanSchema)
+    .refine((plans) => Object.keys(plans).length > 0)
+}).strict();
+
+const authoringExecutionSnapshotV3Schema = authoringExecutionSnapshotV1Schema.extend({
+  version: z.literal(3),
+  providerType: z.enum(["openrouter", "openai_compatible"]),
+  requestConfiguration: z.object({ httpReferer: z.string().trim().min(1).max(2_000).optional() }).strict(),
+  routeBasis: textExecutionRouteBasisSchema,
+  frozenResponseContracts: frozenResponseContractsV2Schema,
+  textExecutionPlans: z.partialRecord(authoringTextOperationV2Schema, textExecutionPlanSchema)
+    .refine((plans) => Object.keys(plans).length > 0),
+  trustedOperationPrompts: z.partialRecord(authoringTextOperationV2Schema, z.string().trim().min(1).max(200_000))
+    .refine((prompts) => Object.keys(prompts).length > 0)
+}).strict();
+
+/**
+ * V1 is retained byte-for-byte and plan-only V2 stays explicit for historical
+ * jobs. Bound V3 cannot downgrade to either format when contract fields vanish.
+ */
+export const authoringExecutionSnapshotSchema = z.union([
+  authoringExecutionSnapshotV1Schema,
+  authoringExecutionSnapshotV2LegacySchema,
+  authoringExecutionSnapshotV3Schema
+]);
 
 export const authoringStageViewSchema = z.object({
   id: authoringIdSchema,
@@ -195,8 +245,13 @@ const authoringJobViewFields = {
   incomplete: z.boolean()
 };
 
-const worldConceptJobViewSchema = z.object({
+const authoringJobDetailFields = {
   ...authoringJobViewFields,
+  physicalAccounting: physicalTextAccountingSchema.optional()
+};
+
+const worldConceptJobViewSchema = z.object({
+  ...authoringJobDetailFields,
   kind: z.literal("world_concept"),
   result: worldContentSchema.optional(),
   request: worldConceptSubmitSchema.optional(),
@@ -206,7 +261,7 @@ const worldConceptJobViewSchema = z.object({
 }).strict();
 
 const characterJobViewSchema = z.object({
-  ...authoringJobViewFields,
+  ...authoringJobDetailFields,
   kind: z.literal("character"),
   result: playableCharacterSchema.optional(),
   request: characterSubmitSchema.optional(),
@@ -216,7 +271,7 @@ const characterJobViewSchema = z.object({
 }).strict();
 
 const storySourceJobViewSchema = z.object({
-  ...authoringJobViewFields,
+  ...authoringJobDetailFields,
   kind: z.literal("story_source"),
   target: z.object({ kind: z.literal("new_world") }).strict(),
   request: sourceAuthoringInputSchema.optional(),
@@ -335,3 +390,4 @@ export type AuthoringResult = WorldContent | PlayableCharacter;
 export type AuthoringWorldOutline = z.infer<typeof authoringWorldOutlineSchema>;
 export type AuthoringStageOutput = z.infer<typeof authoringStageOutputSchema>;
 export type AuthoringExecutionSnapshot = z.infer<typeof authoringExecutionSnapshotSchema>;
+export type AuthoringTextOperation = z.infer<typeof authoringTextOperationSchema>;

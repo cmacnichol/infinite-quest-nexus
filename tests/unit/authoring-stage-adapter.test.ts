@@ -1,13 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
+import { buildSourceExtractionPrompt, buildSourceWorldPrompt, CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, SOURCE_WORLD_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
+import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { normalizeSourceDocument } from "../../packages/domain/src/source-authoring.js";
 import { planSourceChunks } from "../../packages/domain/src/source-authoring-budget.js";
 import type { AuthoringClaim, AuthoringExecutionRepository } from "../../packages/application/src/authoring/ports.js";
 import type { AuthoringExecutionSnapshot } from "../../packages/application/src/authoring/types.js";
+import { authoringExecutionSnapshotSchema } from "../../packages/contracts/src/authoring.js";
+import { normalizeTextSelection } from "../../packages/contracts/src/provider-selection.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import type { SchemaVerificationV2 } from "../../packages/contracts/src/text-response-format.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
+import { prepareAuthoringResponseContractExecution, prepareAuthoringTextExecution, prepareDirectAuthoringTextExecution, serializePreparedAuthoringRequest } from "../../services/runtime/src/authoring-text-execution-preparation.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import type { ProviderResult } from "../../packages/story-engine/src/providers.js";
-import { expandWorldCharacterSeed } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { PreparedRouteTerminalError, type PresetRouteFailureReason } from "../../packages/story-engine/src/preset-route-execution.js";
+import { expandWorldCharacterSeed, generateStandalonePlayableCharacter, generateWorldOutline } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { createSourceAuthoringAdapter } from "../../services/runtime/src/source-authoring-adapter.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const descriptor = { id: "text-1", model: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024, requestTimeoutMs: 10_000, temperature: 0.7, configuration: {} };
@@ -38,11 +48,333 @@ function runtimeStage(overrides: Partial<Parameters<ReturnType<typeof createRunt
   return {
     input: { kind: "character" as const, idempotencyKey: "character-key", target: { kind: "new_world" as const }, prompt: "Create a capable cartographer.", content: { schemaVersion: 5, world: { title: "Roads", genre: "fantasy", tone: "hopeful", backgroundStory: "Roads move.", premise: "Map them.", firstAction: "Walk.", rules: "" }, playableCharacters: [], entities: [], relationships: [], rpgStats: [], defaultTriggers: [], eventTriggers: [], assets: [], defaults: {} } },
     snapshot: { ...snapshot, prompts: { ...snapshot.prompts, character_generation: "Use {{protocol}} and return complete character JSON." } },
-    stageKey: "character:durable-character", parentOutputs: [], ownerUserId: "owner-1", ...overrides
+    stageKey: "character:durable-character", parentOutputs: [], ownerUserId: "owner-1",
+    jobId: claim.jobId, stageId: claim.stageId, jobGeneration: claim.jobGeneration,
+    stageGeneration: claim.stageGeneration, leaseToken: claim.leaseToken,
+    ...overrides
   } as Parameters<ReturnType<typeof createRuntimeAuthoringStageDispatcher>>[0];
 }
 
 describe("executeAuthoringStage", () => {
+  it.each([
+    ["schema", "prepared_route_terminal", "schema_invalid"],
+    ["refusal", "prepared_route_terminal", "refusal"],
+    ["exhaustion", "prepared_route_exhausted", "provider_unavailable"],
+    ["ambiguous", "prepared_route_unknown_outcome", "ambiguous_transport"],
+    ["post-output", "prepared_route_terminal", "unknown"]
+  ] as const)("contains prepared %s terminal errors in representative world, character, and source callers", async (_label, code, reason) => {
+    const terminal = () => new PreparedRouteTerminalError(
+      code, reason as PresetRouteFailureReason, "prepared route stopped", "attempt-1"
+    );
+    const worldExecute = vi.fn(async () => { throw terminal(); });
+    const worldRepair = vi.fn();
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const worldInput = {
+      sourceName: "terminal", sourceKind: "prompt" as const, title: "Terminal world",
+      summary: "A road.", keywords: [], excerpts: [], prompt: "Build the road."
+    };
+    await expect(generateWorldOutline({
+      input: worldInput, provider: { execute: vi.fn() },
+      preparedExecution: { execute: worldExecute },
+      worldPrompt: buildTemplateWorldPrompt(worldInput, "World prompt."),
+      prompt: "World prompt.", repairPrompt: "World repair.", onRepair: worldRepair
+    })).rejects.toMatchObject({ code, reason });
+    expect(worldExecute).toHaveBeenCalledOnce();
+    expect(worldRepair).not.toHaveBeenCalled();
+    expect(timeout).not.toHaveBeenCalled();
+    timeout.mockRestore();
+
+    const characterExecute = vi.fn(async () => { throw terminal(); });
+    const characterRepair = vi.fn();
+    const characterTimeout = vi.spyOn(globalThis, "setTimeout");
+    const characterStage = runtimeStage();
+    if (characterStage.input.kind !== "character") throw new Error("character fixture is invalid");
+    await expect(generateStandalonePlayableCharacter({
+      provider: { execute: vi.fn() }, preparedExecution: { execute: characterExecute },
+      content: characterStage.input.content,
+      promptText: "Create Iris.", promptTemplate: "Character prompt.", onRepair: characterRepair
+    })).rejects.toMatchObject({ code, reason });
+    expect(characterExecute).toHaveBeenCalledOnce();
+    expect(characterRepair).not.toHaveBeenCalled();
+    expect(characterTimeout).not.toHaveBeenCalled();
+    characterTimeout.mockRestore();
+
+    const source = normalizeSourceDocument("Terminal", "Iris wears a blue coat.", "terminal-source");
+    const chunk = planSourceChunks({
+      source, boundaryParagraphId: source.paragraphs[0]!.id, systemPrompt: "Extract facts.", instructions: "",
+      budget: { contextWindowTokens: 8192, maxOutputTokens: 1024, countTokens: (value) => new TextEncoder().encode(value).length }
+    })[0]!;
+    const sourceExecute = vi.fn(async () => { throw terminal(); });
+    const sourceRepair = vi.fn(async () => { throw new Error("repair must not run"); });
+    const sourceDelay = vi.fn(async () => undefined);
+    const sourceAdapter = createSourceAuthoringAdapter({
+      plans: { initial: { prompt: "Prepared extraction." }, repair: { prompt: "Prepared extraction repair." } },
+      requestBudget: { executeInitial: sourceExecute, executeRepair: sourceRepair }, delay: sourceDelay
+    });
+    await expect(sourceAdapter.extractSourceChunk({
+      source, chunk, boundaryParagraphId: source.paragraphs[0]!.id, mode: "faithful", instructions: ""
+    })).rejects.toMatchObject({ code, reason });
+    expect(sourceExecute).toHaveBeenCalledOnce();
+    expect(sourceRepair).not.toHaveBeenCalled();
+    expect(sourceDelay).not.toHaveBeenCalled();
+  });
+  it("resolves one inherited preset into every frozen authoring operation exactly once", async () => {
+    const resolvePreset = vi.fn(async () => ({ slug: "story", name: "Story", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Preset rules." }));
+    const discoverModels = vi.fn(async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]);
+    const prepared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution: { ...descriptor, name: "Text", providerRole: "text", providerType: "openrouter", executionRevision: "ordinary", authorityRevision: "authority", textSelection: { kind: "openrouter_preset", slug: "story" }, execute: async () => providerResult("{}") },
+      operationPrompts: { standaloneCharacter: "Create a cartographer.", worldOutline: "Create a world." },
+      ports: { resolvePreset, discoverModels }
+    });
+    expect(resolvePreset).toHaveBeenCalledOnce();
+    expect(discoverModels).toHaveBeenCalledOnce();
+    expect(prepared.plans.standaloneCharacter!.prompt).toBe("Preset rules.\n\nCreate a cartographer.");
+    expect(prepared.plans.worldOutline!.prompt).toBe("Preset rules.\n\nCreate a world.");
+    expect(prepared.plans.standaloneCharacter!.authorityRevision).toBe("authority");
+    expect(prepared.plans.standaloneCharacter!.requestTimeoutMs).toBe(10_000);
+  });
+
+  it("maps saved and request text overrides once while keeping them scoped to the effective selection", async () => {
+    const execution = {
+      ...descriptor,
+      id: "00000000-0000-4000-8000-000000000061",
+      name: "Text",
+      providerRole: "text" as const,
+      providerType: "openrouter" as const,
+      executionRevision: "ordinary",
+      authorityRevision: "authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "story" },
+      configuration: {
+        textExecutionOverrides: {
+          parameters: { temperature: 0.19, max_tokens: 700 },
+          conservativeContextWindowTokens: 6_000
+        }
+      },
+      execute: async () => providerResult("{}")
+    };
+    const ports = {
+      resolvePreset: vi.fn(async ({ slug }: { slug: string }) => ({
+        slug, name: slug, versionId: `v-${slug}`, version: 1, configHash: "a".repeat(64),
+        config: { models: ["model-pinned"], temperature: 0.8, max_tokens: 900 }, systemPrompt: "Preset rules."
+      })),
+      discoverModels: vi.fn(async () => [{ id: "model-pinned", contextWindowTokens: 12_000, maxOutputTokens: 1_000 }])
+    };
+
+    const operationPrompts = {
+      worldOutline: "Create the world.",
+      standaloneCharacter: "Create the character.",
+      organizer: "Organize the character.",
+      sourceExtraction: "Extract source facts.",
+      sourceSynthesis: "Synthesize the world.",
+      sourceCharacter: "Synthesize the source character.",
+      illustrationPromptRefinement: "Refine the illustration prompt."
+    };
+    const inherited = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts, ports
+    });
+    expect(inherited.routeBasis.parameters).toMatchObject({ temperature: 0.19, max_tokens: 700 });
+    expect(inherited.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 6_000, maxOutputTokens: 700 });
+    for (const operation of Object.keys(operationPrompts)) {
+      expect(inherited.plans[operation]).toMatchObject({
+        parameters: { temperature: 0.19, max_tokens: 700 }
+      });
+    }
+
+    const cleared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports,
+      textExecutionOverrides: null
+    });
+    expect(cleared.routeBasis.parameters).toMatchObject({ temperature: 0.8, max_tokens: 900 });
+    expect(cleared.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 8_192, maxOutputTokens: 900 });
+
+    const replaced = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports,
+      textExecutionOverrides: { parameters: { top_p: 0.44 }, conservativeContextWindowTokens: 7_000 }
+    });
+    expect(replaced.routeBasis.parameters).toMatchObject({ temperature: 0.8, top_p: 0.44, max_tokens: 900 });
+    expect(replaced.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 7_000, maxOutputTokens: 900 });
+
+    const changedSelection = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports,
+      selectionOverride: { kind: "openrouter_preset", slug: "other" }
+    });
+    expect(changedSelection.routeBasis.parameters).toMatchObject({ temperature: 0.8, max_tokens: 900 });
+    expect(changedSelection.routeBasis.candidates[0]).toMatchObject({ contextWindowTokens: 8_192, maxOutputTokens: 900 });
+  });
+
+  it("serializes effective temperature and output bytes while enforcing conservative and hard caps", async () => {
+    const execution = {
+      ...descriptor,
+      id: "00000000-0000-4000-8000-000000000062",
+      name: "Text",
+      providerRole: "text" as const,
+      providerType: "openrouter" as const,
+      executionRevision: "ordinary",
+      authorityRevision: "authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "story" },
+      configuration: {
+        textExecutionOverrides: {
+          parameters: { temperature: 0.19, max_tokens: 5_000 },
+          conservativeContextWindowTokens: 6_000
+        }
+      },
+      execute: async () => providerResult("{}")
+    };
+    const ports = {
+      resolvePreset: async () => ({
+        slug: "story", name: "Story", versionId: "v1", version: 1, configHash: "a".repeat(64),
+        config: { model: "model-pinned", temperature: 0.8, max_tokens: 900 }, systemPrompt: "Preset rules."
+      }),
+      discoverModels: async () => [{ id: "model-pinned" }]
+    };
+    const prepare = (textExecutionOverrides?: null, discovery = ports) => prepareAuthoringResponseContractExecution({
+      ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create." }, ports: discovery,
+      ...(textExecutionOverrides === undefined ? {} : { textExecutionOverrides })
+    });
+    const overridden = await prepare();
+    const overriddenRequest = serializePreparedAuthoringRequest({
+      execution, prepared: overridden, operation: "worldOutline",
+      request: { systemPrompt: "ignored", input: "small input" }
+    });
+    expect(JSON.parse(overriddenRequest.body)).toMatchObject({ temperature: 0.19, max_tokens: 1_024 });
+    expect(overriddenRequest.budgetAudit).toMatchObject({ inputLimit: 4_976, outputReserveTokens: 1_024 });
+
+    const cleared = await prepare(null, {
+      ...ports,
+      discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8_192, maxOutputTokens: 1_000 }]
+    });
+    const clearedRequest = serializePreparedAuthoringRequest({
+      execution, prepared: cleared, operation: "worldOutline",
+      request: { systemPrompt: "ignored", input: "small input" }
+    });
+    expect(JSON.parse(clearedRequest.body)).toMatchObject({ temperature: 0.8, max_tokens: 900 });
+    expect(clearedRequest.budgetAudit).toMatchObject({ inputLimit: 7_292, outputReserveTokens: 900 });
+  });
+
+  it("carries saved overrides into actual direct world and organizer request bytes", async () => {
+    const execution = {
+      ...descriptor,
+      id: "00000000-0000-4000-8000-000000000064",
+      name: "Text",
+      providerRole: "text" as const,
+      providerType: "openrouter" as const,
+      executionRevision: "ordinary",
+      authorityRevision: "authority",
+      endpointIdentity: "endpoint",
+      textSelection: { kind: "openrouter_preset" as const, slug: "story" },
+      configuration: {
+        textExecutionOverrides: {
+          parameters: { temperature: 0.19, max_tokens: 5_000 },
+          conservativeContextWindowTokens: 6_000
+        }
+      },
+      execute: async () => providerResult("{}")
+    };
+    const execute = vi.fn(async (_input: unknown) => providerResult("{}"));
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution,
+      operationPrompts: { worldOutline: "Create.", organizer: "Organize." },
+      options: {
+        nativePresetPlansEnabled: true,
+        preparedExecutor: { execute },
+        loadAuthority: async () => ({
+          id: execution.id,
+          providerRole: "text" as const,
+          authorityRevision: execution.authorityRevision,
+          endpointIdentity: execution.endpointIdentity
+        }),
+        ports: {
+          resolvePreset: async () => ({
+            slug: "story", name: "Story", versionId: "v1", version: 1,
+            configHash: "a".repeat(64), config: { model: "model-pinned", temperature: 0.8, max_tokens: 900 },
+            systemPrompt: "Preset rules."
+          }),
+          discoverModels: async () => [{ id: "model-pinned" }]
+        }
+      } as never
+    });
+
+    await prepared!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "small world" } });
+    await prepared!.execute({ operation: "organizer", request: { systemPrompt: "ignored", input: "small character" } });
+    for (const [call] of execute.mock.calls) {
+      const request = (call as { preparedRequest: { body: string; budgetAudit: unknown } }).preparedRequest;
+      expect(JSON.parse(request.body)).toMatchObject({ temperature: 0.19, max_tokens: 1_024 });
+      expect(request.budgetAudit).toMatchObject({ inputLimit: 4_976, outputReserveTokens: 1_024 });
+    }
+  });
+
+  it("rejects v2 preparation without current authority evidence", async () => {
+    await expect(prepareAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution: { ...descriptor, name: "Text", providerRole: "text", providerType: "openrouter", textSelection: { kind: "model", modelId: "model-pinned" }, execute: async () => providerResult("{}") },
+      operationPrompts: { standaloneCharacter: "Create a cartographer." },
+      ports: { resolvePreset: async () => { throw new Error("unused"); }, discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }] }
+    })).rejects.toThrow("authority revisions");
+  });
+
+  it("fails closed before direct dispatch when the frozen authority changes", async () => {
+    const execute = vi.fn(async () => providerResult("{}"));
+    const prepared = await prepareDirectAuthoringTextExecution({
+      ownerUserId: "owner-1",
+      execution: { ...descriptor, name: "Text", providerRole: "text", providerType: "openrouter", executionRevision: "ordinary", authorityRevision: "authority-a", textSelection: { kind: "openrouter_preset", slug: "story" }, execute: async () => providerResult("{}") },
+      operationPrompts: { worldOutline: "Create a world." },
+      options: {
+        nativePresetPlansEnabled: true,
+        preparedExecutor: { execute },
+        loadAuthority: async () => ({ id: "text-1", providerRole: "text", authorityRevision: "authority-b" }),
+        ports: {
+          resolvePreset: async () => ({ slug: "story", name: "Story", versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Preset rules." }),
+          discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+        }
+      }
+    });
+    await expect(prepared!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "{}" } })).rejects.toThrow("authority");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("uses explicit direct models without preset lookup and resolves explicit preset aliases", async () => {
+    const profileId = "22222222-2222-4222-8222-222222222222";
+    const getPreset = vi.fn(async ({ slug }: { slug: string }) => ({ slug, name: slug, versionId: "v1", version: 1, configHash: "a".repeat(64), config: { models: ["preset-model"] }, systemPrompt: `${slug} instructions.` }));
+    const discoverModels = vi.fn(async ({ modelIds }: { modelIds: readonly string[] }) => modelIds.map((id) => ({
+      id, contextWindowTokens: 8192, maxOutputTokens: 1024,
+      responseFormatAdvertisement: {
+        supportedParameters: ["response_format", "structured_outputs"],
+        discoveredAt: "2026-09-20T00:00:00.000Z"
+      }
+    })));
+    const captured: Array<{ plan: { selection: unknown } }> = [];
+    const execute = vi.fn(async (input: { plan: { selection: unknown } }) => { captured.push(input); return providerResult("{}"); });
+    const verification: SchemaVerificationV2 = {
+      version: 2, providerType: "openrouter", endpointIdentity: "native-endpoint", model: "explicit-model",
+      routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+      operation: "world_outline", schemaHash: getProviderOutputSchemaV2("world_outline").schemaHash,
+      streaming: false, verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+      providerRoutingSlugs: ["openai"], nativeOpenTrackerObjects: true
+    };
+    const options = {
+      nativePresetPlansEnabled: true, preparedExecutor: { execute },
+      loadAuthority: async () => ({ id: profileId, providerRole: "text" as const, endpointIdentity: "native-endpoint", authorityRevision: "authority" }),
+      ports: { resolvePreset: getPreset, discoverModels },
+      responseFormatCapabilities: createProviderResponseFormatCapabilities({ records: [verification], now: () => Date.parse("2026-09-20T00:00:00.000Z") })
+    };
+    const execution = {
+      ...descriptor, id: profileId, endpointIdentity: "native-endpoint", name: "Text", providerRole: "text" as const,
+      providerType: "openrouter" as const, executionRevision: "ordinary", authorityRevision: "authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "inherited" }, execute: async () => providerResult("{}")
+    };
+    const direct = await prepareDirectAuthoringTextExecution({ ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create a world." }, options, selectionOverride: { kind: "model", modelId: "explicit-model" } });
+    await direct!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "{}" } });
+    expect(getPreset).not.toHaveBeenCalled();
+    expect(captured[0]?.plan.selection).toEqual({ kind: "model", modelId: "explicit-model" });
+
+    const alias = normalizeTextSelection({ providerType: "openrouter", providerRole: "text", defaultModel: "@preset/explicit" });
+    const preset = await prepareDirectAuthoringTextExecution({ ownerUserId: "owner-1", execution, operationPrompts: { worldOutline: "Create a world." }, options, selectionOverride: alias });
+    await preset!.execute({ operation: "worldOutline", request: { systemPrompt: "ignored", input: "{}" } });
+    expect(getPreset).toHaveBeenCalledWith(expect.objectContaining({ slug: "explicit" }));
+    expect(captured[1]?.plan.selection).toEqual({ kind: "openrouter_preset", slug: "explicit" });
+  });
   it("preserves the synchronous seed prompt field names in the shared expansion seam", async () => {
     let sentSeed: unknown;
     const seed = { id: "durable-character", name: "Iris", role: "Cartographer", concept: "Maps shifting roads.", narrativeHook: "Her map changes at dawn." };
@@ -69,6 +401,52 @@ describe("executeAuthoringStage", () => {
     expect(left).toMatchObject({ providerProfileId: "text-1", model: "model-pinned" });
     const changedTemperature = createAuthoringExecutionSnapshot({ ...base, temperature: 0.9 }, { world: "prompt" }, { authoring: "v1" }, hash);
     expect(changedTemperature.configurationHash).not.toEqual(left.configurationHash);
+  });
+
+  it("accepts a private v2 per-operation text plan while preserving a literal v1 snapshot", () => {
+    const v1 = authoringExecutionSnapshotSchema.parse(snapshot);
+    const plan = {
+      version: 2,
+      selection: { kind: "model", modelId: "model-pinned" },
+      preset: null,
+      candidates: [{ modelId: "model-pinned", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+      presetSystemPrompt: "Preset instructions.",
+      parameters: { temperature: 0.7 },
+      prompt: "Preset instructions.\n\nCreate a capable cartographer.",
+      promptHash: "a".repeat(64),
+      endpointReference: "endpoint-1",
+      credentialReference: "credential-1",
+      profileRevision: "profile-1",
+      protocolVersion: "authoring-v2",
+      planHash: "b".repeat(64)
+    };
+    const v2 = authoringExecutionSnapshotSchema.parse({
+      ...snapshot,
+      version: 2,
+      textExecutionPlans: { standaloneCharacter: plan }
+    });
+
+    expect(v1).not.toHaveProperty("version");
+    expect(v2).toMatchObject({ version: 2, textExecutionPlans: { standaloneCharacter: { prompt: plan.prompt } } });
+  });
+
+  it("freezes supplied operation plans into a v2 authoring snapshot", () => {
+    const parsed = authoringExecutionSnapshotSchema.parse({
+      ...snapshot,
+      version: 2,
+      textExecutionPlans: {
+        standaloneCharacter: {
+          version: 2, selection: { kind: "model", modelId: "model-pinned" }, preset: null,
+          candidates: [{ modelId: "model-pinned", providerPolicy: {}, contextWindowTokens: 8192, maxOutputTokens: 1024 }],
+          presetSystemPrompt: "", parameters: {}, prompt: "Frozen prompt.", promptHash: "a".repeat(64),
+          endpointReference: "endpoint-1", credentialReference: null, profileRevision: "profile-1", protocolVersion: "authoring-v2", planHash: "b".repeat(64)
+        }
+      }
+    });
+    if (!("textExecutionPlans" in parsed)) throw new Error("Expected v2 plan fixture.");
+    const plan = parsed.textExecutionPlans;
+    const frozen = createAuthoringExecutionSnapshot(descriptor, { character_generation: "legacy" }, { character: "v1" }, sha256, plan);
+    expect(frozen).toMatchObject({ version: 2, textExecutionPlans: { standaloneCharacter: { prompt: "Frozen prompt." } } });
   });
 
   it("loads the pinned claim and dispatches only its missing stage", async () => {
@@ -309,6 +687,244 @@ describe("executeAuthoringStage", () => {
     expect(output).toMatchObject({ kind: "source_world", proposal: { world: { title: "chapter.txt" }, playableCharacters: [expect.objectContaining({ name: "Iris", profile: expect.objectContaining({ appearance: expect.objectContaining({ clothing: "blue coat", apparentAge: "" }) }) })] } });
   });
 
+  it.each([
+    ["preset", "faithful", "extraction"], ["preset", "expand", "extraction"],
+    ["preset", "faithful", "synthesis"], ["preset", "expand", "synthesis"],
+    ["preset", "faithful", "character"], ["preset", "expand", "character"],
+    ["model", "faithful", "extraction"], ["model", "expand", "extraction"],
+    ["model", "faithful", "synthesis"], ["model", "expand", "synthesis"],
+    ["model", "faithful", "character"], ["model", "expand", "character"]
+  ] as const)("dispatches bound %s %s source %s initial and repair contracts through the actual stage caller", async (routeKind, mode, consumer) => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris wears a blue coat.", `job-${mode}-${consumer}`);
+    const iris = {
+      id: "source-fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const,
+      citations: [{ sourceId: source.id, paragraphId: source.paragraphs[0]!.id, start: 0, end: source.paragraphs[0]!.end, quote: source.text }]
+    };
+    const selection = {
+      source, boundaryParagraphId: source.paragraphs[0]!.id, acceptedFacts: [iris], selectedCharacterFactIds: [iris.id],
+      characterIdentityGroups: [{ representativeFactId: iris.id, factIds: [iris.id] }], mode, reviewGeneration: 3
+    };
+    const extractionPrompt = (repair: boolean) => buildSourceExtractionPrompt({
+      instructions: "", sourceText: "", mode,
+      chunk: { sourceRange: { start: 0, end: 0 }, paragraphSpans: [] }, repair
+    }).systemPrompt;
+    const worldPrompt = (repair: boolean) => buildSourceWorldPrompt({
+      instructions: "", reviewGeneration: 0,
+      selection: { source: { id: "snapshot", name: "snapshot", sha256: "0".repeat(64) }, boundaryParagraphId: "snapshot", acceptedFacts: [], selectedCharacterFactIds: [], characterIdentityGroups: [], mode },
+      repair
+    }).systemPrompt;
+    const initialOperation = consumer === "extraction" ? "sourceExtraction" : consumer === "synthesis" ? "sourceSynthesis" : "sourceCharacter";
+    const repairOperation = consumer === "extraction" ? "sourceExtractionRepair" : consumer === "synthesis" ? "sourceSynthesisRepair" : "sourceCharacterRepair";
+    const initialPrompt = consumer === "extraction" ? extractionPrompt(false) : worldPrompt(false);
+    const repairPrompt = consumer === "extraction" ? extractionPrompt(true) : worldPrompt(true);
+    const nativeProvider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000031", name: "Native source", providerRole: "text" as const,
+      providerType: "openrouter" as const, model: "source-model", endpointIdentity: "source-endpoint", executionRevision: "ordinary-source",
+      authorityRevision: "authority-source", textSelection: routeKind === "preset" ? { kind: "openrouter_preset" as const, slug: "source" } : { kind: "model" as const, modelId: "source-model" },
+      execute: async () => { throw new Error("legacy source execution must not run"); }
+    };
+    const schemaOperation = consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character";
+    const verification: SchemaVerificationV2 = {
+      version: 2, providerType: "openrouter", endpointIdentity: "source-endpoint", model: "source-model",
+      routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+      operation: schemaOperation, schemaHash: getProviderOutputSchemaV2(schemaOperation).schemaHash,
+      streaming: false, verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z",
+      providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+    };
+    const resolvePreset = vi.fn(async () => ({ slug: "source", name: "Source", versionId: "source-v1", version: 1, configHash: "a".repeat(64), config: { models: ["source-model"] }, systemPrompt: "Frozen source preset." }));
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId: "owner-1", execution: nativeProvider,
+      operationPrompts: { [initialOperation]: initialPrompt, [repairOperation]: repairPrompt },
+      ports: {
+        resolvePreset,
+        discoverModels: async () => [{ id: "source-model", contextWindowTokens: 8192, maxOutputTokens: 1024,
+          ...(routeKind === "model" ? { responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" } } : {}) }]
+      },
+      ...(routeKind === "model" ? { responseFormatCapabilities: createProviderResponseFormatCapabilities({ records: [verification], now: () => Date.parse("2026-09-20T00:00:00.000Z") }) } : {})
+    });
+    const fullSnapshot = createAuthoringExecutionSnapshot(nativeProvider, {}, {
+      source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION
+    }, sha256, prepared);
+    const chunk = planSourceChunks({
+      source, boundaryParagraphId: source.paragraphs[0]!.id, systemPrompt: initialPrompt, instructions: "Use reviewed facts.",
+      budget: { contextWindowTokens: descriptor.contextWindowTokens, maxOutputTokens: descriptor.maxOutputTokens, countTokens: (value) => new TextEncoder().encode(value).length }
+    })[0]!;
+    const calls: any[] = [];
+    const preparedExecutor = vi.fn(async (input: any) => {
+      calls.push(input);
+      if (calls.length === 1) return providerResult("not json");
+      if (consumer === "extraction") return providerResult(JSON.stringify({ facts: [] }));
+      if (consumer === "synthesis") return providerResult(JSON.stringify({ fields: [], characterFields: [] }));
+      return providerResult(JSON.stringify({ fields: [], characterFields: [{ selectedCharacterFactId: iris.id, fields: [{ path: "profile.appearance.clothing", value: "blue coat", supportingFactIds: [iris.id] }] }] }));
+    });
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => nativeProvider } as never, sha256, preparedExecutor: { execute: preparedExecutor }
+    });
+    const stageKey = consumer === "extraction" ? `source:chunk:${chunk.id}` : consumer === "synthesis" ? "source:synthesis" : `source:character:${iris.id}`;
+    const output = await dispatch(runtimeStage({
+      input: { kind: "story_source", idempotencyKey: `source-${mode}-${consumer}`, target: { kind: "new_world" }, name: source.name, text: source.text, mode, boundaryParagraphId: source.paragraphs[0]!.id, instructions: "Use reviewed facts." },
+      snapshot: fullSnapshot, stageKey,
+      ...(consumer === "extraction" ? { parentOutputs: [{ kind: "source_plan", chunks: [{ ...chunk, sourceRange: { ...chunk.sourceRange }, spans: chunk.spans.map((span) => ({ ...span })) }] }] } : { sourceSelection: selection }),
+      jobId: `job-${mode}-${consumer}`,
+      stageId: `stage-${mode}-${consumer}`,
+      jobGeneration: 7,
+      stageGeneration: 11,
+      leaseToken: `lease-${mode}-${consumer}`
+    }));
+    expect(output.kind).toBe(consumer === "extraction" ? "source_extraction" : "source_world");
+    expect(calls.map((call) => call.operation)).toEqual([
+      consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character",
+      consumer === "extraction" ? "source_extraction_repair" : consumer === "synthesis" ? "source_synthesis_repair" : "source_character_repair"
+    ]);
+    expect(calls.map((call) => call.invocationKey)).toEqual([
+      `${consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character"}:nonstream`,
+      `${consumer === "extraction" ? "source_extraction" : consumer === "synthesis" ? "source_synthesis" : "source_character"}:nonstream`
+    ]);
+    expect(calls.map((call) => call.logicalReservation)).toEqual([
+      {
+        kind: "authoring", ownerUserId: "owner-1", jobId: `job-${mode}-${consumer}`,
+        stageId: `stage-${mode}-${consumer}`, jobGeneration: 7, stageGeneration: 11,
+        leaseToken: `lease-${mode}-${consumer}`, operation: "initial"
+      },
+      {
+        kind: "authoring", ownerUserId: "owner-1", jobId: `job-${mode}-${consumer}`,
+        stageId: `stage-${mode}-${consumer}`, jobGeneration: 7, stageGeneration: 11,
+        leaseToken: `lease-${mode}-${consumer}`, operation: "repair"
+      }
+    ]);
+    for (const [index, call] of calls.entries()) {
+      const body = JSON.parse(call.preparedRequest.body);
+      expect(body.response_format.json_schema.name).toBe(getProviderOutputSchemaV2(schemaOperation).name);
+      expect(body.messages[0].content).toBe(index === 0 ? prepared.plans[initialOperation]!.prompt : prepared.plans[repairOperation]!.prompt);
+      expect(body.messages.filter((message: any) => message.content === (index === 0 ? prepared.plans[initialOperation]!.prompt : prepared.plans[repairOperation]!.prompt))).toHaveLength(1);
+      expect(call.preparedRequest.budgetAudit).toMatchObject({ countMode: "estimated", outputReserveTokens: 1024 });
+      expect(call.frozenResponseContracts.contracts[`${schemaOperation}:nonstream`].admission.basis).toBe(routeKind === "model" ? "model_verified" : "preset_trusted");
+    }
+    expect(resolvePreset).toHaveBeenCalledTimes(routeKind === "preset" ? 1 : 0);
+  });
+
+  it.each(["synthesis", "character"] as const)("reclaims historical v2 source %s initial and repair plans through the actual caller", async (consumer) => {
+    const source = normalizeSourceDocument("chapter.txt", "Iris wears a blue coat.", "legacy-" + consumer);
+    const iris = {
+      id: "source-fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const,
+      citations: [{ sourceId: source.id, paragraphId: source.paragraphs[0]!.id, start: 0, end: source.paragraphs[0]!.end, quote: source.text }]
+    };
+    const legacyProvider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000041", name: "Legacy source", providerRole: "text" as const,
+      providerType: "openrouter" as const, model: "legacy-source-model", endpointIdentity: "legacy-source-endpoint",
+      executionRevision: "legacy-source-profile", authorityRevision: "legacy-source-authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "legacy-source" },
+      execute: async () => { throw new Error("legacy provider execute must not run"); }
+    };
+    const prepared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: legacyProvider,
+      operationPrompts: { sourceWorld: "Frozen legacy source prompt.", sourceWorldRepair: "Frozen legacy source repair prompt." },
+      ports: {
+        resolvePreset: async () => ({ slug: "legacy-source", name: "Legacy source", versionId: "legacy-v1", version: 1, configHash: "b".repeat(64), config: { models: ["legacy-source-model"] }, systemPrompt: "Legacy source preset." }),
+        discoverModels: async () => [{ id: "legacy-source-model", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+      }
+    });
+    const legacySnapshot = createAuthoringExecutionSnapshot(legacyProvider, {}, {
+      source: SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION, sourceWorld: SOURCE_WORLD_PROMPT_PROTOCOL_VERSION
+    }, sha256, prepared.plans as never);
+    expect(legacySnapshot).toMatchObject({ version: 2, textExecutionPlans: { sourceWorld: {}, sourceWorldRepair: {} } });
+    const calls: any[] = [];
+    const preparedExecutor = vi.fn(async (input: any) => {
+      calls.push(input);
+      if (calls.length === 1) return providerResult("not json");
+      return consumer === "synthesis"
+        ? providerResult(JSON.stringify({ fields: [], characterFields: [] }))
+        : providerResult(JSON.stringify({ fields: [], characterFields: [{ selectedCharacterFactId: iris.id, fields: [{ path: "profile.appearance.clothing", value: "blue coat", supportingFactIds: [iris.id] }] }] }));
+    });
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => legacyProvider } as never, sha256,
+      preparedExecutor: { execute: preparedExecutor }
+    });
+    const output = await dispatch(runtimeStage({
+      input: { kind: "story_source", idempotencyKey: "legacy-" + consumer, target: { kind: "new_world" }, name: source.name, text: source.text, mode: "faithful", boundaryParagraphId: source.paragraphs[0]!.id, instructions: "" },
+      snapshot: legacySnapshot,
+      stageKey: consumer === "synthesis" ? "source:synthesis" : "source:character:" + iris.id,
+      sourceSelection: {
+        source, boundaryParagraphId: source.paragraphs[0]!.id, acceptedFacts: [iris], selectedCharacterFactIds: [iris.id],
+        characterIdentityGroups: [{ representativeFactId: iris.id, factIds: [iris.id] }], mode: "faithful", reviewGeneration: 1
+      },
+      jobId: "legacy-" + consumer
+    }));
+    expect(output.kind).toBe("source_world");
+    expect(calls.map((call) => call.operation)).toEqual(["sourceWorld", "sourceWorldRepair"]);
+    expect(calls.map((call) => call.request.systemPrompt)).toEqual([
+      prepared.plans.sourceWorld!.prompt, prepared.plans.sourceWorldRepair!.prompt
+    ]);
+  });
+
+  it("reclaims a historical v2 standalone repair through its single frozen operation plan", async () => {
+    const legacyProvider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000042", name: "Legacy standalone", providerRole: "text" as const,
+      providerType: "openrouter" as const, endpointIdentity: "legacy-character-endpoint",
+      executionRevision: "legacy-character-profile", authorityRevision: "legacy-character-authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "legacy-character" },
+      execute: async () => { throw new Error("legacy provider execute must not run"); }
+    };
+    const prepared = await prepareAuthoringTextExecution({
+      ownerUserId: "owner-1", execution: legacyProvider,
+      operationPrompts: { standaloneCharacter: "Frozen legacy standalone prompt." },
+      ports: {
+        resolvePreset: async () => ({ slug: "legacy-character", name: "Legacy character", versionId: "legacy-v1", version: 1, configHash: "c".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Legacy standalone preset." }),
+        discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+      }
+    });
+    const legacySnapshot = createAuthoringExecutionSnapshot(legacyProvider, {}, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared.plans as never);
+    const calls: any[] = [];
+    const preparedExecutor = vi.fn(async (input: any) => {
+      calls.push(input);
+      return calls.length === 1 ? providerResult("not json") : providerResult(JSON.stringify(characterContent()));
+    });
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text: async () => legacyProvider } as never, sha256,
+      preparedExecutor: { execute: preparedExecutor }
+    });
+    await expect(dispatch(runtimeStage({ snapshot: legacySnapshot }))).resolves.toMatchObject({ kind: "character", character: { name: "Iris" } });
+    expect(calls.map((call) => call.operation)).toEqual(["standaloneCharacter", "standaloneCharacter"]);
+    expect(calls.map((call) => call.request.systemPrompt)).toEqual([
+      prepared.plans.standaloneCharacter!.prompt, prepared.plans.standaloneCharacter!.prompt
+    ]);
+  });
+
+  it.each(["whole-unused-invocation", "unused-repair-half"] as const)("rejects v3 closure tampering before actual dispatch: %s", async (tamper) => {
+    const provider = {
+      ...descriptor, id: "00000000-0000-4000-8000-000000000043", name: "Closure provider", providerRole: "text" as const,
+      providerType: "openrouter" as const, endpointIdentity: "closure-endpoint",
+      executionRevision: "closure-profile", authorityRevision: "closure-authority",
+      textSelection: { kind: "openrouter_preset" as const, slug: "closure" },
+      execute: async () => { throw new Error("legacy execution must not run"); }
+    };
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId: "owner-1", execution: provider,
+      operationPrompts: {
+        standaloneCharacter: "Create the character.", standaloneCharacterRepair: "Repair the character.",
+        organizer: "Organize the character.", organizerRepair: "Repair the organization."
+      },
+      ports: {
+        resolvePreset: async () => ({ slug: "closure", name: "Closure", versionId: "closure-v1", version: 1, configHash: "d".repeat(64), config: { models: ["model-pinned"] }, systemPrompt: "Closure preset." }),
+        discoverModels: async () => [{ id: "model-pinned", contextWindowTokens: 8192, maxOutputTokens: 1024 }]
+      }
+    });
+    const fullSnapshot = createAuthoringExecutionSnapshot(provider, {}, { character: CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION }, sha256, prepared);
+    const tampered = structuredClone(fullSnapshot) as any;
+    const removed = tamper === "whole-unused-invocation" ? ["organizer", "organizerRepair"] : ["organizerRepair"];
+    for (const operation of removed) {
+      delete tampered.textExecutionPlans[operation];
+      delete tampered.trustedOperationPrompts[operation];
+    }
+    const execute = vi.fn(async () => providerResult(JSON.stringify(characterContent())));
+    const text = vi.fn(async () => provider);
+    const dispatch = createRuntimeAuthoringStageDispatcher({
+      execution: { text } as never, sha256, preparedExecutor: { execute }
+    });
+    await expect(dispatch(runtimeStage({ snapshot: tampered }))).rejects.toThrow(/closure|incomplete/i);
+    expect(text).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
   it.each(["source:plan", "source:chunk:source-chunk:0"])("classifies an unavailable resumed %s provider as a source failure", async (stageKey) => {
     const dispatch = createRuntimeAuthoringStageDispatcher({
       execution: { text: async () => { throw new Error("pinned provider unavailable"); } } as never,

@@ -663,13 +663,13 @@ async function insertLogicalRecord(
         const { record } = envelope;
         await requireLogicalMutation(database.query(
           `INSERT INTO provider_profiles (
-             id,owner_user_id,name,provider_type,provider_role,base_url,default_model,
+             id,owner_user_id,name,provider_type,provider_role,base_url,default_model,text_selection,
              context_window_tokens,max_output_tokens,temperature,configuration,enabled,
              health_status,consecutive_failures,last_health_check_at,last_health_error,
              request_timeout_ms,is_default,created_at,updated_at
            ) VALUES (
-             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,false,
-             'unknown',0,NULL,NULL,$12,$13,$14,$15
+             $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12::jsonb,false,
+             'unknown',0,NULL,NULL,$13,$14,$15,$16
            )`,
           [
             record.sourceId,
@@ -679,6 +679,7 @@ async function insertLogicalRecord(
             record.authority.providerRole,
             record.baseUrl ?? "http://disabled.invalid",
             record.authority.defaultModel,
+            record.authority.textSelection ?? null,
             record.authority.contextWindowTokens,
             record.authority.maxOutputTokens,
             record.authority.temperature,

@@ -7,6 +7,7 @@ import {
   type TextProviderProfile
 } from "../../packages/story-engine/src/providers.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 
 const profile: TextProviderProfile = {
   providerType: "openrouter", baseUrl: "https://openrouter.example/api/v1", model: "requested/model",
@@ -30,6 +31,16 @@ function contract(mode: "json_object" | "json_schema", streaming = false): any {
   };
 }
 
+function trustedPresetContract(): any {
+  const schema = getProviderOutputSchemaV2("story");
+  return {
+    version: 2, mode: "json_schema", admission: { mode: "json_schema", basis: "preset_trusted" },
+    operation: "story", streaming: false, forbidFormatFallback: true,
+    schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+    authority: { kind: "preset_trusted", routeBasisHash: "a".repeat(64), planHash: "b".repeat(64) }
+  };
+}
+
 async function failure(mode: "json_object" | "json_schema", response: Response, request: Record<string, unknown> = {}) {
   const fetcher = vi.fn(async () => response);
   let error: any;
@@ -50,6 +61,30 @@ function sse(chunks: string[], terminalError?: Error): ReadableStream<Uint8Array
 }
 
 describe("prepared response-contract transport", () => {
+  it.each([
+    ["OpenRouter", profile],
+    ["OpenAI-compatible", { ...profile, providerType: "openai_compatible" as const }],
+    ["LM Studio", { ...profile, providerType: "lmstudio" as const }]
+  ])("rejects a trusted preset v2 contract before %s transport", async (_name, providerProfile) => {
+    const fetcher = vi.fn(async () => new Response("unexpected transport", { status: 500 }));
+    await expect(callTextProvider(providerProfile, {
+      systemPrompt: "system", input: "input", responseContract: trustedPresetContract()
+    }, transport(fetcher as typeof fetch))).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("pins verified v2 OpenRouter routes on the exact schema request", async () => {
+    const schema = getProviderOutputSchemaV2("story");
+    const v2 = { version: 2 as const, mode: "json_schema" as const, admission: { mode: "json_schema" as const, basis: "model_verified" as const,
+      verification: { version: 2 as const, providerType: "openrouter" as const, endpointIdentity: "endpoint", model: profile.model, routeConfigHash: "a".repeat(64), adapterProtocol: "text-schema-adapter-v2" as const,
+        operation: "story" as const, schemaHash: schema.schemaHash, streaming: false, verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-10-18T00:00:00.000Z", providerRoutingSlugs: ["verified/route"], nativeOpenTrackerObjects: true } },
+      operation: "story" as const, streaming: false, forbidFormatFallback: true as const, schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+      authority: { kind: "model_verified" as const, providerProfileId: "00000000-0000-4000-8000-000000000001", providerType: "openrouter" as const, endpointIdentity: "endpoint", model: profile.model, providerConfigurationHash: "b".repeat(64), routeConfigHash: "a".repeat(64), verificationRegistryHash: "c".repeat(64) } };
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ error: { code: "invalid_schema" } }), { status: 400 }));
+    await expect(callTextProvider(profile, { systemPrompt: "system", input: "input", responseContract: v2 }, transport(fetcher as typeof fetch))).rejects.toThrow();
+    const body = JSON.parse(String((fetcher.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body).toMatchObject({ response_format: { type: "json_schema" }, provider: { require_parameters: true, only: ["verified/route"] } });
+  });
   it.each([
     ["json_object", "unsupported_response_format", "provider_schema_unsupported"],
     ["json_schema", "invalid_schema", "provider_schema_invalid"],

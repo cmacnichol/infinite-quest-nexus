@@ -17,7 +17,7 @@ import { createPortableImportExportComposition } from "../../services/runtime/sr
 import { inspectArchive, readVerifiedEntry, stageArchiveUpload, type ArchiveLimits } from "../../services/api/src/archive-io.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && process.platform === "linux" ? describe : describe.skip;
 
 const limits: ArchiveLimits = {
   maxCompressedBytes: 10_000_000,

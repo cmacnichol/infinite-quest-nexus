@@ -46,6 +46,7 @@ export type AuthoringApplicationErrorCode =
   | "authoring_idempotency_conflict"
   | "authoring_input_too_large"
   | "authoring_active_job_limit"
+  | "authoring_native_text_execution_unavailable"
   | "choose_source_facts"
   | "authoring_apply_unavailable";
 
@@ -58,7 +59,7 @@ export class AuthoringApplicationError extends Error {
 
 /** Typed adapter error. SQL adapters must not leak database-local error classes across this boundary. */
 export class AuthoringRepositoryError extends Error {
-  constructor(readonly code: "idempotency_conflict" | "revision_conflict" | "invalid_state" | "not_found" | "active_job_limit" | "choose_source_facts") {
+  constructor(readonly code: "idempotency_conflict" | "revision_conflict" | "invalid_state" | "not_found" | "active_job_limit" | "native_text_execution_unavailable" | "choose_source_facts") {
     super(code);
     this.name = "AuthoringRepositoryError";
   }

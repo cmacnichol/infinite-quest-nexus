@@ -14,11 +14,30 @@ function adapter(responseFormatCapabilities?: object) {
   const application = {
     createProfile: vi.fn(), updateProfile: vi.fn(), listProfiles: vi.fn(), listModels: vi.fn()
   };
-  const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn() };
+  const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn(),
+    resolveCandidatePresetWithCredential: vi.fn(async (_candidate: { baseUrl: string }, _slug: string, _credential: string | null) => ({ preset: {} })),
+    presetSaveAuthoritySnapshot: vi.fn(async (_ownerUserId: string, _providerProfileId: string, _lock: boolean): Promise<Readonly<{ candidate: unknown; readSavedCredential(): string | null; revision: string }> | null> => null) };
   return { application, runtime, adapter: createProviderApplicationAdapter({ application, runtime, responseFormatCapabilities, transaction: async (work: (binding: never) => Promise<unknown>) => work({ application, runtime } as never) } as never) };
 }
 
 describe("provider API configuration boundary", () => {
+  it.each([
+    [{ kind: "openrouter_preset", slug: "night-shift" }, "legacy"],
+    [{ kind: "model", modelId: "model" }, "required"]
+  ] as const)("rejects generic text generation without an operation contract for %j", async (selection, policy) => {
+    const value = adapter();
+    const execute = vi.fn();
+    (value.application as never as { resolveDirect: ReturnType<typeof vi.fn> }).resolveDirect = vi.fn(async () => ({
+      status: "resolved", providerProfileId: id, model: selection.kind === "model" ? selection.modelId : `@preset/${selection.slug}`
+    }));
+    value.application.listProfiles.mockResolvedValue([{ ...input, id, textSelection: selection,
+      configuration: { textResponseFormatPolicy: policy } }]);
+    (value.runtime as never as { execution: unknown }).execution = { text: vi.fn(async () => ({ model: "model", execute })) };
+    await expect(value.adapter.generateText(owner, { messages: [{ role: "user", content: "Hello" }] } as never))
+      .rejects.toMatchObject({ code: "unsupported_operation", statusCode: 409 });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it.each(["create", "update", "candidate"] as const)("rejects an invalid raw response format policy for %s before safe projection", async (operation) => {
     const value = adapter();
     const invalid = { ...input, configuration: { textResponseFormatPolicy: "schema", ignoredClaim: true } };
@@ -36,6 +55,138 @@ describe("provider API configuration boundary", () => {
     value.application.createProfile.mockResolvedValue({ profile: { ...input, id, hasCredential: false, health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now" }, configurationProjection: { kind: "same_request_echo", configuration: { textResponseFormatPolicy: "auto" } } });
     await value.adapter.create(owner, { ...input, configuration: { textResponseFormatPolicy: "auto", browserProof: true } } as never);
     expect(value.application.createProfile.mock.calls[0]?.[0].configuration).toEqual({ textResponseFormatPolicy: "auto" });
+  });
+
+  it.each(["create", "update", "candidate"] as const)("rejects malformed text execution overrides for %s before safe projection", async (operation) => {
+    const value = adapter();
+    const invalid = { ...input, configuration: { textExecutionOverrides: { parameters: { temperature: 99 } }, ignoredClaim: true } };
+    const call = operation === "create" ? () => value.adapter.create(owner, invalid as never)
+      : operation === "update" ? () => value.adapter.update(owner, id, { configuration: invalid.configuration } as never)
+        : () => value.adapter.discoverModels(owner, invalid as never);
+    await expect(call()).rejects.toMatchObject({ statusCode: 400 });
+    expect(value.application.createProfile).not.toHaveBeenCalled();
+    expect(value.application.updateProfile).not.toHaveBeenCalled();
+    expect(value.runtime.discoverCandidateModelsWithCredential).not.toHaveBeenCalled();
+  });
+
+  it.each(["image", "embedding"] as const)("rejects text execution overrides for a %s profile", async (providerRole) => {
+    const value = adapter();
+    await expect(value.adapter.create(owner, {
+      ...input,
+      providerRole,
+      configuration: { textExecutionOverrides: { parameters: { temperature: 0.4 } } }
+    } as never)).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/text execution overrides/i) });
+    expect(value.application.createProfile).not.toHaveBeenCalled();
+  });
+
+  it("returns the repository Required default on create while retaining safe same-request fields", async () => {
+    const value = adapter();
+    value.application.createProfile.mockResolvedValue({
+      profile: {
+        ...input, id,
+        configuration: {
+          textResponseFormatPolicy: "required",
+          textExecutionOverrides: { parameters: { temperature: 0.2 } }
+        },
+        hasCredential: false,
+        health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null },
+        createdAt: "now", updatedAt: "now"
+      },
+      configurationProjection: {
+        kind: "same_request_echo",
+        configuration: { textExecutionOverrides: { parameters: { temperature: 0.2 } } }
+      }
+    });
+
+    const result = await value.adapter.create(owner, {
+      ...input,
+      configuration: { textExecutionOverrides: { parameters: { temperature: 0.2 } } }
+    } as never);
+
+    expect(result.configuration).toEqual({
+      textResponseFormatPolicy: "required",
+      textExecutionOverrides: { parameters: { temperature: 0.2 } }
+    });
+  });
+
+  it("accepts a native OpenRouter preset and derives its legacy default model", async () => {
+    const value = adapter();
+    const textSelection = { kind: "openrouter_preset" as const, slug: "nexus-nsfw" };
+    value.application.createProfile.mockResolvedValue({
+      profile: {
+        ...input, id, defaultModel: "@preset/nexus-nsfw", textSelection,
+        configuration: { textResponseFormatPolicy: "required" }, hasCredential: false,
+        health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now"
+      },
+      configurationProjection: { kind: "same_request_echo", configuration: { textResponseFormatPolicy: "required" } }
+    });
+
+    const result = await value.adapter.create(owner, { ...input, defaultModel: "", textSelection } as never);
+
+    expect(value.application.createProfile).toHaveBeenCalledWith(expect.objectContaining({
+      defaultModel: "@preset/nexus-nsfw", textSelection
+    }));
+    expect(result).toMatchObject({ defaultModel: "@preset/nexus-nsfw", textSelection });
+  });
+
+  it.each(["create", "candidate"] as const)("rejects a supplied text selection for an image profile at %s", async (operation) => {
+    const value = adapter();
+    const image = {
+      ...input, providerRole: "image", textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" }
+    };
+    const call = operation === "create"
+      ? () => value.adapter.create(owner, image as never)
+      : () => value.adapter.discoverModels(owner, image as never);
+    await expect(call()).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/text selection/i) });
+    expect(value.application.createProfile).not.toHaveBeenCalled();
+    expect(value.runtime.discoverCandidateModelsWithCredential).not.toHaveBeenCalled();
+  });
+
+  it("preserves an explicit compatibility policy when a rename-only patch omits it", async () => {
+    const value = adapter();
+    value.application.listProfiles.mockResolvedValue([{ ...input, id, configuration: { textResponseFormatPolicy: "legacy" },
+      textSelection: { kind: "model", modelId: "model" } }]);
+    value.application.updateProfile.mockResolvedValue({
+      profile: {
+        ...input, id, name: "Renamed", configuration: { textResponseFormatPolicy: "legacy" },
+        textSelection: { kind: "model", modelId: "model" }, hasCredential: false,
+        health: { status: "unknown", consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "now"
+      }, configurationProjection: { kind: "sanitized_read" }
+    });
+    const result = await value.adapter.update(owner, id, { name: "Renamed" } as never);
+    expect(value.application.updateProfile).toHaveBeenCalledWith(expect.objectContaining({ changes: { name: "Renamed" } }));
+    expect(result.configuration).toEqual({ textResponseFormatPolicy: "legacy" });
+  });
+
+  it("validates a preset PATCH from one authority snapshot when the profile changes after the initial list read", async () => {
+    const value = adapter();
+    const staleProfile = { ...input, id, baseUrl: "https://endpoint-a.example/v1", textSelection: { kind: "model" as const, modelId: "model" } };
+    const authorityProfile = {
+      ...input, id, baseUrl: "https://endpoint-b.example/v1", textSelection: { kind: "model" as const, modelId: "model" },
+      hasCredential: true, health: { status: "unknown" as const, consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "later"
+    };
+    const readSavedCredential = vi.fn(() => "rotated-secret");
+    value.application.listProfiles.mockResolvedValue([staleProfile]);
+    value.runtime.presetSaveAuthoritySnapshot.mockResolvedValue({
+      candidate: authorityProfile, readSavedCredential, revision: "authority-b"
+    });
+    value.runtime.resolveCandidatePresetWithCredential.mockImplementation(async (candidate, _slug, credential) => {
+      if (candidate.baseUrl !== authorityProfile.baseUrl || credential !== "rotated-secret") {
+        throw new Error("preset validation mixed endpoint and credential authority");
+      }
+      return { preset: {} };
+    });
+    value.application.updateProfile.mockResolvedValue({
+      profile: { ...authorityProfile, defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset" as const, slug: "night-shift" } },
+      configurationProjection: { kind: "sanitized_read" }
+    });
+
+    const result = await value.adapter.update(owner, id, {
+      defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+    } as never);
+
+    expect(result).toMatchObject({ baseUrl: authorityProfile.baseUrl, textSelection: { kind: "openrouter_preset", slug: "night-shift" } });
+    expect(readSavedCredential).toHaveBeenCalledOnce();
   });
 
   it("does not expose text response-format metadata through image inventory or a text embedding fallback", async () => {

@@ -71,6 +71,12 @@ Use structured logs with correlation IDs for campaign, generation job, model req
 
 Database migrations must be ordered, repeatable, reviewed, and safe for the deployed application version. Prefer backward-compatible expand/contract changes so rolling API replicas can coexist. Applied online migrations are automatic; destructive or downtime-requiring `.maintenance.sql` migrations must remain exceptional and require an explicit operator opt-in on an existing database. Back up authoritative database data and test restoration. Treat embeddings and summaries as rebuildable unless operational requirements later make their backup worthwhile.
 
+### Durable prepared-attempt cost rollout
+
+Migration `0101_durable_campaign_physical_attempt_costs` is an online, additive accounting migration. It widens `provider_cost_events.amount` to unconstrained `numeric` and backfills completed Story and illustration prepared attempts only when their live parent job still proves the owner, campaign, profile, and provider attribution. Deploy API and worker code that writes campaign cost events before cleanup workers remove jobs or profiles, then let the normal migration lock apply `0101`; no feature flag or backfill rerun is required. Cost events remain the campaign accounting authority after job, rewind, and profile cleanup.
+
+The migration deliberately leaves orphaned physical attempts un-attributed because there is no safe campaign owner to invent. It also preserves the amount already stored by historical cost events: widening the column prevents new truncation but cannot recover fractional digits rounded before the migration. Rollback keeps the additive event rows and widened column; use a compatible application build and investigate any historical correction explicitly rather than reconciling charges automatically.
+
 ### Recoverable generation reviews
 
 Current malformed main output pauses for an explicit review; it does not dispatch an automatic schema or mechanics rewrite. A user may choose full Retry, which starts the existing replacement workflow, or a version-2 fact-format repair only when the stored offer binds the original response, producing request, and repair plan. Historical automatic-repair checkpoints remain readable for audit and safe resume compatibility, but operators must not create or reinterpret them as current automatic work. Preserve the original provider response and request evidence while a review is pending; do not replace them during recovery.

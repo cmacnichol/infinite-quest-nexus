@@ -5,6 +5,13 @@ import {
   type ProviderType
 } from "../../contracts/src/generation.js";
 import {
+  normalizeTextSelection,
+  selectionCompatibilityId,
+  textModelSelectionSchema,
+  type TextModelSelection
+} from "../../contracts/src/provider-selection.js";
+import {
+  assertProviderConfiguration,
   toSafeProviderConfiguration,
   type CreateProviderProfileCommand,
   type DirectProviderResolution,
@@ -19,6 +26,7 @@ import {
 } from "../../application/src/providers/index.js";
 import type { EncryptedCredential } from "../../story-engine/src/credentials.js";
 import type { DatabaseClient } from "./pool.js";
+import { sha256, stableStringify } from "../../domain/src/index.js";
 
 type ProviderRow = {
   id: string;
@@ -27,6 +35,7 @@ type ProviderRow = {
   provider_role: ProviderRole;
   base_url: string;
   default_model: string;
+  text_selection: unknown;
   context_window_tokens: number;
   max_output_tokens: number;
   temperature: number;
@@ -45,13 +54,19 @@ type ProviderRow = {
   updated_at: Date | string;
 };
 
-const SELECT_COLUMNS = `id, name, provider_type, provider_role, base_url, default_model,
+const SELECT_COLUMNS = `id, name, provider_type, provider_role, base_url, default_model, text_selection,
   context_window_tokens, max_output_tokens, temperature, request_timeout_ms, configuration,
   encrypted_api_key, credential_nonce, credential_auth_tag, credential_key_version, enabled,
   is_default, health_status, consecutive_failures, last_health_check_at, created_at, updated_at`;
 
 function httpError(message: string, statusCode: number): Error {
   return Object.assign(new Error(message), { statusCode });
+}
+
+function isTextPresetSelection(row: Pick<ProviderRow, "default_model" | "text_selection">): boolean {
+  const selection = textModelSelectionSchema.safeParse(row.text_selection);
+  if (selection.success && selection.data.kind === "openrouter_preset") return true;
+  return row.default_model.trim().startsWith("@preset/");
 }
 
 function iso(value: Date | string): string {
@@ -66,6 +81,19 @@ function capability(role: ProviderRole): ProviderProfileView["capability"] {
 }
 
 function profileView(row: ProviderRow): ProviderProfileView {
+  let textSelection: TextModelSelection | undefined;
+  if (row.provider_role === "text" || row.provider_role === "intent") {
+    try {
+      textSelection = normalizeTextSelection({
+        providerType: row.provider_type,
+        providerRole: row.provider_role,
+        defaultModel: row.default_model,
+        ...(row.text_selection === null || row.text_selection === undefined ? {} : { textSelection: row.text_selection as TextModelSelection })
+      });
+    } catch {
+      // Historical malformed aliases remain visible through defaultModel without rewriting persisted data.
+    }
+  }
   return {
     id: row.id,
     name: row.name,
@@ -74,6 +102,7 @@ function profileView(row: ProviderRow): ProviderProfileView {
     capability: capability(row.provider_role),
     baseUrl: row.base_url,
     defaultModel: row.default_model,
+    ...(textSelection === undefined ? {} : { textSelection }),
     contextWindowTokens: row.context_window_tokens,
     maxOutputTokens: row.max_output_tokens,
     temperature: row.temperature,
@@ -95,7 +124,9 @@ function profileView(row: ProviderRow): ProviderProfileView {
 export function validateProviderConfiguration(
   providerType: ProviderType,
   configuration: unknown,
+  providerRole?: ProviderRole,
 ): SafeProviderConfiguration {
+  assertProviderConfiguration(configuration, providerRole);
   const validated = providerType === "sogni"
     ? sogniIllustrationProviderConfigSchema.parse(configuration)
     : providerType === "sogni_sdk"
@@ -105,15 +136,47 @@ export function validateProviderConfiguration(
 }
 
 function validateCreate(command: CreateProviderProfileCommand): CreateProviderProfileCommand {
-  const configuration = validateProviderConfiguration(command.providerType, command.configuration);
+  const configuration = validateProviderConfiguration(command.providerType, command.configuration, command.providerRole);
   const parsed = providerProfileInputSchema.parse({ ...command, configuration });
   if (parsed.isDefault && !parsed.enabled) throw httpError("A disabled provider cannot be the default.", 400);
+  if (parsed.textSelection !== undefined && parsed.providerRole !== "text" && parsed.providerRole !== "intent") {
+    throw httpError("Text selections are available only for text or intent provider profiles.", 400);
+  }
+  const textSelection = normalizeTextSelection({
+    providerType: parsed.providerType,
+    providerRole: parsed.providerRole,
+    defaultModel: parsed.defaultModel,
+    ...(parsed.textSelection === undefined ? {} : { textSelection: parsed.textSelection })
+  });
   return {
     ...command,
     ...parsed,
     baseUrl: parsed.baseUrl.replace(/\/+$/, ""),
+    defaultModel: selectionCompatibilityId(textSelection),
+    ...(parsed.providerRole === "text" || parsed.providerRole === "intent" ? { textSelection } : {}),
     configuration
   } as CreateProviderProfileCommand;
+}
+
+function withRequiredTextResponseFormat(
+  role: ProviderRole,
+  configuration: SafeProviderConfiguration,
+  force = false,
+): SafeProviderConfiguration {
+  if ((role === "text" || role === "intent") && (force || configuration.textResponseFormatPolicy === undefined)) {
+    return toSafeProviderConfiguration({ ...configuration, textResponseFormatPolicy: "required" });
+  }
+  return configuration;
+}
+
+function withTextExecutionOverrides(
+  configuration: SafeProviderConfiguration,
+  value: SafeProviderConfiguration["textExecutionOverrides"] | null | undefined,
+): SafeProviderConfiguration {
+  const { textExecutionOverrides: _current, ...rest } = configuration;
+  return value === null || value === undefined
+    ? toSafeProviderConfiguration(rest)
+    : toSafeProviderConfiguration({ ...rest, textExecutionOverrides: value });
 }
 
 async function lockRole(client: DatabaseClient, ownerUserId: string, role: ProviderRole): Promise<void> {
@@ -197,7 +260,11 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
     },
 
     async createProfile(rawCommand) {
-      const command = validateCreate(rawCommand);
+      const parsed = validateCreate(rawCommand);
+      const command = {
+        ...parsed,
+        configuration: withRequiredTextResponseFormat(parsed.providerRole, parsed.configuration)
+      } as CreateProviderProfileCommand;
       if (command.isDefault) {
         await lockRole(client, command.ownerUserId, command.providerRole);
         await client.query(
@@ -207,13 +274,13 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       }
       const result = await client.query<ProviderRow>(
         `INSERT INTO provider_profiles (
-           owner_user_id, name, provider_type, provider_role, base_url, default_model,
+           owner_user_id, name, provider_type, provider_role, base_url, default_model, text_selection,
            context_window_tokens, max_output_tokens, temperature, request_timeout_ms,
            configuration, enabled, is_default
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13,$14)
          RETURNING ${SELECT_COLUMNS}`,
         [command.ownerUserId, command.name, command.providerType, command.providerRole,
-          command.baseUrl, command.defaultModel.trim(), command.contextWindowTokens,
+          command.baseUrl, command.defaultModel.trim(), command.textSelection ? JSON.stringify(command.textSelection) : null, command.contextWindowTokens,
           command.maxOutputTokens, command.temperature, command.requestTimeoutMs,
           JSON.stringify(command.configuration), command.enabled, command.isDefault]
       );
@@ -237,20 +304,68 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
       const row = current.rows[0];
       if (!row) throw httpError("Provider profile not found.", 404);
       const changes = command.changes;
+      const existingSelection = (() => {
+        try {
+          return selectionCompatibilityId(normalizeTextSelection({
+            providerType: row.provider_type, providerRole: row.provider_role, defaultModel: row.default_model,
+            ...(row.text_selection === null ? {} : { textSelection: row.text_selection as TextModelSelection })
+          }));
+        } catch {
+          return null;
+        }
+      })();
+      const requestedSelection = (() => {
+        try {
+          return selectionCompatibilityId(normalizeTextSelection({
+            providerType: row.provider_type, providerRole: row.provider_role,
+            defaultModel: changes.defaultModel ?? (changes.textSelection === undefined ? row.default_model : ""),
+            ...(changes.textSelection === undefined && (row.text_selection === null || changes.defaultModel !== undefined) ? {} : {
+              textSelection: changes.textSelection ?? row.text_selection as TextModelSelection
+            })
+          }));
+        } catch {
+          return null;
+        }
+      })();
+      const selectionChanged = existingSelection === null || requestedSelection === null
+        ? changes.defaultModel !== undefined || changes.textSelection !== undefined
+        : existingSelection !== requestedSelection;
       const merged = validateCreate({
         ownerUserId: command.ownerUserId,
         name: changes.name ?? row.name,
         providerType: row.provider_type,
         providerRole: row.provider_role,
         baseUrl: changes.baseUrl ?? row.base_url,
-        defaultModel: changes.defaultModel ?? row.default_model,
+        defaultModel: changes.defaultModel ?? (changes.textSelection === undefined ? row.default_model : requestedSelection ?? row.default_model),
+        ...(changes.textSelection === undefined && (row.text_selection === null || changes.defaultModel !== undefined) ? {} : {
+          textSelection: changes.textSelection ?? row.text_selection as TextModelSelection
+        }),
         contextWindowTokens: changes.contextWindowTokens ?? row.context_window_tokens,
         maxOutputTokens: changes.maxOutputTokens ?? row.max_output_tokens,
         temperature: changes.temperature ?? row.temperature,
         requestTimeoutMs: changes.requestTimeoutMs ?? row.request_timeout_ms,
-        configuration: changes.configuration === undefined
-          ? toSafeProviderConfiguration(row.configuration)
-          : validateProviderConfiguration(row.provider_type, changes.configuration),
+        configuration: (() => {
+          const currentConfiguration = toSafeProviderConfiguration(row.configuration);
+          const suppliedConfigurationBase = changes.configuration === undefined
+            ? currentConfiguration
+            : validateProviderConfiguration(row.provider_type, changes.configuration, row.provider_role);
+          const suppliedConfiguration = changes.configuration !== undefined
+            && suppliedConfigurationBase.textResponseFormatPolicy === undefined
+            && currentConfiguration.textResponseFormatPolicy !== undefined
+            ? toSafeProviderConfiguration({
+                ...suppliedConfigurationBase,
+                textResponseFormatPolicy: currentConfiguration.textResponseFormatPolicy
+              })
+            : suppliedConfigurationBase;
+          const effectiveOverridePatch = changes.textExecutionOverrides === undefined
+            ? (selectionChanged ? null : currentConfiguration.textExecutionOverrides)
+            : changes.textExecutionOverrides;
+          const overrideAware = withTextExecutionOverrides(suppliedConfiguration, effectiveOverridePatch);
+          const explicitResponsePolicy = changes.configuration?.textResponseFormatPolicy !== undefined;
+          return !selectionChanged || explicitResponsePolicy
+            ? overrideAware
+            : withRequiredTextResponseFormat(row.provider_role, overrideAware, true);
+        })(),
         enabled: changes.enabled ?? row.enabled,
         isDefault: changes.isDefault ?? row.is_default
       });
@@ -261,11 +376,11 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
         );
       }
       const result = await client.query<ProviderRow>(
-        `UPDATE provider_profiles SET name=$3, base_url=$4, default_model=$5,
-           context_window_tokens=$6, max_output_tokens=$7, temperature=$8, request_timeout_ms=$9,
-           configuration=$10::jsonb, enabled=$11, is_default=$12, updated_at=now()
+        `UPDATE provider_profiles SET name=$3, base_url=$4, default_model=$5, text_selection=$6::jsonb,
+           context_window_tokens=$7, max_output_tokens=$8, temperature=$9, request_timeout_ms=$10,
+           configuration=$11::jsonb, enabled=$12, is_default=$13, updated_at=now()
          WHERE id=$1 AND owner_user_id=$2 RETURNING ${SELECT_COLUMNS}`,
-        [row.id, command.ownerUserId, merged.name, merged.baseUrl, merged.defaultModel.trim(),
+        [row.id, command.ownerUserId, merged.name, merged.baseUrl, merged.defaultModel.trim(), merged.textSelection ? JSON.stringify(merged.textSelection) : null,
           merged.contextWindowTokens, merged.maxOutputTokens, merged.temperature,
           merged.requestTimeoutMs, JSON.stringify(merged.configuration), merged.enabled, merged.isDefault]
       );
@@ -359,6 +474,9 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
   const resolution: ProviderResolutionPort = {
     resolveDirect: (request) => resolve(request.ownerUserId, request.providerRole, request.selectedProviderProfileId, request.model),
     async resolveEmbedding(request): Promise<EmbeddingProviderResolution> {
+      if (request.model?.trim().startsWith("@preset/")) {
+        throw httpError("A text preset cannot be used for embedding fallback.", 400);
+      }
       const dedicated = await client.query<Pick<ProviderRow, "id" | "provider_type" | "default_model" | "is_default">>(
         `SELECT id,provider_type,default_model,is_default FROM provider_profiles
           WHERE owner_user_id=$1 AND provider_role='embedding' AND enabled=true
@@ -386,7 +504,20 @@ export function createPostgresProviderRepositories(client: DatabaseClient): Post
           selectedTextFallbackAllowed ? request.selectedProviderProfileId : undefined,
           request.model,
         );
-        if (fallback.status === "resolved") return { ...fallback, requestedRole: "embedding", source: "text_fallback" };
+        if (fallback.status === "resolved") {
+          const profile = await client.query<Pick<ProviderRow, "default_model" | "text_selection">>(
+            `SELECT default_model,text_selection FROM provider_profiles
+              WHERE id=$1 AND owner_user_id=$2 AND provider_role='text' AND enabled=true`,
+            [fallback.providerProfileId, request.ownerUserId]
+          );
+          if (profile.rows[0] && isTextPresetSelection(profile.rows[0])) {
+            if (request.selectedProviderProfileId || request.model?.trim()) {
+              throw httpError("A text preset cannot be used for embedding fallback.", 400);
+            }
+            return { status: "unconfigured", requestedRole: "embedding", resolvedRole: null, source: "none" };
+          }
+          return { ...fallback, requestedRole: "embedding", source: "text_fallback" };
+        }
       }
       return { status: "unconfigured", requestedRole: "embedding", resolvedRole: null, source: "none" };
     }
@@ -428,6 +559,9 @@ export type PrivateProviderCredentialRow = Readonly<{
   temperature: number;
   requestTimeoutMs: number;
   configuration: SafeProviderConfiguration;
+  textSelection?: TextModelSelection;
+  /** Opaque revision of every execution-relevant profile field, including encrypted credential material. */
+  executionRevision: string;
   encryptedCredential: EncryptedCredential | null;
 }>;
 
@@ -443,6 +577,19 @@ export async function loadPrivateProviderCredentialRow(
   const row = result.rows[0];
   if (!row) return null;
   const complete = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version;
+  const encryptedCredential = complete ? {
+    ciphertext: row.encrypted_api_key!, nonce: row.credential_nonce!, authTag: row.credential_auth_tag!, keyVersion: row.credential_key_version!
+  } : null;
+  const textSelection = (row.provider_role === "text" || row.provider_role === "intent")
+    ? normalizeTextSelection({ providerType: row.provider_type, providerRole: row.provider_role, defaultModel: row.default_model,
+      ...(row.text_selection === null || row.text_selection === undefined ? {} : { textSelection: row.text_selection as TextModelSelection }) })
+    : undefined;
+  const executionRevision = sha256(stableStringify({
+    id: row.id, providerType: row.provider_type, providerRole: row.provider_role, baseUrl: row.base_url,
+    defaultModel: row.default_model, textSelection, contextWindowTokens: row.context_window_tokens,
+    maxOutputTokens: row.max_output_tokens, temperature: row.temperature, requestTimeoutMs: row.request_timeout_ms,
+    configuration: toSafeProviderConfiguration(row.configuration), enabled: row.enabled, encryptedCredential
+  }));
   return {
     ownerUserId,
     providerProfileId: row.id,
@@ -456,9 +603,9 @@ export async function loadPrivateProviderCredentialRow(
     temperature: row.temperature,
     requestTimeoutMs: row.request_timeout_ms,
     configuration: toSafeProviderConfiguration(row.configuration),
-    encryptedCredential: complete ? {
-      ciphertext: row.encrypted_api_key!, nonce: row.credential_nonce!, authTag: row.credential_auth_tag!, keyVersion: row.credential_key_version!
-    } : null
+    ...(textSelection === undefined ? {} : { textSelection }),
+    executionRevision,
+    encryptedCredential
   };
 }
 

@@ -12,7 +12,8 @@ import {
 import { planSourceChunks, type AuthoringBudget } from "../../packages/domain/src/source-authoring-budget.js";
 import {
   SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION,
-  buildSourceExtractionPrompt
+  buildSourceExtractionPrompt,
+  buildSourceWorldPrompt
 } from "../../packages/domain/src/authoring-prompts.js";
 import { createRuntimeSourceAuthoringRequestBudget } from "../../services/runtime/src/source-authoring-budget.js";
 import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
@@ -97,6 +98,30 @@ describe("source authoring adapter", () => {
     const otherChunk = planSourceChunks({ source: other, boundaryParagraphId: other.paragraphs[0]!.id, systemPrompt: "", instructions: "", budget })[0]!;
     expect(() => validateExtractedSourceFactsWithinBoundary(other, otherChunk, other.paragraphs[0]!.id, [{ ...base, citations: [{ evidenceId: entry.evidenceId }] }])).toThrow();
     expect(() => validateExtractedSourceFactsWithinBoundary(source, chunk, source.paragraphs[0]!.id, [{ ...base, citations: [{ evidenceId: entry.evidenceId }] }])).toThrow();
+  });
+
+  it.each(["faithful", "expand"] as const)("dispatches frozen initial and repair plans for %s source extraction", async (mode) => {
+    const { source, chunk } = sourceAndChunk();
+    const input = { source, chunk, boundaryParagraphId: source.paragraphs[1]!.id, instructions: "Keep evidence.", mode };
+    const issued: ProviderRequest[] = [];
+    const expected = renderSourceExtractionRequest(input, false, []);
+    const evidenceId = JSON.parse(expected.input).chunk.paragraphSpans[0].evidenceId;
+    const valid = JSON.stringify({ facts: [{ category: "character", subject: "Iris", predicate: "wears", value: "a blue coat", provenance: "stated", citations: [{ evidenceId }] }] });
+    const adapter = createSourceAuthoringAdapter({
+      plans: { initial: { prompt: `Preset\n\n${expected.systemPrompt}` }, repair: { prompt: `Preset\n\n${renderSourceExtractionRequest(input, true, []).systemPrompt}` } },
+      requestBudget: {
+        executeInitial: async (request) => { issued.push(request); return result(valid.replace(evidenceId, "evidence:000000000000000000000000")); },
+        executeRepair: async (request) => { issued.push(request); return result(valid); }
+      },
+      delay: async () => undefined
+    });
+    await expect(adapter.extractSourceChunk(input)).resolves.toHaveLength(1);
+    expect(issued).toHaveLength(2);
+    expect(issued[0]!.systemPrompt).toBe(`Preset\n\n${expected.systemPrompt}`);
+    expect(issued[1]!.systemPrompt).toBe(`Preset\n\n${renderSourceExtractionRequest(input, true, []).systemPrompt}`);
+    expect(issued[0]!.systemPrompt.match(/Preset/g)).toHaveLength(1);
+    expect(issued[1]!.systemPrompt.match(/Preset/g)).toHaveLength(1);
+    expect(issued[1]!.recoveryInput).toBeDefined();
   });
 
   it.each([undefined, "", "another-job", "debug-job"])("logs citation text only for the opted-in job (%s)", async (debugJobId) => {
@@ -382,6 +407,20 @@ describe("source authoring adapter", () => {
     expect(prepared.body).toContain("expand");
     expect(prepared.body).toContain(SOURCE_EXTRACTION_PROMPT_PROTOCOL_VERSION);
     expect(prepared.byteLength).toBe(new TextEncoder().encode(prepared.body).length);
+  });
+
+  it("serializes the same frozen v2 source prompt for initial and repair", () => {
+    const { source, chunk } = sourceAndChunk();
+    const execution: RuntimeTextExecution = { id: "source-profile", name: "Source", providerRole: "text", providerType: "openai_compatible", model: "source-model", contextWindowTokens: 8_000, maxOutputTokens: 400, temperature: 0.2, requestTimeoutMs: 30_000, configuration: {}, execute: async () => result('{"facts":[]}') };
+    const budget = createRuntimeSourceAuthoringRequestBudget(execution);
+    const plan = { prompt: "Frozen preset plus source protocol." };
+    const input = { source, chunk, boundaryParagraphId: source.paragraphs[1]!.id, mode: "faithful" as const, instructions: "Keep evidence." };
+    const initial = renderSourceExtractionRequest(input, false, [], undefined, plan);
+    const repair = renderSourceExtractionRequest(input, true, [{ path: "facts" }], "rejected", plan);
+    expect(budget.prepareInitial(initial).body).toBe(budget.render(initial));
+    expect(budget.prepareRepair(repair).body).toBe(budget.render(repair));
+    expect(initial.systemPrompt).toBe(plan.prompt);
+    expect(repair.systemPrompt).toBe(plan.prompt);
   });
 
   it("uses trusted nonzero global Unicode spans and rejects excerpt-local citation coordinates", async () => {
@@ -798,6 +837,25 @@ describe("source authoring adapter", () => {
     await expect(adapter.synthesizeSourceWorld(invalid)).rejects.toMatchObject({ authoringFailure: { code: "source_review_conflict", stage: "source", retryable: false, issues: [{ path: "fields", code: "custom", message: "The reviewed source selection is no longer valid." }] } });
     expect(executeInitial).not.toHaveBeenCalled();
     expect(executeRepair).not.toHaveBeenCalled();
+  });
+
+  it.each(["faithful", "expand"] as const)("dispatches frozen initial and repair source-world plans for %s", async (mode) => {
+    const source = normalizeSourceDocument("source-world.txt", "Iris wears a blue coat.", "source-world");
+    const fact = { id: "fact:iris", kind: "character" as const, subject: "Iris", predicate: "clothing", value: "blue coat", provenance: "stated" as const, citations: [{ sourceId: source.id, paragraphId: "paragraph:0", start: 0, end: source.paragraphs[0]!.end, quote: source.text }] };
+    const input = { selection: { source, boundaryParagraphId: "paragraph:0", acceptedFacts: [fact], selectedCharacterFactIds: [fact.id], characterIdentityGroups: [{ representativeFactId: fact.id, factIds: [fact.id] }], mode }, reviewGeneration: 1, instructions: "Keep facts." };
+    const expected = buildSourceWorldPrompt({ ...input, repair: false });
+    const repairExpected = buildSourceWorldPrompt({ ...input, repair: true });
+    const issued: ProviderRequest[] = [];
+    const adapter = createSourceWorldAuthoringAdapter({
+      plans: { initial: { prompt: `Preset\n\n${expected.systemPrompt}` }, repair: { prompt: `Preset\n\n${repairExpected.systemPrompt}` } },
+      requestBudget: { executeInitial: async request => { issued.push(request); return result("not json"); }, executeRepair: async request => { issued.push(request); return result(JSON.stringify({ fields: [], characterFields: [] })); } },
+      delay: async () => undefined
+    });
+    await expect(adapter.synthesizeSourceWorld(input)).resolves.toBeDefined();
+    expect(issued).toHaveLength(2);
+    expect(issued[0]!.systemPrompt).toBe(`Preset\n\n${expected.systemPrompt}`);
+    expect(issued[1]!.systemPrompt).toBe(`Preset\n\n${repairExpected.systemPrompt}`);
+    if (mode === "expand") expect(issued[0]!.systemPrompt).toContain("Expansion mode may additionally return");
   });
 
   it("rejects a self-consistent later-tail chunk before the provider runs", async () => {

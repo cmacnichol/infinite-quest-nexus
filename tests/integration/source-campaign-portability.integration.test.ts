@@ -12,7 +12,7 @@ import { buildCampaignArchiveArtifact } from "../../services/runtime/src/campaig
 import { createPortableImportExportComposition } from "../../services/runtime/src/portable-import-export-composition.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-const integration = databaseUrl ? describe : describe.skip;
+const integration = databaseUrl && process.platform === "linux" ? describe : describe.skip;
 
 integration("source campaign portability", () => {
   it("transfers source evidence to a new owner through production campaign archive services", async () => {

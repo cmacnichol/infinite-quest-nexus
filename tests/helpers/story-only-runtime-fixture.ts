@@ -13,7 +13,7 @@ import { createStoryOnlySyntheticProvider, type StoryOnlySyntheticProvider } fro
 const DEDICATED_HOST = "127.0.0.1";
 const DEDICATED_PORT = "15439";
 const DEDICATED_DATABASE = "infinitequest_storyonly_test";
-const INTEGRATION_TEST_PORTS = new Set(["55432", "55470"]);
+const EXPLICIT_POSTGRES_PORT = /^\d{1,5}$/u;
 const INTEGRATION_TEST_DATABASE = /^infinitequest_test_[a-f0-9]{32}$/u;
 const OWNED_DATABASE_PREFIX = "infinitequest_storyonly_";
 const RUNTIME_PORT = 18081;
@@ -38,7 +38,9 @@ export function assertStoryOnlyRuntimeTarget(databaseUrl: string): StoryOnlyRunt
   const target = new URL(databaseUrl);
   const database = target.pathname.replace(/^\//u, "");
   const isDedicatedRuntimeTarget = target.port === DEDICATED_PORT && database === DEDICATED_DATABASE;
-  const isIsolatedIntegrationTarget = INTEGRATION_TEST_PORTS.has(target.port) && INTEGRATION_TEST_DATABASE.test(database);
+  const port = Number(target.port);
+  const isIsolatedIntegrationTarget = EXPLICIT_POSTGRES_PORT.test(target.port) && port > 0 && port <= 65_535
+    && INTEGRATION_TEST_DATABASE.test(database);
   if (target.protocol !== "postgresql:" || target.hostname !== DEDICATED_HOST || (!isDedicatedRuntimeTarget && !isIsolatedIntegrationTarget)) {
     throw new Error("Story-only runtime requires the dedicated localhost test database target.");
   }
@@ -317,7 +319,7 @@ export async function startStoryOnlyRuntime(options: Readonly<{ databaseUrl: str
       temperature: 0,
       enabled: true,
       isDefault: true,
-      configuration: {}
+      configuration: { textResponseFormatPolicy: "auto" }
     }, CREDENTIAL_SECRET);
     const fixtureStory = (title: string, turnControlStyle: "action_only" | "flexible_action" | "flexible_scene", turns: readonly unknown[]) => storyImportRequestSchema.parse({
       sourceName: `${title.toLowerCase().replaceAll(/[^a-z]+/gu, "-")}.story`,

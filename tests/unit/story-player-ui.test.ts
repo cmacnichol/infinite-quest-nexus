@@ -88,7 +88,7 @@ async function bootLegacyStory({
     user: { displayName: profile.displayName, settings: profile.settings }
   }));
 
-  (storyModule.startStoryPlayer as (composition: unknown) => void)({
+  const initialized = (storyModule.startStoryPlayer as (composition: unknown) => Promise<void>)({
     api: {
       session: {
         get: async () => ({ user: { settings: { continuousReading, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_action" } } }),
@@ -119,8 +119,7 @@ async function bootLegacyStory({
     clock: { now: () => 1 }
   });
   document.dispatchEvent(new window.Event("DOMContentLoaded"));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await initialized;
   return {
     document,
     window,
@@ -202,15 +201,15 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     const syncStatus = vi.fn().mockResolvedValueOnce(recoveredCampaign).mockResolvedValueOnce(cleanCampaign);
     try {
       const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), syncStatus, workflow });
-      expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(false);
+      await vi.waitFor(() => expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(false), { timeout: 5_000 });
       expect(document.getElementById("btnRetryGeneration")?.classList.contains("hidden")).toBe(false);
 
       window.location.pathname = "/story/campaign-2";
       document.dispatchEvent(new window.Event("DOMContentLoaded"));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(true);
+      await vi.waitFor(() => {
+        expect(document.getElementById("storyTitle")?.textContent).toBe("Clean campaign");
+        expect(document.getElementById("generationRecoveryPanel")?.classList.contains("hidden")).toBe(true);
+      });
       expect(document.getElementById("generationRecoveryPanel")?.getAttribute("data-job-id")).toBe("");
       const resumesAfterCleanLoad = workflow.resume.mock.calls.length;
       document.getElementById("btnRetryGeneration")?.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -394,7 +393,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       const action = document.getElementById("freeAction") as HTMLTextAreaElement;
       action.value = "Keep this local prompt.";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      await vi.waitFor(() => expect(workflow.resume).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(workflow.resume).toHaveBeenCalledOnce(), { timeout: 5_000 });
 
       expect(saved).toEqual([]);
       expect(action.value).toBe("Keep this local prompt.");
@@ -518,7 +517,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("submits and resets a one-shot legacy turn-length override after durable attachment", async () => {
     const workflow = {
       resume: async () => null,
-      submit: vi.fn().mockResolvedValue({ jobId: "generation-override", watch: async function* () {} })
+      submit: vi.fn().mockResolvedValue({ jobId: "generation-override", watch: async function* () {
+        yield { type: "settled", outcome: "discarded", error: new Error("test discard") };
+      } })
     };
     try {
       const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
@@ -529,17 +530,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       selectOption(length, "extended");
       action.value = "Inspect the ruins";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+      await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
         request: expect.objectContaining({ storyLengthProfileOverride: "extended" })
-      }));
-      expect(length.value).toBe("");
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      })), { timeout: 5_000 });
+      await vi.waitFor(() => expect(length.value).toBe(""), { timeout: 5_000 });
+      await vi.waitFor(() => expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(false), { timeout: 5_000 });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -557,13 +552,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       selectOption(length, "long");
       action.value = "Inspect the ruins";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledOnce(), { timeout: 5_000 });
       expect(length.value).toBe("long");
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(false), { timeout: 5_000 });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -572,7 +563,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("submits a retry-dialog override without inferring one from the accepted turn", async () => {
     const workflow = {
       resume: async () => null,
-      submit: vi.fn().mockResolvedValue({ jobId: "retry-override", watch: async function* () {} })
+      submit: vi.fn().mockResolvedValue({ jobId: "retry-override", watch: async function* () {
+        yield { type: "settled", outcome: "discarded", error: new Error("test discard") };
+      } })
     };
     try {
       const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
@@ -583,16 +576,11 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(retryLength.options[0]?.textContent).toBe("Campaign default — Standard");
       selectOption(retryLength, "brief");
       document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
+      await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
         operationKind: "replace_latest",
         request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
-      }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      })), { timeout: 5_000 });
+      await vi.waitFor(() => expect((document.getElementById("generationProgress") as HTMLElement).classList.contains("hidden")).toBe(true), { timeout: 5_000 });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -603,7 +591,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       resume: async () => null,
       submit: vi.fn()
         .mockRejectedValueOnce(new Error("queue unavailable"))
-        .mockResolvedValueOnce({ jobId: "retry-after-rejection", watch: async function* () {} })
+        .mockResolvedValueOnce({ jobId: "retry-after-rejection", watch: async function* () {
+          yield { type: "settled", outcome: "discarded", error: new Error("test discard") };
+        } })
     };
     try {
       const { document, window } = await bootLegacyStory({ turns: makeTurns(1, 1), workflow });
@@ -614,13 +604,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       const retryLength = document.getElementById("retryStoryLengthProfileOverride") as HTMLSelectElement;
       selectOption(retryLength, "brief");
       document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length === 0; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(retryDialog.hasAttribute("open")).toBe(true);
+      await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+      await vi.waitFor(() => expect(retryDialog.hasAttribute("open")).toBe(true), { timeout: 5_000 });
       expect(retryLength.value).toBe("brief");
       expect(workflow.submit.mock.calls[0]).toEqual(["campaign-1", expect.objectContaining({
         operationKind: "replace_latest",
@@ -628,19 +613,14 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       })]);
 
       document.getElementById("btnRetryPromptSubmit")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      for (let attempt = 0; attempt < 8 && workflow.submit.mock.calls.length < 2; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(workflow.submit).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledTimes(2), { timeout: 5_000 });
       expect(workflow.submit.mock.calls[1]).toEqual(["campaign-1", expect.objectContaining({
         operationKind: "replace_latest",
         request: expect.objectContaining({ storyLengthProfileOverride: "brief" })
       })]);
       expect(retryDialog.hasAttribute("open")).toBe(false);
       expect(retryLength.value).toBe("");
+      await vi.waitFor(() => expect((document.getElementById("generationProgress") as HTMLElement).classList.contains("hidden")).toBe(true), { timeout: 5_000 });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -668,8 +648,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         narration: "The gate remains closed.",
         choices: ["Open the gate.", "Call for the keeper."]
       }];
-      const start = storyModule.startStoryPlayer as (composition: unknown) => void;
-      start({
+      const start = storyModule.startStoryPlayer as (composition: unknown) => Promise<void>;
+      const initialized = start({
         api: {
           session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_action" } } }) },
           providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
@@ -681,12 +661,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         workflow: { resume: async () => null }
       });
       document.dispatchEvent(new window.Event("DOMContentLoaded"));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      for (let attempt = 0; attempt < 8 && !document.querySelector("#choiceArea .choice"); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
+      await initialized;
       const input = document.getElementById("freeAction") as HTMLTextAreaElement;
       const choices = document.querySelectorAll<HTMLButtonElement>("#choiceArea .choice");
       input.value = "Keep watch.";
@@ -751,8 +726,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       }];
       const classifyTurnInput = vi.fn();
       const submissions: unknown[] = [];
-      const start = storyModule.startStoryPlayer as (composition: unknown) => void;
-      start({
+      const start = storyModule.startStoryPlayer as (composition: unknown) => Promise<void>;
+      const initialized = start({
         api: {
           session: { get: async () => ({ user: { settings: { continuousReading: false, autoSubmitTurnChoices: true, defaultTurnControlStyle: "flexible_scene" } } }) },
           providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
@@ -779,9 +754,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         clock: { now: () => 1_000 }
       });
       document.dispatchEvent(new window.Event("DOMContentLoaded"));
-      for (let attempt = 0; attempt < 10 && !document.querySelector("#choiceArea .choice"); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
+      await initialized;
 
       selectOption(document.getElementById("turnStoryLengthProfileOverride") as HTMLSelectElement, "extended");
       document.querySelector<HTMLButtonElement>("#choiceArea .choice")?.dispatchEvent(new window.Event("click", { bubbles: true }));
@@ -804,7 +777,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
         }
       });
       expect((document.getElementById("freeAction") as HTMLTextAreaElement).value).toBe("");
-      await vi.waitFor(() => expect(document.getElementById("generationProgress")?.classList.contains("hidden")).toBe(true));
+      await vi.waitFor(() => expect(document.getElementById("generationProgress")?.classList.contains("hidden")).toBe(true), { timeout: 5_000 });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -829,7 +802,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       scene!.dispatchEvent(new window.Event("change", { bubbles: true }));
       action.value = "Describe the next scene.";
       document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      await vi.waitFor(() => expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(false));
+      await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledOnce(), { timeout: 5_000 });
+      await vi.waitFor(() => expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(false), { timeout: 5_000 });
       expect(workflow.submit).toHaveBeenCalledWith("campaign-1", expect.objectContaining({
         request: expect.objectContaining({ requestedInputMode: "scene", resolvedInputMode: "scene" })
       }));
@@ -2324,15 +2298,13 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       });
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(50);
-      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("first page failed");
+      await vi.waitFor(() => expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(50), { timeout: 5_000 });
+      await vi.waitFor(() => expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("first page failed"), { timeout: 5_000 });
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(2), { timeout: 5_000 });
+      await vi.waitFor(() => expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(100), { timeout: 5_000 });
       const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
-      expect(fetchTurns).toHaveBeenCalledTimes(2);
       expect(cards).toHaveLength(100);
       expect(cards[0]?.textContent).toContain("Turn 1");
       expect(cards[99]?.textContent).toContain("Turn 100");
@@ -2511,6 +2483,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
       document.getElementById("btnExportPdf")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(printWindow.print).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledOnce(), { timeout: 5_000 });
       document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));

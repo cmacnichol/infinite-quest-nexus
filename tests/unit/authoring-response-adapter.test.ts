@@ -8,6 +8,7 @@ import {
   type ProviderResult
 } from "../../packages/story-engine/src/providers.js";
 import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
+import { PreparedRouteTerminalError, type PresetRouteFailureReason } from "../../packages/story-engine/src/preset-route-execution.js";
 import { extractJsonObject } from "../../packages/story-engine/src/output.js";
 import { characterProfileSchema } from "../../packages/contracts/src/world-library.js";
 import { validateGeneratedCharacter } from "../../packages/domain/src/authoring-output.js";
@@ -366,6 +367,44 @@ describe("runAuthoringResponse", () => {
     await expect(runAuthoringResponse({ stage: "world", request, parse: JSON.parse, delay: async () => undefined }))
       .rejects.toMatchObject({ authoringFailure: { code: "authoring_provider_timeout", retryable: true } });
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["ambiguous timeout", () => timeoutError(), "authoring_provider_timeout"],
+    ["exhausted route", () => new ProviderTransportError("route exhausted", {
+      providerType: "openrouter", operation: "authoring", endpoint: "https://provider.test", model: "model",
+      timeoutMs: 1_000, durationMs: 10, timedOut: false, transportCode: "route_exhausted",
+      causeCategory: "network", causeMessage: "No route remained."
+    }), "authoring_provider_unavailable"]
+  ] as const)("treats prepared-executor %s failures as terminal", async (_label, error, code) => {
+    const request = vi.fn().mockImplementation(async () => { throw error(); });
+    const delay = vi.fn(async () => undefined);
+
+    await expect(runAuthoringResponse({
+      stage: "world", request, parse: JSON.parse, delay,
+      transportRetryOwner: "prepared_executor"
+    })).rejects.toMatchObject({ authoringFailure: { code, retryable: false } });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(delay).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["schema terminal", "prepared_route_terminal", "schema_invalid"],
+    ["refusal terminal", "prepared_route_terminal", "refusal"],
+    ["candidate exhaustion", "prepared_route_exhausted", "provider_unavailable"],
+    ["ambiguous dispatch", "prepared_route_unknown_outcome", "ambiguous_transport"],
+    ["post-output terminal", "prepared_route_terminal", "unknown"]
+  ] as const)("does not re-enter outer transport retry for a prepared %s", async (_label, code, reason) => {
+    const terminal = new PreparedRouteTerminalError(code, reason as PresetRouteFailureReason, "prepared route stopped", "attempt-1");
+    const request = vi.fn().mockRejectedValue(terminal);
+    const delay = vi.fn(async () => undefined);
+
+    await expect(runAuthoringResponse({
+      stage: "source", request, parse: JSON.parse, delay,
+      transportRetryOwner: "prepared_executor"
+    })).rejects.toBe(terminal);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(delay).not.toHaveBeenCalled();
   });
 
   it("keeps malformed output plus repair transport failures inside four calls", async () => {

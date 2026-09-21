@@ -72,7 +72,8 @@ integration("prompt-memory remediation composed workflow", () => {
     const provider = await createProvider(pool, {
       name: `Continuity provider ${crypto.randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
       baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "deterministic-continuity",
-      contextWindowTokens: 1_048_576, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: {}
+      contextWindowTokens: 1_048_576, maxOutputTokens: 4_096, temperature: 0, enabled: true,
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret);
     providerId = provider.id;
     (server as Server & { __transport?: { close(): Promise<void> } }).__transport = transport;

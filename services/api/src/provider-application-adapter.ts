@@ -6,19 +6,23 @@ import type {
 } from "../../../packages/contracts/src/index.js";
 import {
   toSafeProviderConfiguration,
-  assertResponseFormatPolicy,
+  assertProviderConfiguration,
   type ProviderApplication,
   type ProviderCandidate,
   type ProviderModelInventory,
+  type ProviderPresetDetail,
+  type ProviderPresetInventory,
   type ProviderProfileMutationResult,
   type ProviderProfileView,
   type ProviderRole,
   type PromptScope
 } from "../../../packages/application/src/providers/index.js";
+import { normalizeTextSelection, selectionCompatibilityId } from "../../../packages/contracts/src/provider-selection.js";
 import type { ProviderRequest, ProviderResult } from "../../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
 import { capabilityRouteConfigHash, providerEndpointIdentity } from "../../../packages/contracts/src/provider-capability-identity.js";
 import type { ModelParameterAdvertisement, ResponseSchemaOperation } from "../../../packages/contracts/src/text-response-format.js";
+import { projectSafePresetDetail, projectSafePresetPage } from "../../../packages/contracts/src/provider-presets.js";
 
 type ApiRuntimeProviderAdapter = Readonly<{
   execution: Readonly<{
@@ -40,6 +44,9 @@ type ApiRuntimeProviderAdapter = Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory>;
+  discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number }>, credential: string | null): Promise<ProviderPresetInventory>;
+  resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
+  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<Readonly<{ candidate: ProviderCandidate; readSavedCredential(): string | null; revision: string }> | null>;
 }>;
 
 type ProviderApiComposition = Readonly<{
@@ -76,7 +83,7 @@ function profileResponse(
   capabilities?: ProviderApiComposition["responseFormatCapabilities"],
 ) {
   const configuration = mutation?.configurationProjection.kind === "same_request_echo"
-    ? mutation.configurationProjection.configuration
+    ? Object.freeze({ ...profile.configuration, ...mutation.configurationProjection.configuration })
     : profile.configuration;
   return {
     id: profile.id,
@@ -85,6 +92,7 @@ function profileResponse(
     providerRole: profile.providerRole,
     baseUrl: profile.baseUrl,
     defaultModel: profile.defaultModel,
+    ...(profile.textSelection === undefined ? {} : { textSelection: profile.textSelection }),
     contextWindowTokens: profile.contextWindowTokens,
     maxOutputTokens: profile.maxOutputTokens,
     temperature: profile.temperature,
@@ -99,11 +107,43 @@ function profileResponse(
     hasApiKey: profile.hasCredential,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
-    ...(profile.providerRole === "text" ? { responseFormatCapability: responseFormatCapability(profile, profile.defaultModel, null, capabilities) } : {})
+    ...(profile.providerRole === "text" && profile.defaultModel.trim().length > 0
+      ? { responseFormatCapability: responseFormatCapability(profile, profile.defaultModel, null, capabilities) }
+      : {})
   };
 }
 
 export type ProviderApiTransportAdapter = ReturnType<typeof createProviderApplicationAdapter>;
+
+function assertTextSelectionRole(input: Readonly<{ providerRole: ProviderRole; textSelection?: unknown }>): void {
+  if (input.textSelection !== undefined && input.providerRole !== "text" && input.providerRole !== "intent") {
+    throw Object.assign(new Error("Text selections are available only for text or intent provider profiles."), { statusCode: 400 });
+  }
+}
+
+function candidateForPresetSave(ownerUserId: string, profile: ProviderProfileView | ProviderProfileInput | ProviderCandidate, selection: ReturnType<typeof normalizeTextSelection>, changes?: ProviderProfileUpdate): ProviderCandidate {
+  return {
+    ownerUserId, name: changes?.name ?? profile.name, providerType: profile.providerType, providerRole: profile.providerRole,
+    baseUrl: changes?.baseUrl ?? profile.baseUrl, defaultModel: selectionCompatibilityId(selection), textSelection: selection,
+    contextWindowTokens: changes?.contextWindowTokens ?? profile.contextWindowTokens,
+    maxOutputTokens: changes?.maxOutputTokens ?? profile.maxOutputTokens,
+    temperature: changes?.temperature ?? profile.temperature,
+    requestTimeoutMs: changes?.requestTimeoutMs ?? profile.requestTimeoutMs,
+    configuration: toSafeProviderConfiguration({ ...profile.configuration, ...changes?.configuration }),
+    enabled: changes?.enabled ?? profile.enabled, isDefault: changes?.isDefault ?? profile.isDefault
+  };
+}
+
+function updatedSelection(profile: Pick<ProviderCandidate, "providerType" | "providerRole" | "defaultModel" | "textSelection">, input: ProviderProfileUpdate) {
+  if (profile.providerRole !== "text" && profile.providerRole !== "intent") return undefined;
+  return normalizeTextSelection({ providerType: profile.providerType, providerRole: profile.providerRole,
+    defaultModel: input.defaultModel ?? (input.textSelection === undefined ? profile.defaultModel : selectionCompatibilityId(input.textSelection)),
+    ...(input.textSelection === undefined && input.defaultModel !== undefined ? {} : { textSelection: input.textSelection ?? profile.textSelection }) });
+}
+
+function stalePresetSave(): never {
+  throw Object.assign(new Error("Provider preset Save authority changed. Refresh the profile and try again."), { statusCode: 409, code: "preset_save_stale" });
+}
 
 export function createProviderApplicationAdapter(composition: ProviderApiComposition) {
   return Object.freeze({
@@ -113,7 +153,15 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async create(ownerUserId: string, input: ProviderProfileInput) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration, input.providerRole);
+      assertTextSelectionRole(input);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent"
+        ? normalizeTextSelection(input)
+        : undefined;
+      const defaultModel = textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel;
+      if (textSelection?.kind === "openrouter_preset") {
+        await composition.runtime.resolveCandidatePresetWithCredential(candidateForPresetSave(ownerUserId, input, textSelection), textSelection.slug, input.apiKey ?? null);
+      }
       return composition.transaction(async ({ application, runtime }) => {
         const mutation = await application.createProfile({
           ownerUserId,
@@ -121,7 +169,8 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
           providerType: input.providerType,
           providerRole: input.providerRole,
           baseUrl: input.baseUrl,
-          defaultModel: input.defaultModel,
+          defaultModel,
+          ...(textSelection === undefined ? {} : { textSelection }),
           contextWindowTokens: input.contextWindowTokens,
           maxOutputTokens: input.maxOutputTokens,
           temperature: input.temperature,
@@ -141,21 +190,53 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
     },
 
     async update(ownerUserId: string, providerProfileId: string, input: ProviderProfileUpdate) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration);
+      const textSelection = input.textSelection;
+      const current = (await composition.application.listProfiles({ ownerUserId })).find((profile) => profile.id === providerProfileId);
+      if (!current) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      const canChangeTextSelection = current.providerRole === "text" || current.providerRole === "intent";
+      const requiresPresetAuthority = canChangeTextSelection &&
+        (input.textSelection !== undefined || input.defaultModel !== undefined || input.baseUrl !== undefined || input.apiKey !== undefined);
+      const authority = requiresPresetAuthority
+        ? await composition.runtime.presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, false)
+        : null;
+      if (requiresPresetAuthority && !authority) stalePresetSave();
+      const profileForSelection = authority?.candidate ?? current;
+      const nextSelection = updatedSelection(profileForSelection, input);
+      const selectionChanged = nextSelection && profileForSelection.textSelection
+        ? selectionCompatibilityId(nextSelection) !== selectionCompatibilityId(profileForSelection.textSelection)
+        : false;
+      const needsPresetValidation = nextSelection?.kind === "openrouter_preset" &&
+        (selectionChanged || input.baseUrl !== undefined && input.baseUrl !== profileForSelection.baseUrl || input.apiKey !== undefined);
+      if (needsPresetValidation) {
+        if (!authority) stalePresetSave();
+        const candidate = candidateForPresetSave(ownerUserId, authority.candidate, nextSelection, input);
+        const credential = input.apiKey !== undefined ? input.apiKey || null : authority.readSavedCredential();
+        await composition.runtime.resolveCandidatePresetWithCredential(candidate, nextSelection.slug, credential);
+      }
       return composition.transaction(async ({ application, runtime }) => {
+        if (authority && (await runtime.presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, true))?.revision !== authority.revision) stalePresetSave();
         const mutation = await application.updateProfile({
           ownerUserId,
           providerProfileId,
           changes: {
             ...(input.name === undefined ? {} : { name: input.name }),
             ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
-            ...(input.defaultModel === undefined ? {} : { defaultModel: input.defaultModel }),
+            ...(input.defaultModel === undefined && textSelection === undefined ? {} : {
+              ...(input.defaultModel === undefined ? { defaultModel: selectionCompatibilityId(textSelection!) } : { defaultModel: input.defaultModel }),
+              ...(textSelection === undefined ? {} : { textSelection })
+            }),
             ...(input.contextWindowTokens === undefined ? {} : { contextWindowTokens: input.contextWindowTokens }),
             ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
             ...(input.temperature === undefined ? {} : { temperature: input.temperature }),
             ...(input.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: input.requestTimeoutMs }),
             ...(input.configuration === undefined ? {} : {
-              configuration: toSafeProviderConfiguration(input.configuration)
+              configuration: toSafeProviderConfiguration(input.configuration),
+              ...(!Object.prototype.hasOwnProperty.call(input.configuration, "textExecutionOverrides") ? {} : {
+                textExecutionOverrides: input.configuration.textExecutionOverrides === null
+                  ? null
+                  : toSafeProviderConfiguration(input.configuration).textExecutionOverrides
+              })
             }),
             ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
             ...(input.isDefault === undefined ? {} : { isDefault: input.isDefault })
@@ -215,15 +296,34 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       }));
     },
 
+    async presets(ownerUserId: string, providerProfileId: string, offset: number, limit: number, refresh = false, signal?: AbortSignal) {
+      const profile = (await composition.application.listProfiles({ ownerUserId })).find((candidate) => candidate.id === providerProfileId);
+      if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      if ((profile.providerRole !== "text" && profile.providerRole !== "intent") || profile.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile is required."), { statusCode: 400 });
+      return projectSafePresetPage((await composition.application.listPresets({ ownerUserId, providerProfileId, offset, limit, refresh, ...(signal ? { signal } : {}) })).page);
+    },
+
+    async preset(ownerUserId: string, providerProfileId: string, slug: string, signal?: AbortSignal) {
+      const profile = (await composition.application.listProfiles({ ownerUserId })).find((candidate) => candidate.id === providerProfileId);
+      if (!profile) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
+      if ((profile.providerRole !== "text" && profile.providerRole !== "intent") || profile.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile is required."), { statusCode: 400 });
+      return projectSafePresetDetail((await composition.application.getPreset({ ownerUserId, providerProfileId, slug, ...(signal ? { signal } : {}) })).preset);
+    },
+
     async discoverModels(ownerUserId: string, input: ProviderProfileInput) {
-      assertResponseFormatPolicy(input.configuration);
+      assertProviderConfiguration(input.configuration, input.providerRole);
+      assertTextSelectionRole(input);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent"
+        ? normalizeTextSelection(input)
+        : undefined;
       const inventory = await composition.runtime.discoverCandidateModelsWithCredential({
         ownerUserId,
         name: input.name,
         providerType: input.providerType,
         providerRole: input.providerRole,
         baseUrl: input.baseUrl,
-        defaultModel: input.defaultModel,
+        defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel,
+        ...(textSelection === undefined ? {} : { textSelection }),
         contextWindowTokens: input.contextWindowTokens,
         maxOutputTokens: input.maxOutputTokens,
         temperature: input.temperature,
@@ -243,6 +343,22 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       }));
     },
 
+    async discoverPresets(ownerUserId: string, input: ProviderProfileInput, offset: number, limit: number, signal?: AbortSignal) {
+      assertProviderConfiguration(input.configuration, input.providerRole);
+      assertTextSelectionRole(input);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent" ? normalizeTextSelection(input) : undefined;
+      const candidate: ProviderCandidate = { ownerUserId, name: input.name, providerType: input.providerType, providerRole: input.providerRole, baseUrl: input.baseUrl, defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel, ...(textSelection ? { textSelection } : {}), contextWindowTokens: input.contextWindowTokens, maxOutputTokens: input.maxOutputTokens, temperature: input.temperature, requestTimeoutMs: input.requestTimeoutMs, configuration: toSafeProviderConfiguration(input.configuration), enabled: input.enabled, isDefault: input.isDefault };
+      return projectSafePresetPage((await composition.runtime.discoverCandidatePresetsWithCredential(candidate, { offset, limit, ...(signal ? { signal } : {}) }, input.apiKey ?? null)).page);
+    },
+
+    async resolvePreset(ownerUserId: string, input: ProviderProfileInput, slug: string, signal?: AbortSignal) {
+      assertProviderConfiguration(input.configuration, input.providerRole);
+      assertTextSelectionRole(input);
+      const textSelection = input.providerRole === "text" || input.providerRole === "intent" ? normalizeTextSelection(input) : undefined;
+      const candidate: ProviderCandidate = { ownerUserId, name: input.name, providerType: input.providerType, providerRole: input.providerRole, baseUrl: input.baseUrl, defaultModel: textSelection ? selectionCompatibilityId(textSelection) : input.defaultModel, ...(textSelection ? { textSelection } : {}), contextWindowTokens: input.contextWindowTokens, maxOutputTokens: input.maxOutputTokens, temperature: input.temperature, requestTimeoutMs: input.requestTimeoutMs, configuration: toSafeProviderConfiguration(input.configuration), enabled: input.enabled, isDefault: input.isDefault };
+      return projectSafePresetDetail((await composition.runtime.resolveCandidatePresetWithCredential(candidate, slug, input.apiKey ?? null, signal)).preset);
+    },
+
     async generateText(ownerUserId: string, request: ProviderTextRequest) {
       const resolution = await composition.application.resolveDirect({
         ownerUserId,
@@ -254,6 +370,19 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       });
       if (resolution.status === "unconfigured") {
         throw Object.assign(new Error("Add a text provider or mark one as default in Provider Management."), { statusCode: 409 });
+      }
+      const selectedProfile = (await composition.application.listProfiles({ ownerUserId }))
+        .find((profile) => profile.id === resolution.providerProfileId);
+      if (!selectedProfile) throw Object.assign(new Error("Enabled text provider profile not found."), { statusCode: 400 });
+      const selection = normalizeTextSelection({
+        providerType: selectedProfile.providerType,
+        providerRole: "text",
+        defaultModel: resolution.model
+      });
+      if (selection.kind === "openrouter_preset" || selectedProfile.configuration.textResponseFormatPolicy === "required") {
+        throw Object.assign(new Error("Generic text generation has no supported operation contract for this selection."), {
+          code: "unsupported_operation", statusCode: 409
+        });
       }
       const provider = await composition.runtime.execution.text(
         { ownerUserId },

@@ -63,6 +63,7 @@ import { workerMemoryApplication } from "../helpers/memory-applications.js";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const sha256 = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
+const privatePreparedAttemptSentinel = "PRIVATE_PREPARED_TEXT_ATTEMPT_BODY_MUST_NOT_EXPORT";
 const illustrationIdentity = (segmentId: string, variantIndex: number): string => {
   const digest = createHash("md5")
     .update(`illustration:${segmentId}:${variantIndex}`)
@@ -144,7 +145,7 @@ function importReport(input: Readonly<{
       sourceApplication: "0.1.0",
       sourceMigration: input.sourceMigration ?? "0095_story_memory_capability_enrollment",
       destinationApplication: "0.1.0",
-      destinationMigration: input.destinationMigration ?? "0096_campaign_memory_defaults",
+      destinationMigration: input.destinationMigration ?? "0101_durable_campaign_physical_attempt_costs",
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -312,7 +313,24 @@ integration("deterministic owner-wide System Archive export", () => {
                  'https://provider-user:provider-password@portable.invalid/v1?api_key=provider-query-secret#provider-fragment-secret',
                  'story-model',654321,$2::jsonb,'encrypted_api_key','nonce','tag',1,true,'healthy')
        RETURNING id`,
-      [ownerUserId, JSON.stringify({ timeoutMs: 1234, retryLimit: 2, password: "must-not-export" })],
+      [ownerUserId, JSON.stringify({
+        timeoutMs: 1234,
+        retryLimit: 2,
+        password: "must-not-export",
+        textExecutionOverrides: {
+          parameters: { temperature: 0.23, max_tokens: 777 },
+          conservativeContextWindowTokens: 12_345
+        }
+      })],
+    );
+    await pool.query(
+      `INSERT INTO prepared_text_physical_attempts (
+         owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,candidate_ordinal,
+         requested_model,provider_policy,request_payload_hash,request_body
+       ) VALUES ($1,'direct','archive-private-attempt',$2::jsonb,$3,0,'private-model',$4::jsonb,$5,$6)`,
+      [ownerUserId, JSON.stringify({ credentialReference: "PRIVATE_CREDENTIAL_REFERENCE_MUST_NOT_EXPORT" }),
+        sha256("private-plan"), JSON.stringify({ apiKey: "PRIVATE_PROVIDER_POLICY_MUST_NOT_EXPORT" }),
+        sha256(privatePreparedAttemptSentinel), privatePreparedAttemptSentinel],
     );
     await pool.query(
       `INSERT INTO prompt_template_overrides (owner_user_id,prompt_key,content)
@@ -486,7 +504,7 @@ integration("deterministic owner-wide System Archive export", () => {
       `INSERT INTO provider_cost_events (
          owner_user_id,campaign_id,turn_id,provider_profile_id,provider_type,category,
          operation,amount,currency
-       ) VALUES ($1,$2,$3,$4,'openai_compatible','story','response',0.012345,'USD')`,
+       ) VALUES ($1,$2,$3,$4,'openai_compatible','story','response',0.012345678901234567,'USD')`,
       [ownerUserId, campaignId, turnId, provider.rows[0]!.id],
     );
     await pool.query(
@@ -807,7 +825,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0096_campaign_memory_defaults",
+      sourceMigration: "0101_durable_campaign_physical_attempt_costs",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -840,8 +858,17 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(portableProvider.record).toMatchObject({
       baseUrl: "https://portable.invalid/v1",
       timeoutMs: 654321,
-      authority: { configuration: { retryLimit: 2 } },
+      authority: { configuration: {
+        retryLimit: 2,
+        textExecutionOverrides: {
+          parameters: { temperature: 0.23, max_tokens: 777 },
+          conservativeContextWindowTokens: 12_345
+        }
+      } },
     });
+    expect(serialized).not.toContain(privatePreparedAttemptSentinel);
+    expect(serialized).not.toContain("PRIVATE_CREDENTIAL_REFERENCE_MUST_NOT_EXPORT");
+    expect(serialized).not.toContain("PRIVATE_PROVIDER_POLICY_MUST_NOT_EXPORT");
     const promptRecords = (await Promise.all(Object.values(zip.files)
       .filter((entry) => entry.name.startsWith("records/prompts/") && !entry.dir)
       .map((entry) => entry.async("string"))))
@@ -1222,7 +1249,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(preview).toMatchObject({
       formatVersion: 2,
       sourceApplication: "0.1.0",
-      sourceMigration: "0096_campaign_memory_defaults",
+      sourceMigration: "0101_durable_campaign_physical_attempt_costs",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -1250,7 +1277,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0096_campaign_memory_defaults",
+        latestMigration: "0101_durable_campaign_physical_attempt_costs",
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1284,9 +1311,9 @@ integration("deterministic owner-wide System Archive export", () => {
         versions: {
           archiveFormat: 2,
           sourceApplication: "0.1.0",
-          sourceMigration: "0096_campaign_memory_defaults",
+          sourceMigration: "0101_durable_campaign_physical_attempt_costs",
           destinationApplication: "0.1.0",
-          destinationMigration: "0096_campaign_memory_defaults",
+          destinationMigration: "0101_durable_campaign_physical_attempt_costs",
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1309,7 +1336,7 @@ integration("deterministic owner-wide System Archive export", () => {
     const exported = await exportArchive();
     const zip = await JSZip.loadAsync(exported.bytes);
     const manifest = JSON.parse(await zip.file("manifest.json")!.async("string")) as Record<string, unknown>;
-    manifest.sourceMigration = "0096_future_system_archive_shape";
+    manifest.sourceMigration = "0101_future_system_archive_shape";
     zip.file("manifest.json", JSON.stringify(manifest));
     const newer = await zip.generateAsync({ type: "nodebuffer" });
 
@@ -1319,7 +1346,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0096_campaign_memory_defaults",
+            latestMigration: "0101_durable_campaign_physical_attempt_costs",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1341,7 +1368,7 @@ integration("deterministic owner-wide System Archive export", () => {
       await expect(service.preview({ ownerUserId }, randomUUID())).resolves.toMatchObject({
         valid: false,
         previewHandle: null,
-        versions: { sourceMigration: "0096_future_system_archive_shape" },
+        versions: { sourceMigration: "0101_future_system_archive_shape" },
         errors: ["archive-version-unsupported"],
       });
       expect(createPreview).not.toHaveBeenCalled();
@@ -1360,7 +1387,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0096_campaign_memory_defaults",
+            latestMigration: "0101_durable_campaign_physical_attempt_costs",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1397,7 +1424,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0096_campaign_memory_defaults",
+            latestMigration: "0101_durable_campaign_physical_attempt_costs",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1449,7 +1476,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0096_campaign_memory_defaults",
+            latestMigration: "0101_durable_campaign_physical_attempt_costs",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -2162,6 +2189,15 @@ integration("deterministic owner-wide System Archive export", () => {
       mechanics: { nested: [{}], safe: { markdown: "retained" } },
       providerResponseId: null,
     });
+    await expect(pool.query<{ configuration: Record<string, unknown> }>(
+      "SELECT configuration FROM provider_profiles WHERE owner_user_id=$1", [ownerUserId]
+    )).resolves.toMatchObject({ rows: [{ configuration: {
+      retryLimit: 2,
+      textExecutionOverrides: {
+        parameters: { temperature: 0.23, max_tokens: 777 },
+        conservativeContextWindowTokens: 12_345
+      }
+    } }] });
   }, 30_000);
 
   it("rolls back every logical domain when an atomic System Import fails mid-graph", async () => {
@@ -3515,11 +3551,12 @@ integration("deterministic owner-wide System Archive export", () => {
         domain: "providers", formatVersion: 2, sourceId: providerId,
         record: {
           sourceId: providerId, kind: "intent", displayName: "Intent sentinel",
-          baseUrl: "https://provider.invalid/v2", selectedModel: "intent-model",
+          baseUrl: "https://provider.invalid/v2", selectedModel: "@preset/nexus-nsfw",
           contextWindow: 12_345, timeoutMs: 45_678, retryLimit: 4,
           enabled: false, health: "unknown",
           authority: {
-            providerType: "openrouter", providerRole: "intent", defaultModel: "intent-model",
+            providerType: "openrouter", providerRole: "intent", defaultModel: "@preset/nexus-nsfw",
+            textSelection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
             contextWindowTokens: 12_345, maxOutputTokens: 678, temperature: 0.37,
             configuration: { modelDiscoveryEnabled: true, maximumAttempts: 4, retryLimit: 4 },
             requestTimeoutMs: 45_678, enabled: true, isDefault: true, createdAt, updatedAt,
@@ -3682,7 +3719,7 @@ integration("deterministic owner-wide System Archive export", () => {
             turnId, providerProfileId: providerId, localCallId, providerType: "openrouter",
             category: "story", operation: "response",
             requestedModel: "requested-sentinel", resolvedModel: "resolved-sentinel",
-            amount: "12.345678", currency: "EUR", usageMetadata: { tokens: 73, markdown: exactText },
+            amount: "12.345678901234567", currency: "EUR", usageMetadata: { tokens: 73, markdown: exactText },
             occurredAt: updatedAt, createdAt: acceptedAt,
           },
         },
@@ -3707,6 +3744,21 @@ integration("deterministic owner-wide System Archive export", () => {
     ];
     records.sort((left, right) =>
       SYSTEM_ARCHIVE_DOMAINS.indexOf(left.domain) - SYSTEM_ARCHIVE_DOMAINS.indexOf(right.domain));
+    const providerRecord = records.find((record) => record.domain === "providers")!;
+    const authority = (providerRecord.record as { authority: { providerRole: string; providerType: string; defaultModel: string } }).authority;
+    for (const invalidAuthority of [
+      { ...authority, providerRole: "embedding" },
+      { ...authority, providerType: "lmstudio" },
+      { ...authority, defaultModel: "contradictory-model" },
+    ]) {
+      const invalidProvider = JSON.parse(JSON.stringify(providerRecord)) as { record: { authority: typeof authority } };
+      invalidProvider.record.authority = invalidAuthority;
+      await expect(imports.withAtomicImport(owner, { destination, ignore: {} }, async (transaction) => {
+        await transaction.insertLogicalDomains([invalidProvider] as never);
+      })).rejects.toThrow();
+    }
+    await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM provider_profiles"))
+      .resolves.toMatchObject({ rows: [{ count: "0" }] });
     const assetBytes = Buffer.from("v2-system-archive-asset-sentinel");
     const assetHash = sha256(assetBytes);
     const asset = systemArchiveAssetRecordV2Schema.parse({
@@ -3831,7 +3883,7 @@ integration("deterministic owner-wide System Archive export", () => {
     )).rows).toEqual(checkpointsBefore.rows);
 
     await expect(pool.query(
-      `SELECT profile.provider_type,profile.provider_role,profile.default_model,
+      `SELECT profile.provider_type,profile.provider_role,profile.default_model,profile.text_selection,
               profile.context_window_tokens,profile.max_output_tokens,profile.temperature,
               profile.configuration,profile.request_timeout_ms,profile.enabled,profile.is_default,
               campaign.text_provider_profile_id,campaign.image_provider_profile_id,
@@ -3848,7 +3900,8 @@ integration("deterministic owner-wide System Archive export", () => {
     )).resolves.toMatchObject({ rows: [{
       provider_type: "openrouter",
       provider_role: "intent",
-      default_model: "intent-model",
+      default_model: "@preset/nexus-nsfw",
+      text_selection: { kind: "openrouter_preset", slug: "nexus-nsfw" },
       context_window_tokens: 12_345,
       max_output_tokens: 678,
       temperature: 0.37,
@@ -3916,7 +3969,7 @@ integration("deterministic owner-wide System Archive export", () => {
       local_call_id: localCallId,
       provider_type: "openrouter",
       provider_response_id: null,
-      amount: "12.345678000000",
+      amount: "12.345678901234567",
       currency: "EUR",
       usage_metadata: { tokens: 73, markdown: exactText },
       activity_id: "9007199254740993",
@@ -4086,7 +4139,7 @@ integration("deterministic owner-wide System Archive export", () => {
         archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0096_campaign_memory_defaults",
+          latestMigration: "0101_durable_campaign_physical_attempt_costs",
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4576,7 +4629,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0096_campaign_memory_defaults",
+            latestMigration: "0101_durable_campaign_physical_attempt_costs",
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4632,7 +4685,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0096_campaign_memory_defaults",
+      latestMigration: "0101_durable_campaign_physical_attempt_costs",
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",

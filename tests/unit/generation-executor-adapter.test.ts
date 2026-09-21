@@ -17,6 +17,8 @@ import {
   createGenerationExecutor,
   callCampaignTextProvider,
   appendFactFormatRepairApplication,
+  bindCampaignTextExecutionPlan,
+  deriveCampaignTextExecutionPlan,
   bindCampaignResponseContract,
   responseContractInvocationDetails,
   generationContextFingerprint,
@@ -30,6 +32,7 @@ import { providerPromptProtocolVersion } from "../../services/runtime/src/provid
 import { prepareGenerationReview } from "../../services/runtime/src/generation-review-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
+import { logger } from "../../packages/logger/src/index.js";
 
 const claim: ClaimedGeneration = {
   jobId: "00000000-0000-4000-8000-000000000001",
@@ -41,6 +44,176 @@ const claim: ClaimedGeneration = {
   operationKind: "append",
   replacementTurnId: null
 };
+
+describe("frozen Story route basis", () => {
+  it("composes the saved preset exactly once and rejects a plan from another basis", () => {
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "v1", configHash: "a".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "Use spare prose.", parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000,
+      protocolVersion: "route-basis-v2"
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    const job = { ...completeGenerationExecutionPayload(), orchestration_private: { textExecutionRouteBasis: routeBasis } };
+    const plan = deriveCampaignTextExecutionPlan(job, "Return Story JSON.")!;
+    const request = bindCampaignTextExecutionPlan(job, { systemPrompt: "Return Story JSON.", input: "{}" });
+
+    expect(request.systemPrompt).toBe("Use spare prose.\n\nReturn Story JSON.");
+    expect(bindCampaignTextExecutionPlan(job, request, plan)).toBe(request);
+    (request as { systemPrompt: string }).systemPrompt = "different";
+    expect(() => bindCampaignTextExecutionPlan(job, request, plan)).toThrow("conflicts");
+
+    const twoParagraphPlan = deriveCampaignTextExecutionPlan(job, "First operation paragraph.\n\nLast operation paragraph.")!;
+    expect(() => bindCampaignTextExecutionPlan(job, {
+      systemPrompt: "Last operation paragraph.", input: "{}"
+    }, twoParagraphPlan)).toThrow("conflicts");
+
+    const otherBasis = { ...basis, preset: { ...basis.preset, configHash: "b".repeat(64) } };
+    const otherRouteBasis = { ...otherBasis, routeBasisHash: sha256(stableStringify(otherBasis)) };
+    const otherJob = { ...job, orchestration_private: { textExecutionRouteBasis: otherRouteBasis } };
+    expect(() => bindCampaignTextExecutionPlan(otherJob, {
+      systemPrompt: plan.prompt,
+      input: "{}"
+    }, plan)).toThrow("different route basis");
+  });
+
+  it("uses the prebound main plan once and reduces retrieval budget before context planning", async () => {
+    const presetPrompt = "Conserve context. ".repeat(1_000).trim();
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "tight-route" },
+      preset: { slug: "tight-route", versionId: "v1", configHash: "c".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 20_000, maxOutputTokens: 2_000 }],
+      presetSystemPrompt: presetPrompt, parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000,
+      protocolVersion: "route-basis-v2"
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    const output = JSON.stringify({ narration: "The observatory door opens.", choices: ["Enter.", "Wait.", "Listen.", "Call."],
+      custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", canonical_facts: [],
+      superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const run = async (frozenRouteBasis?: typeof routeBasis) => {
+      const job = completeGenerationExecutionPayload();
+      job.context_options = { ...job.context_options, budgetTokens: 15_000 };
+      if (frozenRouteBasis) job.orchestration_private = { textExecutionRouteBasis: frozenRouteBasis };
+      const repository = {
+        loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+        saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+        recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+        markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true),
+        pauseForReview: vi.fn(async () => true)
+      } as unknown as GenerationExecutionRepository;
+      const providerResult = { content: output, responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "instance", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {} };
+      const provider = { id: claim.providerProfileId, name: "Captured provider", providerRole: "text" as const,
+        providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 20_000, maxOutputTokens: 2_000,
+        temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn(async (_request: unknown) => providerResult) };
+      const preparedCalls: unknown[] = [];
+      const executePrepared = vi.fn(async (input: unknown) => { preparedCalls.push(input); return providerResult; });
+      let retrievalBudgetTokens: number | undefined;
+      const loadGenerationContext = vi.fn(async (_pool: unknown, input: { retrievalBudgetTokens: number }) => {
+        retrievalBudgetTokens = input.retrievalBudgetTokens;
+        return { authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT };
+      });
+      const loadTextExecution = vi.fn(async () => provider);
+      const collaborators = { memory: { loadGenerationContext }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+        loadTextExecution, verifyTextExecutionRouteAuthority: vi.fn(async () => true),
+        promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."), recordProfileCost: vi.fn(async () => undefined),
+        attributeGenerationCostsToTurn: vi.fn(async () => undefined),
+        ...(frozenRouteBasis ? { preparedTextExecutor: { execute: executePrepared } } : {}) } as unknown as GenerationExecutionCollaborators;
+      await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+        .execute({ workerId: frozenRouteBasis ? "frozen-main" : "baseline-main", leaseSeconds: 30, claim })).resolves.toBe(true);
+      expect(repository.markRecoverable).not.toHaveBeenCalled();
+      expect(loadGenerationContext).toHaveBeenCalledOnce();
+      return { retrievalBudgetTokens: retrievalBudgetTokens!,
+        request: (frozenRouteBasis
+          ? (preparedCalls[0] as { request: { systemPrompt: string } } | undefined)?.request
+          : provider.execute.mock.calls[0]?.[0]) as { systemPrompt: string },
+        prepared: executePrepared,
+        loadTextExecution,
+        commitAcceptedTurn: repository.commitAcceptedTurn as ReturnType<typeof vi.fn>,
+        markFailed: repository.markFailed as ReturnType<typeof vi.fn> };
+    };
+
+    const baseline = await run();
+    const frozen = await run(routeBasis);
+
+    expect(frozen.retrievalBudgetTokens).toBeLessThan(baseline.retrievalBudgetTokens);
+    expect(frozen.request.systemPrompt).toBe(`${presetPrompt}\n\nWrite a concise fictional scene.`);
+    expect(frozen.request.systemPrompt.split(presetPrompt)).toHaveLength(2);
+    expect(frozen.prepared).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "story_generation", plan: expect.objectContaining({ requestTimeoutMs: 30_000, parameters: { temperature: 0.2 }, candidates: basis.candidates })
+    }));
+    expect(frozen.loadTextExecution).not.toHaveBeenCalled();
+    expect(frozen.commitAcceptedTurn).toHaveBeenCalledOnce();
+    expect(frozen.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("derives every auxiliary and repair prompt once at the prepared dispatch seam", async () => {
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "v1", configHash: "d".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "Use spare prose.", parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000,
+      protocolVersion: "route-basis-v2"
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    const job = { ...completeGenerationExecutionPayload(), orchestration_private: { textExecutionRouteBasis: routeBasis } };
+    const provider = { id: "profile", name: "Frozen route", providerType: "openrouter" as const, providerRole: "text" as const, model: "story-model",
+      contextWindowTokens: 16_000, maxOutputTokens: 1_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn(async (_request: unknown, _policy?: unknown) => ({
+        content: "{}", responseId: "auxiliary", finishReason: "stop", outputLimited: false, modelInstanceId: "story-model", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {}
+      })) };
+    const preparedCalls: unknown[] = [];
+    const executePrepared = vi.fn(async (input: unknown) => {
+      preparedCalls.push(input);
+      return {
+      content: "{}", responseId: "auxiliary", finishReason: "stop", outputLimited: false, modelInstanceId: "story-model", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {}
+      };
+    });
+    const dependencies = { pool: {} as DatabasePool, collaborators: { recordProfileCost: vi.fn(async () => undefined), preparedTextExecutor: { execute: executePrepared } } } as never;
+
+    const operations = [
+      "rpg_assessment", "event_trigger_before", "story_recovery", "story_choice_repair", "event_trigger_after",
+      "event_extension", "scene_coverage_validation", "scene_coverage_rewrite", "story_continuity_review", "story_continuity_repair"
+    ] as const;
+    for (const operation of operations) {
+      await callCampaignTextProvider(dependencies, provider, job, operation, {
+        systemPrompt: `Actual ${operation} prompt.`, input: "{}"
+      });
+    }
+
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(preparedCalls).toHaveLength(operations.length);
+    for (const [index, operation] of operations.entries()) {
+      const prepared = preparedCalls[index] as { operation: string; request: { systemPrompt: string }; plan: { requestTimeoutMs: number; parameters: unknown; candidates: unknown } };
+      expect(prepared.operation).toBe(operation);
+      expect(prepared.request.systemPrompt).toBe(`Use spare prose.\n\nActual ${operation} prompt.`);
+      expect(prepared.request.systemPrompt.split("Use spare prose.")).toHaveLength(2);
+      expect(prepared.plan).toMatchObject({ requestTimeoutMs: 30_000, parameters: { temperature: 0.2 }, candidates: basis.candidates });
+    }
+  });
+
+  it("fails a native invocation before inference when Task 5 has not supplied a prepared executor", async () => {
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "v1", configHash: "e".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "Use spare prose.", parameters: {}, endpointReference: "endpoint", credentialReference: "profile",
+      profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000, protocolVersion: "route-basis-v2"
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    const job = { ...completeGenerationExecutionPayload(), orchestration_private: { textExecutionRouteBasis: routeBasis } };
+    const provider = { id: "profile", name: "legacy", providerRole: "text" as const, providerType: "openrouter" as const,
+      model: "legacy", contextWindowTokens: 16_000, maxOutputTokens: 1_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    const dependencies = { pool: {} as DatabasePool, collaborators: { recordProfileCost: vi.fn(async () => undefined) } } as never;
+
+    await expect(callCampaignTextProvider(dependencies, provider, job, "scene_coverage_validation", {
+      systemPrompt: "Actual coverage prompt.", input: "{}"
+    })).rejects.toMatchObject({ code: "prepared_text_execution_unavailable" });
+    expect(provider.execute).not.toHaveBeenCalled();
+  });
+});
 
 function rejectedCollaborators(): GenerationExecutionCollaborators {
   const unexpected = vi.fn(async (): Promise<never> => {
@@ -209,6 +382,7 @@ describe("generation executor adapter", () => {
   });
 
   it("does not replace completed response provenance when a post-success cost write fails", async () => {
+    const warnings = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
     const { job, provider, dependencies, completed } = contractDispatchFixture();
     provider.execute = vi.fn(async (request: any) => {
       const preparedRequest = serializeProviderRequest({ ...provider, baseUrl: "" }, request);
@@ -217,7 +391,41 @@ describe("generation executor adapter", () => {
     dependencies.collaborators.recordProfileCost.mockRejectedValueOnce(new Error("cost write failed"));
     await expect(callCampaignTextProvider(dependencies, provider as never, job, "story_generation", { systemPrompt: "rules", input: "action" })).rejects.toThrow("cost write failed");
     expect(completed).toHaveBeenCalledTimes(1);
-    expect(completed).toHaveBeenCalledWith(expect.any(Object), expect.any(String), { returnedModel: "returned", returnedProviderRoute: "route", diagnosticCode: null });
+    expect(completed).toHaveBeenCalledWith(expect.any(Object), expect.any(String), {
+      returnedModel: "returned",
+      returnedProviderRoute: "route",
+      diagnosticCode: null,
+      resultHash: null
+    });
+    expect(warnings.mock.calls.map(([event]) => event)).toContainEqual(expect.objectContaining({
+      event: "turn_generation_accounting_failed"
+    }));
+    expect(warnings.mock.calls.map(([event]) => event)).not.toContainEqual(expect.objectContaining({
+      event: "turn_generation_provider_failed"
+    }));
+    warnings.mockRestore();
+  });
+
+  it("labels historical v1 post-response cost failure as accounting failure", async () => {
+    const warnings = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const job = completeGenerationExecutionPayload();
+    const provider = { id: job.provider_profile_id, name: "Historical", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "model", contextWindowTokens: 16_000,
+      maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content: "{}", responseId: "response", finishReason: "stop",
+        outputLimited: false, modelInstanceId: "model", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        reportedCost: null, rawMetadata: {} })) };
+    await expect(callCampaignTextProvider({ pool: {} as DatabasePool, collaborators: {
+      recordProfileCost: vi.fn(async () => { throw new Error("cost write failed"); })
+    } } as never, provider, job, "story_generation", { systemPrompt: "Rules", input: "Act" }))
+      .rejects.toThrow("cost write failed");
+    expect(warnings.mock.calls.map(([event]) => event)).toContainEqual(expect.objectContaining({
+      event: "turn_generation_accounting_failed"
+    }));
+    expect(warnings.mock.calls.map(([event]) => event)).not.toContainEqual(expect.objectContaining({
+      event: "turn_generation_provider_failed"
+    }));
+    warnings.mockRestore();
   });
 
   it("persists bounded private partial prepared-response evidence before completing the failed invocation", async () => {
@@ -1500,6 +1708,97 @@ describe("generation executor adapter", () => {
 
   });
 
+  it("dispatches main before-event coverage with its distinct operation on a v1 frozen job", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    job.orchestration_inputs.suppressEventTriggers = false;
+    // Historical v1 selections do not freeze an event-coverage schema; the
+    // invocation stays on its legacy request path but retains its operation.
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: { version: 1, selectionHash: "a".repeat(64), contracts: {
+        "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+      } },
+      beforeEvents: [{ id: "before-event", sourceTriggerId: "before-trigger", name: "Bell", timing: "before", condition: "", effect: "", instructions: "A bell rings in the hall.", reason: "", sourceTurn: 3, addTextAfter: false }]
+    } as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => { job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint }; return true; }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      reserveResponseContractInvocation: vi.fn(async (_scope, input) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+      markResponseContractInvocationDispatched: vi.fn(async (_scope, id) => ({ id, status: "dispatched" })),
+      completeResponseContractInvocation: vi.fn(async (_scope, id) => ({ id, status: "completed" })),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const story = JSON.stringify({ narration: "The hall is quiet.", choices: ["A", "B", "C", "D"], custom_action_suggestion: "Wait.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const responses = [
+      { content: story, responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} },
+      { content: JSON.stringify({ event_results: [{ event_id: "before-event", covered: false, missing_required_beats: ["before-event"], contradictions: [] }] }), responseId: "coverage", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }
+    ];
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    provider.execute.mockImplementation(async (request: any) => {
+      const response = responses.shift()!;
+      return request.responseContract
+        ? { ...response, preparedRequest: serializeProviderRequest({ ...provider, baseUrl: "" }, request) }
+        : response;
+    });
+    const operations: string[] = [];
+    const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async (_pool, _provider, attribution) => { operations.push(attribution.operation); }), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "before-event-v1", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(operations).toEqual(["story_generation", "event_coverage_validation"]);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
+  it("dispatches scene coverage with its distinct operation on a v1 frozen job", async () => {
+    const job = completeGenerationExecutionPayload();
+    job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
+    job.resolved_input_mode = "scene";
+    job.orchestration_private = {
+      logicalAttempt: { version: 1, id: job.id, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 },
+      frozenResponseContracts: { version: 1, selectionHash: "a".repeat(64), contracts: {
+        "story:nonstream": { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
+      } }
+    } as never;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async (_scope, checkpoint) => { job.orchestration_private = { ...job.orchestration_private, generationReview: checkpoint }; return true; }),
+      savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      reserveResponseContractInvocation: vi.fn(async (_scope, input) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+      markResponseContractInvocationDispatched: vi.fn(async (_scope, id) => ({ id, status: "dispatched" })),
+      completeResponseContractInvocation: vi.fn(async (_scope, id) => ({ id, status: "completed" })),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const story = JSON.stringify({ narration: "The hall is quiet.", choices: ["A", "B", "C", "D"], custom_action_suggestion: "Wait.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const responses = [
+      { content: story, responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} },
+      { content: JSON.stringify({ covered: false, missing_required_beats: ["scene"], contradictions: [] }), responseId: "coverage", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }
+    ];
+    const provider = { id: claim.providerProfileId, name: "Provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn() };
+    provider.execute.mockImplementation(async (request: any) => {
+      const response = responses.shift()!;
+      return request.responseContract
+        ? { ...response, preparedRequest: serializeProviderRequest({ ...provider, baseUrl: "" }, request) }
+        : response;
+    });
+    const operations: string[] = [];
+    const collaborators = { memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) }, illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async (_pool, _provider, attribution) => { operations.push(attribution.operation); }), attributeGenerationCostsToTurn: vi.fn(async () => undefined) } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "scene-v1", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(operations).toEqual(["story_generation", "scene_coverage_validation"]);
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
   it("stops after a rewritten before-event draft still fails coverage", async () => {
     const job = completeGenerationExecutionPayload();
     job.generation_base_identity = { ...job.generation_base_identity!, stateFingerprint: "a".repeat(64) };
@@ -1766,6 +2065,96 @@ describe("generation executor adapter", () => {
     }));
     expect(provider.execute).not.toHaveBeenCalled();
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
+  it("hands one opaque prepared illustration snapshot through streamed provisional work and the accepted commit", async () => {
+    const job = completeGenerationExecutionPayload();
+    const frozenSnapshot = {
+      version: 2, state: "prepared",
+      routeBasis: { credentialReference: "illustration-profile", authorityRevision: "authority", endpointReference: "endpoint" },
+      plan: { prompt: "PRIVATE_FROZEN_ILLUSTRATION_PROMPT", parameters: { temperature: 0.27 }, candidates: [{ modelId: "frozen-illustration-model" }] },
+      operationPrompt: "Refine fiction only."
+    } as never;
+    const narration = Array.from({ length: 120 }, () => "Lanterns guide Mira through the quiet observatory.").join(" ");
+    const output = JSON.stringify({ narration, choices: ["Enter.", "Wait.", "Study.", "Call."],
+      custom_action_suggestion: "Follow the lanterns.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
+      canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), pauseForReview: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true),
+      saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Streaming provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000,
+      configuration: { streaming: true }, execute: vi.fn(async (request: { onChunk?: (delta: string, accumulated: string) => Promise<void> }) => {
+        await request.onChunk?.(output, output);
+        return { content: output, responseId: "stream", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} };
+      })
+    };
+    const illustration = {
+      loadStreamingIllustrationConfig: vi.fn(async () => ({
+        enabled: true, sourcePolicy: "library_only", matchingScope: "campaign", confidenceProfile: "balanced", repetitionWindow: 3,
+        providerProfileId: null, model: "", size: "1024x1024", aspectRatio: "1:1", quality: "auto", outputFormat: "png", maxAttempts: 3,
+        segmentWordCount: 100, imagesPerSegment: 1, segmentPromptMode: "ai_refined", refinementPrompt: "", defaultRefinementPrompt: "",
+        updatedAt: null, campaignImageProviderProfileId: null, campaignTextProviderProfileId: claim.providerProfileId
+      })),
+      createProvisionalSet: vi.fn(async () => "provisional-set"), createProvisionalSegment: vi.fn(async () => undefined),
+      promoteProvisionalSet: vi.fn(async () => undefined), orphanProvisionalSet: vi.fn(async () => undefined),
+      enqueueAcceptedTurnIllustrationSegments: vi.fn(async () => undefined)
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration, prepareIllustrationTextExecution: vi.fn(async () => frozenSnapshot), loadTextExecution: vi.fn(async () => provider),
+      promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "native-streaming-snapshot", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(collaborators.prepareIllustrationTextExecution).toHaveBeenCalledOnce();
+    expect(repository.saveStreamingSegments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      provisionalSetId: "provisional-set", illustrationTextExecutionSnapshot: frozenSnapshot
+    }));
+    expect((illustration.createProvisionalSegment as ReturnType<typeof vi.fn>).mock.calls.some(([, , request]) =>
+      (request as { textExecutionSnapshot?: unknown }).textExecutionSnapshot === frozenSnapshot
+    )).toBe(true);
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ illustrationTextExecutionSnapshot: frozenSnapshot }));
+  });
+
+  it("commits an accepted story when illustration preflight throws, carrying only unavailable metadata", async () => {
+    const job = completeGenerationExecutionPayload();
+    const output = JSON.stringify({ narration: "The observatory door opens onto a quiet moonlit hall.", choices: ["Enter.", "Wait.", "Study.", "Call."],
+      custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
+      canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), pauseForReview: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true),
+      saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true),
+      markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const provider = {
+      id: claim.providerProfileId, name: "Commit provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
+      model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async () => ({ content: output, responseId: "normal", finishReason: "stop", outputLimited: false, modelInstanceId: "i", usage: {}, reportedCost: null, rawMetadata: {} }))
+    };
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
+      prepareIllustrationTextExecution: vi.fn(async () => { throw new Error("synthetic metadata outage"); }),
+      promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "illustration-preflight-outage", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      illustrationTextExecutionSnapshot: { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" }
+    }));
+    expect(repository.markRecoverable).not.toHaveBeenCalled();
   });
 
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {

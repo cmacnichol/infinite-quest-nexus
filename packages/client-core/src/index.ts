@@ -46,6 +46,9 @@ export {
   ApiContractError,
   NexusApiError
 } from "./errors.js";
+export { createSelectionEditorState, reduceSelectionEditor, serializeSelectionEditorPatch } from "./providers/selection-editor.js";
+export { isExactStoryResponseFormatCapability } from "./providers/story-response-format-capability.js";
+export type { OverrideIntent, ResponseFormatPolicy, SelectionEditorEvent, SelectionEditorInput, SelectionEditorPatch, SelectionEditorState } from "./providers/selection-editor.js";
 export { createGenerationWorkflow } from "./generation/workflow.js";
 export { GenerationWorkflowProtocolError } from "./generation/types.js";
 export { generationDiagnosticPresentation, generationRecoveryGuidance, generationResponseFormatPresentation, generationReviewPresentation } from "./generation/projection.js";

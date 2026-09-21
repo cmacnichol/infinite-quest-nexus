@@ -18,6 +18,7 @@ events are:
 - `turn_generation_provider_started` — a provider call has begun.
 - `turn_generation_provider_completed` — a provider call returned.
 - `turn_generation_provider_failed` — a provider call failed before it returned.
+- `turn_generation_accounting_failed` — the provider returned, but writing its reported cost failed. The generation retains its existing retry or terminal behavior; this event does not imply another provider call.
 - `turn_generation_stream_progress` — sampled primary-stream progress.
 - `turn_generation_stream_persist_failed` — persisting a primary-stream update failed.
 - `turn_generation_validation_completed` — output validation finished.

@@ -41,7 +41,7 @@ function probeInput(values: Map<string, string>): ProbeInput {
   return {
     ...DEFAULT_STRUCTURED_OUTPUT_PROBE,
     model: values.get("--model") ?? DEFAULT_STRUCTURED_OUTPUT_PROBE.model,
-    route: values.get("--route") ?? DEFAULT_STRUCTURED_OUTPUT_PROBE.route,
+    route: values.get("--route") ?? "",
     inputUsdPerToken: numeric(values, "--input-usd-per-token", DEFAULT_STRUCTURED_OUTPUT_PROBE.inputUsdPerToken),
     outputUsdPerToken: numeric(values, "--output-usd-per-token", DEFAULT_STRUCTURED_OUTPUT_PROBE.outputUsdPerToken),
     contextTokens: numeric(values, "--context-tokens", DEFAULT_STRUCTURED_OUTPUT_PROBE.contextTokens),

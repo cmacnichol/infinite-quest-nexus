@@ -17,6 +17,11 @@ import type {
   RuntimeImageExecution,
   RuntimeTextExecution
 } from "./provider-credential-transport-adapter.js";
+import {
+  serializePreparedAuthoringRequest,
+  type PreparedAuthoringResponseContractExecution,
+  type PreparedAuthoringTextExecutor
+} from "./authoring-text-execution-preparation.js";
 
 export type ImageProviderAdapterDependencies = Readonly<{
   loadImageExecution(
@@ -42,6 +47,8 @@ export type PromptRefinementAdapterDependencies = Readonly<{
   recordProviderHealth: ImageProviderAdapterDependencies["recordProviderHealth"];
   buildRefinementInput(fictionText: string, storyContext: string): string;
   parseRefinedPrompt(content: string): string;
+  /** Frozen v2 routes dispatch through the shared plan-aware executor. */
+  preparedTextExecutor?: PreparedAuthoringTextExecutor;
 }>;
 
 export type ArtifactDownloadAdapterDependencies = Readonly<{
@@ -63,6 +70,16 @@ function sanitizedProviderMetadata(
       .map(([key, nested]) => [key, sanitize(nested)]));
   };
   return sanitize(metadata ?? {}) as Readonly<Record<string, unknown>>;
+}
+
+function assertIllustrationPromptEnvelope(content: string): void {
+  let value: unknown;
+  try { value = JSON.parse(content); } catch { throw new Error("Prompt refinement did not return the required JSON envelope."); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Prompt refinement did not return the required JSON envelope.");
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 1 || typeof record.image_prompt !== "string") {
+    throw new Error("Prompt refinement did not return the required image_prompt envelope.");
+  }
 }
 
 function imageArtifact(artifact: ImageProviderArtifact): IllustrationImageArtifact {
@@ -221,21 +238,86 @@ export function createIllustrationPromptRefinementAdapter(
   return {
     async refinePrompt(request) {
       try {
-        const provider = await dependencies.loadTextExecution(
-          request.ownerUserId,
-          request.providerProfileId,
-          request.model,
-        );
-        const result = await provider.execute({
-          systemPrompt: request.systemPrompt,
+        const logicalReservation = request.promptJobId && request.claimAttempt !== undefined && request.leaseOwner
+          ? {
+            kind: "illustration" as const,
+            ownerUserId: request.ownerUserId,
+            promptJobId: request.promptJobId,
+            claimAttempt: request.claimAttempt,
+            leaseOwner: request.leaseOwner,
+            operation: "initial" as const
+          }
+          : undefined;
+        const providerRequest = {
+          systemPrompt: request.textExecutionPlan?.prompt ?? request.systemPrompt,
           input: dependencies.buildRefinementInput(request.fictionText, request.storyContext)
-        });
+        };
+        const result = request.textExecutionPlan
+          ? await (() => {
+            if (!dependencies.preparedTextExecutor) {
+              throw Object.assign(new Error("The frozen illustration route has no prepared text executor."), {
+                code: "prepared_text_execution_unavailable"
+              });
+            }
+            if (!logicalReservation) {
+              throw Object.assign(new Error("The frozen illustration route has no durable prompt-job claim."), {
+                code: "prepared_route_reservation_required"
+              });
+            }
+            if (!request.textExecutionContract) {
+              return dependencies.preparedTextExecutor.execute({
+                plan: request.textExecutionPlan,
+                operation: "illustration_prompt_refinement",
+                ownerUserId: request.ownerUserId,
+                providerProfileId: request.providerProfileId,
+                request: providerRequest,
+                logicalReservation,
+                ...(request.currentClaim === undefined ? {} : { currentClaim: request.currentClaim })
+              });
+            }
+            const prepared: PreparedAuthoringResponseContractExecution = {
+              routeBasis: request.textExecutionContract.routeBasis,
+              plans: { illustrationPromptRefinement: request.textExecutionPlan },
+              modelAdvertisements: {},
+              frozenResponseContracts: request.textExecutionContract.frozenResponseContracts,
+              trustedOperationPrompts: { illustrationPromptRefinement: request.textExecutionContract.trustedOperationPrompt }
+            };
+            const preparedRequest = serializePreparedAuthoringRequest({
+              execution: {
+                providerType: request.textExecutionContract.providerType,
+                configuration: request.textExecutionContract.requestConfiguration
+              },
+              prepared,
+              operation: "illustrationPromptRefinement",
+              request: providerRequest
+            });
+            return dependencies.preparedTextExecutor.execute({
+              plan: request.textExecutionPlan,
+              operation: "illustration_prompt_refinement",
+              invocationKey: "illustration_prompt_refinement:nonstream",
+              frozenResponseContracts: request.textExecutionContract.frozenResponseContracts,
+              routeBasis: request.textExecutionContract.routeBasis,
+              trustedOperationPrompt: request.textExecutionContract.trustedOperationPrompt,
+              ownerUserId: request.ownerUserId,
+              providerProfileId: request.providerProfileId,
+              request: { ...providerRequest, systemPrompt: request.textExecutionPlan.prompt },
+              preparedRequest,
+              logicalReservation,
+              ...(request.currentClaim === undefined ? {} : { currentClaim: request.currentClaim })
+            });
+          })()
+          : await dependencies.loadTextExecution(
+            request.ownerUserId,
+            request.providerProfileId,
+            request.model,
+          ).then((provider) => provider.execute(providerRequest));
         await dependencies.recordProviderHealth(
           pool,
           request.ownerUserId,
           request.providerProfileId,
           true,
         );
+        if (request.textExecutionContract) assertIllustrationPromptEnvelope(result.content);
         return {
           providerRole: "text",
           providerProfileId: request.providerProfileId,
@@ -245,7 +327,8 @@ export function createIllustrationPromptRefinementAdapter(
             responseId: result.responseId,
             finishReason: result.finishReason,
             usage: result.usage,
-            reportedCost: result.reportedCost
+            reportedCost: result.reportedCost,
+            ...(result.physicalAttemptId ? { physicalAttemptId: result.physicalAttemptId } : {})
           })
         };
       } catch (error) {

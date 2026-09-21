@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { physicalTextAccountingSchema } from "./physical-text-accounting.js";
 
 export const apiTimestampSchema = z.union([z.iso.datetime(), z.date()]);
 
@@ -12,6 +13,7 @@ export const apiErrorEnvelopeSchema = z.object({
   correlationId: z.string().trim().min(1),
   code: z.string().trim().min(1).optional(),
   details: apiErrorDetailsSchema,
+  physicalAccounting: physicalTextAccountingSchema.optional(),
   issues: z.unknown().optional()
 });
 

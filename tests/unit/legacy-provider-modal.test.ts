@@ -20,10 +20,10 @@ describe("legacy provider modal defaults", () => {
   });
 
   it("keeps the response-format policy in the text-only provider configuration", () => {
-    expect(nexusSource).toContain('elements.providerResponseFormatPolicy.value = "legacy"');
+    expect(nexusSource).toContain('elements.providerResponseFormatPolicy.value = "required"');
     expect(nexusSource).toContain("configuration.textResponseFormatPolicy = elements.providerResponseFormatPolicy.value");
     expect(nexusSource).toContain('delete configuration.textResponseFormatPolicy');
-    expect(nexusSource).toContain("provider.configuration?.textResponseFormatPolicy || \"legacy\"");
+    expect(nexusSource).toContain("provider.configuration?.textResponseFormatPolicy || \"required\"");
   });
 
   it("renders bounded server capability status and clears stale capability details", () => {

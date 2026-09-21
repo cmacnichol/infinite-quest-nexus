@@ -20,6 +20,11 @@ import type {
   ProviderHealthRecord,
   ProviderModelInventory,
   ProviderModelInventoryRequest,
+  ProviderPresetDetail,
+  ProviderPresetDetailRequest,
+  ProviderPresetInventory,
+  ProviderPresetPageRequest,
+  ProviderRequestAbortSignal,
   ProviderProfileMutationResult,
   ProviderProfileView,
   ProviderResolutionRequest,
@@ -45,6 +50,10 @@ export interface ProviderProfilePort {
 export interface ProviderModelInventoryPort {
   listModels(request: ProviderModelInventoryRequest): Promise<ProviderModelInventory>;
   discoverCandidateModels(candidate: ProviderCandidate): Promise<ProviderModelInventory>;
+  listPresets(request: ProviderPresetPageRequest): Promise<ProviderPresetInventory>;
+  getPreset(request: ProviderPresetDetailRequest): Promise<ProviderPresetDetail>;
+  discoverCandidatePresets(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number; signal?: ProviderRequestAbortSignal }>): Promise<ProviderPresetInventory>;
+  resolveCandidatePreset(candidate: ProviderCandidate, slug: string, signal?: ProviderRequestAbortSignal): Promise<ProviderPresetDetail>;
 }
 
 export interface ProviderHealthPort {

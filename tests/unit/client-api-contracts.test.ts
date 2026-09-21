@@ -51,6 +51,32 @@ describe("client API response contracts", () => {
     expect("turnInputClassificationResponseSchema" in contracts).toBe(false);
   });
 
+  it("treats a missing native text capability from an old server as disabled", () => {
+    expect(metaResponseSchema.parse({
+      application: { name: "Infinite Quest Nexus", version: "old", commit: null, builtAt: null },
+      capabilities: { systemArchive: true }
+    }).capabilities.nativeTextExecutionPlans).toBe(false);
+    expect(metaResponseSchema.parse({
+      application: { name: "Infinite Quest Nexus", version: "new", commit: null, builtAt: null },
+      capabilities: { systemArchive: true, nativeTextExecutionPlans: true }
+    }).capabilities.nativeTextExecutionPlans).toBe(true);
+  });
+
+  it("strictly validates complete safe provider views", () => {
+    const provider = {
+      id: CAMPAIGN_ID, name: "OpenRouter", providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "@preset/night-shift",
+      textSelection: { kind: "openrouter_preset", slug: "night-shift" }, contextWindowTokens: 32768,
+      maxOutputTokens: 4096, temperature: 0.8, requestTimeoutMs: 300000,
+      configuration: { textResponseFormatPolicy: "required", textExecutionOverrides: { parameters: { temperature: 0.4 } } },
+      enabled: true, isDefault: true, healthStatus: "healthy", consecutiveFailures: 0,
+      lastHealthCheckAt: TIMESTAMP, lastHealthError: null, hasApiKey: true, createdAt: TIMESTAMP, updatedAt: TIMESTAMP,
+      responseFormatCapability: { version: 1, model: "@preset/night-shift", expectedRegistryDigest: "a".repeat(64), advertisedAt: null, operations: [] }
+    };
+    expect(providerListResponseSchema.parse({ providers: [provider] }).providers[0]).toEqual(provider);
+    expect(providerListResponseSchema.safeParse({ providers: [{ ...provider, encryptedApiKey: "PRIVATE" }] }).success).toBe(false);
+  });
+
   it.each([
     ["meta response", metaResponseSchema],
     ["session response", sessionResponseSchema],

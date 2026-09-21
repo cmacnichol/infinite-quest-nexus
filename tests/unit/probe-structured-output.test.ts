@@ -3,7 +3,9 @@ import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it, vi } from "vitest";
-import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
+import { loadSchemaVerificationFile } from "../../services/runtime/src/provider-schema-verification.js";
 import {
   DEFAULT_STRUCTURED_OUTPUT_PROBE,
   prepareStructuredOutputProbe,
@@ -15,27 +17,38 @@ import { main as probeCli } from "../../scripts/probe-structured-output.js";
 
 const options = {
   ...DEFAULT_STRUCTURED_OUTPUT_PROBE,
+  route: "novita/fp8",
   priceObservedAt: "2026-09-18T18:52:22.331Z"
 };
 
-it("prepares twelve offline synthetic request shapes without loading live runtime or fetching", async () => {
+it("requires configured preset routing as explicit input instead of silently selecting a public route", async () => {
+  const loadLiveRuntime = vi.fn();
+  await expect(probeCli(["--price-observed-at", options.priceObservedAt], { loadLiveRuntime }))
+    .rejects.toThrow(/route/);
+  expect(loadLiveRuntime).not.toHaveBeenCalled();
+});
+
+it("prepares the complete v2 operation and stream catalog without loading live runtime or fetching", async () => {
   const loadLiveRuntime = vi.fn();
   const fetch = vi.fn();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = fetch;
   const plan = prepareStructuredOutputProbe(options);
 
-  await probeCli(["--price-observed-at", options.priceObservedAt], { loadLiveRuntime });
+  await probeCli(["--route", options.route, "--price-observed-at", options.priceObservedAt], { loadLiveRuntime });
   expect(loadLiveRuntime).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
   globalThis.fetch = originalFetch;
-  expect(plan.requests).toHaveLength(12);
+  expect(plan.requests).toHaveLength(17);
   expect(plan.profileId).toBeNull();
   expect(plan.safePlan).toMatchObject({
     model: "deepseek/deepseek-v3.2-exp",
     route: "novita/fp8",
-    requestCount: 12,
-    maxInferenceCostUsd: 0.540918
+    configuredCandidateOrder: ["novita/fp8"],
+    pricingScope: "hypothetical_explicit_candidate_set",
+    targetPreset: "@preset/nexus-nsfw",
+    requestCount: 17,
+    maxInferenceCostUsd: 0.766301
   });
   expect(JSON.stringify(plan.safePlan)).not.toContain("Synthetic lantern");
   expect(JSON.stringify(plan.safePlan)).not.toContain("secret");
@@ -50,7 +63,7 @@ it("rejects invalid execution ceilings and non-canonical target metadata before 
     { ...options, contextTokens: 163_839 }
   ]) expect(() => prepareStructuredOutputProbe(invalid)).toThrow();
 
-  expect(() => prepareStructuredOutputProbe({ ...options, maxCalls: 11 })).toThrow(/12/);
+  expect(() => prepareStructuredOutputProbe({ ...options, maxCalls: 16 })).toThrow(/17/);
   expect(() => prepareStructuredOutputProbe({ ...options, maxOutputTokens: 2047 })).toThrow(/2048/);
 });
 
@@ -60,26 +73,26 @@ it("serializes registered strict schemas for the exact selected full route and d
 
   expect(plan.safePlan.largestBodyByteCount).toBe(largest);
   expect(plan.safePlan.routeConfigHash).toMatch(/^[a-f0-9]{64}$/);
-  expect(plan.safePlan.maxInferenceCostUsd).toBe(0.540918);
+  expect(plan.safePlan.maxInferenceCostUsd).toBe(0.766301);
   for (const request of plan.requests) {
     const body = JSON.parse(request.body);
     expect(body.provider).toEqual({ require_parameters: true, only: ["novita/fp8"] });
-    expect(body.response_format.json_schema.name).toBe(getProviderOutputSchema(request.operation).name);
-    expect(request.schemaHash).toBe(getProviderOutputSchema(request.operation).schemaHash);
+    expect(body.response_format.json_schema.name).toBe(getProviderOutputSchemaV2(request.operation).name);
+    expect(request.schemaHash).toBe(getProviderOutputSchemaV2(request.operation).schemaHash);
   }
   expect(JSON.parse(plan.requests[0]!.body).messages[1].content).toContain("tracker_updates");
 });
 
-it("keeps both synthetic nested tracker values through production parsing and validates every wire schema", () => {
+it("keeps synthetic nested tracker values through production parsing and validates every wire schema", () => {
   const plan = prepareStructuredOutputProbe(options);
   const validator = new Ajv({ strict: false, allErrors: true });
   for (const request of plan.requests) {
     const wire = request.syntheticResponse;
-    expect(validator.compile(getProviderOutputSchema(request.operation).schema)(wire)).toBe(true);
+    expect(validator.compile(getProviderOutputSchemaV2(request.operation).schema)(wire)).toBe(true);
     expect(request.validate(wire)).toEqual({ ok: true });
   }
   const stories = plan.requests.filter((request) => request.operation === "story");
-  expect(stories).toHaveLength(4);
+  expect(stories).toHaveLength(2);
   expect(stories.every((request) => request.validate(request.syntheticResponse).ok)).toBe(true);
 });
 
@@ -105,7 +118,7 @@ it("stops at the first failed synthetic response and fabricates no proposed reco
   expect(execute).toHaveBeenCalledTimes(1);
   expect(result.proposedRecords).toEqual([]);
   expect(result.failure).toMatchObject({ call: 1, reason: "response_identity_or_completion" });
-  expect(result.observations).toEqual([{ call: 1, operation: "story", streaming: false, status: "failed", returnedModel: "DeepSeek V3.2 Exp", returnedProviderRoute: "Novita" }]);
+  expect(result.observations).toEqual([{ call: 1, operation: "story", streaming: true, status: "failed", returnedModel: "DeepSeek V3.2 Exp", returnedProviderRoute: "Novita" }]);
 });
 
 it.each([
@@ -123,7 +136,7 @@ it.each([
   expect(result).toMatchObject({ proposedRecords: [], failure: { call: 1, reason } });
 });
 
-it("qualifies all twelve synthetic calls and produces only complete proposed verification records", async () => {
+it("qualifies the complete v2 catalog and round-trips proposed records through the production loader and eligibility gate", async () => {
   const plan = prepareStructuredOutputProbe(options);
   const execute: ProbeExecutor = async (request) => ({
     content: JSON.stringify(request.syntheticResponse),
@@ -136,11 +149,35 @@ it("qualifies all twelve synthetic calls and produces only complete proposed ver
   const result = await runStructuredOutputProbe(plan, execute, { now: "2026-09-18T18:52:22.331Z" });
 
   expect(result.failure).toBeNull();
-  expect(result.proposedRecords).toHaveLength(12);
+  expect(result.proposedRecords).toHaveLength(17);
+  expect(result.proposedRecords.every((record) => record.version === 2 && record.adapterProtocol === "text-schema-adapter-v2")).toBe(true);
   expect(result.proposedRecords.every((record) => record.endpointIdentity === plan.endpointIdentity
     && record.routeConfigHash === plan.routeConfigHash
     && record.providerRoutingSlugs[0] === "novita/fp8")).toBe(true);
-  expect(result.currentWorkerInvocationCoverage).toEqual(["story:stream", "story:nonstream", "choices:nonstream", "continuity_review:nonstream"]);
+  expect(result.currentWorkerInvocationCoverage).toHaveLength(17);
+
+  const directory = join(tmpdir(), `iq-probe-records-${Date.now()}-${Math.random()}`);
+  const recordsPath = join(directory, "records.json");
+  const { mkdir, writeFile, rm } = await import("node:fs/promises");
+  await mkdir(directory);
+  try {
+    await writeFile(recordsPath, JSON.stringify(result.proposedRecords));
+    const loaded = loadSchemaVerificationFile(recordsPath, { now: () => Date.parse("2026-09-18T18:52:22.331Z") });
+    expect(loaded.records).toHaveLength(17);
+    const capabilities = createProviderResponseFormatCapabilities({ records: loaded.records, registryDigest: loaded.digest, now: () => Date.parse("2026-09-18T18:52:22.331Z") });
+    for (const record of result.proposedRecords) {
+      const eligibility = capabilities.eligibilityV2({
+        advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-18T18:52:22.331Z" },
+        providerType: "openrouter", endpointIdentity: record.endpointIdentity, model: record.model,
+        routeConfigHash: record.routeConfigHash, adapterProtocol: "text-schema-adapter-v2",
+        operation: record.operation, schemaHash: record.schemaHash, streaming: record.streaming,
+        now: "2026-09-18T18:52:22.331Z", nativeOpenTrackerObjects: record.nativeOpenTrackerObjects
+      });
+      expect(eligibility.status).toBe("verified");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 it("rejects stale price evidence and refuses execution before runtime loading when no private report is reserved", async () => {
@@ -150,8 +187,8 @@ it("rejects stale price evidence and refuses execution before runtime loading wh
     "--execute", "--model", options.model, "--route", options.route,
     "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken),
     "--price-observed-at", options.priceObservedAt, "--context-tokens", String(options.contextTokens),
-    "--max-calls", "12", "--max-output-tokens", "2048", "--max-input-tokens", "163840",
-    "--max-cost-usd", "0.540918", "--accept-max-cost-usd", "0.540918",
+    "--max-calls", "17", "--max-output-tokens", "2048", "--max-input-tokens", "163840",
+    "--max-cost-usd", "0.766301", "--accept-max-cost-usd", "0.766301",
     "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved"
   ], { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow(/private --report/);
   expect(loadLiveRuntime).not.toHaveBeenCalled();
@@ -169,16 +206,16 @@ it("rejects unknown, duplicate, and missing execute guards before loading runtim
 
 it.each([
   ["--max-input-tokens", "163839"],
-  ["--max-cost-usd", "0.540917"],
-  ["--accept-max-cost-usd", "0.540917"]
+  ["--max-cost-usd", "0.766300"],
+  ["--accept-max-cost-usd", "0.766300"]
 ])("rejects a fully specified below-ceiling %s before loading runtime", async (changedFlag, changedValue) => {
   const report = join(tmpdir(), `iq-probe-guard-${Date.now()}-${Math.random()}.json`);
   const loadLiveRuntime = vi.fn();
   const args = [
     "--execute", "--model", options.model, "--route", options.route,
     "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken),
-    "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "12", "--max-output-tokens", "2048",
-    "--max-input-tokens", "163840", "--max-cost-usd", "0.540918", "--accept-max-cost-usd", "0.540918",
+    "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "17", "--max-output-tokens", "2048",
+    "--max-input-tokens", "163840", "--max-cost-usd", "0.766301", "--accept-max-cost-usd", "0.766301",
     "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
   ];
   args[args.indexOf(changedFlag) + 1] = changedValue;
@@ -190,7 +227,7 @@ it.each([
 it("keeps dry-run stdout free of synthetic prompt content", async () => {
   const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   try {
-    await probeCli(["--price-observed-at", options.priceObservedAt], { loadLiveRuntime: vi.fn() });
+    await probeCli(["--route", options.route, "--price-observed-at", options.priceObservedAt], { loadLiveRuntime: vi.fn() });
     expect(write.mock.calls.join("\n")).not.toContain("tracker_updates");
   } finally { write.mockRestore(); }
 });
@@ -211,7 +248,7 @@ it("sets the standalone runtime role for documented execute arguments and attemp
   }));
   try {
     await expect(probeCli([
-      "--execute", "--model", options.model, "--route", options.route, "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken), "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "12", "--max-output-tokens", "2048", "--max-input-tokens", "163840", "--max-cost-usd", "0.540918", "--accept-max-cost-usd", "0.540918", "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
+      "--execute", "--model", options.model, "--route", options.route, "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken), "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "17", "--max-output-tokens", "2048", "--max-input-tokens", "163840", "--max-cost-usd", "0.766301", "--accept-max-cost-usd", "0.766301", "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
     ], { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow(/Probe execution failed/);
     expect(poolEnd).toHaveBeenCalledTimes(1);
     expect(transportClose).toHaveBeenCalledTimes(1);

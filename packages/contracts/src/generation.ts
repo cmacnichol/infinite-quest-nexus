@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { selectionCompatibilityId, textModelSelectionSchema } from "./provider-selection.js";
 import { generationResponseFormatProjectionSchema } from "./generation-response-format-projection.js";
 export {
   canonicalFactUpdateSchema,
@@ -15,6 +16,7 @@ import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
 import { generationFailureDiagnosticProjectionSchema, generationReviewTransportSchema } from "./generation-review.js";
+import { textExecutionOverridesSchema } from "./text-execution-plan.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
 export const providerRoleSchema = z.enum(["text", "image", "embedding", "intent"]);
@@ -31,6 +33,7 @@ export const providerProfileInputSchema = z.object({
   providerRole: providerRoleSchema.default("text"),
   baseUrl: z.url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), "Base URL must use HTTP or HTTPS."),
   defaultModel: z.string().trim().max(500).default(""),
+  textSelection: textModelSelectionSchema.optional(),
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).default(32768),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).default(4096),
   temperature: z.coerce.number().min(0).max(2).default(0.8),
@@ -61,6 +64,7 @@ export const providerProfileUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   baseUrl: z.url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), "Base URL must use HTTP or HTTPS.").optional(),
   defaultModel: z.string().trim().max(500).optional(),
+  textSelection: textModelSelectionSchema.optional(),
   contextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional(),
   maxOutputTokens: z.coerce.number().int().min(128).max(262144).optional(),
   temperature: z.coerce.number().min(0).max(2).optional(),
@@ -89,6 +93,10 @@ export const generationRequestSchema = z.object({
   classificationId: z.uuid().optional(),
   providerProfileId: z.uuid().optional(),
   model: z.string().trim().max(500).optional(),
+  /** Typed native selection. The legacy model field remains its exact compatibility alias. */
+  textSelection: textModelSelectionSchema.optional(),
+  /** Omitted inherits same-selection saved intent; null restores profile/Preset inheritance. */
+  textExecutionOverrides: textExecutionOverridesSchema.nullable().optional(),
   idempotencyKey: z.string().trim().min(8).max(200),
   context: z.object({
     budgetTokens: z.coerce.number().int().min(512).max(4_000_000).default(32000),
@@ -96,6 +104,10 @@ export const generationRequestSchema = z.object({
     recentTurns: z.coerce.number().int().min(1).max(100).default(8),
     modelContextWindowTokens: z.coerce.number().int().min(1024).max(4_000_000).optional()
   }).default({ budgetTokens: 32000, compression: "auto", recentTurns: 8 })
+}).superRefine((value, context) => {
+  if (value.model && value.textSelection && value.model !== selectionCompatibilityId(value.textSelection)) {
+    context.addIssue({ code: "custom", path: ["textSelection"], message: "model and textSelection contradict each other." });
+  }
 });
 
 export const generationRetryLatestRequestSchema = generationRequestSchema.extend({

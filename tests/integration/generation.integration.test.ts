@@ -298,7 +298,7 @@ integration("durable Story Engine integration", () => {
       maxOutputTokens: 4096,
       temperature: 0,
       enabled: true,
-      configuration: {}
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret);
     providerId = provider.id;
   });
@@ -1009,7 +1009,7 @@ integration("durable Story Engine integration", () => {
       const streamedStory = validStory(narration);
       await pool.query(
         "UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1",
-        [providerId, JSON.stringify({ streaming: true })]
+        [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]
       );
       replies.push({ content: streamedStory, streamChunks: [streamedStory] });
       const job = await queue(imported.campaignId, "Continue into the accepted scene.");
@@ -1089,7 +1089,7 @@ integration("durable Story Engine integration", () => {
     } finally {
       await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON turn_illustration_sets`);
       await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
     }
   });
 
@@ -1226,7 +1226,7 @@ integration("durable Story Engine integration", () => {
       maxOutputTokens: 4096,
       temperature: 0,
       enabled: true,
-      configuration: {}
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret);
     const before = await pool.query<{ id: string; narration: string; active_turn_number: number }>(
       `SELECT t.id, t.narration, c.active_turn_number
@@ -2273,7 +2273,7 @@ integration("durable Story Engine integration", () => {
     const streamedDraft = validStory("Private streamed marker: she rolls a 17 and opens Location Gamma.");
     const acceptedStory = validStory("Her practiced touch opens Location Gamma.");
     const requestOffset = requests.length;
-    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
     try {
       replies.push(
         {
@@ -2296,7 +2296,7 @@ integration("durable Story Engine integration", () => {
       const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
       expect(turn.rows[0]?.narration).toBe("Her practiced touch opens Location Gamma.");
     } finally {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
     }
   });
 
@@ -2309,7 +2309,7 @@ integration("durable Story Engine integration", () => {
     const warnSpy = vi.spyOn(logger, "warn");
     const errorSpy = vi.spyOn(logger, "error");
     try {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
       replies.push(
         { content: streamedDraft, streamChunks: [streamedDraft] },
         { content: acceptedStory }
@@ -2391,7 +2391,7 @@ integration("durable Story Engine integration", () => {
       expect(serializedLogs).not.toContain(acceptedStory);
       expect(serializedLogs).not.toContain("Open Location Gamma.");
     } finally {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
       infoSpy.mockRestore();
       warnSpy.mockRestore();
       errorSpy.mockRestore();
@@ -2439,7 +2439,7 @@ integration("durable Story Engine integration", () => {
         .map(([event]) => event)
         .filter((event): event is Record<string, unknown> => typeof event === "object" && event !== null && "event" in event);
       expect(events).toEqual(expect.arrayContaining([
-        expect.objectContaining({ event: "turn_generation_provider_failed", errorCode: "unclassified_error" })
+        expect.objectContaining({ event: "turn_generation_accounting_failed", errorCode: "unclassified_error" })
       ]));
       expect(events).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ event: "turn_generation_failed" })
@@ -2479,7 +2479,7 @@ integration("durable Story Engine integration", () => {
       return originalQuery(...args);
     }) as any);
     try {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
       replies.push({ content: streamedStory, streamChunks, streamChunkDelayMs: 400 });
       const job = await queue(imported.campaignId);
       await runGenerationJob(pool, "story-worker-stream-sampling", 30, credentialSecret);
@@ -2495,7 +2495,7 @@ integration("durable Story Engine integration", () => {
       ]);
       expect(JSON.stringify(events)).not.toContain(unsafeCode);
     } finally {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
       querySpy.mockRestore();
       infoSpy.mockRestore();
       warnSpy.mockRestore();
@@ -2648,7 +2648,7 @@ integration("durable Story Engine integration", () => {
     const streamedDraft = validStory("First visible streamed draft: she rolls a 17 and opens Location Gamma.");
     const hiddenRepairDraft = '{"narration":"Hidden repair draft';
     const requestOffset = requests.length;
-    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
     try {
       replies.push(
         { content: streamedDraft, streamChunks: [streamedDraft] },
@@ -2671,7 +2671,7 @@ integration("durable Story Engine integration", () => {
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "recoverable", partialOutput: expect.stringContaining("First visible streamed draft") });
       expect(await getGenerationReview(pool, job.id)).toMatchObject({ canKeep: false, canRetry: false });
     } finally {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
     }
   });
 
@@ -2682,7 +2682,7 @@ integration("durable Story Engine integration", () => {
     const hiddenSceneRewrite = '{"narration":"Hidden scene rewrite';
     const acceptedStory = validStory("The accepted scene resolves at Location Gamma.");
     const requestOffset = requests.length;
-    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
     try {
       replies.push(
         { content: streamedDraft, streamChunks: [streamedDraft] },
@@ -2700,7 +2700,7 @@ integration("durable Story Engine integration", () => {
       }));
       await runGenerationJob(pool, "story-worker-scene-preview-a", 30, credentialSecret);
 
-      const initialRequests = requests.slice(requestOffset);
+      const initialRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
       expect(initialRequests).toHaveLength(2);
       expect(initialRequests[0]?.stream).toBe(true);
       expect(initialRequests.slice(1).every((request) => request.stream !== true)).toBe(true);
@@ -2715,21 +2715,23 @@ integration("durable Story Engine integration", () => {
       expect(retried.partialOutput).toContain("First visible scene preview");
       expect(retried.partialOutput).not.toContain("Hidden scene rewrite");
 
+      // Explicit Retry starts from a new candidate; the obsolete hidden rewrite must not become its input.
+      replies.length = 0;
       replies.push(
         { content: acceptedStory },
         { content: JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] }) }
       );
       await runGenerationJob(pool, "story-worker-scene-preview-b", 30, credentialSecret);
 
-      const allRequests = requests.slice(requestOffset);
-      expect(allRequests).toHaveLength(5);
+      const allRequests = requests.slice(requestOffset).filter((request) => Array.isArray(request.messages));
+      expect(allRequests).toHaveLength(4);
       expect(allRequests.filter((request) => request.stream === true)).toHaveLength(1);
       expect(allRequests.slice(1).every((request) => request.stream !== true)).toBe(true);
       expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "completed" });
       const turn = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id = $1 AND turn_number = 3", [imported.campaignId]);
       expect(turn.rows[0]?.narration).toBe("The accepted scene resolves at Location Gamma.");
     } finally {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
     }
   });
 
@@ -2789,13 +2791,13 @@ integration("durable Story Engine integration", () => {
 
   it("prevents an in-flight worker from committing after cancellation", async () => {
     const imported = await campaign();
-    const job = await queue(imported.campaignId, "Do not accept this in-flight action.");
     const beforeTurns = await pool.query("SELECT id FROM turns WHERE campaign_id = $1 ORDER BY turn_number", [imported.campaignId]);
     const beforeState = await pool.query("SELECT revision FROM campaign_state WHERE campaign_id = $1", [imported.campaignId]);
     const beforeMemories = await pool.query("SELECT id FROM chronicle_memories WHERE campaign_id = $1 AND ordinal = 3", [imported.campaignId]);
     const streamedStory = validStory("The worker must discard this completed provider output after cancellation.");
     const streamChunks = [streamedStory.slice(0, 160), streamedStory.slice(160)];
-    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true })]);
+    await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
+    const job = await queue(imported.campaignId, "Do not accept this in-flight action.");
     try {
       replies.push({ content: streamedStory, streamChunks, streamChunkDelayMs: 800 });
       const inFlightWorker = runGenerationJob(pool, "in-flight-cancel-worker", 30, credentialSecret);
@@ -2807,7 +2809,7 @@ integration("durable Story Engine integration", () => {
       await expect(cancelGeneration(pool, job.id)).resolves.toMatchObject({ id: job.id, status: "cancelled" });
       expect(await inFlightWorker).toBe(true);
     } finally {
-      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({})]);
+      await pool.query("UPDATE provider_profiles SET configuration = $2::jsonb WHERE id = $1", [providerId, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
     }
 
     expect(await getGenerationJob(pool, job.id)).toMatchObject({ status: "cancelled", partialOutput: null });

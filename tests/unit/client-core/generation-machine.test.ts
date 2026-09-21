@@ -134,6 +134,35 @@ describe("generation machine", () => {
     });
   });
 
+  it("compares v2 requested selection and observed serving identity without conflating them", () => {
+    const machine = createGenerationMachine();
+    const responseFormat = {
+      version: 2 as const,
+      savedPolicy: "required" as const,
+      effectiveMode: "json_schema" as const,
+      schemaVersion: "story-v2",
+      schemaHash: "a".repeat(64),
+      operation: "story" as const,
+      streaming: true,
+      requestedSelection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      assurance: "trusted_preset" as const,
+      actualServedIdentity: { status: "unknown" as const, model: null, providerRoute: null },
+      preflight: "selected" as const,
+      preflightDiagnostic: null,
+      diagnosticCode: null
+    };
+    const first = snapshot({ status: "generating", responseFormat });
+    machine.observe(first);
+    expect(machine.observe(first)).toEqual({ kind: "duplicate" });
+    expect(machine.observe(snapshot({
+      status: "generating",
+      responseFormat: {
+        ...responseFormat,
+        actualServedIdentity: { status: "known", model: "served-model", providerRoute: "served-route" }
+      }
+    }))).toMatchObject({ kind: "accepted", narrationChanged: false });
+  });
+
   it("emits a narration change when the current narration is cleared", () => {
     const machine = createGenerationMachine();
     machine.observe(snapshot({ status: "generating", partialNarration: "The gate groans." }));

@@ -1,14 +1,21 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GenerationApplicationError } from "../../packages/application/src/index.js";
 import { generationRequestSchema, generationRetryLatestRequestSchema } from "../../packages/contracts/src/generation.js";
+import type { TextExecutionRouteBasis } from "../../packages/contracts/src/text-execution-plan.js";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
+import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import { loadPrivateProviderCredentialRow, writeEncryptedProviderCredential } from "../../packages/database/src/provider-repository.js";
+import { createApiGenerationApplication } from "../../services/runtime/src/generation-api-composition.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
@@ -52,6 +59,30 @@ integration("PostgreSQL generation command repository", () => {
       promptProtocolVersion: providerPromptProtocolVersion,
       readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
         readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds])
+    });
+  }
+
+  function frozenRouteBasis() {
+    const basis = {
+      version: 2 as const, selection: { kind: "model" as const, modelId: "repository-test-model" }, preset: null,
+      candidates: [{ modelId: "repository-test-model", providerPolicy: {}, contextWindowTokens: 32768, maxOutputTokens: 4096 }],
+      presetSystemPrompt: "", parameters: {}, endpointReference: "provider-endpoint",
+      credentialReference: providerProfileId, profileRevision: "a".repeat(64), requestTimeoutMs: 30_000,
+      protocolVersion: "text-execution-route-basis-v2"
+    };
+    return { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+  }
+
+  function plannedRepository(
+    prepare: () => Promise<TextExecutionRouteBasis> = async () => frozenRouteBasis(),
+    verify: () => Promise<boolean> = async () => true
+  ) {
+    return createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) => loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) => readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
+      prepareTextExecutionRouteBasis: prepare,
+      verifyTextExecutionRouteBasis: verify
     });
   }
 
@@ -131,6 +162,460 @@ integration("PostgreSQL generation command repository", () => {
       context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
     });
   }
+
+  it("persists a prepared plan privately and replays before a second preflight", async () => {
+    const imported = await campaign();
+    let calls = 0;
+    const commands = plannedRepository(async () => { calls += 1; return frozenRouteBasis(); });
+    const request = appendRequest("Freeze this route before queueing.");
+    const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
+    const replay = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
+    expect(replay).toMatchObject({ id: queued.id, duplicate: true });
+    expect(calls).toBe(1);
+    const saved = await pool.query<{ basis: unknown }>("SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]);
+    expect(saved.rows[0]?.basis).toMatchObject({ version: 2, routeBasisHash: frozenRouteBasis().routeBasisHash });
+  });
+
+  it("persists the same frozen private plan for replacement jobs", async () => {
+    const imported = await campaign();
+    const queued = await plannedRepository().enqueueReplacement(
+      { ownerUserId, campaignId: imported.campaignId }, replacementRequest("Freeze the replacement route.")
+    );
+    const saved = await pool.query<{ basis: unknown; status: string }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis,status FROM generation_jobs WHERE id=$1", [queued.id]
+    );
+    expect(saved.rows[0]).toMatchObject({ status: "replacement_queued", basis: { version: 2, routeBasisHash: frozenRouteBasis().routeBasisHash } });
+  });
+
+  it("rejects a changed profile, credential, or campaign provider after preflight without queueing", async () => {
+    for (const changed of ["profile", "credential", "campaign-provider"]) {
+      const imported = await campaign();
+      const commands = plannedRepository(async () => frozenRouteBasis(), async () => false);
+      await expect(commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest(`Reject ${changed} revision race.`)))
+        .rejects.toMatchObject({ kind: "conflict", details: { reason: "provider_profile_changed_refresh_required" } });
+      await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]))
+        .resolves.toMatchObject({ rows: [{ count: "0" }] });
+    }
+  });
+
+  it("rejects a tampered preflight plan before an accepted turn or Chronicle work can be queued", async () => {
+    const imported = await campaign();
+    const tampered = { ...frozenRouteBasis(), routeBasisHash: "b".repeat(64) };
+    const before = await pool.query<{ jobs: string; turns: string; chronicle: string }>(
+      `SELECT (SELECT count(*)::text FROM generation_jobs WHERE campaign_id=$1) AS jobs,
+              (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [imported.campaignId]
+    );
+    await expect(plannedRepository(async () => tampered).enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId }, appendRequest("Reject the tampered queue descriptor.")
+    )).rejects.toMatchObject({ kind: "invalid_state" });
+    await expect(pool.query<{ jobs: string; turns: string; chronicle: string }>(
+      `SELECT (SELECT count(*)::text FROM generation_jobs WHERE campaign_id=$1) AS jobs,
+              (SELECT count(*)::text FROM turns WHERE campaign_id=$1) AS turns,
+              (SELECT count(*)::text FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [imported.campaignId]
+    )).resolves.toMatchObject({ rows: before.rows });
+  });
+
+  it("keeps v1 queue jobs without a text execution plan", async () => {
+    const imported = await campaign();
+    const queued = await repository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Keep historical queue behavior."));
+    await expect(pool.query<{ basis: unknown }>("SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ basis: null }] });
+  });
+
+  it("retains a frozen plan when a recoverable job is retried", async () => {
+    const imported = await campaign();
+    const commands = plannedRepository();
+    const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Retry without changing route."));
+    await pool.query("UPDATE generation_jobs SET status='recoverable',error_code='provider_unavailable' WHERE id=$1", [queued.id]);
+    await expect(commands.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ id: queued.id, status: "queued" });
+    await expect(pool.query<{ basis: unknown }>("SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ basis: { routeBasisHash: frozenRouteBasis().routeBasisHash } }] });
+  });
+
+  it("retains a frozen plan after an expired lease is reclaimed", async () => {
+    const imported = await campaign();
+    const queued = await plannedRepository().enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId }, appendRequest("Reclaim the original frozen route.")
+    );
+    await pool.query("UPDATE generation_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL WHERE id<>$1 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')", [queued.id]);
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const first = await execution.claimNext({ workerId: `first-${crypto.randomUUID()}`, leaseSeconds: 30 });
+    expect(first?.jobId).toBe(queued.id);
+    await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [queued.id]);
+    const second = await execution.claimNext({ workerId: `second-${crypto.randomUUID()}`, leaseSeconds: 30 });
+    expect(second).toMatchObject({ jobId: queued.id, attempts: 2 });
+    await expect(pool.query<{ attempts: number; basis: unknown }>(
+      "SELECT attempts,orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]
+    )).resolves.toMatchObject({ rows: [{ attempts: 2, basis: { routeBasisHash: frozenRouteBasis().routeBasisHash } }] });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
+  it("resumes a queued native route after ordinary profile edits with its saved limits and policy", async () => {
+    const imported = await campaign();
+    const basisWithoutHash = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "queued" },
+      preset: { slug: "queued", versionId: "queued-v1", configHash: "c".repeat(64) },
+      candidates: [{ modelId: "queued-model", providerPolicy: { order: ["queued-model"] }, contextWindowTokens: 12000, maxOutputTokens: 1400 }],
+      presetSystemPrompt: "Saved queue prompt.", parameters: { temperature: 0.21 }, endpointReference: "provider-endpoint",
+      credentialReference: providerProfileId, profileRevision: "b".repeat(64), authorityRevision: "a".repeat(64), requestTimeoutMs: 23456,
+      protocolVersion: "text-execution-route-basis-v2"
+    };
+    const basis = { ...basisWithoutHash, routeBasisHash: sha256(stableStringify(basisWithoutHash)) };
+    const commands = plannedRepository(async () => basis);
+    const workerId = `saved-route-${crypto.randomUUID()}`;
+    const queued = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Resume the frozen native queue."));
+    await pool.query("UPDATE provider_profiles SET temperature=0.91,request_timeout_ms=98765,configuration=$2::jsonb WHERE id=$1", [providerProfileId, JSON.stringify({ changed: true })]);
+    await pool.query("UPDATE generation_jobs SET status='recoverable',error_code='provider_unavailable' WHERE id=$1", [queued.id]);
+    await expect(commands.retry({ ownerUserId, jobId: queued.id })).resolves.toMatchObject({ status: "queued" });
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const claim = await execution.claimNext({ workerId, leaseSeconds: 30 });
+    const payload = await execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    expect(payload?.orchestration_private?.textExecutionRouteBasis).toMatchObject({
+      routeBasisHash: basis.routeBasisHash, parameters: { temperature: 0.21 }, requestTimeoutMs: 23456,
+      candidates: [{ modelId: "queued-model", providerPolicy: { order: ["queued-model"] }, contextWindowTokens: 12000, maxOutputTokens: 1400 }]
+    });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+    await pool.query("UPDATE provider_profiles SET temperature=0,request_timeout_ms=300000,configuration='{}'::jsonb WHERE id=$1", [providerProfileId]);
+  });
+
+  it("rejects post-queue plan tampering at the database immutability fence", async () => {
+    const imported = await campaign();
+    const queued = await plannedRepository().enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest("Reject tampering before dispatch."));
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `tamper-${crypto.randomUUID()}`;
+    await pool.query("UPDATE generation_jobs SET status='failed',lease_owner=NULL,lease_expires_at=NULL WHERE id<>$1 AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')", [queued.id]);
+    const claim = await execution.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    await expect(pool.query(
+      "UPDATE generation_jobs SET orchestration_private=jsonb_set(orchestration_private,'{textExecutionRouteBasis,routeBasisHash}',$2::jsonb) WHERE id=$1",
+      [queued.id, JSON.stringify("b".repeat(64))]
+    )).rejects.toThrow(/immutable/i);
+    await expect(execution.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! }))
+      .resolves.toMatchObject({ orchestration_private: { textExecutionRouteBasis: { routeBasisHash: frozenRouteBasis().routeBasisHash } } });
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
+  it("freezes ordinary metadata-time edits while rejecting credential and campaign authority changes", async () => {
+    const alternateProvider = await createProvider(pool, {
+      name: `Alternate native preset ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "alternate-model", contextWindowTokens: 32768,
+      maxOutputTokens: 4096, temperature: 0, enabled: true, configuration: {}
+    }, credentialSecret);
+    const presetProvider = await createProvider(pool, {
+      name: `Native preset ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "@preset/test",
+      contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, enabled: true, configuration: {}, apiKey: "before-rotation"
+    }, credentialSecret);
+    await pool.query("UPDATE provider_profiles SET text_selection=$2::jsonb WHERE id=$1", [presetProvider.id, JSON.stringify({ kind: "openrouter_preset", slug: "test" })]);
+    await expect(loadPrivateProviderCredentialRow(pool as unknown as DatabaseClient, ownerUserId, presetProvider.id)).resolves.toMatchObject({
+      textSelection: { kind: "openrouter_preset", slug: "test" }
+    });
+    let activeTransactions = 0;
+    const trackQuery = (target: { query: (...argumentsList: any[]) => any }) => async (...argumentsList: any[]) => {
+      const statement = typeof argumentsList[0] === "string" ? argumentsList[0] : argumentsList[0]?.text;
+      if (statement === "BEGIN") activeTransactions += 1;
+      try { return await target.query(...argumentsList); }
+      finally { if (statement === "COMMIT" || statement === "ROLLBACK") activeTransactions -= 1; }
+    };
+    const trackedPool = new Proxy(pool, {
+      get(target, property, receiver) {
+        if (property === "query") return trackQuery(target as unknown as { query: (...argumentsList: any[]) => any });
+        if (property === "connect") return async () => {
+          const client = await target.connect();
+          return new Proxy(client, { get(clientTarget, clientProperty, clientReceiver) {
+            if (clientProperty === "query") return trackQuery(clientTarget as unknown as { query: (...argumentsList: any[]) => any });
+            const value = Reflect.get(clientTarget, clientProperty, clientReceiver);
+            return typeof value === "function" ? value.bind(clientTarget) : value;
+          }});
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }) as DatabasePool;
+    const descriptor = async (database: DatabaseClient | DatabasePool, id: string, model?: string) => {
+      const row = await loadPrivateProviderCredentialRow(database as DatabaseClient, ownerUserId, id);
+      if (!row) throw new Error("Expected a real enabled provider profile.");
+      return { id: row.providerProfileId, name: row.name, providerRole: "text" as const, providerType: row.providerType,
+        model: model?.trim() || row.defaultModel, contextWindowTokens: row.contextWindowTokens, maxOutputTokens: row.maxOutputTokens,
+        temperature: row.temperature, requestTimeoutMs: row.requestTimeoutMs, endpointIdentity: row.baseUrl,
+        executionRevision: row.executionRevision,
+        authorityRevision: createHash("sha256").update(JSON.stringify({ providerProfileId: row.providerProfileId, providerRole: row.providerRole, baseUrl: row.baseUrl, credential: row.encryptedCredential })).digest("hex"),
+        ...(row.textSelection ? { textSelection: row.textSelection } : {}), configuration: row.configuration };
+    };
+    for (const mutation of ["profile", "credential", "campaign-default"] as const) {
+      const imported = await campaign();
+      await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, presetProvider.id]);
+      let metadataCalls = 0;
+      const mutate = async () => {
+        if (mutation === "profile") await pool.query("UPDATE provider_profiles SET max_output_tokens=max_output_tokens+1 WHERE id=$1", [presetProvider.id]);
+        if (mutation === "credential") await writeEncryptedProviderCredential(pool as unknown as DatabaseClient, ownerUserId, presetProvider.id, { ciphertext: `rotated-${crypto.randomUUID()}`, nonce: "rotated-nonce", authTag: "rotated-tag", keyVersion: 1 });
+        if (mutation === "campaign-default") await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id=$1", [imported.campaignId, alternateProvider.id]);
+      };
+      const collaborators = {
+        execution: { text: async (scope: { ownerUserId: string }, id: string) => descriptor(pool, id) },
+        loadQueuedTextProfile: (client: DatabaseClient, _owner: string, id: string, model?: string) => descriptor(client, id, model),
+        responseFormatInventory: {
+          getPreset: async () => { expect(activeTransactions).toBe(0); metadataCalls += 1; await mutate(); return { providerProfileId: presetProvider.id, preset: { slug: "test", versionId: "v1", config: { model: "preset-model" }, configHash: "c".repeat(64) } }; },
+          listModels: async () => { expect(activeTransactions).toBe(0); metadataCalls += 1; return { providerProfileId: presetProvider.id, providerRole: "text" as const, models: [{ id: "preset-model", name: "Preset", contextWindowTokens: 32768 }] }; }
+        }, responseFormatCapabilities: { registryDigest: "d".repeat(64) }, promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() }
+      } as never;
+      const app = createApiGenerationApplication(trackedPool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+      const { providerProfileId: _ignored, ...campaignRequest } = appendRequest(`Reject real ${mutation} changes.`);
+      const enqueue = app.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse(campaignRequest));
+      if (mutation === "profile") {
+        const queued = await enqueue;
+        await expect(pool.query<{ basis: TextExecutionRouteBasis }>(
+          "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [queued.id]
+        )).resolves.toMatchObject({ rows: [{ basis: { profileRevision: expect.any(String), candidates: [{ maxOutputTokens: 4096 }] } }] });
+        await app.cancel({ ownerUserId, jobId: queued.id });
+      } else {
+        await expect(enqueue).rejects.toMatchObject({ kind: "conflict", details: { reason: "provider_profile_changed_refresh_required" } });
+      }
+      expect(metadataCalls).toBe(2);
+      await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]))
+        .resolves.toMatchObject({ rows: [{ count: mutation === "profile" ? "1" : "0" }] });
+    }
+  });
+
+  it("verifies an explicit model without preset metadata and short-circuits missing or foreign campaigns", async () => {
+    let profileCalls = 0;
+    let presetCalls = 0;
+    let modelCalls = 0;
+    const profile = { id: providerProfileId, name: "preset", providerRole: "text" as const, providerType: "openrouter" as const,
+      model: "@preset/test", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 1000,
+      endpointIdentity: "endpoint", executionRevision: "a".repeat(64), authorityRevision: "b".repeat(64),
+      textSelection: { kind: "openrouter_preset" as const, slug: "test" }, configuration: {} };
+    const collaborators = { execution: { text: async () => { profileCalls += 1; return profile; } }, loadQueuedTextProfile: async (_client: DatabaseClient, _owner: string, _id: string, model?: string) => ({ ...profile, model: model?.trim() || profile.model }),
+      responseFormatInventory: {
+        getPreset: async () => { presetCalls += 1; throw new Error("Preset metadata must not be called for an explicit model."); },
+        listModels: async () => {
+          modelCalls += 1;
+          return { providerProfileId, providerRole: "text" as const, models: [{
+            id: "direct-model", name: "Direct", contextWindowTokens: 32_768, maxOutputTokens: 4_096,
+            responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" }
+          }] };
+        }
+      },
+      responseFormatCapabilities: {
+        registryDigest: "d".repeat(64), now: () => "2026-09-20T00:00:00.000Z",
+        eligibilityV2: (input: { operation: Parameters<typeof getProviderOutputSchemaV2>[0]; streaming: boolean }) => ({
+          status: "verified" as const,
+          verification: {
+            version: 2 as const, providerType: "openrouter" as const, endpointIdentity: profile.endpointIdentity,
+            model: "direct-model", routeConfigHash: capabilityRouteConfigHash(profile.configuration),
+            adapterProtocol: "text-schema-adapter-v2" as const, operation: input.operation,
+            schemaHash: getProviderOutputSchemaV2(input.operation).schemaHash, streaming: input.streaming,
+            verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2026-09-21T00:00:00.000Z",
+            providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+          }
+        })
+      }, promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() } } as never;
+    const disabledCampaign = await campaign();
+    const disabled = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, false);
+    await expect(disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, appendRequest("Keep admission disabled.")))
+      .rejects.toMatchObject({ kind: "conflict", details: { reason: "native_text_execution_unavailable" } });
+    await expect(disabled.enqueueAppend({ ownerUserId, campaignId: disabledCampaign.campaignId }, generationRequestSchema.parse({
+      ...appendRequest("Use the historical direct model."), model: "direct-model"
+    }))).resolves.toMatchObject({ status: "queued" });
+    expect(profileCalls).toBe(0);
+    expect(presetCalls).toBe(0);
+    expect(modelCalls).toBe(0);
+    const app = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const imported = await campaign();
+    await app.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ ...appendRequest("Use the direct model."), model: "direct-model" }));
+    expect(presetCalls).toBe(0);
+    expect(modelCalls).toBe(2);
+    const foreignCampaignId = crypto.randomUUID();
+    await expect(app.enqueueAppend({ ownerUserId, campaignId: foreignCampaignId }, appendRequest("Do not discover a missing campaign.")))
+      .rejects.toMatchObject({ kind: "not_found", details: { campaignId: foreignCampaignId } });
+    expect(profileCalls).toBe(2);
+    expect(presetCalls).toBe(0);
+    expect(modelCalls).toBe(2);
+    const foreignOwner = await pool.query<{ id: string }>("INSERT INTO users (display_name) VALUES ('Native preflight foreign owner') RETURNING id");
+    const foreignWorld = await pool.query<{ id: string }>("INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Native preflight foreign world') RETURNING id", [foreignOwner.rows[0]!.id]);
+    const foreignVersion = await pool.query<{ id: string }>("INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,'{}'::jsonb) RETURNING id", [foreignWorld.rows[0]!.id, foreignOwner.rows[0]!.id]);
+    const foreignCampaign = await pool.query<{ id: string }>("INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Native preflight foreign campaign') RETURNING id", [foreignOwner.rows[0]!.id, foreignVersion.rows[0]!.id]);
+    await expect(app.enqueueAppend({ ownerUserId, campaignId: foreignCampaign.rows[0]!.id }, appendRequest("Do not discover a foreign campaign.")))
+      .rejects.toMatchObject({ kind: "not_found", details: { campaignId: foreignCampaign.rows[0]!.id } });
+    expect(profileCalls).toBe(2);
+    expect(presetCalls).toBe(0);
+    expect(modelCalls).toBe(2);
+  });
+
+  it("preflights an owner-default preset when the campaign has no provider binding", async () => {
+    const imported = await campaign();
+    const defaultPreset = await createProvider(pool, {
+      name: `Default native preset ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "@preset/default", contextWindowTokens: 32768,
+      maxOutputTokens: 4096, temperature: 0, enabled: true, configuration: {}
+    }, credentialSecret);
+    await pool.query("UPDATE provider_profiles SET is_default=true,text_selection=$2::jsonb WHERE id=$1", [defaultPreset.id, JSON.stringify({ kind: "openrouter_preset", slug: "default" })]);
+    try {
+      await pool.query("UPDATE campaigns SET text_provider_profile_id=NULL WHERE id=$1", [imported.campaignId]);
+      let metadataCalls = 0;
+      const profile = { id: defaultPreset.id, name: "default", providerRole: "text" as const, providerType: "openrouter" as const,
+        model: "@preset/default", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 1000,
+        endpointIdentity: "endpoint", executionRevision: "a".repeat(64), authorityRevision: "b".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "default" }, configuration: {} };
+      const collaborators = { execution: { text: async () => profile }, loadQueuedTextProfile: async () => profile,
+        responseFormatInventory: {
+          getPreset: async () => { metadataCalls += 1; return { providerProfileId: defaultPreset.id, preset: { slug: "default", versionId: "v1", config: { model: "preset-model" }, configHash: "c".repeat(64) } }; },
+          listModels: async () => { metadataCalls += 1; return { providerProfileId: defaultPreset.id, providerRole: "text" as const, models: [{ id: "preset-model", name: "Preset", contextWindowTokens: 32768 }] }; }
+        }, responseFormatCapabilities: { registryDigest: "d".repeat(64) }, promptTools: { protocolVersion: () => "test" }, prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() } } as never;
+      const app = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+      const { providerProfileId: _ignored, ...defaultRequest } = appendRequest("Freeze the owner default preset.");
+      await app.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse(defaultRequest));
+      expect(metadataCalls).toBe(2);
+      await expect(pool.query<{ providerProfileId: string; basis: unknown }>(
+        "SELECT provider_profile_id AS \"providerProfileId\",orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE campaign_id=$1", [imported.campaignId]
+      )).resolves.toMatchObject({ rows: [{ providerProfileId: defaultPreset.id, basis: { version: 2, preset: { slug: "default" }, authorityRevision: "b".repeat(64), parameters: { temperature: 0 }, requestTimeoutMs: 1000 } }] });
+    } finally {
+      await pool.query("UPDATE provider_profiles SET is_default=false WHERE id=$1", [defaultPreset.id]);
+    }
+  });
+
+  it("freezes typed and exact legacy preset overrides through the API while a concrete model replaces inheritance", async () => {
+    const nativeProvider = await createProvider(pool, {
+      name: `API native override ${crypto.randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: "https://openrouter.ai/api/v1", defaultModel: "@preset/inherited", contextWindowTokens: 32768,
+      maxOutputTokens: 4096, temperature: 0.35, enabled: true, configuration: {
+        textExecutionOverrides: { parameters: { temperature: 0.2, max_tokens: 1_000 }, conservativeContextWindowTokens: 12_000 }
+      }
+    }, credentialSecret);
+    await pool.query("UPDATE provider_profiles SET text_selection=$2::jsonb WHERE id=$1", [
+      nativeProvider.id, JSON.stringify({ kind: "openrouter_preset", slug: "inherited" })
+    ]);
+    const metadataCalls: string[] = [];
+    const profile = {
+      id: nativeProvider.id, name: "API native override", providerRole: "text" as const, providerType: "openrouter" as const,
+      model: "@preset/inherited", contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0.35,
+      requestTimeoutMs: 1_000, endpointIdentity: "api-native-endpoint", executionRevision: "e".repeat(64),
+      authorityRevision: "a".repeat(64), textSelection: { kind: "openrouter_preset" as const, slug: "inherited" },
+      configuration: { textExecutionOverrides: { parameters: { temperature: 0.2, max_tokens: 1_000 }, conservativeContextWindowTokens: 12_000 } }
+    };
+    const collaborators = {
+      execution: { text: async () => profile },
+      loadQueuedTextProfile: async (_client: DatabaseClient, _ownerUserId: string, _providerProfileId: string, model?: string) => ({
+        ...profile, model: model?.trim() || profile.model
+      }),
+      responseFormatInventory: {
+        getPreset: async ({ slug }: { slug: string }) => {
+          metadataCalls.push(`preset:${slug}`);
+          return { providerProfileId: nativeProvider.id, preset: {
+            slug, versionId: `${slug}-v1`, systemPrompt: `${slug} system prompt`, config: { model: `${slug}-model` }, configHash: sha256(`${slug}-config`)
+          } };
+        },
+        listModels: async () => {
+          metadataCalls.push("models");
+          return { providerProfileId: nativeProvider.id, providerRole: "text" as const, models: [
+            { id: "typed-model", name: "Typed", contextWindowTokens: 32768 },
+            { id: "legacy-model", name: "Legacy", contextWindowTokens: 32768 },
+            { id: "concrete-model", name: "Concrete", contextWindowTokens: 32768,
+              responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" } }
+          ] };
+        }
+      },
+      responseFormatCapabilities: {
+        registryDigest: "d".repeat(64), now: () => "2026-09-20T00:00:00.000Z",
+        eligibilityV2: (input: { operation: Parameters<typeof getProviderOutputSchemaV2>[0]; streaming: boolean }) => ({
+          status: "verified" as const,
+          verification: {
+            version: 2 as const, providerType: "openrouter" as const, endpointIdentity: profile.endpointIdentity,
+            model: "concrete-model", routeConfigHash: capabilityRouteConfigHash(profile.configuration),
+            adapterProtocol: "text-schema-adapter-v2" as const, operation: input.operation,
+            schemaHash: getProviderOutputSchemaV2(input.operation).schemaHash, streaming: input.streaming,
+            verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2026-09-21T00:00:00.000Z",
+            providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+          }
+        })
+      }, promptTools: { protocolVersion: () => "test" },
+      prompts: {}, costs: {}, reads: { getTurnCosts: async () => new Map() }
+    } as never;
+    const app = createApiGenerationApplication(pool, collaborators, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const inheritedCampaign = await campaign();
+    const typedCampaign = await campaign();
+    const requestOverrideCampaign = await campaign();
+    const typedReplacementCampaign = await campaign();
+    const concreteReplacementCampaign = await campaign();
+    const legacyCampaign = await campaign();
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=$2 WHERE id = ANY($1::uuid[])", [
+      [inheritedCampaign.campaignId, typedCampaign.campaignId, requestOverrideCampaign.campaignId, typedReplacementCampaign.campaignId, concreteReplacementCampaign.campaignId, legacyCampaign.campaignId], nativeProvider.id
+    ]);
+    const inherited = await app.enqueueAppend({ ownerUserId, campaignId: inheritedCampaign.campaignId }, generationRequestSchema.parse({
+      ...appendRequest("Freeze saved overrides for the inherited preset."), providerProfileId: nativeProvider.id
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [inherited.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "inherited" }, parameters: { temperature: 0.2, max_tokens: 1_000 },
+      candidates: [{ contextWindowTokens: 12_000, maxOutputTokens: 1_000 }]
+    } }] });
+    const typedRequest = generationRequestSchema.parse({
+      ...appendRequest("Freeze the typed API preset."), providerProfileId: nativeProvider.id,
+      textSelection: { kind: "openrouter_preset", slug: "typed" }
+    });
+    const typed = await app.enqueueAppend({ ownerUserId, campaignId: typedCampaign.campaignId }, typedRequest);
+    const replay = await app.enqueueAppend({ ownerUserId, campaignId: typedCampaign.campaignId }, typedRequest);
+    expect(replay).toMatchObject({ id: typed.id, duplicate: true });
+    expect(metadataCalls).toEqual(["preset:inherited", "models", "preset:typed", "models"]);
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [typed.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "typed" }, preset: { slug: "typed" }, presetSystemPrompt: "typed system prompt",
+      parameters: { temperature: 0.35 }, candidates: [{ contextWindowTokens: 32_768, maxOutputTokens: 4_096 }]
+    } }] });
+
+    const requested = await app.enqueueAppend({ ownerUserId, campaignId: requestOverrideCampaign.campaignId }, generationRequestSchema.parse({
+      ...appendRequest("Replace saved overrides on a different preset."), providerProfileId: nativeProvider.id,
+      textSelection: { kind: "openrouter_preset", slug: "typed" },
+      textExecutionOverrides: { parameters: { temperature: 0.11 }, conservativeContextWindowTokens: 8_000 }
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [requested.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "typed" }, parameters: { temperature: 0.11 },
+      candidates: [{ contextWindowTokens: 8_000, maxOutputTokens: 4_096 }]
+    } }] });
+
+    const typedReplacement = await app.enqueueReplacement({ ownerUserId, campaignId: typedReplacementCampaign.campaignId }, generationRetryLatestRequestSchema.parse({
+      ...replacementRequest("Freeze the typed replacement preset."), providerProfileId: nativeProvider.id,
+      textSelection: { kind: "openrouter_preset", slug: "typed" }
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [typedReplacement.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "typed" }, preset: { slug: "typed" }, presetSystemPrompt: "typed system prompt"
+    } }] });
+    expect(metadataCalls).toEqual(["preset:inherited", "models", "preset:typed", "models", "preset:typed", "models", "preset:typed", "models"]);
+
+    const replacement = await app.enqueueReplacement({ ownerUserId, campaignId: concreteReplacementCampaign.campaignId }, generationRetryLatestRequestSchema.parse({
+      ...replacementRequest("Replace inherited routing with a concrete model."), providerProfileId: nativeProvider.id,
+      textSelection: { kind: "model", modelId: "concrete-model" }
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [replacement.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "model", modelId: "concrete-model" }, parameters: { temperature: 0.35 },
+      candidates: [{ contextWindowTokens: 32_768, maxOutputTokens: 4_096 }]
+    } }] });
+    expect(metadataCalls).toEqual(["preset:inherited", "models", "preset:typed", "models", "preset:typed", "models", "preset:typed", "models", "models", "models"]);
+
+    const legacy = await app.enqueueAppend({ ownerUserId, campaignId: legacyCampaign.campaignId }, generationRequestSchema.parse({
+      ...appendRequest("Freeze the exact legacy preset alias."), providerProfileId: nativeProvider.id, model: "@preset/legacy"
+    }));
+    await expect(pool.query<{ basis: unknown }>(
+      "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [legacy.id]
+    )).resolves.toMatchObject({ rows: [{ basis: {
+      selection: { kind: "openrouter_preset", slug: "legacy" }, preset: { slug: "legacy" }, presetSystemPrompt: "legacy system prompt"
+    } }] });
+    expect(metadataCalls).toEqual(["preset:inherited", "models", "preset:typed", "models", "preset:typed", "models", "preset:typed", "models", "models", "models", "preset:legacy", "models"]);
+    await app.cancel({ ownerUserId, jobId: inherited.id });
+    await app.cancel({ ownerUserId, jobId: typed.id });
+    await app.cancel({ ownerUserId, jobId: requested.id });
+    await app.cancel({ ownerUserId, jobId: typedReplacement.id });
+    await app.cancel({ ownerUserId, jobId: replacement.id });
+    await app.cancel({ ownerUserId, jobId: legacy.id });
+  });
 
   it("freezes a v3 effective character identity for an enrolled append and replacement", async () => {
     const imported = await campaign();
@@ -591,9 +1076,9 @@ integration("PostgreSQL generation command repository", () => {
       status: "completed",
       narration: "The observatory door opens.\n\nStars spill across the archive floor.",
       reportedCost: {
-        amount: "0.250000000000",
+        amount: "0.25",
         currency: "USD",
-        byCategory: { story: "0.250000000000", image: "0", memory: "0" }
+        byCategory: { story: "0.25", image: "0", memory: "0" }
       }
     });
   });

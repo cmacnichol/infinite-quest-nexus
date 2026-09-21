@@ -4,20 +4,42 @@ import type { GenerationFailureDiagnostic } from "../../contracts/src/generation
 import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
-import { responseFormatDiagnosticCodeSchema } from "../../contracts/src/text-response-format.js";
+import { responseFormatDiagnosticCodeSchema, responseInvocationKeySchema, type ResponseInvocationKeyV2 } from "../../contracts/src/text-response-format.js";
 import {
   readFrozenResponseContracts,
+  readFrozenResponseContractsVersioned,
   readQueuedResponsePolicy,
+  readQueuedResponsePolicyVersioned,
   queuedResponsePolicyHash,
+  queuedResponsePolicyVersionedHash,
   readAttemptResponseContractAudit,
+  readAttemptResponseContractAuditV2,
   readResponseContractInvocationAudit,
+  readResponseContractInvocationAuditVersioned,
   responseContractInvocationAuditId,
+  responseContractInvocationAuditIdV2,
+  responseContractInvocationLedgerLimitV2,
+  sceneCoverageReplayCheckpointSchema,
+  responseContractOperationV2MatchesInvocation,
+  responseContractOperationSchema,
+  bindFrozenResponseContractInvocationV2,
+  assertDirectResponseContractRouteBasisAuthority,
+  assertPresetResponseContractRouteBasisAuthority,
+  assertFrozenPresetResponseContractRouteBasisAuthority,
   type AttemptResponseContractAudit,
+  type AttemptResponseContractAuditV2,
   type FrozenResponseContracts,
+  type FrozenResponseContractsV2,
+  type FrozenResponseContractsVersioned,
   type QueuedResponsePolicy,
+  type QueuedResponsePolicyVersioned,
   type ResponseInvocationKey,
   type ResponseContractInvocationAudit,
-  type ResponseContractOperation
+  type ResponseContractInvocationAuditV2,
+  type ResponseContractInvocationAuditVersioned,
+  type ResponseContractOperation,
+  type ResponseContractOperationV2,
+  type SceneCoverageReplayCheckpoint
 } from "../../contracts/src/generation-response-contract.js";
 import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
@@ -62,7 +84,8 @@ import {
   buildScopedEntityCatalog,
   normalizeCampaignTrackers,
   resolveEntityMetadata,
-  stableStringify
+  stableStringify,
+  sha256
 } from "../../domain/src/index.js";
 import {
   isGenerationBaseIdentityV3,
@@ -75,6 +98,7 @@ import {
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { withTransaction } from "./pool.js";
+import { textExecutionPlanSchema, textExecutionRouteBasisSchema, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
 
 async function enqueueChunkIndexBestEffort(
   client: DatabaseClient,
@@ -95,8 +119,8 @@ function json(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-/** v1 permits every currently authorized operation plus explicit retries without growing unbounded. */
-const responseContractInvocationLedgerLimit = 24;
+/** Shared durable v1/v2 invocation budget; exhaustion is intentionally fail-closed. */
+const responseContractInvocationLedgerLimit = responseContractInvocationLedgerLimitV2;
 
 /**
  * Exact provider-request evidence is persisted for every new response-contract
@@ -109,14 +133,14 @@ export const responseContractPreparedFailureRequestBodyCharacterLimit = 1_000_00
 
 type PreparedResponseFailureEvidence = NonNullable<GenerationOrchestrationState["preparedResponseFailures"]>[number];
 
-function preparedResponseFailures(value: unknown, ledger: readonly ResponseContractInvocationAudit[] | undefined): readonly PreparedResponseFailureEvidence[] | undefined {
+function preparedResponseFailures(value: unknown, ledger: readonly ResponseContractInvocationAuditVersioned[] | undefined): readonly PreparedResponseFailureEvidence[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length > responseContractInvocationLedgerLimit || !ledger) throw new Error("Prepared response failure evidence is invalid.");
   const ids = new Set<string>();
   return value.map((entry) => {
     if (!entry || typeof entry !== "object") throw new Error("Prepared response failure evidence is invalid.");
     const item = entry as PreparedResponseFailureEvidence;
-    if (item.version !== 1 || typeof item.invocationId !== "string" || ids.has(item.invocationId)
+    if ((item.version !== 1 && item.version !== 2) || typeof item.invocationId !== "string" || ids.has(item.invocationId)
       || typeof item.requestBody !== "string" || item.requestBody.length > responseContractPreparedFailureRequestBodyCharacterLimit
       || typeof item.requestPayloadHash !== "string" || item.requestPayloadHash !== sha256Hex(item.requestBody)
       || !(item.responseId === null || typeof item.responseId === "string" && item.responseId.length <= 256)
@@ -124,19 +148,20 @@ function preparedResponseFailures(value: unknown, ledger: readonly ResponseContr
       || !(item.returnedModel === null || typeof item.returnedModel === "string" && item.returnedModel.length <= 256)
       || !(item.returnedProviderRoute === null || typeof item.returnedProviderRoute === "string" && item.returnedProviderRoute.length <= 256)
       || !(item.diagnosticCode === null || responseFormatDiagnosticCodeSchema.safeParse(item.diagnosticCode).success)
-      || !ledger.some((audit) => audit.id === item.invocationId && audit.requestPayloadHash === item.requestPayloadHash
+      || !ledger.some((audit) => audit.version === item.version && audit.id === item.invocationId
+        && (audit.requestPayloadHash === item.requestPayloadHash || audit.response?.physicalRequestPayloadHash === item.requestPayloadHash)
         && (audit.status === "dispatched" || audit.status === "completed"))) throw new Error("Prepared response failure evidence is invalid.");
     ids.add(item.invocationId);
     return item;
   });
 }
 
-function responseContractInvocations(value: unknown): readonly ResponseContractInvocationAudit[] | undefined {
+function responseContractInvocations(value: unknown): readonly ResponseContractInvocationAuditVersioned[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length > responseContractInvocationLedgerLimit) throw new Error("Response-contract invocation ledger is invalid.");
   const ids = new Set<string>();
   return value.map((candidate) => {
-    const item = readResponseContractInvocationAudit(candidate);
+    const item = readResponseContractInvocationAuditVersioned(candidate);
     if (ids.has(item.id)) throw new Error("Response-contract invocation ledger is invalid.");
     ids.add(item.id);
     return item;
@@ -145,19 +170,80 @@ function responseContractInvocations(value: unknown): readonly ResponseContractI
 
 function responseContractState(jobId: string, value: GenerationOrchestrationState): void {
   try {
-  const queued = readQueuedResponsePolicy(value.queuedResponsePolicy);
-  const frozen = readFrozenResponseContracts(value.frozenResponseContracts);
+  if (value.textExecutionRouteBasis !== undefined && !readTextExecutionRouteBasis(value.textExecutionRouteBasis)) {
+    throw new Error(`Generation ${jobId} has an invalid frozen text execution route basis.`);
+  }
+  if (value.textExecutionPlan !== undefined && !readTextExecutionPlan(value.textExecutionPlan)) {
+    throw new Error(`Generation ${jobId} has an invalid frozen text execution plan.`);
+  }
+  const queued = readQueuedResponsePolicyVersioned(value.queuedResponsePolicy);
+  const frozen = readFrozenResponseContractsVersioned(value.frozenResponseContracts);
   const ledger = responseContractInvocations(value.responseContractInvocations);
+  const v1Ledger = ledger?.every((entry) => entry.version === 1)
+    ? ledger.filter((entry): entry is ResponseContractInvocationAudit => entry.version === 1)
+    : undefined;
   const failures = preparedResponseFailures(value.preparedResponseFailures, ledger);
-  if (frozen && (!queued || queuedResponsePolicyHash(queued) !== queuedResponsePolicyHash(frozen.queuedPolicy))) {
+  if (frozen && (!queued || frozen.version !== queued.version
+    || queuedResponsePolicyVersionedHash(queued) !== queuedResponsePolicyVersionedHash(frozen.queuedPolicy))) {
     throw new Error("Frozen response contract does not match the queued policy.");
+  }
+  if (queued?.version === 2 && queued.authority.kind === "preset_trusted") {
+    assertPresetResponseContractRouteBasisAuthority(queued, value.textExecutionRouteBasis);
+    if (frozen?.version === 2) assertFrozenPresetResponseContractRouteBasisAuthority(frozen, value.textExecutionRouteBasis);
+  }
+  if (queued?.version === 2 && queued.authority.kind === "model_verified") {
+    if (value.textExecutionRouteBasis !== undefined) {
+      assertDirectResponseContractRouteBasisAuthority(queued, value.textExecutionRouteBasis);
+    } else if (queued.authority.routeBasisHash !== undefined) {
+      throw new Error("Direct response-contract route basis is missing.");
+    }
   }
   if (ledger && !frozen) throw new Error("Response-contract invocation ledger requires a frozen contract.");
   if (failures && !frozen) throw new Error("Prepared response failure evidence requires a frozen contract.");
-  if (frozen) {
+  if (frozen?.version === 2) {
+    if (ledger?.some((entry) => entry.version !== 2)) throw new Error("V2 response-contract invocation ledger mixes versions.");
+    for (const entry of ledger ?? []) {
+      if (entry.version !== 2 || !auditMatchesFrozenInvocationV2(frozen, entry.invocationKey, entry.request)
+        || !responseContractOperationV2MatchesInvocation(entry.operation, entry.invocationKey)
+        || entry.id !== responseContractInvocationAuditIdV2(jobId, entry.logicalAttemptId, entry.invocationKey, entry.operation, entry.requestPayloadHash)
+        || entry.request.returnedModel !== null || entry.request.returnedProviderRoute !== null || entry.request.diagnosticCode !== null) {
+        throw new Error("V2 response-contract invocation ledger is inconsistent with its frozen contract.");
+      }
+    }
+    const entries = (ledger ?? []).filter((entry): entry is ResponseContractInvocationAuditV2 => entry.version === 2);
+    const completedFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperationV2[]) =>
+      typeof requestPayloadHash === "string" && entries.some((entry) => entry.status === "completed"
+        && (entry.response?.physicalRequestPayloadHash ?? entry.requestPayloadHash) === requestPayloadHash
+        && operations.includes(entry.operation));
+    if (value.primaryResult && !completedFor(value.primaryResult.requestPayloadHash, ["story_generation"])) throw new Error("Primary response checkpoint has no completed v2 invocation.");
+    if (value.validatedMainDraft && !completedFor(value.validatedMainDraft.requestPayloadHash, ["story_generation", "story_recovery", "scene_coverage_rewrite", "story_continuity_repair"])) throw new Error("Validated draft checkpoint has no completed v2 invocation.");
+    if (value.choiceRepair && !completedFor(value.choiceRepair.originalRequestPayloadHash, ["story_generation", "story_recovery"])) throw new Error("Choice repair original checkpoint has no completed v2 invocation.");
+    if (value.choiceRepair?.status === "validated" && !completedFor(value.choiceRepair.repairRequestPayloadHash, ["story_choice_repair"])) throw new Error("Choice repair checkpoint has no completed v2 invocation.");
+    if (value.extension && !completedFor(value.extension.producingRequestPayloadHash, [value.extension.producingOperation])) throw new Error("Extension checkpoint has no completed v2 invocation.");
+    if (value.semanticRepair?.status === "validated" && !completedFor(value.semanticRepair.repairRequestPayloadHash, ["story_continuity_repair"])) throw new Error("Semantic repair checkpoint has no completed v2 invocation.");
+    if (value.sceneCoverageRepair?.status === "validated" && !completedFor(value.sceneCoverageRepair.repairRequestPayloadHash, ["scene_coverage_rewrite"])) throw new Error("Scene rewrite checkpoint has no completed v2 invocation.");
+    const replayedCoverage = value.sceneCoverageRepair?.validatedCoverage;
+    if (replayedCoverage) {
+      const coverageInvocation = entries.find((entry) => entry.status === "completed"
+        && entry.operation === "scene_coverage_validation"
+        && (entry.response?.physicalRequestPayloadHash ?? entry.requestPayloadHash) === replayedCoverage.requestPayloadHash);
+      if (!coverageInvocation
+        || coverageInvocation.response?.diagnosticCode !== null
+        || coverageInvocation.response?.returnedModel !== replayedCoverage.result.returnedModel
+        || coverageInvocation.response?.returnedProviderRoute !== replayedCoverage.result.returnedProviderRoute
+        || coverageInvocation.response?.resultHash !== replayedCoverage.resultHash) {
+        throw new Error("Scene coverage replay checkpoint does not match its completed v2 invocation.");
+      }
+    }
+    if (value.continuityReview?.reviewRequestHash && value.continuityReview.status === "completed" && !completedFor(value.continuityReview.reviewRequestHash, ["story_continuity_review"])) throw new Error("Continuity review checkpoint has no completed v2 invocation.");
+    return;
+  }
+  const frozenV1 = frozen?.version === 1 ? frozen : undefined;
+  if (ledger && !v1Ledger) throw new Error("V1 response-contract invocation ledger mixes versions.");
+  if (frozenV1) {
     // A frozen selection turns every producing checkpoint into replay evidence.
     // An absent ledger is only valid before any producing checkpoint exists.
-    const entries = ledger ?? [];
+    const entries = v1Ledger ?? [];
     // Checkpoints are saved before their call's ledger reservation.  Those
     // pre-dispatch reservations are legitimate, but no returned-result or
     // validated checkpoint may survive without its durable invocation.
@@ -169,7 +255,7 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
     // before its central invocation reservation. It has no ledger entry yet.
     if (!ledger) return;
     for (const entry of entries) {
-      if (!auditMatchesFrozenInvocation(frozen, entry.invocationKey, entry.request)
+      if (!auditMatchesFrozenInvocation(frozenV1, entry.invocationKey, entry.request)
         || !operationMatchesInvocation(entry.operation, entry.invocationKey)
         || entry.id !== responseContractInvocationAuditId(jobId, entry.logicalAttemptId, entry.invocationKey, entry.operation, entry.requestPayloadHash)
         || entry.request.returnedModel !== null || entry.request.returnedProviderRoute !== null || entry.request.diagnosticCode !== null) {
@@ -228,6 +314,20 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
   }
 }
 
+function readTextExecutionPlan(value: unknown): TextExecutionPlan | undefined {
+  const parsed = textExecutionPlanSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { planHash, ...unhashed } = parsed.data;
+  return sha256(stableStringify(unhashed)) === planHash ? parsed.data : undefined;
+}
+
+function readTextExecutionRouteBasis(value: unknown): TextExecutionRouteBasis | undefined {
+  const parsed = textExecutionRouteBasisSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { routeBasisHash, ...unhashed } = parsed.data;
+  return sha256(stableStringify(unhashed)) === routeBasisHash ? parsed.data : undefined;
+}
+
 function operationMatchesInvocation(operation: ResponseContractOperation, invocationKey: ResponseInvocationKey): boolean {
   if (operation === "story_choice_repair") return invocationKey === "choices:nonstream";
   if (operation === "story_continuity_review") return invocationKey === "continuity_review:nonstream";
@@ -247,14 +347,32 @@ function auditMatchesFrozenInvocation(
     && stableStringify(audit.providerRoutingSlugs) === stableStringify(contract.providerRoutingSlugs);
 }
 
+function auditMatchesFrozenInvocationV2(
+  frozen: FrozenResponseContractsV2,
+  invocationKey: ResponseInvocationKeyV2,
+  audit: AttemptResponseContractAuditV2
+): boolean {
+  const contract = frozen.contracts[invocationKey];
+  if (!contract || audit.selectionHash !== frozen.selectionHash || audit.invocationKey !== invocationKey
+    || audit.schemaVersion !== contract.schemaVersion || audit.schemaHash !== contract.schemaHash) return false;
+  if (contract.authority.kind === "model_verified") {
+    return audit.requestedModel === contract.authority.model && audit.routeBasisHash === null && audit.planHash === null;
+  }
+  return audit.routeBasisHash === contract.authority.routeBasisHash && audit.planHash !== null;
+}
+
 async function updateResponseContractInvocation(
   pool: DatabasePool,
   scope: GenerationLeaseScope,
   invocationId: string,
   nextStatus: "dispatched" | "completed",
   expectedRequestPayloadHash?: string,
-  response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">
-): Promise<ResponseContractInvocationAudit | null> {
+  response?: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & {
+    resultHash?: string | null;
+    physicalAttemptId?: string | null;
+    physicalRequestPayloadHash?: string | null;
+  }
+): Promise<ResponseContractInvocationAuditVersioned | null> {
   return withTransaction(pool, async (client) => {
     const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
       `SELECT orchestration_private AS "orchestrationPrivate" FROM generation_jobs
@@ -269,17 +387,25 @@ async function updateResponseContractInvocation(
     const existing = ledger[index]!;
     if (nextStatus === "dispatched" && existing.requestPayloadHash !== expectedRequestPayloadHash) return null;
     if (existing.status === "completed") {
-      if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({ returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null })) return existing;
+      if (nextStatus === "completed" && stableStringify(existing.response) === stableStringify({
+        returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null,
+        diagnosticCode: response?.diagnosticCode ?? null, physicalAttemptId: response?.physicalAttemptId ?? null,
+        physicalRequestPayloadHash: response?.physicalRequestPayloadHash ?? null, resultHash: response?.resultHash ?? null
+      })) return existing;
       return null;
     }
     if (nextStatus === "dispatched" && existing.status !== "reserved") return null;
     if (nextStatus === "completed" && existing.status !== "dispatched") return null;
     const at = new Date().toISOString();
-    const updated: ResponseContractInvocationAudit = nextStatus === "dispatched"
+    const updated = nextStatus === "dispatched"
       ? { ...existing, status: "dispatched", dispatchedAt: existing.dispatchedAt ?? at }
-      : { ...existing, status: "completed", completedAt: at, response: { returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null, diagnosticCode: response?.diagnosticCode ?? null } };
-    let parsed: ResponseContractInvocationAudit;
-    try { parsed = readResponseContractInvocationAudit(updated); } catch { return null; }
+      : { ...existing, status: "completed", completedAt: at, response: {
+        returnedModel: response?.returnedModel ?? null, returnedProviderRoute: response?.returnedProviderRoute ?? null,
+        diagnosticCode: response?.diagnosticCode ?? null, physicalAttemptId: response?.physicalAttemptId ?? null,
+        physicalRequestPayloadHash: response?.physicalRequestPayloadHash ?? null, resultHash: response?.resultHash ?? null
+      } };
+    let parsed: ResponseContractInvocationAuditVersioned;
+    try { parsed = readResponseContractInvocationAuditVersioned(updated); } catch { return null; }
     ledger[index] = parsed;
     const write = await client.query<{ id: string }>(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating','validating') AND lease_expires_at > now() RETURNING id`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
     if (!write.rows[0]) return null;
@@ -344,12 +470,16 @@ export type FactFormatRepairApplication = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  /** Prompt-independent v2 route evidence captured before queueing. */
+  textExecutionRouteBasis?: TextExecutionRouteBasis;
+  /** Version 2 plans are immutable private snapshots; absence is historical v1 behavior. */
+  textExecutionPlan?: TextExecutionPlan;
   /** Absent is the exact historical job shape; present values are server-owned and versioned. */
-  queuedResponsePolicy?: QueuedResponsePolicy;
-  frozenResponseContracts?: FrozenResponseContracts;
-  responseContractInvocations?: readonly ResponseContractInvocationAudit[];
+  queuedResponsePolicy?: QueuedResponsePolicyVersioned;
+  frozenResponseContracts?: FrozenResponseContractsVersioned;
+  responseContractInvocations?: readonly ResponseContractInvocationAuditVersioned[];
   /** Bounded private transport evidence for an unusable prepared response. */
-  preparedResponseFailures?: readonly {
+  preparedResponseFailures?: readonly ({
     version: 1;
     invocationId: string;
     requestBody: string;
@@ -360,7 +490,18 @@ export type GenerationOrchestrationState = {
     returnedModel: string | null;
     returnedProviderRoute: string | null;
     diagnosticCode: string | null;
-  }[];
+  } | {
+    version: 2;
+    invocationId: string;
+    requestBody: string;
+    requestPayloadHash: string;
+    responseId: string | null;
+    partialContent: string;
+    partialContentTruncated: boolean;
+    returnedModel: string | null;
+    returnedProviderRoute: string | null;
+    diagnosticCode: string | null;
+  })[];
   /** Safe, last-known failure classification; attempts remain the historical ledger. */
   lastFailureDiagnostic?: GenerationFailureDiagnostic;
   /** A primary request was durably reserved; a lease reclaim cannot treat it as an unseen request. */
@@ -420,6 +561,8 @@ export type GenerationOrchestrationState = {
     status: "reserved" | "dispatched" | "validated";
     authorizedReviewId: string;
     authorizedRevision: number;
+    /** A completed v2 coverage response is reusable only for these exact bytes. */
+    validatedCoverage?: SceneCoverageReplayCheckpoint;
   } | undefined;
   continuityReview?: ContinuityReviewCheckpoint | undefined;
   /** Private, immutable candidate and decision evidence for a user review gate. */
@@ -607,7 +750,9 @@ function hasValidSceneCoverageRepair(value: unknown): boolean {
   if (value === undefined) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const repair = value as Record<string, unknown>;
-  return repair.version === 1
+  const coverage = repair.validatedCoverage;
+  const validCoverage = coverage === undefined || sceneCoverageReplayCheckpointSchema.safeParse(coverage).success;
+  return validCoverage && repair.version === 1
     && typeof repair.rejectedMainStoryHash === "string" && repair.rejectedMainStoryHash.length > 0
     && typeof repair.repairRequestBody === "string" && repair.repairRequestBody.length > 0
     && typeof repair.repairRequestPayloadHash === "string"
@@ -776,6 +921,7 @@ function factFormatRepairApplicationsMatchExecutionJob(
 
 export type GenerationStreamingState = Record<string, unknown> & {
   provisionalSetId?: string | null;
+  illustrationTextExecutionSnapshot?: unknown;
 };
 
 export type GenerationOrchestrationInputs = {
@@ -890,6 +1036,8 @@ export type AcceptedGenerationCommit = Readonly<{
   inputs: GenerationOrchestrationInputs;
   orchestration: GenerationOrchestrationState;
   fictionAction: string;
+  /** Prepared outside the accepted-turn transaction; private illustration job state only. */
+  illustrationTextExecutionSnapshot?: unknown;
   collaborators: AcceptedGenerationCommitCollaborators;
   onIllustrationEnqueueError(error: unknown, turnId: string): void;
 }>;
@@ -902,15 +1050,19 @@ export type GenerationExecutionRepository = Readonly<{
   restartAfterSemanticRepair?(scope: GenerationLeaseScope): Promise<boolean>;
   saveOrchestration(scope: GenerationLeaseScope, value: GenerationOrchestrationState): Promise<boolean>;
   /** Writes the first complete preflight selection once; lease reclaimers observe the winner. */
-  saveFrozenResponseContracts?(scope: GenerationLeaseScope, expectedQueuedPolicyHash: string, value: FrozenResponseContracts): Promise<FrozenResponseContracts | null>;
+  saveFrozenResponseContracts?(scope: GenerationLeaseScope, expectedQueuedPolicyHash: string, value: FrozenResponseContractsVersioned): Promise<FrozenResponseContractsVersioned | null>;
   /** Private bounded operation ledger. This is distinct from generation_attempts and worker claim counts. */
-  reserveResponseContractInvocation?(scope: GenerationLeaseScope, input: Readonly<{
-    logicalAttemptId: string; invocationKey: ResponseInvocationKey; operation: ResponseContractOperation;
-    requestPayloadHash: string; request: AttemptResponseContractAudit;
-  }>): Promise<ResponseContractInvocationAudit | null>;
+  reserveResponseContractInvocation?(scope: GenerationLeaseScope, input:
+    | Readonly<{ version?: 1; logicalAttemptId: string; invocationKey: ResponseInvocationKey; operation: ResponseContractOperation; requestPayloadHash: string; request: AttemptResponseContractAudit; }>
+    | Readonly<{ version: 2; logicalAttemptId: string; invocationKey: ResponseInvocationKeyV2; operation: ResponseContractOperationV2; requestPayloadHash: string; request: AttemptResponseContractAuditV2; routeBasis: unknown; plan: unknown; trustedOperationPrompt: string; }>
+  ): Promise<ResponseContractInvocationAuditVersioned | null>;
   /** Consumes a reservation once only when its prepared request hash still matches. */
-  markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string, expectedRequestPayloadHash: string): Promise<ResponseContractInvocationAudit | null>;
-  completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode">): Promise<ResponseContractInvocationAudit | null>;
+  markResponseContractInvocationDispatched?(scope: GenerationLeaseScope, invocationId: string, expectedRequestPayloadHash: string): Promise<ResponseContractInvocationAuditVersioned | null>;
+  completeResponseContractInvocation?(scope: GenerationLeaseScope, invocationId: string, response: Pick<AttemptResponseContractAudit, "returnedModel" | "returnedProviderRoute" | "diagnosticCode"> & {
+    resultHash?: string | null;
+    physicalAttemptId?: string | null;
+    physicalRequestPayloadHash?: string | null;
+  }): Promise<ResponseContractInvocationAuditVersioned | null>;
   /** Atomically publishes a pending review and releases the worker lease. */
   pauseForReview(scope: GenerationLeaseScope, checkpoint: GenerationReviewCheckpoint): Promise<boolean>;
   savePartialNarration(scope: GenerationLeaseScope, narration: string): Promise<boolean>;
@@ -931,8 +1083,9 @@ export async function reconcileNextAcceptedStreamingIllustration(
   return withTransaction(pool, async (client) => {
     const pending = await client.query<{
       id: string; owner_user_id: string; campaign_id: string; result_turn_id: string; narration: string;
+      streaming_segments_state: GenerationStreamingState;
     }>(
-      `SELECT j.id,j.owner_user_id,j.campaign_id,j.result_turn_id,t.narration
+      `SELECT j.id,j.owner_user_id,j.campaign_id,j.result_turn_id,j.streaming_segments_state,t.narration
          FROM generation_jobs j JOIN turns t ON t.id=j.result_turn_id AND t.owner_user_id=j.owner_user_id
         WHERE j.status='completed' AND j.result_turn_id IS NOT NULL
           AND j.streaming_segments_state->>'provisionalIllustrationReconciliation'='pending'
@@ -945,7 +1098,9 @@ export async function reconcileNextAcceptedStreamingIllustration(
     });
     await illustration.promoteProvisionalSet(client, {
       ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id, turnId: job.result_turn_id
-    }, { finalNarration: job.narration, config });
+    }, { finalNarration: job.narration, config,
+      ...(job.streaming_segments_state.illustrationTextExecutionSnapshot
+        ? { textExecutionSnapshot: job.streaming_segments_state.illustrationTextExecutionSnapshot } : {}) });
     await client.query(
       `UPDATE generation_jobs
           SET streaming_segments_state = streaming_segments_state - 'provisionalIllustrationReconciliation', updated_at=now()
@@ -1539,18 +1694,24 @@ async function commitAcceptedTurn(
         await collaborators.illustration.promoteProvisionalSet(
           client,
           { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, generationJobId: job.id, turnId },
-          { finalNarration: story.narration, config: illustrationConfig }
+          { finalNarration: story.narration, config: illustrationConfig,
+            ...((job.streaming_segments_state?.illustrationTextExecutionSnapshot ?? input.illustrationTextExecutionSnapshot)
+              ? { textExecutionSnapshot: job.streaming_segments_state?.illustrationTextExecutionSnapshot ?? input.illustrationTextExecutionSnapshot } : {}) }
         );
       } else {
         await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
           client,
-          { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId }
+          { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId },
+          { generationJobId: job.id,
+            ...(input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : {}) }
         );
       }
     } else {
       await collaborators.illustration.enqueueAcceptedTurnIllustrationSegments(
         client,
-        { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId }
+        { ownerUserId: job.owner_user_id, campaignId: job.campaign_id, turnId },
+        { generationJobId: job.id,
+          ...(input.illustrationTextExecutionSnapshot ? { textExecutionSnapshot: input.illustrationTextExecutionSnapshot } : {}) }
       );
     }
     await client.query("RELEASE SAVEPOINT accepted_turn_illustration_enqueue");
@@ -1608,6 +1769,7 @@ export function createPostgresGenerationExecutionRepository(
   return {
     async claimNext(request) {
       return withTransaction(pool, async (client) => {
+        await client.query("SELECT set_config('app.text_plan_protocol', '2', true)");
         const result = await client.query<{
           id: string;
           owner_user_id: string;
@@ -1820,13 +1982,15 @@ export function createPostgresGenerationExecutionRepository(
         );
         const prior = locked.rows[0]?.orchestrationPrivate;
         if (!prior) return false;
-        const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen,
+        const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen, textExecutionRouteBasis: _basis, textExecutionPlan: _plan,
           responseContractInvocations: _ledger, preparedResponseFailures: suppliedFailures, ...mutable } = value;
         const priorFailures = prior.preparedResponseFailures;
         const appendOnly = priorFailures === undefined || (suppliedFailures !== undefined
           && priorFailures.every((entry) => suppliedFailures.some((candidate) => stableStringify(candidate) === stableStringify(entry))));
         const merged: GenerationOrchestrationState = {
           ...mutable,
+          ...(prior.textExecutionRouteBasis === undefined ? {} : { textExecutionRouteBasis: prior.textExecutionRouteBasis }),
+          ...(prior.textExecutionPlan === undefined ? {} : { textExecutionPlan: prior.textExecutionPlan }),
           ...(prior.queuedResponsePolicy === undefined ? {} : { queuedResponsePolicy: prior.queuedResponsePolicy }),
           ...(prior.frozenResponseContracts === undefined ? {} : { frozenResponseContracts: prior.frozenResponseContracts }),
           ...(prior.responseContractInvocations === undefined ? {} : { responseContractInvocations: prior.responseContractInvocations }),
@@ -1836,10 +2000,12 @@ export function createPostgresGenerationExecutionRepository(
         responseContractState(scope.jobId, merged);
         return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =
-              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations')
-                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
-                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations')
+              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis')
+                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
+                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis')
                END
+               || CASE WHEN orchestration_private ? 'textExecutionRouteBasis' THEN jsonb_build_object('textExecutionRouteBasis', orchestration_private->'textExecutionRouteBasis') ELSE '{}'::jsonb END
+               || CASE WHEN orchestration_private ? 'textExecutionPlan' THEN jsonb_build_object('textExecutionPlan', orchestration_private->'textExecutionPlan') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object('queuedResponsePolicy', orchestration_private->'queuedResponsePolicy') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'frozenResponseContracts' THEN jsonb_build_object('frozenResponseContracts', orchestration_private->'frozenResponseContracts') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'responseContractInvocations' THEN jsonb_build_object('responseContractInvocations', orchestration_private->'responseContractInvocations') ELSE '{}'::jsonb END
@@ -1865,7 +2031,7 @@ export function createPostgresGenerationExecutionRepository(
     },
 
     async saveFrozenResponseContracts(scope, expectedQueuedPolicyHash, value) {
-      const parsed = readFrozenResponseContracts(value);
+      const parsed = readFrozenResponseContractsVersioned(value);
       if (!parsed) throw new Error("Frozen response contracts are required.");
       return withTransaction(pool, async (client) => {
         const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
@@ -1876,10 +2042,10 @@ export function createPostgresGenerationExecutionRepository(
         const row = result.rows[0];
         if (!row) return null;
         const stored = row.orchestrationPrivate;
-        const queued = readQueuedResponsePolicy(stored.queuedResponsePolicy);
-        if (!queued || queuedResponsePolicyHash(queued) !== expectedQueuedPolicyHash
-          || queuedResponsePolicyHash(parsed.queuedPolicy) !== expectedQueuedPolicyHash) return null;
-        const existing = readFrozenResponseContracts(stored.frozenResponseContracts);
+        const queued = readQueuedResponsePolicyVersioned(stored.queuedResponsePolicy);
+        if (!queued || queued.version !== parsed.version || queuedResponsePolicyVersionedHash(queued) !== expectedQueuedPolicyHash
+          || queuedResponsePolicyVersionedHash(parsed.queuedPolicy) !== expectedQueuedPolicyHash) return null;
+        const existing = readFrozenResponseContractsVersioned(stored.frozenResponseContracts);
         if (existing) return existing;
         const write = await client.query<{ id: string }>(
           `UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('frozenResponseContracts',$4::jsonb), updated_at=now()
@@ -1893,7 +2059,8 @@ export function createPostgresGenerationExecutionRepository(
     },
 
     async reserveResponseContractInvocation(scope, input) {
-      readAttemptResponseContractAudit(input.request);
+      if (input.version === 2) readAttemptResponseContractAuditV2(input.request);
+      else readAttemptResponseContractAudit(input.request);
       if (input.request.returnedModel !== null || input.request.returnedProviderRoute !== null || input.request.diagnosticCode !== null) return null;
       return withTransaction(pool, async (client) => {
         const result = await client.query<{ orchestrationPrivate: GenerationOrchestrationState }>(
@@ -1903,15 +2070,40 @@ export function createPostgresGenerationExecutionRepository(
         );
         const row = result.rows[0]; if (!row) return null;
         responseContractState(scope.jobId, row.orchestrationPrivate);
-        const frozen = readFrozenResponseContracts(row.orchestrationPrivate.frozenResponseContracts);
+        const frozen = readFrozenResponseContractsVersioned(row.orchestrationPrivate.frozenResponseContracts);
         const logicalAttempt = row.orchestrationPrivate.logicalAttempt;
-        if (!logicalAttempt || !hasValidLogicalAttempt(logicalAttempt)
-          || input.logicalAttemptId !== logicalAttempt.id
-          || !frozen || frozen.selectionHash !== input.request.selectionHash
-          || !frozen.queuedPolicy.invocationKeys.includes(input.invocationKey)
-          || !operationMatchesInvocation(input.operation, input.invocationKey)
-          || !auditMatchesFrozenInvocation(frozen, input.invocationKey, input.request)) return null;
+        if (!logicalAttempt || !hasValidLogicalAttempt(logicalAttempt) || input.logicalAttemptId !== logicalAttempt.id
+          || !frozen || frozen.version !== (input.version === 2 ? 2 : 1)
+          || frozen.selectionHash !== input.request.selectionHash) return null;
         const ledger = [...(responseContractInvocations(row.orchestrationPrivate.responseContractInvocations) ?? [])];
+        if (input.version === 2) {
+          if (frozen.version !== 2 || !frozen.queuedPolicy.invocationKeys.includes(input.invocationKey)
+            || !responseContractOperationV2MatchesInvocation(input.operation, input.invocationKey)
+            || !auditMatchesFrozenInvocationV2(frozen, input.invocationKey, input.request)
+            || input.request.operationPromptHash !== sha256Hex(input.trustedOperationPrompt)) return null;
+          let bound;
+          try { bound = bindFrozenResponseContractInvocationV2({ frozen, invocationKey: input.invocationKey, operation: input.operation, routeBasis: input.routeBasis, plan: input.plan, trustedOperationPrompt: input.trustedOperationPrompt }); } catch { return null; }
+          if (bound.authority.kind === "preset_trusted") {
+            if (input.request.planHash !== bound.authority.planHash || input.request.routeBasisHash !== bound.authority.routeBasisHash) return null;
+            const plan = readTextExecutionPlan(input.plan);
+            if (!plan || !plan.candidates.some((candidate) => candidate.modelId === input.request.requestedModel)) return null;
+            const savedBasis = readTextExecutionRouteBasis(row.orchestrationPrivate.textExecutionRouteBasis);
+            if (!savedBasis || savedBasis.routeBasisHash !== bound.authority.routeBasisHash) return null;
+          } else if (input.request.planHash !== null || input.request.routeBasisHash !== null) return null;
+          const id = responseContractInvocationAuditIdV2(scope.jobId, input.logicalAttemptId, input.invocationKey, input.operation, input.requestPayloadHash);
+          const existing = ledger.find((item) => item.id === id);
+          if (existing) return existing.version === 2 && stableStringify(existing) === stableStringify({ ...existing, request: input.request }) ? existing : null;
+          if (ledger.length >= responseContractInvocationLedgerLimit) return null;
+          const entry = readResponseContractInvocationAuditVersioned({ version: 2, id, logicalAttemptId: input.logicalAttemptId, invocationKey: input.invocationKey, operation: input.operation, requestPayloadHash: input.requestPayloadHash, request: input.request, status: "reserved", reservedAt: new Date().toISOString(), dispatchedAt: null, completedAt: null, response: null });
+          ledger.push(entry);
+          const write = await client.query<{ id: string }>(`UPDATE generation_jobs SET orchestration_private=orchestration_private || jsonb_build_object('responseContractInvocations',$4::jsonb), updated_at=now() WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND status IN ('assessing','generating','validating') AND lease_expires_at > now() RETURNING id`, [scope.jobId, scope.ownerUserId, scope.workerId, json(ledger)]);
+          return write.rows[0] ? entry : null;
+        }
+        const v1InvocationKey = responseInvocationKeySchema.parse(input.invocationKey);
+        const v1Operation = responseContractOperationSchema.parse(input.operation);
+        if (frozen.version !== 1 || !frozen.queuedPolicy.invocationKeys.includes(v1InvocationKey)
+          || !operationMatchesInvocation(v1Operation, v1InvocationKey)
+          || !auditMatchesFrozenInvocation(frozen, v1InvocationKey, input.request)) return null;
         // Claim attempts are leases, not provider-authorized work. Only the persisted logical-attempt identity changes an operation id.
         const id = responseContractInvocationAuditId(scope.jobId, input.logicalAttemptId, input.invocationKey, input.operation, input.requestPayloadHash);
         const existing = ledger.find((item) => item.id === id);

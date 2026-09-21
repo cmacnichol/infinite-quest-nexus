@@ -125,6 +125,7 @@ async function claimNext(
 ): Promise<ClaimedIllustrationWorkerJob | null> {
   const current = binding(family);
   return withTransaction(pool, async (client) => {
+    if (family === "prompt") await client.query("SELECT set_config('app.text_plan_protocol', '2', true)");
     const result = await client.query<ClaimedRow>(
       `WITH candidate AS (
          SELECT id FROM ${current.table}
@@ -140,7 +141,7 @@ async function claimNext(
               updated_at = now()${family === "resolution" ? ",\n              reason_code = NULL" : ""}
          FROM candidate
         WHERE jobs.id = candidate.id
-       RETURNING ${current.projection}`,
+       RETURNING jobs.${current.projection}`,
       [current.activeStatus, request.workerId, request.leaseSeconds],
     );
     return claimed(result.rows[0], family, request);

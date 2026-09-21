@@ -1,0 +1,37 @@
+# Native OpenRouter Presets acceptance status
+
+## Scoped review and accounting follow-up
+
+The independent scoped review closed F1–F6 and F8–F9, but found F7 incomplete: the durable attempt ledger was not yet reflected in the owner-facing authoring job detail or direct world-preview completion. It also identified an optional post-success accounting read that could replace successful provider content with an error. The follow-up adds finite, owner-scoped physical accounting to those actual read/completion paths and makes that read best-effort. Composed real-PostgreSQL cases cover multiple logical invocations, partial and absent usage, distinct currencies, repeated reads and owner isolation. A focused unit regression proves accepted content survives a failed summary read and replay does not resend. The residual closure also projects the finite request aggregate on the existing direct-preview error envelope while preserving the original error when its optional read fails; the durable ledger remains authoritative. [Verification](verification.md) separates this follow-up's selected checks from the earlier full final-wave results. Independent review through executable commit `ab918be1534f3fe17705c230fa2ea2146d0e9cbc` closed every product finding. See the [final review](final-review.md). This is not deployment approval.
+
+## Consolidated final review fixes
+
+The consolidated F1–F9 fix wave was locally verified against the pre-follow-up executable source described in [verification](verification.md). New Preset work is blocked at Story, authoring, illustration, and generic text boundaries while native admission is off; historical v1 replay and explicit concrete Model compatibility retain their original authority. Save requires exact current preset detail, diagnostics stay bounded, both legacy clients cancel stale discovery, and OpenAI-compatible direct Models use their verified provider type. Failed physical attempts retain observed partial usage/cost in the ledger and applicable campaign reads; the follow-up above adds owner-facing authoring and direct-completion aggregation. The mobile inherited policy label is visible, and post-response accounting failure has its own log event. This is not deployment approval.
+
+That wave passed check/build, the full Windows unit suite, 13 selected complete real-PostgreSQL files, both legacy browser suites, and its then-final-source Linux affected integration/platform unit lanes. Exact counts and skipped-case boundaries are in [verification](verification.md). Admission remains production-default-off; no live inference, deployment, or new UI work occurred.
+
+## Prior Task8 acceptance (earlier source)
+
+This branch implements native preset support in the API/runtime/persistence and both legacy browser entrypoints. The Task1–7 slices were independently approved through commit `6e67cc7a9cc8dd167d37df9cd2f68506a3949fc7`. Task8 composed verification is recorded in [verification](verification.md); the subsequent independent Task8, whole-branch and scoped correction reviews are now complete. This document is evidence status, not deployment approval. Production admission remains off; no paid inference or deployment occurred.
+
+| Requirement | Current evidence and status |
+| --- | --- |
+| Typed Model/Preset selection, API persistence, ownership, archive round-trip | Implemented and approved in Tasks1/6A. Complete affected real PostgreSQL suite passed in Task8. Destination preset remains unresolved until metadata validation, and no first-candidate substitution occurs. |
+| New Model Required defaults and historical compatibility | Fresh/changed selections and omitted API policy require exact operation/schema/stream/route evidence. Explicit historical Model Auto/Legacy and frozen v1 remain supported. Presets use trusted admission and are never mislabeled verified. Tests passed in final unit and PostgreSQL gates. |
+| Discovery, resolver, immutable execution | Tasks2/3 approved saved/candidate endpoints, credential/revision boundaries, pagination, cancellation, ordering, supported parameters and conservative context cap. Queue/reclaim preserve frozen plans and current authority checks. |
+| Exact v2 operation schemas and prompt/body identity | Tasks4A–4C/5C approved Story, RPG, choices, continuity, events/coverage, direct/durable/source authoring, organizer and illustration refinement initial/repair paths. Composed fake-provider tests check full schema, prompt once, budget and canonical dispatched body. Retired `turn_intent` stays retired. |
+| Ordered physical route attempts and safety | Tasks5B/5C approved bounded pre-output availability fallback, terminal errors, durable attempts, observed serving identity/usage, two-job isolation and old-worker fences. Task8 corrected sanitized v2 provider-failure logging and covered production HTTP Retry-After date/seconds paths. |
+| Independent image and embedding lifecycles | Task5/6 tests and final PostgreSQL/Linux image/archive cases passed; text preset credentials/routing/prompt never flow into image or embedding requests. |
+| Saved/request overrides and safe public API/editor | Tasks6A/6B approved persisted inheritance/clear/switching, frozen request intent, redacted status and editor race containment. Full unit and affected PostgreSQL suites passed. |
+| Legacy settings **and** per-request UI | Task7 approved at `6e67cc7a`. Final Task8 Playwright suites passed 10/10 across both entrypoints, desktop/mobile, keyboard, actual payloads and races. [Versioned screenshots](../assets/native-openrouter-presets/) retain the final captures. Browser fixtures are not live model verification. |
+| Complete Windows and Linux gates | Full check/build/unit, 110-file affected PostgreSQL runner and both browsers passed. Versioned final-source Linux harness passed 13/13 integration files (211/211, no skips); seven relevant platform unit files passed (181 pass, one inverse-platform skip). Exact identities, skip scope and commands are in [verification](verification.md). |
+| Offline priced compatibility probe | [17-operation hypothetical plan](probe-plan.md) and [public metadata](probe-metadata-2026-09-20.md) exist. Private `@preset/nexus-nsfw` version/order/filters are unavailable; the `$0.766301` Novita ceiling is a configured hypothetical case, not the exact preset price or capability evidence. Live route compatibility remains unverified. |
+| Rollout and rollback | [Operational plan](rollout.md) covers migrations 0097–0100, all workers upgraded, default-off admission, disabled new enqueue, durable drain/pause and no alias reinterpretation. Deployment and activation have not occurred. |
+| New UI and plain JSON fallback | Both expressly deferred; neither is part of this branch's feature scope. |
+| Independent final review | Complete: whole-branch requirement audit plus scoped fix reviews closed all findings through `ab918be1`. Source-specific test limits and historical RED provenance remain explicit in [final review](final-review.md). |
+
+The [implementation decisions](implementation-decisions.md) record the binding tradeoffs. The [probe plan](probe-plan.md) names the missing private settings before any separately authorized live test.
+
+## Five-fix audit follow-up (2026-09-21)
+
+The [audit completion report](audit-fixes-2026-09-21.md) records the five subsequent fixes, source-specific verification, migration 0101, browser captures, and remaining operational limits. Earlier results above remain tied to their original source revisions.

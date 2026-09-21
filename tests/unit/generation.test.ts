@@ -343,6 +343,18 @@ describe("generation contracts", () => {
       expect(parsed.context.compression).toBe("auto");
       expect(parsed.context.recentTurns).toBe(8);
     });
+
+    it("preserves typed preset overrides and accepts only their exact legacy model alias", () => {
+      const typed = generationRequestSchema.parse({
+        action: "Open the observatory.", idempotencyKey: "typed-preset-override",
+        model: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+      });
+      expect(typed.textSelection).toEqual({ kind: "openrouter_preset", slug: "night-shift" });
+      expect(generationRequestSchema.safeParse({
+        action: "Open the observatory.", idempotencyKey: "conflicting-preset-override",
+        model: "other-model", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+      }).success).toBe(false);
+    });
   });
 
   describe("storyTurnOutputSchema", () => {

@@ -13,6 +13,7 @@ import {
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import type { ModelParameterAdvertisement } from "../../../packages/contracts/src/text-response-format.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
@@ -20,14 +21,17 @@ import {
   assertQueuedResponseContractProfile,
   assertResponseContractAdapter,
   ResponseContractPreflightError,
-  resolveGenerationResponseContracts
+  resolveGenerationResponseContracts,
+  resolveGenerationResponseContractsV2
 } from "./generation-response-contract.js";
+import type { QueuedResponsePolicyVersioned, FrozenResponseContractsVersioned } from "../../../packages/contracts/src/generation-response-contract.js";
 import type { WorkerGenerationProviderCollaborators } from "./provider-application-composition.js";
 import {
   createGenerationExecutor,
   type GenerationExecutionCollaborators,
   type GenerationExecutorDependencies
 } from "./generation-executor-adapter.js";
+import { loadConfig, prepareIllustrationTextExecution } from "./illustration-segment-job-adapter.js";
 
 type WorkerGenerationRepository = GenerationClaimRepository & GenerationExecutionRepository;
 
@@ -65,13 +69,93 @@ export function createGenerationExecutionCollaborators(
   return {
     memory: memory.generation,
     illustration: illustration.generation,
+    prepareIllustrationTextExecution: async ({ ownerUserId, campaignId, operationPrompt }) => {
+      let config;
+      try {
+        config = await loadConfig(pool, ownerUserId, campaignId);
+      } catch {
+        // Illustrations are optional; disabled/missing configuration has no
+        // refinement job to prepare and cannot block the accepted Story turn.
+        return undefined;
+      }
+      return prepareIllustrationTextExecution(ownerUserId, campaignId, config, operationPrompt, providers);
+    },
     loadTextExecution: (ownerUserId, providerProfileId, model) => providers.execution.text(
       { ownerUserId },
       providerProfileId,
       "text",
       model
     ),
-    resolveResponseContracts: async (ownerUserId, profile, queuedPolicy, runtimeProfile) => {
+    preparedTextExecutor: providers.preparedTextExecutor,
+    verifyTextExecutionRouteAuthority: async (ownerUserId, routeBasis) => {
+      // Route choices and prompt policy are frozen with the queued job.  A
+      // resumed native job may read only the current credential authority;
+      // ordinary execution settings must not replace the frozen basis.
+      if (!routeBasis.authorityRevision || !routeBasis.credentialReference) return false;
+      const current = await providers.execution.text(
+        { ownerUserId },
+        routeBasis.credentialReference,
+        "text",
+        routeBasis.candidates[0]?.modelId
+      );
+      return current.id === routeBasis.credentialReference
+        && current.providerRole === "text"
+        && current.authorityRevision === routeBasis.authorityRevision
+        && (current.endpointIdentity ?? current.id) === routeBasis.endpointReference;
+    },
+    resolveResponseContracts: async (ownerUserId, profile, queuedPolicy, runtimeProfile): Promise<FrozenResponseContractsVersioned> => {
+      if (queuedPolicy.version === 2) {
+        if (queuedPolicy.authority.kind === "preset_trusted") {
+          return resolveGenerationResponseContractsV2({
+            queuedPolicy,
+            capabilityEvidenceHash: sha256(stableStringify({ routeBasisHash: queuedPolicy.authority.routeBasisHash }))
+          });
+        }
+        if (queuedPolicy.authority.providerProfileId !== profile.id
+          || queuedPolicy.authority.providerType !== profile.providerType
+          || queuedPolicy.authority.model !== profile.model
+          || queuedPolicy.authority.endpointIdentity !== (profile.endpointIdentity ?? "")
+          || queuedPolicy.authority.verificationRegistryHash !== providers.responseFormatCapabilities.registryDigest) {
+          throw new ResponseContractPreflightError("response_contract_identity_mismatch", "The queued direct-model authority changed before response-contract discovery.");
+        }
+        const authority = queuedPolicy.authority;
+        let advertised: unknown = null;
+        try {
+          const inventory = await providers.responseFormatInventory.listModels({
+            ownerUserId, providerProfileId: profile.id, providerRole: "text"
+          });
+          const selected = inventory.models.find((model: unknown): model is Readonly<{ id: string; responseFormatAdvertisement?: unknown }> => {
+            const candidate = model as Readonly<{ id?: unknown }> | null;
+            return candidate !== null && typeof candidate === "object" && candidate.id === profile.model;
+          });
+          advertised = boundedAdvertisement(selected?.responseFormatAdvertisement);
+        } catch {
+          // Required v2 direct work has no JSON fallback; the exact tuple
+          // resolver below records a finite preflight failure before transport.
+        }
+        const verificationEvidence: unknown[] = [];
+        return resolveGenerationResponseContractsV2({
+          queuedPolicy,
+          capabilityEvidenceHash: () => sha256(stableStringify({ advertisement: advertised, verificationEvidence })),
+          eligible: (operation, streaming) => {
+            const schema = getProviderOutputSchemaV2(operation);
+            const result = providers.responseFormatCapabilities.eligibilityV2({
+              advertisement: advertised as never,
+              providerType: profile.providerType as "openrouter" | "openai_compatible",
+              endpointIdentity: profile.endpointIdentity ?? "",
+              model: profile.model,
+              routeConfigHash: authority.routeConfigHash,
+              adapterProtocol: "text-schema-adapter-v2",
+              operation,
+              schemaHash: schema.schemaHash,
+              streaming,
+              now: providers.responseFormatCapabilities.now()
+            });
+            verificationEvidence.push({ operation, streaming, status: result.status, reason: result.reason, verification: result.verification ?? null });
+            return result;
+          }
+        });
+      }
       // Identity and adapter validation must fail before discovery.  Discovery
       // can be unavailable or malformed, but must never make an old queue
       // policy silently bind a new provider configuration.

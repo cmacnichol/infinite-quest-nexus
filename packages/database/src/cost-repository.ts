@@ -41,6 +41,60 @@ function assertAmount(amount: string): string {
   return amount;
 }
 
+// Campaign cost events are durable once their parent job/profile is cleaned up.
+// Physical prepared-route attempts fill the compatibility gap only until their
+// matching stable event exists; they also preserve charged rejected responses.
+const CAMPAIGN_COST_ROWS = `WITH ledger_scope AS (
+  SELECT attempt.id, NULL::uuid AS legacy_local_call_id, attempt.provider_response_id, profile.provider_type,
+         job.result_turn_id AS turn_id, 'story'::text AS category, attempt.reported_cost, attempt.completed_at
+    FROM prepared_text_physical_attempts attempt
+    JOIN generation_jobs job ON job.id::text=attempt.logical_reservation->>'generationJobId'
+      AND job.owner_user_id=attempt.owner_user_id
+    JOIN provider_profiles profile ON profile.id=job.provider_profile_id AND profile.owner_user_id=job.owner_user_id
+   WHERE attempt.owner_user_id=$1 AND attempt.logical_kind='story' AND job.campaign_id=$2
+     AND attempt.status='completed'
+  UNION ALL
+  SELECT attempt.id,
+         CASE WHEN attempt.outcome='succeeded' AND job.status='completed'
+                   AND attempt.logical_reservation->>'claimAttempt'=job.attempts::text
+              THEN job.id ELSE NULL END AS legacy_local_call_id,
+         attempt.provider_response_id, profile.provider_type,
+         job.turn_id, 'image'::text AS category, attempt.reported_cost, attempt.completed_at
+    FROM prepared_text_physical_attempts attempt
+    JOIN illustration_prompt_jobs job ON job.id::text=attempt.logical_reservation->>'promptJobId'
+      AND job.owner_user_id=attempt.owner_user_id
+    JOIN provider_profiles profile ON profile.id=job.provider_profile_id AND profile.owner_user_id=job.owner_user_id
+   WHERE attempt.owner_user_id=$1 AND attempt.logical_kind='illustration' AND job.campaign_id=$2
+     AND attempt.status='completed'
+), ledger_costs AS (
+  SELECT id, legacy_local_call_id, provider_response_id, provider_type, turn_id, category, completed_at AS occurred_at,
+         reported_cost->>'currency' AS currency,
+         CASE WHEN length(reported_cost->>'amount') <= 64
+                     AND reported_cost->>'amount' ~ '^\\d+(\\.\\d+)?$'
+                   THEN (reported_cost->>'amount')::numeric ELSE NULL END AS amount
+    FROM ledger_scope
+   WHERE reported_cost->>'currency' ~ '^[A-Z]{3}$'
+), all_costs AS (
+  SELECT cost.turn_id, cost.currency, cost.category, cost.amount, cost.occurred_at
+    FROM provider_cost_events cost
+   WHERE cost.owner_user_id=$1 AND cost.campaign_id=$2
+  UNION ALL
+  SELECT ledger.turn_id, ledger.currency, ledger.category, ledger.amount, ledger.occurred_at
+    FROM ledger_costs ledger
+   WHERE ledger.amount IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM provider_cost_events cost
+        WHERE cost.owner_user_id=$1 AND cost.campaign_id=$2
+          AND (
+            ledger.id=cost.local_call_id
+            OR (ledger.provider_response_id IS NOT NULL AND ledger.provider_response_id <> ''
+                AND ledger.provider_response_id=cost.provider_response_id
+                AND ledger.provider_type=cost.provider_type)
+            OR ledger.legacy_local_call_id=cost.local_call_id
+          )
+     )
+)`;
+
 export function createProviderCostRepository(readDatabase: Database): ProviderCostPort {
   return {
     async recordCost(context, command) {
@@ -99,13 +153,12 @@ export function createProviderCostRepository(readDatabase: Database): ProviderCo
         amount: string;
         total_amount: string;
       }>(
-        `WITH category_totals AS (
+        `${CAMPAIGN_COST_ROWS}, category_totals AS (
            SELECT cost.turn_id, cost.currency, cost.category, sum(cost.amount) AS amount
-             FROM provider_cost_events cost
+             FROM all_costs cost
              JOIN turns turn_row ON turn_row.id = cost.turn_id
-               AND turn_row.campaign_id = cost.campaign_id AND turn_row.owner_user_id = cost.owner_user_id
-            WHERE cost.owner_user_id = $1 AND cost.campaign_id = $2
-              AND cost.turn_id = ANY($3::uuid[])
+               AND turn_row.campaign_id = $2 AND turn_row.owner_user_id = $1
+            WHERE cost.turn_id = ANY($3::uuid[])
             GROUP BY cost.turn_id, cost.currency, cost.category
          )
          SELECT turn_id, currency, category, amount::text,
@@ -145,13 +198,12 @@ export function createProviderCostRepository(readDatabase: Database): ProviderCo
         total_other_amount: string;
         last_reported_at: Date | string;
       }>(
-        `WITH category_totals AS (
+        `${CAMPAIGN_COST_ROWS}, category_totals AS (
            SELECT currency, category, sum(amount) AS amount,
                   coalesce(sum(amount) FILTER (WHERE turn_id IS NOT NULL),0) AS attributed_amount,
                   coalesce(sum(amount) FILTER (WHERE turn_id IS NULL),0) AS other_amount,
                   max(occurred_at) AS last_reported_at
-             FROM provider_cost_events
-            WHERE owner_user_id = $1 AND campaign_id = $2
+             FROM all_costs
             GROUP BY currency, category
          )
          SELECT currency, category, amount::text, attributed_amount::text, other_amount::text,

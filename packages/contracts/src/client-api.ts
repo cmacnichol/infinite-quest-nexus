@@ -25,6 +25,7 @@ import { storyContextBudgetTokensSchema, storyLengthProfileSchema } from "./stor
 import { userProfileSchema, userProfileUpdateSchema } from "./users.js";
 import { campaignCharacterProfileSchema, campaignCreateSchema, playableCharacterSchema, worldCreateSchema } from "./world-library.js";
 import { campaignTurnControlStyleSchema } from "./campaign-generation-policy.js";
+import { safeProviderProfileViewSchema } from "./provider-profile-view.js";
 
 const operationKindSchema = generationJobStatusSchema.shape.operationKind;
 const generationStatusSchema = generationJobStatusSchema.shape.status;
@@ -83,9 +84,10 @@ export const metaResponseSchema = z.object({
     builtAt: z.string().nullable()
   }),
   capabilities: z.object({
-    systemArchive: z.boolean()
+    systemArchive: z.boolean(),
+    nativeTextExecutionPlans: z.boolean().optional().default(false)
   }).strict()
-});
+}).strict();
 
 export const sessionResponseSchema = z.object({
   user: userProfileSchema,
@@ -94,14 +96,9 @@ export const sessionResponseSchema = z.object({
 
 export const userProfileResponseSchema = z.object({ user: userProfileSchema });
 
-export const providerSummarySchema = z.object({
-  id: z.uuid(),
-  name: z.string().trim().min(1),
-  providerType: z.string().trim().min(1),
-  providerRole: z.string().trim().min(1)
-}).passthrough();
+export const providerSummarySchema = safeProviderProfileViewSchema;
 
-export const providerListResponseSchema = z.object({ providers: z.array(providerSummarySchema) });
+export const providerListResponseSchema = z.object({ providers: z.array(providerSummarySchema) }).strict();
 
 export const campaignRuntimeStateResponseSchema = campaignRuntimeStateSchema;
 export const campaignRuntimeStateUpdateRequestSchema = campaignRuntimeStateUpdateSchema;

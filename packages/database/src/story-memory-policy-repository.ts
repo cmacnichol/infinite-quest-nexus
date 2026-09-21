@@ -4,6 +4,7 @@ import { sha256 } from "../../domain/src/index.js";
 import { resolveEffectiveContextWindowTokens } from "../../story-engine/src/context-budget.js";
 import { GenerationApplicationError } from "../../application/src/generation/errors.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
+import type { TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 
@@ -89,6 +90,7 @@ export async function saveStoryMemorySettings(pool: DatabasePool, scope: Readonl
 
 export async function resolveStoryMemoryPolicySnapshot(client: DatabaseClient, scope: Readonly<{
   ownerUserId: string; campaignId: string; providerProfileId: string; requestedModel: string; modelContextWindowTokens?: number;
+  textExecutionRouteBasis?: TextExecutionRouteBasis;
 }>, config: StoryMemoryOperatorConfig): Promise<StoryMemoryPolicySnapshot | null> {
   const result = await client.query<{
     capability: StoryMemoryCapability; review_mode: "off" | "observe" | "enforce"; model: string;
@@ -114,18 +116,29 @@ export async function resolveStoryMemoryPolicySnapshot(client: DatabaseClient, s
     throw new GenerationApplicationError("conflict", { reason: "story_memory_enforce_disabled" });
   }
   const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy(row.capability), continuityReview: row.review_mode });
+  const frozenCandidate = scope.textExecutionRouteBasis?.candidates[0];
   const effectiveContextWindowTokens = resolveEffectiveContextWindowTokens(
-    row.context_window_tokens,
+    frozenCandidate?.contextWindowTokens ?? row.context_window_tokens,
     scope.modelContextWindowTokens
   );
   return {
     policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
     providerConfigurationFingerprint: effectiveProviderConfigurationFingerprint({
       providerId: scope.providerProfileId, providerType: row.provider_type,
-      endpointIdentity: sha256(row.base_url.replace(/\/+$/, "")),
-      model: scope.requestedModel.trim() || row.model.trim(), contextWindowTokens: row.context_window_tokens,
-      maxOutputTokens: row.max_output_tokens, temperature: row.temperature, requestTimeoutMs: row.request_timeout_ms,
-      configuration: toSafeProviderConfiguration(row.configuration),
+      endpointIdentity: scope.textExecutionRouteBasis?.endpointReference ?? sha256(row.base_url.replace(/\/+$/, "")),
+      model: frozenCandidate?.modelId ?? (scope.requestedModel.trim() || row.model.trim()), contextWindowTokens: frozenCandidate?.contextWindowTokens ?? row.context_window_tokens,
+      maxOutputTokens: frozenCandidate?.maxOutputTokens ?? row.max_output_tokens,
+      // A captured route keeps an intentional omission stable. Historical
+      // no-basis jobs instead fingerprint the profile setting that they will
+      // execute with.
+      temperature: scope.textExecutionRouteBasis
+        ? scope.textExecutionRouteBasis.parameters.temperature ?? 0
+        : row.temperature,
+      requestTimeoutMs: scope.textExecutionRouteBasis?.requestTimeoutMs ?? row.request_timeout_ms,
+      configuration: frozenCandidate ? {
+        parameters: scope.textExecutionRouteBasis!.parameters,
+        providerPolicy: frozenCandidate.providerPolicy
+      } : toSafeProviderConfiguration(row.configuration),
       effectiveContextWindowTokens,
       inputSafetyPolicy: "estimated_20_percent_plus_1024"
     })

@@ -5,9 +5,12 @@ import type {
   ProviderCandidate,
   ProviderModelInventory,
   ProviderModelInventoryPort,
+  ProviderPresetDetail,
+  ProviderPresetInventory,
   ProviderRole,
   ProviderRuntimeLeasePort
 } from "../../../packages/application/src/providers/index.js";
+import { normalizeTextSelection, type TextModelSelection } from "@infinite-quest/contracts";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
 import {
   loadPrivateProviderCredentialRow,
@@ -21,6 +24,8 @@ import {
   discoverEmbeddingModels,
   discoverImageModels,
   discoverModels,
+  discoverOpenRouterPreset,
+  discoverOpenRouterPresets,
   encryptCredential,
   pollImageProvider,
   submitImageProvider,
@@ -50,12 +55,17 @@ export type RuntimeProviderDescriptor<R extends ProviderRole = ProviderRole> = R
   /** Opaque hash of the effective non-secret provider destination. */
   endpointIdentity?: string;
   configuration: Readonly<Record<string, unknown>>;
+  /** Opaque execution revision; it changes when any route/credential input changes. */
+  executionRevision?: string;
+  /** Opaque authority revision for endpoint, owner-scoped role, enabled row, and credential material only. */
+  authorityRevision?: string;
+  textSelection?: TextModelSelection;
 }>;
 
 export type RuntimeTextExecution = RuntimeProviderDescriptor<"text" | "intent"> & Readonly<{
   execute(
     request: ProviderRequest,
-    policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
+    policy?: Readonly<{ maxOutputTokens?: number; temperature?: number; requestTimeoutMs?: number }>,
   ): Promise<ProviderResult>;
 }>;
 
@@ -99,6 +109,9 @@ export type RuntimeProviderAdapter = Readonly<{
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory>;
+  discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number; signal?: AbortSignal }>, credential: string | null): Promise<ProviderPresetInventory>;
+  resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
+  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<Readonly<{ candidate: ProviderCandidate; readSavedCredential(): string | null; revision: string }> | null>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
@@ -122,6 +135,8 @@ export function createRuntimeProviderAdapter(options: Readonly<{
   leaseDurationMs?: number;
 }>): RuntimeProviderAdapter {
   const leaseDurationMs = options.leaseDurationMs ?? 60_000;
+  const presetSummaryCache = new Map<string, Readonly<{ expiresAt: number; value: ProviderPresetInventory }>>();
+  const presetSummaryCacheVersions = new Map<string, number>();
 
   async function load(ownerUserId: string, providerProfileId: string) {
     const row = await loadPrivateProviderCredentialRow(options.database, ownerUserId, providerProfileId);
@@ -159,6 +174,12 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     model = row.defaultModel,
     contextWindowTokens = row.contextWindowTokens,
   ): RuntimeProviderDescriptor<R> {
+    const authorityRevision = createHash("sha256").update(JSON.stringify({
+      providerProfileId: row.providerProfileId,
+      providerRole: row.providerRole,
+      baseUrl: row.baseUrl,
+      credential: row.encryptedCredential
+    })).digest("hex");
     return Object.freeze({
       id: row.providerProfileId,
       name: row.name,
@@ -171,6 +192,9 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       requestTimeoutMs: row.requestTimeoutMs,
       endpointIdentity: providerEndpointIdentity(row.baseUrl),
       configuration: Object.freeze({ ...row.configuration })
+      , executionRevision: row.executionRevision
+      , authorityRevision
+      , ...(row.textSelection === undefined ? {} : { textSelection: row.textSelection })
     });
   }
 
@@ -267,14 +291,45 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         throw Object.assign(new Error("Provider model inventory is unavailable."), { statusCode: 502 });
       }
     },
-    discoverCandidateModels: (candidate) => discoverCandidateModels(candidate, null)
+    discoverCandidateModels: (candidate) => discoverCandidateModels(candidate, null),
+    async listPresets(request) {
+      const row = await load(request.ownerUserId, request.providerProfileId);
+      if ((row.providerRole !== "text" && row.providerRole !== "intent") || row.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile not found."), { statusCode: 404 });
+      const credentialRevision = row.encryptedCredential
+        ? `${row.encryptedCredential.keyVersion}|${row.encryptedCredential.nonce}|${row.encryptedCredential.authTag}|${row.encryptedCredential.ciphertext}`
+        : "";
+      const identity = createHash("sha256").update(`${request.ownerUserId}|${row.providerProfileId}|${row.baseUrl}|${credentialRevision}|${request.offset}|${request.limit}`).digest("hex");
+      if (request.refresh) presetSummaryCache.delete(identity);
+      const cached = presetSummaryCache.get(identity);
+      if (cached && cached.expiresAt > Date.now()) return cached.value;
+      const version = (presetSummaryCacheVersions.get(identity) ?? 0) + 1;
+      presetSummaryCacheVersions.set(identity, version);
+      const value = Object.freeze({ providerProfileId: request.providerProfileId, page: await discoverOpenRouterPresets(transportProfile(row), request, options.transport) });
+      if (presetSummaryCacheVersions.get(identity) === version) presetSummaryCache.set(identity, Object.freeze({ expiresAt: Date.now() + 60_000, value }));
+      return value;
+    },
+    async getPreset(request) {
+      const row = await load(request.ownerUserId, request.providerProfileId);
+      if ((row.providerRole !== "text" && row.providerRole !== "intent") || row.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider profile not found."), { statusCode: 404 });
+      return Object.freeze({ providerProfileId: request.providerProfileId, preset: await discoverOpenRouterPreset(transportProfile(row), request.slug, options.transport, request.signal) });
+    },
+    async discoverCandidatePresets(candidate, request) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole) };
+      return Object.freeze({ providerProfileId: null, page: await discoverOpenRouterPresets(profile, request, options.transport) });
+    },
+    async resolveCandidatePreset(candidate, slug, signal) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole) };
+      return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport, signal) });
+    }
   };
 
   async function discoverCandidateModels(
     candidate: ProviderCandidate,
     credential: string | null,
   ): Promise<ProviderModelInventory> {
-    const configuration = validateProviderConfiguration(candidate.providerType, candidate.configuration);
+    const configuration = validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole);
     const profile: TextProviderProfile = {
       providerType: candidate.providerType,
       baseUrl: candidate.baseUrl.replace(/\/+$/, ""),
@@ -319,7 +374,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         ...descriptor(row, providerRole, selectedModel, contextWindowTokens),
         execute: (
           request: ProviderRequest,
-          policy?: Readonly<{ maxOutputTokens?: number; temperature?: number }>,
+          policy?: Readonly<{ maxOutputTokens?: number; temperature?: number; requestTimeoutMs?: number }>,
         ) => callTextProvider(
           { ...transportProfile(row, selectedModel), ...policy },
           request,
@@ -369,6 +424,49 @@ export function createRuntimeProviderAdapter(options: Readonly<{
     inventory,
     execution,
     discoverCandidateModelsWithCredential: discoverCandidateModels,
+    async discoverCandidatePresetsWithCredential(candidate, request, credential) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
+      return Object.freeze({ providerProfileId: null, page: await discoverOpenRouterPresets(profile, request, options.transport) });
+    },
+    async resolveCandidatePresetWithCredential(candidate, slug, credential, signal) {
+      if ((candidate.providerRole !== "text" && candidate.providerRole !== "intent") || candidate.providerType !== "openrouter") throw Object.assign(new Error("OpenRouter text provider candidate is required."), { statusCode: 400 });
+      const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
+      return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport, signal) });
+    },
+    async presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, lock) {
+      const result = await options.database.query<{
+        name: string; provider_type: ProviderCandidate["providerType"]; provider_role: ProviderRole; base_url: string; default_model: string;
+        text_selection: unknown; context_window_tokens: number; max_output_tokens: number; temperature: number; request_timeout_ms: number;
+        configuration: unknown; enabled: boolean; is_default: boolean; encrypted_api_key: string | null; credential_nonce: string | null;
+        credential_auth_tag: string | null; credential_key_version: number | null;
+      }>(
+        `SELECT name,provider_type,provider_role,base_url,default_model,text_selection,context_window_tokens,max_output_tokens,temperature,
+                request_timeout_ms,configuration,enabled,is_default,encrypted_api_key,credential_nonce,credential_auth_tag,credential_key_version
+           FROM provider_profiles WHERE id=$1 AND owner_user_id=$2${lock ? " FOR UPDATE" : ""}`,
+        [providerProfileId, ownerUserId]
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const textSelection = row.provider_role === "text" || row.provider_role === "intent"
+        ? normalizeTextSelection({ providerType: row.provider_type, providerRole: row.provider_role, defaultModel: row.default_model,
+          ...(row.text_selection === null || row.text_selection === undefined ? {} : { textSelection: row.text_selection as TextModelSelection }) })
+        : undefined;
+      const candidate = Object.freeze({
+        ownerUserId, name: row.name, providerType: row.provider_type, providerRole: row.provider_role, baseUrl: row.base_url,
+        defaultModel: row.default_model, ...(textSelection === undefined ? {} : { textSelection }),
+        contextWindowTokens: row.context_window_tokens, maxOutputTokens: row.max_output_tokens, temperature: row.temperature,
+        requestTimeoutMs: row.request_timeout_ms, configuration: validateProviderConfiguration(row.provider_type, row.configuration, row.provider_role),
+        enabled: row.enabled, isDefault: row.is_default
+      } as ProviderCandidate);
+      const capturedCredential = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version
+        ? Object.freeze({ ciphertext: row.encrypted_api_key, nonce: row.credential_nonce, authTag: row.credential_auth_tag, keyVersion: row.credential_key_version })
+        : null;
+      const readSavedCredential = () => capturedCredential
+        ? decryptCredential(capturedCredential, options.credentialSecret)
+        : null;
+      return Object.freeze({ candidate, readSavedCredential, revision: createHash("sha256").update(JSON.stringify(row)).digest("hex") });
+    },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()
         ? encryptCredential(credential.trim(), options.credentialSecret)

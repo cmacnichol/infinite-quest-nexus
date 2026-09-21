@@ -1,0 +1,177 @@
+{
+  "mode": "offline_preparation",
+  "targetPreset": "@preset/nexus-nsfw",
+  "presetRoutingStatus": "requires_private_configured_candidate_order",
+  "model": "deepseek/deepseek-v3.2-exp",
+  "route": "novita/fp8",
+  "routeSource": "explicit_configured_candidate_input",
+  "configuredCandidateOrder": [
+    "novita/fp8"
+  ],
+  "pricingScope": "hypothetical_explicit_candidate_set",
+  "requestCount": 17,
+  "endpointIdentity": "76ef4ad6f0c8a4ae66efb13875c107cee40c78997a212353d379acfbb2f45591",
+  "routeConfigHash": "cf893ac1d3c41823f4792d2a13a607f9be2e5e980516a70e56d856d5946b373f",
+  "largestBodyByteCount": 4633,
+  "preparedInputTokenEstimate": 1545,
+  "preparedInputTokenEstimateKind": "application_estimate_not_billing_bound",
+  "conservativeInputTokenCeiling": 163840,
+  "outputTokenCeiling": 2048,
+  "maxInferenceCostUsd": 0.766301,
+  "priceObservedAt": "2026-09-20T23:44:13.000Z",
+  "schemas": [
+    {
+      "operation": "story",
+      "streaming": true,
+      "schemaName": "infinite_quest_story_native_v2",
+      "schemaVersion": "story-native-v2",
+      "schemaHash": "10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7",
+      "payloadHash": "af5fa766c6f6b8df60edd202e7f24d959a07827cbc3887e52b44972077af7bf8",
+      "bodyByteCount": 3082
+    },
+    {
+      "operation": "story",
+      "streaming": false,
+      "schemaName": "infinite_quest_story_native_v2",
+      "schemaVersion": "story-native-v2",
+      "schemaHash": "10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7",
+      "payloadHash": "9a9409d132dc0ebb2426e3956cbdcb004949bca49551b9842ee3becf2e3ff3c0",
+      "bodyByteCount": 3028
+    },
+    {
+      "operation": "choices",
+      "streaming": false,
+      "schemaName": "infinite_quest_choices_v2",
+      "schemaVersion": "choices-v2",
+      "schemaHash": "52c734ad617562bce2ee04cd1a9e741e90f5a5c89d20cfc23fe14abb6c4281af",
+      "payloadHash": "399658cba90d3ec70ef864bd52efc953003e3da2230ad59caaa3637c0bd438b4",
+      "bodyByteCount": 1025
+    },
+    {
+      "operation": "continuity_review",
+      "streaming": false,
+      "schemaName": "infinite_quest_continuity_review_v2",
+      "schemaVersion": "continuity-review-v2",
+      "schemaHash": "04be7bbeb5a12747155231aa60728920ab16dd86892fb41ff3dcad1048501f7e",
+      "payloadHash": "20f4ebcc530dc7d96b986b9066cc1e18c20b3fe327a10b20dc65d38f4440e0a0",
+      "bodyByteCount": 3020
+    },
+    {
+      "operation": "rpg_assessment",
+      "streaming": false,
+      "schemaName": "infinite_quest_rpg_assessment_v1",
+      "schemaVersion": "rpg-assessment-v1",
+      "schemaHash": "52b64429871ddcaa8f36299dead85fb44ae8bc169c7eff10de1a52d61ef1997a",
+      "payloadHash": "78c85c3c6cd2283d15be03444c6b441d3fe8b4eb3e4f3ac21f10a9cc895db92e",
+      "bodyByteCount": 1319
+    },
+    {
+      "operation": "event_trigger_before",
+      "streaming": false,
+      "schemaName": "infinite_quest_event_trigger_before_v1",
+      "schemaVersion": "event-trigger-before-v1",
+      "schemaHash": "7469e9762d94053369f787faf8fdc8945d5e25980457cd464e6be45501b7eff8",
+      "payloadHash": "3841adffc63981ee68ffc2229ef86ba21ff0405b5cea7ee1e7bcc0a5f0de3ffd",
+      "bodyByteCount": 958
+    },
+    {
+      "operation": "event_trigger_after",
+      "streaming": false,
+      "schemaName": "infinite_quest_event_trigger_after_v1",
+      "schemaVersion": "event-trigger-after-v1",
+      "schemaHash": "7469e9762d94053369f787faf8fdc8945d5e25980457cd464e6be45501b7eff8",
+      "payloadHash": "4bce1abaff3b38f738d1e081b9725438c95961f2ce7fa4ba142f781bffc54914",
+      "bodyByteCount": 956
+    },
+    {
+      "operation": "scene_coverage",
+      "streaming": false,
+      "schemaName": "infinite_quest_scene_coverage_v1",
+      "schemaVersion": "scene-coverage-v1",
+      "schemaHash": "aa5e2a7f5b4440416de98741f7b3f17148a50ae7822e10b293decc0b6b1e31f8",
+      "payloadHash": "1a858bc74091be8d56e85a44462561b0240a9d3a16cdf94d1cb49a89f9f8a024",
+      "bodyByteCount": 1022
+    },
+    {
+      "operation": "event_coverage",
+      "streaming": false,
+      "schemaName": "infinite_quest_event_coverage_v1",
+      "schemaVersion": "event-coverage-v1",
+      "schemaHash": "f7394d68eae7c004a3351469bf57be44239653ac3c90375c0712260e4dff30eb",
+      "payloadHash": "819848d5d9cbeaf2f15600ebf9d338e1d684e80b342f71c06aaab8713a6d3163",
+      "bodyByteCount": 1226
+    },
+    {
+      "operation": "world_outline",
+      "streaming": false,
+      "schemaName": "infinite_quest_world_outline_v1",
+      "schemaVersion": "world-outline-v1",
+      "schemaHash": "e27d7c72d8768ece4a583a95f86282da4eab0edf1534b21c987c33d5d0a2c30a",
+      "payloadHash": "b7bbc250340e89f341aac7ccd426bd91bb484a10e31f52daa297b6e6abc4448d",
+      "bodyByteCount": 4049
+    },
+    {
+      "operation": "world_seed_character",
+      "streaming": false,
+      "schemaName": "infinite_quest_world_seed_character_v1",
+      "schemaVersion": "world-seed-character-v1",
+      "schemaHash": "b8c26faaa9ff9f6dbd5e3c93115120841a10603627dafc6806e445add6eee2bf",
+      "payloadHash": "6fd14b74dbcc410c775a5ce403f3386eda537f44031cec2fa4fe346f3c6b4d28",
+      "bodyByteCount": 4633
+    },
+    {
+      "operation": "standalone_character",
+      "streaming": false,
+      "schemaName": "infinite_quest_standalone_character_v1",
+      "schemaVersion": "standalone-character-v1",
+      "schemaHash": "2882cd792867aea086a7b33b42ea394227180d82d9ea60808c1f787b003e2c9a",
+      "payloadHash": "2eb0d583941e86171fac3e7816f8ffe440e4be543e5095424faf10c0d35398cc",
+      "bodyByteCount": 4419
+    },
+    {
+      "operation": "character_organizer",
+      "streaming": false,
+      "schemaName": "infinite_quest_character_organizer_v1",
+      "schemaVersion": "character-organizer-v1",
+      "schemaHash": "31e2663cea81e1c7c9213ff35227b3443a0156cab9760f7c8224c71350f4b3a5",
+      "payloadHash": "6238ebb3712c1d963992a18a91a38ce5fae9c5a91df97cb927d1631734a1c769",
+      "bodyByteCount": 4399
+    },
+    {
+      "operation": "source_extraction",
+      "streaming": false,
+      "schemaName": "infinite_quest_source_extraction_v1",
+      "schemaVersion": "source-extraction-v1",
+      "schemaHash": "bbbc0d360afc81a5c467084fc2f8627e731c50010b4b4120187bc31c3a7da13d",
+      "payloadHash": "71a0623c1e12a9690033aaf23dc19c26e4e1e5b4cf0e159bb7f82eccb23a2967",
+      "bodyByteCount": 1671
+    },
+    {
+      "operation": "source_synthesis",
+      "streaming": false,
+      "schemaName": "infinite_quest_source_synthesis_v1",
+      "schemaVersion": "source-synthesis-v1",
+      "schemaHash": "6c139cfb599008379f9a1307ac4b27f496d3ec138854a0ada9c487e164eae7a9",
+      "payloadHash": "c9f7a8c7c9b5ee2d415694b03ebc484f9f666fed6b851c128e0c0d27cac661d1",
+      "bodyByteCount": 2676
+    },
+    {
+      "operation": "source_character",
+      "streaming": false,
+      "schemaName": "infinite_quest_source_character_v1",
+      "schemaVersion": "source-character-v1",
+      "schemaHash": "6c139cfb599008379f9a1307ac4b27f496d3ec138854a0ada9c487e164eae7a9",
+      "payloadHash": "126b598f367d5664fa463bf945b185a3fce9f16eb58e89f6ed990c94759e988e",
+      "bodyByteCount": 2676
+    },
+    {
+      "operation": "illustration_prompt_refinement",
+      "streaming": false,
+      "schemaName": "infinite_quest_illustration_prompt_refinement_v1",
+      "schemaVersion": "illustration-prompt-refinement-v1",
+      "schemaHash": "ab0b67bf273ad72925d78d25c9957a683ea5aea8f1dfd34eecf7e6655e29c61b",
+      "payloadHash": "1ee9c8330821c98a1f542e6b7676c5665b57f7caafc85d12a1e3cef305257c02",
+      "bodyByteCount": 794
+    }
+  ]
+}

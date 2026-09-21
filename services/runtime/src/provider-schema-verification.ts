@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
-import type { SchemaVerification } from "@infinite-quest/contracts";
+import type { SchemaVerification, SchemaVerificationV2 } from "@infinite-quest/contracts";
+import { providerOutputSchemaOperationV2Schema } from "../../../packages/contracts/src/provider-output-schema.js";
 
 const MAX_BYTES = 1_048_576;
 const MAX_RECORDS = 1_000;
@@ -14,7 +15,8 @@ const ALLOWED_RECORD_KEYS = new Set([
   "version", "providerType", "endpointIdentity", "model", "routeConfigHash", "adapterProtocol", "operation", "schemaHash",
   "streaming", "verifiedAt", "expiresAt", "providerRoutingSlugs", "nativeOpenTrackerObjects"
 ]);
-export type SchemaVerificationFile = Readonly<{ records: readonly SchemaVerification[]; digest: string }>;
+export type SchemaVerificationRecord = SchemaVerification | SchemaVerificationV2;
+export type SchemaVerificationFile = Readonly<{ records: readonly SchemaVerificationRecord[]; digest: string }>;
 export type SchemaVerificationFileOptions = Readonly<{ now?: () => number }>;
 
 function invalid(): never { throw new Error("TEXT_SCHEMA_VERIFICATION_FILE is invalid."); }
@@ -48,31 +50,36 @@ function readBounded(path: string): Buffer {
     }
   }
 }
-function record(value: unknown, now: number): SchemaVerification {
+function record(value: unknown, now: number): SchemaVerificationRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
   const item = value as Record<string, unknown>;
   if (Object.keys(item).some((key) => !ALLOWED_RECORD_KEYS.has(key)) || Object.keys(item).length !== ALLOWED_RECORD_KEYS.size) return invalid();
-  if (item.version !== 1 || (item.providerType !== "openrouter" && item.providerType !== "openai_compatible") || item.adapterProtocol !== "text-schema-adapter-v1" || (item.operation !== "story" && item.operation !== "choices" && item.operation !== "continuity_review") || typeof item.streaming !== "boolean" || typeof item.nativeOpenTrackerObjects !== "boolean") return invalid();
+  const v1Operation = item.operation === "story" || item.operation === "choices" || item.operation === "continuity_review";
+  const v2Operation = providerOutputSchemaOperationV2Schema.safeParse(item.operation).success;
+  if ((item.version !== 1 && item.version !== 2) || (item.providerType !== "openrouter" && item.providerType !== "openai_compatible")
+    || (item.version === 1 && (item.adapterProtocol !== "text-schema-adapter-v1" || !v1Operation))
+    || (item.version === 2 && (item.adapterProtocol !== "text-schema-adapter-v2" || !v2Operation))
+    || typeof item.streaming !== "boolean" || typeof item.nativeOpenTrackerObjects !== "boolean") return invalid();
   if (!isSha256Digest(item.endpointIdentity) || !isSha256Digest(item.routeConfigHash) || !isSha256Digest(item.schemaHash) || !isConcreteModel(item.model) || !isCanonicalTimestamp(item.verifiedAt) || !isCanonicalTimestamp(item.expiresAt)) return invalid();
   if (!Array.isArray(item.providerRoutingSlugs) || item.providerRoutingSlugs.length > MAX_ROUTING_SLUGS || item.providerRoutingSlugs.some((slug) => typeof slug !== "string" || slug.length === 0 || slug.length > MAX_ROUTING_SLUG_LENGTH || !ROUTING_SLUG.test(slug)) || new Set(item.providerRoutingSlugs).size !== item.providerRoutingSlugs.length) return invalid();
   if ((item.providerType === "openrouter" && item.providerRoutingSlugs.length === 0) || (item.providerType === "openai_compatible" && item.providerRoutingSlugs.length !== 0)) return invalid();
   const verifiedAt = Date.parse(item.verifiedAt), expiresAt = Date.parse(item.expiresAt);
   if (expiresAt <= verifiedAt || expiresAt - verifiedAt > MAX_DURATION_MS || verifiedAt > now) return invalid();
   return Object.freeze({
-    version: 1,
+    version: item.version,
     providerType: item.providerType,
     endpointIdentity: item.endpointIdentity,
     model: item.model,
     routeConfigHash: item.routeConfigHash,
-    adapterProtocol: "text-schema-adapter-v1",
-    operation: item.operation as SchemaVerification["operation"],
+    adapterProtocol: item.adapterProtocol,
+    operation: item.operation,
     schemaHash: item.schemaHash,
     streaming: item.streaming,
     verifiedAt: item.verifiedAt,
     expiresAt: item.expiresAt,
     providerRoutingSlugs: Object.freeze([...item.providerRoutingSlugs]),
     nativeOpenTrackerObjects: item.nativeOpenTrackerObjects
-  });
+  }) as SchemaVerificationRecord;
 }
 export function loadSchemaVerificationFile(path: string | undefined, options: SchemaVerificationFileOptions = {}): SchemaVerificationFile {
   if (!path) return Object.freeze({ records: Object.freeze([]), digest: createHash("sha256").update("").digest("hex") });

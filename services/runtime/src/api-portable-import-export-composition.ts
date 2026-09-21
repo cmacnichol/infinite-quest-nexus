@@ -251,6 +251,9 @@ export async function createApiPortableImportExportComposition(
           input: command.template,
           worldId: `portable-preview-${randomUUID()}`,
           ...(command.providerSelection.model === undefined ? {} : { model: command.providerSelection.model }),
+          ...(command.providerSelection.textExecutionOverrides === undefined ? {} : {
+            textExecutionOverrides: command.providerSelection.textExecutionOverrides
+          }),
           ...(command.progress === undefined ? {} : {
             onProgress: (phase, progressPercent, message) => progress.update(command.progress!, {
               phase,

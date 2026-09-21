@@ -30,6 +30,8 @@ import {
 } from "../../contracts/src/source-authoring.js";
 import { createHash, randomUUID } from "node:crypto";
 import { canonicalizeWorldContent, playableCharacterSchema, type WorldContent } from "../../contracts/src/world-library.js";
+import { physicalTextAccountingSchema } from "../../contracts/src/physical-text-accounting.js";
+import { createPostgresPreparedTextAttemptRepository } from "./prepared-text-attempt-repository.js";
 import type {
   AuthoringClaim,
   AuthoringExecutionRepository,
@@ -37,6 +39,7 @@ import type {
   AuthoringWorldApplyPort
 } from "../../application/src/authoring/ports.js";
 import { AuthoringRepositoryError } from "../../application/src/authoring/types.js";
+import { normalizeTextSelection, type TextModelSelection } from "../../contracts/src/provider-selection.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
 import { retryAuthoringStage, type AuthoringStageLifecycle } from "../../domain/src/authoring-jobs.js";
 import { projectAuthoringFailure, validateGeneratedCharacter, validateGeneratedWorldFiction } from "../../domain/src/authoring-output.js";
@@ -558,7 +561,15 @@ const STAGE_RETURNING = `
   stages.lease_token AS "leaseToken", stages.lease_expires_at AS "leaseExpiresAt", stages.output, stages.failure,
   stages.source_review_generation AS "sourceReviewGeneration"`;
 
-export function createPostgresAuthoringRepository(pool: DatabasePool): AuthoringExecutionRepository {
+export function createPostgresAuthoringRepository(pool: DatabasePool): AuthoringExecutionRepository;
+export function createPostgresAuthoringRepository(
+  pool: DatabasePool,
+  options: Readonly<{ textPlanProtocol?: 2 }>
+): AuthoringExecutionRepository;
+export function createPostgresAuthoringRepository(
+  pool: DatabasePool,
+  options: Readonly<{ textPlanProtocol?: 2 }> = {}
+): AuthoringExecutionRepository {
   async function loadStages(jobIds: readonly string[]): Promise<Map<string, StageRow[]>> {
     const byJob = new Map<string, StageRow[]>();
     if (!jobIds.length) return byJob;
@@ -583,7 +594,19 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
     const job = jobs.rows[0];
     if (!job || isDiscardedInput(job.input)) return null;
     const stages = await loadStages([job.id]);
-    return jobView(job, stages.get(job.id) ?? []);
+    const view = jobView(job, stages.get(job.id) ?? []);
+    try {
+      const accounting = await createPostgresPreparedTextAttemptRepository(pool).summarize({
+        kind: "job", ownerUserId: scope.ownerUserId, logicalKind: "authoring", scopeId: job.id
+      });
+      return accounting.attemptCount > 0
+        ? authoringJobViewSchema.parse({ ...view, physicalAccounting: physicalTextAccountingSchema.parse(accounting) })
+        : view;
+    } catch {
+      // A ledger read is optional for the owner-facing job detail; do not hide
+      // an already durable proposal when accounting projection is unavailable.
+      return view;
+    }
   }
 
   async function assertDraftTarget(client: DatabaseClient, scope: OwnerScope, target: { worldId: string; expectedRevision: number; characterId?: string | undefined }): Promise<void> {
@@ -801,6 +824,18 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
           if (isDiscardedInput(replay.input)) throw new AuthoringRepositoryError("invalid_state");
           return replay;
         }
+        if (options.textPlanProtocol !== 2) {
+          const profiles = await client.query<{ provider_type: string; provider_role: string; default_model: string; text_selection: TextModelSelection | null; is_default: boolean }>(
+            `SELECT provider_type,provider_role,default_model,text_selection,is_default FROM provider_profiles
+               WHERE owner_user_id=$1 AND provider_role='text' AND enabled=true
+               ORDER BY is_default DESC,name,id LIMIT 2 FOR SHARE`, [scope.ownerUserId]
+          );
+          const profile = profiles.rows.length === 1 || profiles.rows[0]?.is_default ? profiles.rows[0] : null;
+          if (profile && normalizeTextSelection({ providerType: profile.provider_type, providerRole: profile.provider_role,
+            defaultModel: profile.default_model, ...(profile.text_selection ? { textSelection: profile.text_selection } : {}) }).kind === "openrouter_preset") {
+            throw new AuthoringRepositoryError("native_text_execution_unavailable");
+          }
+        }
         // The replay check deliberately runs before this count. An existing
         // durable request remains safe to resume even when the owner is at cap.
         const active = await client.query<{ count: number }>(
@@ -814,11 +849,11 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
         }
         if (input.target.kind === "world_draft") await assertDraftTarget(client, scope, input.target);
         const inserted = await client.query<JobRow>(
-          `INSERT INTO authoring_jobs (owner_user_id, kind, target, input, request_hash, idempotency_key)
-           VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6)
+          `INSERT INTO authoring_jobs (owner_user_id, kind, target, input, request_hash, idempotency_key, text_plan_protocol)
+           VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
            ON CONFLICT (owner_user_id, idempotency_key) DO NOTHING
            RETURNING ${JOB_SELECT}`,
-          [scope.ownerUserId, input.kind, json(input.target), encoded, hash, input.idempotencyKey]
+          [scope.ownerUserId, input.kind, json(input.target), encoded, hash, input.idempotencyKey, options.textPlanProtocol ?? null]
         );
         const created = inserted.rows[0];
         if (created) {
@@ -1277,6 +1312,7 @@ export function createPostgresAuthoringRepository(pool: DatabasePool): Authoring
       if (!workerId.trim()) throw new TypeError("Authoring worker ID is required.");
       const allowedKinds = authoringKindSchema.array().min(1).parse(rawAllowedKinds ?? ["world_concept", "character", "story_source"]);
       const claim = await withTransaction(pool, async (client) => {
+        await client.query("SELECT set_config('app.text_plan_protocol', '2', true)");
         const jobs = await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM authoring_jobs jobs WHERE jobs.kind = ANY($1::text[]) AND jobs.status IN ('queued','running') AND jobs.expires_at > clock_timestamp() AND EXISTS (SELECT 1 FROM authoring_job_stages stages WHERE stages.job_id = jobs.id AND stages.owner_user_id = jobs.owner_user_id AND stages.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = stages.job_id AND current.stage_key = stages.stage_key) AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(stages.parent_generations) dependency LEFT JOIN authoring_job_stages parent ON parent.job_id = stages.job_id AND parent.stage_key = dependency.key AND parent.generation = dependency.value::int AND parent.status = 'validated' AND parent.generation = (SELECT max(current.generation) FROM authoring_job_stages current WHERE current.job_id = parent.job_id AND current.stage_key = parent.stage_key) WHERE parent.id IS NULL) AND (stages.status = 'queued' AND ((stages.attempt_count = 0 AND stages.retry_count = 0) OR stages.next_attempt_at <= clock_timestamp()) OR stages.status = 'running' AND stages.lease_expires_at <= clock_timestamp() AND stages.attempt_count <= 3)) ORDER BY jobs.created_at, jobs.id FOR UPDATE SKIP LOCKED LIMIT 1`, [allowedKinds]);
         const job = jobs.rows[0];
         if (!job) return null;

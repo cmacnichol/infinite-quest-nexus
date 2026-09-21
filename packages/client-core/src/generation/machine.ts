@@ -46,19 +46,38 @@ function isSameResponseFormat(
   right: GenerationStreamSnapshot["responseFormat"]
 ): boolean {
   if (left === undefined || right === undefined) return left === right;
-  return left.version === right.version
-    && left.savedPolicy === right.savedPolicy
-    && left.effectiveMode === right.effectiveMode
-    && left.schemaVersion === right.schemaVersion
-    && left.schemaHash === right.schemaHash
-    && left.operation === right.operation
-    && left.streaming === right.streaming
-    && left.requestedModel === right.requestedModel
-    && left.returnedModel === right.returnedModel
-    && left.returnedRoute === right.returnedRoute
-    && left.preflight === right.preflight
-    && left.preflightDiagnostic === right.preflightDiagnostic
-    && left.diagnosticCode === right.diagnosticCode;
+  if (left.version !== right.version
+    || left.savedPolicy !== right.savedPolicy
+    || left.effectiveMode !== right.effectiveMode
+    || left.schemaVersion !== right.schemaVersion
+    || left.schemaHash !== right.schemaHash
+    || left.operation !== right.operation
+    || left.streaming !== right.streaming
+    || left.preflight !== right.preflight
+    || left.preflightDiagnostic !== right.preflightDiagnostic
+    || left.diagnosticCode !== right.diagnosticCode) return false;
+  if (left.version === 1 && right.version === 1) {
+    return left.requestedModel === right.requestedModel
+      && left.returnedModel === right.returnedModel
+      && left.returnedRoute === right.returnedRoute;
+  }
+  if (left.version === 2 && right.version === 2) {
+    const leftSelection = left.requestedSelection;
+    const rightSelection = right.requestedSelection;
+    const sameSelection = leftSelection === null || rightSelection === null
+      ? leftSelection === rightSelection
+      : leftSelection.kind === rightSelection.kind
+        && (leftSelection.kind === "model" && rightSelection.kind === "model"
+          ? leftSelection.modelId === rightSelection.modelId
+          : leftSelection.kind === "openrouter_preset" && rightSelection.kind === "openrouter_preset"
+            && leftSelection.slug === rightSelection.slug);
+    return sameSelection
+      && left.assurance === right.assurance
+      && left.actualServedIdentity.status === right.actualServedIdentity.status
+      && left.actualServedIdentity.model === right.actualServedIdentity.model
+      && left.actualServedIdentity.providerRoute === right.actualServedIdentity.providerRoute;
+  }
+  return false;
 }
 
 function isSameReview(left: GenerationReviewSummary | undefined, right: GenerationReviewSummary | undefined): boolean {

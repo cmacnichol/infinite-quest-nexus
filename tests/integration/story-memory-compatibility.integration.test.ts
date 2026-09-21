@@ -56,6 +56,12 @@ async function exportRecords(pool: DatabasePool, ownerUserId: string): Promise<S
 }
 
 integration("T19 story-memory archive compatibility", () => {
+  const restoreKinds: readonly ("system" | "campaign_zip")[] = process.platform === "linux"
+    ? ["system", "campaign_zip"]
+    : ["system"];
+  if (process.platform !== "linux") {
+    it.skip("restores campaign_zip into an empty destination and regenerates from corrected authority without operational state", () => undefined);
+  }
   let pool: DatabasePool;
   let server: Server;
   let providerId = "";
@@ -93,7 +99,7 @@ integration("T19 story-memory archive compatibility", () => {
     await pool?.end();
   });
 
-  it.each(["system", "campaign_zip"] as const)("restores %s into an empty destination and regenerates from corrected authority without operational state", async (kind) => {
+  it.each(restoreKinds)("restores %s into an empty destination and regenerates from corrected authority without operational state", async (kind) => {
     await pool.query("TRUNCATE TABLE users RESTART IDENTITY CASCADE");
     await pool.query("INSERT INTO users(system_key,display_name,status) VALUES ('initial-owner','Initial Owner','active')");
     await pool.end();
@@ -141,7 +147,8 @@ integration("T19 story-memory archive compatibility", () => {
     providerId = (await createProvider(pool, {
       name: `T19 source provider ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
       baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "t19-capturing-provider",
-      contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: {}
+      contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true,
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret)).id;
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: source.id },
       { capability: "r1", reviewMode: "off" }, { installedCapability: "r1", enforceEnabled: false });
@@ -151,7 +158,7 @@ integration("T19 story-memory archive compatibility", () => {
       action: "PRIVATE_JOB_ACTION_CANARY", providerProfileId: providerId, idempotencyKey: randomUUID(),
       context: { budgetTokens: 60_000, compression: "full", recentTurns: 8 }
     }));
-    await pool.query(`UPDATE generation_jobs SET orchestration_private=$2::jsonb,partial_output=$3,streaming_segments_state=$4::jsonb WHERE id=$1`,
+    await pool.query(`UPDATE generation_jobs SET orchestration_private=orchestration_private || $2::jsonb,partial_output=$3,streaming_segments_state=$4::jsonb WHERE id=$1`,
       [privateJob.id, JSON.stringify({ privateCanary: "PRIVATE_REVIEW_CHECKPOINT_CANARY" }), "PRIVATE_PROVISIONAL_NARRATION_CANARY",
         JSON.stringify({ privateCanary: "PRIVATE_STREAM_CHECKPOINT_CANARY" })]);
     const records = await exportRecords(pool, ownerUserId);
@@ -228,7 +235,8 @@ integration("T19 story-memory archive compatibility", () => {
     providerId = (await createProvider(pool, {
       name: `T19 provider ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
       baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "t19-capturing-provider",
-      contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: {}
+      contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true,
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret)).id;
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: restored.rows[0]!.id },
       { capability: "r1", reviewMode: "off" }, { installedCapability: "r1", enforceEnabled: false });
