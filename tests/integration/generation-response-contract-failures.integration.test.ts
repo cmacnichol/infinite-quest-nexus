@@ -441,6 +441,11 @@ integration("response-contract provider failures", () => {
     scenario = "schema_rejection";
     const value = await fixture("required", false, true, "model");
     const sibling = await fixture("required", false, true, "model");
+    // The claim queue orders by created_at; close fixture inserts can tie.
+    await pool.query(
+      "UPDATE generation_jobs SET created_at = (SELECT created_at - interval '1 second' FROM generation_jobs WHERE id=$2) WHERE id=$1",
+      [value.job.id, sibling.job.id]
+    );
     const foreignOwner = (await pool.query<{ id: string }>(
       "INSERT INTO users (display_name,status) VALUES ($1,'active') RETURNING id",
       [`response-contract foreign ${randomUUID()}`]
