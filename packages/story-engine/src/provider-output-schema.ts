@@ -1,4 +1,5 @@
 import type { ResponseSchemaOperation } from "../../contracts/src/text-response-format.js";
+import { CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY } from "../../contracts/src/provider-profile-view.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 
 export type ProviderOutputSchema = Readonly<{
@@ -92,7 +93,7 @@ function entry(operation: ResponseSchemaOperation, version: ProviderOutputSchema
 }
 
 const registry: Readonly<Record<ResponseSchemaOperation, ProviderOutputSchema>> = deepFreeze({
-  story: entry("story", "story-native-v1", "infinite_quest_story_native_v1", storySchema, true),
+  story: entry("story", CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaVersion, "infinite_quest_story_native_v1", storySchema, true),
   choices: entry("choices", "choices-v1", "infinite_quest_choices_v1", choicesSchema, false),
   continuity_review: entry("continuity_review", "continuity-review-v1", "infinite_quest_continuity_review_v1", continuityReviewSchema, false)
 });

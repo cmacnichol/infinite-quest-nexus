@@ -123,4 +123,31 @@ describe("safe public generation diagnostics", () => {
     }));
   });
 
+  it("distinguishes verified Models from trusted Presets and reports requested and served identities", () => {
+    expect(generationResponseFormatPresentation({
+      version: 2, savedPolicy: "required", effectiveMode: "json_schema", schemaVersion: "story-native-v1",
+      schemaHash: "a".repeat(64), operation: "story", streaming: true, preflight: "selected",
+      preflightDiagnostic: null, diagnosticCode: null,
+      requestedSelection: { kind: "openrouter_preset", slug: "night-shift" }, assurance: "trusted_preset",
+      actualServedIdentity: { status: "known", model: "served-model", providerRoute: null }
+    })?.details).toEqual(expect.arrayContaining([
+      "Effective mode: Trusted preset schema for the saved story operation.",
+      "Requested selection: Preset night-shift.",
+      "Actual served model: served-model.",
+      "Actual provider route: Unknown."
+    ]));
+
+    expect(generationResponseFormatPresentation({
+      version: 2, savedPolicy: "auto", effectiveMode: "json_schema", schemaVersion: "story-native-v1",
+      schemaHash: "b".repeat(64), operation: "story", streaming: true, preflight: "selected",
+      preflightDiagnostic: null, diagnosticCode: null,
+      requestedSelection: { kind: "model", modelId: "requested-model" }, assurance: "verified_model",
+      actualServedIdentity: { status: "unknown", model: null, providerRoute: null }
+    })?.details).toEqual(expect.arrayContaining([
+      "Effective mode: Verified Model schema for the saved story operation.",
+      "Requested selection: Model requested-model.",
+      "Actual served model: Unknown.",
+      "Actual provider route: Unknown."
+    ]));
+  });
 });

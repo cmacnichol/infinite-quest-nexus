@@ -4,6 +4,11 @@ import { providerRoleSchema, providerTypeSchema } from "./generation.js";
 import { textModelSelectionSchema } from "./provider-selection.js";
 import { textExecutionOverridesSchema } from "./text-execution-plan.js";
 
+export const CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY = Object.freeze({
+  schemaVersion: "story-native-v1",
+  schemaHash: "10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7"
+});
+
 export const safeProviderConfigurationSchema = z.object({
   streaming: z.boolean().optional(), streamingSupport: z.boolean().optional(), httpReferer: z.string().optional(),
   modelDiscoveryEnabled: z.boolean().optional(), network: z.enum(["fast", "relaxed"]).optional(),

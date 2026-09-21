@@ -3,6 +3,7 @@ export {
   reduceSelectionEditor,
   serializeSelectionEditorPatch
 } from "@infinite-quest/client-core";
+export { isExactStoryResponseFormatCapability } from "@infinite-quest/client-core";
 export type {
   OverrideIntent,
   ResponseFormatPolicy,

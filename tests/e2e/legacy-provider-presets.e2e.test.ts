@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
+import { CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY } from "../../packages/contracts/src/provider-profile-view.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const screenshots = ".superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots";
@@ -42,7 +43,7 @@ function providerFixture(): Provider {
   };
 }
 
-async function installSettingsApi(page: Page, { nativeSupport = true } = {}) {
+async function installSettingsApi(page: Page, { nativeSupport = true, metadataGate = null as Promise<void> | null } = {}) {
   const provider = providerFixture();
   const providers = [provider];
   const writes: Record<string, unknown>[] = [];
@@ -50,6 +51,7 @@ async function installSettingsApi(page: Page, { nativeSupport = true } = {}) {
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname === "/api/v1/meta") {
+      if (metadataGate) await metadataGate;
       return route.fulfill({ contentType: "application/json", body: JSON.stringify({ application: { version: "test" }, capabilities: nativeSupport ? { nativeTextExecutionPlans: true } : {} }) });
     }
     if (url.pathname === "/api/v1/providers" && request.method() === "GET") {
@@ -63,10 +65,13 @@ async function installSettingsApi(page: Page, { nativeSupport = true } = {}) {
       return route.fulfill({ contentType: "application/json", body: JSON.stringify(created) });
     }
     if (url.pathname === `/api/v1/providers/${provider.id}/presets`) {
-      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ presets: [{ slug: "nexus-story", name: "Nexus Story", status: "active", designatedVersionId: "version-1", updatedAt: now }], totalCount: 1, offset: 0, nextOffset: null }) });
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ presets: [{ slug: "nexus-story", name: "Nexus Story", status: "active", designatedVersionId: "version-1", updatedAt: now }, { slug: "alternate-story", name: "Alternate Story", status: "active", designatedVersionId: "version-2", updatedAt: now }], totalCount: 2, offset: 0, nextOffset: null }) });
     }
     if (url.pathname === `/api/v1/providers/${provider.id}/presets/nexus-story`) {
-      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ slug: "nexus-story", name: "Nexus Story", versionId: "version-1", version: 3, standardPrompt: "Write with restrained tension.", candidateModelIds: ["vendor/primary", "vendor/fallback"], providerPolicy: { order: ["openai", "anthropic"], allow_fallbacks: true }, excludedProviderSlugs: [], parameters: { temperature: 0.55, max_tokens: 2400 }, limits: { configuredMaxTokens: 2400, configuredMaxCompletionTokens: null, effectiveMaxOutputTokens: 2400, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } }) });
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ slug: "nexus-story", name: "Nexus Story", versionId: "version-1", version: 3, standardPrompt: "Write with restrained tension.", candidateModelIds: ["vendor/primary", "vendor/fallback"], providerPolicy: { order: ["openai", "anthropic"], allow_fallbacks: true }, excludedProviderSlugs: [], parameters: { temperature: 0.55, max_tokens: 2400 }, limits: { configuredMaxTokens: 2400, configuredMaxCompletionTokens: 1800, effectiveMaxOutputTokens: 1600, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } }) });
+    }
+    if (url.pathname === `/api/v1/providers/${provider.id}/presets/alternate-story`) {
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({ slug: "alternate-story", name: "Alternate Story", versionId: "version-2", version: 1, standardPrompt: "Alternate prompt.", candidateModelIds: ["vendor/alternate"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {}, limits: { configuredMaxTokens: null, configuredMaxCompletionTokens: null, effectiveMaxOutputTokens: null, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } }) });
     }
     if (url.pathname === `/api/v1/providers/${provider.id}` && request.method() === "PATCH") {
       const body = request.postDataJSON() as Record<string, unknown>;
@@ -123,6 +128,15 @@ test("provider settings save and reopen a trusted native preset through the type
   await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toHaveValue("nexus-story");
   await expect(page.locator("#providerPresetPrompt")).toHaveText("Write with restrained tension.");
   await expect(page.locator("#providerPresetVersion")).toHaveText("3 · version-1");
+  await expect(page.locator("#providerPresetLimits")).toContainText("Configured max_tokens: 2,400");
+  await expect(page.locator("#providerPresetLimits")).toContainText("configured max_completion_tokens: 1,800");
+  await expect(page.locator("#providerPresetLimits")).toContainText("effective max output: 1,600");
+  await page.locator("#providerTextOverrideMode").selectOption("explicit");
+  await page.locator("#providerOverrideTemperature").fill("0.31");
+  await page.locator("#providerOverrideMaxTokens").fill("1800");
+  await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("alternate-story");
+  await expect(page.locator("#providerTextOverrideMode")).toHaveValue("inherit");
+  await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
   await page.locator("#providerTextOverrideMode").selectOption("explicit");
   await page.locator("#providerOverrideTemperature").fill("0.31");
   await page.locator("#providerOverrideMaxTokens").fill("1800");
@@ -203,12 +217,37 @@ test("settings retain unavailable saved presets and explain an older server", as
   expect(api.writes).toHaveLength(0);
 
   await page.unrouteAll({ behavior: "wait" });
-  await installSettingsApi(page, { nativeSupport: false });
+  const downlevel = await installSettingsApi(page, { nativeSupport: false });
+  Object.assign(downlevel.provider, {
+    defaultModel: "@preset/retired-story",
+    textSelection: { kind: "openrouter_preset", slug: "retired-story" }
+  });
   await page.reload();
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
   await expect(page.locator("#providerTextSelectionMode")).toBeHidden();
   await expect(page.locator("#providerTextSelectionSupport")).toBeVisible();
   await expect(page.locator("#providerTextSelectionSupport")).toContainText("does not advertise native text execution plans");
+  await expect(page.locator("#providerModelSelectionField")).toBeHidden();
+  await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
+  await expect.poll(() => downlevel.writes.length).toBe(1);
+  expect(downlevel.writes[0]).toMatchObject({ defaultModel: "@preset/retired-story" });
+  expect(downlevel.writes[0]).not.toHaveProperty("textSelection");
+});
+
+test("settings preserve a saved preset while native capability metadata is still loading", async ({ page }) => {
+  let releaseMetadata!: () => void;
+  const metadataGate = new Promise<void>((resolve) => { releaseMetadata = resolve; });
+  const api = await installSettingsApi(page, { metadataGate });
+  Object.assign(api.provider, { defaultModel: "@preset/loading-story", textSelection: { kind: "openrouter_preset", slug: "loading-story" } });
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
+  await expect(page.locator("#providerTextSelectionSupport")).toContainText("Checking whether");
+  await expect(page.locator("#providerModelSelectionField")).toBeHidden();
+  await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0]).toMatchObject({ defaultModel: "@preset/loading-story" });
+  expect(api.writes[0]).not.toHaveProperty("textSelection");
+  releaseMetadata();
 });
 
 test("stale preset list and detail completions cannot replace newer credential or profile state", async ({ page }) => {
@@ -227,18 +266,12 @@ test("stale preset list and detail completions cannot replace newer credential o
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
   await expect(page.locator("#providerPresetStatus")).toContainText("Loading OpenRouter presets");
-  await page.locator("#providerApiKey").fill("replacement-credential");
-  await page.locator("#providerApiKey").dispatchEvent("change");
-  await expect(page.locator("#providerPresetStatus")).toContainText("No presets loaded");
+  await page.getByRole("radio", { name: "Model", exact: true }).check();
   releaseList();
-  await expect(page.locator("#providerPresetSelect option")).toHaveCount(1);
-  await expect(page.locator("#providerPresetStatus")).toContainText("No presets loaded");
-
   await page.unroute(listPattern, delayedList);
-  await page.locator("#providerApiKey").fill("");
-  await page.locator("#providerApiKey").dispatchEvent("change");
-  await page.locator("#refreshProviderPresets").click();
+  await page.getByRole("radio", { name: "Preset", exact: true }).check();
   await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toContainText("Nexus Story");
+  await expect(page.getByRole("combobox", { name: "Preset", exact: true })).not.toContainText("Stale");
   let releaseDetail!: () => void;
   const detailGate = new Promise<void>((resolve) => { releaseDetail = resolve; });
   const detailPattern = `**/api/v1/providers/${api.provider.id}/presets/nexus-story`;
@@ -265,8 +298,13 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
   const fixture = quietLeafApiPayloads({ turnControlStyle: "flexible_action" });
   const provider = providerFixture();
+  provider.configuration = { textResponseFormatPolicy: "auto" };
   const writes: Record<string, unknown>[] = [];
   const jobId = "22222222-2222-4222-8222-222222222222";
+  let exactCapability = false;
+  let delayPresetList = false;
+  let releasePresetList!: () => void;
+  const presetListGate = new Promise<void>((resolve) => { releasePresetList = resolve; });
   await page.addInitScript(() => Object.defineProperty(window, "EventSource", { configurable: true, value: undefined }));
   await page.route("**/vendor/photoswipe/photoswipe.css", (route) => route.fulfill({ contentType: "text/css", body: "" }));
   await page.route("**/api/v1/**", async (route) => {
@@ -276,9 +314,15 @@ test("Story per-request selection keeps Use profile separate and submits a typed
     if (path === "/api/v1/session") return send(fixture.session);
     if (path === "/api/v1/meta") return send({ application: { name: "Infinite Quest Nexus", version: "test", commit: null, builtAt: null }, capabilities: { systemArchive: false, nativeTextExecutionPlans: true } });
     if (path === "/api/v1/providers") return send({ providers: [provider] });
-    if (path === `/api/v1/providers/${provider.id}/presets`) return send({ presets: [{ slug: "nexus-story", name: "Nexus Story", status: "active", designatedVersionId: "version-1", updatedAt: now }], totalCount: 1, offset: 0, nextOffset: null });
-    if (path === `/api/v1/providers/${provider.id}/presets/nexus-story`) return send({ slug: "nexus-story", name: "Nexus Story", versionId: "version-1", version: 3, standardPrompt: "Write with restrained tension.", candidateModelIds: ["vendor/primary"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {}, limits: { configuredMaxTokens: null, configuredMaxCompletionTokens: null, effectiveMaxOutputTokens: null, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } });
-    if (path === `/api/v1/providers/${provider.id}/models`) return send({ models: [{ id: "vendor/direct-model", displayName: "Direct model", loaded: true, instanceId: "vendor/direct-model", contextLength: 32768, responseFormatCapability: { version: 1, model: "vendor/direct-model", expectedRegistryDigest: "fixture-digest", advertisedAt: now, operations: [{ operation: "story", streaming: false, status: "verified", reason: "available", schemaVersion: "story-v1", schemaHash: "a".repeat(64), verifiedAt: now, expiresAt: new Date(Date.now() + 60_000).toISOString() }] } }] });
+    if (path === `/api/v1/providers/${provider.id}/presets`) {
+      if (delayPresetList) {
+        await presetListGate;
+        return send({ error: "stale discovery failure" }, 503);
+      }
+      return send({ presets: [{ slug: "nexus-story", name: "Nexus Story", status: "active", designatedVersionId: "version-1", updatedAt: now }], totalCount: 1, offset: 0, nextOffset: null });
+    }
+    if (path === `/api/v1/providers/${provider.id}/presets/nexus-story`) return send({ slug: "nexus-story", name: "Nexus Story", versionId: "version-1", version: 3, standardPrompt: "Write with restrained tension.", candidateModelIds: ["vendor/primary"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {}, limits: { configuredMaxTokens: 2400, configuredMaxCompletionTokens: 1800, effectiveMaxOutputTokens: 1600, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } });
+    if (path === `/api/v1/providers/${provider.id}/models`) return send({ models: [{ id: "vendor/direct-model", displayName: "Direct model", loaded: true, instanceId: "vendor/direct-model", contextLength: 32768, responseFormatCapability: { version: 1, model: "vendor/direct-model", expectedRegistryDigest: "fixture-digest", advertisedAt: now, operations: [{ operation: "story", streaming: false, status: "verified", reason: "available", schemaVersion: exactCapability ? CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaVersion : "story-v1", schemaHash: exactCapability ? CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaHash : "a".repeat(64), verifiedAt: now, expiresAt: new Date(Date.now() + 60_000).toISOString() }] } }] });
     if (path === `/api/v1/campaigns/${fixture.campaignId}/sync-status`) return send({ ...fixture.syncStatus, campaign: { ...fixture.syncStatus.campaign, textProviderProfileId: provider.id }, pendingGeneration: null, generationRecovery: null });
     if (path === `/api/v1/campaigns/${fixture.campaignId}/turns`) return send(fixture.turns);
     if (path === `/api/v1/campaigns/${fixture.campaignId}/state`) return send(fixture.runtimeState);
@@ -290,7 +334,11 @@ test("Story per-request selection keeps Use profile separate and submits a typed
       writes.push(request.postDataJSON() as Record<string, unknown>);
       return send({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }, 202);
     }
-    if (path === `/api/v1/generation-jobs/${jobId}`) return send({ id: jobId, campaignId: fixture.campaignId, expectedTurnNumber: 2, action: "Continue.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: "append", replacementTurnId: null, status: "failed", attempts: 1, resultTurnId: null, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", createdAt: now, updatedAt: now, partialNarration: null });
+    if (path === `/api/v1/generation-jobs/${jobId}`) {
+      const selection = writes.at(-1)?.textSelection as { kind?: string; slug?: string; modelId?: string } | undefined;
+      const preset = selection?.kind === "openrouter_preset";
+      return send({ id: jobId, campaignId: fixture.campaignId, expectedTurnNumber: 2, action: "Continue.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: "append", replacementTurnId: null, status: "recoverable", attempts: 1, resultTurnId: null, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", createdAt: now, updatedAt: now, partialNarration: null, responseFormat: { version: 2, savedPolicy: preset ? "required" : "auto", effectiveMode: "json_schema", schemaVersion: CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaVersion, schemaHash: CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaHash, operation: "story", streaming: false, preflight: "selected", preflightDiagnostic: null, diagnosticCode: null, requestedSelection: selection || null, assurance: preset ? "trusted_preset" : "verified_model", actualServedIdentity: preset ? { status: "known", model: "served-preset-model", providerRoute: null } : { status: "unknown", model: null, providerRoute: null } } });
+    }
     if (path === `/api/v1/generation-jobs/${jobId}/discard` && request.method() === "POST") return send({ id: jobId, status: "discarded", duplicate: false, operationKind: "append", replacementTurnId: null }, 202);
     return send({});
   });
@@ -302,6 +350,7 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await expect(page.locator("#storyTitle")).toHaveText(fixture.syncStatus.campaign.title);
   await expect(page.locator("#turnTextSelectionPanel")).toHaveCount(1);
   await expect(page.getByRole("combobox", { name: "Text selection" })).toHaveValue("profile");
+  await expect(page.getByRole("combobox", { name: "Text selection" }).locator("option:checked")).toContainText("Model vendor/direct-model · Auto schema");
   await page.locator("#freeAction").fill("Use the profile selection.");
   await page.locator("#btnTakeAction").click();
   await expect.poll(() => writes.length).toBe(1);
@@ -310,10 +359,22 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await page.reload();
   await expect(page.getByRole("combobox", { name: "Text selection" })).toHaveValue("profile");
 
+  delayPresetList = true;
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("preset");
+  await expect(page.locator("#turnPresetStatus")).toContainText("Loading OpenRouter presets");
+  await page.getByRole("combobox", { name: "Text selection" }).selectOption("model");
+  releasePresetList();
+  delayPresetList = false;
+  await page.getByRole("combobox", { name: "Text selection" }).selectOption("preset");
+  await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toContainText("Nexus Story");
+  await expect(page.locator("#turnPresetStatus")).not.toContainText("failed");
+
   await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
   await expect(page.locator("#turnPresetPrompt")).toHaveText("Write with restrained tension.");
   await expect(page.locator("#turnPresetVersion")).toHaveText("3 · version-1");
+  await expect(page.locator("#turnPresetLimits")).toContainText("Configured max_tokens: 2400");
+  await expect(page.locator("#turnPresetLimits")).toContainText("configured max_completion_tokens: 1800");
+  await expect(page.locator("#turnPresetLimits")).toContainText("effective max output: 1600");
   await page.locator("#turnPresetDetail").evaluate((details: HTMLDetailsElement) => { details.open = true; });
   await page.locator("#turnTextSelectionPanel").screenshot({ path: `${screenshots}/story-desktop-preset-detail.png` });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -343,6 +404,11 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await expect.poll(() => writes.length).toBe(2);
   expect(writes[1]).toMatchObject({ model: "@preset/nexus-story", textSelection: { kind: "openrouter_preset", slug: "nexus-story" }, textExecutionOverrides: { parameters: { temperature: 0.31, max_tokens: 654 } } });
   await expect(page.locator("#toast")).toContainText("Generation could not be completed");
+  await expect(page.locator("#generationResponseFormatDetails")).toContainText("Trusted preset schema");
+  await expect(page.locator("#generationResponseFormatDetails")).toContainText("Requested selection: Preset nexus-story");
+  await expect(page.locator("#generationResponseFormatDetails")).toContainText("Actual served model: served-preset-model");
+  await expect(page.locator("#generationResponseFormatDetails")).toContainText("Actual provider route: Unknown");
+  await page.locator("#generationResponseFormatPanel").screenshot({ path: `${screenshots}/story-desktop-trusted-preset-diagnostics.png` });
   expect(writes).toHaveLength(2);
   await page.reload();
   await expect(page.getByRole("combobox", { name: "Text selection" })).toHaveValue("profile");
@@ -350,11 +416,22 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("model");
   await page.locator("#turnModelId").fill("vendor/direct-model");
   await page.getByRole("button", { name: "Verify model capability" }).click();
+  await expect(page.locator("#turnModelCapability")).toContainText("blocked until exact current Story capability evidence");
+  await page.locator("#freeAction").fill("Mismatched schema must remain local.");
+  await page.locator("#btnTakeAction").click();
+  await expect(page.locator("#toast")).toContainText("exact current Story capability evidence");
+  expect(writes).toHaveLength(2);
+  exactCapability = true;
+  await page.getByRole("button", { name: "Verify model capability" }).click();
   await expect(page.locator("#turnModelCapability")).toContainText("exact capability verified");
   await page.locator("#freeAction").fill("Use the direct model.");
   await page.locator("#btnTakeAction").click();
   await expect.poll(() => writes.length).toBe(3);
   expect(writes[2]).toMatchObject({ model: "vendor/direct-model", textSelection: { kind: "model", modelId: "vendor/direct-model" }, textExecutionOverrides: null });
+  await expect(page.locator("#generationResponseFormatDetails")).toContainText("Verified Model schema");
+  await expect(page.locator("#generationResponseFormatDetails")).toContainText("Requested selection: Model vendor/direct-model");
+  await expect(page.locator("#generationResponseFormatDetails")).toContainText("Actual served model: Unknown");
+  await page.locator("#generationResponseFormatPanel").screenshot({ path: `${screenshots}/story-desktop-verified-model-diagnostics.png` });
   await page.reload();
   await expect(page.getByRole("combobox", { name: "Text selection" })).toHaveValue("profile");
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("model");
@@ -371,4 +448,10 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await page.keyboard.press("Home");
   await expect(page.getByRole("combobox", { name: "Text selection" })).toHaveValue("profile");
   await page.screenshot({ path: `${screenshots}/story-mobile-profile.png`, fullPage: true });
+
+  await page.route("**/api/v1/meta", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ application: { version: "test" }, capabilities: {} }) }));
+  await page.reload();
+  await expect(page.locator("#turnTextSelectionPanel")).toBeVisible();
+  await expect(page.locator("#turnTextSelectionSupport")).toContainText("does not advertise native text execution plans");
+  await expect(page.getByRole("combobox", { name: "Text selection" })).toBeHidden();
 });

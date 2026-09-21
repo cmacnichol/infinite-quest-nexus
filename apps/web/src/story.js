@@ -76,7 +76,7 @@ export function startStoryPlayer(composition) {
 const apiClient = composition.api;
 const illustrationApi = composition.illustrations;
 let selectionTools = null;
-let storyNativeSelectionSupported = false;
+let storyNativeSelectionSupportState = "loading";
 let storySelectionMode = "profile";
 let storySelectionEditor = null;
 let storyPresetsApi = null;
@@ -131,6 +131,7 @@ function createStorySelectionDom() {
   panel.id = "turnTextSelectionPanel";
   panel.className = "stack hidden";
   panel.innerHTML = `
+    <p id="turnTextSelectionSupport" class="mini" role="status" aria-live="polite">Checking whether this server supports native Model/Preset selection…</p>
     <label for="turnTextSelectionMode"><span>Text selection</span>
       <select id="turnTextSelectionMode" aria-label="Text selection">
         <option value="profile">Use profile selection</option>
@@ -146,7 +147,7 @@ function createStorySelectionDom() {
     <div id="turnPresetSelection" class="stack hidden">
       <div class="row wrap"><label for="turnPresetSelect"><span>Preset</span><select id="turnPresetSelect" aria-label="Preset"><option value="">Choose a preset</option></select></label><button id="refreshTurnPresets" type="button">Refresh</button><button id="loadMoreTurnPresets" class="hidden" type="button">Load more</button></div>
       <p id="turnPresetStatus" class="mini" role="status" aria-live="polite">Choose Refresh to load presets.</p>
-      <details id="turnPresetDetail" class="hidden"><summary>Structured Outputs · Trusted preset</summary><dl><div><dt>Standard prompt</dt><dd id="turnPresetPrompt"></dd></div><div><dt>Version</dt><dd id="turnPresetVersion"></dd></div><div><dt>Ordered models</dt><dd id="turnPresetModels"></dd></div><div><dt>Provider policy</dt><dd id="turnPresetPolicy"></dd></div><div><dt>Effective limits</dt><dd id="turnPresetLimits"></dd></div></dl></details>
+      <details id="turnPresetDetail" class="hidden"><summary>Structured Outputs · Trusted preset</summary><dl><div><dt>Standard prompt</dt><dd id="turnPresetPrompt"></dd></div><div><dt>Version</dt><dd id="turnPresetVersion"></dd></div><div><dt>Ordered models</dt><dd id="turnPresetModels"></dd></div><div><dt>Provider policy</dt><dd id="turnPresetPolicy"></dd></div><div><dt>Configured and effective limits</dt><dd id="turnPresetLimits"></dd></div></dl></details>
     </div>
     <div id="turnTextOverrides" class="stack hidden">
       <label for="turnTextOverrideMode"><span>Request parameters</span><select id="turnTextOverrideMode"><option value="inherit">Inherit selected Model/Preset</option><option value="explicit">Override for this request</option></select></label>
@@ -197,13 +198,13 @@ async function initializeStoryTextSelection() {
     const managementEntry = "/nexus/legacy-management.js";
     selectionTools = await import(/* @vite-ignore */ managementEntry);
     const metadata = await apiClient.meta.get();
-    storyNativeSelectionSupported = selectionTools.nativePresetSupport(metadata).state === "supported";
+    storyNativeSelectionSupportState = selectionTools.nativePresetSupport(metadata).state;
     storyPresetsApi = selectionTools.createProviderPresetsApi(storyPresetsHttpClient());
   } catch {
-    storyNativeSelectionSupported = false;
+    storyNativeSelectionSupportState = "unsupported";
   }
   const panel = $("turnTextSelectionPanel");
-  if (panel) panel.classList.toggle("hidden", !storyNativeSelectionSupported);
+  renderStoryTextSelection();
 }
 
 function resetStorySelectionEditor() {
@@ -299,7 +300,11 @@ async function loadStoryModelCapabilities() {
 function exactStoryModelVerified(modelId) {
   const capability = storyModelCapabilities.get(modelId) || (storyTextProvider()?.defaultModel === modelId ? storyTextProvider()?.responseFormatCapability : null);
   const streaming = Boolean(storyTextProvider()?.configuration?.streaming || storyTextProvider()?.configuration?.streamingSupport);
-  return Boolean(capability?.model === modelId && capability.operations?.some((operation) => operation.operation === "story" && operation.streaming === streaming && operation.status === "verified" && operation.schemaVersion && operation.schemaHash && operation.expiresAt && new Date(operation.expiresAt).getTime() > Date.now()));
+  return selectionTools?.isExactStoryResponseFormatCapability(capability, {
+    modelId,
+    streaming,
+    isUnexpired: (expiresAt) => new Date(expiresAt).getTime() > Date.now()
+  }) === true;
 }
 
 function storyOverrideValue() {
@@ -323,9 +328,29 @@ function renderStoryTextSelection() {
   const panel = $("turnTextSelectionPanel");
   if (!panel) return;
   const provider = storyTextProvider();
-  const eligible = storyNativeSelectionSupported && provider?.providerType === "openrouter" && provider?.providerRole === "text";
-  panel.classList.toggle("hidden", !eligible);
+  const candidate = provider?.providerType === "openrouter" && provider?.providerRole === "text";
+  const eligible = storyNativeSelectionSupportState === "supported" && candidate;
+  panel.classList.toggle("hidden", !candidate);
+  const support = $("turnTextSelectionSupport");
+  if (support) {
+    support.textContent = storyNativeSelectionSupportState === "loading"
+      ? "Checking whether this server supports native Model/Preset selection…"
+      : storyNativeSelectionSupportState === "unsupported"
+        ? "This server does not advertise native text execution plans. Story will use the saved profile selection."
+        : "Native Model/Preset selection is available.";
+    support.classList.toggle("hidden", eligible);
+  }
+  for (const child of panel.children) {
+    if (child === support) continue;
+    if (!eligible) child.classList.add("hidden");
+    else if (child.tagName === "LABEL") child.classList.remove("hidden");
+  }
   if (!eligible || !storySelectionEditor) return;
+  const saved = normalizedStoryProviderSelection(provider);
+  const policy = provider.configuration?.textResponseFormatPolicy || "required";
+  $("turnTextSelectionMode").options[0].textContent = saved.kind === "openrouter_preset"
+    ? `Use profile · Preset ${saved.slug}`
+    : `Use profile · Model ${saved.modelId || "unspecified"} · ${policy === "legacy" ? "Legacy JSON" : policy === "auto" ? "Auto schema" : "Required schema"}`;
   $("turnTextSelectionMode").value = storySelectionMode;
   $("turnModelSelection").classList.toggle("hidden", storySelectionMode !== "model");
   $("turnPresetSelection").classList.toggle("hidden", storySelectionMode !== "preset");
@@ -357,7 +382,8 @@ function renderStoryTextSelection() {
       $("turnPresetVersion").textContent = `${detail.version} · ${detail.versionId}`;
       $("turnPresetModels").textContent = detail.candidateModelIds.join(" → ") || "No configured candidates";
       $("turnPresetPolicy").textContent = Object.entries(detail.providerPolicy).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(" → ") : value}`).join(" · ") || "Provider defaults";
-      $("turnPresetLimits").textContent = `${detail.limits.effectiveMaxOutputTokens || "Unknown"} output · context capacity unknown`;
+      const limit = (value) => value === null ? "Unknown" : String(value);
+      $("turnPresetLimits").textContent = `Configured max_tokens: ${limit(detail.limits.configuredMaxTokens)} · configured max_completion_tokens: ${limit(detail.limits.configuredMaxCompletionTokens)} · effective max output: ${limit(detail.limits.effectiveMaxOutputTokens)} · context capacity unknown`;
     }
   }
   const draft = storySelectionMode === "model" ? storySelectionEditor.modelDraft : storySelectionEditor.presetDraft;
@@ -371,7 +397,7 @@ function renderStoryTextSelection() {
 }
 
 function storyTextSelectionRequest() {
-  if (!storyNativeSelectionSupported || storySelectionMode === "profile") return {};
+  if (storyNativeSelectionSupportState !== "supported" || storySelectionMode === "profile") return {};
   if (!storySelectionEditor) throw new Error("Native text selection is unavailable for this profile.");
   const patch = selectionTools.serializeSelectionEditorPatch(storySelectionEditor);
   if (storySelectionMode === "model" && !patch.textSelection.modelId) throw new Error("Enter a concrete model ID.");
@@ -2287,6 +2313,7 @@ async function observeGenerationRun(run, action, retryFirst = false) {
     onTerminalFailure: (error, outcome) => {
       clearPendingSubmission();
       state.pendingGeneration = null;
+      if (lastSnapshot) state.generationRecovery = lastSnapshot;
       if (outcome === "unrecoverable") {
         const guidance = generationRecoveryGuidance(lastSnapshot?.diagnostic);
         const presentation = generationDiagnosticPresentation(lastSnapshot?.diagnostic);

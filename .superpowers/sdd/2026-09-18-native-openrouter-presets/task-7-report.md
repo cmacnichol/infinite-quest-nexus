@@ -133,3 +133,66 @@ Browser verification used sanitized route fixtures and made no paid/live provide
 - Confirmed visible native selection exists at both legacy entry points and uses the shared bridge state/API contracts.
 - Confirmed exact full schemas remain in the prepared Model, Preset, explicit-override, inherited-after-clear, and rejected-schema bodies.
 - Confirmed all intended production/test/baseline files are explicit commit candidates and root-owned review/scratch paths are excluded.
+
+## Fix round 1 — independent review corrections
+
+Review base: `51172773db26e9aef9c572cbb33b4e6de03b1f4a`.
+
+All six Important findings in `task-7-review.md` were corrected together.
+
+1. The shared reducer now clears override intent to inherit only when the concrete Model ID or Preset slug changes. Mode changes retain each draft's policy and override state, so a saved-Preset profile can round-trip through a Model Auto/Legacy draft without losing it.
+2. Mode changes clear the active list and detail request identities. Stale list success, failure, and finally events are ignored by the shared reducer. Rendered settings covers a stale success/finally after leaving Preset; rendered Story covers a stale failure/finally after leaving Preset and proves the next current load remains authoritative.
+3. The browser gate now uses `isExactStoryResponseFormatCapability` from client-core through the stable management bridge. It checks exact model, Story operation, streaming mode, verified status, current schema version/hash, and caller-evaluated expiry. The browser-safe version/hash metadata has one contract source, while story-engine still hashes the real canonical schema at runtime. A consistency test compares that computed canonical hash to the browser metadata so a schema edit without an identity update fails. This avoids bundling Node-only schema/hash code into the browser; the expiry predicate is injected because client-core prohibits platform `Date` access.
+4. Settings and Story now distinguish capability loading, supported, and unsupported. Gating never changes the editor's saved typed selection. Settings preserves the compatibility alias and existing configuration on a downlevel or still-loading Save and omits unsupported `textSelection`; Story visibly explains that the server lacks native plans and uses the saved profile selection.
+5. Version-two response-format presentation now distinguishes Trusted preset schema from Verified Model schema, renders requested typed selection, and renders observed model/provider route independently with Unknown for missing fields. Story retains the last terminal snapshot for the recovery panel. The Use profile option names the inherited Model/Preset and shows explicit historical Legacy/Auto policy.
+6. Both settings and Story detail panels separately render configured `max_tokens`, configured `max_completion_tokens`, and effective max output. The browser fixture uses 2400, 1800, and 1600 respectively; null values render Unknown.
+
+### TDD evidence
+
+Initial RED command:
+
+`pnpm exec vitest run tests/unit/provider-selection-editor.test.ts tests/unit/safe-generation-diagnostics.test.ts tests/unit/story-response-format-capability.test.ts`
+
+RED result: 3 files failed. The reducer retained explicit selection overrides across identity changes and retained the stale list request on a mode change; diagnostics rendered a trusted preset as Verified schema and omitted requested/served identity; the new exact-capability helper did not yet exist. The first attempted command named a nonexistent root `vitest.config.ts`; it was corrected immediately to the repository's default Vitest configuration and is not counted as behavioral evidence.
+
+Final focused shared-unit command:
+
+`pnpm exec vitest run tests/unit/provider-selection-editor.test.ts tests/unit/safe-generation-diagnostics.test.ts tests/unit/story-response-format-capability.test.ts`
+
+Result: PASS — 3 files, 24 tests. This includes all stale list success/failure/finally callbacks after a mode change, selection-scoped override resets, same-draft preservation, trusted/verified diagnostics, known-partial and fully unknown served identities, the exact gate matrix, and canonical schema hash consistency.
+
+Related DOM/bridge/contract command:
+
+`pnpm exec vitest run tests/unit/provider-selection-editor.test.ts tests/unit/safe-generation-diagnostics.test.ts tests/unit/story-response-format-capability.test.ts tests/unit/management-ui.test.ts tests/unit/story-player-ui.test.ts tests/unit/web-build-contract.test.ts tests/unit/provider-presets-api.test.ts tests/unit/provider-presets-contract.test.ts`
+
+Result: PASS — 8 files, 204 tests.
+
+Rendered browser command:
+
+`pnpm exec playwright test legacy-provider-presets.e2e.test.ts structured-output-settings.e2e.test.ts --workers=1`
+
+Result: PASS — 10 tests. It includes both legacy entry points, mode races, loading/downlevel preservation, exact mismatched-schema blocking followed by canonical-identity success, profile policy labeling, requested/served diagnostics, configured/effective limits, typed outgoing request payloads, desktop/mobile rendering, and the associated structured-output compatibility suite. Sanitized route fixtures were used; no paid/live provider call was made.
+
+Repository verification:
+
+- `pnpm check` — PASS after replacing prohibited client-core `Date` access with an injected browser expiry predicate. Repository/data boundaries, package TypeScript, both web checks, root noEmit, and JavaScript syntax all passed.
+- `pnpm build` — PASS. Legacy emitted `legacy-management.js`; replacement web compatibility build passed. Existing font-resolution and chunk-size messages remained warnings.
+- `git diff --check` — PASS.
+
+### Refreshed visual evidence
+
+Configured/effective limit panels:
+
+- `.superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots/settings-desktop-preset-detail.png`
+- `.superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots/settings-mobile-preset-detail.png`
+- `.superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots/story-desktop-preset-detail.png`
+- `.superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots/story-mobile-preset-detail.png`
+
+Requested/served assurance diagnostics:
+
+- `.superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots/story-desktop-trusted-preset-diagnostics.png`
+- `.superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots/story-desktop-verified-model-diagnostics.png`
+
+The six images were inspected after the final browser runs. Desktop and mobile limit panels visibly contain all three differing values with readable wrapping. The diagnostic captures visibly distinguish Trusted preset from Verified Model, requested Preset/Model, a known served model with unknown route, and fully unknown served identity. The structured-output suite intentionally refreshed its three tracked baseline images and passed.
+
+No API admission flag, deployment, live inference, new UI feature implementation, push, PR, or main integration was performed. Root-owned untracked `docs/review/native-openrouter-presets/` and `scratch/` were not staged.

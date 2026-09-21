@@ -54,6 +54,32 @@ describe("provider selection editor", () => {
     expect(state.presetDraft).toMatchObject({ slug: "night-shift", responseFormatPolicy: "required" });
   });
 
+  it("resets overrides only when a concrete selection identity changes", () => {
+    let state = initialPresetState();
+    state = reduceSelectionEditor(state, { type: "presetOverrideIntentChanged", intent: { mode: "explicit", value: { parameters: { temperature: 0.8 } } } });
+    state = reduceSelectionEditor(state, { type: "modeChanged", mode: "model" });
+    state = reduceSelectionEditor(state, { type: "modelDraftChanged", modelId: "custom-model", responseFormatPolicy: "auto" });
+    state = reduceSelectionEditor(state, { type: "modelOverrideIntentChanged", intent: { mode: "explicit", value: { parameters: { top_p: 0.7 } } } });
+    state = reduceSelectionEditor(state, { type: "modeChanged", mode: "preset" });
+
+    expect(state.presetDraft).toMatchObject({ slug: "saved-preset", overrideIntent: { mode: "explicit", value: { parameters: { temperature: 0.8 } } } });
+    expect(state.modelDraft).toMatchObject({ modelId: "custom-model", responseFormatPolicy: "auto", overrideIntent: { mode: "explicit", value: { parameters: { top_p: 0.7 } } } });
+
+    state = reduceSelectionEditor(state, { type: "presetDraftChanged", slug: "different-preset" });
+    expect(state.presetDraft.overrideIntent).toEqual({ mode: "inherit" });
+    state = reduceSelectionEditor(state, { type: "modeChanged", mode: "model" });
+    state = reduceSelectionEditor(state, { type: "modelDraftChanged", modelId: "different-model", responseFormatPolicy: "required" });
+    expect(state.modelDraft.overrideIntent).toEqual({ mode: "inherit" });
+  });
+
+  it("invalidates list success, failure, and finally callbacks when mode changes", () => {
+    const started = reduceSelectionEditor(initialPresetState(), { type: "requestStarted", requestId: "list-a", mode: "preset", offset: 0 });
+    const model = reduceSelectionEditor(started, { type: "modeChanged", mode: "model" });
+    expect(model.list).toEqual({ requestId: null, busy: false, requestedOffset: 0, presets: [], totalCount: 0, nextOffset: null, error: null });
+    expect(reduceSelectionEditor(model, { type: "listLoaded", requestId: "list-a", page: emptyPage })).toEqual(model);
+    expect(reduceSelectionEditor(model, { type: "requestFailed", requestId: "list-a", error: "discovery_unavailable" })).toEqual(model);
+    expect(reduceSelectionEditor(model, { type: "requestFinished", requestId: "list-a" })).toEqual(model);
+  });
   it("deduplicates paged results by slug without replacing the earlier order", () => {
     let state = reduceSelectionEditor(initialPresetState(), { type: "requestStarted", requestId: "page-1", mode: "preset", offset: 0 });
     state = reduceSelectionEditor(state, { type: "listLoaded", requestId: "page-1", page: {
@@ -118,16 +144,16 @@ describe("provider selection editor", () => {
   });
 
   it.each([
-    ["changes the Preset draft", { type: "presetDraftChanged", slug: "preset-b" } as const],
-    ["switches to Model mode", { type: "modeChanged", mode: "model" } as const]
-  ])("invalidates detail identity when the user %s", (_name, transition) => {
+    ["changes the Preset draft", { type: "presetDraftChanged", slug: "preset-b" } as const, { mode: "inherit" }],
+    ["switches to Model mode", { type: "modeChanged", mode: "model" } as const, { mode: "preserve", value: { parameters: { temperature: 0.4 } } }]
+  ])("invalidates detail identity when the user %s", (_name, transition, expectedOverride) => {
     const started = reduceSelectionEditor(initialPresetState(), { type: "detailRequestStarted", requestId: "detail-a", slug: "preset-a" });
     const transitioned = reduceSelectionEditor(started, transition);
     expect(transitioned.detail).toEqual({ requestId: null, busy: false, slug: null, value: null, error: null });
     expect(reduceSelectionEditor(transitioned, { type: "detailLoaded", requestId: "detail-a", detail: detailA })).toEqual(transitioned);
     expect(reduceSelectionEditor(transitioned, { type: "detailFailed", requestId: "detail-a", error: "preset_missing" })).toEqual(transitioned);
     expect(reduceSelectionEditor(transitioned, { type: "detailRequestFinished", requestId: "detail-a" })).toEqual(transitioned);
-    expect(transitioned.presetDraft.overrideIntent).toEqual(started.presetDraft.overrideIntent);
+    expect(transitioned.presetDraft.overrideIntent).toEqual(expectedOverride);
     expect(transitioned.modelDraft).toEqual(started.modelDraft);
   });
 
@@ -151,7 +177,7 @@ describe("provider selection editor", () => {
     const presetPatch = serializeSelectionEditorPatch(state);
     expect(presetPatch).toEqual({
       defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" },
-      configuration: { textResponseFormatPolicy: "required" }
+      configuration: { textResponseFormatPolicy: "required", textExecutionOverrides: null }
     });
   });
 });

@@ -74,7 +74,7 @@ let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
 let responseFormatCapabilitySequence = 0;
 let responseFormatCapabilityProfile = null;
-let nativeTextExecutionPlansSupported = false;
+let nativeTextExecutionPlansSupportState = "loading";
 let providerSelectionEditor = null;
 let providerSelectionRequestSequence = 0;
 let providerSelectionCredentialRevision = 0;
@@ -372,11 +372,13 @@ async function loadApplicationMetadata() {
   try {
     const response = await fetch("/api/v1/meta");
     if (!response.ok) {
+      nativeTextExecutionPlansSupportState = "unsupported";
+      syncProviderSelectionSupport();
       setSystemArchiveCapability(false, "System Archive availability could not be confirmed. Specialized formats remain available.");
       return;
     }
     const metadata = await response.json();
-    nativeTextExecutionPlansSupported = nativePresetSupport(metadata).state === "supported";
+    nativeTextExecutionPlansSupportState = nativePresetSupport(metadata).state;
     syncProviderSelectionSupport();
     const version = metadata?.application?.version;
     if (version && elements.nexusVersion) {
@@ -385,6 +387,8 @@ async function loadApplicationMetadata() {
     }
     setSystemArchiveCapability(metadata?.capabilities?.systemArchive === true);
   } catch {
+    nativeTextExecutionPlansSupportState = "unsupported";
+    syncProviderSelectionSupport();
     setSystemArchiveCapability(false, "System Archive availability could not be confirmed. Specialized formats remain available.");
   }
 }
@@ -4230,15 +4234,15 @@ function activeProviderSelectionDraft() {
 
 function syncProviderSelectionSupport() {
   if (!elements.providerTextSelectionMode) return;
-  const eligible = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
+  const eligible = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
   const candidate = elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
   elements.providerTextSelectionMode.classList.toggle("hidden", !eligible);
   elements.providerTextSelectionMode.hidden = !eligible;
   elements.providerTextSelectionSupport.classList.toggle("hidden", !candidate || eligible);
   elements.providerTextSelectionSupport.hidden = !candidate || eligible;
-  if (!eligible && providerSelectionEditor?.mode === "preset") {
-    providerSelectionEditor = reduceSelectionEditor(providerSelectionEditor, { type: "modeChanged", mode: "model" });
-  }
+  elements.providerTextSelectionSupport.textContent = nativeTextExecutionPlansSupportState === "loading"
+    ? "Checking whether this server supports native Model/Preset selection…"
+    : "This server does not advertise native text execution plans. The saved selection will be preserved when you save other settings.";
   renderProviderSelectionEditor();
 }
 
@@ -4255,7 +4259,7 @@ function formatPresetObject(value) {
 
 function renderProviderPresetDetail() {
   const detail = providerSelectionEditor?.detail.value;
-  const presetMode = providerSelectionEditor?.mode === "preset";
+  const presetMode = nativeTextExecutionPlansSupportState === "supported" && providerSelectionEditor?.mode === "preset";
   elements.providerPresetDetail.classList.toggle("hidden", !presetMode);
   elements.providerPresetDetail.hidden = !presetMode;
   if (!presetMode) return;
@@ -4280,13 +4284,13 @@ function renderProviderPresetDetail() {
   elements.providerPresetVersion.textContent = `${detail.version} · ${detail.versionId}`;
   elements.providerPresetModels.textContent = detail.candidateModelIds.length ? detail.candidateModelIds.join(" → ") : "No configured model candidates";
   elements.providerPresetPolicy.textContent = formatPresetObject(detail.providerPolicy);
-  const output = detail.limits.effectiveMaxOutputTokens ? `${number(detail.limits.effectiveMaxOutputTokens)} output tokens` : "output limit unknown";
-  elements.providerPresetLimits.textContent = `${output} · context capacity unknown until execution`;
+  const limit = (value) => value === null ? "Unknown" : number(value);
+  elements.providerPresetLimits.textContent = `Configured max_tokens: ${limit(detail.limits.configuredMaxTokens)} · configured max_completion_tokens: ${limit(detail.limits.configuredMaxCompletionTokens)} · effective max output: ${limit(detail.limits.effectiveMaxOutputTokens)} · context capacity unknown until execution`;
   elements.providerPresetParameters.textContent = formatPresetObject(detail.parameters);
 }
 
 function renderProviderOverrides() {
-  const eligible = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
+  const eligible = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
   elements.providerTextOverrides.classList.toggle("hidden", !eligible);
   elements.providerTextOverrides.hidden = !eligible;
   if (!eligible || !providerSelectionEditor) return;
@@ -4301,15 +4305,15 @@ function renderProviderOverrides() {
 
 function renderProviderSelectionEditor() {
   if (!providerSelectionEditor || !elements.providerSelectionModel) return;
-  const eligible = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
+  const eligible = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
   const illustration = elements.providerRole.value === "image";
-  const presetMode = eligible && providerSelectionEditor.mode === "preset";
+  const presetMode = providerSelectionEditor.mode === "preset";
   elements.providerSelectionModel.checked = !presetMode;
   elements.providerSelectionPreset.checked = presetMode;
   elements.providerModelSelectionField.classList.toggle("hidden", illustration || presetMode);
   elements.providerModelSelectionField.hidden = illustration || presetMode;
-  elements.providerPresetSelectionPanel.classList.toggle("hidden", !presetMode);
-  elements.providerPresetSelectionPanel.hidden = !presetMode;
+  elements.providerPresetSelectionPanel.classList.toggle("hidden", !eligible || !presetMode);
+  elements.providerPresetSelectionPanel.hidden = !eligible || !presetMode;
   elements.providerResponseFormatPolicyField.classList.toggle("hidden", illustration || presetMode);
   elements.providerResponseFormatPolicyField.hidden = illustration || presetMode;
   elements.providerResponseFormatCapability.classList.toggle("hidden", illustration || presetMode);
@@ -4604,7 +4608,7 @@ function applySogniConfiguration(configuration = {}, providerType = elements.pro
 
 function providerConfigurationFromForm(existingConfig = {}) {
   const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
-  if (nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor) {
+  if (nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor) {
     const patch = serializeSelectionEditorPatch(providerSelectionEditor);
     configuration.textResponseFormatPolicy = patch.configuration.textResponseFormatPolicy;
     if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
@@ -4724,7 +4728,8 @@ async function saveProvider(event) {
   providerMessage("Saving provider profile…");
   try {
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
-    const nativeSelection = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor
+    const preservedSelection = providerSelectionEditor ? serializeSelectionEditorPatch(providerSelectionEditor) : null;
+    const nativeSelection = nativeTextExecutionPlansSupportState === "supported" && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor
       ? serializeSelectionEditorPatch(providerSelectionEditor)
       : null;
     const provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
@@ -4735,7 +4740,7 @@ async function saveProvider(event) {
         baseUrl: elements.providerBaseUrl.value,
         apiKey: elements.providerApiKey.value || undefined,
         isDefault: elements.providerIsDefault.checked,
-        defaultModel: nativeSelection?.defaultModel ?? elements.providerDefaultModel.value,
+        defaultModel: nativeSelection?.defaultModel ?? preservedSelection?.defaultModel ?? elements.providerDefaultModel.value,
         ...(nativeSelection ? { textSelection: nativeSelection.textSelection } : {}),
         ...(!isIllustrationProviderForm() ? {
           contextWindowTokens: elements.providerContextTokens.value,
@@ -5191,9 +5196,6 @@ elements.providerResponseFormatPolicy.addEventListener("change", () => {
 elements.providerSelectionModel.addEventListener("change", () => {
   if (!elements.providerSelectionModel.checked || !providerSelectionEditor) return;
   setProviderSelectionState({ type: "modeChanged", mode: "model" });
-  if (providerSelectionEditor.savedSelection.kind !== "model") {
-    setProviderSelectionState({ type: "modelDraftChanged", modelId: providerSelectionEditor.modelDraft.modelId, responseFormatPolicy: "required" });
-  }
   clearResponseFormatCapability();
   renderResponseFormatCapability(responseFormatCapabilityProfile);
 });
