@@ -10,7 +10,7 @@ import type {
   ProviderRole,
   ProviderRuntimeLeasePort
 } from "../../../packages/application/src/providers/index.js";
-import type { TextModelSelection } from "@infinite-quest/contracts";
+import { normalizeTextSelection, type TextModelSelection } from "@infinite-quest/contracts";
 import type { DatabaseClient } from "../../../packages/database/src/pool.js";
 import {
   loadPrivateProviderCredentialRow,
@@ -111,8 +111,7 @@ export type RuntimeProviderAdapter = Readonly<{
   ): Promise<ProviderModelInventory>;
   discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number; signal?: AbortSignal }>, credential: string | null): Promise<ProviderPresetInventory>;
   resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
-  resolveCandidatePresetWithProfileCredential(ownerUserId: string, providerProfileId: string, candidate: ProviderCandidate, slug: string): Promise<ProviderPresetDetail>;
-  presetSaveRevision(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<string | null>;
+  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean, includeCredential: boolean): Promise<Readonly<{ candidate: ProviderCandidate; credential?: string | null; revision: string }> | null>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
@@ -435,23 +434,35 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
       return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport, signal) });
     },
-    async resolveCandidatePresetWithProfileCredential(ownerUserId, providerProfileId, candidate, slug) {
+    async presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, lock, includeCredential) {
       const result = await options.database.query<{
-        encrypted_api_key: string | null; credential_nonce: string | null; credential_auth_tag: string | null; credential_key_version: number | null;
-      }>("SELECT encrypted_api_key,credential_nonce,credential_auth_tag,credential_key_version FROM provider_profiles WHERE id=$1 AND owner_user_id=$2", [providerProfileId, ownerUserId]);
-      const row = result.rows[0];
-      if (!row) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
-      const credential = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version
-        ? decryptCredential({ ciphertext: row.encrypted_api_key, nonce: row.credential_nonce, authTag: row.credential_auth_tag, keyVersion: row.credential_key_version }, options.credentialSecret)
-        : null;
-      return this.resolveCandidatePresetWithCredential(candidate, slug, credential);
-    },
-    async presetSaveRevision(ownerUserId, providerProfileId, lock) {
-      const result = await options.database.query(
-        `SELECT updated_at,provider_type,provider_role,base_url,default_model,text_selection,enabled,encrypted_api_key,credential_nonce,credential_auth_tag,credential_key_version FROM provider_profiles WHERE id=$1 AND owner_user_id=$2${lock ? " FOR UPDATE" : ""}`,
+        name: string; provider_type: ProviderCandidate["providerType"]; provider_role: ProviderRole; base_url: string; default_model: string;
+        text_selection: unknown; context_window_tokens: number; max_output_tokens: number; temperature: number; request_timeout_ms: number;
+        configuration: unknown; enabled: boolean; is_default: boolean; encrypted_api_key: string | null; credential_nonce: string | null;
+        credential_auth_tag: string | null; credential_key_version: number | null;
+      }>(
+        `SELECT name,provider_type,provider_role,base_url,default_model,text_selection,context_window_tokens,max_output_tokens,temperature,
+                request_timeout_ms,configuration,enabled,is_default,encrypted_api_key,credential_nonce,credential_auth_tag,credential_key_version
+           FROM provider_profiles WHERE id=$1 AND owner_user_id=$2${lock ? " FOR UPDATE" : ""}`,
         [providerProfileId, ownerUserId]
       );
-      return result.rows[0] ? createHash("sha256").update(JSON.stringify(result.rows[0])).digest("hex") : null;
+      const row = result.rows[0];
+      if (!row) return null;
+      const textSelection = row.provider_role === "text" || row.provider_role === "intent"
+        ? normalizeTextSelection({ providerType: row.provider_type, providerRole: row.provider_role, defaultModel: row.default_model,
+          ...(row.text_selection === null || row.text_selection === undefined ? {} : { textSelection: row.text_selection as TextModelSelection }) })
+        : undefined;
+      const candidate = Object.freeze({
+        ownerUserId, name: row.name, providerType: row.provider_type, providerRole: row.provider_role, baseUrl: row.base_url,
+        defaultModel: row.default_model, ...(textSelection === undefined ? {} : { textSelection }),
+        contextWindowTokens: row.context_window_tokens, maxOutputTokens: row.max_output_tokens, temperature: row.temperature,
+        requestTimeoutMs: row.request_timeout_ms, configuration: validateProviderConfiguration(row.provider_type, row.configuration, row.provider_role),
+        enabled: row.enabled, isDefault: row.is_default
+      } as ProviderCandidate);
+      const credential = includeCredential && row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version
+        ? decryptCredential({ ciphertext: row.encrypted_api_key, nonce: row.credential_nonce, authTag: row.credential_auth_tag, keyVersion: row.credential_key_version }, options.credentialSecret)
+        : null;
+      return Object.freeze({ candidate, ...(includeCredential ? { credential } : {}), revision: createHash("sha256").update(JSON.stringify(row)).digest("hex") });
     },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()

@@ -15,9 +15,8 @@ function adapter(responseFormatCapabilities?: object) {
     createProfile: vi.fn(), updateProfile: vi.fn(), listProfiles: vi.fn(), listModels: vi.fn()
   };
   const runtime = { storeCredential: vi.fn(), discoverCandidateModelsWithCredential: vi.fn(),
-    resolveCandidatePresetWithCredential: vi.fn(async () => ({ preset: {} })),
-    resolveCandidatePresetWithProfileCredential: vi.fn(async () => ({ preset: {} })),
-    presetSaveRevision: vi.fn(async () => "fixture-revision") };
+    resolveCandidatePresetWithCredential: vi.fn(async (_candidate: { baseUrl: string }, _slug: string, _credential: string | null) => ({ preset: {} })),
+    presetSaveAuthoritySnapshot: vi.fn(async (_ownerUserId: string, _providerProfileId: string, _lock: boolean, _includeCredential: boolean): Promise<Readonly<{ candidate: unknown; credential?: string | null; revision: string }> | null> => null) };
   return { application, runtime, adapter: createProviderApplicationAdapter({ application, runtime, responseFormatCapabilities, transaction: async (work: (binding: never) => Promise<unknown>) => work({ application, runtime } as never) } as never) };
 }
 
@@ -157,6 +156,35 @@ describe("provider API configuration boundary", () => {
     const result = await value.adapter.update(owner, id, { name: "Renamed" } as never);
     expect(value.application.updateProfile).toHaveBeenCalledWith(expect.objectContaining({ changes: { name: "Renamed" } }));
     expect(result.configuration).toEqual({ textResponseFormatPolicy: "legacy" });
+  });
+
+  it("validates a preset PATCH from one authority snapshot when the profile changes after the initial list read", async () => {
+    const value = adapter();
+    const staleProfile = { ...input, id, baseUrl: "https://endpoint-a.example/v1", textSelection: { kind: "model" as const, modelId: "model" } };
+    const authorityProfile = {
+      ...input, id, baseUrl: "https://endpoint-b.example/v1", textSelection: { kind: "model" as const, modelId: "model" },
+      hasCredential: true, health: { status: "unknown" as const, consecutiveFailures: 0, lastCheckedAt: null }, createdAt: "now", updatedAt: "later"
+    };
+    value.application.listProfiles.mockResolvedValue([staleProfile]);
+    value.runtime.presetSaveAuthoritySnapshot.mockResolvedValue({
+      candidate: authorityProfile, credential: "rotated-secret", revision: "authority-b"
+    });
+    value.runtime.resolveCandidatePresetWithCredential.mockImplementation(async (candidate, _slug, credential) => {
+      if (candidate.baseUrl !== authorityProfile.baseUrl || credential !== "rotated-secret") {
+        throw new Error("preset validation mixed endpoint and credential authority");
+      }
+      return { preset: {} };
+    });
+    value.application.updateProfile.mockResolvedValue({
+      profile: { ...authorityProfile, defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset" as const, slug: "night-shift" } },
+      configurationProjection: { kind: "sanitized_read" }
+    });
+
+    const result = await value.adapter.update(owner, id, {
+      defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+    } as never);
+
+    expect(result).toMatchObject({ baseUrl: authorityProfile.baseUrl, textSelection: { kind: "openrouter_preset", slug: "night-shift" } });
   });
 
   it("does not expose text response-format metadata through image inventory or a text embedding fallback", async () => {

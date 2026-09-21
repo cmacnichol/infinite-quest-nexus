@@ -335,6 +335,109 @@ integration("provider route configuration redaction", () => {
     } finally { transport.fetch = originalFetch; }
   });
 
+  it("validates a preset PATCH against the endpoint and credential captured after its stale profile read", async () => {
+    const name = `${baseProviderInput.name} SNAPSHOT-PRESET ${crypto.randomUUID()}`;
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name, providerType: "openrouter", providerRole: "text", baseUrl: "https://endpoint-a.test/api/v1",
+      defaultModel: "concrete-model", apiKey: "initial-secret", configuration: {}
+    } });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id as string;
+    const owner = (await pool.query<{ owner_user_id: string }>("SELECT owner_user_id FROM provider_profiles WHERE id=$1", [id])).rows[0]!.owner_user_id;
+    const graph = createApiProviderApplicationComposition(pool, { credentialSecret: routeConfig.credentialEncryptionKey, transport });
+    let authorityChanged = false;
+    const changeAuthority = async () => {
+      if (!authorityChanged) {
+        authorityChanged = true;
+        await pool.query("UPDATE provider_profiles SET base_url=$2,updated_at=now() WHERE id=$1", [id, "https://endpoint-b.test/api/v1"]);
+        await graph.runtime.storeCredential(owner, id, "rotated-secret");
+      }
+    };
+    const originalSnapshot = graph.runtime.presetSaveAuthoritySnapshot.bind(graph.runtime);
+    const racedRuntime = Object.freeze({
+      ...graph.runtime,
+      presetSaveAuthoritySnapshot: async (ownerUserId: string, providerProfileId: string, lock: boolean, includeCredential: boolean) => {
+        const snapshot = await originalSnapshot(ownerUserId, providerProfileId, lock, includeCredential);
+        if (!lock) await changeAuthority();
+        return snapshot;
+      }
+    });
+    const racedProviders = createProviderApplicationAdapter({ ...graph, runtime: racedRuntime } as never);
+    const racedApp = await buildServer(serverOptions({ config: routeConfig, pool, providers: racedProviders }));
+    const originalFetch = transport.fetch;
+    let observed: { url: string; credential: string | undefined } | null = null;
+    transport.fetch = async (profile, _operation, url) => {
+      observed = { url, credential: profile.apiKey };
+      return new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "private", config: { model: "vendor/model" } } } }), { status: 200 });
+    };
+    try {
+      const saved = await racedApp.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: {
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }
+      } });
+      expect(saved.statusCode).toBe(409);
+      expect(saved.json()).toMatchObject({ code: "preset_save_stale" });
+      expect(observed).toEqual({ url: "https://endpoint-a.test/api/v1/presets/night-shift", credential: "initial-secret" });
+      const current = (await app.inject({ method: "GET", url: "/api/v1/providers" })).json().providers.find((profile: { id: string }) => profile.id === id);
+      expect(current).toMatchObject({ baseUrl: "https://endpoint-b.test/api/v1", textSelection: { kind: "model", modelId: "concrete-model" } });
+    } finally {
+      transport.fetch = originalFetch;
+      await racedApp.close();
+    }
+  });
+
+  it("allows an explicit replacement key to validate a preset without decrypting a corrupt saved key", async () => {
+    const name = `${baseProviderInput.name} REPLACEMENT-KEY ${crypto.randomUUID()}`;
+    const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+      ...baseProviderInput, name, providerType: "openrouter", providerRole: "text", baseUrl: "https://replacement-key.test/api/v1",
+      defaultModel: "concrete-model", apiKey: "initial-secret", configuration: {}
+    } });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id as string;
+    await pool.query(
+      "UPDATE provider_profiles SET encrypted_api_key='corrupt',credential_nonce='corrupt',credential_auth_tag='corrupt',credential_key_version=1 WHERE id=$1",
+      [id]
+    );
+    const originalFetch = transport.fetch;
+    let observedCredential: string | undefined;
+    transport.fetch = async (profile, _operation, url) => {
+      observedCredential = profile.apiKey;
+      expect(url).toBe("https://replacement-key.test/api/v1/presets/night-shift");
+      return new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "private", config: { model: "vendor/model" } } } }), { status: 200 });
+    };
+    try {
+      const saved = await app.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: {
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }, apiKey: "replacement-secret"
+      } });
+      expect(saved.statusCode).toBe(200);
+      expect(observedCredential).toBe("replacement-secret");
+      expect(saved.json()).toMatchObject({ hasApiKey: true, textSelection: { kind: "openrouter_preset", slug: "night-shift" } });
+    } finally { transport.fetch = originalFetch; }
+  });
+
+  it("switches away from a historical preset without decrypting a corrupt saved key", async () => {
+    const name = `${baseProviderInput.name} SWITCH-AWAY ${crypto.randomUUID()}`;
+    const originalFetch = transport.fetch;
+    transport.fetch = async () => new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "private", config: { model: "vendor/model" } } } }), { status: 200 });
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+        ...baseProviderInput, name, providerType: "openrouter", providerRole: "text", baseUrl: "https://switch-away.test/api/v1",
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }, apiKey: "initial-secret", configuration: {}
+      } });
+      expect(created.statusCode).toBe(201);
+      const id = created.json().id as string;
+      await pool.query(
+        "UPDATE provider_profiles SET encrypted_api_key='corrupt',credential_nonce='corrupt',credential_auth_tag='corrupt',credential_key_version=1 WHERE id=$1",
+        [id]
+      );
+      transport.fetch = async () => { throw new Error("switching away must not validate the unavailable historical preset"); };
+      const switched = await app.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: {
+        defaultModel: "concrete-model", textSelection: { kind: "model", modelId: "concrete-model" }
+      } });
+      expect(switched.statusCode).toBe(200);
+      expect(switched.json()).toMatchObject({ textSelection: { kind: "model", modelId: "concrete-model" } });
+    } finally { transport.fetch = originalFetch; }
+  });
+
   it("round-trips strict text overrides with PATCH preserve and explicit clear semantics", async () => {
     const overrides = {
       parameters: { temperature: 0.31, max_tokens: 654 },

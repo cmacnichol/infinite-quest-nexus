@@ -46,8 +46,7 @@ type ApiRuntimeProviderAdapter = Readonly<{
   ): Promise<ProviderModelInventory>;
   discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number }>, credential: string | null): Promise<ProviderPresetInventory>;
   resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
-  resolveCandidatePresetWithProfileCredential(ownerUserId: string, providerProfileId: string, candidate: ProviderCandidate, slug: string): Promise<ProviderPresetDetail>;
-  presetSaveRevision(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<string | null>;
+  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean, includeCredential: boolean): Promise<Readonly<{ candidate: ProviderCandidate; credential?: string | null; revision: string }> | null>;
 }>;
 
 type ProviderApiComposition = Readonly<{
@@ -122,7 +121,7 @@ function assertTextSelectionRole(input: Readonly<{ providerRole: ProviderRole; t
   }
 }
 
-function candidateForPresetSave(ownerUserId: string, profile: ProviderProfileView | ProviderProfileInput, selection: ReturnType<typeof normalizeTextSelection>, changes?: ProviderProfileUpdate): ProviderCandidate {
+function candidateForPresetSave(ownerUserId: string, profile: ProviderProfileView | ProviderProfileInput | ProviderCandidate, selection: ReturnType<typeof normalizeTextSelection>, changes?: ProviderProfileUpdate): ProviderCandidate {
   return {
     ownerUserId, name: changes?.name ?? profile.name, providerType: profile.providerType, providerRole: profile.providerRole,
     baseUrl: changes?.baseUrl ?? profile.baseUrl, defaultModel: selectionCompatibilityId(selection), textSelection: selection,
@@ -135,7 +134,7 @@ function candidateForPresetSave(ownerUserId: string, profile: ProviderProfileVie
   };
 }
 
-function updatedSelection(profile: ProviderProfileView, input: ProviderProfileUpdate) {
+function updatedSelection(profile: Pick<ProviderCandidate, "providerType" | "providerRole" | "defaultModel" | "textSelection">, input: ProviderProfileUpdate) {
   if (profile.providerRole !== "text" && profile.providerRole !== "intent") return undefined;
   return normalizeTextSelection({ providerType: profile.providerType, providerRole: profile.providerRole,
     defaultModel: input.defaultModel ?? (input.textSelection === undefined ? profile.defaultModel : selectionCompatibilityId(input.textSelection)),
@@ -195,26 +194,34 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       const textSelection = input.textSelection;
       const current = (await composition.application.listProfiles({ ownerUserId })).find((profile) => profile.id === providerProfileId);
       if (!current) throw Object.assign(new Error("Provider profile not found."), { statusCode: 404 });
-      const nextSelection = updatedSelection(current, input);
-      const selectionChanged = nextSelection && current.textSelection
-        ? selectionCompatibilityId(nextSelection) !== selectionCompatibilityId(current.textSelection)
+      const canChangeTextSelection = current.providerRole === "text" || current.providerRole === "intent";
+      const requiresPresetAuthority = canChangeTextSelection &&
+        (input.textSelection !== undefined || input.defaultModel !== undefined || input.baseUrl !== undefined || input.apiKey !== undefined);
+      const explicitlySwitchesAwayFromPreset = input.textSelection?.kind === "model" ||
+        input.defaultModel !== undefined && !input.defaultModel.trim().startsWith("@preset/");
+      const includesSavedCredential = input.apiKey === undefined && !explicitlySwitchesAwayFromPreset &&
+        (input.textSelection?.kind === "openrouter_preset" || input.defaultModel?.trim().startsWith("@preset/") ||
+          input.textSelection === undefined && input.defaultModel === undefined && current.textSelection?.kind === "openrouter_preset");
+      const authority = requiresPresetAuthority
+        ? await composition.runtime.presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, false, includesSavedCredential)
+        : null;
+      if (requiresPresetAuthority && !authority) stalePresetSave();
+      const profileForSelection = authority?.candidate ?? current;
+      const nextSelection = updatedSelection(profileForSelection, input);
+      const selectionChanged = nextSelection && profileForSelection.textSelection
+        ? selectionCompatibilityId(nextSelection) !== selectionCompatibilityId(profileForSelection.textSelection)
         : false;
       const needsPresetValidation = nextSelection?.kind === "openrouter_preset" &&
-        (selectionChanged || input.baseUrl !== undefined && input.baseUrl !== current.baseUrl || input.apiKey !== undefined);
-      const preflightRevision = needsPresetValidation
-        ? await composition.runtime.presetSaveRevision(ownerUserId, providerProfileId, false)
-        : null;
+        (selectionChanged || input.baseUrl !== undefined && input.baseUrl !== profileForSelection.baseUrl || input.apiKey !== undefined);
       if (needsPresetValidation) {
-        if (!preflightRevision) stalePresetSave();
-        const candidate = candidateForPresetSave(ownerUserId, current, nextSelection, input);
-        if (input.apiKey !== undefined) {
-          await composition.runtime.resolveCandidatePresetWithCredential(candidate, nextSelection.slug, input.apiKey || null);
-        } else {
-          await composition.runtime.resolveCandidatePresetWithProfileCredential(ownerUserId, providerProfileId, candidate, nextSelection.slug);
-        }
+        if (!authority) stalePresetSave();
+        const candidate = candidateForPresetSave(ownerUserId, authority.candidate, nextSelection, input);
+        const credential = input.apiKey !== undefined ? input.apiKey || null : authority.credential;
+        if (credential === undefined) stalePresetSave();
+        await composition.runtime.resolveCandidatePresetWithCredential(candidate, nextSelection.slug, credential);
       }
       return composition.transaction(async ({ application, runtime }) => {
-        if (preflightRevision !== null && await runtime.presetSaveRevision(ownerUserId, providerProfileId, true) !== preflightRevision) stalePresetSave();
+        if (authority && (await runtime.presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, true, false))?.revision !== authority.revision) stalePresetSave();
         const mutation = await application.updateProfile({
           ownerUserId,
           providerProfileId,
