@@ -111,7 +111,7 @@ export type RuntimeProviderAdapter = Readonly<{
   ): Promise<ProviderModelInventory>;
   discoverCandidatePresetsWithCredential(candidate: ProviderCandidate, request: Readonly<{ offset: number; limit: number; signal?: AbortSignal }>, credential: string | null): Promise<ProviderPresetInventory>;
   resolveCandidatePresetWithCredential(candidate: ProviderCandidate, slug: string, credential: string | null, signal?: AbortSignal): Promise<ProviderPresetDetail>;
-  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean, includeCredential: boolean): Promise<Readonly<{ candidate: ProviderCandidate; credential?: string | null; revision: string }> | null>;
+  presetSaveAuthoritySnapshot(ownerUserId: string, providerProfileId: string, lock: boolean): Promise<Readonly<{ candidate: ProviderCandidate; readSavedCredential(): string | null; revision: string }> | null>;
 }>;
 
 function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
