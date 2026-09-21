@@ -210,7 +210,12 @@ integration("provider route configuration redaction", () => {
     expect(JSON.stringify(list.json())).not.toContain("preset-secret");
     const detail = await app.inject({ method: "GET", url: `/api/v1/providers/${created.json().id}/presets/night-shift` });
     expect(detail.statusCode).toBe(200);
-    expect(detail.json()).toMatchObject({ slug: "night-shift", systemPrompt: "private preset prompt" });
+    expect(detail.json()).toEqual({
+      slug: "night-shift", name: "Night Shift", versionId: "version-2", version: 2,
+      standardPrompt: "private preset prompt", candidateModelIds: ["openai/gpt-4o"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {},
+      limits: { configuredMaxTokens: null, configuredMaxCompletionTokens: null, effectiveMaxOutputTokens: null, contextWindowTokens: { status: "unknown", value: null } },
+      responseFormat: { mode: "json_schema", assurance: "trusted_preset" }
+    });
     expect(JSON.stringify(detail.json())).not.toContain("preset-secret");
   });
 
@@ -259,7 +264,7 @@ integration("provider route configuration redaction", () => {
     expect(JSON.stringify(discovered.json())).not.toContain("candidate-secret");
     const resolved = await app.inject({ method: "POST", url: "/api/v1/providers/resolve-preset?slug=night-shift", payload: candidate });
     expect(resolved.statusCode).toBe(200);
-    expect(resolved.json()).toMatchObject({ slug: "night-shift", systemPrompt: "private preset prompt" });
+    expect(resolved.json()).toMatchObject({ slug: "night-shift", standardPrompt: "private preset prompt", responseFormat: { mode: "json_schema", assurance: "trusted_preset" } });
     const profiles = await app.inject({ method: "GET", url: "/api/v1/providers" });
     expect(profiles.json().providers.some((profile: { name: string }) => profile.name === name)).toBe(false);
   });

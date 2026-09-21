@@ -200,7 +200,7 @@ describe("API server security and CORS headers", () => {
       url: `/api/v1/system-exports/${jobId}`,
     })).statusCode).toBe(404);
     expect((await disabled.inject({ method: "GET", url: "/api/v1/meta" })).json())
-      .toMatchObject({ capabilities: { systemArchive: false } });
+      .toMatchObject({ capabilities: { systemArchive: false, nativeTextExecutionPlans: false } });
     expect(createApiSystemArchive).not.toHaveBeenCalled();
     await disabled.close();
 
@@ -214,13 +214,22 @@ describe("API server security and CORS headers", () => {
     });
     expect(response.statusCode, response.body).toBe(200);
     expect((await enabled.inject({ method: "GET", url: "/api/v1/meta" })).json())
-      .toMatchObject({ capabilities: { systemArchive: true } });
+      .toMatchObject({ capabilities: { systemArchive: true, nativeTextExecutionPlans: false } });
     expect(createApiSystemArchive).toHaveBeenCalledOnce();
     expect(getJob).toHaveBeenCalledWith({
       ownerUserId: "11111111-1111-4111-8111-111111111111",
       jobId,
     });
     await enabled.close();
+  });
+
+  it("advertises native text execution only from the shared runtime admission flag", async () => {
+    const app = await buildServer(serverOptions({
+      config: makeConfig({ nativeTextExecutionPlanAdmission: true }), pool: mockPool
+    }));
+    expect((await app.inject({ method: "GET", url: "/api/v1/meta" })).json())
+      .toMatchObject({ capabilities: { nativeTextExecutionPlans: true } });
+    await app.close();
   });
 
   it("exposes only sanitized System Archive server errors through the production envelope", async () => {

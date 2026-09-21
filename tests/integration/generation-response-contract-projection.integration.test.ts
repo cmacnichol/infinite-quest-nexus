@@ -33,4 +33,33 @@ integration("generation response-contract SQL projection", () => {
     expect(projectGenerationResponseFormat(result.rows[1]?.projected)).toMatchObject({ savedPolicy: "auto", effectiveMode: "json_object", operation: "story", streaming: false, requestedModel: "model-a", returnedModel: "model-b", returnedRoute: "route-b", preflight: "selected" });
     expect(projectGenerationResponseFormat({ ...(result.rows[0]?.projected as object), queuedResponsePolicy: { version: 1, policy: "required" }, errorCode: "response_contract_unavailable" })).toMatchObject({ savedPolicy: "required", effectiveMode: "unavailable", preflight: "unavailable" });
   });
+
+  test("projects v2 requested selection separately from observed serving identity without private authority", async () => {
+    const privateCanary = "PRIVATE_ENDPOINT_CREDENTIAL_PROMPT";
+    const source = {
+      queuedResponsePolicy: {
+        version: 2, policy: "required", admission: { mode: "json_schema", basis: "preset_trusted" },
+        authority: {
+          kind: "preset_trusted", selection: { kind: "openrouter_preset", slug: "night-shift" },
+          endpointReference: privateCanary, credentialReference: privateCanary
+        }
+      },
+      frozenResponseContracts: { version: 2, contracts: {
+        "story:stream": { mode: "json_schema", operation: "story", streaming: true, schemaVersion: "story-v2", schemaHash: "b".repeat(64), schema: { prompt: privateCanary } }
+      } },
+      responseContractInvocations: [{
+        version: 2, invocationKey: "story:stream",
+        request: { schemaVersion: "story-v2", schemaHash: "b".repeat(64), requestedModel: "requested-route" },
+        response: { returnedModel: "served-model", returnedProviderRoute: "served-route", diagnosticCode: null }
+      }]
+    };
+    const result = await pool.query<{ projected: unknown }>(`SELECT ${generationResponseFormatProjection("source")} AS projected FROM (SELECT $1::jsonb AS source) item`, [JSON.stringify(source)]);
+    const projected = projectGenerationResponseFormat(result.rows[0]?.projected);
+    expect(projected).toMatchObject({
+      version: 2, requestedSelection: { kind: "openrouter_preset", slug: "night-shift" }, assurance: "trusted_preset",
+      actualServedIdentity: { status: "known", model: "served-model", providerRoute: "served-route" }
+    });
+    expect(JSON.stringify(result.rows[0]?.projected)).not.toContain(privateCanary);
+    expect(JSON.stringify(projected)).not.toContain("requested-route");
+  });
 });

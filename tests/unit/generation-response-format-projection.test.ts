@@ -31,9 +31,59 @@ describe("generation response-format public projection", () => {
   });
 
   test("keeps malformed or future durable markers unknown rather than relabeling them as legacy or selected", () => {
-    expect(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 2, policy: "future" } }))
+    expect(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 3, policy: "future" } }))
       .toMatchObject({ savedPolicy: "unknown", effectiveMode: "unknown", preflight: "unknown" });
     expect(projectGenerationResponseFormat({ queuedResponsePolicy: { version: 1, policy: "auto" }, frozenResponseContracts: { version: 2 } }))
       .toMatchObject({ savedPolicy: "auto", effectiveMode: "unknown", preflight: "unknown" });
+  });
+
+  test("projects v2 requested Preset selection separately from unknown actual serving identity", () => {
+    const privateCanary = "PRIVATE_V2_PROMPT_PLAN_CREDENTIAL_CANARY";
+    const projected = projectGenerationResponseFormat({
+      queuedResponsePolicy: {
+        version: 2, policy: "required", admission: { mode: "json_schema", basis: "preset_trusted" },
+        authority: { kind: "preset_trusted", selection: { kind: "openrouter_preset", slug: "night-shift" }, endpointReference: privateCanary, credentialReference: privateCanary }
+      },
+      frozenResponseContracts: { version: 2, contracts: {
+        "story:stream": { mode: "json_schema", operation: "story", streaming: true, schemaVersion: "story-v2", schemaHash: "b".repeat(64), schema: { private: privateCanary } }
+      } },
+      responseContractInvocations: [{ version: 2, invocationKey: "story:stream", request: { requestedModel: "requested-route" }, response: { returnedModel: null, returnedProviderRoute: null, diagnosticCode: null } }]
+    });
+
+    expect(projected).toEqual({
+      version: 2, savedPolicy: "required", effectiveMode: "json_schema", schemaVersion: "story-v2", schemaHash: "b".repeat(64),
+      operation: "story", streaming: true, requestedSelection: { kind: "openrouter_preset", slug: "night-shift" }, assurance: "trusted_preset",
+      actualServedIdentity: { status: "unknown", model: null, providerRoute: null }, preflight: "selected", preflightDiagnostic: null, diagnosticCode: null
+    });
+    expect(JSON.stringify(projected)).not.toContain(privateCanary);
+    expect(JSON.stringify(projected)).not.toContain("requested-route");
+  });
+
+  test("projects v2 actual served identity only from supplied response evidence", () => {
+    expect(projectGenerationResponseFormat({
+      queuedResponsePolicy: { version: 2, policy: "required", admission: { mode: "json_schema", basis: "model_verified" }, authority: { kind: "model_verified", model: "requested-model" } },
+      frozenResponseContracts: { version: 2, contracts: { "story:nonstream": { mode: "json_schema", operation: "story", streaming: false, schemaVersion: "story-v2", schemaHash: "c".repeat(64) } } },
+      responseContractInvocations: [{ version: 2, invocationKey: "story:nonstream", request: { requestedModel: "different-request-field" }, response: { returnedModel: "served-model", returnedProviderRoute: "served-route", diagnosticCode: null } }]
+    })).toMatchObject({
+      version: 2, requestedSelection: { kind: "model", modelId: "requested-model" }, assurance: "verified_model",
+      actualServedIdentity: { status: "known", model: "served-model", providerRoute: "served-route" }
+    });
+  });
+
+  test("retains bounded 500-character v2 actual served identity fields", () => {
+    const returnedModel = "m".repeat(500);
+    const returnedProviderRoute = "r".repeat(500);
+    const projected = projectGenerationResponseFormat({
+      queuedResponsePolicy: {
+        version: 2, policy: "required", admission: { mode: "json_schema", basis: "preset_trusted" },
+        authority: { kind: "preset_trusted", selection: { kind: "openrouter_preset", slug: "night-shift" } }
+      },
+      responseContractInvocations: [{
+        version: 2, invocationKey: "story:stream", response: { returnedModel, returnedProviderRoute }
+      }]
+    });
+    expect(projected.version).toBe(2);
+    if (projected.version !== 2) throw new Error("Expected a v2 projection.");
+    expect(projected.actualServedIdentity).toEqual({ status: "known", model: returnedModel, providerRoute: returnedProviderRoute });
   });
 });

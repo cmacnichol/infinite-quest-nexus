@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { beforeAll, describe, expect, test } from "vitest";
 
 const rootDirectory = process.cwd();
@@ -39,6 +40,7 @@ describe("web build contract", () => {
       expect(existsSync(path.join(distDirectory, assetPath)), assetPath).toBe(true);
     }
     expect(existsSync(path.join(distDirectory, "legacy-client.js"))).toBe(true);
+    expect(existsSync(path.join(distDirectory, "legacy-management.js"))).toBe(true);
     expect(storyHtml).toContain('src="/nexus/legacy-client.js"');
     expect(existsSync(path.join(distDirectory, "story.js"))).toBe(false);
     const emitted = [html, storyHtml, ...Array.from(new Set([...localAssetPaths(html, "/nexus/"), ...localAssetPaths(storyHtml, "/nexus/")]))
@@ -51,6 +53,14 @@ describe("web build contract", () => {
     expect(emitted).toContain("retrievalShadowEnabled");
     expect(emitted).toContain("Chronicle retrieval");
     expect(emitted).toContain("this turn predates retrieval auditing");
+  });
+
+  test("legacy management bundle imports without booting the Story player and exports reusable APIs", async () => {
+    const bundle = await import(`${pathToFileURL(path.join(rootDirectory, "apps/web/dist/legacy-management.js")).href}?test=${Date.now()}`);
+    expect(typeof bundle.createSelectionEditorState).toBe("function");
+    expect(typeof bundle.reduceSelectionEditor).toBe("function");
+    expect(typeof bundle.serializeSelectionEditorPatch).toBe("function");
+    expect(typeof bundle.createProviderPresetsApi).toBe("function");
   });
 
   test("replacement build emits HTML whose hashed assets exist", () => {
