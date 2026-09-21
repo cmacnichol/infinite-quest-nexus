@@ -4,6 +4,23 @@ import { defineConfig } from "vite";
 export default defineConfig({
   base: "/nexus/",
   publicDir: "public",
+  plugins: [{
+    name: "legacy-management-development-entry",
+    configureServer(server) {
+      server.middlewares.use(async (request, response, next) => {
+        if (request.url?.split("?", 1)[0] !== "/nexus/legacy-management.js") return next();
+        try {
+          const transformed = await server.transformRequest("/src/legacy-management-entry.ts");
+          if (!transformed) return next();
+          response.statusCode = 200;
+          response.setHeader("Content-Type", "text/javascript");
+          response.end(transformed.code);
+        } catch (error) {
+          next(error as Error);
+        }
+      });
+    }
+  }],
   build: {
     copyPublicDir: true,
     emptyOutDir: true,

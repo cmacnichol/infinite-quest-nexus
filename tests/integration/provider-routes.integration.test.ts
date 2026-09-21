@@ -8,8 +8,10 @@ import { buildServer } from "../../services/api/src/server.js";
 import { inertStorageServerOptions as serverOptions } from "../helpers/build-server-options.js";
 import { createProviderNetworkPolicy } from "../../packages/security/src/provider-network-policy.js";
 import { createProviderTransport, type ProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { createApiProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
 import { createProviderApplicationAdapter } from "../../services/api/src/provider-application-adapter.js";
+import { prepareAuthoringResponseContractExecution, serializePreparedAuthoringRequest } from "../../services/runtime/src/authoring-text-execution-preparation.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -156,7 +158,7 @@ integration("provider route configuration redaction", () => {
 
   it("round-trips strict text overrides with PATCH preserve and explicit clear semantics", async () => {
     const overrides = {
-      parameters: { temperature: 0.31, max_completion_tokens: 654 },
+      parameters: { temperature: 0.31, max_tokens: 654 },
       conservativeContextWindowTokens: 9_999
     };
     const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
@@ -164,19 +166,43 @@ integration("provider route configuration redaction", () => {
       name: `${baseProviderInput.name} OVERRIDES ${crypto.randomUUID()}`,
       providerType: "openrouter", providerRole: "text", defaultModel: "@preset/night-shift",
       textSelection: { kind: "openrouter_preset", slug: "night-shift" },
-      configuration: { textExecutionOverrides: overrides }
+      configuration: {}
     } });
     expect(created.statusCode).toBe(201);
-    expect(created.json().configuration).toEqual({
-      textResponseFormatPolicy: "required",
-      textExecutionOverrides: overrides
-    });
+    expect(created.json().configuration).toEqual({ textResponseFormatPolicy: "required" });
 
     const renamed = await app.inject({ method: "PATCH", url: `/api/v1/providers/${created.json().id}`, payload: {
-      name: `${baseProviderInput.name} OVERRIDES renamed ${crypto.randomUUID()}`
+      name: `${baseProviderInput.name} OVERRIDES renamed ${crypto.randomUUID()}`,
+      configuration: { textExecutionOverrides: overrides }
     } });
     expect(renamed.statusCode).toBe(200);
     expect(renamed.json().configuration.textExecutionOverrides).toEqual(overrides);
+
+    const saved = renamed.json();
+    const execution = {
+      id: saved.id, name: saved.name, providerRole: "text" as const, providerType: "openrouter" as const,
+      model: saved.defaultModel, contextWindowTokens: Number(saved.contextWindowTokens), maxOutputTokens: Number(saved.maxOutputTokens),
+      temperature: Number(saved.temperature), requestTimeoutMs: Number(saved.requestTimeoutMs), configuration: saved.configuration,
+      textSelection: saved.textSelection, executionRevision: "api-round-trip", authorityRevision: "api-authority",
+      endpointIdentity: "api-endpoint", execute: async () => { throw new Error("prepared-body test must not call a provider"); }
+    };
+    const prepared = await prepareAuthoringResponseContractExecution({
+      ownerUserId: "00000000-0000-4000-8000-000000000001", execution,
+      operationPrompts: { worldOutline: "Create a compact world." },
+      ports: {
+        resolvePreset: async () => ({ slug: "night-shift", name: "Night Shift", versionId: "version-2", version: 2, configHash: "a".repeat(64), config: { model: "openai/gpt-4o", temperature: 0.8, max_tokens: 900 }, systemPrompt: "private preset prompt" }),
+        discoverModels: async () => [{ id: "openai/gpt-4o" }]
+      }
+    });
+    const preparedRequest = serializePreparedAuthoringRequest({
+      execution, prepared, operation: "worldOutline",
+      request: { systemPrompt: "ignored", input: "small input" }
+    });
+    expect(JSON.parse(preparedRequest.body)).toMatchObject({ model: "openai/gpt-4o", temperature: 0.31, max_tokens: 654 });
+    expect(JSON.parse(preparedRequest.body).response_format).toEqual({ type: "json_schema", json_schema: {
+      name: getProviderOutputSchemaV2("world_outline").name, strict: true, schema: getProviderOutputSchemaV2("world_outline").schema
+    } });
+    expect(preparedRequest.budgetAudit).toMatchObject({ inputLimit: 9_345, outputReserveTokens: 654 });
 
     const cleared = await app.inject({ method: "PATCH", url: `/api/v1/providers/${created.json().id}`, payload: {
       configuration: { textExecutionOverrides: null }
@@ -184,6 +210,24 @@ integration("provider route configuration redaction", () => {
     expect(cleared.statusCode).toBe(200);
     expect(cleared.json().configuration).not.toHaveProperty("textExecutionOverrides");
     expect(cleared.json().configuration.textResponseFormatPolicy).toBe("required");
+    const clearedExecution = { ...execution, configuration: cleared.json().configuration };
+    const inherited = await prepareAuthoringResponseContractExecution({
+      ownerUserId: "00000000-0000-4000-8000-000000000001", execution: clearedExecution,
+      operationPrompts: { worldOutline: "Create a compact world." },
+      ports: {
+        resolvePreset: async () => ({ slug: "night-shift", name: "Night Shift", versionId: "version-2", version: 2, configHash: "a".repeat(64), config: { model: "openai/gpt-4o", temperature: 0.8, max_tokens: 900 }, systemPrompt: "private preset prompt" }),
+        discoverModels: async () => [{ id: "openai/gpt-4o", contextWindowTokens: 8_192, maxOutputTokens: 1_000 }]
+      }
+    });
+    const inheritedRequest = serializePreparedAuthoringRequest({
+      execution: clearedExecution, prepared: inherited, operation: "worldOutline",
+      request: { systemPrompt: "ignored", input: "small input" }
+    });
+    expect(JSON.parse(inheritedRequest.body)).toMatchObject({ model: "openai/gpt-4o", temperature: 0.8, max_tokens: 900 });
+    expect(JSON.parse(inheritedRequest.body).response_format).toEqual({ type: "json_schema", json_schema: {
+      name: getProviderOutputSchemaV2("world_outline").name, strict: true, schema: getProviderOutputSchemaV2("world_outline").schema
+    } });
+    expect(inheritedRequest.budgetAudit).toMatchObject({ inputLimit: 7_292, outputReserveTokens: 900 });
 
     const invalid = await app.inject({ method: "PATCH", url: `/api/v1/providers/${created.json().id}`, payload: {
       configuration: { textExecutionOverrides: { parameters: { top_p: 2 } } }

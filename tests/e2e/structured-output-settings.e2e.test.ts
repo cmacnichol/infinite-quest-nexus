@@ -73,12 +73,12 @@ async function installProviderApi(page: Page) {
   };
 }
 
-test("Nexus saves explicit policy choices while retaining an absent legacy policy", async ({ page }) => {
+test("Nexus defaults absent policy to Required while saving explicit compatibility choices", async ({ page }) => {
   const api = await installProviderApi(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto("http://127.0.0.1:43173/nexus/index.html#providers");
   await page.getByRole("button", { name: "Edit" }).click();
-  await expect(page.locator("#providerResponseFormatPolicy")).toHaveValue("legacy");
+  await expect(page.locator("#providerResponseFormatPolicy")).toHaveValue("required");
   await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
   await expect.poll(() => api.writes.length).toBe(1);
   expect((requiredAt(api.writes, 0, "legacy provider save").configuration as Record<string, unknown>).textResponseFormatPolicy).toBeUndefined();

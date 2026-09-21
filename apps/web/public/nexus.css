@@ -60,6 +60,7 @@ body:not([data-management-view="dashboard"]) .dashboard-home { display: none; }
 .provider-advanced-fields { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .provider-form label, .provider-select-row label, .generation-form label { display: grid; gap: 7px; color: var(--muted); font-size: .86rem; font-weight: 700; }
 .provider-form .text-model-setting.hidden { display: none; }
+.provider-form [hidden] { display: none !important; }
 .provider-form label[title] { cursor: help; }
 .field-label-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .mini-icon-button { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 8px; padding: 0; background: var(--panel-2); color: var(--text); cursor: pointer; font-weight: 900; }
@@ -514,6 +515,22 @@ fieldset { border: 1px solid var(--line); border-radius: 12px; padding: 16px; ma
 legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
 .fieldset-content { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
 .provider-model-settings.fieldset-content { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.provider-selection-mode { display: flex; align-items: center; gap: 16px; grid-column: 1 / -1; padding: 10px 12px; margin: 0; }
+.provider-selection-mode legend { color: var(--muted); }
+.provider-selection-mode label { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: .84rem; font-weight: 700; }
+.provider-selection-mode input { width: auto; }
+.provider-selection-support, .provider-preset-selection, .provider-preset-detail, .provider-text-overrides { grid-column: 1 / -1; }
+.provider-preset-selection { display: grid; gap: 9px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.12); }
+.provider-preset-selection label, .provider-text-overrides label { display: grid; gap: 6px; color: var(--muted); font-size: .78rem; font-weight: 700; }
+.provider-preset-detail { padding: 14px; border: 1px solid var(--purple); border-radius: 10px; background: rgba(142,98,238,.08); }
+.provider-preset-detail h3, .provider-preset-detail p { margin: 0 0 10px; }
+.provider-preset-detail dl { display: grid; gap: 10px; margin: 0; }
+.provider-preset-detail dl > div { display: grid; grid-template-columns: minmax(130px,.35fr) minmax(0,1fr); gap: 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+.provider-preset-detail dt { color: var(--muted); font-size: .76rem; font-weight: 800; }
+.provider-preset-detail dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; font-size: .8rem; line-height: 1.45; }
+.provider-text-overrides { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.provider-text-override-fields { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 #providerSogniSettings > .fieldset-content { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; }
 #providerSogniSdkSettings { grid-column: 1 / -1; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 .fieldset-note { margin: 0 0 14px; color: var(--muted); font-size: .8rem; line-height: 1.5; }
@@ -591,6 +608,8 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
   .world-details-meta { grid-template-columns: 1fr; }
   .context-controls { grid-template-columns: 1fr; }
   .provider-model-settings, .generation-form, .illustration-settings, .fieldset-content { grid-template-columns: 1fr; }
+  .provider-text-override-fields { grid-template-columns: 1fr; }
+  .provider-preset-detail dl > div { grid-template-columns: 1fr; }
   .advanced-retrieval-fields, .chronicle-maintenance-actions { grid-template-columns: 1fr; }
   .campaign-editor-header, .campaign-editor-actions, .chronicle-subheading, .chronicle-maintenance-actions { align-items: stretch; grid-template-columns: 1fr; }
   .campaign-editor-header { flex-direction: column; }

@@ -1,4 +1,11 @@
 import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
+import {
+  createProviderPresetsApi,
+  createSelectionEditorState,
+  nativePresetSupport,
+  reduceSelectionEditor,
+  serializeSelectionEditorPatch
+} from "/nexus/legacy-management.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
 const assetLibraryBrowser = createImageLibraryBrowser({
@@ -67,6 +74,10 @@ let discoveredEmbeddingModels = [];
 let providerModelPickerTarget = "provider";
 let responseFormatCapabilitySequence = 0;
 let responseFormatCapabilityProfile = null;
+let nativeTextExecutionPlansSupported = false;
+let providerSelectionEditor = null;
+let providerSelectionRequestSequence = 0;
+let providerSelectionCredentialRevision = 0;
 const embeddingJobMonitors = new Map();
 let worldCoverJobPollSequence = 0;
 let illustrationRefinementPromptValue = "";
@@ -322,6 +333,7 @@ function refreshModalBaseline(dialog) {
 }
 
 function clickedDialogBackdrop(dialog, event) {
+  if (event.target !== dialog) return false;
   const bounds = dialog.getBoundingClientRect();
   return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
 }
@@ -364,6 +376,8 @@ async function loadApplicationMetadata() {
       return;
     }
     const metadata = await response.json();
+    nativeTextExecutionPlansSupported = nativePresetSupport(metadata).state === "supported";
+    syncProviderSelectionSupport();
     const version = metadata?.application?.version;
     if (version && elements.nexusVersion) {
       elements.nexusVersion.textContent = `v${version}`;
@@ -4094,7 +4108,9 @@ function renderProviderProfiles() {
     const title = document.createElement("strong");
     title.textContent = provider.name;
     const summary = document.createElement("span");
-    summary.textContent = `${provider.providerRole} · ${providerTypeLabel(provider.providerType)} · ${provider.defaultModel || "model not selected"} · ${Number(provider.requestTimeoutMs || 300000) / 60000} min timeout`;
+    const selection = providerTextSelection(provider);
+    const selectionLabel = selection.kind === "openrouter_preset" ? `Preset · ${selection.slug}` : `Model · ${selection.modelId || "not selected"}`;
+    summary.textContent = `${provider.providerRole} · ${providerTypeLabel(provider.providerType)} · ${selectionLabel} · ${Number(provider.requestTimeoutMs || 300000) / 60000} min timeout`;
     details.append(title, summary);
     if (provider.providerRole === "intent") {
       const retired = document.createElement("span");
@@ -4157,6 +4173,262 @@ function renderProviderProfiles() {
   }
 }
 
+const providerPresetsApi = createProviderPresetsApi({
+  async request(specification) {
+    const options = { method: specification.method };
+    if (specification.signal) options.signal = specification.signal;
+    if (specification.body?.kind === "json") options.body = JSON.stringify(specification.body.value);
+    const value = await api(`/api/v1${specification.path}`, options);
+    return specification.responseSchema.parse(value);
+  }
+});
+
+const providerOverrideFields = Object.freeze({
+  temperature: "providerOverrideTemperature",
+  top_p: "providerOverrideTopP",
+  top_k: "providerOverrideTopK",
+  frequency_penalty: "providerOverrideFrequencyPenalty",
+  presence_penalty: "providerOverridePresencePenalty",
+  repetition_penalty: "providerOverrideRepetitionPenalty",
+  min_p: "providerOverrideMinP",
+  top_a: "providerOverrideTopA",
+  seed: "providerOverrideSeed",
+  max_tokens: "providerOverrideMaxTokens",
+  max_completion_tokens: "providerOverrideMaxCompletionTokens"
+});
+
+function providerTextSelection(provider = null) {
+  if (provider?.textSelection?.kind === "openrouter_preset" || provider?.textSelection?.kind === "model") return provider.textSelection;
+  const value = String(provider?.defaultModel || "");
+  const match = /^@preset\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)$/u.exec(value);
+  return match ? { kind: "openrouter_preset", slug: match[1] } : { kind: "model", modelId: value };
+}
+
+function providerSelectionAuthority(provider = null) {
+  return {
+    profileRevision: provider ? `${provider.id}:${provider.updatedAt || "saved"}` : "new",
+    configurationRevision: JSON.stringify(provider?.configuration || {}),
+    credentialRevision: `${provider?.hasApiKey === true}:${providerSelectionCredentialRevision}`
+  };
+}
+
+function initializeProviderSelectionEditor(provider = null) {
+  const authority = providerSelectionAuthority(provider);
+  providerSelectionEditor = createSelectionEditorState({
+    savedSelection: providerTextSelection(provider),
+    responseFormatPolicy: provider?.configuration?.textResponseFormatPolicy || "required",
+    ...(provider?.configuration?.textExecutionOverrides ? { textExecutionOverrides: provider.configuration.textExecutionOverrides } : {}),
+    ...authority
+  });
+  renderProviderSelectionEditor();
+}
+
+function activeProviderSelectionDraft() {
+  if (!providerSelectionEditor) return null;
+  return providerSelectionEditor.mode === "model" ? providerSelectionEditor.modelDraft : providerSelectionEditor.presetDraft;
+}
+
+function syncProviderSelectionSupport() {
+  if (!elements.providerTextSelectionMode) return;
+  const eligible = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
+  const candidate = elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
+  elements.providerTextSelectionMode.classList.toggle("hidden", !eligible);
+  elements.providerTextSelectionMode.hidden = !eligible;
+  elements.providerTextSelectionSupport.classList.toggle("hidden", !candidate || eligible);
+  elements.providerTextSelectionSupport.hidden = !candidate || eligible;
+  if (!eligible && providerSelectionEditor?.mode === "preset") {
+    providerSelectionEditor = reduceSelectionEditor(providerSelectionEditor, { type: "modeChanged", mode: "model" });
+  }
+  renderProviderSelectionEditor();
+}
+
+function setProviderSelectionState(event) {
+  if (!providerSelectionEditor) return;
+  providerSelectionEditor = reduceSelectionEditor(providerSelectionEditor, event);
+  renderProviderSelectionEditor();
+}
+
+function formatPresetObject(value) {
+  const entries = Object.entries(value || {});
+  return entries.length ? entries.map(([key, item]) => `${key}: ${Array.isArray(item) ? item.join(" → ") : String(item)}`).join(" · ") : "Provider defaults";
+}
+
+function renderProviderPresetDetail() {
+  const detail = providerSelectionEditor?.detail.value;
+  const presetMode = providerSelectionEditor?.mode === "preset";
+  elements.providerPresetDetail.classList.toggle("hidden", !presetMode);
+  elements.providerPresetDetail.hidden = !presetMode;
+  if (!presetMode) return;
+  if (providerSelectionEditor.detail.busy) {
+    elements.providerPresetPrompt.textContent = "Loading preset details…";
+    return;
+  }
+  if (providerSelectionEditor.detail.error) {
+    elements.providerPresetPrompt.textContent = `Preset details are unavailable (${providerSelectionEditor.detail.error}).`;
+    return;
+  }
+  if (!detail) {
+    elements.providerPresetPrompt.textContent = "Choose a preset to inspect its standard prompt.";
+    elements.providerPresetVersion.textContent = "Unknown";
+    elements.providerPresetModels.textContent = "Unknown";
+    elements.providerPresetPolicy.textContent = "Unknown";
+    elements.providerPresetLimits.textContent = "Unknown";
+    elements.providerPresetParameters.textContent = "Inherited";
+    return;
+  }
+  elements.providerPresetPrompt.textContent = detail.standardPrompt || "No standard prompt configured.";
+  elements.providerPresetVersion.textContent = `${detail.version} · ${detail.versionId}`;
+  elements.providerPresetModels.textContent = detail.candidateModelIds.length ? detail.candidateModelIds.join(" → ") : "No configured model candidates";
+  elements.providerPresetPolicy.textContent = formatPresetObject(detail.providerPolicy);
+  const output = detail.limits.effectiveMaxOutputTokens ? `${number(detail.limits.effectiveMaxOutputTokens)} output tokens` : "output limit unknown";
+  elements.providerPresetLimits.textContent = `${output} · context capacity unknown until execution`;
+  elements.providerPresetParameters.textContent = formatPresetObject(detail.parameters);
+}
+
+function renderProviderOverrides() {
+  const eligible = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
+  elements.providerTextOverrides.classList.toggle("hidden", !eligible);
+  elements.providerTextOverrides.hidden = !eligible;
+  if (!eligible || !providerSelectionEditor) return;
+  const intent = activeProviderSelectionDraft().overrideIntent;
+  elements.providerTextOverrideMode.value = intent.mode;
+  elements.providerTextOverrideFields.classList.toggle("hidden", intent.mode !== "explicit");
+  elements.providerTextOverrideFields.hidden = intent.mode !== "explicit";
+  const overrides = intent.mode === "explicit" ? intent.value : intent.mode === "preserve" ? intent.value || {} : {};
+  for (const [key, id] of Object.entries(providerOverrideFields)) elements[id].value = overrides.parameters?.[key] ?? "";
+  elements.providerOverrideContextTokens.value = overrides.conservativeContextWindowTokens ?? "";
+}
+
+function renderProviderSelectionEditor() {
+  if (!providerSelectionEditor || !elements.providerSelectionModel) return;
+  const eligible = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter";
+  const illustration = elements.providerRole.value === "image";
+  const presetMode = eligible && providerSelectionEditor.mode === "preset";
+  elements.providerSelectionModel.checked = !presetMode;
+  elements.providerSelectionPreset.checked = presetMode;
+  elements.providerModelSelectionField.classList.toggle("hidden", illustration || presetMode);
+  elements.providerModelSelectionField.hidden = illustration || presetMode;
+  elements.providerPresetSelectionPanel.classList.toggle("hidden", !presetMode);
+  elements.providerPresetSelectionPanel.hidden = !presetMode;
+  elements.providerResponseFormatPolicyField.classList.toggle("hidden", illustration || presetMode);
+  elements.providerResponseFormatPolicyField.hidden = illustration || presetMode;
+  elements.providerResponseFormatCapability.classList.toggle("hidden", illustration || presetMode);
+  elements.providerResponseFormatCapability.hidden = illustration || presetMode;
+  if (!presetMode) {
+    elements.providerDefaultModel.value = providerSelectionEditor.modelDraft.modelId;
+    elements.providerResponseFormatPolicy.value = providerSelectionEditor.modelDraft.responseFormatPolicy;
+    elements.providerResponseFormatPolicyNote.textContent = providerSelectionEditor.modelDraft.responseFormatPolicy === "required"
+      ? "Required is the default for new Model work and blocks before dispatch when exact current schema evidence is unavailable."
+      : `${providerSelectionEditor.modelDraft.responseFormatPolicy === "legacy" ? "Legacy JSON" : "Automatic schema"} is an explicit historical compatibility override for this Model draft. New selections default to Required.`;
+  } else {
+    const draftSlug = providerSelectionEditor.presetDraft.slug;
+    const selectedExists = providerSelectionEditor.list.presets.some((preset) => preset.slug === draftSlug);
+    elements.providerPresetSelect.replaceChildren(new Option("Choose a preset", ""));
+    if (draftSlug && !selectedExists) {
+      const label = providerSelectionEditor.savedChoiceAvailability === "unavailable" ? `${draftSlug} · unavailable` : `${draftSlug} · saved selection`;
+      elements.providerPresetSelect.append(new Option(label, draftSlug));
+    }
+    for (const preset of providerSelectionEditor.list.presets) elements.providerPresetSelect.append(new Option(`${preset.name} · ${preset.status}`, preset.slug));
+    elements.providerPresetSelect.value = draftSlug;
+    elements.providerPresetSelect.disabled = providerSelectionEditor.list.busy;
+    elements.refreshProviderPresets.disabled = providerSelectionEditor.list.busy;
+    elements.loadMoreProviderPresets.classList.toggle("hidden", providerSelectionEditor.list.nextOffset === null);
+    elements.loadMoreProviderPresets.hidden = providerSelectionEditor.list.nextOffset === null;
+    elements.loadMoreProviderPresets.disabled = providerSelectionEditor.list.busy;
+    if (providerSelectionEditor.list.busy) elements.providerPresetStatus.textContent = "Loading OpenRouter presets…";
+    else if (providerSelectionEditor.list.error) elements.providerPresetStatus.textContent = `Preset discovery failed (${providerSelectionEditor.list.error}). Your selection is unchanged.`;
+    else if (providerSelectionEditor.savedChoiceAvailability === "unavailable") elements.providerPresetStatus.textContent = `Saved preset ${draftSlug} is unavailable. It remains selected until you explicitly change it.`;
+    else if (providerSelectionEditor.list.presets.length) elements.providerPresetStatus.textContent = `${providerSelectionEditor.list.presets.length} of ${providerSelectionEditor.list.totalCount} presets loaded.`;
+    else elements.providerPresetStatus.textContent = "No presets loaded. Choose Refresh to query OpenRouter.";
+  }
+  renderProviderPresetDetail();
+  renderProviderOverrides();
+}
+
+function providerPresetCandidate() {
+  const existing = editingProviderId ? providers.find((item) => item.id === editingProviderId) : null;
+  const discoverySelection = { kind: "model", modelId: providerSelectionEditor.modelDraft.modelId };
+  return {
+    name: elements.providerName.value || "Unsaved OpenRouter provider",
+    providerType: "openrouter",
+    providerRole: "text",
+    baseUrl: elements.providerBaseUrl.value,
+    defaultModel: discoverySelection.modelId,
+    textSelection: discoverySelection,
+    contextWindowTokens: Number(elements.providerContextTokens.value),
+    maxOutputTokens: Number(elements.providerOutputTokens.value),
+    temperature: Number(elements.providerTemperature.value),
+    requestTimeoutMs: Math.round(Number(elements.providerRequestTimeoutMinutes.value) * 60000),
+    ...(elements.providerApiKey.value ? { apiKey: elements.providerApiKey.value } : {}),
+    enabled: elements.providerEnabled.checked,
+    isDefault: elements.providerIsDefault.checked,
+    configuration: { ...(existing?.configuration || {}), textResponseFormatPolicy: "required", streaming: elements.providerStreaming.checked }
+  };
+}
+
+function providerPresetDiagnostic(error) {
+  if (error?.statusCode === 401 || error?.statusCode === 403) return "authentication";
+  if (error?.statusCode === 404) return "preset_missing";
+  if (String(error?.message || "").includes("unsupported")) return "preset_config_unsupported";
+  return "discovery_unavailable";
+}
+
+function useSavedProviderPresetApi() {
+  const profile = providers.find((item) => item.id === editingProviderId);
+  return Boolean(profile && !elements.providerApiKey.value && profile.baseUrl === elements.providerBaseUrl.value);
+}
+
+async function loadProviderPresets({ offset = 0, refresh = false } = {}) {
+  if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset") return;
+  const requestId = `preset-list-${++providerSelectionRequestSequence}`;
+  setProviderSelectionState({ type: "requestStarted", requestId, mode: "preset", offset });
+  try {
+    const page = useSavedProviderPresetApi()
+      ? await providerPresetsApi.listSaved(editingProviderId, { offset, limit: 25, refresh })
+      : await providerPresetsApi.listCandidate(providerPresetCandidate(), { offset, limit: 25 });
+    setProviderSelectionState({ type: "listLoaded", requestId, page });
+  } catch (error) {
+    setProviderSelectionState({ type: "requestFailed", requestId, error: providerPresetDiagnostic(error) });
+  } finally {
+    setProviderSelectionState({ type: "requestFinished", requestId });
+  }
+}
+
+async function loadProviderPresetDetail(slug) {
+  if (!providerSelectionEditor || providerSelectionEditor.mode !== "preset" || !slug) return;
+  const requestId = `preset-detail-${++providerSelectionRequestSequence}`;
+  setProviderSelectionState({ type: "detailRequestStarted", requestId, slug });
+  try {
+    const detail = useSavedProviderPresetApi()
+      ? await providerPresetsApi.detailSaved(editingProviderId, slug)
+      : await providerPresetsApi.detailCandidate(providerPresetCandidate(), slug);
+    setProviderSelectionState({ type: "detailLoaded", requestId, detail });
+  } catch (error) {
+    setProviderSelectionState({ type: "detailFailed", requestId, error: providerPresetDiagnostic(error) });
+  } finally {
+    setProviderSelectionState({ type: "detailRequestFinished", requestId });
+  }
+}
+
+function currentProviderExplicitOverrides() {
+  const parameters = {};
+  for (const [key, id] of Object.entries(providerOverrideFields)) {
+    const raw = elements[id].value;
+    if (raw !== "") parameters[key] = Number(raw);
+  }
+  const overrides = {};
+  if (Object.keys(parameters).length) overrides.parameters = parameters;
+  if (elements.providerOverrideContextTokens.value !== "") overrides.conservativeContextWindowTokens = Number(elements.providerOverrideContextTokens.value);
+  return overrides;
+}
+
+function updateProviderOverrideIntent() {
+  if (!providerSelectionEditor) return;
+  const mode = elements.providerTextOverrideMode.value;
+  const intent = mode === "inherit" ? { mode: "inherit" } : mode === "explicit" ? { mode: "explicit", value: currentProviderExplicitOverrides() } : { mode: "preserve", ...(activeProviderSelectionDraft().overrideIntent.value ? { value: activeProviderSelectionDraft().overrideIntent.value } : {}) };
+  setProviderSelectionState({ type: providerSelectionEditor.mode === "model" ? "modelOverrideIntentChanged" : "presetOverrideIntentChanged", intent });
+}
+
 function resetProviderForm() {
   clearResponseFormatCapability();
   editingProviderId = "";
@@ -4168,7 +4440,7 @@ function resetProviderForm() {
   elements.providerContextTokens.value = "32768";
   elements.providerOutputTokens.value = "4096";
   elements.providerTemperature.value = "0.8";
-  elements.providerResponseFormatPolicy.value = "legacy";
+  elements.providerResponseFormatPolicy.value = "required";
   elements.providerRequestTimeoutMinutes.value = "5";
   applySogniConfiguration(SOGNI_DEFAULT_CONFIGURATION);
   elements.providerAdvancedSettings.open = false;
@@ -4183,6 +4455,7 @@ function resetProviderForm() {
   elements.providerContextTokens.readOnly = false;
   elements.providerContextSource.textContent = "Editable until model discovery supplies a context length.";
   elements.providerContextSource.className = "field-note";
+  initializeProviderSelectionEditor();
   syncProviderRoleSettings();
 }
 
@@ -4202,7 +4475,7 @@ function storedProfileMatchesResponseFormatIdentity() {
     && profile.baseUrl === elements.providerBaseUrl.value
     && (profile.defaultModel || "") === elements.providerDefaultModel.value
     && Boolean(profile.configuration?.streaming || profile.configuration?.streamingSupport) === elements.providerStreaming.checked
-    && (profile.configuration?.textResponseFormatPolicy || "legacy") === elements.providerResponseFormatPolicy.value;
+    && (profile.configuration?.textResponseFormatPolicy || "required") === elements.providerResponseFormatPolicy.value;
 }
 
 function responseFormatCapabilityIdentity() {
@@ -4290,6 +4563,7 @@ function syncProviderRoleSettings(options = {}) {
   elements.providerSogniWebpFormat.hidden = !sogniSdk;
   elements.providerSogniWebpFormat.disabled = !sogniSdk;
   if (sogniRest && elements.providerSogniOutputFormat.value === "webp") elements.providerSogniOutputFormat.value = "png";
+  syncProviderSelectionSupport();
 }
 
 function isIllustrationProviderForm() {
@@ -4330,8 +4604,16 @@ function applySogniConfiguration(configuration = {}, providerType = elements.pro
 
 function providerConfigurationFromForm(existingConfig = {}) {
   const configuration = { ...existingConfig, streaming: elements.providerStreaming.checked };
+  if (nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor) {
+    const patch = serializeSelectionEditorPatch(providerSelectionEditor);
+    configuration.textResponseFormatPolicy = patch.configuration.textResponseFormatPolicy;
+    if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
+      configuration.textExecutionOverrides = patch.configuration.textExecutionOverrides;
+    }
+    return configuration;
+  }
   const hasExplicitResponseFormatPolicy = Object.prototype.hasOwnProperty.call(existingConfig, "textResponseFormatPolicy");
-  if (elements.providerRole.value === "text" && (elements.providerResponseFormatPolicy.value !== "legacy" || hasExplicitResponseFormatPolicy)) {
+  if (elements.providerRole.value === "text" && (elements.providerResponseFormatPolicy.value !== "required" || hasExplicitResponseFormatPolicy)) {
     configuration.textResponseFormatPolicy = elements.providerResponseFormatPolicy.value;
   } else {
     delete configuration.textResponseFormatPolicy;
@@ -4386,7 +4668,7 @@ function beginProviderEdit(provider) {
   elements.providerContextTokens.value = String(provider.contextWindowTokens);
   elements.providerOutputTokens.value = String(provider.maxOutputTokens);
   elements.providerTemperature.value = String(provider.temperature);
-  elements.providerResponseFormatPolicy.value = provider.configuration?.textResponseFormatPolicy || "legacy";
+  elements.providerResponseFormatPolicy.value = provider.configuration?.textResponseFormatPolicy || "required";
   elements.providerRequestTimeoutMinutes.value = String(Number(provider.requestTimeoutMs || 300000) / 60000);
   applySogniConfiguration(provider.configuration, provider.providerType);
   elements.providerStreaming.checked = Boolean(provider.configuration?.streaming || provider.configuration?.streamingSupport);
@@ -4399,11 +4681,15 @@ function beginProviderEdit(provider) {
   discoveredProfileModels = [];
   responseFormatCapabilityProfile = provider.responseFormatCapability || null;
   elements.providerModelPickerList.replaceChildren();
+  initializeProviderSelectionEditor(provider);
   elements.providerName.focus();
   openManagedModal(elements.providerDialog);
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
   syncProviderRoleSettings();
   renderResponseFormatCapability(responseFormatCapabilityProfile);
+  if (providerSelectionEditor.mode === "preset") {
+    void loadProviderPresets().then(() => loadProviderPresetDetail(providerSelectionEditor?.presetDraft.slug));
+  }
 }
 
 async function loadProviders(preselectId = "") {
@@ -4438,6 +4724,9 @@ async function saveProvider(event) {
   providerMessage("Saving provider profile…");
   try {
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
+    const nativeSelection = nativeTextExecutionPlansSupported && elements.providerRole.value === "text" && elements.providerType.value === "openrouter" && providerSelectionEditor
+      ? serializeSelectionEditorPatch(providerSelectionEditor)
+      : null;
     const provider = await api(editingProviderId ? `/api/v1/providers/${editingProviderId}` : "/api/v1/providers", {
       method: editingProviderId ? "PATCH" : "POST",
       body: JSON.stringify({
@@ -4446,7 +4735,8 @@ async function saveProvider(event) {
         baseUrl: elements.providerBaseUrl.value,
         apiKey: elements.providerApiKey.value || undefined,
         isDefault: elements.providerIsDefault.checked,
-        defaultModel: elements.providerDefaultModel.value,
+        defaultModel: nativeSelection?.defaultModel ?? elements.providerDefaultModel.value,
+        ...(nativeSelection ? { textSelection: nativeSelection.textSelection } : {}),
         ...(!isIllustrationProviderForm() ? {
           contextWindowTokens: elements.providerContextTokens.value,
           maxOutputTokens: elements.providerOutputTokens.value,
@@ -4573,6 +4863,12 @@ function chooseProviderModel(value) {
     return;
   }
   elements.providerDefaultModel.value = value;
+  if (providerSelectionEditor && providerSelectionEditor.mode === "model") {
+    const policy = value === providerSelectionEditor.modelDraft.modelId
+      ? providerSelectionEditor.modelDraft.responseFormatPolicy
+      : "required";
+    setProviderSelectionState({ type: "modelDraftChanged", modelId: value, responseFormatPolicy: policy });
+  }
   clearResponseFormatCapability();
   if (discoveredProfileModelsIdentity === responseFormatCapabilityIdentity() && storedProfileMatchesResponseFormatIdentity()) renderResponseFormatCapability(discoveredProfileModels.find((item) => profileModelValue(item) === value || item.id === value)?.responseFormatCapability);
   applyProfileModelContext();
@@ -4880,6 +5176,56 @@ elements.providerRole.addEventListener("change", () => {
 for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming, elements.providerResponseFormatPolicy]) {
   control.addEventListener("input", clearResponseFormatCapability);
   control.addEventListener("change", clearResponseFormatCapability);
+}
+for (const control of [elements.providerBaseUrl, elements.providerApiKey, elements.providerStreaming]) {
+  control.addEventListener("change", () => {
+    providerSelectionCredentialRevision += 1;
+    if (providerSelectionEditor) setProviderSelectionState({ type: "authorityChanged", ...providerSelectionAuthority(providers.find((item) => item.id === editingProviderId) || null) });
+  });
+}
+elements.providerResponseFormatPolicy.addEventListener("change", () => {
+  if (providerSelectionEditor?.mode === "model") {
+    setProviderSelectionState({ type: "modelDraftChanged", modelId: elements.providerDefaultModel.value.trim(), responseFormatPolicy: elements.providerResponseFormatPolicy.value });
+  }
+});
+elements.providerSelectionModel.addEventListener("change", () => {
+  if (!elements.providerSelectionModel.checked || !providerSelectionEditor) return;
+  setProviderSelectionState({ type: "modeChanged", mode: "model" });
+  if (providerSelectionEditor.savedSelection.kind !== "model") {
+    setProviderSelectionState({ type: "modelDraftChanged", modelId: providerSelectionEditor.modelDraft.modelId, responseFormatPolicy: "required" });
+  }
+  clearResponseFormatCapability();
+  renderResponseFormatCapability(responseFormatCapabilityProfile);
+});
+elements.providerSelectionPreset.addEventListener("change", () => {
+  if (!elements.providerSelectionPreset.checked || !providerSelectionEditor) return;
+  setProviderSelectionState({ type: "modeChanged", mode: "preset" });
+  const selectedSlug = providerSelectionEditor.presetDraft.slug;
+  if (!providerSelectionEditor.list.presets.length) {
+    void loadProviderPresets().then(() => {
+      if (selectedSlug && providerSelectionEditor?.mode === "preset" && providerSelectionEditor.presetDraft.slug === selectedSlug) {
+        void loadProviderPresetDetail(selectedSlug);
+      }
+    });
+  } else if (selectedSlug) {
+    void loadProviderPresetDetail(selectedSlug);
+  }
+});
+elements.refreshProviderPresets.addEventListener("click", () => { void loadProviderPresets({ refresh: true }); });
+elements.loadMoreProviderPresets.addEventListener("click", () => {
+  if (providerSelectionEditor?.list.nextOffset !== null) void loadProviderPresets({ offset: providerSelectionEditor.list.nextOffset });
+});
+elements.providerPresetSelect.addEventListener("change", () => {
+  if (!providerSelectionEditor) return;
+  const slug = elements.providerPresetSelect.value;
+  setProviderSelectionState({ type: "presetDraftChanged", slug });
+  if (slug) void loadProviderPresetDetail(slug);
+});
+elements.providerTextOverrideMode.addEventListener("change", updateProviderOverrideIntent);
+for (const id of [...Object.values(providerOverrideFields), "providerOverrideContextTokens"]) {
+  elements[id].addEventListener("input", () => {
+    if (elements.providerTextOverrideMode.value === "explicit") updateProviderOverrideIntent();
+  });
 }
 
 elements.embeddingProvider.addEventListener("change", () => {

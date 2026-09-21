@@ -857,17 +857,29 @@
       <fieldset>
         <legend>Model Configuration</legend>
         <div class="fieldset-content provider-model-settings">
-          <label class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override. Refresh to load the endpoint inventory.">
+          <fieldset id="providerTextSelectionMode" class="text-model-setting provider-selection-mode hidden" aria-describedby="providerTextSelectionSupport">
+            <legend>Selection type</legend>
+            <label><input id="providerSelectionModel" type="radio" name="providerSelectionMode" value="model" checked> Model</label>
+            <label><input id="providerSelectionPreset" type="radio" name="providerSelectionMode" value="preset"> Preset</label>
+          </fieldset>
+          <p id="providerTextSelectionSupport" class="text-model-setting provider-selection-support field-note hidden" aria-live="polite">This server does not advertise native text execution plans. Model/Preset selection is unavailable until the server is upgraded.</p>
+          <label id="providerModelSelectionField" class="model-discovery-field" title="The model Nexus uses when a campaign does not request a model override.">
             <span class="field-label-row"><span>Default model</span><button id="refreshProviderModels" class="mini-icon-button" type="button" aria-label="Refresh models from endpoint" title="Refresh active and inactive models from this endpoint">↻</button></span>
             <input id="providerDefaultModel" readonly role="button" aria-haspopup="dialog" aria-controls="providerModelDialog" placeholder="Click to choose a model">
           </label>
+          <section id="providerPresetSelectionPanel" class="provider-preset-selection text-model-setting hidden" aria-labelledby="providerPresetSelectionTitle">
+            <div class="field-label-row"><strong id="providerPresetSelectionTitle">Preset</strong><button id="refreshProviderPresets" class="mini-icon-button" type="button" aria-label="Refresh presets from OpenRouter" title="Refresh the OpenRouter preset inventory">↻</button></div>
+            <label><span class="sr-only">Preset</span><select id="providerPresetSelect" aria-label="Preset"><option value="">Choose a preset</option></select></label>
+            <div class="button-row"><button id="loadMoreProviderPresets" class="button secondary compact-button hidden" type="button">Load more</button></div>
+            <p id="providerPresetStatus" class="field-note" role="status" aria-live="polite">Choose Refresh to load presets.</p>
+          </section>
           <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
             <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
             <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
           </label>
           <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
           <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
-          <label class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
+          <label id="providerResponseFormatPolicyField" class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
             <select id="providerResponseFormatPolicy" aria-describedby="providerResponseFormatPolicyNote">
               <option value="legacy">Legacy JSON</option>
               <option value="auto">Use schema when verified</option>
@@ -876,6 +888,37 @@
             <span id="providerResponseFormatPolicyNote" class="field-note">Required blocks a new job before dispatch when server verification is unavailable. Changes apply to future jobs; pending jobs retain their frozen configuration and may require a compatible profile to resume.</span>
           </label>
           <div id="providerResponseFormatCapability" class="text-model-setting field-note" aria-live="polite">Schema compatibility is unknown until the server returns a capability summary.</div>
+          <section id="providerPresetDetail" class="provider-preset-detail text-model-setting hidden" aria-live="polite">
+            <h3>Structured Outputs · Trusted preset</h3>
+            <p>Nexus requests the complete operation schema without a local model capability gate. A provider schema rejection is surfaced without a standard-JSON retry.</p>
+            <dl>
+              <div><dt>Standard prompt</dt><dd id="providerPresetPrompt">Choose a preset to inspect its standard prompt.</dd></div>
+              <div><dt>Version</dt><dd id="providerPresetVersion">Unknown</dd></div>
+              <div><dt>Ordered models</dt><dd id="providerPresetModels">Unknown</dd></div>
+              <div><dt>Provider policy</dt><dd id="providerPresetPolicy">Unknown</dd></div>
+              <div><dt>Effective limits</dt><dd id="providerPresetLimits">Unknown</dd></div>
+              <div><dt>Preset parameters</dt><dd id="providerPresetParameters">Inherited</dd></div>
+            </dl>
+          </section>
+          <section id="providerTextOverrides" class="provider-text-overrides text-model-setting hidden" aria-labelledby="providerTextOverridesTitle">
+            <div class="field-label-row"><strong id="providerTextOverridesTitle">Request overrides</strong></div>
+            <label>Override behavior<select id="providerTextOverrideMode"><option value="preserve">Keep saved setting</option><option value="inherit">Inherit selected preset/model</option><option value="explicit">Use explicit overrides</option></select></label>
+            <div id="providerTextOverrideFields" class="provider-text-override-fields hidden">
+              <label>Temperature<input id="providerOverrideTemperature" type="number" min="0" max="2" step="0.01" placeholder="Inherit"></label>
+              <label>Top P<input id="providerOverrideTopP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+              <label>Top K<input id="providerOverrideTopK" type="number" min="0" step="1" placeholder="Inherit"></label>
+              <label>Frequency penalty<input id="providerOverrideFrequencyPenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+              <label>Presence penalty<input id="providerOverridePresencePenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+              <label>Repetition penalty<input id="providerOverrideRepetitionPenalty" type="number" min="0.01" step="0.01" placeholder="Inherit"></label>
+              <label>Min P<input id="providerOverrideMinP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+              <label>Top A<input id="providerOverrideTopA" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+              <label>Seed<input id="providerOverrideSeed" type="number" min="0" step="1" placeholder="Inherit"></label>
+              <label>Max tokens<input id="providerOverrideMaxTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+              <label>Max completion tokens<input id="providerOverrideMaxCompletionTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+              <label>Conservative context window<input id="providerOverrideContextTokens" type="number" min="1" max="4000000" step="1" placeholder="Inherit"></label>
+            </div>
+            <p class="field-note">Inheritance uses the selected preset or model profile. Clear restores inheritance; normal profile defaults are kept separate.</p>
+          </section>
         </div>
       </fieldset>
       <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">

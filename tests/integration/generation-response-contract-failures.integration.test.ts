@@ -645,6 +645,9 @@ integration("response-contract provider failures", () => {
       return Array.isArray(input.fictional_event_instructions);
     });
     expect(extensionBody).toBeDefined();
+    expect(JSON.parse(extensionBody!).response_format).toEqual({ type: "json_schema", json_schema: {
+      name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
+    } });
     expect(row.rows[0]!.orchestrationPrivate.preparedResponseFailures).toEqual(expect.arrayContaining([
       expect.objectContaining({ version: 2, diagnosticCode: "provider_schema_invalid", requestBody: extensionBody })
     ]));
@@ -835,6 +838,9 @@ integration("response-contract provider failures", () => {
     expect(requestBodies).toHaveLength(1);
     const body = JSON.parse(requestBodies[0]!);
     expect(body).toMatchObject({ model, temperature: 0.25, provider: { only: ["preset-route"], require_parameters: true } });
+    expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
+      name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
+    } });
     expect(body.messages[0].content).toContain("Native preset success instruction.");
     expect(privateState.primaryReservation.requestBody).toBe(requestBodies[0]);
     expect(privateState.responseContractInvocations[0].requestPayloadHash).toBe(createHash("sha256").update(requestBodies[0]!).digest("hex"));
