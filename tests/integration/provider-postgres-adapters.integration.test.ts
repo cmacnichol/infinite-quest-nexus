@@ -1097,4 +1097,49 @@ integration("provider PostgreSQL adapters", () => {
     );
     expect(activeClaim.rows).toEqual([{ status: "generating", lease_owner: workerId }]);
   });
+
+  it("completes a charged Story attempt while retaining an oversized provider cost only in physical evidence", async () => {
+    const scoped = await fixture("oversized-physical-cost");
+    const profile = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile(profileCommand(scoped.ownerUserId, `Oversized cost ${crypto.randomUUID()}`))
+    );
+    const workerId = `oversized-cost-worker-${crypto.randomUUID()}`;
+    const invocationId = crypto.randomUUID();
+    const job = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,
+         lease_owner,lease_expires_at,orchestration_private
+       ) VALUES ($1,$2,$3,$4,2,'Record oversized provider cost','generating',$5,now()+interval '5 minutes',
+                 jsonb_build_object('responseContractInvocations',jsonb_build_array(jsonb_build_object('id',$6::text,'operation','story_generation','status','dispatched'))))
+       RETURNING id`,
+      [scoped.ownerUserId, scoped.campaignId, profile.id, crypto.randomUUID(), workerId, invocationId]
+    );
+    const reservation = {
+      kind: "story" as const,
+      ownerUserId: scoped.ownerUserId,
+      generationJobId: job.rows[0]!.id,
+      invocationId,
+      workerId
+    };
+    const attempt = await pool.query<{ id: string }>(
+      `INSERT INTO prepared_text_physical_attempts (
+         owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,candidate_ordinal,
+         requested_model,provider_policy,request_payload_hash,request_body,status,dispatched_at
+       ) VALUES ($1,'story',$2,$3::jsonb,$4,0,'oversized-cost-model','{}'::jsonb,$5,'{}','dispatched',now()) RETURNING id`,
+      [scoped.ownerUserId, `${job.rows[0]!.id}:${invocationId}`, JSON.stringify(reservation), "a".repeat(64), "b".repeat(64)]
+    );
+    const oversizedAmount = `0.${"0".repeat(16_384)}1`;
+
+    await expect(createPostgresPreparedTextAttemptRepository(pool).complete(reservation, attempt.rows[0]!.id, {
+      outcome: "failed", failureReason: "unknown", providerResponseId: "oversized-cost-response",
+      returnedModel: "oversized-cost-model", returnedProviderRoute: null, usage: { inputTokens: 3 },
+      reportedCost: { amount: oversizedAmount, currency: "USD" }, emittedOutput: false
+    })).resolves.toMatchObject({ id: attempt.rows[0]!.id, status: "completed" });
+    await expect(pool.query(
+      "SELECT status,reported_cost->>'amount' AS amount FROM prepared_text_physical_attempts WHERE id=$1", [attempt.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ status: "completed", amount: oversizedAmount }] });
+    await expect(pool.query(
+      "SELECT count(*)::int AS count FROM provider_cost_events WHERE local_call_id=$1", [attempt.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
 });

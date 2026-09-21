@@ -121,6 +121,10 @@ integration("standard database migration runner", () => {
                    'completed','succeeded','{"inputTokens":2}'::jsonb,'{"amount":"0.400000000000000001","currency":"USD"}'::jsonb,now(),now()) RETURNING id`,
         [ownerUserId, JSON.stringify({ promptJobId: promptJob.id, claimAttempt: "1" }), hashes[0], hashes[1]]
       )).rows[0]!;
+      const oversizedStoryAmount = `0.${"0".repeat(16_384)}1`;
+      const oversizedStoryAttempt = await insertAttempt(
+        "story", { generationJobId: storyJob.id, invocationId: "oversized-cost" }, "oversized-story-cost", oversizedStoryAmount
+      );
       await insertAttempt("story", { generationJobId: crypto.randomUUID() }, "orphan-story", "0.7");
       await insertAttempt("illustration", { promptJobId: crypto.randomUUID() }, "orphan-illustration", "0.8");
       await isolatedPool.query(
@@ -144,6 +148,12 @@ integration("standard database migration runner", () => {
         { local_call_id: storyAttempt, amount: "0.123456789012345678", category: "story" }
       ]);
       expect(illustrationAttempt).not.toBe(promptJob.id);
+      await expect(isolatedPool.query(
+        "SELECT reported_cost->>'amount' AS amount FROM prepared_text_physical_attempts WHERE id=$1", [oversizedStoryAttempt]
+      )).resolves.toMatchObject({ rows: [{ amount: oversizedStoryAmount }] });
+      await expect(isolatedPool.query(
+        "SELECT count(*)::int AS count FROM provider_cost_events WHERE local_call_id=$1", [oversizedStoryAttempt]
+      )).resolves.toMatchObject({ rows: [{ count: 0 }] });
       await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([]);
     } finally {
       if (isolatedPool) await isolatedPool.end();

@@ -228,6 +228,7 @@ async function lockCampaignCostAttribution(
 function hasRecordableCost(value: unknown): value is Readonly<{ amount: string; currency: string }> {
   return Boolean(value) && typeof value === "object"
     && typeof (value as { amount?: unknown }).amount === "string"
+    && (value as { amount: string }).amount.length <= 64
     && /^\d+(?:\.\d+)?$/u.test((value as { amount: string }).amount)
     && typeof (value as { currency?: unknown }).currency === "string"
     && /^[A-Z]{3}$/u.test((value as { currency: string }).currency);

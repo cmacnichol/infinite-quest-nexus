@@ -158,6 +158,7 @@ integration("independent illustration pipeline", () => {
   const storyRequests: Array<Record<string, unknown>> = [];
   const nativeRefinementRequestBodies: string[] = [];
   let nativeRefinementReportedCost: number | null = null;
+  let nativeRefinementReturnedModel: string | null = null;
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
@@ -249,7 +250,7 @@ integration("independent illustration pipeline", () => {
           nativeRefinementRequestBodies.push(body);
           response.writeHead(200, { "content-type": "application/json" });
           response.end(JSON.stringify({
-            id: crypto.randomUUID(), model: "synthetic-text-model",
+            id: crypto.randomUUID(), model: nativeRefinementReturnedModel ?? "synthetic-text-model",
             choices: [{ message: { content: JSON.stringify({ image_prompt: "Mira raises a lantern on a fogbound road, cinematic fantasy illustration" }) }, finish_reason: "stop" }],
             usage: {
               prompt_tokens: 301, completion_tokens: 41, total_tokens: 342,
@@ -2600,6 +2601,7 @@ integration("independent illustration pipeline", () => {
       [rebuilt.setId, rebuiltTarget.id]
     );
     await makeOnlyPromptClaimable(pool, rebuiltTarget.id);
+    nativeRefinementReturnedModel = "unexpected-refinement-model";
     await expect(runNativeIllustrationPromptJob(
       pool, "task-5c-composed-regenerated", 30, ports.promptRefinement, ports.costs, graph.illustration
     )).resolves.toBe(true);
@@ -2616,7 +2618,7 @@ integration("independent illustration pipeline", () => {
       "SELECT status,error_code FROM illustration_prompt_jobs WHERE id=$1", [rebuiltTarget.id]
     );
     expect(rebuiltAttempts.rows, JSON.stringify(rebuiltOutcome.rows)).toEqual([expect.objectContaining({
-      outcome: "succeeded",
+      outcome: "failed",
       logical_reservation: {
         kind: "illustration", ownerUserId, promptJobId: rebuiltTarget.id, claimAttempt: 1,
         leaseOwner: "task-5c-composed-regenerated", operation: "initial"
@@ -2629,13 +2631,14 @@ integration("independent illustration pipeline", () => {
     expect(rebuildWireBodies[0]!.match(/PRIVATE_COMPOSED_ILLUSTRATION_PROMPT/g)).toHaveLength(1);
     await expect(pool.query<{ status: string }>(
       "SELECT status FROM illustration_prompt_jobs WHERE id=$1", [rebuiltTarget.id]
-    )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
-    await expect(pool.query<{ count: number }>(
-      `SELECT count(*)::int AS count FROM provider_cost_events
-        WHERE campaign_id=$1 AND local_call_id IN ($2,$3)`,
+    )).resolves.toMatchObject({ rows: [{ status: "recoverable" }] });
+    await expect(pool.query<{ count: number; amount: string }>(
+      `SELECT count(*)::int AS count,coalesce(sum(amount),0)::text AS amount FROM provider_cost_events
+        WHERE campaign_id=$1 AND local_call_id IN ($2,$3)
+        GROUP BY campaign_id`,
       [imported.campaignId, attempts.rows[0]!.id, rebuiltAttempts.rows[0]!.id]
-    )).resolves.toMatchObject({ rows: [{ count: 2 }] });
-    await pool.query("DELETE FROM illustration_prompt_jobs WHERE id=$1", [target.id]);
+    )).resolves.toMatchObject({ rows: [{ count: 2, amount: "0.0128" }] });
+    await pool.query("DELETE FROM illustration_prompt_jobs WHERE id IN ($1,$2)", [target.id, rebuiltTarget.id]);
     await pool.query("UPDATE campaigns SET text_provider_profile_id=NULL WHERE id=$1", [imported.campaignId]);
     await pool.query("DELETE FROM provider_profiles WHERE id=$1", [nativeTextProviderId]);
     await expect(pool.query<{ count: number; detached: number }>(
@@ -2644,6 +2647,7 @@ integration("independent illustration pipeline", () => {
     )).resolves.toMatchObject({ rows: [{ count: 2, detached: 2 }] });
     } finally {
       nativeRefinementReportedCost = null;
+      nativeRefinementReturnedModel = null;
     }
   });
 
