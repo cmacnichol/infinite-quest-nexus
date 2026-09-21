@@ -101,6 +101,16 @@ integration("response-contract provider failures", () => {
         } }));
         return;
       }
+      if (request.url === "/presets/native-mutable" || request.url === "/v1/presets/native-mutable") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "native-mutable", name: "Native mutable", status: "active",
+          designated_version: { id: "native-mutable-v1", version: 1,
+            system_prompt: "Native mutable preset instruction.",
+            config: { model: "openrouter/free" } }
+        } }));
+        return;
+      }
       let body = "";
       request.setEncoding("utf8");
       request.on("data", (chunk) => { body += chunk; });
@@ -313,7 +323,7 @@ integration("response-contract provider failures", () => {
     policy: "legacy" | "auto" | "required",
     streaming = false,
     native = false,
-    selection: "model" | "preset" | "fallback" = "model",
+    selection: "model" | "preset" | "fallback" | "mutable" = "model",
     options: Readonly<{ storyOnly?: boolean; scene?: boolean; rpg?: boolean; triggers?: boolean; eventExtension?: boolean; continuity?: "enforce"; contextWindowTokens?: number; providerType?: "openrouter" | "openai_compatible"; verificationProviderType?: "openrouter" | "openai_compatible" }> = {}
   ) {
     const address = server.address(); if (!address || typeof address === "string") throw new Error("failure provider did not bind");
@@ -361,7 +371,7 @@ integration("response-contract provider failures", () => {
     const verification = native ? await fileLoadedV2Verification(streaming, options.verificationProviderType ?? options.providerType) : { records: policy === "required" ? records(streaming) : [], digest };
     const apiGraph = createApiProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: verification.records, schemaVerificationDigest: verification.digest, clock: () => verificationNow });
     const application = createApiGenerationApplication(pool, apiGraph.generation, undefined, { installedCapability: "r3", enforceEnabled: true }, native);
-    const request = generationRequestSchema.parse({ action: "Open the observatory archive.", providerProfileId: provider.id, ...(options.storyOnly || options.scene ? { requestedInputMode: "scene" as const, resolvedInputMode: "scene" as const, inputModeSource: "explicit" as const } : {}), ...(selection === "preset" || selection === "fallback" ? { textSelection: { kind: "openrouter_preset", slug: selection === "fallback" ? "native-fallback" : "native-success" } } : {}), idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } });
+    const request = generationRequestSchema.parse({ action: "Open the observatory archive.", providerProfileId: provider.id, ...(options.storyOnly || options.scene ? { requestedInputMode: "scene" as const, resolvedInputMode: "scene" as const, inputModeSource: "explicit" as const } : {}), ...(selection === "preset" || selection === "fallback" || selection === "mutable" ? { textSelection: { kind: "openrouter_preset", slug: selection === "fallback" ? "native-fallback" : selection === "mutable" ? "native-mutable" : "native-success" } } : {}), ...(options.contextWindowTokens === undefined ? {} : { textExecutionOverrides: { conservativeContextWindowTokens: options.contextWindowTokens } }), idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
     ownedJobIds.push(job.id);
     const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: verification.records, schemaVerificationDigest: verification.digest, clock: () => verificationNow });
@@ -411,6 +421,19 @@ integration("response-contract provider failures", () => {
     expect(duplicate.id).toBe(value.job.id);
     await expect(pool.query<{ count: number }>("SELECT count(*)::int AS count FROM generation_jobs WHERE campaign_id=$1", [value.campaignId]))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
+    expect(requestBodies).toHaveLength(0);
+  }, 60_000);
+
+  it("rejects a mutable native preset before generation job persistence or provider dispatch", async () => {
+    scenario = "success";
+    const jobsBefore = (await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs")).rows[0]!.count;
+
+    await expect(fixture("required", false, true, "mutable", { contextWindowTokens: 8_000 })).rejects.toMatchObject({
+      diagnosticCode: "preset_config_unsupported", field: "model"
+    });
+
+    await expect(pool.query<{ count: string }>("SELECT count(*)::text AS count FROM generation_jobs"))
+      .resolves.toMatchObject({ rows: [{ count: jobsBefore }] });
     expect(requestBodies).toHaveLength(0);
   }, 60_000);
 

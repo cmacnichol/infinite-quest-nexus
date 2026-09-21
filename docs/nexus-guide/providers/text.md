@@ -12,6 +12,12 @@
 
 The advertised loaded-model context length is used when available. A provider profile is user-owned and its key is encrypted before database persistence. The API never returns the stored key.
 
+## OpenRouter saved presets
+
+Saved OpenRouter preset routes must use concrete model IDs that can be frozen with a queued generation. Nexus rejects OpenRouter's `~` family aliases, `openrouter/auto`, and `openrouter/free`, including surrounding whitespace. It does not reject another concrete ID merely because it contains `latest` or begins with `openrouter/`.
+
+When an OpenRouter preset includes one of the deliberately unsupported public configuration fields `tools`, `stop`, or `transforms`, the provider response identifies that field by name. Other unknown or private configuration names remain the generic `config` diagnostic, and Nexus does not expose remote configuration values or messages.
+
 Changing a campaign's text profile affects its next request, which still bootstraps from authoritative campaign state.
 
 The campaign's effective Story text profile generates Action and Story Direction

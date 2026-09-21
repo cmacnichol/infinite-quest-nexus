@@ -177,6 +177,23 @@ integration("provider route configuration redaction", () => {
     }
   });
 
+  it("projects stop as an exact safe remote preset field without exposing remote text", async () => {
+    const originalFetch = transport.fetch;
+    transport.fetch = async () => new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "version-2", version: 2, system_prompt: "PRIVATE_REMOTE_CANARY", config: { stop: ["PRIVATE_STOP_CANARY"] } } } }), { status: 200 });
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/v1/providers/resolve-preset?slug=night-shift", payload: {
+        ...baseProviderInput, name: `${baseProviderInput.name} STOP ${crypto.randomUUID()}`,
+        providerType: "openrouter", providerRole: "text", defaultModel: "@preset/night-shift", configuration: {}
+      } });
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toEqual(expect.objectContaining({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "stop" } }));
+      expect(response.body).not.toContain("PRIVATE_REMOTE_CANARY");
+      expect(response.body).not.toContain("PRIVATE_STOP_CANARY");
+    } finally {
+      transport.fetch = originalFetch;
+    }
+  });
+
   it("keeps generic text generation operationless with native admission off and on", async () => {
     const preset = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
       ...baseProviderInput, name: `${baseProviderInput.name} GENERIC PRESET ${crypto.randomUUID()}`,

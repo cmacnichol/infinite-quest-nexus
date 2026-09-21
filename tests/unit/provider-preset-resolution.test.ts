@@ -131,8 +131,64 @@ describe("preset execution-plan resolution", () => {
   });
 
   it("rejects unsupported config and conflicting provider sort/order without silent drops", async () => {
-    await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "config" });
+    const unsupportedPorts = { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) };
+    await expect(resolveTextExecutionPlan(input({ ports: unsupportedPorts }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "stop" });
+    expect(unsupportedPorts.discoverModels).not.toHaveBeenCalled();
     await expect(resolveTextExecutionPlan(input({ ports: { resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], provider: { order: ["openai"], sort: "price" } } })), discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }]) } }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "provider.sort" });
+  });
+
+  it.each([
+    "~anthropic/claude-sonnet-latest", "openrouter/auto", "openrouter/free",
+    " ~anthropic/claude-sonnet-latest ", " openrouter/auto ", " openrouter/free "
+  ])("rejects the mutable OpenRouter candidate %s before discovery or route freezing", async (modelId) => {
+    const ports = {
+      resolvePreset: vi.fn(async () => ({ ...preset, config: { model: modelId } })),
+      discoverModels: vi.fn(async () => [{ id: modelId, contextWindowTokens: 32_000, maxOutputTokens: 1_000 }])
+    };
+
+    await expect(resolveTextExecutionPlan(input({
+      profile: { ...profile, contextWindowTokens: undefined },
+      overrides: { conservativeContextWindowTokens: 8_000 },
+      ports
+    }))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "model" });
+
+    expect(ports.discoverModels).not.toHaveBeenCalled();
+  });
+
+  it("retains concrete model IDs containing latest text and their configured fallback order", async () => {
+    const ports = {
+      resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["vendor/latest-stable", "openrouter/concrete-model"] } })),
+      discoverModels: vi.fn(async () => [
+        { id: "vendor/latest-stable", contextWindowTokens: 32_000, maxOutputTokens: 1_000 },
+        { id: "openrouter/concrete-model", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }
+      ])
+    };
+
+    await expect(resolveTextExecutionPlan(input({
+      profile: { ...profile, contextWindowTokens: undefined },
+      overrides: { conservativeContextWindowTokens: 8_000 },
+      ports
+    }))).resolves.toMatchObject({ candidates: [
+      expect.objectContaining({ modelId: "vendor/latest-stable" }),
+      expect.objectContaining({ modelId: "openrouter/concrete-model" })
+    ] });
+
+    expect(ports.discoverModels).toHaveBeenCalledWith(expect.objectContaining({ modelIds: ["vendor/latest-stable", "openrouter/concrete-model"] }));
+  });
+
+  it("does not apply the OpenRouter mutable-ID boundary to a non-OpenRouter direct model", async () => {
+    const ports = {
+      resolvePreset: vi.fn(async () => preset),
+      discoverModels: vi.fn(async () => [{ id: "openrouter/free", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }])
+    };
+
+    await expect(resolveTextExecutionPlan(input({
+      profile: { ...profile, providerType: "openai_compatible", selection: { kind: "model", modelId: "openrouter/free" } },
+      ports
+    }))).resolves.toMatchObject({ candidates: [expect.objectContaining({ modelId: "openrouter/free" })] });
+
+    expect(ports.resolvePreset).not.toHaveBeenCalled();
+    expect(ports.discoverModels).toHaveBeenCalledOnce();
   });
 
   it("requires an explicit conservative cap if discovered context capacity is unknown", async () => {
@@ -288,6 +344,6 @@ describe("preset execution-plan resolution", () => {
         resolvePreset: vi.fn(async () => ({ ...preset, config: { models: ["openai/gpt-4.1"], stop: ["END"] } })),
         discoverModels: vi.fn(async () => [{ id: "openai/gpt-4.1", contextWindowTokens: 32_000, maxOutputTokens: 1_000 }])
       }
-    })).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "config" });
+    })).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "stop" });
   });
 });

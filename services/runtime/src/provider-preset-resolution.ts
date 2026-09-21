@@ -9,9 +9,10 @@ import {
   type TextGenerationParameters
 } from "@infinite-quest/contracts";
 import { stableStringify, sha256 } from "../../../packages/domain/src/text.js";
-import { validateOpenRouterPresetConfig } from "../../../packages/story-engine/src/openrouter-presets.js";
+import { OpenRouterPresetError, validateOpenRouterPresetConfig } from "../../../packages/story-engine/src/openrouter-presets.js";
 
 const PLAN_VERSION = 2 as const;
+const MUTABLE_OPENROUTER_MODEL_IDS = new Set(["openrouter/auto", "openrouter/free"]);
 
 export type TextModelLimit = Readonly<{
   id: string;
@@ -102,6 +103,16 @@ function modelIds(config: Readonly<Record<string, unknown>>): readonly string[] 
   return freeze(ordered);
 }
 
+function rejectMutableOpenRouterModelIds(providerType: string, ids: readonly string[]): void {
+  if (providerType !== "openrouter") return;
+  if (ids.some((modelId) => {
+    const normalized = modelId.trim();
+    return normalized.startsWith("~") || MUTABLE_OPENROUTER_MODEL_IDS.has(normalized);
+  })) {
+    throw new OpenRouterPresetError("preset_config_unsupported", "Preset configuration is unsupported or invalid.", "model");
+  }
+}
+
 function outputLimit(parameters: TextGenerationParameters, profileLimit: number, discovered?: number): number {
   const limits = [positiveInteger(profileLimit, "Profile maxOutputTokens")];
   if (parameters.max_tokens !== undefined) limits.push(parameters.max_tokens);
@@ -183,6 +194,7 @@ async function resolvePlanInputs(input: Omit<ResolveTextExecutionPlansInput, "op
   }
 
   const ids = selection.kind === "model" ? [selection.modelId] : modelIds(config);
+  rejectMutableOpenRouterModelIds(profile.providerType, ids);
   const discovered = await input.ports.discoverModels({ ownerUserId: profile.ownerUserId, providerProfileId: profile.providerProfileId, modelIds: ids });
   const byId = limitsById(discovered);
   // An omitted selected model is unknown capacity; unrelated inventory entries

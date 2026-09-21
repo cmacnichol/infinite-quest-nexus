@@ -9,6 +9,7 @@ const MAX_CONFIG_DEPTH = 16;
 const MAX_MODELS = 32;
 const MAX_PROVIDER_ARRAY = 64;
 const PRESET_PARAMETERS = new Set(["model", "models", "temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_p", "top_a", "seed", "max_tokens", "max_completion_tokens", "provider"]);
+const PUBLIC_UNSUPPORTED_PRESET_FIELDS = new Set(["tools", "stop", "transforms"]);
 const PROVIDER_PARAMETERS = new Set(["order", "only", "ignore", "allow_fallbacks", "require_parameters", "data_collection", "sort", "quantizations", "enforce_distillable_text", "preferred_min_throughput", "preferred_max_latency", "max_price", "zdr"]);
 const MAX_PRICE_PARAMETERS = new Set(["prompt", "completion", "image", "request"]);
 
@@ -98,7 +99,7 @@ function positiveInt(value: unknown): number {
 }
 
 function unsupported(field: string): never {
-  const safeField = PRESET_PARAMETERS.has(field) || field === "provider" ||
+  const safeField = PUBLIC_UNSUPPORTED_PRESET_FIELDS.has(field) || PRESET_PARAMETERS.has(field) || field === "provider" ||
     (field.startsWith("provider.") && PROVIDER_PARAMETERS.has(field.slice("provider.".length))) ||
     (field.startsWith("provider.max_price.") && MAX_PRICE_PARAMETERS.has(field.slice("provider.max_price.".length)))
     ? field : "config";

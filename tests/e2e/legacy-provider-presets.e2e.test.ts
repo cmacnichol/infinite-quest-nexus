@@ -4,7 +4,7 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY } from "../../packages/contracts/src/provider-profile-view.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const screenshots = ".superpowers/sdd/2026-09-18-native-openrouter-presets/task-7-screenshots";
+const screenshots = process.env.PLAYWRIGHT_LEGACY_PROVIDER_PRESET_SCREENSHOT_DIR ?? ".superpowers/sdd/2026-09-21-native-preset-audit-fixes/task-4-5-screenshots";
 
 type Provider = Record<string, unknown> & {
   id: string;
@@ -254,15 +254,16 @@ test("settings show bounded preset field diagnostics without remote private text
   const api = await installSettingsApi(page);
   await page.route(`**/api/v1/providers/${api.provider.id}/presets/nexus-story`, (route) => route.fulfill({
     status: 422, contentType: "application/json",
-    body: JSON.stringify({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "config" },
+    body: JSON.stringify({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "stop" },
       message: "PRIVATE_REMOTE_CANARY" })
   }));
   await page.goto(`${origin}/nexus/index.html#providers`);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
   await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
-  await expect(page.locator("#providerPresetPrompt")).toContainText("preset_config_unsupported: config");
+  await expect(page.locator("#providerPresetPrompt")).toContainText("preset_config_unsupported: stop");
   await expect(page.locator("#providerPresetDetail")).not.toContainText("PRIVATE_REMOTE_CANARY");
+  await page.locator("#providerPresetDetail").screenshot({ path: `${screenshots}/settings-desktop-unsupported-preset-diagnostic.png` });
   expect(api.writes).toHaveLength(0);
 });
 
@@ -410,7 +411,7 @@ test("Story per-request selection keeps Use profile separate and submits a typed
     }
     if (path === `/api/v1/providers/${provider.id}/presets/nexus-story`) {
       if (delayPresetDetail) await presetDetailGate;
-      if (unsupportedPresetDetail) return send({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "config" }, message: "PRIVATE_REMOTE_CANARY" }, 422);
+      if (unsupportedPresetDetail) return send({ code: "preset_config_unsupported", details: { code: "preset_config_unsupported", field: "stop" }, message: "PRIVATE_REMOTE_CANARY" }, 422);
       return send({ slug: "nexus-story", name: "Nexus Story", versionId: "version-1", version: 3, standardPrompt: "Write with restrained tension.", candidateModelIds: ["vendor/primary"], providerPolicy: {}, excludedProviderSlugs: [], parameters: {}, limits: { configuredMaxTokens: 2400, configuredMaxCompletionTokens: 1800, effectiveMaxOutputTokens: 1600, contextWindowTokens: { status: "unknown", value: null } }, responseFormat: { mode: "json_schema", assurance: "trusted_preset" } });
     }
     if (path === `/api/v1/providers/${provider.id}/models`) return send({ models: [{ id: "vendor/direct-model", displayName: "Direct model", loaded: true, instanceId: "vendor/direct-model", contextLength: 32768, responseFormatCapability: { version: 1, model: "vendor/direct-model", expectedRegistryDigest: "fixture-digest", advertisedAt: now, operations: [{ operation: "story", streaming: false, status: "verified", reason: "available", schemaVersion: exactCapability ? CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaVersion : "story-v1", schemaHash: exactCapability ? CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY.schemaHash : "a".repeat(64), verifiedAt: now, expiresAt: new Date(Date.now() + 60_000).toISOString() }] } }] });
@@ -488,8 +489,9 @@ test("Story per-request selection keeps Use profile separate and submits a typed
   await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toContainText("Nexus Story");
   unsupportedPresetDetail = true;
   await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
-  await expect(page.locator("#turnPresetStatus")).toContainText("preset_config_unsupported: config");
+  await expect(page.locator("#turnPresetStatus")).toContainText("preset_config_unsupported: stop");
   await expect(page.locator("#turnPresetStatus")).not.toContainText("PRIVATE_REMOTE_CANARY");
+  await page.locator("#turnTextSelectionPanel").screenshot({ path: `${screenshots}/story-desktop-unsupported-preset-diagnostic.png` });
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("model");
   unsupportedPresetDetail = false;
   await page.getByRole("combobox", { name: "Text selection" }).selectOption("preset");

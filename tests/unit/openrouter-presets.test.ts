@@ -93,6 +93,31 @@ describe("OpenRouter preset metadata discovery", () => {
     await expect(discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x", config: { provider: { arbitrary: true } } } } }), { status: 200 })]))).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported" });
   });
 
+  it.each(["tools", "stop", "transforms"])("projects the documented unsupported field %s without exposing its value", async (field) => {
+    const privateCanary = "PRIVATE_PRESET_VALUE_CANARY";
+    const config = { [field]: privateCanary };
+    const action = discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: {
+      slug: "night-shift", name: "Night Shift", status: "active",
+      designated_version: { id: "v", version: 1, system_prompt: "x", config }
+    } }), { status: 200 })]));
+
+    await expect(action).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field });
+    await expect(action).rejects.not.toThrow(privateCanary);
+  });
+
+  it("keeps arbitrary private configuration names and values behind the generic field", async () => {
+    const privateField = "api_key_private_canary";
+    const privateValue = "PRIVATE_PRESET_VALUE_CANARY";
+    const action = discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: {
+      slug: "night-shift", name: "Night Shift", status: "active",
+      designated_version: { id: "v", version: 1, system_prompt: "x", config: { [privateField]: privateValue } }
+    } }), { status: 200 })]));
+
+    await expect(action).rejects.toMatchObject({ diagnosticCode: "preset_config_unsupported", field: "config" });
+    await expect(action).rejects.not.toThrow(privateField);
+    await expect(action).rejects.not.toThrow(privateValue);
+  });
+
   it("accepts only range-valid typed generation and provider-routing fields", async () => {
     const detail = (config: unknown) => discoverOpenRouterPreset(profile, "night-shift", transport([new Response(JSON.stringify({ data: { slug: "night-shift", name: "Night Shift", status: "active", designated_version: { id: "v", version: 1, system_prompt: "x", config } } }), { status: 200 })]));
     await expect(detail({ model: "openai/gpt-4o", models: ["openai/gpt-4o"], temperature: 1, top_p: 0.5, top_k: 20, frequency_penalty: 1, presence_penalty: -1, repetition_penalty: 1.1, min_p: 0.1, top_a: 0.2, seed: 42, max_tokens: 512, max_completion_tokens: 512, provider: { order: ["openai"], only: ["openai"], ignore: ["anthropic"], allow_fallbacks: true, require_parameters: true, data_collection: "allow", quantizations: ["fp16"], enforce_distillable_text: true, preferred_min_throughput: 1, preferred_max_latency: 2, max_price: { prompt: 1, completion: 2 } } })).resolves.toMatchObject({ slug: "night-shift" });
