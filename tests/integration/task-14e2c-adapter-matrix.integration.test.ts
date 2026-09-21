@@ -317,7 +317,8 @@ integration("Task 14e2c additive adapter contract matrix", () => {
           "0097_provider_text_selection",
           "0098_illustration_text_execution_snapshot",
           "0099_worker_text_plan_protocol_fences",
-          "0100_prepared_text_physical_attempts"
+          "0100_prepared_text_physical_attempts",
+          "0101_durable_campaign_physical_attempt_costs"
       ]);
     } finally {
       await pool.end();
