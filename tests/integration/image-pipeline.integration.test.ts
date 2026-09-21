@@ -1879,7 +1879,7 @@ integration("independent illustration pipeline", () => {
     expect(delivered.mimeType).toBe("image/webp");
     expect(delivered.bytes.length).toBeGreaterThan(0);
     const costSummary = await getCampaignCostSummary(pool, imported.campaignId);
-    expect(costSummary.totals[0]?.byCategory.image).toBe("0.040000000000");
+    expect(costSummary.totals[0]?.byCategory.image).toBe("0.04");
   });
 
   it("runs library-only resolution without an image provider", async () => {
