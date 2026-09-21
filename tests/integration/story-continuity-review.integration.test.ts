@@ -1400,6 +1400,20 @@ integration("T17 durable continuity review", () => {
   }, 60_000);
 
   it("keeps the accepted streamed turn when promoted native illustration children roll back, then reconciles their frozen snapshot", async () => {
+    // The primary turn uses the historical streaming path; only illustration
+    // refinement in this scenario is admitted as a native preset operation.
+    const streamingStoryProviderId = (await createProvider(pool, {
+      name: `T17 concrete streaming story ${randomUUID()}`,
+      providerType: "openai_compatible",
+      providerRole: "text",
+      baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+      defaultModel: "t17-capturing-fake",
+      contextWindowTokens: 65_536,
+      maxOutputTokens: 4_096,
+      temperature: 0.2,
+      enabled: true,
+      configuration: legacyStreamingContinuityResponseFormatConfiguration
+    }, credentialSecret)).id;
     const nativeTextProviderId = (await createProvider(pool, {
       name: `T17 native streaming illustration ${randomUUID()}`,
       providerType: "openrouter",
@@ -1461,7 +1475,7 @@ integration("T17 durable continuity review", () => {
       },
       "Stream a native illustrated turn.",
       false,
-      nativeTextProviderId
+      streamingStoryProviderId
     );
     const illustration = createApiIllustrationApplication(pool, nativeIllustration);
     const baseCollaborators = createGenerationExecutionCollaborators(
