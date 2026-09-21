@@ -1705,7 +1705,7 @@ function assertRoundThreeArchiveRelationships(
           operation: "response",
           requestedModel: "",
           resolvedModel: "",
-          amount: index === 0 ? "0.010000000000" : "0.020000000000",
+          amount: index === 0 ? "0.01" : "0.02",
           currency: "USD",
           usageMetadata: {},
           occurredAt: representativeTimestamp,

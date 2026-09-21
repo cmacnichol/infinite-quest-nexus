@@ -203,7 +203,7 @@ integration("dashboard statistics integration", () => {
         providerProfileId,
         providerType: "openrouter",
         currency: "USD",
-        amount: "0.375000000000",
+        amount: "0.375",
         eventCount: 2
       }));
     } finally {

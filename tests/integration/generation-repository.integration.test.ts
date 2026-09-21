@@ -1076,9 +1076,9 @@ integration("PostgreSQL generation command repository", () => {
       status: "completed",
       narration: "The observatory door opens.\n\nStars spill across the archive floor.",
       reportedCost: {
-        amount: "0.250000000000",
+        amount: "0.25",
         currency: "USD",
-        byCategory: { story: "0.250000000000", image: "0", memory: "0" }
+        byCategory: { story: "0.25", image: "0", memory: "0" }
       }
     });
   });

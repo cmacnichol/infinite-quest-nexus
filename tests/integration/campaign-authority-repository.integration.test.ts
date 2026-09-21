@@ -634,7 +634,7 @@ integration("PostgreSQL campaign sync adapters", () => {
     await expect(getCampaignCostSummary(pool, imported.campaignId)).resolves.toMatchObject({
       campaignId: imported.campaignId,
       hasReportedCosts: true,
-      totals: [{ amount: "0.150000000000", currency: "USD" }]
+      totals: [{ amount: "0.150", currency: "USD" }]
     });
     expect(enqueueChunkIndex).toHaveBeenCalledOnce();
     expect(enqueueChunkIndex).toHaveBeenCalledWith(expect.anything(), {
@@ -1946,9 +1946,9 @@ integration("PostgreSQL campaign sync adapters", () => {
       [ownerUserId, imported.campaignId, turnId]
     );
     const expectedCost = {
-      amount: "0.125000000000",
+      amount: "0.125",
       currency: "USD",
-      byCategory: { story: "0.125000000000", image: "0", memory: "0" }
+      byCategory: { story: "0.125", image: "0", memory: "0" }
     };
 
     expect((await readTurnReportedCostsForTest(pool, ownerUserId, [turnId])).get(turnId)).toEqual(expectedCost);
