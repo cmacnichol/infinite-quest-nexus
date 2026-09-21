@@ -115,6 +115,28 @@ describe("text provider adapters", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("returns an HTTP-date Retry-After delay through the production provider path", async () => {
+    const now = Date.parse("2026-09-20T12:00:00.000Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const openAiProfile: TextProviderProfile = {
+      ...profile,
+      providerType: "openai_compatible",
+      baseUrl: "https://api.openai.com/v1"
+    };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+      status: 429,
+      headers: { "retry-after": "Sun, 20 Sep 2026 12:00:02 GMT" }
+    }));
+
+    await expect(callTextProvider(openAiProfile, {
+      systemPrompt: "system",
+      input: "input",
+      responseFormatFallback: "forbid"
+    }, createTestProviderTransport(fetcher as typeof fetch)))
+      .rejects.toMatchObject({ statusCode: 429, retryAfterMs: 2_000 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the default compatible response-format fallback for non-authoring callers", async () => {
     const sentBodies: string[] = [];
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {

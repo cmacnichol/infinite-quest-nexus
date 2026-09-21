@@ -138,7 +138,7 @@ export async function createStoryOnlyFixture(options: Readonly<{
     const providerProfileId = (await createProvider(pool, {
       name: `Story-only benchmark ${options.seed ?? randomUUID()}`, providerType: "openai_compatible", providerRole: "text",
       baseUrl: "http://127.0.0.1:9911", defaultModel: "story-only-benchmark-model", contextWindowTokens: 32_768,
-      maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: {}
+      maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret)).id;
     const turnControlStyle = options.playMode === "story_only" ? "flexible_scene"
       : options.playMode === "legacy_action" ? "action_only" : "flexible_action";
@@ -213,7 +213,7 @@ export async function runStoryOnlyFixture(fixture: StoryOnlyFixture): Promise<St
       enqueueAcceptedTurnIllustrationSegments: async () => null } as GenerationExecutionCollaborators["illustration"],
     loadTextExecution: async () => ({
       id: providerProfileId, name: "Story-only benchmark provider", providerRole: "text", providerType: "openai_compatible", model: "story-only-benchmark-model",
-      contextWindowTokens: 32_768, maxOutputTokens: 4_096, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      contextWindowTokens: 32_768, maxOutputTokens: 4_096, temperature: 0, requestTimeoutMs: 1_000, configuration: { textResponseFormatPolicy: "auto" },
       execute: async (request: { input?: string }) => {
         requests.push(String(request.input ?? ""));
         if (delayMs > 0) await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs));

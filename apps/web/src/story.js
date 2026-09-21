@@ -73,6 +73,13 @@ export function chronicleRetrievalHistoryMarkup(audit) {
 
 export function startStoryPlayer(composition) {
 
+let resolveInitialization;
+let rejectInitialization;
+const initialization = new Promise((resolve, reject) => {
+  resolveInitialization = resolve;
+  rejectInitialization = reject;
+});
+
 const apiClient = composition.api;
 const illustrationApi = composition.illustrations;
 let selectionTools = null;
@@ -4115,7 +4122,13 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     })
     .catch(() => {});
-  init();
+  const initPromise = init();
+  initPromise.then(resolveInitialization, rejectInitialization);
+  // The production entry point does not consume the readiness promise. Keep
+  // initialization failures observable to callers without creating an
+  // unhandled rejection when the return value is intentionally ignored.
+  initPromise.catch(() => {});
 });
 
+return initialization;
 }

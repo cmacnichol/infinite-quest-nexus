@@ -2083,7 +2083,7 @@ integration("independent illustration pipeline", () => {
       "SELECT id,status,attempts,lease_owner,lease_expires_at FROM illustration_prompt_jobs WHERE id=$1",
       [promptJob.id]
     )).rows[0]).toEqual(expiredBefore);
-    await pool.query("UPDATE provider_profiles SET default_model='edited-after-enqueue', temperature=0.91 WHERE id=$1", [textProviderId]);
+    await pool.query("UPDATE provider_profiles SET default_model='edited-after-enqueue', text_selection=jsonb_build_object('kind','model','modelId','edited-after-enqueue'), temperature=0.91 WHERE id=$1", [textProviderId]);
     const executionCallsBeforeClaim = frozenExecution.mock.calls.length;
     const ports = createIllustrationWorkerPorts(pool, native);
     await expect(runNativeIllustrationPromptJob(pool, "native-illustration-worker", 30, ports.promptRefinement, ports.costs, native)).resolves.toBe(true);

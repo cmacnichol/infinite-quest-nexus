@@ -70,7 +70,7 @@ integration("T15 executor-backed continuity evidence", () => {
     await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T15 fake provider did not bind.");
-    providerId = (await createProvider(pool, { name: `T15 capturing fake ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "t15-capturing-fake", contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: {} }, credentialSecret)).id;
+    providerId = (await createProvider(pool, { name: `T15 capturing fake ${randomUUID()}`, providerType: "openai_compatible", providerRole: "text", baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "t15-capturing-fake", contextWindowTokens: 65_536, maxOutputTokens: 4_096, temperature: 0, enabled: true, configuration: { textResponseFormatPolicy: "auto" } }, credentialSecret)).id;
     (server as Server & { transport?: { close(): Promise<void> } }).transport = transport;
   });
 
@@ -252,7 +252,7 @@ integration("T15 executor-backed continuity evidence", () => {
     const replayTurn = await acceptedTurn(fixture.campaignId);
     const run = deriveStoryContinuityRunFromExecutorCapture({
       scenarioId: id, trajectory, outputMode,
-      provider: { id: providerId, model: "t15-capturing-fake", settingsHash: createHash("sha256").update(JSON.stringify({ providerType: "openai_compatible", model: "t15-capturing-fake", temperature: 0, contextWindowTokens: 65_536, maxOutputTokens: 4_096, configuration: {} })).digest("hex") },
+      provider: { id: providerId, model: "t15-capturing-fake", settingsHash: createHash("sha256").update(JSON.stringify({ providerType: "openai_compatible", model: "t15-capturing-fake", temperature: 0, contextWindowTokens: 65_536, maxOutputTokens: 4_096, configuration: { textResponseFormatPolicy: "auto" } })).digest("hex") },
       sourceEvidence: [evidence], sourceRecords: [sourceRecord], candidateRecords: [candidateRecord],
       sourceEvidenceManifest: captured.manifest, capturedRequestBody: captured.body, originalRequestBody: captured.originalBody,
       acceptedTurn: { narration: accepted.narration, continuitySummary: String(accepted.state.continuitySummary ?? ""), openThreads: accepted.state.openThreads as string[] },

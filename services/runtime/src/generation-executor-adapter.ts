@@ -1537,6 +1537,33 @@ export async function callCampaignTextProvider(
     job, operation, typeof preparedRequest.onChunk === "function", prepared.payloadHash, provider,
     request.systemPrompt, executionPlan
   ) : undefined;
+  const logV2ProviderFailure = (error: unknown, startedAt: number) => {
+    logProviderTransportError(error, {
+      generationJobId: job.id,
+      campaignId: job.campaign_id,
+      providerProfileId: job.provider_profile_id,
+      storyOperation: operation
+    });
+    const transportError = providerTransportErrorDetails(error);
+    const rawErrorCode = transportError
+      ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
+      : errorCodeFrom(error);
+    const errorCode = rawErrorCode ? safeLogErrorCode(rawErrorCode) : null;
+    const budgetScope = diagnosticBudgetScope(error);
+    logger.warn({
+      event: "turn_generation_provider_failed",
+      ...generationLogContext(job),
+      storyOperation: operation,
+      streaming: typeof request.onChunk === "function",
+      recovery: Boolean(request.recoveryInput),
+      errorName: error instanceof Error ? error.name : "Error",
+      ...(errorCode ? { errorCode } : {}),
+      ...(budgetScope ? { budgetScope } : {}),
+      ...(transportError ? { providerCategory: transportError.causeCategory } : {}),
+      transportTimedOut: Boolean(transportError?.timedOut),
+      durationMs: Date.now() - startedAt
+    });
+  };
   if (invocation) {
     const checkedPrepared = prepared!;
     if (checkedPrepared.body.length > responseContractPreparedFailureRequestBodyCharacterLimit) {
@@ -1602,9 +1629,7 @@ export async function callCampaignTextProvider(
         })
         : await provider.execute(transportRequest);
     } catch (error) {
-      logProviderTransportError(error, {
-        generationJobId: job.id, campaignId: job.campaign_id, providerProfileId: job.provider_profile_id, storyOperation: operation
-      });
+      logV2ProviderFailure(error, startedAt);
       const preparedError = preparedResponseContractError(error) ?? undefined;
       let nextPreparedResponseFailures: NonNullable<GenerationOrchestrationState["preparedResponseFailures"]> | null = null;
       if (preparedError) {
@@ -1674,11 +1699,16 @@ export async function callCampaignTextProvider(
         : null
     });
     if (!completed || completed.status !== "completed") throw Object.assign(new Error("The response-contract completion lost its lease."), { code: "lease_lost" });
-    await dependencies.collaborators.recordProfileCost(
-      dependencies.pool, provider, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
-      generationJobId: job.id, category: "story", operation,
-      ...(result.physicalAttemptId ? { localCallId: result.physicalAttemptId } : {}) }, result
-    );
+    try {
+      await dependencies.collaborators.recordProfileCost(
+        dependencies.pool, provider, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+        generationJobId: job.id, category: "story", operation,
+        ...(result.physicalAttemptId ? { localCallId: result.physicalAttemptId } : {}) }, result
+      );
+    } catch (error) {
+      logV2ProviderFailure(error, startedAt);
+      throw error;
+    }
     logger.info({
       event: "turn_generation_provider_completed",
       ...generationLogContext(job), storyOperation: operation, providerType: provider.providerType,

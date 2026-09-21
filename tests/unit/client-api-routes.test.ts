@@ -486,7 +486,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
     }] };
     if (sql.includes("FROM provider_cost_events") || sql.includes("FROM category_totals")) return { rows: [] };
 
-    if (sql.includes("idempotency_key = $2") && sql.includes("FROM generation_jobs")) {
+    if ((sql.includes("idempotency_key = $2") || sql.includes("idempotency_key=$2")) && sql.includes("FROM generation_jobs")) {
       const replacement = params[1] === "replace-route-key";
       return { rows: [{
         id: JOB_ID,

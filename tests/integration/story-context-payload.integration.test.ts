@@ -125,7 +125,7 @@ integration("story context payload baseline shape", () => {
       maxOutputTokens: 4_096,
       temperature: 0,
       enabled: true,
-      configuration: {}
+      configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret)).id;
     (server as Server & { __transport?: { close(): Promise<void> } }).__transport = transport;
   });
@@ -469,7 +469,8 @@ integration("story context payload baseline shape", () => {
       return loadPostgresChronicleGenerationAuthorityContext(client, { ...scope, expectedBaseIdentity: frozen.baseIdentity });
     });
     const provider = { id: providerId, providerType: "openai_compatible", model: "story-context-payload-baseline",
-      contextWindowTokens: 1_048_576, maxOutputTokens: 4_096, temperature: 0, requestTimeoutMs: 1_000, configuration: {} } as never;
+      contextWindowTokens: 1_048_576, maxOutputTokens: 4_096, temperature: 0, requestTimeoutMs: 1_000,
+      configuration: { textResponseFormatPolicy: "auto" } } as never;
     const planned = planGenerationPromptContext(context, provider, "Write a scene.", "Ask the Sable Relay about its keeper.", [],
       { profile: "brief", minWords: 100, maxWords: 120 }, "action", 1_000_000, 1_000_000, randomUUID());
     const serialized = serializeProviderRequest(provider, { systemPrompt: "Write a scene.", input: planned.storyInput }).body;

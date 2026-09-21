@@ -1932,6 +1932,7 @@ async function assertRepresentativeArchive(
         providerType: "openai_compatible",
         providerRole: expected.kind,
         defaultModel: expected.selectedModel,
+        textSelection: null,
         contextWindowTokens: 32768,
         maxOutputTokens: 4096,
         temperature: 0.8,

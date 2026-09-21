@@ -1612,8 +1612,8 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
       }
       if (sql.includes("FROM campaign_memory_configs")) return { rows: [] };
       if (sql.includes("provider_role = 'embedding'")) return { rows: [] };
-      if (sql.includes("SELECT provider_role FROM provider_profiles")) {
-        return { rows: [{ provider_role: "image" }] };
+      if (sql.includes("SELECT provider_role,default_model,text_selection FROM provider_profiles")) {
+        return { rows: [{ provider_role: "image", default_model: "image-model", text_selection: null }] };
       }
       if (sql.includes("INSERT INTO campaign_memory_configs")) {
         persisted = true;
@@ -1647,8 +1647,8 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
       if (sql.includes("provider_role = 'embedding'")) {
         return { rows: [{ id: "embedding-profile", is_default: true }] };
       }
-      if (sql.includes("SELECT provider_role FROM provider_profiles")) {
-        return { rows: [{ provider_role: "text" }] };
+      if (sql.includes("SELECT provider_role,default_model,text_selection FROM provider_profiles")) {
+        return { rows: [{ provider_role: "text", default_model: "text-model", text_selection: null }] };
       }
       if (sql.includes("INSERT INTO campaign_memory_configs")) {
         persisted = true;
@@ -1742,8 +1742,8 @@ describe("PostgreSQL Chronicle embedding configuration policy", () => {
       if (sql.includes("provider_role = 'embedding'")) {
         return { rows: [{ id: "embedding-profile", is_default: true }] };
       }
-      if (sql.includes("SELECT provider_role FROM provider_profiles")) {
-        return { rows: [{ provider_role: "text" }] };
+      if (sql.includes("SELECT provider_role,default_model,text_selection FROM provider_profiles")) {
+        return { rows: [{ provider_role: "text", default_model: "text-model", text_selection: null }] };
       }
       if (sql.includes("INSERT INTO chronicle_jobs")) {
         enqueued = true;

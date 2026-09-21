@@ -81,7 +81,11 @@ integration("standard database migration runner", () => {
           "0093_portable_source_material_authority_paths",
           "0094_story_generation_policy",
           "0095_story_memory_capability_enrollment",
-          "0096_campaign_memory_defaults"
+          "0096_campaign_memory_defaults",
+          "0097_provider_text_selection",
+          "0098_illustration_text_execution_snapshot",
+          "0099_worker_text_plan_protocol_fences",
+          "0100_prepared_text_physical_attempts"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -1773,7 +1777,11 @@ END;
         "0093_portable_source_material_authority_paths",
         "0094_story_generation_policy",
           "0095_story_memory_capability_enrollment",
-          "0096_campaign_memory_defaults"
+          "0096_campaign_memory_defaults",
+          "0097_provider_text_selection",
+          "0098_illustration_text_execution_snapshot",
+          "0099_worker_text_plan_protocol_fences",
+          "0100_prepared_text_physical_attempts"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2776,7 +2784,11 @@ END;
         "0093_portable_source_material_authority_paths",
         "0094_story_generation_policy",
           "0095_story_memory_capability_enrollment",
-          "0096_campaign_memory_defaults"
+          "0096_campaign_memory_defaults",
+          "0097_provider_text_selection",
+          "0098_illustration_text_execution_snapshot",
+          "0099_worker_text_plan_protocol_fences",
+          "0100_prepared_text_physical_attempts"
       ]);
 
       // The additive nullable generation-policy column is present after the upgrade;

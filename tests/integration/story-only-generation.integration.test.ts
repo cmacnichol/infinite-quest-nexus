@@ -40,7 +40,7 @@ integration("Story Direction composed PostgreSQL generation", () => {
       name: `Story Direction composed ${crypto.randomUUID()}`,
       providerType: "openai_compatible", providerRole: "text", baseUrl: "http://127.0.0.1:9911",
       defaultModel: "story-only-composed-model", contextWindowTokens: 32_768, maxOutputTokens: 4_096,
-      temperature: 0, enabled: true, configuration: {}
+      temperature: 0, enabled: true, configuration: { textResponseFormatPolicy: "auto" }
     }, credentialSecret)).id;
   });
 
@@ -118,7 +118,7 @@ integration("Story Direction composed PostgreSQL generation", () => {
     const provider = {
       id: providerProfileId, name: "Synthetic story-only provider", providerRole: "text" as const,
       providerType: "openai_compatible" as const, model: "story-only-composed-model", contextWindowTokens: 32_768,
-      maxOutputTokens: 4_096, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      maxOutputTokens: 4_096, temperature: 0, requestTimeoutMs: 1_000, configuration: { textResponseFormatPolicy: "auto" },
       execute: async (request: { input?: string; systemPrompt?: string }) => {
         requests.push(String(request.input));
         systemPrompts?.push(String(request.systemPrompt));

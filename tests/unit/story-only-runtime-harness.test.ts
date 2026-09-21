@@ -57,11 +57,13 @@ describe("story-only disposable runtime harness", () => {
       .toMatchObject({ host: "127.0.0.1", port: "15439", database: "infinitequest_storyonly_test" });
     expect(assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1:55432/infinitequest_test_0123456789abcdef0123456789abcdef"))
       .toMatchObject({ host: "127.0.0.1", port: "55432", database: "infinitequest_test_0123456789abcdef0123456789abcdef" });
-    expect(assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1:55470/infinitequest_test_abcdef0123456789abcdef0123456789"))
-      .toMatchObject({ host: "127.0.0.1", port: "55470", database: "infinitequest_test_abcdef0123456789abcdef0123456789" });
+    expect(assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1:62603/infinitequest_test_abcdef0123456789abcdef0123456789"))
+      .toMatchObject({ host: "127.0.0.1", port: "62603", database: "infinitequest_test_abcdef0123456789abcdef0123456789" });
     expect(() => assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1:55432/infinitequest_test"))
       .toThrow("dedicated");
     expect(() => assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1:55432/infinitequest_test_shared"))
+      .toThrow("dedicated");
+    expect(() => assertStoryOnlyRuntimeTarget("postgresql://test:secret@127.0.0.1/infinitequest_test_0123456789abcdef0123456789abcdef"))
       .toThrow("dedicated");
     expect(() => assertStoryOnlyRuntimeTarget("postgresql://test:secret@provider.example:15439/infinitequest_storyonly_test"))
       .toThrow("dedicated");
