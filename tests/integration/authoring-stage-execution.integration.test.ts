@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import Fastify from "fastify";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { authoringRuntimeFixture, deferred } from "../helpers/authoring-runtime.js";
@@ -11,11 +12,13 @@ import { createAuthoringApplication } from "../../packages/application/src/autho
 import { createAuthoringWorkerApplication } from "../../packages/application/src/authoring/worker.js";
 import type { AuthoringClaim } from "../../packages/application/src/authoring/ports.js";
 import { createPostgresAuthoringRepository, createPostgresAuthoringTargetPort } from "../../packages/database/src/authoring-job-repository.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { logger } from "../../packages/logger/src/index.js";
 import { CHARACTER_AUTHORING_PROMPT_PROTOCOL_VERSION, WORLD_AUTHORING_PROMPT_PROTOCOL_VERSION } from "../../packages/domain/src/authoring-prompts.js";
 import { AuthoringResponseError } from "../../services/runtime/src/authoring-response-adapter.js";
+import { registerAuthoringRoutes } from "../../services/api/src/authoring-routes.js";
 import { createRuntimeAuthoringApplication, createRuntimeAuthoringWorkerApplication } from "../../services/runtime/src/authoring-composition.js";
 import { createAuthoringExecutionSnapshot, createRuntimeAuthoringStageDispatcher, executeAuthoringStage } from "../../services/runtime/src/authoring-stage-adapter.js";
 import { prepareAuthoringResponseContractExecution } from "../../services/runtime/src/authoring-text-execution-preparation.js";
@@ -27,7 +30,7 @@ import type { ProviderRequest, ProviderResult } from "../../packages/story-engin
 import { ProviderHttpError } from "../../packages/story-engine/src/providers.js";
 import { composePresetPrompt } from "../../packages/story-engine/src/preset-prompt.js";
 import { buildSourceExtractionPrompt, buildSourceWorldPrompt } from "../../packages/domain/src/authoring-prompts.js";
-import { assembleGeneratedWorld, generateTemplateWorld } from "../../services/runtime/src/provider-world-generation-adapter.js";
+import { assembleGeneratedWorld, generateTemplateWorld, generateWorldPreviewForOwner } from "../../services/runtime/src/provider-world-generation-adapter.js";
 import { createApiProviderApplicationComposition, createWorkerProviderApplicationComposition } from "../../services/runtime/src/provider-application-composition.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
 import { currentIntegrationProviderTransport, installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
@@ -661,7 +664,10 @@ integration("durable authoring real repository and stage dispatcher", () => {
         response.end(JSON.stringify({
           id: randomUUID(), model: "native-model",
           choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }
+          ...(schemaName === "infinite_quest_world_outline_v1"
+            ? { usage: call === 1 ? { prompt_tokens: 5, cost: "0.1", currency: "USD" }
+              : { completion_tokens: 7, cost: "0.2", currency: "EUR" } }
+            : {})
         }));
       });
     });
@@ -691,6 +697,26 @@ integration("durable authoring real repository and stage dispatcher", () => {
       await expect(worker.runNext({ workerId: "task-5c-world-outline", leaseSeconds: 60 })).resolves.toBe(true);
       await expect(worker.runNext({ workerId: "task-5c-world-character", leaseSeconds: 60 })).resolves.toBe(true);
       const activeWorld = (await authoring.get({ ownerUserId }, world.id))!;
+      expect(activeWorld.physicalAccounting).toEqual({
+        attemptCount: 4, completedCount: 4,
+        observedUsage: { inputTokens: 5, outputTokens: 7, totalTokens: null },
+        usageCoverage: { inputTokens: 1, outputTokens: 1, totalTokens: 0 },
+        reportedCosts: [{ amount: "0.2", currency: "EUR" }, { amount: "0.1", currency: "USD" }]
+      });
+      expect((await authoring.get({ ownerUserId }, world.id))?.physicalAccounting).toEqual(activeWorld.physicalAccounting);
+      expect(await authoring.get({ ownerUserId: randomUUID() }, world.id)).toBeNull();
+      const api = Fastify();
+      try {
+        await registerAuthoringRoutes(api, {
+          application: authoring, enabled: true, resolveOwner: async () => ({ ownerUserId }),
+          acquireAdmission: async () => ({ allowed: true })
+        });
+        const detail = await api.inject({ method: "GET", url: `/api/v1/authoring/jobs/${world.id}` });
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().physicalAccounting).toEqual(activeWorld.physicalAccounting);
+      } finally {
+        await api.close();
+      }
       await authoring.cancel({ ownerUserId }, world.id, activeWorld.revision);
 
       const source = await authoring.submit({ ownerUserId }, {
@@ -710,6 +736,11 @@ integration("durable authoring real repository and stage dispatcher", () => {
       await authoring.startSourceSynthesis({ ownerUserId }, source.id, reviewed.revision);
       await expect(worker.runNext({ workerId: "task-5c-source-synthesis", leaseSeconds: 60 })).resolves.toBe(true);
       await expect(worker.runNext({ workerId: "task-5c-source-character", leaseSeconds: 60 })).resolves.toBe(true);
+      expect((await authoring.get({ ownerUserId }, source.id))?.physicalAccounting).toMatchObject({
+        attemptCount: 6, completedCount: 6,
+        observedUsage: { inputTokens: null, outputTokens: null, totalTokens: null },
+        usageCoverage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCosts: []
+      });
 
       const attempts = await pool.query<{
         request_body: string; reservation_key: string; outcome: string;
@@ -805,7 +836,9 @@ integration("durable authoring real repository and stage dispatcher", () => {
         response.end(JSON.stringify({
           id: randomUUID(), model: "native-model",
           choices: [{ message: { content: JSON.stringify(content) }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 12, completion_tokens: 8, total_tokens: 20 }
+          usage: schemaName === "infinite_quest_world_outline_v1"
+            ? { prompt_tokens: 12, cost: "0.1", currency: "USD" }
+            : { completion_tokens: 8, cost: "0.2", currency: "EUR" }
         }));
       });
     });
@@ -828,11 +861,21 @@ integration("durable authoring real repository and stage dispatcher", () => {
         summary: marker, keywords: [], excerpts: [], prompt: marker
       };
       const [first, second] = await Promise.all([
-        generateTemplateWorld(pool, ownerUserId, provider.id, input, graph.worldGeneration, `world-${randomUUID()}`),
+        generateWorldPreviewForOwner(pool, ownerUserId, { title: input.title, prompt: marker }, graph.worldGeneration, {
+          createWorldGenerationProgress: async () => undefined,
+          updateWorldGenerationProgress: async () => undefined
+        }),
         generateTemplateWorld(pool, ownerUserId, provider.id, input, graph.worldGeneration, `world-${randomUUID()}`)
       ]);
       expect(first.content.playableCharacters).toHaveLength(3);
       expect(second.content.playableCharacters).toHaveLength(3);
+      expect(first.physicalAccounting).toEqual({
+        attemptCount: 4, completedCount: 4,
+        observedUsage: { inputTokens: 12, outputTokens: 24, totalTokens: null },
+        usageCoverage: { inputTokens: 1, outputTokens: 3, totalTokens: 0 },
+        reportedCosts: [{ amount: "0.6", currency: "EUR" }, { amount: "0.1", currency: "USD" }]
+      });
+      expect(second.physicalAccounting).toEqual(first.physicalAccounting);
 
       const attempts = await pool.query<{
         request_body: string; reservation_key: string; outcome: string;
@@ -866,6 +909,13 @@ integration("durable authoring real repository and stage dispatcher", () => {
       for (const rows of scopes.values()) {
         expect(rows).toHaveLength(4);
         expect(new Set(rows.map((row) => row.logical_reservation.invocationId)).size).toBe(4);
+      }
+      const accounting = createPostgresPreparedTextAttemptRepository(pool);
+      for (const requestScopeId of scopes.keys()) {
+        const scope = { kind: "job", ownerUserId, logicalKind: "direct", scopeId: requestScopeId } as const;
+        expect(await accounting.summarize(scope)).toEqual(first.physicalAccounting);
+        expect(await accounting.summarize(scope)).toEqual(first.physicalAccounting);
+        expect((await accounting.summarize({ ...scope, ownerUserId: randomUUID() })).attemptCount).toBe(0);
       }
       const bodies = requestBodies.map((body) => JSON.parse(body));
       expect(bodies.filter((body) => body.response_format.json_schema.name === "infinite_quest_world_outline_v1")).toHaveLength(2);

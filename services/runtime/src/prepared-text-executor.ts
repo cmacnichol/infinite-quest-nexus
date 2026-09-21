@@ -64,6 +64,7 @@ export function createPreparedTextExecutor(input: Readonly<{
   loadAuthority(ownerUserId: string, providerProfileId: string, model: string): Promise<RuntimeTextExecution>;
 }>): PreparedAuthoringTextExecutor {
   return {
+    summarize: (scope) => input.attempts.summarize(scope),
     async execute(execution) {
       if (!execution.logicalReservation) {
         throw Object.assign(new Error("Prepared text execution requires an explicit logical reservation."), {
@@ -171,8 +172,15 @@ export function createPreparedTextExecutor(input: Readonly<{
         }
         throw error;
       }
-      const physicalAccounting = await input.attempts.summarize({ kind: "logical", reservation: execution.logicalReservation });
-      return { ...result.value, physicalAttemptId: result.attemptId, physicalAccounting };
+      let physicalAccounting: Awaited<ReturnType<PhysicalAttemptRepository["summarize"]>> | null = null;
+      try {
+        physicalAccounting = await input.attempts.summarize({ kind: "logical", reservation: execution.logicalReservation });
+      } catch {
+        // The provider response and physical attempt already completed. Keep
+        // successful content; the durable ledger can be read again later.
+      }
+      return { ...result.value, physicalAttemptId: result.attemptId,
+        ...(physicalAccounting ? { physicalAccounting } : {}) };
     }
   };
 }

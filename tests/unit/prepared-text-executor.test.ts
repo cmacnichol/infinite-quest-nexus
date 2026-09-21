@@ -43,15 +43,17 @@ function result(): ProviderResult {
   };
 }
 
-function repository(recordOutput: PhysicalAttemptRepository["recordOutput"]): PhysicalAttemptRepository {
+function repository(recordOutput: PhysicalAttemptRepository["recordOutput"], summarize?: PhysicalAttemptRepository["summarize"]): PhysicalAttemptRepository {
   let row: PhysicalAttemptRecord | null = null;
   return {
-    async summarize() {
+    async summarize(scope) {
+      if (summarize) return summarize(scope);
       return { attemptCount: row ? 1 : 0, completedCount: row?.status === "completed" ? 1 : 0,
         observedUsage: { inputTokens: null, outputTokens: null, totalTokens: null },
         usageCoverage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCosts: [] };
     },
     async reserve(input) {
+      if (row) return row;
       row = {
         id: `attempt-${input.candidateOrdinal}`, status: "reserved", logicalReservation: input.logicalReservation,
         planProvenance: input.planProvenance, candidateOrdinal: input.candidateOrdinal, candidate: input.candidate,
@@ -133,5 +135,17 @@ describe("prepared text executor stream durability", () => {
     expect(externalChunk).not.toHaveBeenCalled();
     expect(execute).toHaveBeenCalledOnce();
     expect(loadAuthority).toHaveBeenCalledOnce();
+  });
+
+  it("keeps successful content when a post-completion accounting read fails and never resends on replay", async () => {
+    const execute = vi.fn(async () => result());
+    const attempts = repository(vi.fn(), vi.fn(async () => { throw new Error("accounting read unavailable"); }));
+    const executor = createPreparedTextExecutor({ attempts, loadAuthority: async () => authority(execute) });
+    const input = executionInput(vi.fn());
+
+    await expect(executor.execute(input)).resolves.toMatchObject({ content: "accepted", physicalAttemptId: "attempt-0" });
+    expect(execute).toHaveBeenCalledOnce();
+    await expect(executor.execute(input)).rejects.toMatchObject({ code: "prepared_route_unknown_outcome" });
+    expect(execute).toHaveBeenCalledOnce();
   });
 });

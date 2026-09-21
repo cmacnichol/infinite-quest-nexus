@@ -37,6 +37,7 @@ import {
   type ProviderResult
 } from "../../../packages/story-engine/src/index.js";
 import { normalizeTextSelection } from "../../../packages/contracts/src/provider-selection.js";
+import type { PhysicalTextAccounting } from "../../../packages/contracts/src/physical-text-accounting.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import type { WorldGenerationProviderCollaborators } from "./provider-application-composition.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
@@ -692,7 +693,7 @@ export async function generateTemplateWorld(
   model?: string,
   onProgress?: (phase: string, percent: number, message: string) => Promise<void> | void,
   textExecutionOverrides?: import("@infinite-quest/contracts").TextExecutionOverrides | null,
-): Promise<{ title: string; content: WorldContent }> {
+): Promise<{ title: string; content: WorldContent; physicalAccounting?: PhysicalTextAccounting }> {
   if (!providerProfileId) {
     logger.error({ ownerUserId, sourceKind: input.sourceKind }, "World generation failed: missing provider profile ID");
     throw Object.assign(new Error("Select a text provider to convert or generate the Story World."), { statusCode: 400 });
@@ -787,9 +788,11 @@ export async function generateTemplateWorld(
 
   await onProgress?.("completed", 100, "World and character generation completed.");
   logger.info({ characterCount: content.playableCharacters.length }, "Completed template world generation successfully");
+  const physicalAccounting = await preparedExecution?.readAccounting?.();
   return {
     title: content.world.title,
-    content
+    content,
+    ...(physicalAccounting ? { physicalAccounting } : {})
   };
 }
 
@@ -809,7 +812,7 @@ export async function generateWorldPreviewForOwner(
   request: WorldGenerationPreviewRequest,
   providers: WorldGenerationProviderCollaborators,
   dependencies: WorldGenerationProviderDependencies
-): Promise<{ title: string; content: WorldContent }> {
+): Promise<{ title: string; content: WorldContent; physicalAccounting?: PhysicalTextAccounting }> {
   const providerResolution = await providers.resolution.resolveDirect({ ownerUserId, providerRole: "text" });
   const providerProfileId = providerResolution.status === "resolved"
     ? providerResolution.providerProfileId
@@ -843,7 +846,7 @@ export async function generateWorldPreviewForOwner(
     });
   }
 
-  let generated: { title: string; content: WorldContent };
+  let generated: { title: string; content: WorldContent; physicalAccounting?: PhysicalTextAccounting };
   try {
     generated = await generateTemplateWorld(
       pool,

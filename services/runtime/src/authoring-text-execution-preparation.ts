@@ -17,7 +17,9 @@ import {
   type TextExecutionPlan,
   type TextExecutionRouteBasis,
   type TextExecutionOverrides,
-  type TextModelSelection
+  type TextModelSelection,
+  type PhysicalTextAccounting,
+  physicalTextAccountingSchema
 } from "@infinite-quest/contracts";
 import { randomUUID } from "node:crypto";
 import { resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
@@ -38,7 +40,7 @@ import {
   type PreparedProviderRequest
 } from "../../../packages/story-engine/src/provider-request.js";
 import type { ProviderRequest, ProviderResult, TextProviderProfile } from "../../../packages/story-engine/src/providers.js";
-import type { LogicalReservation } from "../../../packages/story-engine/src/preset-route-execution.js";
+import type { LogicalReservation, PhysicalAttemptAccountingScope, PhysicalAttemptAccountingSummary } from "../../../packages/story-engine/src/preset-route-execution.js";
 import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import type { ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
@@ -51,6 +53,7 @@ export type PreparedTextExecutionOperation = ResponseContractOperationV2 | Autho
   | "organizer" | "organizerRepair" | "illustrationPromptRefinement";
 
 export type PreparedAuthoringTextExecutor = Readonly<{
+  summarize?(scope: PhysicalAttemptAccountingScope): Promise<PhysicalAttemptAccountingSummary>;
   execute(input: Readonly<{
     plan: TextExecutionPlan;
     operation: PreparedTextExecutionOperation;
@@ -81,6 +84,7 @@ export type DirectAuthoringTextPlanOptions = Readonly<{
 
 export type PreparedDirectAuthoringTextExecution = Readonly<{
   execute(input: Readonly<{ operation: DirectAuthoringTextOperationV2; request: ProviderRequest }>): Promise<ProviderResult>;
+  readAccounting?(): Promise<PhysicalTextAccounting | null>;
 }>;
 
 export type PreparedAuthoringTextPlans = Readonly<{
@@ -401,6 +405,17 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
   const requestScopeId = randomUUID();
   const activeInvocations = new Map<string, string>();
   return Object.freeze({
+    readAccounting: async () => {
+      if (!options.preparedExecutor?.summarize) return null;
+      try {
+        const summary = await options.preparedExecutor.summarize({
+          kind: "job", ownerUserId: input.ownerUserId, logicalKind: "direct", scopeId: requestScopeId
+        });
+        return summary.attemptCount ? physicalTextAccountingSchema.parse(summary) : null;
+      } catch {
+        return null;
+      }
+    },
     execute: async ({ operation, request }) => {
       const identity = directAuthoringResponseContractIdentity(operation);
       const plan = prepared.plans[operation];

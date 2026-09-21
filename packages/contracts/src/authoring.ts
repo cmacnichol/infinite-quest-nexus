@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { physicalTextAccountingSchema } from "./physical-text-accounting.js";
 import { frozenResponseContractsV2Schema } from "./generation-response-contract.js";
 import { authoringTextOperationV2Schema } from "./provider-output-schema.js";
 import { textExecutionPlanSchema, textExecutionRouteBasisSchema } from "./text-execution-plan.js";
@@ -244,8 +245,13 @@ const authoringJobViewFields = {
   incomplete: z.boolean()
 };
 
-const worldConceptJobViewSchema = z.object({
+const authoringJobDetailFields = {
   ...authoringJobViewFields,
+  physicalAccounting: physicalTextAccountingSchema.optional()
+};
+
+const worldConceptJobViewSchema = z.object({
+  ...authoringJobDetailFields,
   kind: z.literal("world_concept"),
   result: worldContentSchema.optional(),
   request: worldConceptSubmitSchema.optional(),
@@ -255,7 +261,7 @@ const worldConceptJobViewSchema = z.object({
 }).strict();
 
 const characterJobViewSchema = z.object({
-  ...authoringJobViewFields,
+  ...authoringJobDetailFields,
   kind: z.literal("character"),
   result: playableCharacterSchema.optional(),
   request: characterSubmitSchema.optional(),
@@ -265,7 +271,7 @@ const characterJobViewSchema = z.object({
 }).strict();
 
 const storySourceJobViewSchema = z.object({
-  ...authoringJobViewFields,
+  ...authoringJobDetailFields,
   kind: z.literal("story_source"),
   target: z.object({ kind: z.literal("new_world") }).strict(),
   request: sourceAuthoringInputSchema.optional(),

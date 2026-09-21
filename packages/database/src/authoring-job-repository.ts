@@ -30,6 +30,8 @@ import {
 } from "../../contracts/src/source-authoring.js";
 import { createHash, randomUUID } from "node:crypto";
 import { canonicalizeWorldContent, playableCharacterSchema, type WorldContent } from "../../contracts/src/world-library.js";
+import { physicalTextAccountingSchema } from "../../contracts/src/physical-text-accounting.js";
+import { createPostgresPreparedTextAttemptRepository } from "./prepared-text-attempt-repository.js";
 import type {
   AuthoringClaim,
   AuthoringExecutionRepository,
@@ -592,7 +594,19 @@ export function createPostgresAuthoringRepository(
     const job = jobs.rows[0];
     if (!job || isDiscardedInput(job.input)) return null;
     const stages = await loadStages([job.id]);
-    return jobView(job, stages.get(job.id) ?? []);
+    const view = jobView(job, stages.get(job.id) ?? []);
+    try {
+      const accounting = await createPostgresPreparedTextAttemptRepository(pool).summarize({
+        kind: "job", ownerUserId: scope.ownerUserId, logicalKind: "authoring", scopeId: job.id
+      });
+      return accounting.attemptCount > 0
+        ? authoringJobViewSchema.parse({ ...view, physicalAccounting: physicalTextAccountingSchema.parse(accounting) })
+        : view;
+    } catch {
+      // A ledger read is optional for the owner-facing job detail; do not hide
+      // an already durable proposal when accounting projection is unavailable.
+      return view;
+    }
   }
 
   async function assertDraftTarget(client: DatabaseClient, scope: OwnerScope, target: { worldId: string; expectedRevision: number; characterId?: string | undefined }): Promise<void> {
