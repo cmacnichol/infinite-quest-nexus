@@ -356,8 +356,8 @@ integration("provider route configuration redaction", () => {
     const originalSnapshot = graph.runtime.presetSaveAuthoritySnapshot.bind(graph.runtime);
     const racedRuntime = Object.freeze({
       ...graph.runtime,
-      presetSaveAuthoritySnapshot: async (ownerUserId: string, providerProfileId: string, lock: boolean, includeCredential: boolean) => {
-        const snapshot = await originalSnapshot(ownerUserId, providerProfileId, lock, includeCredential);
+      presetSaveAuthoritySnapshot: async (ownerUserId: string, providerProfileId: string, lock: boolean) => {
+        const snapshot = await originalSnapshot(ownerUserId, providerProfileId, lock);
         if (!lock) await changeAuthority();
         return snapshot;
       }
@@ -385,6 +385,52 @@ integration("provider route configuration redaction", () => {
     }
   });
 
+  it("does not decrypt a stale saved key after authority switches to a concrete model", async () => {
+    const name = `${baseProviderInput.name} STALE-SWITCHAWAY ${crypto.randomUUID()}`;
+    const originalFetch = transport.fetch;
+    let remoteAttempts = 0;
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {
+        ...baseProviderInput, name, providerType: "openrouter", providerRole: "text", baseUrl: "https://before-switch.test/api/v1",
+        defaultModel: "@preset/night-shift", textSelection: { kind: "openrouter_preset", slug: "night-shift" }, apiKey: "initial-secret", configuration: {}
+      } });
+      expect(created.statusCode).toBe(201);
+      const id = created.json().id as string;
+      const owner = (await pool.query<{ owner_user_id: string }>("SELECT owner_user_id FROM provider_profiles WHERE id=$1", [id])).rows[0]!.owner_user_id;
+      const graph = createApiProviderApplicationComposition(pool, { credentialSecret: routeConfig.credentialEncryptionKey, transport });
+      const originalSnapshot = graph.runtime.presetSaveAuthoritySnapshot.bind(graph.runtime);
+      let authorityChanged = false;
+      const racedRuntime = Object.freeze({
+        ...graph.runtime,
+        presetSaveAuthoritySnapshot: async (ownerUserId: string, providerProfileId: string, lock: boolean) => {
+          if (!lock && !authorityChanged) {
+            authorityChanged = true;
+            await pool.query(
+              "UPDATE provider_profiles SET default_model=$2,text_selection=$3::jsonb,encrypted_api_key='corrupt',credential_nonce='corrupt',credential_auth_tag='corrupt',credential_key_version=1,updated_at=now() WHERE id=$1",
+              [id, "concrete-model", JSON.stringify({ kind: "model", modelId: "concrete-model" })]
+            );
+          }
+          return originalSnapshot(ownerUserId, providerProfileId, lock);
+        }
+      });
+      const racedProviders = createProviderApplicationAdapter({ ...graph, runtime: racedRuntime } as never);
+      const racedApp = await buildServer(serverOptions({ config: routeConfig, pool, providers: racedProviders }));
+      transport.fetch = async () => {
+        remoteAttempts += 1;
+        throw new Error("concrete authority selection must not validate a preset");
+      };
+      try {
+        const saved = await racedApp.inject({ method: "PATCH", url: `/api/v1/providers/${id}`, payload: { baseUrl: "https://after-switch.test/api/v1" } });
+        expect(saved.statusCode).toBe(200);
+        expect(saved.json()).toMatchObject({ baseUrl: "https://after-switch.test/api/v1", textSelection: { kind: "model", modelId: "concrete-model" } });
+        expect(remoteAttempts).toBe(0);
+      } finally {
+        await racedApp.close();
+      }
+    } finally {
+      transport.fetch = originalFetch;
+    }
+  });
   it("allows an explicit replacement key to validate a preset without decrypting a corrupt saved key", async () => {
     const name = `${baseProviderInput.name} REPLACEMENT-KEY ${crypto.randomUUID()}`;
     const created = await app.inject({ method: "POST", url: "/api/v1/providers", payload: {

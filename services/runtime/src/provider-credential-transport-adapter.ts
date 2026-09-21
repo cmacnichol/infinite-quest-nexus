@@ -434,7 +434,7 @@ export function createRuntimeProviderAdapter(options: Readonly<{
       const profile: TextProviderProfile = { providerType: candidate.providerType, baseUrl: candidate.baseUrl.replace(/\/+$/, ""), model: candidate.defaultModel, contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens, temperature: candidate.temperature, requestTimeoutMs: candidate.requestTimeoutMs, configuration: validateProviderConfiguration(candidate.providerType, candidate.configuration, candidate.providerRole), ...(credential?.trim() ? { apiKey: credential.trim() } : {}) };
       return Object.freeze({ providerProfileId: null, preset: await discoverOpenRouterPreset(profile, slug, options.transport, signal) });
     },
-    async presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, lock, includeCredential) {
+    async presetSaveAuthoritySnapshot(ownerUserId, providerProfileId, lock) {
       const result = await options.database.query<{
         name: string; provider_type: ProviderCandidate["providerType"]; provider_role: ProviderRole; base_url: string; default_model: string;
         text_selection: unknown; context_window_tokens: number; max_output_tokens: number; temperature: number; request_timeout_ms: number;
@@ -459,10 +459,13 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         requestTimeoutMs: row.request_timeout_ms, configuration: validateProviderConfiguration(row.provider_type, row.configuration, row.provider_role),
         enabled: row.enabled, isDefault: row.is_default
       } as ProviderCandidate);
-      const credential = includeCredential && row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version
-        ? decryptCredential({ ciphertext: row.encrypted_api_key, nonce: row.credential_nonce, authTag: row.credential_auth_tag, keyVersion: row.credential_key_version }, options.credentialSecret)
+      const capturedCredential = row.encrypted_api_key && row.credential_nonce && row.credential_auth_tag && row.credential_key_version
+        ? Object.freeze({ ciphertext: row.encrypted_api_key, nonce: row.credential_nonce, authTag: row.credential_auth_tag, keyVersion: row.credential_key_version })
         : null;
-      return Object.freeze({ candidate, ...(includeCredential ? { credential } : {}), revision: createHash("sha256").update(JSON.stringify(row)).digest("hex") });
+      const readSavedCredential = () => capturedCredential
+        ? decryptCredential(capturedCredential, options.credentialSecret)
+        : null;
+      return Object.freeze({ candidate, readSavedCredential, revision: createHash("sha256").update(JSON.stringify(row)).digest("hex") });
     },
     async storeCredential(ownerUserId, providerProfileId, credential) {
       const encrypted = credential?.trim()
