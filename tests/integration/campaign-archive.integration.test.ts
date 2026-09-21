@@ -234,7 +234,7 @@ integration("campaign archive export", () => {
     );
     await pool.query(
       `INSERT INTO provider_cost_events (owner_user_id,campaign_id,turn_id,provider_type,category,operation,requested_model,resolved_model,amount,currency,usage_metadata)
-       VALUES ($1,$2,$3,'openai_compatible','image','illustration','fixture-image','fixture-image',0.01,'USD','{}'::jsonb)`,
+       VALUES ($1,$2,$3,'openai_compatible','image','illustration','fixture-image','fixture-image',0.010000000000000123,'USD','{}'::jsonb)`,
       [ownerUserId, campaignId, turnId]
     );
   });
@@ -605,7 +605,7 @@ integration("campaign archive export", () => {
       expect.objectContaining({ id: segmentId, turn_id: turnId, ordinal: 0, direct_prompt: "An archive door.", prompt_source: "direct" })
     ]);
     expect(campaign.archiveRecords.costs).toEqual([
-      expect.objectContaining({ turn_id: turnId, provider_type: "openai_compatible", category: "image", operation: "illustration", amount: "0.01", currency: "USD" })
+      expect.objectContaining({ turn_id: turnId, provider_type: "openai_compatible", category: "image", operation: "illustration", amount: "0.010000000000000123", currency: "USD" })
     ]);
     const chronicle = JSON.parse((await readVerifiedEntry(archive, "chronicle.json", limits.maxJsonEntryBytes)).toString("utf8"));
     expect(chronicle).not.toHaveProperty("chunks");

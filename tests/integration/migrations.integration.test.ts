@@ -35,6 +35,123 @@ integration("standard database migration runner", () => {
     if (pool) await pool.end();
   });
 
+  it("backfills live Story and illustration attempt charges exactly once without attributing orphaned evidence", async () => {
+    const databaseName = `infinitequest_durable_costs_${crypto.randomUUID().replaceAll("-", "")}`;
+    const databaseUrlValue = new URL(databaseUrl!);
+    databaseUrlValue.pathname = `/${databaseName}`;
+    const beforeDirectory = await mkdtemp(join(tmpdir(), "infinitequest-durable-costs-before-"));
+    let isolatedPool: DatabasePool | null = null;
+    try {
+      await pool.query(`CREATE DATABASE ${databaseName}`);
+      for (const file of await readdir(resolve("database/migrations"))) {
+        if (file.endsWith(".sql") && file <= "0100_prepared_text_physical_attempts.sql") {
+          await copyFile(join(resolve("database/migrations"), file), join(beforeDirectory, file));
+        }
+      }
+      isolatedPool = createDatabasePool(databaseUrlValue.toString(), 2);
+      await migrateDatabase(isolatedPool, beforeDirectory);
+      const ownerUserId = (await isolatedPool.query<{ id: string }>(
+        "SELECT id FROM users WHERE system_key='initial-owner'"
+      )).rows[0]!.id;
+      const world = (await isolatedPool.query<{ id: string }>(
+        "INSERT INTO worlds (owner_user_id,title) VALUES ($1,'Durable costs') RETURNING id", [ownerUserId]
+      )).rows[0]!;
+      const version = (await isolatedPool.query<{ id: string }>(
+        "INSERT INTO world_versions (world_id,owner_user_id,version_number,content) VALUES ($1,$2,1,'{}') RETURNING id",
+        [world.id, ownerUserId]
+      )).rows[0]!;
+      const campaign = (await isolatedPool.query<{ id: string }>(
+        "INSERT INTO campaigns (owner_user_id,world_version_id,title) VALUES ($1,$2,'Durable costs') RETURNING id",
+        [ownerUserId, version.id]
+      )).rows[0]!;
+      const turn = (await isolatedPool.query<{ id: string }>(
+        "INSERT INTO turns (owner_user_id,campaign_id,turn_number,narration) VALUES ($1,$2,1,'Accounting turn') RETURNING id",
+        [ownerUserId, campaign.id]
+      )).rows[0]!;
+      const profile = (await isolatedPool.query<{ id: string }>(
+        `INSERT INTO provider_profiles (owner_user_id,name,provider_type,provider_role,base_url,default_model)
+         VALUES ($1,'Durable costs','openrouter','text','http://costs.invalid/v1','cost-model') RETURNING id`, [ownerUserId]
+      )).rows[0]!;
+      const storyJob = (await isolatedPool.query<{ id: string }>(
+        `INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status)
+         VALUES ($1,$2,$3,'durable-cost-story',2,'Count Story cost','failed') RETURNING id`,
+        [ownerUserId, campaign.id, profile.id]
+      )).rows[0]!;
+      const set = (await isolatedPool.query<{ id: string }>(
+        `INSERT INTO turn_illustration_sets (owner_user_id,campaign_id,turn_id,source_text_hash,segment_word_count,images_per_segment,prompt_mode)
+         VALUES ($1,$2,$3,'costs',100,1,'ai_refined') RETURNING id`, [ownerUserId, campaign.id, turn.id]
+      )).rows[0]!;
+      const segment = (await isolatedPool.query<{ id: string }>(
+        `INSERT INTO turn_illustration_segments (owner_user_id,illustration_set_id,campaign_id,turn_id,ordinal,start_offset,end_offset,start_word,end_word,source_text,source_text_hash,direct_prompt)
+         VALUES ($1,$2,$3,$4,0,0,1,0,1,'A costed scene.','costs','A costed scene.') RETURNING id`,
+        [ownerUserId, set.id, campaign.id, turn.id]
+      )).rows[0]!;
+      const promptJob = (await isolatedPool.query<{ id: string }>(
+        `INSERT INTO illustration_prompt_jobs (owner_user_id,campaign_id,turn_id,segment_id,provider_profile_id,requested_model,status,attempts)
+         VALUES ($1,$2,$3,$4,$5,'cost-model','completed',2) RETURNING id`,
+        [ownerUserId, campaign.id, turn.id, segment.id, profile.id]
+      )).rows[0]!;
+      const hashes = ["a".repeat(64), "b".repeat(64)];
+      const insertAttempt = async (kind: "story" | "illustration", reservation: Record<string, string>, responseId: string, amount: string) => {
+        const result = await isolatedPool!.query<{ id: string }>(
+          `INSERT INTO prepared_text_physical_attempts (
+             owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,candidate_ordinal,requested_model,
+             provider_policy,request_payload_hash,request_body,status,outcome,provider_response_id,usage,reported_cost,dispatched_at,completed_at
+           ) VALUES ($1,$2,$3,$4::jsonb,$5,0,'cost-model','{}'::jsonb,$6,'{}','completed','succeeded',$7,
+                     '{"inputTokens":3}'::jsonb,jsonb_build_object('amount',$8::text,'currency','USD'),now(),now()) RETURNING id`,
+          [ownerUserId, kind, `${kind}:${responseId}`, JSON.stringify(reservation), hashes[0], hashes[1], responseId, amount]
+        );
+        return result.rows[0]!.id;
+      };
+      const storyAttempt = await insertAttempt("story", { generationJobId: storyJob.id, invocationId: "missing-legacy-invocation" }, "story-cost", "0.123456789012345678");
+      const illustrationAttempt = await insertAttempt("illustration", { promptJobId: promptJob.id, claimAttempt: "2" }, "illustration-cost", "0.400000000000000001");
+      const failedIllustrationAttempt = (await isolatedPool.query<{ id: string }>(
+        `INSERT INTO prepared_text_physical_attempts (
+           owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,candidate_ordinal,requested_model,
+           provider_policy,request_payload_hash,request_body,status,outcome,failure_reason,usage,reported_cost,dispatched_at,completed_at
+         ) VALUES ($1,'illustration','illustration:charged-failed',$2::jsonb,$3,1,'cost-model','{}'::jsonb,$4,'{}',
+                   'completed','failed','unknown','{"inputTokens":2}'::jsonb,'{"amount":"0.200000000000000001","currency":"USD"}'::jsonb,now(),now()) RETURNING id`,
+        [ownerUserId, JSON.stringify({ promptJobId: promptJob.id }), hashes[0], hashes[1]]
+      )).rows[0]!;
+      const earlierSucceededIllustrationAttempt = (await isolatedPool.query<{ id: string }>(
+        `INSERT INTO prepared_text_physical_attempts (
+           owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,candidate_ordinal,requested_model,
+           provider_policy,request_payload_hash,request_body,status,outcome,usage,reported_cost,dispatched_at,completed_at
+         ) VALUES ($1,'illustration','illustration:invalid-envelope',$2::jsonb,$3,2,'cost-model','{}'::jsonb,$4,'{}',
+                   'completed','succeeded','{"inputTokens":2}'::jsonb,'{"amount":"0.400000000000000001","currency":"USD"}'::jsonb,now(),now()) RETURNING id`,
+        [ownerUserId, JSON.stringify({ promptJobId: promptJob.id, claimAttempt: "1" }), hashes[0], hashes[1]]
+      )).rows[0]!;
+      await insertAttempt("story", { generationJobId: crypto.randomUUID() }, "orphan-story", "0.7");
+      await insertAttempt("illustration", { promptJobId: crypto.randomUUID() }, "orphan-illustration", "0.8");
+      await isolatedPool.query(
+        `INSERT INTO provider_cost_events (
+           owner_user_id,campaign_id,turn_id,provider_profile_id,local_call_id,provider_type,provider_response_id,
+           category,operation,requested_model,resolved_model,amount,currency,usage_metadata
+         ) VALUES ($1,$2,$3,$4,$5,'openrouter','illustration-cost','image','illustration_prompt_refinement',
+                   'cost-model','cost-model','0.400000000000000001','USD','{}'::jsonb)`,
+        [ownerUserId, campaign.id, turn.id, profile.id, promptJob.id]
+      );
+
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
+        .resolves.toEqual(["0101_durable_campaign_physical_attempt_costs"]);
+      expect((await isolatedPool.query<{ local_call_id: string; amount: string; category: string }>(
+        `SELECT local_call_id::text,amount::text,category FROM provider_cost_events
+          WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY category,amount`, [ownerUserId, campaign.id]
+      )).rows).toEqual([
+        { local_call_id: failedIllustrationAttempt.id, amount: "0.200000000000000001", category: "image" },
+        { local_call_id: promptJob.id, amount: "0.400000000000", category: "image" },
+        { local_call_id: earlierSucceededIllustrationAttempt.id, amount: "0.400000000000000001", category: "image" },
+        { local_call_id: storyAttempt, amount: "0.123456789012345678", category: "story" }
+      ]);
+      expect(illustrationAttempt).not.toBe(promptJob.id);
+      await expect(migrateDatabase(isolatedPool, resolve("database/migrations"))).resolves.toEqual([]);
+    } finally {
+      if (isolatedPool) await isolatedPool.end();
+      await dropTestDatabaseWhenIdle(pool, databaseName);
+      await rm(beforeDirectory, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("marks pre-protocol prompt acknowledgements for renewal when 0086 follows 0085", async () => {
     const databaseName = `infinitequest_prompt_protocol_upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
     const databaseUrlValue = new URL(databaseUrl!);
@@ -85,7 +202,8 @@ integration("standard database migration runner", () => {
           "0097_provider_text_selection",
           "0098_illustration_text_execution_snapshot",
           "0099_worker_text_plan_protocol_fences",
-          "0100_prepared_text_physical_attempts"
+          "0100_prepared_text_physical_attempts",
+          "0101_durable_campaign_physical_attempt_costs"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -1781,7 +1899,8 @@ END;
           "0097_provider_text_selection",
           "0098_illustration_text_execution_snapshot",
           "0099_worker_text_plan_protocol_fences",
-          "0100_prepared_text_physical_attempts"
+          "0100_prepared_text_physical_attempts",
+          "0101_durable_campaign_physical_attempt_costs"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2788,7 +2907,8 @@ END;
           "0097_provider_text_selection",
           "0098_illustration_text_execution_snapshot",
           "0099_worker_text_plan_protocol_fences",
-          "0100_prepared_text_physical_attempts"
+          "0100_prepared_text_physical_attempts",
+          "0101_durable_campaign_physical_attempt_costs"
       ]);
 
       // The additive nullable generation-policy column is present after the upgrade;

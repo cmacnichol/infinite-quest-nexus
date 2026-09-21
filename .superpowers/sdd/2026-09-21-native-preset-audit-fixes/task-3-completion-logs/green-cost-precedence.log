@@ -1,0 +1,617 @@
+
+ RUN  v4.1.11 C:/Users/chris/.codex/worktrees/native-openrouter-presets/InfiniteQuest
+
+[2026-09-21 14:32:21.609 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> Migrating files:"
+[2026-09-21 14:32:21.609 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0001_initial_nexus"
+[2026-09-21 14:32:21.609 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0002_owner_scope_constraints"
+[2026-09-21 14:32:21.609 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0003_asset_references"
+[2026-09-21 14:32:21.609 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0004_chronicle_job_deduplication"
+[2026-09-21 14:32:21.609 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0005_story_engine"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0006_typed_story_orchestration"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0007_semantic_chronicle"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0008_world_library"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0009_illustration_pipeline"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0010_provider_profile_defaults"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0011_embedding_model_default"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0012_dynamic_chronicle"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0013_campaign_story_length"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0014_generation_progress"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0015_campaign_cost_events"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0016_provider_request_timeout"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0017_campaign_characters"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0018_initial_state_snapshot"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0019_multi_tenant_hardening"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0020_user_settings"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0021_world_version_deletion"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0022_campaign_state_revisions"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0023_durable_generation_replacement"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0024_structured_canonical_facts"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0025_asset_reference_lifecycle"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0026_campaign_world_transfers"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0027_turn_intent_provider_role"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0028_turn_input_modes"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0029_durable_image_provider_jobs"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0030_world_cover_image_jobs"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0031_context_aware_image_library"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0032_sogni_sdk_provider"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0033_segmented_turn_illustrations"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0034_campaign_illustration_refinement_instructions"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0035_campaign_illustration_refinement_prompt"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0036_structured_character_profiles"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0037_prompt_library"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0038_prompt_library_hardening"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0039_chronicle_entity_identity"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0040_streaming_illustration_pipeline"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0041_allow_streaming_asset_contexts"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0042_json_illustration_refinement_prompt"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0043_world_generation_progress"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0044_api_admission_control"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0045_archive_previews"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0046_archive_preview_superseded"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0047_full_campaign_state_corrections"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0048_cascade_streaming_image_jobs"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0049_cancelled_generation_jobs"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0050_cancel_provisional_illustration_children"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0051_preserve_replacement_turn_provenance"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0052_generation_job_notifications"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0053_durable_asset_portable_operations"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0054_private_filesystem_authority"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0055_private_portable_repository_guards"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0056_private_filesystem_current_clock"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0057_finalized_asset_delivery_authority"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0058_secure_storage_lifecycle"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0059_secure_storage_target_intent"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0060_asset_publication_identities"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0061_portable_import_composition"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0062_portable_import_asset_publications"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0063_portable_legacy_story_asset_publications"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0064_normalized_asset_publication_requests"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0065_illustration_asset_publications"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0066_portable_normalized_asset_publications"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0067_asset_metadata_backfill_executor"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0068_portable_legacy_story_create_world"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0069_import_progress_status"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0070_turn_narration_corrections"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0071_world_share_links"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0072_chronicle_memory_chunks"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0073_chronicle_chunk_job_fencing"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0074_chronicle_retrieval_observability"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0075_chronicle_query_embedding_cache"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0076_chronicle_chunk_skip_reasons"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0077_chronicle_chunk_processed_signature"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0078_system_archive_jobs"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0079_resumable_system_archive_uploads"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0080_published_asset_derivative_reservations"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0081_campaign_story_context_budget"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0082_turn_zero_state_correction_facts"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0083_cleaned_campaign_export_deletion"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0084_generation_authority_identity"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0085_prompt_override_compatibility_acknowledgements"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0086_prompt_override_protocol_acknowledgements"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0087_chronicle_query_cache_access_sequence"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0088_expand_campaign_story_context_budget"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0089_authoring_jobs"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0090_authoring_apply_review_selection"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0091_story_source_authoring"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0092_source_synthesis_review_fence"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0093_portable_source_material_authority_paths"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0094_story_generation_policy"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0095_story_memory_capability_enrollment"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0096_campaign_memory_defaults"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0097_provider_text_selection"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0098_illustration_text_execution_snapshot"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0099_worker_text_plan_protocol_fences"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0100_prepared_text_physical_attempts"
+[2026-09-21 14:32:21.610 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "> - 0101_durable_campaign_physical_attempt_costs"
+[2026-09-21 14:32:21.611 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0001_initial_nexus (UP) ###"
+[2026-09-21 14:32:21.633 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0002_owner_scope_constraints (UP) ###"
+[2026-09-21 14:32:21.638 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0003_asset_references (UP) ###"
+[2026-09-21 14:32:21.640 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0004_chronicle_job_deduplication (UP) ###"
+[2026-09-21 14:32:21.642 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0005_story_engine (UP) ###"
+[2026-09-21 14:32:21.649 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0006_typed_story_orchestration (UP) ###"
+[2026-09-21 14:32:21.652 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0007_semantic_chronicle (UP) ###"
+[2026-09-21 14:32:21.655 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0008_world_library (UP) ###"
+[2026-09-21 14:32:21.660 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0009_illustration_pipeline (UP) ###"
+[2026-09-21 14:32:21.666 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0010_provider_profile_defaults (UP) ###"
+[2026-09-21 14:32:21.668 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0011_embedding_model_default (UP) ###"
+[2026-09-21 14:32:21.670 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0012_dynamic_chronicle (UP) ###"
+[2026-09-21 14:32:21.672 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0013_campaign_story_length (UP) ###"
+[2026-09-21 14:32:21.673 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0014_generation_progress (UP) ###"
+[2026-09-21 14:32:21.675 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0015_campaign_cost_events (UP) ###"
+[2026-09-21 14:32:21.679 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0016_provider_request_timeout (UP) ###"
+[2026-09-21 14:32:21.681 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0017_campaign_characters (UP) ###"
+[2026-09-21 14:32:21.683 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0018_initial_state_snapshot (UP) ###"
+[2026-09-21 14:32:21.684 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0019_multi_tenant_hardening (UP) ###"
+[2026-09-21 14:32:21.689 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0020_user_settings (UP) ###"
+[2026-09-21 14:32:21.691 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0021_world_version_deletion (UP) ###"
+[2026-09-21 14:32:21.694 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0022_campaign_state_revisions (UP) ###"
+[2026-09-21 14:32:21.697 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0023_durable_generation_replacement (UP) ###"
+[2026-09-21 14:32:21.700 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0024_structured_canonical_facts (UP) ###"
+[2026-09-21 14:32:21.704 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0025_asset_reference_lifecycle (UP) ###"
+[2026-09-21 14:32:21.706 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0026_campaign_world_transfers (UP) ###"
+[2026-09-21 14:32:21.709 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0027_turn_intent_provider_role (UP) ###"
+[2026-09-21 14:32:21.711 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0028_turn_input_modes (UP) ###"
+[2026-09-21 14:32:21.715 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0029_durable_image_provider_jobs (UP) ###"
+[2026-09-21 14:32:21.718 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0030_world_cover_image_jobs (UP) ###"
+[2026-09-21 14:32:21.723 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0031_context_aware_image_library (UP) ###"
+[2026-09-21 14:32:21.735 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0032_sogni_sdk_provider (UP) ###"
+[2026-09-21 14:32:21.737 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0033_segmented_turn_illustrations (UP) ###"
+[2026-09-21 14:32:21.750 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0034_campaign_illustration_refinement_instructions (UP) ###"
+[2026-09-21 14:32:21.752 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0035_campaign_illustration_refinement_prompt (UP) ###"
+[2026-09-21 14:32:21.753 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0036_structured_character_profiles (UP) ###"
+[2026-09-21 14:32:21.756 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0037_prompt_library (UP) ###"
+[2026-09-21 14:32:21.759 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0038_prompt_library_hardening (UP) ###"
+[2026-09-21 14:32:21.761 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0039_chronicle_entity_identity (UP) ###"
+[2026-09-21 14:32:21.763 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0040_streaming_illustration_pipeline (UP) ###"
+[2026-09-21 14:32:21.767 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0041_allow_streaming_asset_contexts (UP) ###"
+[2026-09-21 14:32:21.769 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0042_json_illustration_refinement_prompt (UP) ###"
+[2026-09-21 14:32:21.770 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0043_world_generation_progress (UP) ###"
+[2026-09-21 14:32:21.772 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0044_api_admission_control (UP) ###"
+[2026-09-21 14:32:21.775 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0045_archive_previews (UP) ###"
+[2026-09-21 14:32:21.778 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0046_archive_preview_superseded (UP) ###"
+[2026-09-21 14:32:21.780 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0047_full_campaign_state_corrections (UP) ###"
+[2026-09-21 14:32:21.782 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0048_cascade_streaming_image_jobs (UP) ###"
+[2026-09-21 14:32:21.785 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0049_cancelled_generation_jobs (UP) ###"
+[2026-09-21 14:32:21.786 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0050_cancel_provisional_illustration_children (UP) ###"
+[2026-09-21 14:32:21.787 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0051_preserve_replacement_turn_provenance (UP) ###"
+[2026-09-21 14:32:21.789 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0052_generation_job_notifications (UP) ###"
+[2026-09-21 14:32:21.790 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0053_durable_asset_portable_operations (UP) ###"
+[2026-09-21 14:32:21.808 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0054_private_filesystem_authority (UP) ###"
+[2026-09-21 14:32:21.816 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0055_private_portable_repository_guards (UP) ###"
+[2026-09-21 14:32:21.818 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0056_private_filesystem_current_clock (UP) ###"
+[2026-09-21 14:32:21.819 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0057_finalized_asset_delivery_authority (UP) ###"
+[2026-09-21 14:32:21.826 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0058_secure_storage_lifecycle (UP) ###"
+[2026-09-21 14:32:21.829 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0059_secure_storage_target_intent (UP) ###"
+[2026-09-21 14:32:21.831 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0060_asset_publication_identities (UP) ###"
+[2026-09-21 14:32:21.835 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0061_portable_import_composition (UP) ###"
+[2026-09-21 14:32:21.840 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0062_portable_import_asset_publications (UP) ###"
+[2026-09-21 14:32:21.844 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0063_portable_legacy_story_asset_publications (UP) ###"
+[2026-09-21 14:32:21.845 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0064_normalized_asset_publication_requests (UP) ###"
+[2026-09-21 14:32:21.858 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0065_illustration_asset_publications (UP) ###"
+[2026-09-21 14:32:21.862 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0066_portable_normalized_asset_publications (UP) ###"
+[2026-09-21 14:32:21.869 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0067_asset_metadata_backfill_executor (UP) ###"
+[2026-09-21 14:32:21.872 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0068_portable_legacy_story_create_world (UP) ###"
+[2026-09-21 14:32:21.873 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0069_import_progress_status (UP) ###"
+[2026-09-21 14:32:21.876 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0070_turn_narration_corrections (UP) ###"
+[2026-09-21 14:32:21.879 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0071_world_share_links (UP) ###"
+[2026-09-21 14:32:21.882 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0072_chronicle_memory_chunks (UP) ###"
+[2026-09-21 14:32:21.890 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0073_chronicle_chunk_job_fencing (UP) ###"
+[2026-09-21 14:32:21.892 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0074_chronicle_retrieval_observability (UP) ###"
+[2026-09-21 14:32:21.897 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0075_chronicle_query_embedding_cache (UP) ###"
+[2026-09-21 14:32:21.901 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0076_chronicle_chunk_skip_reasons (UP) ###"
+[2026-09-21 14:32:21.902 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0077_chronicle_chunk_processed_signature (UP) ###"
+[2026-09-21 14:32:21.904 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0078_system_archive_jobs (UP) ###"
+[2026-09-21 14:32:21.918 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0079_resumable_system_archive_uploads (UP) ###"
+[2026-09-21 14:32:21.923 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0080_published_asset_derivative_reservations (UP) ###"
+[2026-09-21 14:32:21.924 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0081_campaign_story_context_budget (UP) ###"
+[2026-09-21 14:32:21.926 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0082_turn_zero_state_correction_facts (UP) ###"
+[2026-09-21 14:32:21.927 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0083_cleaned_campaign_export_deletion (UP) ###"
+[2026-09-21 14:32:21.928 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0084_generation_authority_identity (UP) ###"
+[2026-09-21 14:32:21.930 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0085_prompt_override_compatibility_acknowledgements (UP) ###"
+[2026-09-21 14:32:21.931 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0086_prompt_override_protocol_acknowledgements (UP) ###"
+[2026-09-21 14:32:21.933 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0087_chronicle_query_cache_access_sequence (UP) ###"
+[2026-09-21 14:32:21.935 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0088_expand_campaign_story_context_budget (UP) ###"
+[2026-09-21 14:32:21.936 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0089_authoring_jobs (UP) ###"
+[2026-09-21 14:32:21.941 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0090_authoring_apply_review_selection (UP) ###"
+[2026-09-21 14:32:21.943 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0091_story_source_authoring (UP) ###"
+[2026-09-21 14:32:21.944 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0092_source_synthesis_review_fence (UP) ###"
+[2026-09-21 14:32:21.946 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0093_portable_source_material_authority_paths (UP) ###"
+[2026-09-21 14:32:21.947 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0094_story_generation_policy (UP) ###"
+[2026-09-21 14:32:21.950 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0095_story_memory_capability_enrollment (UP) ###"
+[2026-09-21 14:32:21.952 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0096_campaign_memory_defaults (UP) ###"
+[2026-09-21 14:32:21.954 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0097_provider_text_selection (UP) ###"
+[2026-09-21 14:32:21.955 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0098_illustration_text_execution_snapshot (UP) ###"
+[2026-09-21 14:32:21.956 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0099_worker_text_plan_protocol_fences (UP) ###"
+[2026-09-21 14:32:21.961 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0100_prepared_text_physical_attempts (UP) ###"
+[2026-09-21 14:32:21.965 -0400] [32mINFO[39m:
+    [35mevent[39m: "database_migration"
+    [35mmessage[39m: "### MIGRATION 0101_durable_campaign_physical_attempt_costs (UP) ###"
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 11 skipped (12)
+   Start at  14:32:19
+   Duration  2.32s (transform 567ms, setup 74ms, import 1.51s, tests 591ms, environment 0ms)

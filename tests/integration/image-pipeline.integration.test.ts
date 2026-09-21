@@ -157,6 +157,7 @@ integration("independent illustration pipeline", () => {
   const sogniRequests: Array<{ body: Record<string, unknown>; idempotencyKey: string }> = [];
   const storyRequests: Array<Record<string, unknown>> = [];
   const nativeRefinementRequestBodies: string[] = [];
+  let nativeRefinementReportedCost: number | null = null;
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 5);
@@ -250,7 +251,10 @@ integration("independent illustration pipeline", () => {
           response.end(JSON.stringify({
             id: crypto.randomUUID(), model: "synthetic-text-model",
             choices: [{ message: { content: JSON.stringify({ image_prompt: "Mira raises a lantern on a fogbound road, cinematic fantasy illustration" }) }, finish_reason: "stop" }],
-            usage: { prompt_tokens: 301, completion_tokens: 41, total_tokens: 342 }
+            usage: {
+              prompt_tokens: 301, completion_tokens: 41, total_tokens: 342,
+              ...(nativeRefinementReportedCost === null ? {} : { cost: nativeRefinementReportedCost })
+            }
           }));
           return;
         }
@@ -2542,15 +2546,17 @@ integration("independent illustration pipeline", () => {
     );
     await makeOnlyPromptClaimable(pool, target.id);
     const ports = createIllustrationWorkerPorts(pool, graph.illustration);
-    await expect(runNativeIllustrationPromptJob(
-      pool, "task-5c-composed-illustration", 30, ports.promptRefinement, ports.costs, graph.illustration
-    )).resolves.toBe(true);
+    nativeRefinementReportedCost = 0.0064;
+    try {
+      await expect(runNativeIllustrationPromptJob(
+        pool, "task-5c-composed-illustration", 30, ports.promptRefinement, ports.costs, graph.illustration
+      )).resolves.toBe(true);
 
     const attempts = await pool.query<{
-      request_body: string; outcome: string;
+      id: string; request_body: string; outcome: string;
       logical_reservation: { kind: string; ownerUserId: string; promptJobId: string; claimAttempt: number; leaseOwner: string; operation: string };
     }>(
-      `SELECT request_body,outcome,logical_reservation
+      `SELECT id,request_body,outcome,logical_reservation
          FROM prepared_text_physical_attempts
         WHERE logical_kind='illustration' AND logical_reservation->>'promptJobId'=$1`,
       [target.id]
@@ -2566,6 +2572,11 @@ integration("independent illustration pipeline", () => {
         leaseOwner: "task-5c-composed-illustration", operation: "initial"
       }
     });
+    await expect(pool.query<{ count: number; amount: string }>(
+      `SELECT count(*)::int AS count,coalesce(sum(amount),0)::text AS amount
+         FROM provider_cost_events WHERE campaign_id=$1 AND local_call_id=$2`,
+      [imported.campaignId, attempts.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ count: 1, amount: "0.0064" }] });
     const wireBodies = nativeRefinementRequestBodies.slice(wireStart);
     expect(wireBodies).toEqual([attempts.rows[0]!.request_body]);
     const wireBody = JSON.parse(wireBodies[0]!);
@@ -2593,10 +2604,10 @@ integration("independent illustration pipeline", () => {
       pool, "task-5c-composed-regenerated", 30, ports.promptRefinement, ports.costs, graph.illustration
     )).resolves.toBe(true);
     const rebuiltAttempts = await pool.query<{
-      request_body: string; outcome: string;
+      id: string; request_body: string; outcome: string;
       logical_reservation: { kind: string; ownerUserId: string; promptJobId: string; claimAttempt: number; leaseOwner: string; operation: string };
     }>(
-      `SELECT request_body,outcome,logical_reservation
+      `SELECT id,request_body,outcome,logical_reservation
          FROM prepared_text_physical_attempts
         WHERE logical_kind='illustration' AND logical_reservation->>'promptJobId'=$1`,
       [rebuiltTarget.id]
@@ -2619,6 +2630,21 @@ integration("independent illustration pipeline", () => {
     await expect(pool.query<{ status: string }>(
       "SELECT status FROM illustration_prompt_jobs WHERE id=$1", [rebuiltTarget.id]
     )).resolves.toMatchObject({ rows: [{ status: "completed" }] });
+    await expect(pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM provider_cost_events
+        WHERE campaign_id=$1 AND local_call_id IN ($2,$3)`,
+      [imported.campaignId, attempts.rows[0]!.id, rebuiltAttempts.rows[0]!.id]
+    )).resolves.toMatchObject({ rows: [{ count: 2 }] });
+    await pool.query("DELETE FROM illustration_prompt_jobs WHERE id=$1", [target.id]);
+    await pool.query("UPDATE campaigns SET text_provider_profile_id=NULL WHERE id=$1", [imported.campaignId]);
+    await pool.query("DELETE FROM provider_profiles WHERE id=$1", [nativeTextProviderId]);
+    await expect(pool.query<{ count: number; detached: number }>(
+      `SELECT count(*)::int AS count,count(*) FILTER (WHERE provider_profile_id IS NULL)::int AS detached
+         FROM provider_cost_events WHERE campaign_id=$1`, [imported.campaignId]
+    )).resolves.toMatchObject({ rows: [{ count: 2, detached: 2 }] });
+    } finally {
+      nativeRefinementReportedCost = null;
+    }
   });
 
   it("promotes provisional native plans and reconciles final segments with their frozen snapshot", async () => {

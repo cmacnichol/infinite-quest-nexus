@@ -173,6 +173,22 @@ async function lockCampaignCostAttribution(
     [providerProfileId, reservation.ownerUserId]
   );
   if (!profile.rows[0]) return null;
+  const campaign = reservation.kind === "story"
+    ? await client.query<{ campaign_id: string }>(
+      "SELECT campaign_id FROM generation_jobs WHERE id=$1 AND owner_user_id=$2",
+      [reservation.generationJobId, reservation.ownerUserId]
+    )
+    : await client.query<{ campaign_id: string }>(
+      "SELECT campaign_id FROM illustration_prompt_jobs WHERE id=$1 AND owner_user_id=$2",
+      [reservation.promptJobId, reservation.ownerUserId]
+    );
+  const campaignId = campaign.rows[0]?.campaign_id;
+  if (!campaignId) return null;
+  const lockedCampaign = await client.query<{ id: string }>(
+    "SELECT id FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR KEY SHARE",
+    [campaignId, reservation.ownerUserId]
+  );
+  if (!lockedCampaign.rows[0]) return null;
   if (reservation.kind === "story") {
     const locked = await client.query<{
       campaign_id: string; provider_profile_id: string; operation: string;
@@ -188,7 +204,7 @@ async function lockCampaignCostAttribution(
       [reservation.generationJobId, reservation.ownerUserId, reservation.workerId, providerProfileId, reservation.invocationId]
     );
     const row = locked.rows[0];
-    return row ? {
+    return row && row.campaign_id === campaignId ? {
       campaignId: row.campaign_id, providerProfileId: row.provider_profile_id, providerType: profile.rows[0].provider_type,
       generationJobId: reservation.generationJobId, turnId: null, category: "story", operation: row.operation
     } : null;
@@ -203,7 +219,7 @@ async function lockCampaignCostAttribution(
     [reservation.promptJobId, reservation.ownerUserId, reservation.claimAttempt, reservation.leaseOwner, providerProfileId]
   );
   const row = locked.rows[0];
-  return row ? {
+  return row && row.campaign_id === campaignId ? {
     campaignId: row.campaign_id, providerProfileId: row.provider_profile_id, providerType: profile.rows[0].provider_type,
     generationJobId: null, turnId: row.turn_id, category: "image", operation: "illustration_prompt_refinement"
   } : null;

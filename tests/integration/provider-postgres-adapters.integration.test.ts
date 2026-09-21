@@ -14,6 +14,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { createPostgresProviderRepositories, writeEncryptedProviderCredential } from "../../packages/database/src/provider-repository.js";
 import { createPostgresChronicleConfigurationRepository } from "../../packages/database/src/chronicle-repository.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 import { promptCompatibilityRequirement } from "../../packages/contracts/src/prompt-library.js";
 import { encryptCredential } from "../../packages/story-engine/src/credentials.js";
@@ -101,6 +102,7 @@ integration("provider PostgreSQL adapters", () => {
     try {
       if (fixtureOwnerUserIds.length) {
         const parameters = [fixtureOwnerUserIds];
+        await pool.query("DELETE FROM prepared_text_physical_attempts WHERE owner_user_id=ANY($1::uuid[])", parameters);
         await pool.query("DELETE FROM provider_cost_events WHERE owner_user_id=ANY($1::uuid[])", parameters);
         await pool.query("DELETE FROM prompt_template_overrides WHERE owner_user_id=ANY($1::uuid[])", parameters);
         await pool.query("DELETE FROM chronicle_jobs WHERE owner_user_id=ANY($1::uuid[])", parameters);
@@ -966,8 +968,133 @@ integration("provider PostgreSQL adapters", () => {
     });
     const costs = createProviderCostRepository(pool);
     const turnCosts = await costs.getTurnCosts({ ownerUserId: first.ownerUserId, campaignId: first.campaignId, turnIds: [first.turnId] });
-    expect(turnCosts.get(first.turnId)).toMatchObject({ currency: "USD", byCategory: { story: "1.250000000000", image: "0", memory: "0" } });
+    expect(turnCosts.get(first.turnId)).toMatchObject({ currency: "USD", byCategory: { story: "1.250", image: "0", memory: "0" } });
     expect(await costs.getTurnCosts({ ownerUserId: second.ownerUserId, campaignId: first.campaignId, turnIds: [first.turnId] })).toEqual(new Map());
     await expect(costs.getCampaignCostSummary({ ownerUserId: second.ownerUserId, campaignId: first.campaignId })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("uses stable events over legacy attempts and scopes response identity to the provider type", async () => {
+    const scoped = await fixture("durable-cost-precedence");
+    const profile = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile(profileCommand(scoped.ownerUserId, `Physical duplicate ${crypto.randomUUID()}`))
+    );
+    const otherProviderProfile = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile({
+        ...profileCommand(scoped.ownerUserId, `Other provider ${crypto.randomUUID()}`),
+        providerType: "openrouter"
+      })
+    );
+    const job = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status)
+       VALUES ($1,$2,$3,$4,2,'Exercise durable accounting','failed') RETURNING id`,
+      [scoped.ownerUserId, scoped.campaignId, profile.id, crypto.randomUUID()]
+    );
+    const responseId = `legacy-provider-response-${crypto.randomUUID()}`;
+    const attempt = await pool.query<{ id: string }>(
+      `INSERT INTO prepared_text_physical_attempts (
+         owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,
+         candidate_ordinal,requested_model,provider_policy,request_payload_hash,request_body,
+         status,outcome,provider_response_id,usage,reported_cost,dispatched_at,completed_at
+       ) VALUES ($1,'story',$2,$3::jsonb,$4,0,'legacy-model','{}'::jsonb,$5,'{}','completed','succeeded',$6,
+                 '{"inputTokens":3}'::jsonb,'{"amount":"0.5000000000001","currency":"USD"}'::jsonb,now(),now()) RETURNING id`,
+      [scoped.ownerUserId, `legacy-cost:${job.rows[0]!.id}`, JSON.stringify({ generationJobId: job.rows[0]!.id }), "a".repeat(64), "b".repeat(64), responseId]
+    );
+    await pool.query(
+      `INSERT INTO provider_cost_events (
+         owner_user_id,campaign_id,turn_id,provider_profile_id,local_call_id,provider_type,provider_response_id,
+         category,operation,requested_model,resolved_model,amount,currency,usage_metadata
+       ) VALUES ($1,$2,$3,$4,$5,'openai_compatible',$6,'story','story_generation','legacy-model','legacy-model',
+                 '0.2500000000001','USD','{"inputTokens":3}'::jsonb)`,
+      [scoped.ownerUserId, scoped.campaignId, scoped.turnId, profile.id, attempt.rows[0]!.id, responseId]
+    );
+    await pool.query(
+      `INSERT INTO provider_cost_events (
+         owner_user_id,campaign_id,turn_id,provider_profile_id,local_call_id,provider_type,provider_response_id,
+         category,operation,requested_model,resolved_model,amount,currency,usage_metadata
+       ) VALUES ($1,$2,$3,$4,$5,'openrouter',$6,'story','story_generation','legacy-model','legacy-model',
+                 '0.1000000000000','USD','{"inputTokens":1}'::jsonb)`,
+      [scoped.ownerUserId, scoped.campaignId, scoped.turnId, otherProviderProfile.id, crypto.randomUUID(), responseId]
+    );
+
+    const costs = createProviderCostRepository(pool);
+    await expect(costs.getCampaignCostSummary({ ownerUserId: scoped.ownerUserId, campaignId: scoped.campaignId }))
+      .resolves.toEqual(expect.objectContaining({ totals: [expect.objectContaining({
+        currency: "USD", amount: "0.3500000000001", turnAttributed: "0.3500000000001",
+        byCategory: { story: "0.3500000000001", image: "0", memory: "0" }
+      })] }));
+  });
+
+  it("locks the campaign before the active Story claim and leaves rewind invalid while the claim remains active", async () => {
+    const scoped = await fixture("completion-rewind-lock-order");
+    const profile = await inTransaction((client) =>
+      createPostgresProviderRepositories(client).profiles.createProfile(profileCommand(scoped.ownerUserId, `Lock order ${crypto.randomUUID()}`))
+    );
+    const workerId = `task3-completion-${crypto.randomUUID()}`;
+    const invocationId = crypto.randomUUID();
+    const job = await pool.query<{ id: string }>(
+      `INSERT INTO generation_jobs (
+         owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status,
+         lease_owner,lease_expires_at,orchestration_private
+       ) VALUES ($1,$2,$3,$4,2,'Exercise completion and rewind lock order','generating',$5,now()+interval '5 minutes',
+                 jsonb_build_object('responseContractInvocations',jsonb_build_array(jsonb_build_object('id',$6::text,'operation','story_generation','status','dispatched'))))
+       RETURNING id`,
+      [scoped.ownerUserId, scoped.campaignId, profile.id, crypto.randomUUID(), workerId, invocationId]
+    );
+    const reservation = {
+      kind: "story" as const,
+      ownerUserId: scoped.ownerUserId,
+      generationJobId: job.rows[0]!.id,
+      invocationId,
+      workerId
+    };
+    const attempt = await pool.query<{ id: string }>(
+      `INSERT INTO prepared_text_physical_attempts (
+         owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,candidate_ordinal,
+         requested_model,provider_policy,request_payload_hash,request_body,status,dispatched_at
+       ) VALUES ($1,'story',$2,$3::jsonb,$4,0,'lock-order-model','{}'::jsonb,$5,'{}','dispatched',now()) RETURNING id`,
+      [scoped.ownerUserId, `${job.rows[0]!.id}:${invocationId}`, JSON.stringify(reservation), "a".repeat(64), "b".repeat(64)]
+    );
+    const campaignLock = await pool.connect();
+    try {
+      await campaignLock.query("BEGIN");
+      await campaignLock.query("SELECT id FROM campaigns WHERE id=$1 FOR UPDATE", [scoped.campaignId]);
+      const completion = createPostgresPreparedTextAttemptRepository(pool).complete(reservation, attempt.rows[0]!.id, {
+        outcome: "failed", failureReason: "unknown", providerResponseId: null, returnedModel: "lock-order-model",
+        returnedProviderRoute: null, usage: null, reportedCost: { amount: "0.01", currency: "USD" }, emittedOutput: false
+      });
+      let completionIsWaitingForCampaign = false;
+      for (let attemptNumber = 0; attemptNumber < 100; attemptNumber += 1) {
+        const waiting = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS(
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname=current_database() AND wait_event_type='Lock'
+                AND query LIKE '%FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR KEY SHARE%'
+           ) AS waiting`
+        );
+        if (waiting.rows[0]?.waiting) {
+          completionIsWaitingForCampaign = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(completionIsWaitingForCampaign).toBe(true);
+      await campaignLock.query("SET LOCAL lock_timeout='250ms'");
+      await expect(campaignLock.query("SELECT id FROM generation_jobs WHERE id=$1 FOR UPDATE", [job.rows[0]!.id]))
+        .resolves.toMatchObject({ rowCount: 1 });
+      await campaignLock.query("COMMIT");
+      expect(await completion).toMatchObject({ id: attempt.rows[0]!.id, status: "completed" });
+    } finally {
+      try {
+        await campaignLock.query("ROLLBACK");
+      } finally {
+        campaignLock.release();
+      }
+    }
+    // The completed physical attempt does not alter the active generation claim.
+    // A rewind therefore still resolves through the existing invalid-transition path.
+    const activeClaim = await pool.query<{ status: string; lease_owner: string | null }>(
+      "SELECT status,lease_owner FROM generation_jobs WHERE id=$1", [job.rows[0]!.id]
+    );
+    expect(activeClaim.rows).toEqual([{ status: "generating", lease_owner: workerId }]);
   });
 });
