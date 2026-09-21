@@ -64,3 +64,7 @@ Requirement proof is spread across independently approved task slices and final 
 The 11 [versioned browser captures](../assets/native-openrouter-presets/) came from the Task7 approved browser fixture run. Nine remain byte-identical to the reviewed Task7 source captures; `settings-desktop-overrides-explicit.png` and `story-mobile-profile.png` were refreshed from the final passing Task8 browser rerun. The six principal detail/diagnostic captures remained byte-identical. Settings desktop/mobile and Story desktop/mobile details, trusted-Preset and verified-Model diagnostics are represented. The three existing `../assets/structured-output/` baselines were also refreshed by the final browser run. These are rendered fixture evidence, not provider compatibility certification.
 
 The operational [rollout](rollout.md) keeps admission default-off, requires all workers upgraded, and drains/pauses immutable jobs before application rollback. The [acceptance status](acceptance-status.md) and [decisions](implementation-decisions.md) record the completed independent review and preserve the exact source boundaries of each verification run.
+
+## Five-fix audit follow-up (2026-09-21)
+
+The [audit completion report](audit-fixes-2026-09-21.md) records the five subsequent fixes, source-specific verification, migration 0101, browser captures, and remaining operational limits. Earlier results above remain tied to their original source revisions.

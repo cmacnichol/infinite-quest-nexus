@@ -31,3 +31,7 @@ This branch implements native preset support in the API/runtime/persistence and 
 | Independent final review | Complete: whole-branch requirement audit plus scoped fix reviews closed all findings through `ab918be1`. Source-specific test limits and historical RED provenance remain explicit in [final review](final-review.md). |
 
 The [implementation decisions](implementation-decisions.md) record the binding tradeoffs. The [probe plan](probe-plan.md) names the missing private settings before any separately authorized live test.
+
+## Five-fix audit follow-up (2026-09-21)
+
+The [audit completion report](audit-fixes-2026-09-21.md) records the five subsequent fixes, source-specific verification, migration 0101, browser captures, and remaining operational limits. Earlier results above remain tied to their original source revisions.
