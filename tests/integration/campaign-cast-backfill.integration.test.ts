@@ -72,4 +72,68 @@ describe("accepted-history scan preview", () => {
     expect(await createCastBackfillRepository(pool).preview(f.scope, f.request, f.execution))
       .toMatchObject({ completedTurns: 0, completedChunkReceipts: 0, estimatedChunkRequests: 2 });
   });
+  it("persists a frozen Start and returns it after repository restart without duplicate work", async () => {
+    const f = await fixture(), repo = createCastBackfillRepository(pool, () => true);
+    const first = await repo.start(f.scope, f.request, f.execution);
+    expect(first).toMatchObject({ fromTurn: 1, throughTurn: 3, completeTurns: 0, failedTurns: 0, pendingReviewCount: 0, status: "queued" });
+    const changedExecution = { ...f.execution, providerProfileId: randomUUID() };
+    expect(await createCastBackfillRepository(pool, () => true).start(f.scope, f.request, changedExecution)).toEqual(first);
+    const stored = (await pool.query("SELECT execution_snapshot FROM campaign_cast_scans WHERE id=$1", [first.id])).rows[0];
+    expect(stored.execution_snapshot).toEqual(f.execution);
+    const items = (await pool.query("SELECT source FROM campaign_cast_scan_sources WHERE scan_id=$1 ORDER BY turn_number", [first.id])).rows;
+    expect(items).toHaveLength(3);
+    expect(items[0].source).toMatchObject({ turnId: f.turnIds[0], narrationRevision: 0, scope: f.scope });
+    await pool.query("UPDATE turns SET narration='Changed after Start.' WHERE id=$1", [f.turnIds[0]]);
+    expect((await pool.query("SELECT source FROM campaign_cast_scan_sources WHERE scan_id=$1 AND turn_number=1", [first.id])).rows[0].source).toEqual(items[0].source);
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_scans WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(1);
+  });
+  it("serializes concurrent Starts and rejects changed payloads under the same key", async () => {
+    const f = await fixture(), repo = createCastBackfillRepository(pool, () => true);
+    const attempts = await Promise.allSettled([repo.start(f.scope, f.request, f.execution),
+      repo.start(f.scope, { ...f.request, idempotencyKey: "different" }, f.execution)]);
+    expect(attempts.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter(result => result.status === "rejected")).toHaveLength(1);
+    const winner = attempts[0]!.status === "fulfilled" ? f.request : { ...f.request, idempotencyKey: "different" };
+    await expect(repo.start(f.scope, { ...winner, fromTurn: 2 }, f.execution)).rejects.toMatchObject({ code: "cast_idempotency_conflict" });
+  });
+  it("rejects disabled, foreign and stale Starts without persisting scans", async () => {
+    const f = await fixture();
+    await expect(createCastBackfillRepository(pool).start(f.scope, f.request, f.execution)).rejects.toMatchObject({ code: "cast_discovery_disabled" });
+    const repo = createCastBackfillRepository(pool, () => true);
+    await expect(repo.start({ ...f.scope, ownerUserId: randomUUID() }, f.request, f.execution)).rejects.toMatchObject({ code: "cast_not_found" });
+    await expect(repo.start(f.scope, { ...f.request, expectedBoundary: { turnNumber: 3, timelineRevision: 1 } }, f.execution)).rejects.toThrow("cast_stale_boundary");
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_scans WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(0);
+  });
+  it("retains partial completion through pause, resume and cancellation, including when disabled", async () => {
+    const f = await fixture();
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: f.execution, enabled: true }));
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), claim = (await jobs.claim("scan-existing"))!;
+    await jobs.checkpoint(claim, { version: 1, characters: [] });
+    await jobs.publish(claim);
+    const repo = createCastBackfillRepository(pool, () => true), started = await repo.start(f.scope, f.request, f.execution);
+    expect(started.completeTurns).toBe(1);
+    expect(await repo.control(f.scope, started.id, "pause")).toMatchObject({ status: "paused", completeTurns: 1 });
+    expect(await repo.control(f.scope, started.id, "resume")).toMatchObject({ status: "queued", completeTurns: 1 });
+    const disabled = createCastBackfillRepository(pool);
+    await expect(disabled.control(f.scope, started.id, "resume")).rejects.toMatchObject({ code: "cast_discovery_disabled" });
+    expect(await disabled.control(f.scope, started.id, "cancel")).toMatchObject({ status: "cancelled", completeTurns: 1 });
+    expect(await disabled.get(f.scope, started.id)).toMatchObject({ status: "cancelled", completeTurns: 1 });
+    await expect(repo.control(f.scope, started.id, "resume")).rejects.toMatchObject({ code: "cast_revision_conflict" });
+    await expect(repo.get({ ...f.scope, ownerUserId: randomUUID() }, started.id)).rejects.toMatchObject({ code: "cast_not_found" });
+    expect((await repo.start(f.scope, { ...f.request, idempotencyKey: "new-after-cancel" }, f.execution)).id).not.toBe(started.id);
+  });
+  it("reports unresolved identity decisions separately when reusing a completed turn", async () => {
+    const f = await fixture();
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: f.execution, enabled: true }));
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), claim = (await jobs.claim("scan-decisions"))!;
+    await jobs.checkpoint(claim, { version: 1, characters: [] });
+    await jobs.publish(claim);
+    await pool.query(`INSERT INTO campaign_cast_discovery_candidates(owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason)
+      VALUES($1,$2,$3,0,'ambiguous',$4,'{}','ambiguous_identity')`, [f.scope.ownerUserId, f.scope.campaignId, claim.id, JSON.stringify(claim.source)]);
+    const repo = createCastBackfillRepository(pool, () => true);
+    const scan = await repo.start(f.scope, { ...f.request, throughTurn: 1 }, f.execution);
+    expect(scan).toMatchObject({ status: "complete", completeTurns: 1, failedTurns: 0, pendingReviewCount: 1 });
+    await pool.query("UPDATE campaign_cast_discovery_candidates SET status='resolved' WHERE job_id=$1", [claim.id]);
+    expect(await repo.get(f.scope, scan.id)).toMatchObject({ pendingReviewCount: 0 });
+  });
 });

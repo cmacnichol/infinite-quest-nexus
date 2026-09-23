@@ -27,3 +27,15 @@ The strict shared preview schema rejects inconsistent range counts, out-of-range
 This slice has no API/runtime caller yet. It does not freeze a durable scan at Start; that is the next implementation step. The scheduler must revalidate under the campaign lock, persist source identities and execution, enforce one active scan and idempotent Start, then integrate forward priority, pause/cancel and lifecycle fences before exposure. No migration or archive classification has changed yet.
 
 Full unit verification after preview: 4,434 passed and 44 skipped across 352 files (`.tmp/campaign-cast/phase6-preview-unit.log`). No browser interaction or live provider was exercised; preview currently has no rendered surface and invokes no provider.
+
+## Durable Start and persisted controls
+
+Migration `0110_campaign_cast_backfill.sql` adds owner/campaign-scoped scans and frozen per-turn sources. A partial unique index permits one nonterminal scan per campaign; campaign locking serializes Start. Idempotency binds the user request, so a repeated key returns the original scan and frozen execution even if current provider selection changes. A conflicting payload under that key is rejected. Initial completed sources reuse matching phase-04 receipts; pending identity decisions are counted separately from scan failures.
+
+The repository now implements Start, get, pause, resume and cancel. New Start and resume default to disabled; read, pause and cancel remain available. Cancellation preserves completed/failed counts and applied evidence. A cancelled scan cannot resume, but a new explicit Start may reuse its existing discovery receipts. Scan operational rows are excluded from portable archives. The down migration refuses to discard retained scans; disable admission for rollback.
+
+TDD evidence: three Start tests failed before persistence; the partial-progress control test failed before transitions; the unresolved-decision test failed against the initial zero count. All nine new PostgreSQL tests then passed. The combined backfill, discovery and cast-portability run passed 62 tests (`.tmp/campaign-cast/phase6-start-pg.log`). TypeScript and diff checks passed.
+
+This is still an internal repository slice, not a usable scan feature. No worker schedules these rows, no API exposes them, and no capability was enabled. Next connect per-turn scheduling to existing discovery checkpoints with forward priority; stop new dispatch on pause and fence cancellation/in-flight publication; revalidate frozen sources and lifecycle changes; update coverage without claiming gaps; then expose legacy UI controls and verify them in a browser. Controls currently cover persisted scan state only and must gain those worker/lifecycle effects before phase acceptance.
+
+Full unit verification after durable Start: 4,434 passed and 44 skipped across 352 files (`.tmp/campaign-cast/phase6-start-unit.log`), including migration ordering and table-classification inventory. Only the isolated PostgreSQL test database received migration 0110. No deployment, production data, rendered UI or live-provider calls were involved.
