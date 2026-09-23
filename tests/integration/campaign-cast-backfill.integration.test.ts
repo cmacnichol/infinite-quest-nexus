@@ -7,6 +7,7 @@ import { createCastBackfillRepository } from "../../packages/database/src/campai
 import { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } from "../../packages/database/src/campaign-cast-job-repository.js";
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
+import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
 
 describe("accepted-history scan preview", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -135,5 +136,80 @@ describe("accepted-history scan preview", () => {
     expect(scan).toMatchObject({ status: "complete", completeTurns: 1, failedTurns: 0, pendingReviewCount: 1 });
     await pool.query("UPDATE campaign_cast_discovery_candidates SET status='resolved' WHERE job_id=$1", [claim.id]);
     expect(await repo.get(f.scope, scan.id)).toMatchObject({ pendingReviewCount: 0 });
+  });
+  it("schedules frozen sources in order and resumes from durable discovery receipts", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    const jobs = createCastDiscoveryJobRepository(pool, () => true);
+    for (let n = 1; n <= 3; n++) {
+      expect(await scans.scheduleNext()).toBe(true);
+      const claim = (await jobs.claim("history-scan"))!;
+      expect(claim.source.turnNumber).toBe(n);
+      expect(claim.execution).toEqual(f.execution);
+      await jobs.checkpoint(claim, { version: 1, characters: [] });
+      expect(await jobs.publish(claim)).toBe("complete");
+    }
+    await createCastBackfillRepository(pool, () => true).scheduleNext();
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "complete", completeTurns: 3 });
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(3);
+  });
+  it("does not schedule paused scans and cancels stale frozen sources", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    await scans.control(f.scope, scan.id, "pause");
+    expect(await scans.scheduleNext()).toBe(false);
+    await scans.control(f.scope, scan.id, "resume");
+    await pool.query("UPDATE turns SET narration='Replaced narration.' WHERE id=$1", [f.turnIds[0]]);
+    await scans.scheduleNext();
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "cancelled", completeTurns: 0 });
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(0);
+  });
+  it("prioritizes forward work, skips paused scan jobs and fences cancelled publication", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[2]!, execution: f.execution, enabled: true }));
+    const jobs = createCastDiscoveryJobRepository(pool, () => true);
+    const forward = (await jobs.claim("forward-priority"))!;
+    expect(forward.source.turnNumber).toBe(3);
+    await jobs.checkpoint(forward, { version: 1, characters: [] });
+    await jobs.publish(forward);
+    await scans.control(f.scope, scan.id, "pause");
+    expect(await jobs.claim("paused-scan")).toBeNull();
+    await scans.control(f.scope, scan.id, "resume");
+    const historical = (await jobs.claim("resumed-scan"))!;
+    expect(historical.source.turnNumber).toBe(1);
+    await jobs.checkpoint(historical, { version: 1, characters: [] });
+    await scans.control(f.scope, scan.id, "cancel");
+    expect(await jobs.publish(historical)).toBe("lost_lease");
+    expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_receipts WHERE job_id=$1", [historical.id])).rows[0].n).toBe(0);
+  });
+  it.each([false, true])("cancels scans at the lifecycle boundary without converting scan jobs to forward work (scheduled=%s)", async scheduled => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    if (scheduled) await scans.scheduleNext();
+    await withTransaction(pool, async client => {
+      await client.query("UPDATE turns SET narration='Corrected narration.' WHERE id=$1", [f.turnIds[0]]);
+      await applyCastBoundaryChange(client, f.scope, { turnNumber: 3, changeKey: "scan-correction" });
+    });
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "cancelled" });
+    expect(await createCastDiscoveryJobRepository(pool, () => true).claim("after-correction")).toBeNull();
+  });
+  it("retains newly published progress when cancellation precedes the next scheduler tick", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), claim = (await jobs.claim("cancel-after-publish"))!;
+    await jobs.checkpoint(claim, { version: 1, characters: [] });
+    await jobs.publish(claim);
+    expect(await scans.control(f.scope, scan.id, "cancel")).toMatchObject({ status: "cancelled", completeTurns: 1 });
+  });
+  it("prioritizes forward discovery across campaigns as well as within one campaign", async () => {
+    const fixtures = [await fixture(), await fixture()].sort((a, b) => a.scope.campaignId.localeCompare(b.scope.campaignId));
+    const older = fixtures[0]!, newer = fixtures[1]!, scans = createCastBackfillRepository(pool, () => true);
+    await scans.start(older.scope, older.request, older.execution);
+    await scans.scheduleNext();
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: newer.scope, turnId: newer.turnIds[0]!, execution: newer.execution, enabled: true }));
+    expect((await createCastDiscoveryJobRepository(pool, () => true).claim("global-priority"))?.scope).toEqual(newer.scope);
   });
 });

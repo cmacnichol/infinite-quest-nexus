@@ -187,14 +187,25 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         // Lock campaign before job, matching accepted-turn and manual editing order.
         const candidate = (await client.query(`SELECT c.id FROM campaigns c WHERE EXISTS (
           SELECT 1 FROM campaign_cast_discovery_jobs j WHERE j.campaign_id=c.id
+          AND (j.scan_id IS NULL OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status IN ('queued','running')))
           AND ((j.status IN ('queued','retry_wait') AND j.available_at<=clock_timestamp()) OR (j.status='running' AND j.lease_expires_at<=clock_timestamp()))
           AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs earlier WHERE earlier.campaign_id=j.campaign_id
-            AND earlier.status NOT IN ('complete','cancelled') AND (earlier.turn_number<j.turn_number OR (earlier.turn_number=j.turn_number AND earlier.created_at<j.created_at)))
+            AND earlier.status NOT IN ('complete','cancelled')
+            AND (earlier.scan_id IS NULL OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=earlier.scan_id AND s.status IN ('queued','running')))
+            AND (CASE WHEN earlier.scan_id IS NULL THEN 0 ELSE 1 END,earlier.turn_number,earlier.created_at,earlier.id)
+              < (CASE WHEN j.scan_id IS NULL THEN 0 ELSE 1 END,j.turn_number,j.created_at,j.id))
           AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs live WHERE live.campaign_id=j.campaign_id AND live.status='running' AND live.lease_expires_at>clock_timestamp())
-        ) ORDER BY c.id FOR UPDATE OF c SKIP LOCKED LIMIT 1`)).rows[0];
+        ) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs f WHERE f.campaign_id=c.id
+          AND f.scan_id IS NULL AND f.status NOT IN ('complete','cancelled')) THEN 0 ELSE 1 END,c.id
+        FOR UPDATE OF c SKIP LOCKED LIMIT 1`)).rows[0];
         if (!candidate || !enabled()) return null;
+        // An expired paused lease must not retain the campaign's unique running slot.
+        await client.query(`UPDATE campaign_cast_discovery_jobs j SET status='queued',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL
+          WHERE campaign_id=$1 AND status='running' AND lease_expires_at<=clock_timestamp()
+            AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status='paused')`, [candidate.id]);
         const job = (await client.query(`SELECT * FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND status NOT IN ('complete','cancelled')
-          ORDER BY turn_number,created_at,id FOR UPDATE LIMIT 1`, [candidate.id])).rows[0];
+          AND (scan_id IS NULL OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=scan_id AND s.status IN ('queued','running')))
+          ORDER BY CASE WHEN scan_id IS NULL THEN 0 ELSE 1 END,turn_number,created_at,id FOR UPDATE LIMIT 1`, [candidate.id])).rows[0];
         if (!job || job.status === "failed") return null;
         if (job.attempt >= 2 && job.checkpoint === null) {
           await client.query("UPDATE campaign_cast_discovery_jobs SET status='failed',diagnostic_code='provider_failed',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [job.id]);

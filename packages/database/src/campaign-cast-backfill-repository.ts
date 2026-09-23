@@ -1,11 +1,11 @@
-import { castScopeSchema, castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, CAST_DISCOVERY_PROTOCOL, type CastDiscoverySource, type CastScope, type CastBackfillRequest } from "@infinite-quest/contracts";
+import { castScopeSchema, castDiscoverySourceSchema, castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, CAST_DISCOVERY_PROTOCOL, type CastDiscoverySource, type CastScope, type CastBackfillRequest } from "@infinite-quest/contracts";
 import type { CastDiscoveryExecution } from "../../application/src/campaign-cast/discovery.js";
 import { validateCastBackfillRange } from "../../application/src/campaign-cast/backfill.js";
 import { CampaignCastError } from "../../application/src/campaign-cast/ports.js";
 import { buildCastDiscoverySource, chunkCastDiscoverySource } from "../../domain/src/campaign-cast-discovery.js";
 import { withTransaction, type DatabasePool, type DatabaseClient } from "./pool.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
-import { readCastDiscoveryExecution } from "./campaign-cast-job-repository.js";
+import { enqueueCastDiscoveryWithClient, readCastDiscoveryExecution } from "./campaign-cast-job-repository.js";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
 import { z } from "zod";
 
@@ -27,6 +27,65 @@ async function readProgress(client: DatabaseClient, scope: CastScope, id: string
 
 export function createCastBackfillRepository(pool: DatabasePool, enabled = () => false) {
   return {
+    async scheduleNext() {
+      if (!enabled()) return false;
+      return withTransaction(pool, async client => {
+        const campaign = (await client.query(`SELECT c.id,c.owner_user_id,c.active_turn_number FROM campaigns c
+          WHERE EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.campaign_id=c.id AND s.status IN ('queued','running'))
+          ORDER BY c.id FOR UPDATE OF c SKIP LOCKED LIMIT 1`)).rows[0];
+        if (!campaign || !enabled()) return false;
+        const scope = { campaignId: campaign.id as string, ownerUserId: campaign.owner_user_id as string };
+        const scan = (await client.query("SELECT * FROM campaign_cast_scans WHERE campaign_id=$1 AND status IN ('queued','running') FOR UPDATE", [scope.campaignId])).rows[0];
+        const items = (await client.query("SELECT * FROM campaign_cast_scan_sources WHERE scan_id=$1 ORDER BY turn_number", [scan.id])).rows;
+        const state = (await client.query("SELECT timeline_revision FROM campaign_cast_state WHERE campaign_id=$1", [scope.campaignId])).rows[0];
+        for (const item of items) {
+          const source = castDiscoverySourceSchema.parse(item.source);
+          const current = (await client.query(`SELECT effective_narration,correction_revision,turn_number FROM effective_turn_narrations
+            WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3`, [source.turnId, scope.campaignId, scope.ownerUserId])).rows[0];
+          if (source.scope.campaignId !== scope.campaignId || source.scope.ownerUserId !== scope.ownerUserId
+            || !current || current.turn_number !== source.turnNumber || source.turnNumber > campaign.active_turn_number
+            || current.correction_revision !== source.narrationRevision || sha256(current.effective_narration) !== source.sourceHash
+            || (state?.timeline_revision ?? 0) !== source.timelineRevision) {
+            await cancelScan(client, scan.id);
+            return true;
+          }
+        }
+        // Publication and coverage changes wait for active Story generation to finish.
+        if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
+          AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
+        [scope.campaignId, scope.ownerUserId])).rows.length) return false;
+        for (const item of items) {
+          if (item.status === "complete") continue;
+          if (item.status === "failed") {
+            await client.query("UPDATE campaign_cast_scans SET status='failed',updated_at=clock_timestamp() WHERE id=$1", [scan.id]);
+            return true;
+          }
+          const source = castDiscoverySourceSchema.parse(item.source);
+          const existing = (await client.query(`SELECT id,status FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND owner_user_id=$2
+            AND turn_id=$3 AND narration_revision=$4 AND timeline_revision=$5 AND source_hash=$6 AND protocol=$7`,
+          [scope.campaignId, scope.ownerUserId, source.turnId, source.narrationRevision, source.timelineRevision, source.sourceHash, CAST_DISCOVERY_PROTOCOL])).rows[0];
+          if (existing?.status === "complete") {
+            await client.query("UPDATE campaign_cast_scan_sources SET status='complete' WHERE scan_id=$1 AND turn_number=$2", [scan.id, source.turnNumber]);
+            continue;
+          }
+          if (existing?.status === "failed") {
+            await client.query("UPDATE campaign_cast_scan_sources SET status='failed' WHERE scan_id=$1 AND turn_number=$2", [scan.id, source.turnNumber]);
+            await client.query("UPDATE campaign_cast_scans SET status='failed',updated_at=clock_timestamp() WHERE id=$1", [scan.id]);
+            return true;
+          }
+          if (existing && existing.status !== "cancelled") return false;
+          const jobId = await enqueueCastDiscoveryWithClient(client, { scope, turnId: source.turnId,
+            execution: readCastDiscoveryExecution(scan.execution_snapshot), enabled: true });
+          await client.query(`UPDATE campaign_cast_discovery_jobs SET scan_id=$2,status=CASE WHEN status='cancelled' THEN 'queued' ELSE status END,
+            updated_at=clock_timestamp() WHERE id=$1`, [jobId, scan.id]);
+          await client.query(`UPDATE campaign_cast_state SET coverage_start_turn=LEAST(coverage_start_turn,$2) WHERE campaign_id=$1`, [scope.campaignId, scan.from_turn]);
+          await client.query("UPDATE campaign_cast_scans SET status='running',updated_at=clock_timestamp() WHERE id=$1", [scan.id]);
+          return true;
+        }
+        await client.query("UPDATE campaign_cast_scans SET status='complete',updated_at=clock_timestamp() WHERE id=$1", [scan.id]);
+        return true;
+      });
+    },
     async get(rawScope: CastScope, rawId: string) {
       const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId);
       return withTransaction(pool, client => readProgress(client, scope, id));
@@ -45,7 +104,7 @@ export function createCastBackfillRepository(pool: DatabasePool, enabled = () =>
         }
         const status = action === "cancel" ? "cancelled" : action === "pause" ? "paused" : "queued";
         await client.query("UPDATE campaign_cast_scans SET status=$2,updated_at=clock_timestamp() WHERE id=$1", [id, status]);
-        if (action === "cancel") await client.query("UPDATE campaign_cast_scan_sources SET status='cancelled' WHERE scan_id=$1 AND status='pending'", [id]);
+        if (action === "cancel") await cancelScan(client, id);
         return readProgress(client, scope, id);
       });
     },
@@ -87,6 +146,25 @@ export function createCastBackfillRepository(pool: DatabasePool, enabled = () =>
       return withTransaction(pool, async client => (await prepareScan(client, scope, request, execution)).preview);
     }
   };
+}
+
+async function cancelScan(client: DatabaseClient, id: string) {
+  // A publication can finish between scheduler ticks; preserve that receipt-backed progress.
+  await client.query(`UPDATE campaign_cast_scan_sources p SET status='complete' WHERE scan_id=$1 AND status='pending'
+    AND EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs j WHERE j.campaign_id=p.campaign_id AND j.owner_user_id=p.owner_user_id
+      AND j.turn_id::text=p.source->>'turnId' AND j.narration_revision=(p.source->>'narrationRevision')::int
+      AND j.source_hash=p.source->>'sourceHash' AND j.status='complete')`, [id]);
+  await client.query("UPDATE campaign_cast_scans SET status='cancelled',updated_at=clock_timestamp() WHERE id=$1", [id]);
+  await client.query("UPDATE campaign_cast_scan_sources SET status='cancelled' WHERE scan_id=$1 AND status='pending'", [id]);
+  await client.query(`UPDATE campaign_cast_discovery_jobs SET status='cancelled',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,
+    updated_at=clock_timestamp() WHERE scan_id=$1 AND status NOT IN ('complete','cancelled')`, [id]);
+}
+
+/** Caller holds the campaign lock; already applied evidence is handled by the cast lifecycle. */
+export async function cancelCastScansWithClient(client: DatabaseClient, scope: CastScope) {
+  const scans = (await client.query(`SELECT id FROM campaign_cast_scans WHERE campaign_id=$1 AND owner_user_id=$2
+    AND status IN ('queued','running','paused','failed') FOR UPDATE`, [scope.campaignId, scope.ownerUserId])).rows;
+  for (const scan of scans) await cancelScan(client, scan.id);
 }
 
 async function prepareScan(client: DatabaseClient, scope: CastScope, request: CastBackfillRequest, execution: CastDiscoveryExecution) {

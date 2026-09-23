@@ -4,12 +4,15 @@ import type { DatabaseClient } from "./pool.js";
 import { rebuildCastWithClient } from "./campaign-cast-repository.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { reconcileCastDiscoveryBoundary } from "./campaign-cast-job-repository.js";
+import { cancelCastScansWithClient } from "./campaign-cast-backfill-repository.js";
 
 export async function applyCastBoundaryChange(client: DatabaseClient, scope: CastScope,
   boundary: { turnNumber: number; changeKey: string }): Promise<void> {
   await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR UPDATE", [scope.campaignId, scope.ownerUserId]);
   const state = (await client.query("SELECT last_boundary_change_key FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
-  if (!state || state.last_boundary_change_key === boundary.changeKey) return;
+  if (state?.last_boundary_change_key === boundary.changeKey) return;
+  await cancelCastScansWithClient(client, scope);
+  if (!state) return;
   // Match the campaign history lifecycle: discarded future user edits cannot reappear
   // when a new timeline reaches the same turn number.
   const events = (await client.query("SELECT id,payload FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number>$3", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows;
