@@ -185,6 +185,7 @@ function serializeProviderRequestInternal(
   boundPreset?: Readonly<{
     contract: PreparedResponseContractV2;
     candidate: TextRouteCandidate;
+    remoteRouting: boolean;
     parameters: TextGenerationParameters;
     responseCache?: PreparedProviderRequest["responseCache"];
   }>
@@ -266,7 +267,7 @@ function serializeProviderRequestInternal(
             : profile.providerType === "openrouter" && responseContract.version === 2 && responseContract.admission.basis === "model_verified"
               ? { provider: { require_parameters: true, only: responseContract.admission.verification.providerRoutingSlugs } } : {}),
           ...(profile.providerType === "openrouter" && responseContract.version === 2 && responseContract.admission.basis === "preset_trusted"
-            && boundPreset
+            && boundPreset && !boundPreset.remoteRouting
             ? { provider: { ...boundPreset.candidate.providerPolicy, require_parameters: true } } : {})
         } : responseContract?.mode === "json_object" ? { response_format: { type: "json_object" } } : options.responseFormat === false ? {} : { response_format: { type: "json_object" } }),
         ...(request.onChunk ? { stream: true, stream_options: { include_usage: true } } : {})
@@ -309,6 +310,10 @@ function bindFrozenPresetProviderRequest(
   if (request.systemPrompt !== plan.prompt) {
     throw new Error("Frozen preset request prompt does not match the derived frozen plan.");
   }
+  if (candidate.modelId.startsWith("@preset/") && (routeBasis.candidates.length !== 1
+    || candidate.modelId !== `@preset/${routeBasis.selection.slug}`)) {
+    throw new Error("Remote preset routing requires the selected preset as its only dispatch target.");
+  }
   return { contract, routeBasis, plan, candidate };
 }
 
@@ -341,7 +346,7 @@ export function serializeBoundFrozenPresetProviderRequest(
   const candidate = bound.candidate;
   const frozenProfile = frozenPresetProfile(profile, candidate, bound.plan.parameters);
   return serializeProviderRequestInternal(frozenProfile, request, options, {
-    contract: bound.contract, candidate, parameters: bound.plan.parameters, responseCache: bound.plan.responseCache
+    contract: bound.contract, candidate, remoteRouting: candidate.modelId.startsWith("@preset/"), parameters: bound.plan.parameters, responseCache: bound.plan.responseCache
   });
 }
 
@@ -487,7 +492,7 @@ export function serializeCheckedBoundFrozenPresetProviderRequest(
       throw new Error("Bound frozen preset serialization cannot accept a caller-supplied response contract.");
     }
     return serializeProviderRequestInternal(candidateProfile, candidateRequest, serializationOptions, {
-      contract: bound.contract, candidate, parameters: bound.plan.parameters, responseCache: bound.plan.responseCache
+      contract: bound.contract, candidate, remoteRouting: candidate.modelId.startsWith("@preset/"), parameters: bound.plan.parameters, responseCache: bound.plan.responseCache
     });
   });
 }

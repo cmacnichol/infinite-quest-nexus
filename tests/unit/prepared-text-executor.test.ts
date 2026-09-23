@@ -176,6 +176,71 @@ describe("prepared text executor stream durability", () => {
     expect(routeBasis.candidates[0]!.maxOutputTokens).toBe(maxOutputTokens);
   });
 
+  it.each([false, true])("dispatches Story JSON Schema through the preset, including recovery=%s", async (recovery) => {
+    const maxOutputTokens = 8_000;
+    const routeDraft = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "review" },
+      preset: { slug: "review", versionId: "v1", configHash: hash("preset") },
+      candidates: [{ modelId: "@preset/review", providerPolicy: {}, contextWindowTokens: 65_536, maxOutputTokens }],
+      presetSystemPrompt: "Review instructions.", parameters: { temperature: 0.2 }, endpointReference: "endpoint-a",
+      credentialReference: "profile-a", profileRevision: "profile-v1", authorityRevision: "authority-v1",
+      requestTimeoutMs: 2_000, protocolVersion: "text-schema-adapter-v2"
+    };
+    const routeBasis = { ...routeDraft, routeBasisHash: textExecutionRouteBasisHash({ ...routeDraft, routeBasisHash: hash("basis") }) };
+    const invocationKey = "story:stream" as const;
+    const operation = "story_generation" as const;
+    const policy = {
+      version: 2 as const, policy: "required" as const, providerProfileId: "11111111-1111-4111-8111-111111111111",
+      admission: { mode: "json_schema" as const, basis: "preset_trusted" as const },
+      authority: { kind: "preset_trusted" as const, routeBasisHash: routeBasis.routeBasisHash, selection: routeBasis.selection,
+        endpointReference: "endpoint-a", credentialReference: "profile-a", authorityRevision: "authority-v1", profileRevision: "profile-v1" },
+      operationClosureVersion: 2 as const, invocationKeys: [invocationKey]
+    };
+    const schema = getProviderOutputSchemaV2("story");
+    const selected = {
+      version: 2 as const, queuedPolicy: policy, selectedAt: "2026-09-22T00:00:00.000Z", capabilityEvidenceHash: hash("capability"),
+      contracts: { [invocationKey]: { version: 2 as const, mode: "json_schema" as const, admission: policy.admission,
+        operation: "story" as const, streaming: true, forbidFormatFallback: true as const,
+        schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+        authority: { kind: "preset_trusted" as const, routeBasisHash: routeBasis.routeBasisHash } } }
+    };
+    const frozen = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
+    const trustedOperationPrompt = "Check the final story.";
+    const reviewPlan = deriveTextExecutionPlan(routeBasis, trustedOperationPrompt);
+    const request = { systemPrompt: reviewPlan.prompt, input: "A visitor asks to enter.", onChunk: vi.fn(),
+      ...(recovery ? { recoveryInput: "Return a complete valid replacement." } : {}), budgetOutput: { kind: "story_append" as const } };
+    const expectedOutputTokens = Math.min(maxOutputTokens, 16_384);
+    const preparedRequest = serializeCheckedBoundFrozenPresetProviderRequest({
+      providerType: "openrouter", baseUrl: "", model: "@preset/review", contextWindowTokens: 65_536, maxOutputTokens, temperature: 0.2
+    }, request, { frozen, routeBasis, plan: reviewPlan, invocationKey, operation, trustedOperationPrompt }, {
+      inputLimit: 65_536 - expectedOutputTokens, count: (value) => Math.ceil(value.length / 3), output: request.budgetOutput
+    });
+    const execute = vi.fn(async (sent: ProviderRequest) => {
+      expect(sent.preparedRequest?.body).toBe(preparedRequest.body);
+      expect(sent.preparedRequest?.payloadHash).toBe(preparedRequest.payloadHash);
+      expect(JSON.parse(sent.preparedRequest!.body).max_tokens).toBe(expectedOutputTokens);
+      const body = JSON.parse(sent.preparedRequest!.body);
+      expect(body.model).toBe("@preset/review");
+      expect(body.response_format).toMatchObject({ type: "json_schema", json_schema: { strict: true } });
+      expect(body).not.toHaveProperty("provider");
+      expect(body).not.toHaveProperty("models");
+      return { ...result(), returnedModel: "fallback-model", returnedProviderRoute: "remote-route" };
+    });
+    const attempts = repository(vi.fn());
+    const complete = vi.spyOn(attempts, "complete");
+    const loadAuthority = vi.fn(async () => authority(execute));
+    const executor = createPreparedTextExecutor({ attempts, loadAuthority });
+    await expect(executor.execute({ ...executionInput(vi.fn()), plan: reviewPlan, operation, request, preparedRequest,
+      routeBasis, frozenResponseContracts: frozen, invocationKey, trustedOperationPrompt
+    })).resolves.toMatchObject({ content: "accepted" });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(loadAuthority).toHaveBeenCalledWith(expect.any(String), "profile-a", "@preset/review");
+    expect(complete).toHaveBeenCalledWith(expect.anything(), expect.any(String), expect.objectContaining({
+      returnedModel: "fallback-model", returnedProviderRoute: "remote-route", outcome: "succeeded"
+    }));
+    expect(routeBasis.candidates[0]!.maxOutputTokens).toBe(maxOutputTokens);
+  });
+
   it("waits for durable output evidence before exposing a provider chunk", async () => {
     let release!: (value: PhysicalAttemptRecord) => void;
     const persisted = new Promise<PhysicalAttemptRecord>((resolve) => { release = resolve; });

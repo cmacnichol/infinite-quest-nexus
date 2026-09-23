@@ -39,7 +39,7 @@ const canary = "PRIVATE_PROVIDER_FAILURE_CANARY";
 const partialJson = `{\"narration\":\"Mira reaches the observatory.\",\"scratchpad\":\"${canary}`;
 const successfulRpgAssessment = JSON.stringify({ stat_id: "insight", difficulty_modifier: 0, rationale: "The archive must be studied carefully.", favorable_outcome: "Mira recognizes the lantern's old signal.", setback_outcome: "Dust obscures the archive's first clue." });
 
-type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "scene_rewrite_overflow_rejection" | "historical_http_error" | "refusal" | "partial_stream" | "route_partial_stream" | "success" | "choice_repair" | "route_fallback" | "route_exhausted" | "route_invalid_identity" | "route_refusal";
+type Scenario = "schema_rejection" | "recovery_schema_rejection" | "aux_schema_rejection" | "aux_trigger_schema_rejection" | "aux_scene_schema_rejection" | "aux_event_coverage_schema_rejection" | "aux_event_schema_rejection" | "scene_rewrite_overflow_rejection" | "historical_http_error" | "refusal" | "partial_stream" | "route_partial_stream" | "success" | "choice_repair" | "route_fallback" | "route_exhausted" | "route_rate_limit" | "route_refusal";
 const successfulStory = JSON.stringify({ narration: "Mira reaches the observatory.", choices: ["Wait.", "Listen.", "Enter.", "Leave."], custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "", continuity_summary: "Mira reaches the observatory.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
 const duplicateChoiceStory = JSON.stringify({ ...JSON.parse(successfulStory), choices: ["Wait.", "Wait.", "Enter.", "Leave."] });
 const successfulChoiceRepair = JSON.stringify({ choices: ["Search the archive.", "Follow the lantern.", "Call for the archivist.", "Leave a marker."], custom_action_suggestion: "Study the constellation chart." });
@@ -126,21 +126,21 @@ integration("response-contract provider failures", () => {
           return;
         }
         requestBodies.push(body);
-        if (scenario === "route_invalid_identity" || scenario === "route_refusal") {
+        if (scenario === "route_refusal") {
           const requestedModel = JSON.parse(body).model as string;
           const responseId = `charged-terminal-${scenario}-${requestBodies.length}`;
           response.writeHead(200, { "content-type": "application/json", "x-generation-id": responseId });
-          response.end(JSON.stringify({ id: responseId, model: scenario === "route_invalid_identity" ? "wrong-served-model" : requestedModel,
+          response.end(JSON.stringify({ id: responseId, model: requestedModel,
             provider: "preset-route", choices: [{ message: scenario === "route_refusal" ? { refusal: "No response." } : { content: successfulStory }, finish_reason: scenario === "route_refusal" ? "content_filter" : "stop" }],
             usage: { prompt_tokens: 21, cost: "0.0064", currency: "USD" } }));
           return;
         }
-        if ((scenario === "route_fallback" || scenario === "route_exhausted") && JSON.parse(body).model === fallbackModels[0]) {
+        if (scenario === "route_rate_limit") {
           response.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
           response.end(JSON.stringify({ error: { code: "rate_limit", message: "fixture availability rejection" } }));
           return;
         }
-        if (scenario === "route_exhausted" && JSON.parse(body).model === fallbackModels[1]) {
+        if (scenario === "route_exhausted") {
           response.writeHead(400, { "content-type": "application/json", "x-generation-id": "fallback-schema-id" });
           response.end(JSON.stringify({ id: "fallback-schema-id", model: fallbackModels[1], provider: "preset-route",
             error: { code: "response_format_invalid", message: canary } }));
@@ -246,7 +246,8 @@ integration("response-contract provider failures", () => {
             : content;
           response.writeHead(200, { "content-type": "application/json", "x-generation-id": "success-id" });
           response.end(JSON.stringify({
-            id: "success-id", model: parsed.model ?? model, provider: parsed.provider?.only?.[0] ?? "verified-route",
+            id: "success-id", model: parsed.model?.startsWith("@preset/") ? (scenario === "route_fallback" ? fallbackModels[1] : model) : parsed.model ?? model,
+            provider: parsed.model?.startsWith("@preset/") ? "remote-preset-route" : parsed.provider?.only?.[0] ?? "verified-route",
             choices: [{ message: { content: selectedContent }, finish_reason: "stop" }],
             usage: { prompt_tokens: 80, completion_tokens: 30, total_tokens: 110,
               ...(scenario === "route_fallback" ? { cost: "0.0042", currency: "USD" } : {}) }
@@ -945,7 +946,10 @@ integration("response-contract provider failures", () => {
     expect(privateState.textExecutionRouteBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "native-success" }, presetSystemPrompt: "Native preset success instruction.", parameters: { temperature: 0.25 } });
     expect(requestBodies).toHaveLength(1);
     const body = JSON.parse(requestBodies[0]!);
-    expect(body).toMatchObject({ model, temperature: 0.25, provider: { only: ["preset-route"], require_parameters: true } });
+    expect(body).toMatchObject({ model: "@preset/native-success", temperature: 0.25 });
+    expect(body).not.toHaveProperty("provider");
+    expect(attempts.rows[0]).toMatchObject({ requestedModel: "@preset/native-success", returnedModel: model,
+      providerPolicy: {}, returnedProviderRoute: "remote-preset-route" });
     expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
       name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
     } });
@@ -954,7 +958,7 @@ integration("response-contract provider failures", () => {
     expect(privateState.responseContractInvocations[0].requestPayloadHash).toBe(createHash("sha256").update(requestBodies[0]!).digest("hex"));
   }, 60_000);
 
-  it("advances one frozen preset route after a conclusive rate limit and commits one turn and logical charge", async () => {
+  it("lets OpenRouter select a fallback model from the preset and records one turn and physical charge", async () => {
     scenario = "route_fallback";
     const value = await fixture("required", false, true, "fallback");
     const before = await authority(value.campaignId);
@@ -983,13 +987,13 @@ integration("response-contract provider failures", () => {
 
     expect(job).toMatchObject({ status: "completed", errorCode: null, errorMessage: null, recoveryMetadata: {} });
     expect(after.accepted).toBe(before.accepted + 1);
-    expect(requestBodies).toHaveLength(2);
-    for (const [index, bodyText] of requestBodies.entries()) {
+    expect(requestBodies).toHaveLength(1);
+    for (const bodyText of requestBodies) {
       const body = JSON.parse(bodyText);
       expect(body).toMatchObject({
-        model: fallbackModels[index], temperature: 0.25,
-        provider: { only: ["preset-route"], data_collection: "deny", require_parameters: true }
+        model: "@preset/native-fallback", temperature: 0.25
       });
+      expect(body).not.toHaveProperty("provider");
       expect(body.messages[0].content.split("Native preset fallback instruction.").length - 1).toBe(1);
       expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
         name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
@@ -999,12 +1003,11 @@ integration("response-contract provider failures", () => {
       expect.objectContaining({ status: "completed", operation: "story_generation" })
     ]);
     expect(attempts.rows).toEqual([
-      expect.objectContaining({ candidateOrdinal: 0, requestedModel: fallbackModels[0], outcome: "failed", failureReason: "rate_limit", usage: null, reportedCost: null }),
-      expect.objectContaining({ candidateOrdinal: 1, requestedModel: fallbackModels[1], outcome: "succeeded", failureReason: null,
+      expect.objectContaining({ candidateOrdinal: 0, requestedModel: "@preset/native-fallback", outcome: "succeeded", failureReason: null,
         usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: { amount: "0.0042", currency: "USD" } })
     ]);
     expect(costs.rows).toEqual([
-      expect.objectContaining({ localCallId: attempts.rows[1]!.id, turnId: job.resultTurnId, amount: "0.0042",
+      expect.objectContaining({ localCallId: attempts.rows[0]!.id, turnId: job.resultTurnId, amount: "0.0042",
         usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 } })
     ]);
     expect(await createProviderCostRepository(pool).getCampaignCostSummary({ ownerUserId, campaignId: value.campaignId })).toMatchObject({
@@ -1012,7 +1015,23 @@ integration("response-contract provider failures", () => {
     });
   }, 60_000);
 
-  it("attributes terminal candidate evidence to the second physical attempt after safe route exhaustion", async () => {
+  it("does not expand or retry a preset after OpenRouter returns a rate limit", async () => {
+    scenario = "route_rate_limit";
+    const value = await fixture("required", false, true, "fallback");
+    const before = await authority(value.campaignId);
+    await executeOnce(value);
+    expect(requestBodies).toHaveLength(1);
+    expect(JSON.parse(requestBodies[0]!)).toMatchObject({ model: "@preset/native-fallback",
+      response_format: { type: "json_schema" } });
+    const attempts = await pool.query(
+      "SELECT requested_model,outcome,failure_reason FROM prepared_text_physical_attempts WHERE logical_reservation->>'generationJobId'=$1",
+      [value.job.id]
+    );
+    expect(attempts.rows).toEqual([{ requested_model: "@preset/native-fallback", outcome: "failed", failure_reason: "rate_limit" }]);
+    expect(await authority(value.campaignId)).toEqual(before);
+  }, 60_000);
+
+  it("retains the preset request and schema rejection without a concrete-model retry", async () => {
     scenario = "route_exhausted";
     const value = await fixture("required", false, true, "fallback");
     const before = await authority(value.campaignId);
@@ -1031,27 +1050,26 @@ integration("response-contract provider failures", () => {
         WHERE logical_reservation->>'generationJobId'=$1 ORDER BY candidate_ordinal`,
       [value.job.id]
     );
-    const secondBodyHash = createHash("sha256").update(requestBodies[1]!).digest("hex");
+    const bodyHash = createHash("sha256").update(requestBodies[0]!).digest("hex");
 
     expect(job).toMatchObject({ status: "failed", errorCode: "provider_schema_invalid" });
-    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies).toHaveLength(1);
     expect(attempts.rows).toEqual([
-      expect.objectContaining({ candidateOrdinal: 0, outcome: "failed", failureReason: "rate_limit", usage: null, reportedCost: null }),
-      expect.objectContaining({ candidateOrdinal: 1, outcome: "failed", failureReason: "schema_invalid", usage: null, reportedCost: null })
+      expect.objectContaining({ candidateOrdinal: 0, outcome: "failed", failureReason: "schema_invalid", usage: null, reportedCost: null })
     ]);
     expect(job.orchestrationPrivate.preparedResponseFailures).toEqual([
       expect.objectContaining({ responseId: "fallback-schema-id", diagnosticCode: "provider_schema_invalid",
-        requestBody: requestBodies[1], requestPayloadHash: secondBodyHash })
+        requestBody: requestBodies[0], requestPayloadHash: bodyHash })
     ]);
     expect(job.orchestrationPrivate.responseContractInvocations).toEqual([
       expect.objectContaining({ status: "completed", response: expect.objectContaining({
-        physicalAttemptId: attempts.rows[1]!.id, physicalRequestPayloadHash: secondBodyHash
+        physicalAttemptId: attempts.rows[0]!.id, physicalRequestPayloadHash: bodyHash
       }) })
     ]);
     expect(await authority(value.campaignId)).toEqual(before);
   }, 60_000);
 
-  it.each(["route_invalid_identity", "route_refusal"] as const)("retains partial usage and reported cost for charged 2xx %s without fallback or state mutation", async (failureScenario) => {
+  it.each(["route_refusal"] as const)("retains partial usage and reported cost for charged 2xx %s without fallback or state mutation", async (failureScenario) => {
     scenario = failureScenario;
     const value = await fixture("required", false, true, "fallback");
     const before = await authority(value.campaignId);
@@ -1062,7 +1080,7 @@ integration("response-contract provider failures", () => {
       [ownerUserId, value.job.id]
     );
     expect(requestBodies).toHaveLength(1);
-    expect(attempts.rows).toEqual([expect.objectContaining({ outcome: "failed", failure_reason: failureScenario === "route_refusal" ? "refusal" : "invalid_identity",
+    expect(attempts.rows).toEqual([expect.objectContaining({ outcome: "failed", failure_reason: "refusal",
       usage: { inputTokens: 21 }, reported_cost: { amount: "0.0064", currency: "USD" } })]);
     const event = await pool.query<{
       localCallId: string; generationJobId: string | null; providerProfileId: string | null;
@@ -1113,7 +1131,7 @@ integration("response-contract provider failures", () => {
 
     expect(job.status).toBe("failed");
     expect(requestBodies).toHaveLength(1);
-    expect(JSON.parse(requestBodies[0]!).model).toBe(fallbackModels[0]);
+    expect(JSON.parse(requestBodies[0]!).model).toBe("@preset/native-fallback");
     expect(attempts.rows).toEqual([
       expect.objectContaining({ candidateOrdinal: 0, status: "completed", outcome: "failed", failureReason: "unknown",
         providerResponseId: "partial-stream-id", responseStartedAt: expect.any(Date), usage: null, reportedCost: null })
@@ -1418,7 +1436,8 @@ integration("response-contract provider failures", () => {
     expect(row.rows[0]!.status).toBe("completed");
     expect(row.rows[0]!.attempts).toBeGreaterThan(1);
     expect(requestBodies).toHaveLength(1);
-    expect(JSON.parse(requestBodies[0]!)).toMatchObject({ temperature: 0.25, provider: { only: ["preset-route"], require_parameters: true } });
+    expect(JSON.parse(requestBodies[0]!)).toMatchObject({ model: "@preset/native-success", temperature: 0.25 });
+    expect(JSON.parse(requestBodies[0]!)).not.toHaveProperty("provider");
     expect(row.rows[0]!.orchestrationPrivate.primaryReservation.requestBody).toBe(requestBodies[0]);
     expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([
       expect.objectContaining({ version: 2, requestPayloadHash: createHash("sha256").update(requestBodies[0]!).digest("hex") })
