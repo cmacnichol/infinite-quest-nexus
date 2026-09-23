@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { castGenerationSnapshotSchema } from "../../packages/contracts/src/campaign-cast-context.js";
+import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
 import { selectCastContext } from "../../packages/domain/src/campaign-cast-context.js";
 import { estimateTokens } from "../../packages/domain/src/text.js";
 
@@ -24,6 +24,13 @@ const select = (snapshot: unknown, budgetTokens = 3000, direction = "Visit The W
 });
 
 describe("captured cast context", () => {
+  it("preserves its fingerprint across JSON persistence of absent optional fields", () => {
+    const input = fixture();
+    const snapshot = { ...input, details: input.details.map((detail) => ({ ...detail,
+      observations: detail.observations.map((observation) => ({ ...observation,
+        evidence: { ...observation.evidence, invalidated: undefined } })) })) };
+    expect(castGenerationSnapshotFingerprint(snapshot)).toBe(castGenerationSnapshotFingerprint(JSON.parse(JSON.stringify(snapshot))));
+  });
   it("keeps the snapshot closed and rejects foreign or duplicate evidence bindings", () => {
     const input = fixture();
     expect(castGenerationSnapshotSchema.safeParse({ ...input, secret: "no" }).success).toBe(false);

@@ -6,6 +6,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 integration("direct recent effective turn window", () => {
@@ -25,14 +26,29 @@ integration("direct recent effective turn window", () => {
       [ownerUserId, scope.campaignId, ordinal, `Intent ${ordinal}.`, `Accepted narration ${ordinal}.`, ordinal % 2 ? "action" : "scene"]);
     return scope;
   }
-  async function capture(scope: Awaited<ReturnType<typeof fixture>>, expectedTurnNumber: number, operationKind: "append" | "replace_latest" = "append") {
+  async function capture(scope: Awaited<ReturnType<typeof fixture>>, expectedTurnNumber: number, operationKind: "append" | "replace_latest" = "append",
+    baseIdentityVersion: "generation-base-v3" | "generation-base-v4" = "generation-base-v3") {
     return withTransaction(pool, async (client) => {
       const input = { ...scope, expectedTurnNumber, operationKind, query: "Continue." };
-      const frozen = await resolveGenerationAuthoritySnapshot(client, { ...input, baseIdentityVersion: "generation-base-v3", captureRecentWindow: true });
+      const frozen = await resolveGenerationAuthoritySnapshot(client, { ...input, baseIdentityVersion, captureRecentWindow: true });
       const context = await loadPostgresChronicleGenerationAuthorityContext(client, { ...input, expectedBaseIdentity: frozen.baseIdentity });
       return { frozen, context, input };
     });
   }
+  it("loads v4 cast authority with recent history and rejects changed cast without upgrading v3", async () => {
+    const scope = await fixture(4);
+    const historical = await capture(scope, 5);
+    const current = await capture(scope, 5, "append", "generation-base-v4");
+    expect(current.context.authority.castSnapshot).toEqual(current.frozen.castSnapshot);
+    expect(current.context.recentTurns).toEqual(historical.context.recentTurns);
+    await createPostgresCampaignCastRepository(pool).applyBatch({ ownerUserId: scope.ownerUserId, campaignId: scope.campaignId }, { boundary: { turnNumber: 4, timelineRevision: 0 },
+      idempotencyKey: "cast-context-change", commands: [{ kind: "create", name: "Mara", aliases: [], origin: { kind: "manual" } }] });
+    await expect(withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client,
+      { ...current.input, expectedBaseIdentity: current.frozen.baseIdentity }))).rejects.toMatchObject({ code: "authoritative_context_invalid" });
+    const old = await withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client,
+      { ...historical.input, expectedBaseIdentity: historical.frozen.baseIdentity }));
+    expect(old.authority.castSnapshot).toBeUndefined();
+  });
   it.each([0, 1, 2, 5])("captures preceding exact ordinals with %s accepted turns and no Chronicle", async (turns) => {
     const scope = await fixture(turns);
     const { context } = await capture(scope, turns + 1);

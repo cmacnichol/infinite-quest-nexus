@@ -4,7 +4,7 @@ import { prepareGenerationReview } from "./generation-review-adapter.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
-import { canonicalEvidenceJson, isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, hasGenerationCharacterAuthority } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
 export { planGenerationPromptContext } from "./generation-context-planner.js";
 import {
@@ -2519,7 +2519,7 @@ async function executeLoadedGeneration(
       const planned = planGenerationPromptContext(
         generationContext, provider, storySystemPrompt, safeAction, safeGuidance,
         storyLength, job.resolved_input_mode, configuredCampaignContextBudget, inputTokenLimit,
-        isGenerationBaseIdentityV3(generationContext.baseIdentity) ? job.id : undefined,
+        hasGenerationCharacterAuthority(generationContext.baseIdentity) ? job.id : undefined,
         hasFrozenStoryMemoryPolicy ? "story_memory" : "legacy",
         frozenStoryMemoryPolicySnapshot?.policy
       );

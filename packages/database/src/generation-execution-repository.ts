@@ -90,7 +90,7 @@ import {
   sha256
 } from "../../domain/src/index.js";
 import {
-  isGenerationBaseIdentityV3,
+  hasGenerationCharacterAuthority,
   readGenerationBaseIdentity
 } from "../../application/src/memory/generation-context.js";
 import {
@@ -1432,7 +1432,7 @@ async function commitAcceptedTurn(
     campaignId: job.campaign_id,
     operationKind: job.operation_kind,
     expectedTurnNumber: job.expected_turn_number,
-    ...(isGenerationBaseIdentityV3(storedBaseIdentity) ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
+    ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
   });
   if (!matchesGenerationBaseIdentity(storedBaseIdentity, authority.baseIdentity)) {
     throw Object.assign(new Error("Campaign authority changed before this generation could commit."), {
@@ -1904,7 +1904,7 @@ export function createPostgresGenerationExecutionRepository(
           campaignId: row.campaign_id,
           operationKind: row.operation_kind,
           expectedTurnNumber: row.expected_turn_number,
-          ...(isGenerationBaseIdentityV3(storedBaseIdentity) ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
+          ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
         });
       } catch (error) {
         const detail = error as { code?: unknown; field?: unknown };

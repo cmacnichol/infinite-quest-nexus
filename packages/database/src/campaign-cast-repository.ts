@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { castGenerationSnapshotSchema, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
+import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
 import { createCastCandidateRepository } from "./campaign-cast-candidate-repository.js";
 import { z } from "zod";
@@ -185,10 +185,10 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
 
 /** Caller owns the transaction. Lock and read retained authority without initializing cast rows. */
 export async function captureCastGenerationSnapshotWithClient(client: DatabaseClient, rawScope: CastScope,
-  options: { discoveryEnabled: boolean; boundary?: CastBoundary }): Promise<{ snapshot: CastGenerationSnapshot; fingerprint: string }> {
+  options: { discoveryEnabled: boolean; boundary?: CastBoundary; turnNumber?: number }): Promise<{ snapshot: CastGenerationSnapshot; fingerprint: string }> {
   const scope = castScopeSchema.parse(rawScope);
   const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
-  const boundary = options.boundary ?? { turnNumber: campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 };
+  const boundary = options.boundary ?? { turnNumber: options.turnNumber ?? campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 };
   const projected = await snapshotProjection(client, scope, campaign, state, boundary);
   const status = await readCastDiscoveryStatus(client, scope, options.discoveryEnabled);
   const coverageStartTurn = status.coverageStartTurn !== null && status.coverageStartTurn <= boundary.turnNumber ? status.coverageStartTurn : null;
@@ -201,7 +201,7 @@ export async function captureCastGenerationSnapshotWithClient(client: DatabaseCl
       evidence: observation.evidence.kind === "world" && observation.evidence.worldVersionId !== campaign.world_version_id
         ? { kind: "historical_world", sourceWorldVersionId: observation.evidence.worldVersionId, sourcePath: observation.evidence.sourcePath }
         : observation.evidence })) })) });
-  return { snapshot: value, fingerprint: sha256(stableStringify(value)) };
+  return { snapshot: value, fingerprint: castGenerationSnapshotFingerprint(value) };
 }
 
 async function cacheSnapshot(client: DatabaseClient, scope: CastScope, value: CastSnapshot): Promise<void> {

@@ -2,7 +2,7 @@ import type { ContextBudgetBlock } from "../../../packages/story-engine/src/cont
 import { normalizeStoryEvidenceSource, selectVerifiedNarrativeExcerpt } from "../../../packages/domain/src/story-evidence-spans.js";
 import { worldFictionOverview } from "../../../packages/domain/src/world-fiction-reference.js";
 import type { StoryMemoryPolicy } from "../../../packages/contracts/src/story-memory-policy.js";
-import { canonicalEvidenceJson, createStoryEvidence, generationEvidenceManifestHash, isGenerationBaseIdentityV3, type GenerationContextCandidate, type GenerationEvidenceManifest, type StoryEvidence } from "../../../packages/application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, createStoryEvidence, generationEvidenceManifestHash, hasGenerationCharacterAuthority, type GenerationContextCandidate, type GenerationEvidenceManifest, type StoryEvidence } from "../../../packages/application/src/memory/generation-context.js";
 import type { MemoryGenerationAuthorityContext } from "../../../packages/application/src/index.js";
 import type { StoryLengthWordRange } from "../../../packages/contracts/src/story-settings.js";
 import { ContextBudgetError, buildStoryMemoryUserPrompt, buildStoryUserPrompt, containsMechanicsLanguage, estimatedInputSafetyAllowanceTokens, estimateStoryTokens, planContext, serializeProviderRequest, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
@@ -60,7 +60,7 @@ function generationSourceManifest(
   if (Object.hasOwn(sentAuthority, "selectedCharacterAuthority")) {
     const characterSourceId = [authority.selectedCharacterId, authority.characterAuthority?.name]
       .find((value): value is string => typeof value === "string" && Boolean(value.trim())) ?? "selected-character";
-    entries.push(completeEvidence({ source: { kind: "character", id: characterSourceId, revision: String(isGenerationBaseIdentityV3(context.baseIdentity) ? context.baseIdentity.characterProfileRevision : 0), turnNumber: null }, semanticRole: "character_authority", rank: 0, selectionGroup: "protected", sourcePath: "/selectedCharacterAuthority", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+    entries.push(completeEvidence({ source: { kind: "character", id: characterSourceId, revision: String(hasGenerationCharacterAuthority(context.baseIdentity) ? context.baseIdentity.characterProfileRevision : 0), turnNumber: null }, semanticRole: "character_authority", rank: 0, selectionGroup: "protected", sourcePath: "/selectedCharacterAuthority", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
   }
   const stateSource = { kind: "state_edit" as const, id: context.baseIdentity.baseTurnId ?? "campaign-current-state", revision: String(context.baseIdentity.campaignStateRevision), turnNumber: context.baseIdentity.baseTurnNumber };
   entries.push(completeEvidence({ source: stateSource, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/currentContinuity", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
@@ -148,7 +148,7 @@ export function planGenerationPromptContext(
   policy?: StoryMemoryPolicy
 ) {
   const authority = context.authority;
-  const layered = isGenerationBaseIdentityV3(context.baseIdentity) && policy?.recentTurnTarget === 3;
+  const layered = hasGenerationCharacterAuthority(context.baseIdentity) && policy?.recentTurnTarget === 3;
   const recentRecords = layered ? (context.recentTurns ?? []).map((turn) => ({
     sourceId: turn.turnId, turnNumber: turn.turnNumber, inputMode: turn.inputMode,
     intent: turn.action, acceptedNarration: turn.narration
@@ -174,17 +174,17 @@ export function planGenerationPromptContext(
   const worldReferences = worldSelection?.entries ?? [];
   const authorityContext = {
     authoritativeRules: Array.isArray(authority.rules) ? authority.rules : [],
-    worldCanon: isGenerationBaseIdentityV3(context.baseIdentity) ? worldFictionOverview(authority.worldCanon) : fictionSafeAuthority(authority.worldCanon ?? {}),
+    worldCanon: hasGenerationCharacterAuthority(context.baseIdentity) ? worldFictionOverview(authority.worldCanon) : fictionSafeAuthority(authority.worldCanon ?? {}),
     selectedCharacterId: authority.selectedCharacterId ?? null,
     // This complete classified projection is distinct from world lore and
     // current continuity. The protected planner either sends it whole or
     // fails before provider I/O; it is never a bounded public preview.
-    ...(isGenerationBaseIdentityV3(context.baseIdentity) && authority.characterAuthority
+    ...(hasGenerationCharacterAuthority(context.baseIdentity) && authority.characterAuthority
       ? { selectedCharacterAuthority: fictionSafeAuthority(authority.characterAuthority) }
       : {}),
     currentContinuity: fictionSafeAuthority(authority.currentContinuity ?? {}),
     currentScene: fictionSafeAuthority(authority.latestTurn ?? null),
-    ...(isGenerationBaseIdentityV3(context.baseIdentity) ? { worldReferences: [] as readonly Readonly<{ sourceId: string; sourcePath: string; content: string }>[] } : {}),
+    ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: [] as readonly Readonly<{ sourceId: string; sourcePath: string; content: string }>[] } : {}),
     ...(layered ? { recentTurns: [] as typeof recentRecords } : {}),
     chronicle: [] as readonly PromptCandidate[]
   };
@@ -196,7 +196,7 @@ export function planGenerationPromptContext(
   const candidates = context.candidates.map((source) => {
     const candidate = candidateRecord(source);
     if (source.sourceValidationFailed) sourceValidationFailures++;
-    if (!isGenerationBaseIdentityV3(context.baseIdentity) || policy?.excerptPolicy !== "verified_spans_v1" || source.kind !== "turn_fiction" || !source.narrativeSource) return candidate;
+    if (!hasGenerationCharacterAuthority(context.baseIdentity) || policy?.excerptPolicy !== "verified_spans_v1" || source.kind !== "turn_fiction" || !source.narrativeSource) return candidate;
     const normalized = normalizeStoryEvidenceSource(source.content);
     const excerpt = selectVerifiedNarrativeExcerpt(normalized, source.narrativeSource.spans.map((span) => ({ ...span, normalizationVersion: source.narrativeSource!.normalizationVersion, sourceHash: source.narrativeSource!.sourceHash })));
     if (!excerpt) { sourceValidationFailures++; return candidate; }
@@ -244,7 +244,7 @@ export function planGenerationPromptContext(
   ];
   const promptContext = (selected: readonly Readonly<{ id: string }>[]) => ({
     ...authorityContext,
-    ...(isGenerationBaseIdentityV3(context.baseIdentity) ? { worldReferences: selected.filter((block: { id: string; scope?: string }) => block.scope === "world")
+    ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: selected.filter((block: { id: string; scope?: string }) => block.scope === "world")
       .map((block) => worldReferences.find((reference) => reference.sourceId === block.id))
       .filter((reference): reference is typeof worldReferences[number] => Boolean(reference))
       .map(({ sourceId, sourcePath, content }) => ({ sourceId, sourcePath, content })) } : {}),
@@ -281,11 +281,11 @@ export function planGenerationPromptContext(
   const measure = (selected: readonly ContextBudgetBlock[]) => {
     try { return planContext(planOptions(selected)); }
     catch (error) {
-      if (error instanceof ContextBudgetError && isGenerationBaseIdentityV3(context.baseIdentity)) Object.assign(error, { protectedComponents });
+      if (error instanceof ContextBudgetError && hasGenerationCharacterAuthority(context.baseIdentity)) Object.assign(error, { protectedComponents });
       throw error;
     }
   };
-  const useWorldQuota = isGenerationBaseIdentityV3(context.baseIdentity) && Boolean(authority.worldReferenceSource);
+  const useWorldQuota = hasGenerationCharacterAuthority(context.baseIdentity) && Boolean(authority.worldReferenceSource);
   let plan;
   if (useWorldQuota || layered) {
     const authorityBlock = blocks[0]!;
@@ -371,7 +371,7 @@ export function planGenerationPromptContext(
     promptContext: selectedContext,
     storyInput,
     contextPlan: plan,
-    worldReferenceOmissions: isGenerationBaseIdentityV3(context.baseIdentity) ? worldSelection?.omissions ?? { unrecognizedRecordCount: 0, missingEndpointCount: 0, ambiguousAliasCount: 0, oversizedRecordCount: 0, entityCapCount: 0, relationshipCapCount: 0 } : null,
+    worldReferenceOmissions: hasGenerationCharacterAuthority(context.baseIdentity) ? worldSelection?.omissions ?? { unrecognizedRecordCount: 0, missingEndpointCount: 0, ambiguousAliasCount: 0, oversizedRecordCount: 0, entityCapCount: 0, relationshipCapCount: 0 } : null,
     ...(attemptId ? { sourceManifest: generationSourceManifest(attemptId, requestBody, context, action, selectedContext, worldReferences.filter((reference) => (selectedContext.worldReferences ?? []).some((selected) => selected.sourceId === reference.sourceId))) } : {})
   };
 }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { sha256Hex } from "./hash.js";
 import { castSnapshotSchema, castScopeSchema, castObservationSchema, castOverrideSchema } from "./campaign-cast.js";
 
 /** Captured private authority, separate from the historical public cast-list contract. */
@@ -32,3 +33,13 @@ export const castGenerationSnapshotSchema = castSnapshotSchema.extend({
     || snapshot.trackedThroughTurn !== snapshot.boundary.turnNumber)) invalid("Current coverage must reach the captured turn");
 });
 export type CastGenerationSnapshot = z.infer<typeof castGenerationSnapshotSchema>;
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).filter(([, child]) => child !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+export function castGenerationSnapshotFingerprint(value: unknown): string {
+  return sha256Hex(canonicalJson(castGenerationSnapshotSchema.parse(value)));
+}

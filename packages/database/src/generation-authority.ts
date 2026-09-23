@@ -3,13 +3,16 @@ import { sanitizeChronicleFictionString } from "../../domain/src/chronicle-memor
 import { campaignCharacterProfileSchema } from "../../contracts/src/world-library.js";
 import { effectiveCampaignCharacter } from "../../domain/src/world-characters.js";
 import type { DatabaseClient } from "./pool.js";
+import { captureCastGenerationSnapshotWithClient } from "./campaign-cast-repository.js";
+import type { CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 
 import type {
   GenerationBaseIdentityV3,
+  GenerationBaseIdentityV4,
   LegacyGenerationBaseIdentity
 } from "../../application/src/memory/generation-context.js";
 import type { GenerationRecentTurn } from "../../application/src/memory/generation-context.js";
-export type GenerationBaseIdentity = LegacyGenerationBaseIdentity | GenerationBaseIdentityV3;
+export type GenerationBaseIdentity = LegacyGenerationBaseIdentity | GenerationBaseIdentityV3 | GenerationBaseIdentityV4;
 
 export type ResolvedGenerationAuthority = Readonly<{
   ownerUserId: string;
@@ -17,6 +20,7 @@ export type ResolvedGenerationAuthority = Readonly<{
   worldVersionId: string;
   baseIdentity: GenerationBaseIdentity;
   recentTurns?: readonly GenerationRecentTurn[];
+  castSnapshot?: CastGenerationSnapshot;
 }>;
 
 type ResolveRequest = Readonly<{
@@ -25,7 +29,7 @@ type ResolveRequest = Readonly<{
   operationKind: "append" | "replace_latest";
   expectedTurnNumber: number;
   /** Policy attempts bind effective character authority; historical jobs retain their stored legacy shape. */
-  baseIdentityVersion?: "legacy" | "generation-base-v3";
+  baseIdentityVersion?: "legacy" | "generation-base-v3" | "generation-base-v4";
   captureRecentWindow?: boolean;
 }>;
 
@@ -120,7 +124,8 @@ export async function resolveGenerationAuthoritySnapshot(
       [request.campaignId, request.ownerUserId, baseTurnNumber]
     );
   const baseTurn = baseTurnResult.rows[0] ?? null;
-  const recentRows = request.captureRecentWindow && request.baseIdentityVersion === "generation-base-v3"
+  const modern = request.baseIdentityVersion === "generation-base-v3" || request.baseIdentityVersion === "generation-base-v4";
+  const recentRows = request.captureRecentWindow && modern
     ? (await client.query<{ turn_id: string; turn_number: number; action: string; input_mode: "action" | "scene";
       effective_narration: string; correction_revision: number }>(
       `SELECT t.id AS turn_id,t.turn_number,t.action,t.input_mode,e.effective_narration,e.correction_revision
@@ -149,7 +154,7 @@ export async function resolveGenerationAuthoritySnapshot(
     stateFingerprint: sha256(stableStringify(stateEdit?.state_snapshot_private ?? {})),
     narrationFingerprint: baseTurn ? sha256(baseTurn.effective_narration) : null
   };
-  const baseIdentity: GenerationBaseIdentity = request.baseIdentityVersion === "generation-base-v3"
+  const characterBase: GenerationBaseIdentity = modern
     ? {
       ...legacyIdentity,
       version: "generation-base-v3",
@@ -162,11 +167,19 @@ export async function resolveGenerationAuthoritySnapshot(
       )
     }
     : legacyIdentity;
+  const cast = request.baseIdentityVersion === "generation-base-v4" ? await captureCastGenerationSnapshotWithClient(client,
+    { ownerUserId: request.ownerUserId, campaignId: request.campaignId }, { discoveryEnabled: true, turnNumber: baseTurnNumber }) : undefined;
+  const baseIdentity: GenerationBaseIdentity = cast ? {
+    ...characterBase as GenerationBaseIdentityV3, version: "generation-base-v4",
+    castRevision: cast.snapshot.revision, castTimelineRevision: cast.snapshot.boundary.timelineRevision,
+    castFingerprint: cast.fingerprint, castCoverageStartTurn: cast.snapshot.coverageStartTurn, castTrackedThroughTurn: cast.snapshot.trackedThroughTurn
+  } : characterBase;
   return {
     ownerUserId: request.ownerUserId,
     campaignId: request.campaignId,
     worldVersionId: campaign.world_version_id,
     baseIdentity,
+    ...(cast ? { castSnapshot: cast.snapshot } : {}),
     ...(recentTurns ? { recentTurns } : {})
   };
 }

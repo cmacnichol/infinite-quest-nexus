@@ -6,6 +6,7 @@ import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool 
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 integration("campaign cast PostgreSQL foundation", () => {
@@ -34,6 +35,28 @@ integration("campaign cast PostgreSQL foundation", () => {
     }
     return { scope: { ownerUserId, campaignId }, worldVersionId, evidence: turns[0]!, later: turns[1]!, boundary: { turnNumber: 2, timelineRevision: 0 } };
   }
+
+  it("binds cast changes only to explicitly requested v4 generation bases", async () => {
+    const f = await fixture(), repo = createPostgresCampaignCastRepository(pool);
+    await pool.query("INSERT INTO campaign_state(campaign_id,owner_user_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [f.scope.campaignId, ownerUserId]);
+    const resolve = (version: "legacy" | "generation-base-v3" | "generation-base-v4", operationKind: "append" | "replace_latest" = "append") =>
+      withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, { ...f.scope, operationKind,
+        expectedTurnNumber: operationKind === "append" ? 3 : 2, baseIdentityVersion: version }));
+    const old = await resolve("generation-base-v3"), first = await resolve("generation-base-v4");
+    expect(first.baseIdentity).toMatchObject({ version: "generation-base-v4", castRevision: 0, castTimelineRevision: 0,
+      castFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), castCoverageStartTurn: null, castTrackedThroughTurn: null });
+    expect(first.castSnapshot).toMatchObject({ characters: [], boundary: { turnNumber: 2, timelineRevision: 0 } });
+    await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: "base-character", commands: [
+      { kind: "create", name: "Mara", aliases: [], origin: { kind: "manual" } }
+    ] });
+    const next = await resolve("generation-base-v4");
+    expect(next.baseIdentity).not.toEqual(first.baseIdentity);
+    expect((await resolve("generation-base-v3")).baseIdentity).toEqual(old.baseIdentity);
+    expect((await resolve("legacy")).castSnapshot).toBeUndefined();
+    const replacement = await resolve("generation-base-v4", "replace_latest");
+    expect(replacement.castSnapshot?.boundary.turnNumber).toBe(1);
+    expect(replacement.castSnapshot?.characters.some((person) => person.name === "Mara")).toBe(false);
+  });
 
   it("captures generation authority without initializing or creating identities", async () => {
     const f = await fixture();
