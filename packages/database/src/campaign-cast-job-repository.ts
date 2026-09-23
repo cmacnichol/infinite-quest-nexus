@@ -69,6 +69,39 @@ export async function enqueueCastDiscoveryWithClient(client: DatabaseClient, inp
   return prior.id;
 }
 
+/** Reconcile only already-enrolled sources while the caller holds the campaign lock. */
+export async function reconcileCastDiscoveryBoundary(client: DatabaseClient, scope: CastScope, throughTurn: number): Promise<void> {
+  const state = (await client.query("SELECT timeline_revision FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2",
+    [scope.campaignId, scope.ownerUserId])).rows[0];
+  const jobs = (await client.query(`SELECT j.*,n.correction_revision,n.effective_narration
+    FROM campaign_cast_discovery_jobs j LEFT JOIN effective_turn_narrations n
+      ON n.turn_id=j.turn_id AND n.campaign_id=j.campaign_id AND n.owner_user_id=j.owner_user_id
+    WHERE j.campaign_id=$1 AND j.owner_user_id=$2 AND j.status<>'cancelled' ORDER BY j.turn_number FOR UPDATE OF j`,
+  [scope.campaignId, scope.ownerUserId])).rows;
+  for (const job of jobs) {
+    const retained = job.turn_number <= throughTurn && typeof job.effective_narration === "string";
+    const unchanged = retained && job.narration_revision === job.correction_revision && job.source_hash === sha256(job.effective_narration);
+    if (!unchanged) {
+      await client.query(`UPDATE campaign_cast_discovery_jobs SET status='cancelled',lease_token=NULL,lease_owner=NULL,
+        lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1`, [job.id]);
+      await client.query("UPDATE campaign_cast_discovery_candidates SET status='cancelled' WHERE job_id=$1 AND status='pending'", [job.id]);
+      if (retained) await enqueueCastDiscoveryWithClient(client, { scope, turnId: job.turn_id, enabled: true,
+        ...(job.execution_snapshot.unavailable === true ? { admissionUnavailable: true } : { execution: readExecution(job.execution_snapshot) }) });
+      continue;
+    }
+    // Revoke in-flight work without resetting spent attempts or replaying published chunks.
+    // Parsed output remains reusable: publication still reconciles its captured identities.
+    const revision = state.timeline_revision;
+    await client.query(`UPDATE campaign_cast_discovery_jobs SET timeline_revision=$2,source=$3,chunks=$4,
+      status=CASE WHEN status='running' THEN 'queued' ELSE status END,
+      lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1`,
+    [job.id, revision, JSON.stringify({ ...job.source, timelineRevision: revision }),
+      JSON.stringify(job.chunks.map((chunk: CastDiscoverySource) => ({ ...chunk, timelineRevision: revision })))]);
+    await client.query(`UPDATE campaign_cast_discovery_candidates SET source=jsonb_set(source,'{timelineRevision}',to_jsonb($2::integer))
+      WHERE job_id=$1 AND status='pending'`, [job.id, revision]);
+  }
+}
+
 function claimFromRow(value: unknown): CastDiscoveryClaim {
   const ordinal = z.number().int().nonnegative();
   const row = z.object({ id: z.uuid(), campaign_id: z.uuid(), owner_user_id: z.uuid(), turn_id: z.uuid(), turn_number: ordinal,

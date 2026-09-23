@@ -3,6 +3,7 @@ import { castCommandSchema, castBatchReceiptSchema, castOriginSchema, type CastS
 import type { DatabaseClient } from "./pool.js";
 import { rebuildCastWithClient } from "./campaign-cast-repository.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
+import { reconcileCastDiscoveryBoundary } from "./campaign-cast-job-repository.js";
 
 export async function applyCastBoundaryChange(client: DatabaseClient, scope: CastScope,
   boundary: { turnNumber: number; changeKey: string }): Promise<void> {
@@ -10,7 +11,7 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
   const state = (await client.query("SELECT last_boundary_change_key FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
   if (!state || state.last_boundary_change_key === boundary.changeKey) return;
   // Match the campaign history lifecycle: discarded future user edits cannot reappear
-  // when a new timeline reaches the same turn number. No discovery jobs exist until phase 04.
+  // when a new timeline reaches the same turn number.
   const events = (await client.query("SELECT id,payload FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number>$3", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows;
   for (const event of events) {
     const retained = event.payload.filter((item: { command: unknown }) => {
@@ -25,6 +26,7 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
   await client.query(`UPDATE campaign_cast_state SET timeline_revision=timeline_revision+1,revision=revision+1,last_boundary_change_key=$3
     WHERE campaign_id=$1 AND owner_user_id=$2`, [scope.campaignId, scope.ownerUserId, boundary.changeKey]);
   await rebuildCastWithClient(client, scope);
+  await reconcileCastDiscoveryBoundary(client, scope, boundary.turnNumber);
 }
 
 /** Copy only retained authority, using explicit mappings supplied by the caller. */

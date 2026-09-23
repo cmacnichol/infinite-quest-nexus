@@ -16,6 +16,7 @@ import { createProviderResponseFormatCapabilities } from "../../services/runtime
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { createWorkerCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
+import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -49,6 +50,54 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("rebases retained discovery checkpoints and fences leases across an idempotent rewind boundary", async () => {
+    const f = await fixture(2);
+    const retainedId = await f.enqueue(), discardedId = await f.enqueue(1);
+    const repo = createCastDiscoveryJobRepository(pool, () => true), old = (await repo.claim("old"))!;
+    await repo.checkpoint(old, proposal());
+    const boundary = { turnNumber: 1, changeKey: "fixture-rewind" };
+    await withTransaction(pool, (client) => applyCastBoundaryChange(client, f.scope, boundary));
+    await withTransaction(pool, (client) => applyCastBoundaryChange(client, f.scope, boundary));
+    expect(await repo.publish(old, applied)).toBe("lost_lease");
+    expect(await repo.checkpoint(old, emptyOutput)).toBe(false);
+    const next = (await repo.claim("new"))!;
+    expect(next).toMatchObject({ id: retainedId, attempt: old.attempt, output: proposal(), source: { timelineRevision: 1 } });
+    expect(await repo.publish(next)).toBe("complete");
+    expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find((p) => p.name === "Mara")?.profile)
+      .toEqual({ "appearance.description": "blue eyes" });
+    expect((await pool.query("SELECT status FROM campaign_cast_discovery_jobs WHERE id=$1", [discardedId])).rows[0].status).toBe("cancelled");
+    expect(await repo.claim("idle")).toBeNull();
+  });
+  it("does not reset exhausted discovery attempts or failed admission at a retained history boundary", async () => {
+    const f = await fixture(2);
+    const first = await f.enqueue();
+    await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[1]!, enabled: true, admissionUnavailable: true }));
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET attempt=2,status='failed',diagnostic_code='provider_failed' WHERE id=$1", [first]);
+    await withTransaction(pool, (client) => applyCastBoundaryChange(client, f.scope, { turnNumber: 2, changeKey: "retained-boundary" }));
+    expect((await pool.query("SELECT status,attempt,diagnostic_code,timeline_revision FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows)
+      .toEqual([{ status: "failed", attempt: 2, diagnostic_code: "provider_failed", timeline_revision: 1 },
+        { status: "failed", attempt: 0, diagnostic_code: "admission_unavailable", timeline_revision: 1 }]);
+    expect(await createCastDiscoveryJobRepository(pool, () => true).claim("idle")).toBeNull();
+  });
+  it("requeues changed narration, cancels its pending candidates, and preserves another campaign", async () => {
+    const f = await fixture(), other = await fixture();
+    const priorId = await f.enqueue(), otherId = await other.enqueue();
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET status='complete' WHERE id=$1", [priorId]);
+    await pool.query(`INSERT INTO campaign_cast_discovery_candidates(owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason)
+      SELECT owner_user_id,campaign_id,id,0,'mara',source,'{}','ambiguous' FROM campaign_cast_discovery_jobs WHERE id=$1`, [priorId]);
+    await withTransaction(pool, async (client) => {
+      await client.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id)
+        SELECT owner_user_id,campaign_id,turn_id,1,'Iven has green eyes.',source_hash,'user_edit',owner_user_id FROM campaign_cast_discovery_jobs WHERE id=$1`, [priorId]);
+      await applyCastBoundaryChange(client, f.scope, { turnNumber: 1, changeKey: "fixture-correction" });
+    });
+    const rows = (await pool.query("SELECT id,status,narration_revision,timeline_revision,source FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 ORDER BY created_at", [f.scope.campaignId])).rows;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ id: priorId, status: "cancelled" });
+    expect(rows[1]).toMatchObject({ status: "queued", narration_revision: 1, timeline_revision: 1 });
+    expect(rows[1].source.paragraphs.map((p: { text: string }) => p.text).join("")).toBe("Iven has green eyes.");
+    expect((await pool.query("SELECT status FROM campaign_cast_discovery_candidates WHERE job_id=$1", [priorId])).rows[0].status).toBe("cancelled");
+    expect((await pool.query("SELECT status,timeline_revision FROM campaign_cast_discovery_jobs WHERE id=$1", [otherId])).rows[0]).toEqual({ status: "queued", timeline_revision: 0 });
+  });
   it.each(["preset", "model"] as const)("persists frozen %s admission and executes discovery through physical accounting into validated cast authority", async (routeKind) => {
     const f = await fixture();
     await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",

@@ -2,6 +2,12 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
+## Latest checkpoint: discovery history reconciliation
+
+The existing correction, rewind, and accepted-turn replacement transaction now reconciles already-enrolled discovery jobs after rebuilding cast authority. Changed/discarded sources are cancelled along with pending identity candidates; changed retained narration receives a fresh source using the saved admission. Unchanged sources retain their job ID, published chunk receipts, checkpoint, attempts, and failures while advancing to the current timeline. All active leases are revoked, preventing an older worker from publishing or checkpointing against the changed history. Repeated lifecycle notification remains idempotent. This does not enroll branch/transfer destinations or report contiguous coverage yet.
+
+RED: the new regressions reproduced missing lease revocation and missing corrected-source requeue (2 failures, 21 existing discovery tests passed). GREEN: 68 PostgreSQL tests across discovery, cast lifecycle, and generation acceptance passed. Another 121 focused unit tests across discovery, projection, and generation execution passed. Repository/TypeScript checks and `git diff --check` passed. Independent bounded review found no actionable issues; the reviewer did not independently rerun tests. No rendered UI changed, so browser checks were not run for this checkpoint. No live provider, deployment, or production-data verification was performed. Evidence logs: `.tmp/campaign-cast/lifecycle-{red,green,unit,check}.log` in the worktree.
+
 ## Evidence and provider-contract checkpoint
 
 The discovery contract bounds candidates, observations, quotes, IDs, and allowed fields. Source preparation preserves accepted narration, assigns stable paragraph/subparagraph IDs, and reports source overflow rather than returning a partial completed source. Duplicate paragraph IDs and provider-local keys fail validation.
@@ -25,9 +31,9 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 ## Remaining implementation
 
 1. Connect the durable queue below to unresolved candidates, contiguous coverage, and runtime capability handling. Migration 0104 now exists; use the next ordered migration for further additive schema changes.
-2. Wire the frozen preparation and prepared executor below into provider composition and the worker lane. Admission must happen before acceptance, with no provider call inside its transaction. Verify global concurrency and the physical-attempt ceiling across preset fallback plus logical retries.
+2. Frozen preparation, provider composition, and the worker lane are wired below. Verify global concurrency and the physical-attempt ceiling across preset fallback plus logical retries.
 3. Finish pinned-world playable-character selection and bounded identity hints. Atomic accepted-turn enqueue is implemented below; forward enrollment and contiguous coverage still need integration.
-4. Lifecycle cancellation/re-enqueue for corrections, replacement, rewind, branches, and transfer. Existing phase-02 approvals cover these source integrations.
+4. Same-campaign lifecycle reconciliation is implemented below. Finish branch/transfer discovery enrollment and coverage. Existing phase-02 approvals cover these source integrations.
 5. Status/retry/candidate-resolution API and legacy UI, then actual PostgreSQL and browser acceptance gates.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
 
