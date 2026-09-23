@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { createPostgresCampaignCastRepository, captureCastGenerationSnapshotWithClient } from "../../packages/database/src/campaign-cast-repository.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
@@ -34,6 +34,46 @@ integration("campaign cast PostgreSQL foundation", () => {
     }
     return { scope: { ownerUserId, campaignId }, worldVersionId, evidence: turns[0]!, later: turns[1]!, boundary: { turnNumber: 2, timelineRevision: 0 } };
   }
+
+  it("captures generation authority without initializing or creating identities", async () => {
+    const f = await fixture();
+    const capture = () => withTransaction(pool, (client) => captureCastGenerationSnapshotWithClient(client, f.scope, { discoveryEnabled: true }));
+    const first = await capture();
+    expect(first.snapshot).toMatchObject({ revision: 0, characters: [], details: [], coverageStartTurn: null,
+      trackedThroughTurn: null, discoveryStatus: "pending", boundary: f.boundary });
+    expect(await capture()).toEqual(first);
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_state WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(0);
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_characters WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(0);
+    await expect(withTransaction(pool, (client) => captureCastGenerationSnapshotWithClient(client,
+      { ...f.scope, ownerUserId: randomUUID() }, { discoveryEnabled: true }))).rejects.toThrow();
+  });
+  it("captures current source evidence and effective overrides with a stable fingerprint", async () => {
+    const f = await fixture(), repo = createPostgresCampaignCastRepository(pool);
+    const created = await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: "capture-create", commands: [
+      { kind: "create", name: "Mara", aliases: ["The Watcher"], origin: { kind: "discovered" }, evidence: f.evidence }
+    ] });
+    const characterId = created.characterIds[0]!;
+    await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: "capture-evidence", commands: [
+      { kind: "observe", characterId, field: "appearance.description", value: "blue eyes", mode: "fact", speakerCharacterId: null,
+        supersedesObservationId: null, evidence: f.evidence },
+      { kind: "override", characterId, field: "appearance.description", value: "green eyes" }
+    ] });
+    const capture = () => withTransaction(pool, (client) => captureCastGenerationSnapshotWithClient(client, f.scope, { discoveryEnabled: true }));
+    const first = await capture();
+    expect(first.snapshot.details.find((detail) => detail.characterId === characterId)).toMatchObject({
+      observations: [expect.objectContaining({ value: "blue eyes" })], overrides: [expect.objectContaining({ value: "green eyes" })]
+    });
+    expect(await capture()).toEqual(first);
+    await pool.query("UPDATE turns SET narration='The source was corrected.' WHERE id=$1", [f.evidence.turnId]);
+    const corrected = await capture();
+    expect(corrected.fingerprint).not.toBe(first.fingerprint);
+    expect(corrected.snapshot.details.find((detail) => detail.characterId === characterId)).toMatchObject({
+      observations: [], overrides: [expect.objectContaining({ value: "green eyes" })]
+    });
+    const historical = await withTransaction(pool, (client) => captureCastGenerationSnapshotWithClient(client, f.scope,
+      { discoveryEnabled: true, boundary: { turnNumber: 0, timelineRevision: 0 } }));
+    expect(historical.snapshot.characters.filter((character) => character.origin.kind !== "protagonist")).toEqual([]);
+  });
 
   it("initializes one linked protagonist concurrently without copying its profile", async () => {
     const { scope, boundary } = await fixture();

@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } from "../../packages/database/src/campaign-cast-job-repository.js";
-import { applyCastBatchWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { applyCastBatchWithClient, createPostgresCampaignCastRepository, captureCastGenerationSnapshotWithClient } from "../../packages/database/src/campaign-cast-repository.js";
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
 import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
@@ -408,6 +408,11 @@ describe("durable cast discovery", () => {
       { scope: f.scope, turnId: f.turnIds[2]!, enabled: true, admissionUnavailable: true }));
     expect(await cast.discoveryStatus(f.scope)).toMatchObject({ state: "failed", trackedThroughTurn: 2,
       firstGap: { jobId: failed, status: "failed", diagnosticCode: "admission_unavailable" } });
+    const captured = await withTransaction(pool, (client) => captureCastGenerationSnapshotWithClient(client, f.scope, { discoveryEnabled: true }));
+    expect(captured.snapshot).toMatchObject({ coverageStartTurn: 2, trackedThroughTurn: 2, discoveryStatus: "failed", boundary: { turnNumber: 4 } });
+    const retained = await withTransaction(pool, (client) => captureCastGenerationSnapshotWithClient(client, f.scope,
+      { discoveryEnabled: true, boundary: { turnNumber: 2, timelineRevision: 0 } }));
+    expect(retained.snapshot).toMatchObject({ coverageStartTurn: 2, trackedThroughTurn: 2, discoveryStatus: "current" });
     await pool.query(`INSERT INTO campaign_cast_discovery_candidates(owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason)
       SELECT owner_user_id,campaign_id,id,0,'mara',source,'{}','ambiguous' FROM campaign_cast_discovery_jobs WHERE id=$1`, [start]);
     expect(await cast.discoveryStatus(f.scope)).toMatchObject({ trackedThroughTurn: 2, unresolvedCount: 1 });

@@ -35,4 +35,5 @@ export * from "./turn-corrections.js";
 export * from "./illustration-client.js";
 export * from "./system-archives.js";
 export * from "./campaign-cast.js";
+export * from "./campaign-cast-context.js";
 export * from "./campaign-cast-discovery.js";

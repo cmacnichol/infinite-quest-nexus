@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { castGenerationSnapshotSchema, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
 import { createCastCandidateRepository } from "./campaign-cast-candidate-repository.js";
 import { z } from "zod";
@@ -93,7 +94,9 @@ function protagonistProfile(campaign: Campaign): { name: string; aliases: string
 }
 
 /** Always projects retained authority. A cached profile never hides a corrected source. */
-async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary): Promise<CastSnapshot> {
+async function snapshotProjection(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary): Promise<{
+  snapshot: CastSnapshot; details: CastGenerationSnapshot["details"];
+}> {
   assertBoundary(campaign, state, boundary);
   const characterRows = (await client.query("SELECT id,origin,first_observed_turn FROM campaign_cast_characters WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY created_at,id", [scope.campaignId, scope.ownerUserId])).rows.map((row) => characterRowSchema.parse(row));
   const events = (await client.query("SELECT id,effective_turn_number,payload,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY sequence", [scope.campaignId, scope.ownerUserId])).rows.map((row) => eventSchema.parse(row));
@@ -161,17 +164,44 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
     overrides.set(person.id, fields);
     person.revision++;
   }
+  const details: CastGenerationSnapshot["details"] = [];
   for (const person of people.values()) {
     const own = current.filter((observation) => observation.characterId === person.id && validIds.has(observation.id));
     const ownMentions = mentions.filter((item) => item.characterId === person.id);
     person.lastObservedTurn = Math.max(person.firstObservedTurn, ...own.map((observation) => castEvidenceOrder(observation.evidence)[0]), ...ownMentions.map((item) => item.turnNumber));
     person.revision += own.length + ownMentions.length;
+    details.push({ characterId: person.id, observations: own, overrides: [...(overrides.get(person.id)?.values() ?? [])] });
     if (person.origin.kind === "protagonist") continue;
     person.profile = projectCastProfile({ observations: own, overrides: [...(overrides.get(person.id)?.values() ?? [])] });
     validateCastFiction(person.name);
     person.aliases.forEach(validateCastFiction);
   }
-  return castSnapshotSchema.parse({ revision: state?.revision ?? 0, boundary, characters: [...people.values()] });
+  return { snapshot: castSnapshotSchema.parse({ revision: state?.revision ?? 0, boundary, characters: [...people.values()] }), details };
+}
+
+async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State | null, boundary: CastBoundary): Promise<CastSnapshot> {
+  return (await snapshotProjection(client, scope, campaign, state, boundary)).snapshot;
+}
+
+/** Caller owns the transaction. Lock and read retained authority without initializing cast rows. */
+export async function captureCastGenerationSnapshotWithClient(client: DatabaseClient, rawScope: CastScope,
+  options: { discoveryEnabled: boolean; boundary?: CastBoundary }): Promise<{ snapshot: CastGenerationSnapshot; fingerprint: string }> {
+  const scope = castScopeSchema.parse(rawScope);
+  const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
+  const boundary = options.boundary ?? { turnNumber: campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 };
+  const projected = await snapshotProjection(client, scope, campaign, state, boundary);
+  const status = await readCastDiscoveryStatus(client, scope, options.discoveryEnabled);
+  const coverageStartTurn = status.coverageStartTurn !== null && status.coverageStartTurn <= boundary.turnNumber ? status.coverageStartTurn : null;
+  const trackedThroughTurn = coverageStartTurn === null || status.trackedThroughTurn === null ? null : Math.min(status.trackedThroughTurn, boundary.turnNumber);
+  const value = castGenerationSnapshotSchema.parse({ ...projected.snapshot, version: "cast-context-v1", scope,
+    worldVersionId: campaign.world_version_id, coverageStartTurn, trackedThroughTurn,
+    discoveryStatus: !options.discoveryEnabled ? "off" : trackedThroughTurn === boundary.turnNumber ? "current"
+      : status.state === "failed" && status.firstGap && status.firstGap.turnNumber <= boundary.turnNumber ? "failed" : "pending",
+    details: projected.details.map((detail) => ({ ...detail, observations: detail.observations.map((observation) => ({ ...observation,
+      evidence: observation.evidence.kind === "world" && observation.evidence.worldVersionId !== campaign.world_version_id
+        ? { kind: "historical_world", sourceWorldVersionId: observation.evidence.worldVersionId, sourcePath: observation.evidence.sourcePath }
+        : observation.evidence })) })) });
+  return { snapshot: value, fingerprint: sha256(stableStringify(value)) };
 }
 
 async function cacheSnapshot(client: DatabaseClient, scope: CastScope, value: CastSnapshot): Promise<void> {

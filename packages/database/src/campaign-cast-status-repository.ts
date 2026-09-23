@@ -1,10 +1,10 @@
 import { castDiscoveryStatusSchema, type CastDiscoveryStatus } from "../../contracts/src/campaign-cast-discovery.js";
 import { castScopeSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
 import { CampaignCastError } from "../../application/src/campaign-cast/ports.js";
-import type { DatabasePool } from "./pool.js";
+import type { DatabasePool, DatabaseClient } from "./pool.js";
 
 /** One statement observes enrollment, current narration, and progress at one database snapshot. */
-export async function readCastDiscoveryStatus(pool: DatabasePool, rawScope: CastScope, enabled: boolean): Promise<CastDiscoveryStatus> {
+export async function readCastDiscoveryStatus(pool: DatabasePool | DatabaseClient, rawScope: CastScope, enabled: boolean): Promise<CastDiscoveryStatus> {
   const scope = castScopeSchema.parse(rawScope);
   const row = (await pool.query(`SELECT c.active_turn_number,s.coverage_start_turn,gap.turn_number,gap.job_id,gap.status,gap.diagnostic_code,
       (SELECT count(*)::integer FROM campaign_cast_discovery_candidates p
