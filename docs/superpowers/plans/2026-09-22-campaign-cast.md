@@ -1,6 +1,8 @@
 # Campaign cast: phased implementation specification
 
-**Status:** Phases 01–02 implemented; phases 03–06 remain planned. Updated 2026-09-23. See the [phase 01 handoff](../../review/campaign-cast/phase-01.md) and [phase 02 handoff](../../review/campaign-cast/phase-02.md) for interfaces, verification, and remaining gates.
+**Status:** Phases 01–02 and legacy phase 03 implemented; phases 04–06 are next. Updated 2026-09-23. See the [phase 01 handoff](../../review/campaign-cast/phase-01.md), [phase 02 handoff](../../review/campaign-cast/phase-02.md), and [phase 03 handoff](../../review/campaign-cast/phase-03.md).
+
+**Current execution scope:** The user requested legacy UI first, then phases 04–06. Implement UI controls and browser gates on `/story`; defer the replacement `/app/story` panel. Shared APIs and client state remain reusable. References to both panels in the original phase plans are superseded by this explicit scope adjustment; backend, durability, generation, and backfill requirements remain intact.
 
 **Goal:** Give campaigns a persistent, editable cast and automatically discover characters from accepted story turns. Preserve enough identity, provenance, and temporal structure to add relationships later without replacing the character model.
 

@@ -4,6 +4,7 @@ import {
   createBrowserGenerationSource,
   createBrowserIdFactory,
   createStoryMemoryApi,
+  createCampaignCastApi,
   createDocumentVisibilitySource,
   createNoopSessionPort,
   createNexusApiClient,
@@ -24,6 +25,7 @@ export interface StoryPlayerComposition {
   readonly failedTurnPrompts: FailedTurnPromptStore;
   readonly session: SessionPort;
   readonly storyMemory: StoryMemoryApi;
+  readonly cast: ReturnType<typeof createCampaignCastApi>;
   readonly workflow: GenerationWorkflow;
 }
 
@@ -112,6 +114,7 @@ export function createStoryPlayerComposition(
     failedTurnPrompts,
     session,
     storyMemory: factories.createStoryMemory({ basePath: "/api/v1", session }),
+    cast: createCampaignCastApi({ basePath: "/api/v1", session }),
     workflow
   };
 }

@@ -1,6 +1,6 @@
 # Campaign cast operations
 
-Phase 02 provides manual supporting-character APIs and history/backup integration. The editor UI, automatic discovery, generation-context injection, and optional history backfill remain separate phases. See the [implementation specification](../superpowers/plans/2026-09-22-campaign-cast.md).
+Phases 02–03 provide manual supporting-character APIs, history/backup integration, and the legacy Story cast editor. Automatic discovery, generation-context injection, and optional history backfill remain separate phases. The replacement UI is deferred by the current legacy-first scope. See the [implementation specification](../superpowers/plans/2026-09-22-campaign-cast.md).
 
 ## Enable and disable editing
 
