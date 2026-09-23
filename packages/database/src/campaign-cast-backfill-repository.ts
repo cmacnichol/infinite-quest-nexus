@@ -32,6 +32,10 @@ export function createCastBackfillRepository(pool: DatabasePool, enabled = () =>
       return withTransaction(pool, async client => {
         const campaign = (await client.query(`SELECT c.id,c.owner_user_id,c.active_turn_number FROM campaigns c
           WHERE EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.campaign_id=c.id AND s.status IN ('queued','running'))
+          AND NOT EXISTS (SELECT 1 FROM generation_jobs g WHERE g.campaign_id=c.id AND g.owner_user_id=c.owner_user_id
+            AND g.status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable'))
+          AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs j JOIN campaign_cast_scans s ON s.id=j.scan_id
+            WHERE j.campaign_id=c.id AND s.status IN ('queued','running') AND j.status IN ('queued','running','retry_wait'))
           ORDER BY c.id FOR UPDATE OF c SKIP LOCKED LIMIT 1`)).rows[0];
         if (!campaign || !enabled()) return false;
         const scope = { campaignId: campaign.id as string, ownerUserId: campaign.owner_user_id as string };

@@ -20,6 +20,12 @@ Enabled jobs freeze cast authority with `generation-base-v4`, `story-v17-campaig
 
 To roll back context injection for new jobs, set `CAST_CONTEXT_ENABLED=false` and restart/redeploy through the normal deployment procedure. Keep the compatible application version for in-flight jobs: their frozen cast capability and authority remain in force. Stored identities, evidence and edits are retained. Disabling discovery also prevents new jobs from enabling cast context, without clearing existing cast data. No relationship inference or automatic historical backfill is enabled by this flag.
 
+## History scan rollout status
+
+Phase 06 is still in progress; its API and legacy controls are not yet exposed. `CAST_BACKFILL_ENABLED` defaults to `false` in runtime configuration, Compose and Swarm and requires editing plus discovery. The worker can schedule explicitly persisted scans through the existing discovery lane; enabling the flag does not create scans or enumerate historical campaigns. Configure API and worker replicas consistently when the remaining acceptance gates are complete. See the [phase-06 progress record](../review/campaign-cast/phase-06-progress.md).
+
+Disabling this flag stops scan scheduling, claims, retries and publication while retaining saved checkpoints and applied cast authority. Forward discovery remains available when its separate gate is on. Expired scan leases release the campaign running slot when forward work needs it. Keep additive scan migrations 0110–0111 and their provenance; their down migrations reject removal while retained operational records exist. No deployment has enabled this capability.
+
 ## Enable and disable editing
 
 `CAST_EDITING_ENABLED` defaults to `false` in runtime configuration, Compose, and Swarm. After applying migrations through `0103_campaign_cast_lifecycle`, an operator can set it to `true` and restart/redeploy the API through the existing [deployment procedure](deployment.md). `/api/v1/meta` exposes `capabilities.castEditing`; cast read responses also include this capability. No deployment was performed as part of implementation.

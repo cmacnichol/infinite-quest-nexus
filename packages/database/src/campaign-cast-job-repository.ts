@@ -139,7 +139,7 @@ async function lockLiveClaim(client: DatabaseClient, claim: CastDiscoveryClaim) 
   return row ? { row, campaign } : null;
 }
 
-export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: () => boolean) {
+export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: () => boolean, scansEnabled = () => false) {
   return {
     /** Explicit user retry. Any replacement admission must be prepared before this transaction. */
     async retryFailed(rawScope: CastScope, rawId: string, rawRequest: RetryCastDiscovery, replacement?: CastDiscoveryExecution) {
@@ -150,6 +150,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         const job = (await client.query("SELECT * FROM campaign_cast_discovery_jobs WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3 FOR UPDATE",
           [id, scope.campaignId, scope.ownerUserId])).rows[0];
         if (!job) throw new CampaignCastError("cast_not_found");
+        if (job.scan_id && !scansEnabled()) throw new CampaignCastError("cast_discovery_disabled");
         const turn = (await client.query("SELECT turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3",
           [job.turn_id, scope.campaignId, scope.ownerUserId])).rows[0];
         if (!turn || job.status === "cancelled" || job.timeline_revision !== cast.boundary.timelineRevision
@@ -187,25 +188,26 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         // Lock campaign before job, matching accepted-turn and manual editing order.
         const candidate = (await client.query(`SELECT c.id FROM campaigns c WHERE EXISTS (
           SELECT 1 FROM campaign_cast_discovery_jobs j WHERE j.campaign_id=c.id
-          AND (j.scan_id IS NULL OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status IN ('queued','running')))
+          AND (j.scan_id IS NULL OR ($1::boolean AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status IN ('queued','running'))))
           AND ((j.status IN ('queued','retry_wait') AND j.available_at<=clock_timestamp()) OR (j.status='running' AND j.lease_expires_at<=clock_timestamp()))
           AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs earlier WHERE earlier.campaign_id=j.campaign_id
             AND earlier.status NOT IN ('complete','cancelled')
-            AND (earlier.scan_id IS NULL OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=earlier.scan_id AND s.status IN ('queued','running')))
+            AND (earlier.scan_id IS NULL OR ($1::boolean AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=earlier.scan_id AND s.status IN ('queued','running'))))
             AND (CASE WHEN earlier.scan_id IS NULL THEN 0 ELSE 1 END,earlier.turn_number,earlier.created_at,earlier.id)
               < (CASE WHEN j.scan_id IS NULL THEN 0 ELSE 1 END,j.turn_number,j.created_at,j.id))
           AND NOT EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs live WHERE live.campaign_id=j.campaign_id AND live.status='running' AND live.lease_expires_at>clock_timestamp())
         ) ORDER BY CASE WHEN EXISTS (SELECT 1 FROM campaign_cast_discovery_jobs f WHERE f.campaign_id=c.id
           AND f.scan_id IS NULL AND f.status NOT IN ('complete','cancelled')) THEN 0 ELSE 1 END,c.id
-        FOR UPDATE OF c SKIP LOCKED LIMIT 1`)).rows[0];
+        FOR UPDATE OF c SKIP LOCKED LIMIT 1`, [scansEnabled()])).rows[0];
         if (!candidate || !enabled()) return null;
-        // An expired paused lease must not retain the campaign's unique running slot.
+        // An expired paused/disabled scan lease must not retain the unique running slot.
         await client.query(`UPDATE campaign_cast_discovery_jobs j SET status='queued',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL
           WHERE campaign_id=$1 AND status='running' AND lease_expires_at<=clock_timestamp()
-            AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status='paused')`, [candidate.id]);
+            AND scan_id IS NOT NULL AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status='paused'))`,
+        [candidate.id, scansEnabled()]);
         const job = (await client.query(`SELECT * FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND status NOT IN ('complete','cancelled')
-          AND (scan_id IS NULL OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=scan_id AND s.status IN ('queued','running')))
-          ORDER BY CASE WHEN scan_id IS NULL THEN 0 ELSE 1 END,turn_number,created_at,id FOR UPDATE LIMIT 1`, [candidate.id])).rows[0];
+          AND (scan_id IS NULL OR ($2::boolean AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=scan_id AND s.status IN ('queued','running'))))
+          ORDER BY CASE WHEN scan_id IS NULL THEN 0 ELSE 1 END,turn_number,created_at,id FOR UPDATE LIMIT 1`, [candidate.id, scansEnabled()])).rows[0];
         if (!job || job.status === "failed") return null;
         if (job.attempt >= 2 && job.checkpoint === null) {
           await client.query("UPDATE campaign_cast_discovery_jobs SET status='failed',diagnostic_code='provider_failed',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [job.id]);
@@ -245,7 +247,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
       return withTransaction(pool, async (client) => {
         const live = await lockLiveClaim(client, claim);
         if (!live) return "lost_lease" as const;
-        if (!enabled()) return "disabled" as const;
+        if (!enabled() || live.row.scan_id && !scansEnabled()) return "disabled" as const;
         const current = claimFromRow(live.row);
         const state = (await client.query("SELECT timeline_revision FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2", [current.scope.campaignId, current.scope.ownerUserId])).rows[0];
         const turn = (await client.query("SELECT turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3", [current.source.turnId, current.scope.campaignId, current.scope.ownerUserId])).rows[0];

@@ -8,6 +8,7 @@ import { createCastDiscoveryJobRepository } from "../../../packages/database/src
 import { createCastDiscoveryExtractor } from "./campaign-cast-discovery-adapter.js";
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 import { logger } from "../../../packages/logger/src/index.js";
+import { createCastBackfillRepository } from "../../../packages/database/src/campaign-cast-backfill-repository.js";
 
 export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castEditingEnabled" | "castDiscoveryEnabled">,
   providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "prepareCastDiscoveryExecution">) {
@@ -37,12 +38,14 @@ export function createApiCampaignCastApplication(pool: DatabasePool, config: Pic
   });
 }
 
-export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castDiscoveryEnabled">,
+export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castDiscoveryEnabled" | "castBackfillEnabled">,
   executor: PreparedAuthoringTextExecutor): CastDiscoveryWorkerApplication {
-  const repository = createCastDiscoveryJobRepository(pool, () => config.castDiscoveryEnabled === true);
+  const repository = createCastDiscoveryJobRepository(pool, () => config.castDiscoveryEnabled === true, () => config.castBackfillEnabled === true);
   const extractor = createCastDiscoveryExtractor({ executor });
+  const scans = createCastBackfillRepository(pool, () => config.castDiscoveryEnabled === true && config.castBackfillEnabled === true);
   return { async runNext(workerId) {
     if (config.castDiscoveryEnabled !== true) return false;
+    await scans.scheduleNext();
     const status = await runCastDiscoveryOnce({ workerId, repository, extractor });
     if (["failed", "checkpoint_failed", "publication_failed"].includes(status)) {
       logger.warn({ event: "cast_discovery_deferred", workerId, status });

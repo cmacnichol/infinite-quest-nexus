@@ -24,6 +24,7 @@ import { createApiCampaignCastApplication, createWorkerCampaignCastApplication }
 import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { applyValidatedCastDiscovery } from "../../packages/database/src/campaign-cast-discovery-publication.js";
+import { createCastBackfillRepository } from "../../packages/database/src/campaign-cast-backfill-repository.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -469,9 +470,10 @@ describe("durable cast discovery", () => {
     expect((await pool.query("SELECT status,timeline_revision FROM campaign_cast_discovery_jobs WHERE id=$1", [otherId])).rows[0]).toEqual({ status: "queued", timeline_revision: 0 });
   });
   it.each([
-    { routeKind: "preset", outcome: "success" }, { routeKind: "model", outcome: "success" },
-    { routeKind: "model", outcome: "timeout" }, { routeKind: "model", outcome: "malformed" }
-  ] as const)("executes frozen $routeKind discovery with $outcome through physical accounting", async ({ routeKind, outcome }) => {
+    { routeKind: "preset", outcome: "success", scan: false }, { routeKind: "model", outcome: "success", scan: false },
+    { routeKind: "model", outcome: "timeout", scan: false }, { routeKind: "model", outcome: "malformed", scan: false },
+    { routeKind: "model", outcome: "success", scan: true }, { routeKind: "model", outcome: "timeout", scan: true }
+  ] as const)("executes frozen $routeKind discovery with $outcome through physical accounting (scan=$scan)", async ({ routeKind, outcome, scan }) => {
     const f = await fixture();
     const acceptedBefore = (await pool.query("SELECT id,narration,accepted_at FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows;
     await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
@@ -505,12 +507,14 @@ describe("durable cast discovery", () => {
       execution: { ...frozen, providerProfileId: randomUUID() }, enabled: true }))).rejects.toThrow("Invalid cast discovery provider binding");
     await expect(withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!,
       execution: { ...frozen, plan: deriveTextExecutionPlan(frozen.admission!.routeBasis, "Changed prompt and recomputed hash.") }, enabled: true }))).rejects.toThrow();
-    await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: frozen, enabled: true }));
+    if (scan) await createCastBackfillRepository(pool, () => true).start(f.scope,
+      { fromTurn: 1, throughTurn: 1, expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "runtime-scan" }, frozen);
+    else await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: frozen, enabled: true }));
     const executor = createPreparedTextExecutor({ attempts: createPostgresPreparedTextAttemptRepository(pool),
       async loadAuthority(owner, profile) { expect(owner).toBe(ownerUserId); expect(profile).toBe(execution.id); return execution; } });
     expect(await createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: false }, executor).runNext("disabled")).toBe(false);
     expect(calls).toBe(0);
-    const worker = createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: true }, executor);
+    const worker = createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: true, castBackfillEnabled: scan }, executor);
     const extractionStarted = performance.now();
     expect(await worker.runNext("runtime")).toBe(outcome === "success");
     if (process.env.CAST_TEST_TIMINGS === "true") process.stdout.write(JSON.stringify({ measurement: "discovery_worker_tick", routeKind, outcome,

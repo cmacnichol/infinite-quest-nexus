@@ -65,6 +65,7 @@ export type RuntimeConfig = {
   castEditingEnabled?: boolean;
   castDiscoveryEnabled?: boolean;
   castContextEnabled?: boolean;
+  castBackfillEnabled?: boolean;
   textProviderConcurrency?: number;
   /** Operator capability ceiling; defaults to R3 for Max campaign memory. */
   storyMemoryCapability?: "r1" | "r2" | "r3" | null;
@@ -278,6 +279,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     castEditingEnabled,
     castDiscoveryEnabled,
     castContextEnabled: booleanSetting("CAST_CONTEXT_ENABLED", false) && castDiscoveryEnabled,
+    castBackfillEnabled: booleanSetting("CAST_BACKFILL_ENABLED", false) && castDiscoveryEnabled,
     textProviderConcurrency: requiredIntegerSetting("TEXT_PROVIDER_CONCURRENCY", 2, 1, 1000),
     storyMemoryCapability: storyMemoryCapabilitySetting(),
     storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", true),
