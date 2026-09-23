@@ -1,18 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CAST_DISCOVERY_PROTOCOL, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryOutput, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
+import { CAST_DISCOVERY_PROTOCOL, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryIdentitySnapshot, type CastDiscoveryOutput, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
 import { castScopeSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
 import { readTextExecutionPlan, type TextExecutionPlan } from "../../contracts/src/text-execution-plan.js";
 import { buildCastDiscoverySource, chunkCastDiscoverySource } from "../../domain/src/campaign-cast-discovery.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
+import { applyValidatedCastDiscovery, captureCastDiscoveryIdentities } from "./campaign-cast-discovery-publication.js";
 
 export type CastDiscoveryExecution = { providerProfileId: string; plan: TextExecutionPlan };
 export type CastDiscoveryClaim = {
   id: string; scope: CastScope; source: CastDiscoverySource; chunkOrdinal: number; chunkCount: number;
   execution: CastDiscoveryExecution; attempt: number; leaseToken: string; output: CastDiscoveryOutput | null;
+  identities: CastDiscoveryIdentitySnapshot;
 };
-type AppliedDiscovery = { characterIds: string[]; observationIds: string[] };
+type AppliedDiscovery = { characterIds: string[]; observationIds: string[]; validationSummary?: { accepted: number; unresolved: number; rejected: { localKey: string; code: string }[] } };
 const diagnostics = z.enum(["provider_timeout", "provider_failed", "invalid_output", "source_requires_manual_scan", "publication_failed"]);
 
 function readExecution(value: unknown): CastDiscoveryExecution {
@@ -57,7 +59,7 @@ function claimFromRow(value: unknown): CastDiscoveryClaim {
   const row = z.object({ id: z.uuid(), campaign_id: z.uuid(), owner_user_id: z.uuid(), turn_id: z.uuid(), turn_number: ordinal,
     narration_revision: ordinal, timeline_revision: ordinal, source_hash: z.string(), source: castDiscoverySourceSchema,
     chunks: z.array(castDiscoverySourceSchema).min(1).max(32), chunk_ordinal: ordinal, attempt: ordinal.max(2),
-    lease_token: z.uuid(), checkpoint: castDiscoveryOutputSchema.nullable(), execution_snapshot: z.unknown() }).parse(value);
+    lease_token: z.uuid(), checkpoint: castDiscoveryOutputSchema.nullable(), execution_snapshot: z.unknown(), identity_snapshot: castDiscoveryIdentitySnapshotSchema }).parse(value);
   const chunks = row.chunks;
   const bound = (source: CastDiscoverySource) => source.turnId === row.turn_id && source.turnNumber === row.turn_number
     && source.scope.ownerUserId === row.owner_user_id && source.scope.campaignId === row.campaign_id
@@ -70,7 +72,7 @@ function claimFromRow(value: unknown): CastDiscoveryClaim {
   if (!chunks[row.chunk_ordinal]) throw new Error("Invalid discovery chunk checkpoint.");
   return { id: z.uuid().parse(row.id), scope: castScopeSchema.parse({ ownerUserId: row.owner_user_id, campaignId: row.campaign_id }),
     source: chunks[row.chunk_ordinal]!, chunkOrdinal: row.chunk_ordinal, chunkCount: chunks.length, execution: readExecution(row.execution_snapshot),
-    attempt: row.attempt, leaseToken: z.uuid().parse(row.lease_token), output: row.checkpoint === null ? null : castDiscoveryOutputSchema.parse(row.checkpoint) };
+    attempt: row.attempt, leaseToken: z.uuid().parse(row.lease_token), output: row.checkpoint === null ? null : castDiscoveryOutputSchema.parse(row.checkpoint), identities: row.identity_snapshot };
 }
 
 async function lockLiveClaim(client: DatabaseClient, claim: CastDiscoveryClaim) {
@@ -105,9 +107,10 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
           return null;
         }
         const token = randomUUID();
+        const identities = job.identity_snapshot ?? await captureCastDiscoveryIdentities(client, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id });
         const result = await client.query(`UPDATE campaign_cast_discovery_jobs SET status='running',lease_token=$2,lease_owner=$3,
           lease_expires_at=clock_timestamp()+interval '90 seconds',attempt=attempt+CASE WHEN checkpoint IS NULL THEN 1 ELSE 0 END,
-          updated_at=clock_timestamp() WHERE id=$1 RETURNING *`, [job.id, token, worker]);
+          identity_snapshot=$4,updated_at=clock_timestamp() WHERE id=$1 RETURNING *`, [job.id, token, worker, JSON.stringify(identities)]);
         return claimFromRow(result.rows[0]);
       });
     },
@@ -132,7 +135,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         return true;
       });
     },
-    async publish(claim: CastDiscoveryClaim, apply: (client: DatabaseClient, current: CastDiscoveryClaim) => Promise<AppliedDiscovery>) {
+    async publish(claim: CastDiscoveryClaim, apply: (client: DatabaseClient, current: CastDiscoveryClaim) => Promise<AppliedDiscovery> = applyValidatedCastDiscovery) {
       if (!enabled()) return "disabled" as const;
       return withTransaction(pool, async (client) => {
         const live = await lockLiveClaim(client, claim);
@@ -154,11 +157,11 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         if (current.output === null) throw new Error("Discovery output must be checkpointed before publication.");
         const receipt = await apply(client, current);
         z.array(z.uuid()).parse(receipt.characterIds); z.array(z.uuid()).parse(receipt.observationIds);
-        await client.query(`INSERT INTO campaign_cast_discovery_receipts(job_id,campaign_id,owner_user_id,chunk_ordinal,output_hash,character_ids,observation_ids)
-          VALUES($1,$2,$3,$4,$5,$6,$7)`, [current.id, current.scope.campaignId, current.scope.ownerUserId, current.chunkOrdinal,
-          sha256(stableStringify(current.output)), receipt.characterIds, receipt.observationIds]);
+        await client.query(`INSERT INTO campaign_cast_discovery_receipts(job_id,campaign_id,owner_user_id,chunk_ordinal,output_hash,character_ids,observation_ids,validation_summary)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [current.id, current.scope.campaignId, current.scope.ownerUserId, current.chunkOrdinal,
+          sha256(stableStringify(current.output)), receipt.characterIds, receipt.observationIds, JSON.stringify(receipt.validationSummary ?? {})]);
         const complete = current.chunkOrdinal + 1 === current.chunkCount;
-        await client.query(`UPDATE campaign_cast_discovery_jobs SET status=$2,chunk_ordinal=chunk_ordinal+1,attempt=0,checkpoint=NULL,
+        await client.query(`UPDATE campaign_cast_discovery_jobs SET status=$2,chunk_ordinal=chunk_ordinal+1,attempt=0,checkpoint=NULL,identity_snapshot=NULL,
           lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,diagnostic_code=NULL,available_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`,
         [current.id, complete ? "complete" : "queued"]);
         return complete ? "complete" as const : "next_chunk" as const;

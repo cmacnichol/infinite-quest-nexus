@@ -134,7 +134,8 @@ export const portableCampaignCastSchema = z.object({
         || JSON.stringify(characters.get(item.characterId)?.origin) !== JSON.stringify(command.origin)) fail();
       else created.add(item.characterId);
     } else {
-      if (!characters.has(command.characterId) || !created.has(command.characterId)
+      const protagonistEvidence = command.kind === "observe" && characters.get(command.characterId)?.origin.kind === "protagonist";
+      if (!characters.has(command.characterId) || !created.has(command.characterId) && !protagonistEvidence
         || characters.get(command.characterId)!.firstObservedTurn > event.effectiveTurnNumber) fail();
       if (command.kind === "observe") {
         if (command.evidence.kind === "turn" && command.evidence.invalidated) fail();

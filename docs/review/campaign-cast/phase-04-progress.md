@@ -26,7 +26,7 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 
 1. Connect the durable queue below to unresolved candidates, contiguous coverage, and runtime capability handling. Migration 0104 now exists; use the next ordered migration for further additive schema changes.
 2. Freeze routing at admission without a provider call inside acceptance. Use the existing prepared-request executor and physical-attempt cost ledger with a new lease-bound discovery reservation; do not disguise discovery as a direct authoring request.
-3. Wire atomic accepted-turn enqueue and validated publication using the implemented campaign/timeline/source fences and same-client cast seam. Capture and reconcile character revisions, and allow protagonist observations without editing its authoritative profile; update portability validation accordingly.
+3. Wire atomic accepted-turn enqueue to the validated publication seam below. Complete pinned-world playable-character selection and bounded identity hints before provider dispatch.
 4. Lifecycle cancellation/re-enqueue for corrections, replacement, rewind, branches, and transfer. Existing phase-02 approvals cover these source integrations.
 5. Status/retry/candidate-resolution API and legacy UI, then actual PostgreSQL and browser acceptance gates.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
@@ -54,3 +54,21 @@ Verification:
 - Repository checks and TypeScript passed. Independent bounded queue review found no concrete blocker; suggested stale-worker and lease-exhaustion tests were added and passed.
 
 The task-owned disposable PostgreSQL container `infinitequest-cast-phase4` is available on localhost port 55439 for continued verification. Its URL is only in ignored `.tmp/campaign-cast/database-url.txt`; do not print or commit it. No production database was used. No new browser check applies to this backend-only checkpoint.
+
+## Validated publication checkpoint
+
+Migration `0105_campaign_cast_discovery_candidates.sql` adds captured identity snapshots, receipt validation summaries, and scoped unresolved candidates. Candidate proposals are operational; applied observations remain portable cast events. Resolution endpoints and UI are still pending.
+
+Claims capture identities on the first attempt of each chunk and retain them across retries. Default publication now validates the checkpoint, reconciles current identities, holds ambiguous or changed identities, and appends source-bound observations transactionally. It refreshes the roster between candidates so two aliases in one output cannot silently create duplicate identities. Existing world occurrences are reused by immutable world-version/entity provenance, including after a manual rename. Names, aliases, field overrides, pins, and ignore flags survive publication. Current world hints cover the scoped entity catalog, including legacy entity maps; playable-character selection and bounded profile hints still need completion.
+
+Protagonist observations can now be recorded and survive portable export/import with ID mapping. They do not change the authoritative campaign character profile. Supporting-character editing restrictions still apply to the protagonist.
+
+Verification at this checkpoint:
+
+- RED/GREEN PostgreSQL regressions cover duplicate aliases within one output and reuse of a renamed world occurrence.
+- Ten affected PostgreSQL integration files: **162 passed, 11 skipped**. This includes all **17 discovery tests**, **12 cast repository tests**, lifecycle, portability, APIs, migrations, archives, generation events, and adapter contracts. The previously reported migration ordering failure did not recur in this selection.
+- Full unit suite with four workers: **345 files passed; 4,351 passed, 44 skipped**.
+- `corepack pnpm check` passed. Bounded independent source review found no remaining blocker in the alias-collision and world-reuse fixes; the reviewer did not independently rerun PostgreSQL.
+- Browser and live-provider checks were not run for these unwired backend changes. No deployment or production data changes occurred.
+
+Automatic discovery is still not enabled or connected to generation acceptance. The next required slice is lease-bound physical-attempt accounting and frozen runtime execution, followed by acceptance/lifecycle wiring and the status/resolution UI.

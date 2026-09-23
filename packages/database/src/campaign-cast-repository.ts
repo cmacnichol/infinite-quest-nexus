@@ -10,6 +10,7 @@ import { createCastCharacterSchema, editCastCharacterSchema, type CreateCastChar
 import { CampaignCastError, type CampaignCastRepositoryPort, type CampaignCastWritePort } from "../../application/src/campaign-cast/index.js";
 import { castEvidenceOrder, projectCastProfile, validateCastFiction } from "../../domain/src/campaign-cast.js";
 import { characterFictionAuthority } from "../../domain/src/character-fiction-authority.js";
+import { buildScopedEntityCatalog } from "../../domain/src/entity-references.js";
 import { sha256, stableStringify, truncateAtBoundary } from "../../domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 
@@ -152,11 +153,11 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
     person.revision++;
   }
   for (const person of people.values()) {
-    if (person.origin.kind === "protagonist") continue;
     const own = current.filter((observation) => observation.characterId === person.id && validIds.has(observation.id));
-    person.profile = projectCastProfile({ observations: own, overrides: [...(overrides.get(person.id)?.values() ?? [])] });
     person.lastObservedTurn = Math.max(person.firstObservedTurn, ...own.map((observation) => castEvidenceOrder(observation.evidence)[0]));
     person.revision += own.length;
+    if (person.origin.kind === "protagonist") continue;
+    person.profile = projectCastProfile({ observations: own, overrides: [...(overrides.get(person.id)?.values() ?? [])] });
     validateCastFiction(person.name);
     person.aliases.forEach(validateCastFiction);
   }
@@ -173,6 +174,12 @@ async function cacheSnapshot(client: DatabaseClient, scope: CastScope, value: Ca
 }
 
 /** Lifecycle callers already own a transaction; never open a nested pool transaction. */
+export async function initializeCastWithClient(client: DatabaseClient, rawScope: CastScope): Promise<CastSnapshot> {
+  const scope = castScopeSchema.parse(rawScope), campaign = await lockCampaign(client, scope);
+  const state = await initialize(client, scope, campaign);
+  return snapshot(client, scope, campaign, state, { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision });
+}
+
 export async function rebuildCastWithClient(client: DatabaseClient, scope: CastScope, turnNumber?: number): Promise<CastSnapshot> {
   const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
   const value = await snapshot(client, scope, campaign, state,
@@ -181,10 +188,10 @@ export async function rebuildCastWithClient(client: DatabaseClient, scope: CastS
   return value;
 }
 
-async function assertSupportingCharacter(client: DatabaseClient, scope: CastScope, id: string): Promise<void> {
+async function assertSupportingCharacter(client: DatabaseClient, scope: CastScope, id: string, allowProtagonistEvidence = false): Promise<void> {
   const result = await client.query("SELECT origin FROM campaign_cast_characters WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3", [id, scope.campaignId, scope.ownerUserId]);
   if (!result.rows[0]) throw new Error("Cast character not found.");
-  if (castOriginSchema.parse(result.rows[0].origin).kind === "protagonist") throw new Error("Use the existing protagonist profile authority.");
+  if (!allowProtagonistEvidence && castOriginSchema.parse(result.rows[0].origin).kind === "protagonist") throw new Error("Use the existing protagonist profile authority.");
 }
 
 async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: Campaign, eventId: string, boundary: CastBoundary, stored: StoredCommand): Promise<void> {
@@ -199,14 +206,15 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
     if (command.origin.kind === "world") {
       if (command.origin.worldVersionId !== campaign.world_version_id) throw new Error("Invalid cast world origin.");
       const world = (await client.query("SELECT content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [campaign.world_version_id, scope.ownerUserId])).rows[0]?.content;
-      if (!Array.isArray(world?.entities) || !world.entities.some((item: Record<string, unknown>) => (item?.id ?? item?.key) === (command.origin.kind === "world" ? command.origin.entityId : null))) throw new Error("World identity not found.");
+      const entityId = command.origin.entityId;
+      if (!buildScopedEntityCatalog({ worldContent: world }).some((entity) => entity.id === `world:${entityId}`)) throw new Error("World identity not found.");
     }
     const first = command.evidence?.kind === "turn" ? command.evidence.turnNumber : boundary.turnNumber;
     await client.query("INSERT INTO campaign_cast_characters(id,owner_user_id,campaign_id,origin,first_observed_turn) VALUES($1,$2,$3,$4,$5)",
       [stored.characterId, scope.ownerUserId, scope.campaignId, JSON.stringify(command.origin), first]);
     return;
   }
-  await assertSupportingCharacter(client, scope, command.characterId);
+  await assertSupportingCharacter(client, scope, command.characterId, command.kind === "observe");
   if (command.kind === "identity") { validateCastFiction(command.name); command.aliases.forEach(validateCastFiction); }
   if (command.kind === "override") validateCastFiction(command.value);
   if (command.kind !== "observe") return;
@@ -360,12 +368,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       });
     },
     async initialize(rawScope) {
-      const scope = castScopeSchema.parse(rawScope);
-      return withTransaction(pool, async (client) => {
-        const campaign = await lockCampaign(client, scope);
-        const state = await initialize(client, scope, campaign);
-        return snapshot(client, scope, campaign, state, { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision });
-      });
+      return withTransaction(pool, (client) => initializeCastWithClient(client, rawScope));
     },
     async loadSnapshot(rawScope, rawBoundary) {
       const scope = castScopeSchema.parse(rawScope), boundary = castBoundarySchema.parse(rawBoundary);

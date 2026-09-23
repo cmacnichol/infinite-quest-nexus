@@ -1,10 +1,10 @@
-import { CAST_DISCOVERY_PROTOCOL, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryCandidate, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
+import { CAST_DISCOVERY_PROTOCOL, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryCandidate, type CastDiscoveryIdentitySnapshot, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
 import type { CastCharacter, CastField, CastOrigin } from "../../contracts/src/campaign-cast.js";
 import { estimateTokens, sha256, stableStringify } from "./text.js";
 import { validateCastFiction } from "./campaign-cast.js";
 import { normalizeEntityTerm } from "./entity-references.js";
 
-export type CastDiscoveryWorldIdentity = { entityId: string; name: string; aliases: string[]; identityHints?: string[] };
+export type CastDiscoveryWorldIdentity = CastDiscoveryIdentitySnapshot["worldCharacters"][number];
 
 /** Callers supply campaign-scoped validated identities, never a raw generation context. */
 export function buildCastDiscoveryInput(input: {

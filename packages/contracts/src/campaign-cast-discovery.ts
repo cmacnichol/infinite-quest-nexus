@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { castFieldSchema, castScopeSchema } from "./campaign-cast.js";
+import { castCharacterSchema, castFieldSchema, castScopeSchema } from "./campaign-cast.js";
 
 export const CAST_DISCOVERY_PROTOCOL = "cast-discovery-v1";
 const evidence = z.object({ paragraphId: z.string().min(1).max(200), quote: z.string().min(1).max(1000) }).strict();
@@ -21,3 +21,10 @@ export const castDiscoverySourceSchema = z.object({
 export type CastDiscoveryCandidate = z.infer<typeof castDiscoveryCandidateSchema>;
 export type CastDiscoveryOutput = z.infer<typeof castDiscoveryOutputSchema>;
 export type CastDiscoverySource = z.infer<typeof castDiscoverySourceSchema>;
+
+export const castDiscoveryIdentitySnapshotSchema = z.object({
+  revision: z.number().int().nonnegative(), characters: z.array(castCharacterSchema), worldVersionId: z.uuid(),
+  worldCharacters: z.array(z.object({ entityId: z.string().min(1).max(200), name: z.string().min(1).max(200),
+    aliases: z.array(z.string().min(1).max(200)).max(20), identityHints: z.array(z.string().min(1).max(2000)).max(20).optional() }).strict())
+}).strict();
+export type CastDiscoveryIdentitySnapshot = z.infer<typeof castDiscoveryIdentitySnapshotSchema>;

@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 
@@ -58,6 +59,31 @@ integration("campaign cast PostgreSQL foundation", () => {
     expect(await repo.applyBatch(scope, request)).toEqual(receipt);
     expect((await repo.loadSnapshot(scope, boundary)).characters.filter((c) => c.name === "Mara")).toHaveLength(2);
     await expect(repo.applyBatch(scope, { ...request, commands: [request.commands[0]!] })).rejects.toThrow(/idempotency/i);
+  });
+  it("retains protagonist observations through export without editing its existing profile", async () => {
+    const source = await fixture(), destination = await fixture(), narration = "Iven wears a red coat.";
+    for (const f of [source, destination]) await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.evidence.turnId, narration]);
+    const repo = createPostgresCampaignCastRepository(pool);
+    const before = await repo.initialize(source.scope), protagonist = before.characters[0]!;
+    await repo.applyBatch(source.scope, { boundary: source.boundary, idempotencyKey: "protagonist-evidence", commands: [{
+      kind: "observe", characterId: protagonist.id, field: "state.clothing", value: "red coat", mode: "fact", speakerCharacterId: null,
+      evidence: { ...source.evidence, quote: narration, sourceHash: sha256(narration) }, supersedesObservationId: null
+    }] });
+    const after = await repo.detail(source.scope, protagonist.id);
+    expect(after.character.profile).toEqual(protagonist.profile);
+    expect(after.character.lastObservedTurn).toBe(1);
+    expect(after.observations[0]?.value).toBe("red coat");
+    await expect(repo.applyBatch(source.scope, { boundary: source.boundary, idempotencyKey: "forbidden-protagonist-edit", commands: [{
+      kind: "override", characterId: protagonist.id, field: "story.role", value: "captain"
+    }] })).rejects.toThrow(/protagonist/i);
+    await withTransaction(pool, async (client) => {
+      const payload = await exportCampaignCast(client, source.scope);
+      await importCampaignCast(client, destination.scope, payload, { turns: new Map([[source.evidence.turnId, destination.evidence.turnId]]), worlds: new Map() });
+    });
+    const restored = (await repo.current(destination.scope)).characters[0]!;
+    expect(restored.id).not.toBe(protagonist.id);
+    expect(restored.profile).toEqual(protagonist.profile);
+    expect((await repo.detail(destination.scope, restored.id)).observations[0]?.value).toBe("red coat");
   });
 
   it("rebuilds observations and blank overrides and respects the requested historical boundary", async () => {

@@ -37,10 +37,105 @@ describe("durable cast discovery", () => {
       profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
     const execution = { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) };
     const enqueue = (n = 0, enabled = true) => withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope, turnId: turnIds[n]!, execution, enabled }));
-    return { scope, turnIds, enqueue, execution };
+    return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
   const applied = async () => ({ characterIds: [], observationIds: [] });
+  const proposal = (existingCharacterId: string | null = null) => ({ version: 1 as const, characters: [{ localKey: "mara", name: "Mara", aliases: [] as string[], existingCharacterId,
+    identityEvidence: [{ paragraphId: "p1", quote: "Mara has blue eyes." }], observations: [{ field: "appearance.description" as const,
+      value: "blue eyes", mode: "fact" as const, speakerCharacterId: null, paragraphId: "p1", quote: "Mara has blue eyes." }] }] });
+
+  it("publishes validated sparse identities and evidence from the durable checkpoint", async () => {
+    const f = await fixture(); await f.enqueue();
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;
+    await repo.checkpoint(job, proposal());
+    expect(await repo.publish(job)).toBe("complete");
+    const cast = await createPostgresCampaignCastRepository(pool).current(f.scope);
+    const mara = cast.characters.find((p) => p.name === "Mara")!;
+    expect(mara).toMatchObject({ origin: { kind: "discovered" }, profile: { "appearance.description": "blue eyes" } });
+    expect((await createPostgresCampaignCastRepository(pool).detail(f.scope, mara.id)).observations[0]?.evidence)
+      .toMatchObject({ turnId: f.turnIds[0], narrationRevision: 0, quote: "Mara has blue eyes." });
+  });
+  it("captures identities before extraction and preserves a later manual override", async () => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const created = await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "manual-mara", name: "Mara", aliases: [], profile: { "appearance.description": "blue eyes" } });
+    await f.enqueue();
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;
+    expect(job.identities.characters.find((p) => p.id === created.character.id)?.profile).toEqual({ "appearance.description": "blue eyes" });
+    await repo.checkpoint(job, proposal(created.character.id));
+    await editor.edit(f.scope, created.character.id, { expectedCastRevision: created.revision, expectedCharacterRevision: created.character.revision,
+      expectedBoundary: created.boundary, idempotencyKey: "manual-green", setOverrides: { "appearance.description": "green eyes" } });
+    expect(await repo.publish(job)).toBe("complete");
+    const detail = await editor.detail(f.scope, created.character.id);
+    expect(detail.character.profile["appearance.description"]).toBe("green eyes");
+    expect(detail.observations.map((o) => o.value)).toEqual(["blue eyes"]);
+  });
+  it("retains ambiguous identities for review and rejects forged evidence without creating characters", async () => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "existing-mara", name: "Mara", aliases: [], profile: {} });
+    await f.enqueue();
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;
+    const output = proposal();
+    output.characters.push({ ...output.characters[0]!, localKey: "forged", name: "Dara", identityEvidence: [{ paragraphId: "p1", quote: "Dara is here." }] });
+    await repo.checkpoint(job, output);
+    expect(await repo.publish(job)).toBe("complete");
+    const pending = (await pool.query("SELECT reason,proposal FROM campaign_cast_discovery_candidates WHERE job_id=$1", [job.id])).rows;
+    expect(pending).toHaveLength(1); expect(pending[0].reason).toBe("identity_needs_review");
+    expect(pending[0].proposal.name).toBe("Mara");
+    expect((await editor.current(f.scope)).characters).toHaveLength(2);
+    const receipt = (await pool.query("SELECT validation_summary FROM campaign_cast_discovery_receipts WHERE job_id=$1", [job.id])).rows[0];
+    expect(receipt.validation_summary).toMatchObject({ accepted: 0, unresolved: 1, rejected: [{ localKey: "forged", code: "quote_not_in_source" }] });
+  });
+  it("links a character from a pinned legacy world entity map", async () => {
+    const f = await fixture(2), narration = "Mara is also known as the Watcher. Mara has blue eyes.";
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({ entities: { mara: { name: "Mara", kind: "character", aliases: ["the Watcher"] } } })]);
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=ANY($1::uuid[])", [f.turnIds, narration]);
+    await f.enqueue();
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;
+    const output = proposal();
+    output.characters[0]!.aliases = ["the Watcher"];
+    output.characters[0]!.identityEvidence = [{ paragraphId: "p1", quote: narration }];
+    await repo.checkpoint(job, output);
+    expect(await repo.publish(job)).toBe("complete");
+    const cast = await createPostgresCampaignCastRepository(pool).current(f.scope);
+    const mara = cast.characters.find((p) => p.name === "Mara")!;
+    expect(mara.origin).toEqual({ kind: "world", worldVersionId: f.versionId, entityId: "mara" });
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await editor.edit(f.scope, mara.id, { expectedCastRevision: cast.revision, expectedCharacterRevision: mara.revision,
+      expectedBoundary: cast.boundary, idempotencyKey: "rename-world-person", name: "The Elder", aliases: [], pinned: true, ignored: true });
+    await f.enqueue(1);
+    const next = (await repo.claim("b"))!;
+    await repo.checkpoint(next, output);
+    expect(await repo.publish(next)).toBe("complete");
+    const retained = await editor.current(f.scope);
+    expect(retained.characters).toHaveLength(2);
+    expect(retained.characters.find((p) => p.id === mara.id)).toMatchObject({ name: "The Elder", aliases: [], pinned: true, ignored: true });
+  });
+  it("holds a new same-name manual identity created after extraction began", async () => {
+    const f = await fixture(); await f.enqueue();
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;
+    await repo.checkpoint(job, proposal());
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "late-mara", name: "Mara", aliases: [], profile: {} });
+    expect(await repo.publish(job)).toBe("complete");
+    expect((await editor.current(f.scope)).characters).toHaveLength(2);
+    expect((await pool.query("SELECT reason FROM campaign_cast_discovery_candidates WHERE job_id=$1", [job.id])).rows).toEqual([{ reason: "identity_needs_review" }]);
+  });
+  it("rechecks alias collisions after each identity created in the same output", async () => {
+    const f = await fixture(), quote = "Mara is known as the Watcher. The Watcher is known as Mara.";
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], quote]); await f.enqueue();
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("a"))!;
+    await repo.checkpoint(job, { version: 1, characters: [
+      { localKey: "mara", name: "Mara", aliases: ["the Watcher"], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote }], observations: [] },
+      { localKey: "watcher", name: "the Watcher", aliases: ["Mara"], existingCharacterId: null, identityEvidence: [{ paragraphId: "p1", quote }], observations: [] }
+    ] });
+    expect(await repo.publish(job)).toBe("complete");
+    expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters).toHaveLength(2);
+    expect((await pool.query("SELECT local_key FROM campaign_cast_discovery_candidates WHERE job_id=$1", [job.id])).rows).toEqual([{ local_key: "watcher" }]);
+  });
 
   it("enqueues once in the caller transaction, freezes execution, and does nothing while disabled", async () => {
     const f = await fixture();
