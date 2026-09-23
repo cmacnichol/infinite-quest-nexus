@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CastCharacter } from "../../packages/contracts/src/campaign-cast.js";
 import {
   buildScopedEntityCatalog,
   entityQueryTerms,
@@ -10,6 +11,41 @@ import {
 } from "../../packages/domain/src/entity-references.js";
 
 describe("scoped entity references", () => {
+  const supporting = (id: string, name: string, aliases: string[] = []): CastCharacter => ({
+    id, name, aliases, origin: { kind: "discovered" }, profile: {}, pinned: false, ignored: false,
+    revision: 1, firstObservedTurn: 1, lastObservedTurn: 1
+  });
+  it("promotes admitted characters from heuristic names to stable campaign IDs", () => {
+    const person = supporting("88888888-8888-4888-8888-888888888888", "Mara", ["The Watcher"]);
+    expect(resolveEntityMetadata("Mara returns.", [])).toMatchObject({ entityIds: [], entities: ["Mara"] });
+    const catalog = buildScopedEntityCatalog({ campaignCharacters: [person] });
+    expect(findEntityReferences("Mara returns.", catalog).map((entry) => entry.id)).toEqual([`campaign:${person.id}`]);
+    expect(resolveEntityMetadata("The Watcher returns.", catalog)).toEqual({ entityIds: [`campaign:${person.id}`], entities: ["Mara"] });
+    expect(catalog[0]?.source).toBe("campaign");
+  });
+  it("leaves shared campaign aliases ambiguous and keeps the historical protagonist ID", () => {
+    const one = supporting("88888888-8888-4888-8888-888888888888", "Mara", ["The Watcher"]);
+    const two = supporting("99999999-9999-4999-8999-999999999999", "Iven", ["The Watcher"]);
+    const hero = { ...supporting("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "Ada"), origin: { kind: "protagonist" as const, selectedCharacterId: "hero" } };
+    const catalog = buildScopedEntityCatalog({ characterSnapshot: { id: "hero", name: "Ada" }, campaignCharacters: [one, two, hero] });
+    expect(findEntityReferences("The Watcher returns.", catalog)).toEqual([]);
+    expect(findEntityReferences("Ada returns.", catalog).map((entry) => entry.id)).toEqual(["character:hero"]);
+    expect(catalog.some((entry) => entry.id === `campaign:${hero.id}`)).toBe(false);
+  });
+  it("deduplicates an established pinned-world occurrence while retaining historical retrieval IDs", () => {
+    const person = { ...supporting("88888888-8888-4888-8888-888888888888", "Mara", ["The Watcher"]),
+      origin: { kind: "world" as const, worldVersionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", entityId: "mara" } };
+    const input = { worldContent: { entities: [{ id: "mara", name: "Mara", aliases: ["Gatekeeper"] }] },
+      worldVersionId: person.origin.worldVersionId, campaignCharacters: [person] };
+    const catalog = buildScopedEntityCatalog(input);
+    expect(catalog).toHaveLength(1);
+    expect(resolveEntityMetadata("Gatekeeper returns.", catalog).entityIds).toEqual([`campaign:${person.id}`, "world:mara"]);
+    expect(findEntityReferences("The Watcher", catalog)).toHaveLength(1);
+    expect(input.worldContent.entities[0]!.aliases).toEqual(["Gatekeeper"]);
+    const foreignVersion = buildScopedEntityCatalog({ ...input, worldVersionId: "another-version" });
+    expect(foreignVersion).toHaveLength(2);
+    expect(findEntityReferences("Mara", foreignVersion)).toEqual([]);
+  });
   it("tolerantly builds stable references from world entities and campaign character data", () => {
     const catalog = buildScopedEntityCatalog({
       worldContent: {
