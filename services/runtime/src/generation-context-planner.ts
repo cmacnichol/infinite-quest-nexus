@@ -8,6 +8,13 @@ import type { StoryLengthWordRange } from "../../../packages/contracts/src/story
 import { ContextBudgetError, buildStoryMemoryUserPrompt, buildStoryUserPrompt, containsMechanicsLanguage, estimatedInputSafetyAllowanceTokens, estimateStoryTokens, planContext, serializeProviderRequest, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 import { selectWorldFictionReferences, sha256, stableStringify } from "../../../packages/domain/src/index.js";
 import type { RuntimeTextExecution as GenerationTextProvider } from "./provider-credential-transport-adapter.js";
+import { isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
+import { selectCastContext, type CastContextSelection } from "../../../packages/domain/src/campaign-cast-context.js";
+
+type SentCast = { coverage: CastContextSelection["coverage"]; notice: string; characters: {
+  characterId: string; revision: number; fields: { authority: "user" | "observation"; evidenceId: string;
+    source: { kind: string; effectiveTurnNumber?: number; turnNumber?: number } }[]
+}[] };
 
 const PRIVATE_MECHANICS_AUTHORITY_KEYS = new Set([
   "rpgStats", "eventTriggers", "pendingEventTriggers", "defaultTriggers", "mechanicsPrivate", "roll"
@@ -102,6 +109,24 @@ function generationSourceManifest(
     }
   }
   const historical = (sentAuthority.chronicle ?? []) as readonly PromptCandidate[];
+  const sentCast = sentAuthority.cast as SentCast | undefined;
+  if (sentCast) for (const field of ["coverage", "notice"] as const) {
+    entries.push(completeEvidence({ source: { kind: "cast", id: `cast-${field}`,
+      revision: isGenerationBaseIdentityV4(context.baseIdentity) ? context.baseIdentity.castFingerprint : "unavailable", turnNumber: context.baseIdentity.baseTurnNumber },
+    semanticRole: "current_continuity", rank: 0, selectionGroup: "cast", sourcePath: `/cast/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+  }
+  for (const [index, character] of (sentCast?.characters ?? []).entries()) {
+    const source = { kind: "cast" as const, id: character.characterId, revision: String(character.revision), turnNumber: context.baseIdentity.baseTurnNumber };
+    entries.push(completeEvidence({ source, semanticRole: "character_authority", rank: index, selectionGroup: "cast",
+      sourcePath: `/cast/characters/${index}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+    for (const [fieldIndex, field] of character.fields.entries()) {
+      entries.push(completeEvidence({ source: { ...source, id: `${character.characterId}:${field.evidenceId}`,
+        turnNumber: field.source.effectiveTurnNumber ?? field.source.turnNumber ?? null },
+      semanticRole: field.authority === "user" ? "corrected_state"
+        : field.source.kind === "world" || field.source.kind === "historical_world" ? "world_reference" : "accepted_narration", rank: index, selectionGroup: "cast",
+      sourcePath: `/cast/characters/${index}/fields/${fieldIndex}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+    }
+  }
   for (const [index, candidate] of historical.entries()) {
     const original = context.candidates.find((source) => source.id === candidate.id);
     if (candidate.evidenceForm === "excerpt" && original?.narrativeSource && candidate.sourceSpans) {
@@ -116,7 +141,7 @@ function generationSourceManifest(
       rank: candidate.rank, selectionGroup: candidate.kind === "canonical_fact" ? "historical_fact" : "retrieved", sourcePath: `/chronicle/${index}/content`, normalizationVersion: "fiction-safe-json-v1",
       canonicalFactId: candidate.kind === "canonical_fact" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(candidate.id) ? candidate.id : null }, sentAuthority));
   }
-  const body = { version: "generation-evidence-v1" as const, attemptId, producingRequestHash: sha256(requestBody), entries, requiredReviewEvidenceIds: entries.filter((entry) => entry.selectionGroup === "protected").map((entry) => entry.id) };
+  const body = { version: "generation-evidence-v1" as const, attemptId, producingRequestHash: sha256(requestBody), entries, requiredReviewEvidenceIds: entries.filter((entry) => entry.selectionGroup === "protected" || entry.selectionGroup === "cast").map((entry) => entry.id) };
   return { ...body, manifestHash: generationEvidenceManifestHash(body) };
 }
 
@@ -148,6 +173,9 @@ export function planGenerationPromptContext(
   policy?: StoryMemoryPolicy
 ) {
   const authority = context.authority;
+  const castSnapshot = isGenerationBaseIdentityV4(context.baseIdentity) ? authority.castSnapshot : undefined;
+  let castSelection: CastContextSelection | undefined;
+  let castAllocatedTokens = 0;
   const layered = hasGenerationCharacterAuthority(context.baseIdentity) && policy?.recentTurnTarget === 3;
   const recentRecords = layered ? (context.recentTurns ?? []).map((turn) => ({
     sourceId: turn.turnId, turnNumber: turn.turnNumber, inputMode: turn.inputMode,
@@ -244,6 +272,8 @@ export function planGenerationPromptContext(
   ];
   const promptContext = (selected: readonly Readonly<{ id: string }>[]) => ({
     ...authorityContext,
+    ...(castSelection?.content && selected.some((block) => block.id === "cast-context")
+      ? { cast: JSON.parse(castSelection.content) as SentCast } : {}),
     ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: selected.filter((block: { id: string; scope?: string }) => block.scope === "world")
       .map((block) => worldReferences.find((reference) => reference.sourceId === block.id))
       .filter((reference): reference is typeof worldReferences[number] => Boolean(reference))
@@ -287,9 +317,31 @@ export function planGenerationPromptContext(
   };
   const useWorldQuota = hasGenerationCharacterAuthority(context.baseIdentity) && Boolean(authority.worldReferenceSource);
   let plan;
-  if (useWorldQuota || layered) {
+  if (useWorldQuota || layered || castSnapshot) {
     const authorityBlock = blocks[0]!;
-    const protectedPlan = measure([authorityBlock]);
+    let protectedPlan = measure([authorityBlock]);
+    const castBlocks: typeof blocks = [];
+    if (castSnapshot) {
+      castAllocatedTokens = Math.min(3000, Math.floor(0.10 * Math.max(0, Math.min(
+        contextLimit - protectedPlan.contextTokens, inputLimit - protectedPlan.requestTokens - protectedPlan.safetyAllowanceTokens))));
+      let budgetTokens = castAllocatedTokens;
+      for (;;) {
+        castSelection = selectCastContext({ snapshot: castSnapshot, direction: action,
+          currentScene: authority.latestTurn?.narration ?? "", openThreads: authority.openThreads, budgetTokens });
+        if (!castSelection.content) break;
+        const block = { id: "cast-context", revision: sha256(castSelection.content), content: castSelection.content,
+          protected: false, priority: 0, ordinal: 0, scope: "cast" };
+        const trial = measure([authorityBlock, block]);
+        const added = Math.max(trial.contextTokens - protectedPlan.contextTokens,
+          trial.requestTokens + trial.safetyAllowanceTokens - protectedPlan.requestTokens - protectedPlan.safetyAllowanceTokens);
+        if (trial.selected.some((entry) => entry.id === block.id) && added <= castAllocatedTokens) {
+          castBlocks.push({ ...block, protected: true }); protectedPlan = trial; break;
+        }
+        // Account for the provider envelope and escaping, not only selector JSON.
+        budgetTokens = Math.max(0, budgetTokens - Math.max(1, added - castAllocatedTokens));
+      }
+    }
+    const reservedAuthority = [authorityBlock, ...castBlocks];
     const residual = Math.max(0, Math.min(
       contextLimit - protectedPlan.contextTokens,
       inputLimit - protectedPlan.requestTokens - protectedPlan.safetyAllowanceTokens
@@ -301,7 +353,7 @@ export function planGenerationPromptContext(
       for (let ordinal = context.baseIdentity.baseTurnNumber - 1; ordinal >= Math.max(1, context.baseIdentity.baseTurnNumber - 2); ordinal--) {
         const block = blocks.find((candidate) => candidate.scope === "recent" && candidate.ordinal === ordinal);
         if (!block) { recentDiagnostics.firstGapReason = "recent_gap"; break; }
-        const trial = measure([authorityBlock, ...selectedRecentBlocks, block]);
+        const trial = measure([...reservedAuthority, ...selectedRecentBlocks, block]);
         if (!trial.selected.some((candidate) => candidate.id === block.id)) {
           recentDiagnostics.firstGapReason = trial.omitted[0]?.reason ?? "context_limit"; break;
         }
@@ -314,7 +366,7 @@ export function planGenerationPromptContext(
     }
     const selectedWorldBlocks: typeof blocks = [];
     for (const worldBlock of blocks.filter((block) => block.scope === "world").sort((left, right) => left.priority - right.priority || left.ordinal - right.ordinal || left.id.localeCompare(right.id))) {
-      const trial = measure([authorityBlock, ...selectedWorldBlocks, worldBlock]);
+      const trial = measure([...reservedAuthority, ...selectedWorldBlocks, worldBlock]);
       if (!trial.selected.some((block) => block.id === worldBlock.id)) continue;
       const added = Math.max(
         trial.contextTokens - protectedPlan.contextTokens,
@@ -331,7 +383,7 @@ export function planGenerationPromptContext(
       if (layered && candidate.turnId && recentIds.has(candidate.turnId)) { duplicateIds.push(candidate.id); return false; }
       return true;
     });
-    plan = measure([authorityBlock, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
+    plan = measure([...reservedAuthority, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
   } else {
     plan = measure(blocks);
   }
@@ -356,6 +408,8 @@ export function planGenerationPromptContext(
   const requestBody = serializeProviderRequest(serializationProfile, { systemPrompt, input: storyInput }).body;
   return {
     layerDiagnostics: {
+      ...(castSelection ? { cast: { allocatedTokens: castAllocatedTokens, estimatedTokens: castSelection.estimatedTokens,
+        omittedCharacterIds: castSelection.omittedCharacterIds, omittedFieldCount: castSelection.omittedFieldCount, coverage: castSelection.coverage } } : {}),
       recent: recentDiagnostics,
       duplicateSourceCount: duplicateIds.length,
       excerptsComplete: selectedContext.chronicle.filter((candidate) => !candidate.evidenceForm).length,

@@ -104,7 +104,7 @@ export const memoryGenerationAuthorityContextSchema = z.object({
 export type MemoryGenerationAuthorityContext = DeepReadonly<z.infer<typeof memoryGenerationAuthorityContextSchema>>;
 
 export const sourceRefSchema = z.object({
-  kind: z.enum(["world", "character", "state_edit", "turn", "canonical_fact", "direction"]),
+  kind: z.enum(["world", "character", "cast", "state_edit", "turn", "canonical_fact", "direction"]),
   id: z.string().min(1), revision: z.string().min(1), turnNumber: ordinalSchema.nullable(), contentHash: hashSchema
 }).strict();
 const spanSchema = z.object({ start: ordinalSchema, end: ordinalSchema }).strict()
@@ -114,7 +114,7 @@ const evidenceShapeSchema = z.object({
   semanticRole: z.enum(["accepted_narration", "player_intent", "world_reference", "world_rule", "character_authority", "corrected_state", "current_continuity", "canonical_fact", "derived_summary"]),
   form: z.enum(["complete", "excerpt"]), content: z.string(), spans: z.array(spanSchema),
   sourceLength: ordinalSchema, canonicalFactId: z.string().uuid().nullable(), rank: z.number().finite(),
-  selectionGroup: z.enum(["protected", "direction", "recent", "world", "historical_fact", "retrieved"]),
+  selectionGroup: z.enum(["protected", "direction", "recent", "world", "cast", "historical_fact", "retrieved"]),
   sourcePath: jsonPointerSchema, normalizationVersion: z.enum(["fiction-safe-json-v1", "story-fiction-source-v1"])
 }).strict();
 export type SourceRef = DeepReadonly<z.infer<typeof sourceRefSchema>>;

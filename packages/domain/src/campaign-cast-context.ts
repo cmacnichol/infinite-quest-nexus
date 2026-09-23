@@ -10,6 +10,8 @@ export type CastContextRecord = { characterId: string; revision: number; content
 export type CastContextSelection = { records: CastContextRecord[]; content: string; estimatedTokens: number;
   omittedCharacterIds: string[]; omittedFieldCount: number;
   coverage: { fromTurn: number | null; throughTurn: number | null; baseTurn: number; current: boolean } };
+type CapturedReadonly<T> = T extends readonly (infer U)[] ? readonly CapturedReadonly<U>[]
+  : T extends object ? { readonly [K in keyof T]: CapturedReadonly<T[K]> } : T;
 
 function usable(evidence: CastEvidence, baseTurn: number) {
   return !(evidence.kind === "turn" && evidence.invalidated) && castEvidenceOrder(evidence)[0] <= baseTurn;
@@ -17,7 +19,7 @@ function usable(evidence: CastEvidence, baseTurn: number) {
 
 /** Pure selection over captured authority; this function performs no discovery or mutable reads. */
 export function selectCastContext(input: {
-  snapshot: CastGenerationSnapshot; direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number;
+  snapshot: CapturedReadonly<CastGenerationSnapshot>; direction: string; currentScene: string; openThreads: readonly string[]; budgetTokens: number;
 }): CastContextSelection {
   const snapshot = castGenerationSnapshotSchema.parse(input.snapshot);
   const budget = Number.isFinite(input.budgetTokens) ? Math.max(0, Math.floor(input.budgetTokens)) : 0;

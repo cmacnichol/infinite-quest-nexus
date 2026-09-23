@@ -4,6 +4,7 @@ import { storyMemoryPolicySchema, defaultStoryMemoryPolicy } from "../../package
 import { estimateStoryTokens, serializeProviderRequest } from "../../packages/story-engine/src/index.js";
 import { sha256 } from "../../packages/domain/src/index.js";
 import { bindManifestToProducingRequest } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
+import { castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
   function plannerContext(characterAuthority: unknown, version: "legacy" | "v3" = "v3") {
     const baseIdentity = version === "v3"
       ? { version: "generation-base-v3", operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null, characterProfileRevision: 1, characterProfileFingerprint: "b".repeat(64) }
@@ -34,6 +35,52 @@ function run(context: any, limit = 32_000) {
   return planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [], { profile: "brief", minWords: 100, maxWords: 120 }, "scene", limit, limit - 100, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
 }
 describe("layered generation context planner", () => {
+  it.each(["action", "scene"] as const)("sends bounded cast corrections with exact evidence in %s mode", (mode) => {
+    const context: any = plannerContext({ source: "none", name: "", characterText: "", profile: null });
+    const characterId = "11111111-1111-4111-8111-111111111111";
+    const cast = { version: "cast-context-v1", scope: { ownerUserId: characterId, campaignId: characterId }, worldVersionId: characterId,
+      revision: 1, boundary: { turnNumber: 0, timelineRevision: 0 }, coverageStartTurn: null, trackedThroughTurn: null, discoveryStatus: "pending",
+      characters: [{ id: characterId, name: "Mara", aliases: ["The Watcher"], origin: { kind: "manual" }, profile: {},
+        pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 }],
+      details: [{ characterId, observations: [], overrides: [{ field: "appearance.description", value: "green eyes",
+        evidence: { kind: "user", editId: characterId, effectiveTurnNumber: 0 } }] }] };
+    context.authority.castSnapshot = cast;
+    Object.assign(context.baseIdentity, { version: "generation-base-v4", castRevision: 1, castTimelineRevision: 0,
+      castFingerprint: castGenerationSnapshotFingerprint(cast), castCoverageStartTurn: null, castTrackedThroughTurn: null });
+    const planned = planGenerationPromptContext(context, plannerProvider(), "System", "Visit The Watcher", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, mode, 32_000, 31_900, characterId, "story_memory", defaultStoryMemoryPolicy("r1"));
+    expect(planned.storyInput).toContain("green eyes");
+    const castEntries = planned.sourceManifest!.entries.filter((entry) => entry.source.kind === "cast");
+    expect(castEntries.some((entry) => entry.semanticRole === "corrected_state" && entry.content.includes("green eyes"))).toBe(true);
+    expect(() => bindManifestToProducingRequest(planned.sourceManifest!, planned.contextPlan.serializedRequest)).not.toThrow();
+    expect(() => bindManifestToProducingRequest(planned.sourceManifest!, planned.contextPlan.serializedRequest.replace("green eyes", "blue eyes"))).toThrow();
+    expect(planned.contextPlan.requestTokens + planned.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(31_900);
+    expect(planned.layerDiagnostics.cast?.allocatedTokens).toBeLessThanOrEqual(3000);
+    const oldContext = { ...context, authority: { ...context.authority, castSnapshot: undefined },
+      baseIdentity: { ...context.baseIdentity, version: "generation-base-v3" } };
+    const oldPlan = planGenerationPromptContext(oldContext, plannerProvider(), "System", "Visit The Watcher", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, mode, 32_000, 31_900, characterId, "story_memory", defaultStoryMemoryPolicy("r1"));
+    expect(oldPlan.storyInput).not.toContain("green eyes");
+    expect(planned.contextPlan.requestTokens + planned.contextPlan.safetyAllowanceTokens
+      - oldPlan.contextPlan.requestTokens - oldPlan.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(planned.layerDiagnostics.cast!.allocatedTokens);
+    expect(castEntries.every((entry) => planned.sourceManifest!.requiredReviewEvidenceIds.includes(entry.id))).toBe(true);
+    cast.details[0]!.overrides[0]!.value = "A long complete correction. ".repeat(70);
+    context.baseIdentity.castFingerprint = castGenerationSnapshotFingerprint(cast);
+    const oversized = planGenerationPromptContext(context, plannerProvider(), "System", "Visit The Watcher", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, mode, 5000, 4900, characterId, "story_memory", defaultStoryMemoryPolicy("r1"));
+    expect(oversized.storyInput).not.toContain("A long complete correction.");
+    expect(oversized.layerDiagnostics.cast!.omittedFieldCount).toBe(1);
+    expect(oversized.contextPlan.requestTokens + oversized.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(4900);
+    expect(oversized.sourceManifest!.entries.some((entry) => entry.source.kind === "cast" && entry.semanticRole === "corrected_state")).toBe(false);
+    context.authority.castSnapshot = { ...cast, details: [{ ...cast.details[0], overrides: [], observations: [{
+      id: characterId, characterId, field: "story.role", value: "harbor keeper", mode: "fact", speakerCharacterId: null,
+      supersedesObservationId: null, evidence: { kind: "world", worldVersionId: characterId, sourcePath: "/entities/0" }
+    }] }] };
+    context.baseIdentity.castFingerprint = castGenerationSnapshotFingerprint(context.authority.castSnapshot);
+    const worldCast = planGenerationPromptContext(context, plannerProvider(), "System", "Visit The Watcher", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, mode, 32_000, 31_900, characterId, "story_memory", defaultStoryMemoryPolicy("r1"));
+    expect(worldCast.sourceManifest!.entries.some((entry) => entry.source.kind === "cast" && entry.semanticRole === "world_reference" && entry.content.includes("harbor keeper"))).toBe(true);
+  });
   it("binds selected entity and relationship evidence to the exact provider request", () => {
     const context: any = plannerContext(null);
     context.authority.worldReferenceSource = {
