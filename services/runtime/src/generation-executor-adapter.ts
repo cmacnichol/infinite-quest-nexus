@@ -952,7 +952,7 @@ function choiceRepairPreparedRequest(
     // preset prompt exactly once; precomposing it makes the v2 plan binder
     // treat the preset prefix as operation content.
     systemPrompt,
-    input: buildStoryOnlyChoiceRepairInput(base),
+    input: buildStoryOnlyChoiceRepairInput(base, systemPrompt),
     budgetOutput: { kind: "story_choice_repair" as const },
     ...(responseContract ? { responseContract } : {})
   };
@@ -3234,7 +3234,7 @@ async function executeLoadedGeneration(
           const choiceRepairSystemPrompt = storyOnlyChoiceRepairSystemPrompt!;
           const repairRequest = bindCampaignResponseContract(job, "story_choice_repair", {
             systemPrompt: choiceRepairSystemPrompt,
-            input: buildStoryOnlyChoiceRepairInput(choiceOnly.base),
+            input: buildStoryOnlyChoiceRepairInput(choiceOnly.base, choiceRepairSystemPrompt),
             budgetOutput: { kind: "story_choice_repair" as const }
           }, choiceRepairPlan);
           const initialRepairRequest = choiceRepairPreparedRequest(provider, job, choiceRepairSystemPrompt, choiceOnly.base,

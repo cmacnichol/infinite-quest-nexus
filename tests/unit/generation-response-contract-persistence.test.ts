@@ -18,6 +18,7 @@ import {
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { serializeBoundFrozenPresetProviderRequest, serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
+import { sendPreparedProviderRequest } from "../../packages/story-engine/src/providers.js";
 
 const hash = "a".repeat(64);
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -25,9 +26,10 @@ const logicalAttemptId = "33333333-3333-4333-8333-333333333333";
 const queued = { version: 1, policy: "auto", providerProfileId: "11111111-1111-4111-8111-111111111111", model: "model-a", endpointIdentity: "endpoint-a", providerConfigurationHash: hash, verificationRegistryHash: hash, operationClosureVersion: 1, invocationKeys: ["story:nonstream"] } as const;
 
 describe("durable response-contract persistence contracts", () => {
-  it("keeps a v2 preset closure stable while binding distinct primary and repair plans", () => {
+  it.each([undefined, { enabled: true, ttlSeconds: 600 }, { enabled: false }, { ttlSeconds: 1 }])("keeps a v2 preset closure and cache settings stable: %j", async (responseCache) => {
     const routeBasisDraft = {
       version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-route" },
+      ...(responseCache === undefined ? {} : { responseCache }),
       preset: { slug: "night-route", versionId: "preset-v1", configHash: hash },
       candidates: [
         { modelId: "openai/gpt-5", providerPolicy: { only: ["provider/frozen"], require_parameters: false }, contextWindowTokens: 128000, maxOutputTokens: 4096 },
@@ -70,6 +72,19 @@ describe("durable response-contract persistence contracts", () => {
     const binding = { frozen, routeBasis, plan: primary, invocationKey: "story:nonstream" as const,
       operation: "story_generation" as const, trustedOperationPrompt: "Write the next turn." };
     const prepared = serializeBoundFrozenPresetProviderRequest(profile, { systemPrompt: primary.prompt, input: "Act." }, binding);
+    expect(prepared.responseCache).toEqual(responseCache);
+    await sendPreparedProviderRequest(profile, prepared, {
+      fetch: async (_profile, _operation, _url, init) => {
+        const headers = new Headers(init?.headers);
+        expect(headers.get("X-OpenRouter-Cache")).toBe(responseCache?.enabled === undefined ? null : String(responseCache.enabled));
+        expect(headers.get("X-OpenRouter-Cache-TTL")).toBe(responseCache?.ttlSeconds === undefined ? null : String(responseCache.ttlSeconds));
+        expect(init?.body).toBe(prepared.body);
+        expect(JSON.parse(prepared.body)).not.toHaveProperty("cache_enabled");
+        return new Response("{}");
+      },
+      validateSdkEndpoint: async () => undefined,
+      close: async () => undefined
+    });
     const payload = JSON.parse(prepared.body);
     expect(payload).toMatchObject({ model: "openai/gpt-5", temperature: 0.31, max_tokens: 4096,
       provider: { only: ["provider/frozen"], require_parameters: true },

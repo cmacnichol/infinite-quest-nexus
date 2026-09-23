@@ -1344,6 +1344,13 @@ async function promptContentHash(content) {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+function syncPromptLibraryAcknowledgement() {
+  const template = promptLibrarySelectedTemplate();
+  elements.promptLibraryCompatibilityAcknowledgement.checked = Boolean(
+    template?.compatibility
+  );
+}
+
 function renderPromptLibraryDirtyState() {
   const dirty = promptLibraryIsDirty();
   elements.promptLibraryUnsaved?.classList.toggle("hidden", !dirty);
@@ -1444,6 +1451,7 @@ function renderPromptLibrary(loadEditor = false) {
     promptLibraryEditorContext = context;
     promptLibraryEditorBaseline = template.effectiveContent;
     elements.promptLibraryContent.value = template.effectiveContent;
+    syncPromptLibraryAcknowledgement();
   }
   elements.promptLibraryWarning?.classList.toggle("hidden", template.category !== "Story Engine");
   const compatibility = template.compatibility;
@@ -1452,7 +1460,6 @@ function renderPromptLibrary(loadEditor = false) {
   if (compatibility) {
     elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Review the shipped required shape before saving.`;
     elements.promptLibraryRequiredShape.textContent = compatibility.requiredShapePreview;
-    elements.promptLibraryCompatibilityAcknowledgement.checked = false;
   }
   const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";
   elements.promptLibraryReset.textContent = campaignScope ? "Use inherited application prompt" : "Restore shipped default";
@@ -6792,6 +6799,7 @@ elements.promptLibraryPreview?.addEventListener("click", () => { promptLibraryPr
 elements.promptLibraryContent?.addEventListener("input", () => { renderPromptLibraryDirtyState(); schedulePromptLibraryPreview(); });
 elements.promptLibraryDiscard?.addEventListener("click", () => {
   elements.promptLibraryContent.value = promptLibraryEditorBaseline;
+  syncPromptLibraryAcknowledgement();
   renderPromptLibraryDirtyState();
   schedulePromptLibraryPreview();
 });

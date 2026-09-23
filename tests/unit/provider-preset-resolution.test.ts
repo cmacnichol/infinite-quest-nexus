@@ -65,6 +65,17 @@ function input(overrides: Record<string, unknown> = {}) {
 }
 
 describe("preset execution-plan resolution", () => {
+  it.each([true, false])("freezes preset cache settings separately from generation parameters: %s", async (enabled) => {
+    const request = input();
+    const basis = await resolveTextExecutionRouteBasis({ ...request, ports: {
+      ...request.ports,
+      resolvePreset: async () => ({ ...preset, config: { ...preset.config, cache_enabled: enabled, cache_ttl_seconds: 600 } })
+    } });
+    expect(basis.responseCache).toEqual({ enabled, ttlSeconds: 600 });
+    expect(deriveTextExecutionPlan(JSON.parse(JSON.stringify(basis)), "Write.").responseCache).toEqual(basis.responseCache);
+    expect(basis.parameters).not.toHaveProperty("cache_enabled");
+    expect(basis.parameters).not.toHaveProperty("cache_ttl_seconds");
+  });
   it("freezes one prompt-independent route basis and derives each real operation prompt exactly once", async () => {
     const ports = {
       resolvePreset: vi.fn(async () => preset),

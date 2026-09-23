@@ -68,6 +68,21 @@ const planProvenance = {
 } as const;
 
 describe("preset route execution", () => {
+  it.each([
+    { only: ["deepinfra"], ignore: [], accepted: true },
+    { only: ["other"], ignore: [], accepted: false },
+    { only: ["deepinfra"], ignore: ["deepinfra"], accepted: false }
+  ])("compares provider identity case consistently: %j", async ({ only, ignore, accepted }) => {
+    const execution = executePresetRoutes({
+      candidates: [{ ...candidates[0]!, providerPolicy: { only, ignore } }],
+      planProvenance, logicalReservation: storyReservation, attempts: attempts(),
+      prepareCandidate: () => ({ body: "{}", payloadHash: "hash-0" }),
+      invoke: async () => ({ content: "ok", returnedModel: "model-a", returnedProviderRoute: "DeepInfra" }),
+      totalDeadlineMs: 1000
+    });
+    if (accepted) await expect(execution).resolves.toBeDefined();
+    else await expect(execution).rejects.toMatchObject({ reason: "invalid_identity" });
+  });
   it("uses candidates in frozen order and advances only after a safe pre-output rate limit", async () => {
     const invoke = vi.fn()
       .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { routeFailureReason: "rate_limit", retryAfterMs: 0 }))
