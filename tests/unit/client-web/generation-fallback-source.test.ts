@@ -336,17 +336,19 @@ describe("browser generation fallback source", () => {
     expect(events.sources[0]?.closeCalls).toBe(1);
   });
 
-  it("still rejects an invalid polling snapshot after stream rejection", async () => {
+  it("recovers after both stream and polling snapshots are rejected", async () => {
     const events = eventSources();
-    const api = apiQueue(events.sources, { invalid: true } as unknown as GenerationJobSnapshot);
+    const api = apiQueue(events.sources, { invalid: true } as unknown as GenerationJobSnapshot, snapshot({ status: "completed" }));
     const source = createBrowserGenerationSource(options({ api, eventSourceFactory: events.factory }));
     const iterator = source.watch(jobId, signal())[Symbol.asyncIterator]();
     const next = iterator.next();
     await Promise.resolve();
     events.sources[0]?.message({ invalid: true });
     await expect(next).resolves.toMatchObject({ value: { kind: "degraded" } });
-    await expect(iterator.next()).rejects.toMatchObject({ kind: "invalid_snapshot" });
-    expect(api.calls).toBe(1);
+    await expect(iterator.next()).resolves.toMatchObject({ value: { kind: "degraded", reason: "invalid_snapshot" } });
+    await expect(iterator.next()).resolves.toMatchObject({ value: { snapshot: { id: jobId, status: "completed" } } });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    expect(api.calls).toBe(2);
   });
 
   it("does not poll if the watcher aborts after a rejected stream frame", async () => {

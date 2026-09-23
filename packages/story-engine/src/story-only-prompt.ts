@@ -2,6 +2,7 @@ import type { GenerationPolicySnapshot, StoryOnlyPromptSnapshot } from "../../co
 import {
   composeStoryMemorySystemPrompt,
   composeStoryPromptSystemPrompt,
+  STORY_FACT_DELTA_WIRE_CONTRACT,
   storyMemoryMandatoryContract,
   storyPromptMandatoryContract
 } from "../../contracts/src/story-prompt.js";
@@ -18,6 +19,7 @@ const SYSTEM_SUPPLEMENT = [
 ].join("\n");
 
 const CHOICE_REPAIR_SYSTEM = [
+  "Choice-only output contract v2.",
   "Repair only the generated choices for a Story Direction turn.",
   "Return one strict JSON object with exactly choices and custom_action_suggestion; return no narration, facts, trackers, explanations, or other fields.",
   "choices must contain exactly four concise, distinct fiction-only immediate directions. custom_action_suggestion must be concise and distinct from every choice.",
@@ -77,19 +79,27 @@ export function composeStoryOnlyChoiceRepairSystemPrompt(
   storyMemoryPromptProtocol?: string,
   storyPromptContractProtocol?: string
 ): string {
-  if (hasFrozenStoryMemoryPolicy) return `${choiceRepairSystem}\n\n${storyMemoryMandatoryContract(storyMemoryPromptProtocol)}`;
-  return storyPromptContractProtocol
-    ? `${choiceRepairSystem}\n\n${storyPromptMandatoryContract(storyPromptContractProtocol)}`
-    : choiceRepairSystem;
+  const contract = hasFrozenStoryMemoryPolicy ? storyMemoryMandatoryContract(storyMemoryPromptProtocol)
+    : storyPromptContractProtocol ? storyPromptMandatoryContract(storyPromptContractProtocol) : "";
+  // Preserve captured historical prompt bytes. New choice repairs retain the
+  // authority guards without asking for fields forbidden by their wire schema.
+  const scopedContract = choiceRepairSystem.startsWith("Choice-only output contract v2.")
+    ? contract.replace(STORY_FACT_DELTA_WIRE_CONTRACT, "").trim() : contract;
+  return scopedContract ? `${choiceRepairSystem}\n\n${scopedContract}` : choiceRepairSystem;
 }
 
-export function buildStoryOnlyChoiceRepairInput(base: StoryWithoutChoices): string {
+export function buildStoryOnlyChoiceRepairInput(base: StoryWithoutChoices, choiceRepairSystem = CHOICE_REPAIR_SYSTEM): string {
   return JSON.stringify({
     final_narration: base.narration,
     continuity_summary: base.continuity_summary,
     canonical_facts: base.canonical_facts,
     canonical_fact_updates: base.canonical_fact_updates,
     open_threads: base.open_threads,
-    required_shape: { choices: ["exactly four concise fiction-only directions"], custom_action_suggestion: "one concise distinct fiction-only suggestion" }
+    required_shape: {
+      choices: choiceRepairSystem.startsWith("Choice-only output contract v2.")
+        ? ["first concise fiction-only direction", "second distinct fiction-only direction", "third distinct fiction-only direction", "fourth distinct fiction-only direction"]
+        : ["exactly four concise fiction-only directions"],
+      custom_action_suggestion: "one concise distinct fiction-only suggestion"
+    }
   });
 }

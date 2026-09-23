@@ -214,10 +214,11 @@ function assertReturnedIdentity(candidate: TextRouteCandidate, value: Readonly<{
   }
   const provider = value.returnedProviderRoute;
   if (!provider) return;
-  if (candidate.providerPolicy.only && !candidate.providerPolicy.only.includes(provider)) {
+  const matchesProvider = (route: string) => route.toLowerCase() === provider.toLowerCase();
+  if (candidate.providerPolicy.only && !candidate.providerPolicy.only.some(matchesProvider)) {
     throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned a route outside the frozen provider policy.", null, undefined, value);
   }
-  if (candidate.providerPolicy.ignore?.includes(provider)) {
+  if (candidate.providerPolicy.ignore?.some(matchesProvider)) {
     throw new PreparedRouteTerminalError("prepared_route_identity_mismatch", "invalid_identity", "The provider returned an ignored route.", null, undefined, value);
   }
 }
