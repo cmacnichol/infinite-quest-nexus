@@ -37,6 +37,6 @@ export function createApiCastBackfillApplication(pool: DatabasePool,
       if (replay) return replay;
       return repository.start(scope, request, await prepare(scope));
     },
-    latest: repository.latest, get: repository.get, control: repository.control
+    latest: repository.latest, get: repository.get, control: repository.control, retry: repository.retry
   };
 }

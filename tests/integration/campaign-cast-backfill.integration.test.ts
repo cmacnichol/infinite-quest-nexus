@@ -11,6 +11,7 @@ import { applyCastBoundaryChange } from "../../packages/database/src/campaign-ca
 import Fastify from "fastify";
 import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
 import { createApiCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
+import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 
 describe("accepted-history scan preview", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -312,5 +313,54 @@ describe("accepted-history scan preview", () => {
       expect((await app.inject({ method: "POST", url: `${base}/${scan.id}/resume`, payload: {} })).statusCode).toBe(503);
       expect((await app.inject({ method: "POST", url: `${base}/${scan.id}/cancel`, payload: {} })).json()).toMatchObject({ status: "cancelled" });
     } finally { await app.close(); }
+  });
+  it("retries a failed scan turn atomically through the API without losing completed chunks or spending twice", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], "Mara waits. ".repeat(2000)]);
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    const first = (await jobs.claim("first-chunk"))!;
+    await jobs.checkpoint(first, { version: 1, characters: [] });
+    expect(await jobs.publish(first)).toBe("next_chunk");
+    const second = (await jobs.claim("failed-chunk"))!;
+    await jobs.fail(second, "provider_timeout");
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET available_at=clock_timestamp() WHERE id=$1", [first.id]);
+    await jobs.fail((await jobs.claim("exhausted-chunk"))!, "provider_timeout");
+    await scans.scheduleNext();
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "failed", failedTurns: 1, firstFailedTurn: 1 });
+    const cast = await createPostgresCampaignCastRepository(pool).current(f.scope);
+    const single = createDatabasePool(process.env.TEST_DATABASE_URL!, 1), app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(single,
+      { castEditingEnabled: true, castDiscoveryEnabled: true, castBackfillEnabled: true }),
+      enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    const payload = { turnNumber: 1, expectedCastRevision: cast.revision, expectedBoundary: cast.boundary, idempotencyKey: "scan-retry" };
+    try {
+      const url = `/api/v1/campaigns/${f.scope.campaignId}/cast/scans/${scan.id}/retry`;
+      expect((await app.inject({ method: "POST", url, payload: { ...payload, expectedCastRevision: 999 } })).statusCode).toBe(409);
+      const result = await app.inject({ method: "POST", url, payload });
+      expect(result.statusCode).toBe(200);
+      expect(result.json()).toMatchObject({ status: "queued", failedTurns: 0 });
+      expect((await app.inject({ method: "POST", url, payload })).json()).toEqual(result.json());
+      const resumed = (await jobs.claim("retried-chunk"))!;
+      expect(resumed).toMatchObject({ id: first.id, chunkOrdinal: 1, retryGeneration: 1, attempt: 1 });
+      expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_receipts WHERE job_id=$1", [first.id])).rows[0].n).toBe(1);
+      expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_retries WHERE job_id=$1", [first.id])).rows[0].n).toBe(1);
+      await scans.control(f.scope, scan.id, "cancel");
+      expect((await app.inject({ method: "POST", url, payload })).statusCode).toBe(409);
+    } finally { await app.close(); await single.end(); }
+  });
+  it("uses frozen scan admission to recover a reused forward admission failure and keeps paused scans paused", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    const jobId = await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client,
+      { scope: f.scope, turnId: f.turnIds[0]!, admissionUnavailable: true, enabled: true }));
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    const cast = await createPostgresCampaignCastRepository(pool).current(f.scope);
+    await scans.control(f.scope, scan.id, "pause");
+    expect(await scans.retry(f.scope, scan.id, { turnNumber: 1, expectedCastRevision: cast.revision,
+      expectedBoundary: cast.boundary, idempotencyKey: "recover-admission" })).toMatchObject({ status: "paused", failedTurns: 0 });
+    expect((await pool.query("SELECT execution_snapshot,retry_generation FROM campaign_cast_discovery_jobs WHERE id=$1", [jobId])).rows[0])
+      .toEqual({ execution_snapshot: f.execution, retry_generation: 1 });
   });
 });

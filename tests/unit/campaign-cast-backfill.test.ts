@@ -37,6 +37,13 @@ describe("campaign cast backfill contracts", () => {
     expect(castBackfillProgressSchema.safeParse({ ...progress, status: "complete" }).success).toBe(false);
     expect(castBackfillProgressSchema.safeParse({ ...progress, completeTurns: 6, failedTurns: 0, status: "complete" }).success).toBe(true);
   });
+  it("identifies the failed turn for explicit recovery without accepting an out-of-range turn", () => {
+    const progress = { id: "10000000-0000-4000-8000-000000000001", fromTurn: 3, throughTurn: 8,
+      completeTurns: 2, failedTurns: 1, pendingReviewCount: 0, firstFailedTurn: 5, status: "failed" };
+    expect(castBackfillProgressSchema.safeParse(progress).success).toBe(true);
+    expect(castBackfillProgressSchema.safeParse({ ...progress, firstFailedTurn: 9 }).success).toBe(false);
+    expect(castBackfillProgressSchema.safeParse({ ...progress, failedTurns: 0 }).success).toBe(false);
+  });
 });
 
 describe("accepted-history scan range policy", () => {

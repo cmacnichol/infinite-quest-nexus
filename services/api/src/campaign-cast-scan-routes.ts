@@ -9,7 +9,7 @@ export async function registerCampaignCastScanRoutes(app: FastifyInstance, optio
   const params = z.object({ campaignId: z.uuid(), scanId: z.uuid().optional() }).strict();
   for (const [method, suffix, operation] of [["GET", "", "latest"], ["POST", "", "start"],
     ["POST", "/preview", "preview"], ["GET", "/:scanId", "get"], ["POST", "/:scanId/pause", "pause"],
-    ["POST", "/:scanId/resume", "resume"], ["POST", "/:scanId/cancel", "cancel"]] as const) {
+    ["POST", "/:scanId/resume", "resume"], ["POST", "/:scanId/cancel", "cancel"], ["POST", "/:scanId/retry", "retry"]] as const) {
     app.route({ method, url: base + suffix, bodyLimit: 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params), scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
@@ -19,6 +19,7 @@ export async function registerCampaignCastScanRoutes(app: FastifyInstance, optio
         if (operation === "get") return await application.get(scope, ids.scanId!);
         if (operation === "preview") return await application.preview(scope, request.body as never);
         if (operation === "start") return reply.code(201).send(await application.start(scope, request.body as never));
+        if (operation === "retry") return await application.retry(scope, ids.scanId!, request.body as never);
         z.object({}).strict().parse(request.body ?? {});
         return await application.control(scope, ids.scanId!, operation);
       } catch (caught) {

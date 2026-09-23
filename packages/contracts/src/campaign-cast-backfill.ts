@@ -1,9 +1,11 @@
 import { z } from "zod";
-import { castBoundarySchema } from "./campaign-cast.js";
+import { castBoundarySchema, castWriteBase } from "./campaign-cast.js";
 import { textModelSelectionSchema } from "./provider-selection.js";
 
 const turn = z.number().int().positive();
 const count = z.number().int().nonnegative();
+export const castBackfillRetrySchema = z.object({ ...castWriteBase, turnNumber: turn }).strict();
+export type CastBackfillRetry = z.infer<typeof castBackfillRetrySchema>;
 export const castBackfillPreviewSchema = z.object({
   fromTurn: turn, throughTurn: turn, boundary: castBoundarySchema, turnCount: turn,
   estimatedChunkRequests: count, completedChunkReceipts: count, completedTurns: count,
@@ -24,9 +26,14 @@ export const castBackfillRequestSchema = z.object({
 export const castBackfillProgressSchema = z.object({
   id: z.uuid(), fromTurn: turn, throughTurn: turn,
   completeTurns: count, failedTurns: count, pendingReviewCount: count,
+  firstFailedTurn: turn.nullable().optional(),
   status: z.enum(["queued", "running", "paused", "complete", "failed", "cancelled"])
 }).strict().superRefine((value, context) => {
   const total = value.throughTurn - value.fromTurn + 1;
+  if (value.firstFailedTurn !== undefined && (value.firstFailedTurn === null ? value.failedTurns !== 0
+    : value.failedTurns === 0 || value.firstFailedTurn < value.fromTurn || value.firstFailedTurn > value.throughTurn)) {
+    context.addIssue({ code: "custom", path: ["firstFailedTurn"], message: "The failed turn must belong to the selected range and match failure progress." });
+  }
   if (total < 1) context.addIssue({ code: "custom", path: ["throughTurn"], message: "The scan range must be ordered." });
   if (value.completeTurns + value.failedTurns > total) {
     context.addIssue({ code: "custom", path: ["completeTurns"], message: "Processed turns cannot exceed the scan range." });

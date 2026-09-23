@@ -8,11 +8,14 @@ import { sha256, stableStringify } from "../../domain/src/text.js";
 import { enqueueCastDiscoveryWithClient, readCastDiscoveryExecution } from "./campaign-cast-job-repository.js";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
 import { z } from "zod";
+import { castBackfillRetrySchema, type CastBackfillRetry } from "../../contracts/src/campaign-cast-backfill.js";
+import { createCastDiscoveryJobRepository } from "./campaign-cast-job-repository.js";
 
 async function readProgress(client: DatabaseClient, scope: CastScope, id: string) {
   const row = (await client.query(`SELECT s.*,
     (SELECT count(*)::int FROM campaign_cast_scan_sources p WHERE p.scan_id=s.id AND p.status='complete') AS complete_turns,
     (SELECT count(*)::int FROM campaign_cast_scan_sources p WHERE p.scan_id=s.id AND p.status='failed') AS failed_turns,
+    (SELECT min(turn_number) FROM campaign_cast_scan_sources p WHERE p.scan_id=s.id AND p.status='failed') AS first_failed_turn,
     (SELECT count(*)::int FROM campaign_cast_scan_sources p
       JOIN campaign_cast_discovery_jobs j ON j.campaign_id=p.campaign_id AND j.owner_user_id=p.owner_user_id
         AND j.turn_id::text=p.source->>'turnId' AND j.narration_revision=(p.source->>'narrationRevision')::int
@@ -22,11 +25,42 @@ async function readProgress(client: DatabaseClient, scope: CastScope, id: string
     FROM campaign_cast_scans s WHERE s.id=$1 AND s.campaign_id=$2 AND s.owner_user_id=$3`, [id, scope.campaignId, scope.ownerUserId])).rows[0];
   if (!row) throw new CampaignCastError("cast_not_found");
   return castBackfillProgressSchema.parse({ id: row.id, fromTurn: row.from_turn, throughTurn: row.through_turn,
-    completeTurns: row.complete_turns, failedTurns: row.failed_turns, pendingReviewCount: row.pending_review_count, status: row.status });
+    completeTurns: row.complete_turns, failedTurns: row.failed_turns, firstFailedTurn: row.first_failed_turn,
+    pendingReviewCount: row.pending_review_count, status: row.status });
 }
 
 export function createCastBackfillRepository(pool: DatabasePool, enabled = () => false) {
   return {
+    async retry(rawScope: CastScope, rawId: string, rawRequest: CastBackfillRetry) {
+      const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), request = castBackfillRetrySchema.parse(rawRequest);
+      return withTransaction(pool, async client => {
+        if (!enabled()) throw new CampaignCastError("cast_discovery_disabled");
+        if (!(await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR UPDATE", [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_not_found");
+        const scan = await readProgress(client, scope, id);
+        if (scan.status === "cancelled") throw new CampaignCastError("cast_revision_conflict");
+        const item = (await client.query("SELECT source FROM campaign_cast_scan_sources WHERE scan_id=$1 AND turn_number=$2", [id, request.turnNumber])).rows[0];
+        if (!item) throw new CampaignCastError("cast_not_found");
+        const source = castDiscoverySourceSchema.parse(item.source);
+        const job = (await client.query(`SELECT id,execution_snapshot FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND owner_user_id=$2
+          AND turn_id=$3 AND narration_revision=$4 AND timeline_revision=$5 AND source_hash=$6 AND protocol=$7`,
+        [scope.campaignId, scope.ownerUserId, source.turnId, source.narrationRevision, source.timelineRevision, source.sourceHash, CAST_DISCOVERY_PROTOCOL])).rows[0];
+        if (!job) throw new CampaignCastError("cast_invalid_request");
+        const replacement = job.execution_snapshot.unavailable
+          ? readCastDiscoveryExecution((await client.query("SELECT execution_snapshot FROM campaign_cast_scans WHERE id=$1", [id])).rows[0].execution_snapshot)
+          : undefined;
+        await createCastDiscoveryJobRepository(pool, enabled, enabled).retryFailed(scope, job.id, {
+          expectedCastRevision: request.expectedCastRevision, expectedBoundary: request.expectedBoundary,
+          idempotencyKey: `scan:${id}:${sha256(request.idempotencyKey)}`
+        }, replacement, client);
+        const retried = (await client.query("SELECT status FROM campaign_cast_discovery_jobs WHERE id=$1", [job.id])).rows[0];
+        await client.query("UPDATE campaign_cast_scan_sources SET status=$3 WHERE scan_id=$1 AND turn_number=$2",
+          [id, request.turnNumber, retried.status === "complete" ? "complete" : retried.status === "failed" ? "failed" : "pending"]);
+        await client.query(`UPDATE campaign_cast_scans SET status=CASE WHEN status IN ('paused','complete') THEN status
+          WHEN EXISTS (SELECT 1 FROM campaign_cast_scan_sources p WHERE p.scan_id=$1 AND p.status='failed') THEN 'failed' ELSE 'queued' END,
+          updated_at=clock_timestamp() WHERE id=$1`, [id]);
+        return readProgress(client, scope, id);
+      });
+    },
     async latest(rawScope: CastScope) {
       const scope = castScopeSchema.parse(rawScope);
       return withTransaction(pool, async client => {

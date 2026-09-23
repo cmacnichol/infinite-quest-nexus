@@ -142,9 +142,9 @@ async function lockLiveClaim(client: DatabaseClient, claim: CastDiscoveryClaim) 
 export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: () => boolean, scansEnabled = () => false) {
   return {
     /** Explicit user retry. Any replacement admission must be prepared before this transaction. */
-    async retryFailed(rawScope: CastScope, rawId: string, rawRequest: RetryCastDiscovery, replacement?: CastDiscoveryExecution) {
+    async retryFailed(rawScope: CastScope, rawId: string, rawRequest: RetryCastDiscovery, replacement?: CastDiscoveryExecution, transactionClient?: DatabaseClient) {
       const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), request = retryCastDiscoverySchema.parse(rawRequest);
-      return withTransaction(pool, async (client) => {
+      const retry = async (client: DatabaseClient) => {
         const cast = await initializeCastWithClient(client, scope);
         if (!enabled()) throw new CampaignCastError("cast_discovery_disabled");
         const job = (await client.query("SELECT * FROM campaign_cast_discovery_jobs WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3 FOR UPDATE",
@@ -179,7 +179,9 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
         await client.query(`INSERT INTO campaign_cast_discovery_retries(job_id,campaign_id,owner_user_id,idempotency_key,request_hash,retry_generation)
           VALUES($1,$2,$3,$4,$5,$6)`, [id, scope.campaignId, scope.ownerUserId, request.idempotencyKey, requestHash, generation]);
         return castDiscoveryRetryResultSchema.parse({ jobId: id, retryGeneration: generation });
-      });
+      };
+      // Scan progress and discovery retry share one atomic transaction when composed.
+      return transactionClient ? retry(transactionClient) : withTransaction(pool, retry);
     },
     async claim(workerId: string): Promise<CastDiscoveryClaim | null> {
       if (!enabled()) return null;

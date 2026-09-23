@@ -69,3 +69,13 @@ RED/GREEN: the route test returned 404 before registration; the complete request
 Still required: explicit failed-source retry API, shared client and rendered legacy scan controls, complete source/coverage/publication audit and phase acceptance. All feature flags remain unchanged/default-off; no live provider or deployment was used.
 
 Full unit verification after API wiring: 4,434 passed and 44 skipped across 352 files (`.tmp/campaign-cast/phase6-api-unit.log`). Documentation link targets and diff checks passed. Rendered browser verification remains for the upcoming legacy UI slice.
+
+## Explicit scan retry
+
+Added POST `/cast/scans/:scanId/retry` with turn number, expected cast revision/boundary and idempotency key. The existing discovery retry implementation can participate in the caller's transaction, keeping scan progress and job retry generation atomic without a nested connection. Retry preserves completed chunks/checkpoints and prior accounting, validates frozen source identity, rejects cancelled scans, and keeps a paused scan paused. An admission-unavailable reused forward job receives the scan's already frozen execution snapshot. Progress now exposes an optional `firstFailedTurn`, with range/count consistency validation, for the upcoming retry UI.
+
+RED/GREEN: the HTTP retry test failed before the route existed; admission recovery failed before supplying the frozen scan plan; the progress contract rejected the new failed-turn field before implementation. Final affected PostgreSQL verification passed 88 tests across backfill, discovery, lifecycle and portability. The retry flow runs on a one-connection pool, preserves the first completed chunk receipt, advances exactly one retry generation on repeated requests and rejects stale/cancelled requests. TypeScript and focused contract tests passed. Logs: `.tmp/campaign-cast/phase6-retry-{red,green,pg}.log`.
+
+Remaining: shared client and legacy scan controls with browser evidence, then full phase-06 audit. During UI integration, keep failed scan recovery on the scan retry route so scan progress and discovery accounting remain atomic; audit interaction with the existing generic discovery Retry button. No feature flag was enabled and no live provider/deployment was used.
+
+Full unit verification after retry: 4,435 passed and 44 skipped across 352 files (`.tmp/campaign-cast/phase6-retry-unit.log`). Diff checks passed. Browser verification remains outstanding until the legacy scan UI is implemented.
