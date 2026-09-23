@@ -1,5 +1,11 @@
 # Campaign cast operations
 
+## Discovery rollout status
+
+Automatic discovery is still under development. `CAST_DISCOVERY_ENABLED` defaults to `false`, independently of `CAST_EDITING_ENABLED`. The worker and combined runtime roles can process durable discovery jobs through a capacity-one optional lane when enabled. The API-only role does not run that lane. Current source does not yet enqueue discovery from accepted generation, and remaining release gates include lifecycle/coverage controls, shared provider capacity, and the total physical-attempt ceiling across preset fallback and retries. Keep the gate off until those gates are complete.
+
+Discovery uses the saved text-provider route and its exact qualified nonstream schema, a 30-second request deadline, and source-linked validated publication. Its physical calls are recorded under operation `cast_discovery`, attributed to the source campaign and turn. Checkpointed responses survive worker interruption and are reused for publication. Disabling discovery prevents new claims and publication without disabling manual editing; it retains jobs and evidence for recovery. No relationship inference is enabled by this gate.
+
 Phases 02–03 provide manual supporting-character APIs, history/backup integration, and the legacy Story cast editor. Automatic discovery, generation-context injection, and optional history backfill remain separate phases. The replacement UI is deferred by the current legacy-first scope. See the [implementation specification](../superpowers/plans/2026-09-22-campaign-cast.md).
 
 ## Enable and disable editing

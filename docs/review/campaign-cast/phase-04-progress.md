@@ -110,3 +110,14 @@ Independent review found a direct-model binding defect: the shared binding helpe
 - Discovery/worker/authoring/prepared-executor selection: **78 passed** before the final direct-binding regression; all six adapter tests passed again afterward.
 - Full unit suite with four workers: **347 files passed; 4,365 passed, 44 skipped**. Repository checks, TypeScript, and `git diff --check` passed.
 - No live model call, browser change, deployment, or production database operation occurred.
+
+## Production worker registration checkpoint
+
+The worker and combined runtime roles now compose the discovery application with the existing prepared executor and durable repository. `CAST_DISCOVERY_ENABLED` defaults off independently of editing. The scheduler registers a capacity-one optional discovery lane only when enabled, including when optional lanes are injected. Errors use sanitized diagnostics; ordinary empty/deferred work observes the existing poll delay. This does not yet establish an aggregate provider-call cap across lanes or the total physical-call ceiling across preset fallbacks and logical retries; both remain release gates.
+
+- RED/GREEN captured the missing default-off config and missing scheduler registration.
+- Config, scheduler, and runtime-role unit selection: **61 passed**. Both worker and combined roles construct discovery only when enabled. A pending discovery call does not stop ordinary story polling.
+- Discovery PostgreSQL suite: **21 passed**, now using the production discovery composition for both direct and preset frozen execution. Disabled composition performs no provider call; enabled composition publishes validated authority and attributed accounting.
+- Repository checks and TypeScript passed after fixing a test spy signature. `git diff --check` passed.
+- Independent review identified shutdown counts indexed by lane position. RED/GREEN reproduced discovery being labeled as illustration; counters now look up lane names and include discovery explicitly. Discovery participates in the existing shutdown drain.
+- Generation acceptance still does not enqueue discovery. No browser or live-provider verification applies to this backend registration, and no production runtime was started or changed.

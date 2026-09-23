@@ -89,6 +89,8 @@ export type RuntimeRoleDependencies = Readonly<{
     signal: AbortSignal,
   ): AuthoringWorkerApplication;
   createApiAuthoring(pool: DatabasePool): AuthoringApplication;
+  createWorkerCastDiscovery?(pool: DatabasePool, config: RuntimeConfig,
+    providers: WorkerProviderApplicationComposition["generation"]): NonNullable<WorkerDependencies["castDiscovery"]>;
   buildServer(options: BuildServerOptions): Promise<RuntimeServer>;
   runWorker(
     pool: DatabasePool,
@@ -190,6 +192,8 @@ export async function dispatchRuntimeRole(
       generation,
       illustration: workerIllustration,
       generationIllustration: illustration,
+      ...(config.castDiscoveryEnabled === true && dependencies.createWorkerCastDiscovery
+        ? { castDiscovery: dependencies.createWorkerCastDiscovery(pool, config, providerGraph.generation) } : {}),
       memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle),
       authoring
     });
@@ -231,6 +235,8 @@ export async function dispatchRuntimeRole(
     generation: workerGeneration,
     illustration: workerIllustration,
     generationIllustration: workerIllustrationTransactions,
+    ...(config.castDiscoveryEnabled === true && dependencies.createWorkerCastDiscovery
+      ? { castDiscovery: dependencies.createWorkerCastDiscovery(pool, config, workerProviderGraph.generation) } : {}),
     memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle),
     authoring
   });

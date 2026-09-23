@@ -9,12 +9,13 @@ import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../pack
 import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
 import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 import { runCastDiscoveryOnce } from "../../packages/application/src/campaign-cast/discovery.js";
-import { prepareCastDiscoveryExecution, createCastDiscoveryExtractor } from "../../services/runtime/src/campaign-cast-discovery-adapter.js";
+import { prepareCastDiscoveryExecution } from "../../services/runtime/src/campaign-cast-discovery-adapter.js";
 import { createPreparedTextExecutor } from "../../services/runtime/src/prepared-text-executor.js";
 import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { createWorkerCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -81,9 +82,11 @@ describe("durable cast discovery", () => {
     await expect(withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!,
       execution: { ...frozen, plan: deriveTextExecutionPlan(frozen.admission!.routeBasis, "Changed prompt and recomputed hash.") }, enabled: true }))).rejects.toThrow();
     await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: frozen, enabled: true }));
-    const extractor = createCastDiscoveryExtractor({ executor: createPreparedTextExecutor({ attempts: createPostgresPreparedTextAttemptRepository(pool),
-      async loadAuthority(owner, profile) { expect(owner).toBe(ownerUserId); expect(profile).toBe(execution.id); return execution; } }) });
-    expect(await runCastDiscoveryOnce({ workerId: "runtime", repository: createCastDiscoveryJobRepository(pool, () => true), extractor })).toBe("complete");
+    const executor = createPreparedTextExecutor({ attempts: createPostgresPreparedTextAttemptRepository(pool),
+      async loadAuthority(owner, profile) { expect(owner).toBe(ownerUserId); expect(profile).toBe(execution.id); return execution; } });
+    expect(await createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: false }, executor).runNext("disabled")).toBe(false);
+    expect(calls).toBe(0);
+    expect(await createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: true }, executor).runNext("runtime")).toBe(true);
     expect(calls).toBe(1);
     expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find((p) => p.name === "Mara")?.profile)
       .toEqual({ "appearance.description": "blue eyes" });

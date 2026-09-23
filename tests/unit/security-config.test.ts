@@ -27,6 +27,7 @@ const securitySettingNames = [
   "NATIVE_TEXT_EXECUTION_PLAN_ADMISSION",
   "SYSTEM_ARCHIVE_ENABLED",
   "CAST_EDITING_ENABLED",
+  "CAST_DISCOVERY_ENABLED",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
   "SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE",
@@ -46,6 +47,12 @@ function minimumEnvironment(): void {
 }
 
 describe("runtime security configuration", () => {
+  it("keeps automatic cast discovery off independently of editing", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false });
+    process.env.CAST_DISCOVERY_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: true, castEditingEnabled: false });
+  });
   it("keeps cast editing off until explicitly enabled by the operator", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ castEditingEnabled: false });

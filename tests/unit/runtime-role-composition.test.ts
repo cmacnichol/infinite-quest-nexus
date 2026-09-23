@@ -124,6 +124,22 @@ function dependencies(controller: AbortController) {
 }
 
 describe("runtime role generation composition", () => {
+  it.each(["worker", "all"] as const)("wires the discovery worker only when enabled in the %s role", async (role) => {
+    for (const enabled of [false, true]) {
+      const controller = new AbortController(), { values } = dependencies(controller);
+      const castDiscovery = { runNext: vi.fn(async () => false) };
+      const factory = vi.fn(() => castDiscovery);
+      const startWorker = vi.fn<RuntimeRoleDependencies["runWorker"]>(async () => undefined);
+      const roleConfig = { ...config(role), castDiscoveryEnabled: enabled };
+      await dispatchRuntimeRole(roleConfig, pool, controller.signal, { ...values, runWorker: startWorker, createWorkerCastDiscovery: factory }, providerTransport, generationEvents);
+      expect(factory).toHaveBeenCalledTimes(enabled ? 1 : 0);
+      const workerDependencies = startWorker.mock.calls[0]![3];
+      if (enabled) {
+        expect(factory).toHaveBeenCalledWith(pool, roleConfig, workerGenerationProviders);
+        expect(workerDependencies.castDiscovery).toBe(castDiscovery);
+      } else expect(workerDependencies).not.toHaveProperty("castDiscovery");
+    }
+  });
   it.each([
     ["worker", false], ["worker", true], ["all", false], ["all", true]
   ] as const)("%s production scheduler claims authoring only when rollout is %s", async (role, enabled) => {

@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 import type {
   GenerationWorkerApplication,
   AuthoringWorkerApplication,
+  CastDiscoveryWorkerApplication,
   IllustrationApplication,
   IllustrationWorkerApplication,
   MemoryWorkerApplication
@@ -31,6 +32,7 @@ export type WorkerDependencies = Readonly<{
   generationIllustration?: IllustrationApplication;
   memory: MemoryWorkerApplication;
   authoring?: AuthoringWorkerApplication;
+  castDiscovery?: CastDiscoveryWorkerApplication;
   optionalLanes?: WorkerOptionalLanes;
 }>;
 
@@ -41,6 +43,7 @@ export type WorkerOptionalLanes = Readonly<{
   systemArchive?(): Promise<boolean>;
   authoring?(): Promise<boolean>;
   authoringCleanup?(): Promise<boolean>;
+  castDiscovery?(): Promise<boolean>;
 }>;
 
 export type StartedGeneration = Readonly<{
@@ -103,7 +106,7 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 }
 
 type ActiveLane = {
-  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring" | "authoring-cleanup";
+  name: "illustration" | "chronicle" | "asset" | "system-archive" | "authoring" | "authoring-cleanup" | "cast-discovery";
   active: Set<Promise<boolean>>;
   nextEligibleAt: number;
   pollAfterWork?: boolean;
@@ -209,7 +212,7 @@ export async function runWorker(
   pool: DatabasePool,
   config: RuntimeConfig,
   signal: AbortSignal,
-  { generation, illustration, generationIllustration, memory, authoring, optionalLanes: injectedOptionalLanes }: WorkerDependencies
+  { generation, illustration, generationIllustration, memory, authoring, castDiscovery, optionalLanes: injectedOptionalLanes }: WorkerDependencies
 ): Promise<void> {
   const workerId = `${hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
   logger.info({ event: "worker_started", workerId });
@@ -257,11 +260,14 @@ export async function runWorker(
     authoring,
     signal,
   );
-  const { authoring: configuredAuthoring, ...nonAuthoringLanes } = configuredOptionalLanes;
-  const optionalLanes: WorkerOptionalLanes = config.aiAuthoringJobsEnabled === true
-    ? configuredOptionalLanes
-    : nonAuthoringLanes;
+  const { authoring: configuredAuthoring, castDiscovery: configuredCastDiscovery, ...baseLanes } = configuredOptionalLanes;
+  const castRun = configuredCastDiscovery ?? (castDiscovery ? () => castDiscovery.runNext(workerId) : undefined);
+  const optionalLanes: WorkerOptionalLanes = { ...baseLanes,
+    ...(config.aiAuthoringJobsEnabled === true && configuredAuthoring ? { authoring: configuredAuthoring } : {}),
+    ...(config.castDiscoveryEnabled === true && castRun ? { castDiscovery: castRun } : {}) };
   const lanes: ActiveLane[] = [
+    ...(optionalLanes.castDiscovery === undefined ? [] : [{ name: "cast-discovery" as const,
+      active: new Set<Promise<boolean>>(), nextEligibleAt: 0, run: optionalLanes.castDiscovery }]),
     { name: "illustration", active: new Set(), nextEligibleAt: 0, run: optionalLanes.illustration },
     { name: "chronicle", active: new Set(), nextEligibleAt: 0, run: optionalLanes.chronicle },
     { name: "asset", active: new Set(), nextEligibleAt: 0, run: optionalLanes.asset },
@@ -365,6 +371,8 @@ export async function runWorker(
                   ...(diagnostic === undefined ? {} : { diagnostic }),
                 };
               })()
+              : lane.name === "cast-discovery"
+                ? { errorCode: "cast-discovery-failed", message: "Character discovery failed." }
               : lane.name === "authoring" || lane.name === "authoring-cleanup"
                 ? { errorCode: "authoring-execution-failed", message: "Authoring job execution failed." }
                 : { message: error instanceof Error ? error.message : String(error) })
@@ -407,9 +415,10 @@ export async function runWorker(
         event: "worker_draining_jobs",
         workerId,
         generationJobs: activeGeneration.size,
-        illustrationJobs: lanes[0]!.active.size,
-        chronicleJobs: lanes[1]!.active.size,
-        assetJobs: lanes[2]!.active.size,
+        illustrationJobs: lanes.find((lane) => lane.name === "illustration")?.active.size ?? 0,
+        chronicleJobs: lanes.find((lane) => lane.name === "chronicle")?.active.size ?? 0,
+        assetJobs: lanes.find((lane) => lane.name === "asset")?.active.size ?? 0,
+        castDiscoveryJobs: lanes.find((lane) => lane.name === "cast-discovery")?.active.size ?? 0,
         systemArchiveJobs: lanes.find((lane) => lane.name === "system-archive")?.active.size ?? 0,
         authoringJobs: lanes.find((lane) => lane.name === "authoring")?.active.size ?? 0,
       });

@@ -23,6 +23,9 @@ export interface CastDiscoveryExtractorPort {
   /** Uses the frozen execution snapshot, bounded request, and lease-bound physical accounting. */
   extract(claim: CastDiscoveryClaim): Promise<unknown>;
 }
+export interface CastDiscoveryWorkerApplication {
+  runNext(workerId: string): Promise<boolean>;
+}
 export class CastDiscoveryExtractionError extends Error {
   constructor(readonly diagnostic: "provider_timeout" | "provider_failed" | "source_requires_manual_scan") {
     super(diagnostic);

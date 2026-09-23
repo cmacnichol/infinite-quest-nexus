@@ -63,6 +63,7 @@ export type RuntimeConfig = {
   credentialEncryptionKey: string;
   worldSharingEnabled?: boolean;
   castEditingEnabled?: boolean;
+  castDiscoveryEnabled?: boolean;
   /** Operator capability ceiling; defaults to R3 for Max campaign memory. */
   storyMemoryCapability?: "r1" | "r2" | "r3" | null;
   /** Enables R3 enforce enrollments; enabled by default for Max. */
@@ -271,6 +272,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     castEditingEnabled: booleanSetting("CAST_EDITING_ENABLED", false),
+    castDiscoveryEnabled: booleanSetting("CAST_DISCOVERY_ENABLED", false),
     storyMemoryCapability: storyMemoryCapabilitySetting(),
     storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", true),
     security: {
