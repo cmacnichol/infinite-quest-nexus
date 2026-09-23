@@ -28,6 +28,7 @@ const securitySettingNames = [
   "SYSTEM_ARCHIVE_ENABLED",
   "CAST_EDITING_ENABLED",
   "CAST_DISCOVERY_ENABLED",
+  "CAST_CONTEXT_ENABLED",
   "TEXT_PROVIDER_CONCURRENCY",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
@@ -48,6 +49,18 @@ function minimumEnvironment(): void {
 }
 
 describe("runtime security configuration", () => {
+  it("requires discovery and editing before opting into cast generation context", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false });
+    process.env.CAST_CONTEXT_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false });
+    process.env.CAST_EDITING_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false });
+    process.env.CAST_DISCOVERY_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: true });
+    process.env.CAST_CONTEXT_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castDiscoveryEnabled: true });
+  });
   it("bounds shared text provider capacity", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ textProviderConcurrency: 2 });

@@ -124,6 +124,11 @@ function dependencies(controller: AbortController) {
 }
 
 describe("runtime role generation composition", () => {
+  it.each(["api", "all"] as const)("forwards cast context capability to new-job capture in the %s role", async (role) => {
+    const controller = new AbortController(), { values } = dependencies(controller);
+    await dispatchRuntimeRole({ ...config(role), castContextEnabled: true }, pool, controller.signal, values, providerTransport, generationEvents);
+    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, expect.objectContaining({ castContextEnabled: true }));
+  });
   it.each(["api", "all"] as const)("supplies API discovery recovery collaborators in the %s role", async (role) => {
     const controller = new AbortController(), { values } = dependencies(controller), roleConfig = config(role);
     const cast = { retryDiscovery: async () => ({ jobId: "fixture", retryGeneration: 1 }) } as never;

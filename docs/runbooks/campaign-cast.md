@@ -10,7 +10,15 @@ Leases expire after the request deadline plus five seconds to recover capacity a
 
 Discovery uses the saved text-provider route and its exact qualified nonstream schema, a 30-second request deadline, and source-linked validated publication. Its physical calls are recorded under operation `cast_discovery`, attributed to the source campaign and turn. Checkpointed responses survive worker interruption and are reused for publication. Disabling discovery prevents new claims and publication without disabling manual editing; it retains jobs and evidence for recovery. No relationship inference is enabled by this gate.
 
-Phases 02–03 provide manual supporting-character APIs, history/backup integration, and the legacy Story cast editor. Automatic discovery, generation-context injection, and optional history backfill remain separate phases. The replacement UI is deferred by the current legacy-first scope. See the [implementation specification](../superpowers/plans/2026-09-22-campaign-cast.md).
+Phases 02–03 provide manual supporting-character APIs, history/backup integration, and the legacy Story cast editor. Generation context and optional history backfill have separate gates. The replacement UI is deferred by the current legacy-first scope. See the [implementation specification](../superpowers/plans/2026-09-22-campaign-cast.md).
+
+## Generation context gate
+
+`CAST_CONTEXT_ENABLED` defaults to `false` in runtime configuration, Compose and Swarm. It takes effect only when `CAST_EDITING_ENABLED` and `CAST_DISCOVERY_ENABLED` are also true. Configure all replicas consistently. The capability applies to newly queued jobs for campaigns enrolled in Story Memory; Story Memory Off retains its compatible generation path. The phase-05 acceptance audit is still pending; this flag has not been enabled in a deployment.
+
+Enabled jobs freeze cast authority with `generation-base-v4`, `story-v17-campaign-cast` and `current-continuity-v4`. Both Action and Story Direction include selected, source-linked cast records within existing context ceilings. User field corrections take precedence from their effective turn. Incomplete tracking is disclosed in private context, with stale dynamic fields omitted rather than asserted as current. Existing history remains available as dated evidence. The initial cast allocation is at most 3,000 tokens and 10% of available context; it does not increase campaign or provider budgets.
+
+To roll back context injection for new jobs, set `CAST_CONTEXT_ENABLED=false` and restart/redeploy through the normal deployment procedure. Keep the compatible application version for in-flight jobs: their frozen cast capability and authority remain in force. Stored identities, evidence and edits are retained. Disabling discovery also prevents new jobs from enabling cast context, without clearing existing cast data. No relationship inference or automatic historical backfill is enabled by this flag.
 
 ## Enable and disable editing
 

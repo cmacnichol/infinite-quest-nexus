@@ -163,7 +163,8 @@ export async function dispatchRuntimeRole(
     );
     const generation = dependencies.createApiGeneration(pool, providerGraph.generation, {
       installedCapability: config.storyMemoryCapability ?? null,
-      enforceEnabled: config.storyMemoryEnforceEnabled === true
+      enforceEnabled: config.storyMemoryEnforceEnabled === true,
+      ...(config.castContextEnabled === true ? { castContextEnabled: true } : {})
     });
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
@@ -211,7 +212,8 @@ export async function dispatchRuntimeRole(
   const workerProviderGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
   const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation, {
     installedCapability: config.storyMemoryCapability ?? null,
-    enforceEnabled: config.storyMemoryEnforceEnabled === true
+    enforceEnabled: config.storyMemoryEnforceEnabled === true,
+    ...(config.castContextEnabled === true ? { castContextEnabled: true } : {})
   });
   const illustration = dependencies.createApiIllustration(pool, apiProviderGraph.illustration);
   const memory = dependencies.createApiMemory(pool, apiProviderGraph.chronicle);
