@@ -22,6 +22,7 @@ export function castEvidenceOrder(evidence: CastEvidence): readonly [number, num
     case "turn": return [evidence.turnNumber, evidence.narrationRevision];
     case "user": return [evidence.effectiveTurnNumber, 0];
     case "world": return [0, 0];
+    case "historical_world": return [0, 0];
   }
 }
 

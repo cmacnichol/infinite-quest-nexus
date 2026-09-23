@@ -1,6 +1,6 @@
 # Campaign cast: phased implementation specification
 
-**Status:** Phase 01 implemented; phases 02–06 remain planned. Updated 2026-09-22. See the [phase 01 handoff](../../review/campaign-cast/phase-01.md) for interfaces, verification, and remaining gates.
+**Status:** Phases 01–02 implemented; phases 03–06 remain planned. Updated 2026-09-23. See the [phase 01 handoff](../../review/campaign-cast/phase-01.md) and [phase 02 handoff](../../review/campaign-cast/phase-02.md) for interfaces, verification, and remaining gates.
 
 **Goal:** Give campaigns a persistent, editable cast and automatically discover characters from accepted story turns. Preserve enough identity, provenance, and temporal structure to add relationships later without replacing the character model.
 

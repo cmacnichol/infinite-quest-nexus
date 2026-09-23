@@ -137,6 +137,7 @@ function sourceColumns(
 export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
   campaign_cast_state: sourceColumns({
     portable_exact: ["campaign_id", "revision", "timeline_revision"],
+    operational_excluded: ["last_boundary_change_key"],
     owner_remapped: ["owner_user_id"]
   }),
   campaign_cast_characters: sourceColumns({

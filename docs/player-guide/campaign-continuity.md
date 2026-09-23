@@ -19,3 +19,11 @@ Choose **Create separate campaign** to preserve the original campaign and create
 ## Undo the latest turn
 
 Use **Undo latest** only when you intend to rewind the most recent accepted boundary. The command does not edit narration in place; it changes which accepted boundary is current.
+
+## Supporting-character history
+
+Campaign cast storage and a gated editing API are available; the cast editor UI and automatic character discovery are still planned. When cast records exist, branching copies only the identities and edits supported at the selected boundary. Rewind and undo discard later character edits along with later story progress.
+
+Correcting or replacing narration invalidates character facts based on the old narration. Explicit user overrides remain authoritative at retained boundaries, including intentionally blank fields. Campaign and System Archives preserve cast identity and edit history even when editing is disabled. Cross-world transfers retain the characters' original provenance rather than treating them as entities authored in the destination world.
+
+Operator details are in [Campaign cast operations](../runbooks/campaign-cast.md).

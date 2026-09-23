@@ -1,6 +1,7 @@
 import { createDatabasePool, loadRuntimeConfig } from "../../../packages/database/src/index.js";
 import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/database/src/migrate.js";
 import { buildServer } from "../../api/src/server.js";
+import { createApiCampaignCastApplication } from "./campaign-cast-composition.js";
 import { runWorker } from "../../worker/src/worker.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { createProviderNetworkPolicy } from "../../../packages/security/src/provider-network-policy.js";
@@ -81,7 +82,7 @@ await runRuntimeLifecycle(config, abortController, {
       (value) => createHash("sha256").update(value).digest("hex"),
       { nativePresetPlansEnabled: config.nativeTextExecutionPlanAdmission === true }
     ),
-    buildServer,
+    buildServer: (options) => buildServer({ ...options, cast: createApiCampaignCastApplication(options.pool, options.config) }),
     runWorker
   }, providerTransport, generationEvents)
 });

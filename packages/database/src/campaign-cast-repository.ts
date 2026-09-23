@@ -4,9 +4,10 @@ import {
   castBatchSchema, castBatchReceiptSchema, castBoundarySchema, castCharacterSchema,
   castCommandSchema, castObservationSchema, castOriginSchema, castScopeSchema, castSnapshotSchema,
   type CastBatch, type CastBatchReceipt, type CastBoundary, type CastCharacter, type CastCommand,
-  type CastEvidence, type CastObservation, type CastOverride, type CastProfile, type CastScope, type CastSnapshot
+  type CastDetail, type CastEvidence, type CastObservation, type CastOverride, type CastProfile, type CastScope, type CastSnapshot
 } from "../../contracts/src/campaign-cast.js";
-import type { CampaignCastRepositoryPort } from "../../application/src/campaign-cast/index.js";
+import { createCastCharacterSchema, editCastCharacterSchema, type CreateCastCharacter, type EditCastCharacter, type CastWriteResult } from "../../contracts/src/campaign-cast.js";
+import { CampaignCastError, type CampaignCastRepositoryPort, type CampaignCastWritePort } from "../../application/src/campaign-cast/index.js";
 import { castEvidenceOrder, projectCastProfile, validateCastFiction } from "../../domain/src/campaign-cast.js";
 import { characterFictionAuthority } from "../../domain/src/character-fiction-authority.js";
 import { sha256, stableStringify, truncateAtBoundary } from "../../domain/src/text.js";
@@ -27,7 +28,7 @@ const characterRowSchema = z.object({ id: z.uuid(), origin: castOriginSchema, fi
 async function lockCampaign(client: DatabaseClient, scope: CastScope): Promise<Campaign> {
   const result = await client.query(`SELECT active_turn_number,world_version_id,selected_character_id,character_profile,character_snapshot
     FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR UPDATE`, [scope.campaignId, scope.ownerUserId]);
-  if (!result.rows[0]) throw new Error("Campaign cast not found.");
+  if (!result.rows[0]) throw new CampaignCastError("cast_not_found");
   return campaignSchema.parse(result.rows[0]);
 }
 
@@ -51,7 +52,9 @@ function assertBoundary(campaign: Campaign, state: State | null, boundary: CastB
 
 async function evidenceIsCurrent(client: DatabaseClient, scope: CastScope, campaign: Campaign, evidence: CastEvidence): Promise<boolean> {
   if (evidence.kind === "user") return false;
+  if (evidence.kind === "historical_world") return true;
   if (evidence.kind === "turn") {
+    if (evidence.invalidated) return false;
     const result = await client.query(`SELECT turn_number,correction_revision,effective_narration FROM effective_turn_narrations
       WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3`, [evidence.turnId, scope.campaignId, scope.ownerUserId]);
     const row = result.rows[0];
@@ -59,7 +62,8 @@ async function evidenceIsCurrent(client: DatabaseClient, scope: CastScope, campa
       && row.correction_revision === evidence.narrationRevision && sha256(row.effective_narration) === evidence.sourceHash
       && row.effective_narration.includes(evidence.quote));
   }
-  if (evidence.worldVersionId !== campaign.world_version_id) return false;
+  // Retained evidence can refer to an earlier immutable version after transfer.
+  // New observations are restricted to the pinned version at the write boundary.
   const result = await client.query("SELECT content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [evidence.worldVersionId, scope.ownerUserId]);
   let value: unknown = result.rows[0]?.content;
   for (const key of evidence.sourcePath.slice(1).split("/").map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))) {
@@ -168,6 +172,15 @@ async function cacheSnapshot(client: DatabaseClient, scope: CastScope, value: Ca
   }
 }
 
+/** Lifecycle callers already own a transaction; never open a nested pool transaction. */
+export async function rebuildCastWithClient(client: DatabaseClient, scope: CastScope, turnNumber?: number): Promise<CastSnapshot> {
+  const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
+  const value = await snapshot(client, scope, campaign, state,
+    { turnNumber: turnNumber ?? campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 });
+  if (turnNumber === undefined) await cacheSnapshot(client, scope, value);
+  return value;
+}
+
 async function assertSupportingCharacter(client: DatabaseClient, scope: CastScope, id: string): Promise<void> {
   const result = await client.query("SELECT origin FROM campaign_cast_characters WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3", [id, scope.campaignId, scope.ownerUserId]);
   if (!result.rows[0]) throw new Error("Cast character not found.");
@@ -177,6 +190,7 @@ async function assertSupportingCharacter(client: DatabaseClient, scope: CastScop
 async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: Campaign, eventId: string, boundary: CastBoundary, stored: StoredCommand): Promise<void> {
   const command = stored.command;
   if (command.kind === "create") {
+    if (command.origin.kind === "historical_world" || command.evidence?.kind === "historical_world") throw new Error("Historical provenance is import-only.");
     if (command.origin.kind === "protagonist") throw new Error("Protagonist identity is initialized by the server.");
     validateCastFiction(command.name); command.aliases.forEach(validateCastFiction);
     if (command.origin.kind === "manual" && command.evidence) throw new Error("Manual identity evidence is the server event.");
@@ -196,7 +210,9 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
   if (command.kind === "identity") { validateCastFiction(command.name); command.aliases.forEach(validateCastFiction); }
   if (command.kind === "override") validateCastFiction(command.value);
   if (command.kind !== "observe") return;
+  if (command.evidence.kind === "historical_world") throw new Error("Historical provenance is import-only.");
   validateCastFiction(command.value);
+  if (command.evidence.kind === "world" && command.evidence.worldVersionId !== campaign.world_version_id) throw new Error("Invalid cast world evidence.");
   if (!await evidenceIsCurrent(client, scope, campaign, command.evidence)) throw new Error("Invalid or stale cast observation evidence.");
   if (command.speakerCharacterId) {
     const speaker = await client.query("SELECT id FROM campaign_cast_characters WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3", [command.speakerCharacterId, scope.campaignId, scope.ownerUserId]);
@@ -217,8 +233,117 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
     eventId, observation.field, observation.value, observation.mode, observation.speakerCharacterId, JSON.stringify(observation.evidence), observation.supersedesObservationId]);
 }
 
-export function createPostgresCampaignCastRepository(pool: DatabasePool): CampaignCastRepositoryPort {
+async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State,
+  batch: CastBatch, requestHash: string, publicCharacterId?: string): Promise<CastBatchReceipt> {
+  const payload: StoredCommand[] = batch.commands.map((command) => ({ command,
+    ...(command.kind === "create" ? { characterId: publicCharacterId ?? randomUUID() } : {}),
+    ...(command.kind === "observe" ? { observationId: randomUUID() } : {}) }));
+  const receipt: CastBatchReceipt = { eventId: randomUUID(), revision: state.revision + 1,
+    characterIds: payload.flatMap((item) => item.characterId ? [item.characterId] : []),
+    observationIds: payload.flatMap((item) => item.observationId ? [item.observationId] : []) };
+  await client.query(`INSERT INTO campaign_cast_events(id,owner_user_id,campaign_id,effective_turn_number,timeline_revision,idempotency_key,request_hash,payload,receipt)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [receipt.eventId, scope.ownerUserId, scope.campaignId, batch.boundary.turnNumber,
+    batch.boundary.timelineRevision, batch.idempotencyKey, requestHash, JSON.stringify(payload), JSON.stringify(receipt)]);
+  for (const stored of payload) await applyCommand(client, scope, campaign, receipt.eventId, batch.boundary, stored);
+  await client.query("UPDATE campaign_cast_state SET revision=$3 WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId, receipt.revision]);
+  const value = await snapshot(client, scope, campaign, { ...state, revision: receipt.revision }, batch.boundary);
+  await cacheSnapshot(client, scope, value);
+  if (publicCharacterId) {
+    receipt.result = { character: value.characters.find((person) => person.id === publicCharacterId)!, revision: value.revision, boundary: value.boundary };
+    await client.query("UPDATE campaign_cast_events SET receipt=$2 WHERE id=$1", [receipt.eventId, JSON.stringify(receipt)]);
+  }
+  return receipt;
+}
+
+export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { editingEnabled?: boolean } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
+  async function write(rawScope: CastScope, characterId: string | null, raw: CreateCastCharacter | EditCastCharacter): Promise<CastWriteResult> {
+    const scope = castScopeSchema.parse(rawScope);
+    const request = characterId ? editCastCharacterSchema.parse(raw) : createCastCharacterSchema.parse(raw);
+    return withTransaction(pool, async (client) => {
+      const campaign = await lockCampaign(client, scope);
+      if (!options.editingEnabled) throw new CampaignCastError("cast_editing_disabled");
+      const state = await initialize(client, scope, campaign);
+      const requestHash = sha256(stableStringify({ characterId, request }));
+      const prior = (await client.query("SELECT request_hash,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
+      if (prior) {
+        if (prior.request_hash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict");
+        const receipt = castBatchReceiptSchema.parse(prior.receipt);
+        if (!receipt.result) throw new CampaignCastError("cast_idempotency_conflict");
+        return receipt.result;
+      }
+      if (state.revision !== request.expectedCastRevision || state.timeline_revision !== request.expectedBoundary.timelineRevision
+        || campaign.active_turn_number !== request.expectedBoundary.turnNumber) throw new CampaignCastError("cast_revision_conflict");
+      const active = await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
+        AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`, [scope.campaignId, scope.ownerUserId]);
+      if (active.rows.length) throw new CampaignCastError("cast_generation_active");
+      const commands: CastCommand[] = [];
+      const targetId = characterId ?? randomUUID();
+      if (characterId) {
+        const edit = request as EditCastCharacter;
+        const current = await snapshot(client, scope, campaign, state, request.expectedBoundary);
+        const person = current.characters.find((person) => person.id === characterId);
+        if (!person) throw new CampaignCastError("cast_not_found");
+        if (person.origin.kind === "protagonist") throw new CampaignCastError("cast_protagonist_read_only");
+        if (person.revision !== edit.expectedCharacterRevision) throw new CampaignCastError("cast_revision_conflict");
+        if (edit.name !== undefined || edit.aliases !== undefined) commands.push({ kind: "identity", characterId, name: edit.name ?? person.name, aliases: edit.aliases ?? person.aliases });
+        for (const field of edit.clearOverrides ?? []) commands.push({ kind: "clear_override", characterId, field });
+        if (edit.pinned !== undefined) commands.push({ kind: "pin", characterId, value: edit.pinned });
+        if (edit.ignored !== undefined) commands.push({ kind: "ignore", characterId, value: edit.ignored });
+      } else {
+        const create = request as CreateCastCharacter;
+        commands.push({ kind: "create", name: create.name, aliases: create.aliases, origin: { kind: "manual" } });
+      }
+      for (const [field, value] of Object.entries(characterId ? (request as EditCastCharacter).setOverrides ?? {} : (request as CreateCastCharacter).profile)) {
+        commands.push(castCommandSchema.parse({ kind: "override", characterId: targetId, field, value }));
+      }
+      try {
+        for (const command of commands) {
+          if (command.kind === "create" || command.kind === "identity") { validateCastFiction(command.name); command.aliases.forEach(validateCastFiction); }
+          if (command.kind === "override") validateCastFiction(command.value);
+        }
+      } catch { throw new CampaignCastError("cast_invalid_request"); }
+      return (await persistBatch(client, scope, campaign, state, { boundary: request.expectedBoundary,
+        idempotencyKey: request.idempotencyKey, commands }, requestHash, targetId)).result!;
+    });
+  }
   return {
+    create: (scope, request) => write(scope, null, request),
+    edit: (scope, id, request) => write(scope, z.uuid().parse(id), request),
+    async current(rawScope) {
+      const scope = castScopeSchema.parse(rawScope);
+      return withTransaction(pool, async (client) => {
+        const campaign = await lockCampaign(client, scope), state = await initialize(client, scope, campaign);
+        return snapshot(client, scope, campaign, state, { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision });
+      });
+    },
+    async detail(rawScope, rawId) {
+      const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId);
+      return withTransaction(pool, async (client) => {
+        const campaign = await lockCampaign(client, scope), state = await initialize(client, scope, campaign);
+        const boundary = { turnNumber: campaign.active_turn_number, timelineRevision: state.timeline_revision };
+        const value = await snapshot(client, scope, campaign, state, boundary);
+        const character = value.characters.find((person) => person.id === id);
+        if (!character) throw new CampaignCastError("cast_not_found");
+        const observations = (await client.query(`SELECT id,character_id AS "characterId",field,value,mode,
+          speaker_character_id AS "speakerCharacterId",evidence,supersedes_observation_id AS "supersedesObservationId"
+          FROM campaign_cast_observations WHERE campaign_id=$1 AND owner_user_id=$2 AND character_id=$3 ORDER BY sequence`, [scope.campaignId, scope.ownerUserId, id])).rows.map((row) => castObservationSchema.parse(row));
+        const overrides = new Map<string, CastOverride>();
+        const identityEvents: CastDetail["identityEvents"] = [];
+        const events = (await client.query("SELECT id,effective_turn_number,payload,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number <= $3 ORDER BY sequence", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows.map((row) => eventSchema.parse(row));
+        for (const event of events) for (const { command, characterId } of event.payload) {
+          if (command.kind === "create" && characterId === id || command.kind === "identity" && command.characterId === id) {
+            identityEvents.push({ eventId: event.id, effectiveTurnNumber: event.effective_turn_number,
+              name: command.name, aliases: command.aliases,
+              evidence: command.kind === "create" && command.evidence ? command.evidence
+                : { kind: "user", editId: event.id, effectiveTurnNumber: event.effective_turn_number } });
+          }
+          if (command.kind === "override" && command.characterId === id) overrides.set(command.field, { field: command.field, value: command.value, evidence: { kind: "user", editId: event.id, effectiveTurnNumber: event.effective_turn_number } });
+          if (command.kind === "clear_override" && command.characterId === id) overrides.delete(command.field);
+        }
+        return { character, revision: value.revision, boundary, observations, overrides: [...overrides.values()], identityEvents, unresolvedCandidateIds: [],
+          editorDestination: character.origin.kind === "protagonist" ? `/api/v1/campaigns/${scope.campaignId}/character-profile` : null };
+      });
+    },
     async initialize(rawScope) {
       const scope = castScopeSchema.parse(rawScope);
       return withTransaction(pool, async (client) => {
@@ -253,20 +378,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool): Campai
           return castBatchReceiptSchema.parse(prior.receipt);
         }
         assertBoundary(campaign, state, batch.boundary, true);
-        const payload: StoredCommand[] = batch.commands.map((command: CastCommand) => ({ command,
-          ...(command.kind === "create" ? { characterId: randomUUID() } : {}),
-          ...(command.kind === "observe" ? { observationId: randomUUID() } : {}) }));
-        const receipt: CastBatchReceipt = { eventId: randomUUID(), revision: state.revision + 1,
-          characterIds: payload.flatMap((item) => item.characterId ? [item.characterId] : []),
-          observationIds: payload.flatMap((item) => item.observationId ? [item.observationId] : []) };
-        await client.query(`INSERT INTO campaign_cast_events(id,owner_user_id,campaign_id,effective_turn_number,timeline_revision,idempotency_key,request_hash,payload,receipt)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [receipt.eventId, scope.ownerUserId, scope.campaignId, batch.boundary.turnNumber,
-          batch.boundary.timelineRevision, batch.idempotencyKey, requestHash, JSON.stringify(payload), JSON.stringify(receipt)]);
-        for (const stored of payload) await applyCommand(client, scope, campaign, receipt.eventId, batch.boundary, stored);
-        await client.query("UPDATE campaign_cast_state SET revision=$3 WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId, receipt.revision]);
-        const value = await snapshot(client, scope, campaign, { ...state, revision: receipt.revision }, batch.boundary);
-        await cacheSnapshot(client, scope, value);
-        return receipt;
+        return persistBatch(client, scope, campaign, state, batch, requestHash);
       });
     }
   };

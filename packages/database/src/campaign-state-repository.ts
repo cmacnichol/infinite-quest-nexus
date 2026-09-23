@@ -54,6 +54,7 @@ import {
 } from "./canonical-fact-reference-remapping.js";
 import { readTurnPage } from "./play-loop-read-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
+import { applyCastBoundaryChange, copyCampaignCast } from "./campaign-cast-lifecycle.js";
 import {
   createPostgresWorldCampaignTransactionPort,
   worldCampaignDatabaseClient
@@ -1176,6 +1177,8 @@ function createPostgresCampaignAuthorityRepository(
         [branchCampaignId, scope.campaignId, scope.ownerUserId]
       );
 
+      await copyCampaignCast(client, scope, { ownerUserId: scope.ownerUserId, campaignId: branchCampaignId },
+        parsed.targetTurnNumber, new Map(normalizedTurns.map((turn) => [turn.sourceId, turn.id])));
       const memoryScope = {
         ownerUserId: scope.ownerUserId,
         campaignId: branchCampaignId,
@@ -1340,6 +1343,10 @@ function createPostgresCampaignAuthorityRepository(
       }
 
       const discardedTurnCount = current.activeTurnNumber - parsed.targetTurnNumber;
+      if (discardedTurnCount > 0) {
+        await applyCastBoundaryChange(client, scope, { turnNumber: parsed.targetTurnNumber,
+          changeKey: `rewind:${current.activeTurnNumber}:${current.revision}:${parsed.targetTurnNumber}` });
+      }
       await client.query(
         `DELETE FROM generation_jobs
           WHERE campaign_id = $1 AND owner_user_id = $2 AND expected_turn_number > $3`,

@@ -1,3 +1,4 @@
+import { applyCastBoundaryChange } from "./campaign-cast-lifecycle.js";
 import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
 import type { GenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
@@ -1637,6 +1638,8 @@ async function commitAcceptedTurn(
       campaignId: job.campaign_id,
       worldVersionId: campaign.world_version_id
     });
+    await applyCastBoundaryChange(client, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id },
+      { turnNumber: job.expected_turn_number, changeKey: `replacement:${job.id}:${turnId}` });
     await client.query(
       `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
        VALUES ($1,$2,'campaign_turn_replaced',$3,$4)`,

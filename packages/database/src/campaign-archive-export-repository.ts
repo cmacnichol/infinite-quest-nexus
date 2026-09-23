@@ -2,6 +2,8 @@ import type { ArchiveAssetBinding, ArchiveAssetRecord } from "../../contracts/sr
 import { archiveAssetRecordSchema, sanitizePortableMetadata } from "../../contracts/src/archives.js";
 import type { WorldContent } from "../../contracts/src/world-library.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
+import { exportCampaignCast } from "./campaign-cast-portability.js";
+import type { PortableCampaignCast } from "../../contracts/src/campaign-cast.js";
 
 type SnapshotCampaign = Record<string, any> & {
   id: string;
@@ -49,6 +51,7 @@ export type CampaignArchiveExportAssetInventory = Readonly<{
 
 export type CampaignArchiveExportSnapshot = Readonly<{
   ownerUserId: string;
+  cast?: PortableCampaignCast;
   campaign: SnapshotCampaign;
   turns: readonly Record<string, any>[];
   profileEdits: readonly unknown[];
@@ -242,6 +245,7 @@ export async function loadCampaignArchiveExportSnapshot(
       throw exportError("Accepted turns do not match the campaign active turn number.");
     }
     const values = [ownerUserId, campaignId] as const;
+    const cast = await exportCampaignCast(client, { ownerUserId, campaignId });
     const profileEdits = await queryRows(client, "SELECT id,revision,previous_profile,next_profile,edit_source,created_at FROM campaign_character_profile_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values);
     const stateEdits = await queryRows(client, "SELECT id,effective_turn_number,revision,state_snapshot_private,changed_fields,created_at FROM campaign_state_edits WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY revision", values);
     const narrationCorrections = await queryRows(client, `SELECT id,turn_id,revision,narration,
@@ -263,7 +267,7 @@ export async function loadCampaignArchiveExportSnapshot(
     if (latestStateRevision > Number(campaign.state_revision)) throw exportError("Campaign state revision does not match the captured state edit ledger.");
     await client.query("COMMIT");
     return {
-      ownerUserId, campaign, turns, profileEdits, stateEdits, narrationCorrections, migrations,
+      ownerUserId, campaign, turns, profileEdits, stateEdits, narrationCorrections, migrations, ...(cast ? { cast } : {}),
       illustrationConfig: illustrationConfigs[0] ?? null, illustrationSets, illustrationSegments,
       costs, memories, summaries, legacyHistory: legacy.rows[0] ?? null, assets,
     };

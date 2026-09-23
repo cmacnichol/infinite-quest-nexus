@@ -2,6 +2,8 @@
 
 > **For agentic workers:** Implement task-by-task with strict TDD. Use `superpowers:subagent-driven-development` when delegation is selected; otherwise execute natively. Do not start a later phase in this patch.
 
+**Status:** Implemented 2026-09-23. See [verification and handoff](../../review/campaign-cast/phase-02.md). Discovery jobs do not exist yet; phase 04 must add their cancellation to the completed boundary-change seam.
+
 **Goal:** Expose safe manual character creation and editing, with history, branching, and backup behavior complete before public use.
 
 **Architecture:** A campaign-cast application module owns mutations and optimistic concurrency. Existing history and transfer operations invoke cast lifecycle operations in their transactions; portable formats preserve identities and evidence with explicit ID remapping.
@@ -53,8 +55,8 @@ Concurrent edits; explicit blank versus reset-to-discovered; branch before a cha
 
 ## Task 1: manual application and routes
 
-- [ ] Add a failing API case that creates a sparse character, reads it, saves an empty appearance override, then retries the identical mutation and receives the same ID/revision.
-- [ ] Assert the write contract preserves an intentional blank:
+- [x] Add a failing API case that creates a sparse character, reads it, saves an empty appearance override, then retries the identical mutation and receives the same ID/revision.
+- [x] Assert the write contract preserves an intentional blank:
 
 ```ts
 expect(editCastCharacterSchema.parse({
@@ -65,28 +67,28 @@ expect(editCastCharacterSchema.parse({
 }).setOverrides).toEqual({ "appearance.description": "" });
 ```
 
-- [ ] Under campaign/state locks, check gate, server owner, boundary, revisions, active generation, and idempotency; append the edit event and update projection/revision atomically.
-- [ ] Reject editing linked protagonist fields through this route and return its existing editor destination; pin/ignore rules must not hide the protagonist authority. Return a specific validation error rather than silently ignoring the write.
-- [ ] Cover stale revisions, simultaneous writes, unsafe markup rendered as data, request size limits, and same-name characters. `ignored` excludes a supporting character from automatic prompt selection but retains evidence; `pinned` increases relevance priority without guaranteeing unlimited prompt space.
-- [ ] Run application and API suites RED/GREEN; commit only after those behaviors pass.
+- [x] Under campaign/state locks, check gate, server owner, boundary, revisions, active generation, and idempotency; append the edit event and update projection/revision atomically.
+- [x] Reject editing linked protagonist fields through this route and return its existing editor destination; pin/ignore rules must not hide the protagonist authority. Return a specific validation error rather than silently ignoring the write.
+- [x] Cover stale revisions, simultaneous writes, unsafe markup rendered as data, request size limits, and same-name characters. `ignored` excludes a supporting character from automatic prompt selection but retains evidence; `pinned` increases relevance priority without guaranteeing unlimited prompt space.
+- [x] Run application and API suites RED/GREEN; commit only after those behaviors pass.
 
 ## Task 2: temporal lifecycle and correction
 
-- [ ] Define `applyCastBoundaryChange(client, scope, boundary)` in `campaign-cast-lifecycle.ts`: increment timeline revision, invalidate source revisions no longer effective, cancel stale operational jobs, and rebuild the projection from retained effective events. The caller supplies its transaction client.
-- [ ] Invoke it from rewind/undo, replacement, and narration correction. Preserve user edits at retained boundaries; exclude edits effective after the new boundary. Source-dependent automatic observations from corrected narration become inactive.
-- [ ] For branching, copy retained identities/events/evidence through the selected boundary using an explicit cast-ID and turn-ID mapping. Characters first introduced afterward must not be copied. Initialize the destination protagonist link against its own campaign.
-- [ ] For cross-world transfer, preserve campaign-local characters and historical origin provenance; do not reinterpret old world IDs as destination world entities. Copy only data permitted by the existing transfer boundary, and maintain an explicit source-to-destination mapping.
-- [ ] Test lifecycle using real PostgreSQL: character at turn 8 absent from branch at 7; edit at 9 absent after rewind to 8; corrected source facts inactive; repeated rewind idempotent; no in-flight stale batch can recreate removed state.
-- [ ] Run the new lifecycle suite plus affected existing campaign-state and transfer integration tests; capture RED/GREEN and commit.
+- [x] Define `applyCastBoundaryChange(client, scope, boundary)` in `campaign-cast-lifecycle.ts`: increment timeline revision, invalidate source revisions no longer effective, cancel stale operational jobs, and rebuild the projection from retained effective events. The caller supplies its transaction client.
+- [x] Invoke it from rewind/undo, replacement, and narration correction. Preserve user edits at retained boundaries; exclude edits effective after the new boundary. Source-dependent automatic observations from corrected narration become inactive.
+- [x] For branching, copy retained identities/events/evidence through the selected boundary using an explicit cast-ID and turn-ID mapping. Characters first introduced afterward must not be copied. Initialize the destination protagonist link against its own campaign.
+- [x] For cross-world transfer, preserve campaign-local characters and historical origin provenance; do not reinterpret old world IDs as destination world entities. Copy only data permitted by the existing transfer boundary, and maintain an explicit source-to-destination mapping.
+- [x] Test lifecycle using real PostgreSQL: character at turn 8 absent from branch at 7; edit at 9 absent after rewind to 8; corrected source facts inactive; repeated rewind idempotent; no in-flight stale batch can recreate removed state.
+- [x] Run the new lifecycle suite plus affected existing campaign-state and transfer integration tests; capture RED/GREEN and commit.
 
 ## Task 3: portability and controlled exposure
 
-- [ ] Version portable cast payloads; exports include identities, retained observation/event evidence, overrides, and origin provenance. Exclude job leases, provider credentials, model payloads, and rebuildable profiles.
-- [ ] Import old archives without cast as an empty supporting cast. For cast-aware archives, validate sizes/references before writes, remap campaign/turn/character IDs, assign server-resolved ownership, and rebuild projections. Preserve source owner information only as non-authoritative provenance if the existing format supports it.
-- [ ] Complete System Archive classifications, row selection, preview accounting, relationship validation of cast-to-turn references, and restoration ordering. Unknown newer cast formats must produce a clear unsupported-version error rather than silently dropping records.
-- [ ] Test campaign JSON and System Archive round trips, user blanks, repeated names, foreign source references, and old-format import. Verify existing campaign export paths cannot silently omit enabled cast data.
-- [ ] Wire `castEditing` default-off capability and deployment configuration using the existing settings conventions; update config examples and manifests only where required to carry that setting consistently.
-- [ ] Run the new portability suite and affected archive tests, type checks, and `git diff --check`; commit and produce phase handoff.
+- [x] Version portable cast payloads; exports include identities, retained observation/event evidence, overrides, and origin provenance. Exclude job leases, provider credentials, model payloads, and rebuildable profiles.
+- [x] Import old archives without cast as an empty supporting cast. For cast-aware archives, validate sizes/references before writes, remap campaign/turn/character IDs, assign server-resolved ownership, and rebuild projections. Preserve source owner information only as non-authoritative provenance if the existing format supports it.
+- [x] Complete System Archive classifications, row selection, preview accounting, relationship validation of cast-to-turn references, and restoration ordering. Unknown newer cast formats must produce a clear unsupported-version error rather than silently dropping records.
+- [x] Test campaign JSON and System Archive round trips, user blanks, repeated names, foreign source references, and old-format import. Verify existing campaign export paths cannot silently omit enabled cast data.
+- [x] Wire `castEditing` default-off capability and deployment configuration using the existing settings conventions; update config examples and manifests only where required to carry that setting consistently.
+- [x] Run the new portability suite and affected archive tests, type checks, and `git diff --check`; commit and produce phase handoff.
 
 ## Exit gate and rollback
 

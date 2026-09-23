@@ -26,6 +26,7 @@ const securitySettingNames = [
   "AI_STORY_SOURCE_AUTHORING_ENABLED",
   "NATIVE_TEXT_EXECUTION_PLAN_ADMISSION",
   "SYSTEM_ARCHIVE_ENABLED",
+  "CAST_EDITING_ENABLED",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
   "SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE",
@@ -45,6 +46,14 @@ function minimumEnvironment(): void {
 }
 
 describe("runtime security configuration", () => {
+  it("keeps cast editing off until explicitly enabled by the operator", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ castEditingEnabled: false });
+    process.env.CAST_EDITING_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castEditingEnabled: true });
+    process.env.CAST_EDITING_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ castEditingEnabled: false });
+  });
   it("defaults Story Memory to Max and preserves explicit operator restrictions", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ storyMemoryCapability: "r3", storyMemoryEnforceEnabled: true });
