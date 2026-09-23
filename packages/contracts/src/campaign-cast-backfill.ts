@@ -1,8 +1,20 @@
 import { z } from "zod";
 import { castBoundarySchema } from "./campaign-cast.js";
+import { textModelSelectionSchema } from "./provider-selection.js";
 
 const turn = z.number().int().positive();
 const count = z.number().int().nonnegative();
+export const castBackfillPreviewSchema = z.object({
+  fromTurn: turn, throughTurn: turn, boundary: castBoundarySchema, turnCount: turn,
+  estimatedChunkRequests: count, completedChunkReceipts: count, completedTurns: count,
+  manualScanTurns: z.array(turn), providerProfileId: z.uuid(), selection: textModelSelectionSchema
+}).strict().refine(value => value.throughTurn <= value.boundary.turnNumber
+  && value.turnCount === value.throughTurn - value.fromTurn + 1
+  && value.completedTurns + value.manualScanTurns.length <= value.turnCount
+  && new Set(value.manualScanTurns).size === value.manualScanTurns.length
+  && value.manualScanTurns.every(number => number >= value.fromTurn && number <= value.throughTurn),
+"Preview counts must describe the selected accepted range.");
+export type CastBackfillPreview = z.infer<typeof castBackfillPreviewSchema>;
 export const castBackfillRequestSchema = z.object({
   fromTurn: turn, throughTurn: turn, expectedBoundary: castBoundarySchema,
   idempotencyKey: z.string().trim().min(1).max(200)

@@ -18,7 +18,7 @@ export type { CastDiscoveryClaim, CastDiscoveryExecution } from "../../applicati
 type AppliedDiscovery = { characterIds: string[]; observationIds: string[]; validationSummary?: { accepted: number; unresolved: number; rejected: { localKey: string; code: string }[] } };
 const diagnostics = z.enum(["provider_timeout", "provider_failed", "invalid_output", "source_requires_manual_scan", "publication_failed"]);
 
-function readExecution(value: unknown): CastDiscoveryExecution {
+export function readCastDiscoveryExecution(value: unknown): CastDiscoveryExecution {
   const parsed = z.object({ providerProfileId: z.uuid(), plan: z.unknown(), admission: z.object({
     routeBasis: z.unknown(), frozenResponseContracts: z.unknown(), providerType: z.enum(["openrouter", "openai_compatible"]),
     configuration: z.record(z.string(), z.unknown()) }).strict().optional() }).strict().parse(value);
@@ -39,6 +39,8 @@ function readExecution(value: unknown): CastDiscoveryExecution {
     invocationKey: "cast_discovery:nonstream", operation: "cast_discovery", trustedOperationPrompt: CAST_DISCOVERY_SYSTEM_PROMPT });
   return { providerProfileId, plan, admission: { ...parsed.admission, routeBasis, frozenResponseContracts } };
 }
+
+const readExecution = readCastDiscoveryExecution;
 
 /** Caller owns the accepted-turn transaction. No provider or nested transaction occurs here. */
 export async function enqueueCastDiscoveryWithClient(client: DatabaseClient, input: {

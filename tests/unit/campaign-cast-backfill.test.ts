@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { castBackfillRequestSchema, castBackfillProgressSchema } from "../../packages/contracts/src/campaign-cast-backfill.js";
+import { castBackfillRequestSchema, castBackfillProgressSchema, castBackfillPreviewSchema } from "../../packages/contracts/src/campaign-cast-backfill.js";
 import { validateCastBackfillRange } from "../../packages/application/src/campaign-cast/backfill.js";
 
 const request = { fromTurn: 3, throughTurn: 8, expectedBoundary: { turnNumber: 10, timelineRevision: 0 }, idempotencyKey: "history-scan-0001" };
 describe("campaign cast backfill contracts", () => {
+  it("keeps preview counts within the selected history and excludes private admission", () => {
+    const preview = { fromTurn: 3, throughTurn: 8, boundary: request.expectedBoundary, turnCount: 6,
+      estimatedChunkRequests: 6, completedChunkReceipts: 0, completedTurns: 0, manualScanTurns: [],
+      providerProfileId: "10000000-0000-4000-8000-000000000001", selection: { kind: "model", modelId: "fixture" } };
+    expect(castBackfillPreviewSchema.parse(preview)).toEqual(preview);
+    for (const changes of [{ turnCount: 7 }, { completedTurns: 7 }, { manualScanTurns: [2] },
+      { manualScanTurns: [3, 3] }, { completedTurns: 6, manualScanTurns: [3] }, { execution: { credentials: "private" } }]) {
+      expect(castBackfillPreviewSchema.safeParse({ ...preview, ...changes }).success).toBe(false);
+    }
+  });
   it("accepts a positive inclusive range with an explicit boundary and start key", () => {
     expect(castBackfillRequestSchema.parse(request)).toEqual(request);
   });
