@@ -1,11 +1,12 @@
 import type { CampaignStateCorrectionProjectionScope, CampaignWorldVersionMemoryScope, CorrectionMemoryChanges } from "../../application/src/memory/index.js";
 import { campaignRuntimeStateContentSchema } from "../../contracts/src/generation.js";
 import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
-import { buildChronicleEntityCatalog, chronicleContentHash, sanitizeChronicleFictionString, sanitizeChronicleMemoryLines } from "../../domain/src/chronicle-memory-helpers.js";
+import { chronicleContentHash, sanitizeChronicleFictionString, sanitizeChronicleMemoryLines } from "../../domain/src/chronicle-memory-helpers.js";
 import { canonicalFactDeduplicationKey, createCorrectionCanonicalFactId } from "../../domain/src/canonical-facts.js";
 import { resolveEntityMetadata, type EntityReference } from "../../domain/src/entity-references.js";
 import { estimateTokens } from "../../domain/src/text.js";
 import type { DatabaseClient } from "./pool.js";
+import { loadChronicleEntityCatalog } from "./chronicle-entity-catalog.js";
 
 type FactRow = { id: string; source_turn_id: string | null; source_turn_number: number; content: string; entities: string[]; entity_ids: string[] };
 type Projection = { kind: string; turnId: string | null; ordinal: number; content: string; importance: number; entities: string[]; entityIds: string[]; metadata: Record<string, unknown> };
@@ -19,10 +20,8 @@ export type StateCorrection = Readonly<{
 export async function applyPostgresStateCorrection(client: DatabaseClient, scope: CampaignStateCorrectionProjectionScope): Promise<CorrectionMemoryChanges> {
   const result = await client.query<{
     effective_turn_number: number; state_snapshot_private: unknown; changed_fields: string[];
-    world_content: Record<string, unknown>; character_snapshot: Record<string, unknown> | null; character_profile: Record<string, unknown> | null;
   }>(
-    `SELECT e.effective_turn_number,e.state_snapshot_private,e.changed_fields,
-            wv.content AS world_content,c.character_snapshot,c.character_profile
+    `SELECT e.effective_turn_number,e.state_snapshot_private,e.changed_fields
        FROM campaign_state_edits e JOIN campaigns c ON c.id=e.campaign_id AND c.owner_user_id=e.owner_user_id
        JOIN world_versions wv ON wv.id=c.world_version_id AND wv.owner_user_id=c.owner_user_id
       WHERE e.id=$1 AND e.owner_user_id=$2 AND e.campaign_id=$3 AND c.world_version_id=$4`,
@@ -34,7 +33,7 @@ export async function applyPostgresStateCorrection(client: DatabaseClient, scope
     return { changedMemoryIds: [], removedMemoryIds: [] };
   }
   const snapshot = campaignRuntimeStateContentSchema.parse(row.state_snapshot_private);
-  const catalog = buildChronicleEntityCatalog({ worldContent: row.world_content, characterSnapshot: row.character_snapshot, characterProfile: row.character_profile });
+  const catalog = await loadChronicleEntityCatalog(client, scope);
   return projectStateCorrection(client, scope, catalog, { id: scope.stateEditId, effectiveTurnNumber: row.effective_turn_number, snapshot }, new Set(row.changed_fields));
 }
 

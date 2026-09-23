@@ -7,6 +7,7 @@ import { exportCampaignCast, importCampaignCast } from "../../packages/database/
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
+import { memoryGeneration } from "../helpers/memory-applications.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 integration("campaign cast PostgreSQL foundation", () => {
@@ -35,6 +36,38 @@ integration("campaign cast PostgreSQL foundation", () => {
     }
     return { scope: { ownerUserId, campaignId }, worldVersionId, evidence: turns[0]!, later: turns[1]!, boundary: { turnNumber: 2, timelineRevision: 0 } };
   }
+
+  it.each(["accepted", "reindex", "correction"])("preserves cast identities in %s Chronicle projections", async (mode) => {
+    const f = await fixture(), repo = createPostgresCampaignCastRepository(pool);
+    const receipt = await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: "chronicle-cast", commands: [
+      { kind: "create", name: "Sera", aliases: ["Silver Watcher"], origin: { kind: "manual" } }
+    ] });
+    const narration = "The Silver Watcher waits at the harbor.";
+    const derived = { continuitySummary: "Sera waits at the harbor.", canonicalFacts: ["The Silver Watcher knows the road."], openThreads: ["Find Sera."] };
+    await pool.query("UPDATE turns SET narration=$2,state_snapshot_private=$3 WHERE id=$1", [f.later.turnId, narration, JSON.stringify(derived)]);
+    const memory = memoryGeneration(pool), scope = { ...f.scope, worldVersionId: f.worldVersionId };
+    await withTransaction(pool, async (client) => {
+      if (mode === "reindex") await memory.rebuildCampaignMemories(client, scope);
+      else {
+        await memory.writeAcceptedTurnFiction(client, { ...scope, turnId: f.later.turnId, ordinal: 2, action: "", narration });
+        if (mode === "correction") {
+          const stateEditId = randomUUID();
+          await client.query(`INSERT INTO campaign_state_edits(id,owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields)
+            VALUES($1,$2,$3,2,1,$4,$5)`, [stateEditId, ownerUserId, f.scope.campaignId, JSON.stringify({ ...derived,
+            canonicalFacts: derived.canonicalFacts.map((content) => ({ id: null, content })), scratchpad: "", trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] }),
+          JSON.stringify(["continuitySummary", "canonicalFacts", "openThreads"])]);
+          await memory.applyCampaignStateCorrection(client, { ...scope, stateEditId });
+        } else await memory.storeDerivedTurnMemories(client, { ...scope, turnId: f.later.turnId, ordinal: 2, derived: { ...derived, entityCatalog: [] } });
+      }
+    });
+    const rows = (await pool.query("SELECT memory_kind,entity_ids FROM chronicle_memories WHERE campaign_id=$1 AND ordinal=2", [f.scope.campaignId])).rows;
+    expect(rows.map((row) => row.memory_kind).sort()).toEqual(["campaign_summary", "canonical_fact", "open_thread", "turn_fiction"]);
+    for (const row of rows) expect(row.entity_ids).toContain(`campaign:${receipt.characterIds[0]}`);
+    expect((await pool.query("SELECT entity_ids FROM campaign_canonical_facts WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].entity_ids).toContain(`campaign:${receipt.characterIds[0]}`);
+    await expect(withTransaction(pool, (client) => memory.storeDerivedTurnMemories(client, {
+      ...scope, worldVersionId: randomUUID(), turnId: f.later.turnId, ordinal: 2, derived: { ...derived, entityCatalog: [] }
+    }))).rejects.toThrow("Campaign not found.");
+  });
 
   it("refreshes scoped Chronicle identity metadata without changing content or embedding state", async () => {
     const f = await fixture(), foreign = await fixture(), repo = createPostgresCampaignCastRepository(pool);
