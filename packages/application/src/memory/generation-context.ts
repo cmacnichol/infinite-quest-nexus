@@ -1,4 +1,4 @@
-import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, sha256Hex, z } from "@infinite-quest/contracts";
+import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, sha256Hex, z } from "@infinite-quest/contracts";
 export type { ReviewEvidenceReference } from "@infinite-quest/contracts";
 
 /** Private only: these values are not public preview projections. */
@@ -24,7 +24,12 @@ export const generationBaseIdentityV3Schema = legacyGenerationBaseIdentitySchema
   recentWindowFingerprint: hashSchema.optional()
 }).strict();
 export type GenerationBaseIdentityV3 = DeepReadonly<z.infer<typeof generationBaseIdentityV3Schema>>;
-export const generationBaseIdentitySchema = z.union([legacyGenerationBaseIdentitySchema, generationBaseIdentityV3Schema]);
+export const generationBaseIdentityV4Schema = generationBaseIdentityV3Schema.extend({
+  version: z.literal("generation-base-v4"), castRevision: ordinalSchema, castTimelineRevision: ordinalSchema,
+  castFingerprint: hashSchema, castCoverageStartTurn: ordinalSchema.min(1).nullable(), castTrackedThroughTurn: ordinalSchema.nullable()
+}).strict();
+export type GenerationBaseIdentityV4 = DeepReadonly<z.infer<typeof generationBaseIdentityV4Schema>>;
+export const generationBaseIdentitySchema = z.union([legacyGenerationBaseIdentitySchema, generationBaseIdentityV3Schema, generationBaseIdentityV4Schema]);
 export type GenerationBaseIdentity = DeepReadonly<z.infer<typeof generationBaseIdentitySchema>>;
 /** Historical rows remain legacy-shaped; only a stored v3 marker authorizes the new reader. */
 export function readGenerationBaseIdentity(value: unknown): GenerationBaseIdentity {
@@ -32,6 +37,12 @@ export function readGenerationBaseIdentity(value: unknown): GenerationBaseIdenti
 }
 export function isGenerationBaseIdentityV3(value: GenerationBaseIdentity): value is GenerationBaseIdentityV3 {
   return "version" in value && value.version === "generation-base-v3";
+}
+export function isGenerationBaseIdentityV4(value: GenerationBaseIdentity): value is GenerationBaseIdentityV4 {
+  return "version" in value && value.version === "generation-base-v4";
+}
+export function hasGenerationCharacterAuthority(value: GenerationBaseIdentity): value is GenerationBaseIdentityV3 | GenerationBaseIdentityV4 {
+  return isGenerationBaseIdentityV3(value) || isGenerationBaseIdentityV4(value);
 }
 
 /** T04 resolves the complete profile at capture; absent authority is explicit, never synthesized. */
@@ -47,6 +58,7 @@ export const generationContextAuthoritySchema = z.object({
   rules: z.array(z.string()), worldCanon: z.record(z.string(), z.unknown()), selectedCharacterId: z.string().nullable(),
   currentContinuity: campaignRuntimeStateContentSchema,
   characterAuthority: generationCharacterAuthoritySchema.optional(),
+  castSnapshot: castGenerationSnapshotSchema.optional(),
   /** Pinned world-version JSON only; adapter selection happens in the private v3 planner. */
   worldReferenceSource: z.object({ worldVersionId: z.string().uuid(), worldContent: z.unknown() }).strict().optional(),
   scratchpad: z.string(), openThreads: campaignRuntimeStateContentSchema.shape.openThreads,
@@ -75,11 +87,24 @@ export const memoryGenerationAuthorityContextSchema = z.object({
   authority: generationContextAuthoritySchema, candidates: z.array(generationContextCandidateSchema),
   recentTurns: z.array(generationRecentTurnSchema).max(2).optional(),
   baseIdentity: generationBaseIdentitySchema, chronicleRetrieval: chronicleRetrievalAuditSchema.optional()
-}).strict();
+}).strict().superRefine((value, context) => {
+  const cast = value.authority.castSnapshot;
+  if (!isGenerationBaseIdentityV4(value.baseIdentity)) {
+    if (cast) context.addIssue({ code: "custom", message: "Historical generation bases cannot acquire cast authority." });
+    return;
+  }
+  const base = value.baseIdentity;
+  if (!cast || !value.authority.characterAuthority || cast.revision !== base.castRevision
+    || cast.boundary.timelineRevision !== base.castTimelineRevision || cast.boundary.turnNumber !== base.baseTurnNumber
+    || cast.coverageStartTurn !== base.castCoverageStartTurn || cast.trackedThroughTurn !== base.castTrackedThroughTurn
+    || castGenerationSnapshotFingerprint(cast) !== base.castFingerprint) {
+    context.addIssue({ code: "custom", message: "Captured cast does not match the generation base." });
+  }
+});
 export type MemoryGenerationAuthorityContext = DeepReadonly<z.infer<typeof memoryGenerationAuthorityContextSchema>>;
 
 export const sourceRefSchema = z.object({
-  kind: z.enum(["world", "character", "state_edit", "turn", "canonical_fact", "direction"]),
+  kind: z.enum(["world", "character", "cast", "state_edit", "turn", "canonical_fact", "direction"]),
   id: z.string().min(1), revision: z.string().min(1), turnNumber: ordinalSchema.nullable(), contentHash: hashSchema
 }).strict();
 const spanSchema = z.object({ start: ordinalSchema, end: ordinalSchema }).strict()
@@ -89,7 +114,7 @@ const evidenceShapeSchema = z.object({
   semanticRole: z.enum(["accepted_narration", "player_intent", "world_reference", "world_rule", "character_authority", "corrected_state", "current_continuity", "canonical_fact", "derived_summary"]),
   form: z.enum(["complete", "excerpt"]), content: z.string(), spans: z.array(spanSchema),
   sourceLength: ordinalSchema, canonicalFactId: z.string().uuid().nullable(), rank: z.number().finite(),
-  selectionGroup: z.enum(["protected", "direction", "recent", "world", "historical_fact", "retrieved"]),
+  selectionGroup: z.enum(["protected", "direction", "recent", "world", "cast", "historical_fact", "retrieved"]),
   sourcePath: jsonPointerSchema, normalizationVersion: z.enum(["fiction-safe-json-v1", "story-fiction-source-v1"])
 }).strict();
 export type SourceRef = DeepReadonly<z.infer<typeof sourceRefSchema>>;

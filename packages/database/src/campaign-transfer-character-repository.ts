@@ -593,6 +593,7 @@ async function cloneTransferredCampaign(
       [scope.ownerUserId, reference.asset_id, campaignId, mappedTurnId, reference.asset_role, reference.created_at],
     );
   }
+  await copyCampaignCast(client, scope, { ownerUserId: scope.ownerUserId, campaignId }, source.active_turn_number, turnIds);
   const memoryScope = { ownerUserId: scope.ownerUserId, campaignId, worldVersionId: target.id };
   const memoryCount = await memory.rebuildCampaignMemories(client, memoryScope);
   await enqueueChunkIndexBestEffort(client, memory, memoryScope);
@@ -758,3 +759,4 @@ export function createPostgresCampaignTransferRepository(
     }
   };
 }
+import { copyCampaignCast } from "./campaign-cast-lifecycle.js";

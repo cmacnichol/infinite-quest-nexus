@@ -1,3 +1,5 @@
+import { applyCastBoundaryChange } from "./campaign-cast-lifecycle.js";
+import { enqueueCastDiscoveryWithClient, type CastDiscoveryExecution } from "./campaign-cast-job-repository.js";
 import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
 import type { GenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
@@ -88,7 +90,7 @@ import {
   sha256
 } from "../../domain/src/index.js";
 import {
-  isGenerationBaseIdentityV3,
+  hasGenerationCharacterAuthority,
   readGenerationBaseIdentity
 } from "../../application/src/memory/generation-context.js";
 import {
@@ -470,6 +472,7 @@ export type FactFormatRepairApplication = Readonly<{
 }>;
 
 export type GenerationOrchestrationState = {
+  castDiscoveryAdmission?: { status: "ready"; execution: CastDiscoveryExecution } | { status: "unavailable" };
   /** Prompt-independent v2 route evidence captured before queueing. */
   textExecutionRouteBasis?: TextExecutionRouteBasis;
   /** Version 2 plans are immutable private snapshots; absence is historical v1 behavior. */
@@ -1023,6 +1026,9 @@ export type AcceptedGenerationCommitCollaborators = Readonly<{
 }>;
 
 export type AcceptedGenerationCommit = Readonly<{
+  /** Prepared before the transaction; absent while discovery is disabled. */
+  castDiscoveryExecution?: CastDiscoveryExecution;
+  castDiscoveryUnavailable?: boolean;
   scope: GenerationLeaseScope;
   job: GenerationExecutionPayload;
   story: StoryTurnOutput;
@@ -1426,7 +1432,7 @@ async function commitAcceptedTurn(
     campaignId: job.campaign_id,
     operationKind: job.operation_kind,
     expectedTurnNumber: job.expected_turn_number,
-    ...(isGenerationBaseIdentityV3(storedBaseIdentity) ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
+    ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
   });
   if (!matchesGenerationBaseIdentity(storedBaseIdentity, authority.baseIdentity)) {
     throw Object.assign(new Error("Campaign authority changed before this generation could commit."), {
@@ -1637,6 +1643,8 @@ async function commitAcceptedTurn(
       campaignId: job.campaign_id,
       worldVersionId: campaign.world_version_id
     });
+    await applyCastBoundaryChange(client, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id },
+      { turnNumber: job.expected_turn_number, changeKey: `replacement:${job.id}:${turnId}` });
     await client.query(
       `INSERT INTO activity_events (owner_user_id, campaign_id, event_type, correlation_id, details)
        VALUES ($1,$2,'campaign_turn_replaced',$3,$4)`,
@@ -1734,6 +1742,10 @@ async function commitAcceptedTurn(
     campaignId: job.campaign_id,
     worldVersionId: campaign.world_version_id
   });
+  if (input.castDiscoveryExecution || input.castDiscoveryUnavailable) {
+    await enqueueCastDiscoveryWithClient(client, { scope: { ownerUserId: job.owner_user_id, campaignId: job.campaign_id },
+      turnId, ...(input.castDiscoveryExecution ? { execution: input.castDiscoveryExecution } : { admissionUnavailable: true }), enabled: true });
+  }
   const completed = await client.query<{ id: string }>(
     `UPDATE generation_jobs SET status = 'completed', result_turn_id = $3, provider_response_id = $4,
        provider_finish_reason = $5, completed_at = now(), updated_at = now(), lease_owner = NULL, lease_expires_at = NULL,
@@ -1892,7 +1904,7 @@ export function createPostgresGenerationExecutionRepository(
           campaignId: row.campaign_id,
           operationKind: row.operation_kind,
           expectedTurnNumber: row.expected_turn_number,
-          ...(isGenerationBaseIdentityV3(storedBaseIdentity) ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
+          ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
         });
       } catch (error) {
         const detail = error as { code?: unknown; field?: unknown };

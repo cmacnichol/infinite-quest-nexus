@@ -62,6 +62,11 @@ export type RuntimeConfig = {
   systemArchiveLimits: ArchiveLimits;
   credentialEncryptionKey: string;
   worldSharingEnabled?: boolean;
+  castEditingEnabled?: boolean;
+  castDiscoveryEnabled?: boolean;
+  castContextEnabled?: boolean;
+  castBackfillEnabled?: boolean;
+  textProviderConcurrency?: number;
   /** Operator capability ceiling; defaults to R3 for Max campaign memory. */
   storyMemoryCapability?: "r1" | "r2" | "r3" | null;
   /** Enables R3 enforce enrollments; enabled by default for Max. */
@@ -226,6 +231,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
     );
   }
   const systemArchiveAllowLimitIncrease = booleanSetting("SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE", false);
+  const castEditingEnabled = booleanSetting("CAST_EDITING_ENABLED", false);
+  const castDiscoveryEnabled = booleanSetting("CAST_DISCOVERY_ENABLED", false) && castEditingEnabled;
 
   return {
     role: roleValue as RuntimeConfig["role"],
@@ -269,6 +276,11 @@ export function loadRuntimeConfig(): RuntimeConfig {
     }, systemArchiveAllowLimitIncrease),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
+    castEditingEnabled,
+    castDiscoveryEnabled,
+    castContextEnabled: booleanSetting("CAST_CONTEXT_ENABLED", false) && castDiscoveryEnabled,
+    castBackfillEnabled: booleanSetting("CAST_BACKFILL_ENABLED", false) && castDiscoveryEnabled,
+    textProviderConcurrency: requiredIntegerSetting("TEXT_PROVIDER_CONCURRENCY", 2, 1, 1000),
     storyMemoryCapability: storyMemoryCapabilitySetting(),
     storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", true),
     security: {

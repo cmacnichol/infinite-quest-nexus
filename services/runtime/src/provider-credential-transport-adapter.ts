@@ -127,6 +127,7 @@ function diagnostic(error: unknown): ProviderHealthDiagnosticCode {
 }
 
 export function createRuntimeProviderAdapter(options: Readonly<{
+  capacity?: import("./text-provider-capacity.js").TextProviderCapacity;
   database: DatabaseClient;
   credentialSecret: string;
   transport: ProviderTransport;
@@ -375,11 +376,14 @@ export function createRuntimeProviderAdapter(options: Readonly<{
         execute: (
           request: ProviderRequest,
           policy?: Readonly<{ maxOutputTokens?: number; temperature?: number; requestTimeoutMs?: number }>,
-        ) => callTextProvider(
-          { ...transportProfile(row, selectedModel), ...policy },
-          request,
-          options.transport
-        )
+        ) => {
+          const profile = { ...transportProfile(row, selectedModel), ...policy };
+          return options.capacity ? options.capacity.execute({
+            timeoutMs: profile.requestTimeoutMs ?? 300_000,
+            ...(request.abortSignal ? { signal: request.abortSignal } : {})
+          }, (signal) => callTextProvider(profile, { ...request, abortSignal: signal }, options.transport))
+            : callTextProvider(profile, request, options.transport);
+        }
       });
     },
     async embedding(scope, providerProfileId, providerRole, model) {

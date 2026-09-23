@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import type {
   ClaimedGeneration,
   IllustrationGenerationTransactionPort
@@ -2124,8 +2125,14 @@ describe("generation executor adapter", () => {
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ illustrationTextExecutionSnapshot: frozenSnapshot }));
   });
 
-  it("commits an accepted story when illustration preflight throws, carrying only unavailable metadata", async () => {
+  it.each(["unavailable", "ready", "saved", "disabled"] as const)("commits accepted story with illustration metadata outage and %s discovery admission", async (discovery) => {
     const job = completeGenerationExecutionPayload();
+    const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null,
+      candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }],
+      presetSystemPrompt: "", parameters: {}, endpointReference: "fixture", credentialReference: claim.providerProfileId,
+      profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+    const frozen = { providerProfileId: claim.providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, "Frozen discovery fixture.") };
+    if (discovery === "saved") job.orchestration_private.castDiscoveryAdmission = { status: "ready", execution: frozen };
     const output = JSON.stringify({ narration: "The observatory door opens onto a quiet moonlit hall.", choices: ["Enter.", "Wait.", "Study.", "Call."],
       custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
       canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
@@ -2145,6 +2152,10 @@ describe("generation executor adapter", () => {
       memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
       illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
       prepareIllustrationTextExecution: vi.fn(async () => { throw new Error("synthetic metadata outage"); }),
+      ...(discovery === "disabled" ? {} : { prepareCastDiscoveryExecution: vi.fn(async () => {
+        if (discovery === "unavailable") throw new Error("synthetic discovery metadata outage");
+        return frozen;
+      }) }),
       promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
     } as unknown as GenerationExecutionCollaborators;
 
@@ -2155,6 +2166,11 @@ describe("generation executor adapter", () => {
       illustrationTextExecutionSnapshot: { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" }
     }));
     expect(repository.markRecoverable).not.toHaveBeenCalled();
+    if (discovery === "unavailable") expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ castDiscoveryUnavailable: true }));
+    else if (discovery !== "disabled") expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ castDiscoveryExecution: frozen }));
+    else expect(vi.mocked(repository.commitAcceptedTurn).mock.calls[0]![0]).not.toHaveProperty("castDiscoveryExecution");
+    if (discovery !== "disabled") expect(collaborators.prepareCastDiscoveryExecution).toHaveBeenCalledTimes(discovery === "saved" ? 0 : 1);
+    expect(provider.execute).toHaveBeenCalledOnce();
   });
 
   it("treats a missing guarded payload as cancellation before provider work or mutation", async () => {
@@ -2250,6 +2266,22 @@ describe("generation executor adapter", () => {
       } })
     }));
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("rejects mismatched cast policy and captured base before provider loading: %s", async (castContext) => {
+    const policy = defaultStoryMemoryPolicy("r1");
+    const job = completeGenerationExecutionPayload();
+    if (castContext) job.context_options = { ...job.context_options, storyMemoryPolicy: {
+      policy, policyHash: storyMemoryPolicyHash(policy), castContext: true, contextProtocol: "current-continuity-v4",
+      promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64)
+    } } as never;
+    else job.generation_base_identity = { ...job.generation_base_identity, version: "generation-base-v4" } as never;
+    const repository = { ...guardedRepository(), loadExecutionPayload: vi.fn(async () => job), markRecoverable: vi.fn(async () => true) };
+    const collaborators = rejectedCollaborators();
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
+    expect(collaborators.loadTextExecution).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "story_memory_cast_base_mismatch" }));
   });
 
   it("refuses an unsupported future Story Memory policy before loading its provider and publishes discard recovery", async () => {

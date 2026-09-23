@@ -3,11 +3,12 @@ import type {
   MemoryGenerationAuthorityScope
 } from "../../application/src/memory/types.js";
 import {
-  isGenerationBaseIdentityV3,
+  hasGenerationCharacterAuthority,
   memoryGenerationAuthorityContextSchema,
   type GenerationContextCandidate
 } from "../../application/src/memory/generation-context.js";
 import type { DatabaseClient } from "./pool.js";
+import { castGenerationSnapshotSchema } from "../../contracts/src/campaign-cast-context.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { characterFictionAuthority, stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
 import { loadPostgresChronicleGenerationCandidates } from "./chronicle-context-repository.js";
@@ -48,8 +49,8 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
 ): Promise<MemoryGenerationAuthorityContext> {
   const resolved = await resolveGenerationAuthoritySnapshot(client, {
     ...scope,
-    ...(scope.expectedBaseIdentity && isGenerationBaseIdentityV3(scope.expectedBaseIdentity)
-      ? { baseIdentityVersion: "generation-base-v3" as const, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined }
+    ...(scope.expectedBaseIdentity && hasGenerationCharacterAuthority(scope.expectedBaseIdentity)
+      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined }
       : {})
   });
   if (scope.expectedBaseIdentity
@@ -79,7 +80,7 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   );
   const campaignRow = campaign.rows[0];
   if (!campaignRow) throw new Error("Generation authority campaign was not found.");
-  const v3 = isGenerationBaseIdentityV3(resolved.baseIdentity);
+  const v3 = hasGenerationCharacterAuthority(resolved.baseIdentity);
   const currentContinuity = await loadCurrentContinuityCorrection(client, scope, baseTurnNumber, v3 ? { complete: true } : {});
   const acceptedState = baseTurnNumber > 0 ? await client.query<{ state_snapshot_private: unknown; model_metadata: Record<string, unknown> }>(
     `SELECT state_snapshot_private, model_metadata FROM turns
@@ -125,7 +126,8 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
       rules: completeRules(worldCanon.rules ?? worldCanon.story_rules ?? ""),
       worldCanon,
       selectedCharacterId: campaignRow.selected_character_id,
-      ...(isGenerationBaseIdentityV3(resolved.baseIdentity)
+      ...(resolved.castSnapshot ? { castSnapshot: resolved.castSnapshot } : {}),
+      ...(hasGenerationCharacterAuthority(resolved.baseIdentity)
         ? { characterAuthority: characterFictionAuthority(campaignRow.character_profile, campaignRow.character_snapshot),
           worldReferenceSource: { worldVersionId: scope.worldVersionId, worldContent: campaignRow.world_content } }
         : {}),
@@ -169,6 +171,7 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
     worldVersionId: scope.worldVersionId,
     query: scope.query,
     throughTurnNumber: baseTurnNumber,
+    ...(authorityContext.authority.castSnapshot ? { castSnapshot: castGenerationSnapshotSchema.parse(authorityContext.authority.castSnapshot) } : {}),
     ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
     ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy })
   }, dependencies, options);

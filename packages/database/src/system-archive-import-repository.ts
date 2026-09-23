@@ -25,6 +25,8 @@ import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository
 import { validateWorldSourceMaterialForContent } from "../../domain/src/source-authoring.js";
 import { worldContentSchema } from "../../contracts/src/world-library.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
+import { importCampaignCast } from "./campaign-cast-portability.js";
+import { portableCastReferences, type PortableCampaignCast } from "../../contracts/src/campaign-cast.js";
 
 export type SystemImportDestinationFingerprint = Readonly<{
   initialOwnerId: string;
@@ -2538,6 +2540,7 @@ export function createPostgresSystemArchiveImportRepository(
         const transaction: SystemArchiveAtomicImportTransaction = {
           database: client,
           async insertLogicalDomains(records) {
+            const pendingCast: { campaignId: string; cast: PortableCampaignCast }[] = [];
             if (reportRecorded) {
               throw repositoryError("System Archive authority cannot change after its Import Report.", 409);
             }
@@ -2587,7 +2590,15 @@ export function createPostgresSystemArchiveImportRepository(
               if ("campaignId" in envelope.record && envelope.record.campaignId) {
                 campaignIds.add(envelope.record.campaignId);
               }
-              if (envelope.domain === "campaigns") campaignIds.add(envelope.record.sourceId);
+              if (envelope.domain === "campaigns") {
+                campaignIds.add(envelope.record.sourceId);
+                if (envelope.record.cast) pendingCast.push({ campaignId: envelope.record.sourceId, cast: envelope.record.cast });
+              }
+            }
+            for (const entry of pendingCast) {
+              const references = portableCastReferences(entry.cast);
+              await importCampaignCast(client, { ownerUserId: owner.ownerUserId, campaignId: entry.campaignId }, entry.cast,
+                { turns: new Map(references.turns.map((id) => [id, id])), worlds: new Map(references.worlds.map((id) => [id, id])) });
             }
             return Object.freeze({
               recordsByDomain: Object.freeze({ ...persistedCounts }),

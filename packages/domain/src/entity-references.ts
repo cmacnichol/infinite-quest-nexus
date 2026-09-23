@@ -1,6 +1,7 @@
 import { extractEntities } from "./text.js";
+import { castCharacterSchema, type CastCharacter } from "../../contracts/src/campaign-cast.js";
 
-export type EntityReferenceSource = "world" | "character";
+export type EntityReferenceSource = "world" | "character" | "campaign";
 
 export type EntityReference = {
   id: string;
@@ -8,6 +9,8 @@ export type EntityReference = {
   aliases: string[];
   kind: string;
   source: EntityReferenceSource;
+  /** Older world metadata remains useful after its campaign occurrence is admitted. */
+  equivalentIds?: string[];
 };
 
 export type EntityReferenceMatch = {
@@ -19,6 +22,8 @@ export type EntityCatalogInput = {
   worldContent?: unknown;
   characterSnapshot?: unknown;
   characterProfile?: unknown;
+  worldVersionId?: string;
+  campaignCharacters?: readonly CastCharacter[];
 };
 
 type UnknownRecord = Record<string, unknown>;
@@ -136,6 +141,7 @@ export function buildScopedEntityCatalog(
       Object.hasOwn(possibleInput!, "worldContent")
       || Object.hasOwn(possibleInput!, "characterSnapshot")
       || Object.hasOwn(possibleInput!, "characterProfile")
+      || Object.hasOwn(possibleInput!, "campaignCharacters")
     );
   const worldContent = isInput ? possibleInput?.worldContent : inputOrWorldContent;
   const characterSnapshot = isInput ? possibleInput?.characterSnapshot : suppliedCharacterSnapshot;
@@ -152,6 +158,28 @@ export function buildScopedEntityCatalog(
     profileAliases(characterProfile)
   );
   if (character) candidates.push(character);
+
+  const campaignCharacters = isInput && Array.isArray(possibleInput?.campaignCharacters)
+    ? possibleInput.campaignCharacters.flatMap((value) => {
+      const parsed = castCharacterSchema.safeParse(value);
+      return parsed.success && parsed.data.origin.kind !== "protagonist" ? [parsed.data] : [];
+    }) : [];
+  for (const person of campaignCharacters) {
+    const reference = toReference(person, "campaign", "character")!;
+    if (person.origin.kind === "world" && person.origin.worldVersionId === possibleInput?.worldVersionId) {
+      const origin = person.origin;
+      const occurrences = campaignCharacters.filter((entry) => entry.origin.kind === "world"
+        && entry.origin.worldVersionId === origin.worldVersionId && entry.origin.entityId === origin.entityId);
+      const worldIndex = candidates.findIndex((entry) => entry.source === "world" && entry.id === `world:${origin.entityId}`);
+      if (occurrences.length === 1 && worldIndex >= 0) {
+        const world = candidates[worldIndex]!;
+        reference.equivalentIds = [world.id];
+        reference.aliases = uniqueAliases([...reference.aliases, ...world.aliases]);
+        candidates.splice(worldIndex, 1);
+      }
+    }
+    candidates.push(reference);
+  }
 
   const byScopedId = new Map<string, EntityReference>();
   for (const candidate of candidates) {
@@ -290,7 +318,7 @@ export function resolveEntityMetadata(
   const references = findEntityReferences(text, catalog);
   const displayNames = references.map((entity) => entity.displayName);
   return {
-    entityIds: references.map((entity) => entity.id),
+    entityIds: [...new Set(references.flatMap((entity) => [entity.id, ...entity.equivalentIds ?? []]))],
     entities: [...new Set([
       ...displayNames,
       ...extractCapitalizationFallback(text, catalog)

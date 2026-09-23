@@ -332,12 +332,13 @@ export function createApiGenerationApplication(
   const repository = factories === productionFactories
     ? createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: async (client, ownerUserId, campaignId, storyMemoryPolicy) => storyMemoryPolicy
-        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }, storyMemoryPolicy.policy.continuityReview)
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }, storyMemoryPolicy.policy.continuityReview, storyMemoryPolicy.castContext === true)
         : resolveStoryPromptSnapshot(client, { ownerUserId, scope: "campaign", campaignId }),
       promptProtocolVersion: providers.promptTools.protocolVersion,
       resolveStoryMemoryPolicySnapshot: (client, scope) => resolveStoryMemoryPolicySnapshot(client, scope, {
          installedCapability: resolvedOperatorConfig.installedCapability,
-         enforceEnabled: resolvedOperatorConfig.enforceEnabled
+         enforceEnabled: resolvedOperatorConfig.enforceEnabled,
+         castContextEnabled: resolvedOperatorConfig.castContextEnabled === true
       }),
       resolveQueuedResponsePolicy: createQueuedResponsePolicyResolver(providers, nativeTextExecutionPlanAdmission),
       ...(nativeTextExecutionPlanAdmission ? createQueuedTextExecutionPreparation(pool, providers) : {}),

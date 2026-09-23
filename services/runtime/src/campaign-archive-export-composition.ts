@@ -178,6 +178,7 @@ function payloads(snapshot: CampaignArchiveExportSnapshot) {
   };
   const records = {
     formatVersion: 1,
+    ...(snapshot.cast ? { cast: snapshot.cast } : {}),
     characterProfileEdits: snapshot.profileEdits,
     stateEdits: snapshot.stateEdits,
     narrationCorrections: snapshot.narrationCorrections,

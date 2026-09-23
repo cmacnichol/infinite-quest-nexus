@@ -1,0 +1,97 @@
+# Campaign cast phase 05 progress
+
+Phase 04 was accepted in `ace89560` for the user-requested legacy UI scope. Phase 05 is in progress; phase 06 remains pending. Nothing in this checkpoint enables cast context in production prompts.
+
+## Identity catalog groundwork
+
+`EntityCatalogInput` accepts optional schema-validated campaign characters and the pinned world version ID. Supporting characters resolve to `campaign:<uuid>`; name and accepted aliases share that ID. Ambiguous aliases remain unresolved. The linked protagonist does not create a duplicate catalog entry, preserving historical protagonist IDs.
+
+A world-origin occurrence replaces its equivalent catalog entry only when its origin matches the supplied pinned world version and it is the unique occurrence. It retains the historical world ID as an equivalent retrieval ID and combines reference aliases without changing world data. A different world version remains separate and ambiguous where names overlap. Historical calls without campaign input retain their prior shape.
+
+RED/GREEN: two new identity tests failed before implementation; all 13 entity tests now pass. Entity, Chronicle helper and discovery selection: 39 tests passed. Repository and TypeScript checks passed. Logs: `.tmp/campaign-cast/phase5-identity-{red,green,regression,check}.log`.
+
+## Remaining phase-05 work
+
+Follow [the implementation plan](../../superpowers/plans/2026-09-22-campaign-cast-05-generation.md): captured evidence/coverage schema; bounded field-level fiction selection and override precedence; derived Chronicle metadata refresh with scoped fallback; versioned generation base and commit fingerprint; exact serialized source manifest and continuity-review support; both Story input modes; composed returning-character, lag, correction, historical retry and isolation tests. The catalog input is not wired to runtime callers yet. Do not enable `castContext` before those gates pass.
+
+## Captured evidence and selector checkpoint
+
+`castGenerationSnapshotSchema` is a separate versioned private contract carrying scope, pinned world, cast revision/boundary, coverage, character identities and their current evidence/overrides. It rejects duplicate/foreign bindings and future character chronology. The read-only transaction helper captures the existing retained projection under the campaign lock, creates no identities or state rows, and hashes the complete snapshot. It shares the existing correction/supersession rules; historical base boundaries and coverage are explicit. Earlier-world evidence is labeled historical.
+
+`selectCastContext` selects direct/current-scene references, active threads, pins and recent characters in deterministic order. It excludes ignored/protagonist cards and unresolved shared-alias-only matches, reprojects fields from captured evidence, preserves overrides (including explicit state corrections during lag), and omits claims, invalid/future evidence, invalidated supersession chains and stale dynamic fields. Historical-world state is never asserted as current. Whole fields/records are omitted when necessary; token accounting includes the complete serialized envelope and coverage/precedence notice. A zero budget produces no block. Runtime total-budget allocation remains unwired.
+
+Verification: RED/GREEN covered initial selector/capture, invalid supersession dependencies, future chronology and historical-world state. All five cast PostgreSQL suites passed (83 tests), including no read-side creation, foreign-owner exclusion, corrected evidence/fingerprint changes and historical coverage. Focused context/projection/contract/entity selection passed 37 tests. Repository/TypeScript checks passed. Independent review found no issue and independently passed 21 context/entity tests before the final priority test was added. Logs: `.tmp/campaign-cast/phase5-{context-red,context-green,supersession-red,boundary-red,capture-red,capture-green,capture-regression,context-regression,context-check}.log`.
+
+Still required: production capture wiring, a new generation-base/prompt version and historical readers, commit freshness checks, context planner allocation, exact request manifest/reviewer binding, Chronicle metadata refresh/fallback, composed payload/replay proof and phase 06. This checkpoint does not make cast information influence narration yet.
+
+## V4 authority reader and freshness checkpoint
+
+Added an explicit `generation-base-v4` reader binding cast revision, timeline, coverage bounds and the complete captured snapshot fingerprint. Authority capture uses the existing campaign transaction locks and the appropriate append/replacement base. Context loading preserves modern character/recent-history behavior, requires matching captured cast for v4, and rejects cast attached to older bases. Execution loading and commit re-resolve the stored version and reject changed cast authority. Legacy/v3 remain unchanged; production enqueue still creates their existing versions.
+
+The shared fingerprint sorts keys and omits undefined optional object fields, matching JSON persistence. A regression first reproduced an unequal fingerprint after JSON round-trip and then passed after normalization. Focused generation/selector units: 44 passed. PostgreSQL execution, recent-window and cast repository suites: 62 passed, including v4 load/commit drift rejection without advancing accepted history. Repository/TypeScript checks passed before the final serialization test; final check recorded in `phase5-v4-check.log`. Independent review found no actionable defects and separately ran 26 unit tests before the final serialization regression.
+
+Logs: `.tmp/campaign-cast/phase5-v4-{unit,pg,execution,json-red,check}.log`. These tests exercise saved v4 readers explicitly; they do not claim a production v4 queue path or actual cast prompt inclusion. Still required: frozen queue capability/prompt protocol, bounded planner allocation and evidence manifest/reviewer support, derived metadata refresh/fallback, composed payload/replay verification, and phase 06.
+
+## Bounded cast prompt and source manifest
+
+The planner now consumes captured cast only for v4. It allocates at most 3,000 tokens and 10% of residual available context, within existing context/request ceilings. The pure selector drops whole fields/records; a second check measures actual provider serialization and safety allowance before reserving the selected block. Legacy/v3 retain their existing wire shape. Diagnostics expose allocation, omitted fields/characters and coverage.
+
+Selected cast identities, individual fields, coverage and precedence notice are bound to the exact producing request. User overrides are corrected-state evidence; accepted-turn observations and world references retain separate semantic roles. Every selected cast entry is required in review; omitted fields cannot supply manifest evidence. Both Action and Story Direction tests prove a user correction reaches serialized output, altered payloads fail rebinding, over-budget corrections are omitted whole, and historical v3 remains unaffected.
+
+RED/GREEN logs: `phase5-planner-cast-red.log`, `phase5-planner-world-red.log`, `phase5-planner-regression.log` under `.tmp/campaign-cast/`. Focused suites passed 55 tests; the complete unit suite passed 4,413 tests with 44 existing skips in 350 files (`phase5-planner-fullunit.log`). Independent review found no actionable defects and separately ran 43 tests. Type/repository checks: `phase5-planner-check.log`. No browser, PostgreSQL or live-provider behavior is claimed by these planner tests.
+
+Remaining release gates: versioned prompt/reviewer semantics and frozen queue capability, derived Chronicle metadata refresh/fallback, composed PostgreSQL payload/commit/replay tests, enablement configuration and documentation, then phase 06. New jobs still do not enqueue v4, so this checkpoint does not enable cast context in production.
+
+## Frozen queue and prompt capability
+
+Added opt-in `story-v17-campaign-cast` / `current-continuity-v4` with `castContext: true` in the frozen Story Memory snapshot. Strict validation rejects mixed capability/protocol combinations; older snapshots and constants remain unchanged. V17 appends application-owned cast precedence rules without rewriting creative template bytes. Its prompt proof and execution identity are distinct, including for replacements. Review and repair append the same precedence contract only under the frozen v17 proof and reject cast evidence under older proofs.
+
+The internal operator setting `castContextEnabled` now reaches policy capture, prompt resolution and enqueue. Enabled append/replacement jobs capture v4; the executor agrees with their execution identity and refuses a cast/base mismatch before loading providers. No environment/deployment flag is enabled in this checkpoint; that release gate still depends on retrieval and composed verification. Disabling the internal setting changes only subsequently captured jobs.
+
+RED/GREEN: protocol tuple and prompt reader (3 tests), PostgreSQL enqueue for append/replacement, PostgreSQL on/off capability snapshots, executor base/capability rejection in both directions, and review/repair contract selection. Queue/enrollment PostgreSQL suites passed 62 tests. Complete unit suite passed 4,419 tests with 44 skips in 351 files. Repository/TypeScript checks passed; independent review found no actionable defects and separately ran 14 policy/review adapter tests. Logs under `.tmp/campaign-cast/`: `phase5-{protocol-red,protocol-green,queue-red,queue-green,capability-red,queue-regression,worker-cast-red,worker-protocol-green,review-cast-red,review-cast-green,protocol-fullunit,protocol-check}.log`.
+
+Remaining: derived Chronicle metadata refresh/fallback and runtime catalog wiring, full PostgreSQL discovery/edit/returning-alias/actual-provider-payload/commit/replay proof, any resulting runtime compatibility fixes, default-off configuration/deployment documentation, phase-05 acceptance audit, then phase 06. No live-provider or browser validation is claimed for this backend slice.
+
+## Captured catalog and scoped retrieval fallback
+
+The private generation candidate loader now forwards the captured cast to Chronicle retrieval. The retrieval boundary checks cast capability, owner, campaign, pinned world and exact cutoff before using it. Campaign names/aliases come from the captured historical projection and retain equivalent world IDs; the legacy protagonist alias-attestation rule remains unchanged. Ignored cards still participate in ambiguity because ignoring a card does not delete an identity.
+
+Bounded, parameterized alias fragments supplement lexical retrieval when derived IDs are behind. Returned scoped memory rows recompute entity metadata using the full captured catalog in memory; this grants no source authority and writes neither accepted history nor stored indexes. A PostgreSQL fixture with 500 turns proves that an alias retrieves an older Mara scene and an older fact missed by the old path. It also covers foreign/cutoff rejection and ambiguous aliases, including ignored identities. The ignored-alias regression failed before its fix.
+
+Verification: 37 PostgreSQL tests passed across historical facts, chunk retrieval and recent-window suites; the opt-in 1k/10k/100k historical-fact benchmark was skipped. Seven focused identity/Chronicle unit suites passed 77 tests. Type/repository checks passed. Independent review found no actionable defects. Logs: `.tmp/campaign-cast/phase5-retrieval-{red,green,turn,ambiguity-red,regression,unit,check}.log`.
+
+Still required: persistent derived metadata refresh, composed PostgreSQL discovery/edit/provider-request/commit/replay verification, enablement configuration and documentation, acceptance audit and phase 06. The read-side fallback is implemented; persistent reindexing is not yet implemented.
+
+## Persistent identity metadata refresh
+
+Cast creation, identity edits and current lifecycle rebuilds now refresh derived Chronicle memory and canonical-fact entity IDs in the same campaign transaction. Matching uses the complete current roster to preserve alias ambiguity, scans scoped candidates in pages of 250, and guards updates against changed source content. Accepted narration, hashes, embedding state and job state are not rewritten. Historical cast reads remain read-only. Discovery defers per-character refreshes and performs one refresh using the completed publication chunk's roster.
+
+RED/GREEN evidence covers adding and removing aliases across 261 accepted-history records, canonical facts, foreign-campaign isolation and unchanged content/hash/metadata. The publication regression reproduced two scans for two characters before batching and one afterward. All five cast PostgreSQL suites passed 86 tests. The full unit suite passed 4,419 tests with 44 skips in 351 files; repository/TypeScript checks and diff whitespace checks passed. Independent review confirmed the repeated-scan concern was resolved and found no concrete new issue. Logs: `.tmp/campaign-cast/phase5-metadata-{red,green,page,batch-red,batch-green,pg,unit,check}.log`.
+
+The refresh remains synchronous under the campaign lock; paging bounds each fetch, not total work for large histories. No live-provider or browser verification is claimed for this backend slice. Next: preserve cast metadata during ordinary Chronicle writes and full reindexing, then complete composed payload/commit/replay proof, default-off configuration, phase-05 acceptance and phase 06.
+
+## Chronicle write and reindex persistence
+
+A shared database catalog loader now checks the owner/campaign/pinned-world scope, locks the campaign, and includes its current cast identities in derived-index metadata. Accepted fiction, summaries, facts, open threads, state corrections and canonical/full maintenance replay use this catalog. Full reindexing reuses one catalog throughout replay. Campaigns without cast state retain a fast path; explicit-boundary cast projection neither initializes cast nor recursively refreshes indexes. Generation retrieval still uses its separately captured historical catalog.
+
+The accepted-write regression also exposed stale caller-supplied catalogs. Derived writes now resolve their catalog from database authority; only private maintenance replay can reuse the already captured catalog. Wrong-world requests are rejected even when they supply a catalog.
+
+RED/GREEN: accepted writes, reindexing, stale catalog input and state corrections all reproduced missing campaign IDs before their fixes. PostgreSQL verification passed 76 tests across eight cast/Chronicle/correction/replay/portability suites, including accepted-ledger immutability. The complete unit suite passed 4,419 tests with 44 skips in 351 files. Repository/TypeScript checks passed; independent review found no actionable defects. Logs: `.tmp/campaign-cast/phase5-{reindex-red,reindex-green,catalog-input-red,correction-catalog-red,reindex-pg,reindex-unit-focused,reindex-unit,reindex-check}.log`.
+
+Still outstanding: composed discovery/edit/actual-provider-payload/commit/next-snapshot proof, default-off operator configuration, phase-05 acceptance audit and phase 06. No deployment, live-provider or browser verification is claimed for this backend checkpoint.
+
+## Composed generation proof and operator gate
+
+`campaign-cast-generation.integration.test.ts` now exercises Action and Story Direction with cast context enabled and disabled. Each case runs the real discovery application/repository with a deterministic extractor against accepted turn 1, publishes identity/alias/observations, saves a user appearance override, and generates after seven quiet turns. The actual request passed to the synthetic provider adapter contains the stable ID, user override, dated role evidence and lag notice; stale dynamic location is omitted. A foreign campaign has both a narration marker and a cast record sharing the alias, whose profile and ID remain excluded. The tests assert accepted commit, input mode, and the next queue's cast fingerprint/snapshot. Disabled cases retain v3 and omit the cast block.
+
+This is real PostgreSQL queue/executor/commit evidence with synthetic generation and extraction. The request capture is at `execute()`, not final HTTP serialization; it does not prove a live model follows the supplied character facts. Early failed runs corrected invalid fixture output, incomplete provider/illustration configuration and assertion shapes; they did not identify a production generation defect.
+
+`CAST_CONTEXT_ENABLED` now defaults off in runtime, `.env.example`, Compose and Swarm. It requires effective discovery capability (which requires editing) and is forwarded by API/combined roles to new-job capture. Existing frozen job behavior remains unchanged. The runbook documents Story Memory enrollment, limits, evidence precedence and rollback. Operator config and runtime forwarding tests demonstrated RED then GREEN.
+
+Verification: 111 PostgreSQL tests passed across composed cast generation, discovery, generation queue and Story Memory enrollment. Full unit suite passed 4,422 tests with 44 skips in 351 files. Type/repository checks and diff whitespace checks passed. Compose configuration validated with `.env.example`; Swarm configuration validated with normal interpolation. The initial `--skip-interpolation` Swarm check failed because its published port remained an unresolved string; normal interpolation passed. Independent review found no actionable findings and reran 51 config/runtime-role unit tests. Logs: `.tmp/campaign-cast/phase5-{composed,composed-pg,composed-check,context-config-red,context-config-green,context-config-unit}.log`.
+
+Next: audit phase 05 against every plan gate and close any uncovered requirements, then implement phase 06. No deployment or feature enablement has been performed.
+
+## Acceptance audit
+
+Phase 05 is accepted for the legacy-first scope; see the [requirement-by-requirement acceptance record](phase-05-acceptance.md). The audit added composed commit races and saved-v3 pre-dispatch retry cases in both modes, plus conflicting canonical-fact review variants. Eight composed PG cases pass; the broader nine-suite PG run passed 211 tests with one optional scale benchmark skipped. Full unit suite passed 4,424 tests with 44 skips; type/repository checks passed. The exact standard integration command failed in shared local test-database authentication before tests ran; isolated PostgreSQL evidence and the limitation are recorded separately. Phase 06 is next and remains part of the active goal.

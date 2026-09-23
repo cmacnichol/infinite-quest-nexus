@@ -74,7 +74,7 @@ export const responseInvocationKeyV2Schema = z.enum([
   "story:stream", "story:nonstream", "choices:nonstream", "continuity_review:nonstream", "rpg_assessment:nonstream",
   "event_trigger_before:nonstream", "event_trigger_after:nonstream", "scene_coverage:nonstream", "event_coverage:nonstream",
   "world_outline:nonstream", "world_seed_character:nonstream", "standalone_character:nonstream", "character_organizer:nonstream",
-  "source_extraction:nonstream", "source_synthesis:nonstream", "source_character:nonstream", "illustration_prompt_refinement:nonstream"
+  "source_extraction:nonstream", "source_synthesis:nonstream", "source_character:nonstream", "illustration_prompt_refinement:nonstream", "cast_discovery:nonstream"
 ]);
 export type ResponseInvocationKeyV2 = z.infer<typeof responseInvocationKeyV2Schema>;
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);

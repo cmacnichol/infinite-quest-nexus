@@ -51,6 +51,8 @@ const stat = { name: "Courage", value: 50, note: "Resolve" };
 const trigger = { name: "Lantern", value: "lit", rules: "Changes with the fiction." };
 const sourceField = { path: "world.rules", value: "Keep faith.", supportingFactIds: ["fact-1"] };
 const validEnvelopeFixtures = {
+  cast_discovery: { version: 1, characters: [{ localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
+    identityEvidence: [{ paragraphId: "p1", quote: "Mara waits." }], observations: [] }] },
   story: { narration: "The door opens.", choices: ["Enter", "Wait", "Call", "Leave"], custom_action_suggestion: "Listen", scratchpad: "", tracker_updates: [{ any: { nested: true } }], image_prompt: "", continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] },
   choices: { choices: ["Enter", "Wait", "Call", "Leave"], custom_action_suggestion: "Listen" },
   continuity_review: { version: "story-continuity-review-v1", verdict: "pass", findings: [] },
@@ -69,6 +71,7 @@ const validEnvelopeFixtures = {
   illustration_prompt_refinement: { image_prompt: "Moonlit market, watercolor." }
 } as const;
 const malformedEnvelopeFixtures = {
+  cast_discovery: { version: 1, characters: [{ ...validEnvelopeFixtures.cast_discovery.characters[0], identityEvidence: [] }] },
   story: { ...validEnvelopeFixtures.story, choices: ["Enter", "Wait", "Leave"] },
   choices: { ...validEnvelopeFixtures.choices, choices: ["Enter", "Wait", "Leave"] },
   continuity_review: { ...validEnvelopeFixtures.continuity_review, findings: [null] },
@@ -157,7 +160,7 @@ describe("native response-contract admission", () => {
     expect(providerOutputSchemaOperationV2Schema.options).toEqual([
       "story", "choices", "continuity_review", "rpg_assessment", "event_trigger_before", "event_trigger_after",
       "scene_coverage", "event_coverage", "world_outline", "world_seed_character", "standalone_character",
-      "character_organizer", "source_extraction", "source_synthesis", "source_character", "illustration_prompt_refinement"
+      "character_organizer", "source_extraction", "source_synthesis", "source_character", "illustration_prompt_refinement", "cast_discovery"
     ]);
     for (const operation of providerOutputSchemaOperationV2Schema.options) {
       const schema = getProviderOutputSchemaV2(operation);

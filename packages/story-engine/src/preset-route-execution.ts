@@ -2,6 +2,7 @@ import type { TextRouteCandidate } from "../../contracts/src/text-execution-plan
 import type { ReportedProviderCost } from "./providers.js";
 
 export type LogicalReservation =
+  | Readonly<{ kind: "cast_discovery"; ownerUserId: string; jobId: string; chunkOrdinal: number; claimAttempt: number; retryGeneration?: number; leaseToken: string }>
   | Readonly<{ kind: "story"; ownerUserId: string; generationJobId: string; invocationId: string; workerId: string }>
   | Readonly<{ kind: "authoring"; ownerUserId: string; jobId: string; stageId: string; jobGeneration: number; stageGeneration: number; leaseToken: string; operation: "initial" | "repair" }>
   | Readonly<{ kind: "illustration"; ownerUserId: string; promptJobId: string; claimAttempt: number; leaseOwner: string; operation: "initial" | "repair" }>

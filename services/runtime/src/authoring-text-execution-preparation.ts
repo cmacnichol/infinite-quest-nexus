@@ -101,6 +101,7 @@ export async function prepareAuthoringTextExecution(input: Readonly<{
   ports: TextExecutionPlanDiscoveryPorts;
   selectionOverride?: TextModelSelection;
   textExecutionOverrides?: TextExecutionOverrides | null;
+  protocolVersion?: string;
 }>): Promise<PreparedAuthoringTextPlans> {
   if (!input.execution.authorityRevision || !input.execution.executionRevision) {
     throw new Error("Authoring v2 preparation requires current execution and authority revisions.");
@@ -112,7 +113,7 @@ export async function prepareAuthoringTextExecution(input: Readonly<{
     ...(input.textExecutionOverrides === undefined ? {} : { requestOverrides: input.textExecutionOverrides })
   });
   const resolved = await resolveTextExecutionPlans({
-    profile: { ownerUserId: input.ownerUserId, providerProfileId: input.execution.id, profileRevision: input.execution.executionRevision, authorityRevision: input.execution.authorityRevision, providerType: input.execution.providerType, selection, contextWindowTokens: input.execution.contextWindowTokens, maxOutputTokens: input.execution.maxOutputTokens, requestTimeoutMs: input.execution.requestTimeoutMs, parameters: { temperature: input.execution.temperature }, endpointReference: input.execution.endpointIdentity ?? input.execution.id, credentialReference: input.execution.id, protocolVersion: "authoring-text-plan-v2" },
+    profile: { ownerUserId: input.ownerUserId, providerProfileId: input.execution.id, profileRevision: input.execution.executionRevision, authorityRevision: input.execution.authorityRevision, providerType: input.execution.providerType, selection, contextWindowTokens: input.execution.contextWindowTokens, maxOutputTokens: input.execution.maxOutputTokens, requestTimeoutMs: input.execution.requestTimeoutMs, parameters: { temperature: input.execution.temperature }, endpointReference: input.execution.endpointIdentity ?? input.execution.id, credentialReference: input.execution.id, protocolVersion: input.protocolVersion ?? "authoring-text-plan-v2" },
     operationPrompts: input.operationPrompts,
     ...(overrides === undefined ? {} : { overrides }),
     ports: input.ports
@@ -149,7 +150,7 @@ function canonicalAuthoringRequest(request: ProviderRequest): CanonicalProviderR
   };
 }
 
-function directContractPreparation(input: Readonly<{
+export function prepareTextResponseContractAdmission(input: Readonly<{
   execution: RuntimeTextExecution;
   selection: TextModelSelection;
   routeBasis: TextExecutionRouteBasis;
@@ -263,7 +264,7 @@ export async function prepareAuthoringResponseContractExecution(input: Readonly<
     ...(input.textExecutionOverrides === undefined ? {} : { textExecutionOverrides: input.textExecutionOverrides })
   });
   const invocationKeys = [...new Set(promptEntries.map(([operation]) => authoringResponseContractIdentity(operation).invocationKey))];
-  const contractPreparation = directContractPreparation({
+  const contractPreparation = prepareTextResponseContractAdmission({
     execution: input.execution,
     selection,
     routeBasis: prepared.routeBasis,
@@ -388,7 +389,7 @@ export async function prepareDirectAuthoringTextExecution(input: Readonly<{
     ...(input.textExecutionOverrides === undefined ? {} : { textExecutionOverrides: input.textExecutionOverrides })
   });
   const invocationKeys = [...new Set(promptEntries.map(([operation]) => directAuthoringResponseContractIdentity(operation).invocationKey))];
-  const contractPreparation = directContractPreparation({
+  const contractPreparation = prepareTextResponseContractAdmission({
     execution: input.execution, selection, routeBasis: prepared.routeBasis,
     invocationKeys, modelAdvertisements: prepared.modelAdvertisements,
     ...(options.responseFormatCapabilities === undefined ? {} : { capabilities: options.responseFormatCapabilities })

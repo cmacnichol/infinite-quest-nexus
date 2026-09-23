@@ -545,6 +545,7 @@ const systemCampaignStateSnapshotSchema = z.object({
 }).strict();
 
 const systemCampaignRecordSchema = z.object({
+  cast: portableCampaignCastSchema.optional(),
   sourceId: z.string().uuid(),
   worldVersionId: z.string().uuid(),
   title: identifierSchema,
@@ -1614,3 +1615,4 @@ export type SystemArchiveAssetRecordV2 = z.infer<typeof systemArchiveAssetRecord
 export type SystemArchiveAssetRecord =
   | z.infer<typeof archiveAssetRecordSchema>
   | SystemArchiveAssetRecordV2;
+import { portableCampaignCastSchema } from "./campaign-cast.js";

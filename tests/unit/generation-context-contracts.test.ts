@@ -23,6 +23,33 @@ const authority = {
 const characterAuthority = { source: "campaign_profile", name: "Rowan", characterText: "", profile: characterProfileSchema.parse({ story: { keyRelationships: "Keeps watch with Mira." } }) };
 
 describe("canonical private generation context", () => {
+  it("requires explicit cast fences in v4 and leaves frozen v3 identities unchanged", () => {
+    const v3 = { ...baseIdentity, version: "generation-base-v3", characterProfileRevision: 0, characterProfileFingerprint: hash };
+    const v4 = { ...v3, version: "generation-base-v4", castRevision: 4, castTimelineRevision: 2,
+      castFingerprint: hash, castCoverageStartTurn: 1, castTrackedThroughTurn: 1 };
+    expect(context.readGenerationBaseIdentity(v4)).toEqual(v4);
+    expect(context.readGenerationBaseIdentity(v3)).toEqual(v3);
+    expect(context.isGenerationBaseIdentityV3(context.readGenerationBaseIdentity(v4))).toBe(false);
+    for (const field of ["castRevision", "castTimelineRevision", "castFingerprint", "castCoverageStartTurn", "castTrackedThroughTurn"]) {
+      const incomplete: Record<string, unknown> = { ...v4 }; delete incomplete[field];
+      expect(context.generationBaseIdentitySchema.safeParse(incomplete).success).toBe(false);
+    }
+    expect(context.generationBaseIdentityV3Schema.safeParse(v4).success).toBe(false);
+  });
+  it("requires the captured cast to match the v4 base and rejects adding cast authority to old jobs", () => {
+    const castSnapshot = { version: "cast-context-v1", scope: { ownerUserId: uuid, campaignId: uuid }, worldVersionId: uuid,
+      revision: 2, boundary: { turnNumber: 1, timelineRevision: 0 }, characters: [], details: [],
+      coverageStartTurn: 1, trackedThroughTurn: 1, discoveryStatus: "current" };
+    const v4 = { ...baseIdentity, version: "generation-base-v4", characterProfileRevision: 0, characterProfileFingerprint: hash,
+      castRevision: 2, castTimelineRevision: 0, castFingerprint: sha256Hex(context.canonicalEvidenceJson(castSnapshot)),
+      castCoverageStartTurn: 1, castTrackedThroughTurn: 1 };
+    const value = { baseIdentity: v4, authority: { ...authority, characterAuthority, castSnapshot }, candidates: [] };
+    expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
+    expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, authority }).success).toBe(false);
+    expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, authority: { ...value.authority,
+      castSnapshot: { ...castSnapshot, revision: 3 } } }).success).toBe(false);
+    expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, baseIdentity }).success).toBe(false);
+  });
   it("retains the complete baseline fields and explicitly reads legacy identities", () => {
     expect(context.memoryGenerationAuthorityContextSchema.parse(JSON.parse(JSON.stringify({ authority, candidates: [], baseIdentity })))).toEqual({ authority, candidates: [], baseIdentity });
     expect(context.readLegacyGenerationBaseIdentity(baseIdentity)).toEqual(baseIdentity);

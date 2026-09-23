@@ -1,3 +1,4 @@
+import { applyCastBoundaryChange } from "./campaign-cast-lifecycle.js";
 import type {
   CampaignWorldVersionMemoryScope,
   MemoryGenerationTransactionPort
@@ -145,6 +146,8 @@ export function createPostgresTurnCorrectionRepository(
           ]
         );
 
+        await applyCastBoundaryChange(client, scope, { turnNumber: campaign.activeTurnNumber,
+          changeKey: `correction:${turn.id}:${nextRevision}` });
         const memoryScope = {
           ownerUserId: scope.ownerUserId,
           campaignId: scope.campaignId,

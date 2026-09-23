@@ -26,6 +26,11 @@ const securitySettingNames = [
   "AI_STORY_SOURCE_AUTHORING_ENABLED",
   "NATIVE_TEXT_EXECUTION_PLAN_ADMISSION",
   "SYSTEM_ARCHIVE_ENABLED",
+  "CAST_EDITING_ENABLED",
+  "CAST_DISCOVERY_ENABLED",
+  "CAST_CONTEXT_ENABLED",
+  "CAST_BACKFILL_ENABLED",
+  "TEXT_PROVIDER_CONCURRENCY",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
   "SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE",
@@ -45,6 +50,45 @@ function minimumEnvironment(): void {
 }
 
 describe("runtime security configuration", () => {
+  it("requires discovery and editing before opting into cast context and history scans", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false });
+    process.env.CAST_CONTEXT_ENABLED = "true";
+    process.env.CAST_BACKFILL_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false });
+    process.env.CAST_EDITING_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false });
+    process.env.CAST_DISCOVERY_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: true, castBackfillEnabled: true });
+    process.env.CAST_CONTEXT_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castDiscoveryEnabled: true });
+  });
+  it("bounds shared text provider capacity", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ textProviderConcurrency: 2 });
+    process.env.TEXT_PROVIDER_CONCURRENCY = "3";
+    expect(loadRuntimeConfig()).toMatchObject({ textProviderConcurrency: 3 });
+    process.env.TEXT_PROVIDER_CONCURRENCY = "0";
+    expect(() => loadRuntimeConfig()).toThrow();
+  });
+  it("requires editing capability before enabling automatic cast discovery", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false });
+    process.env.CAST_DISCOVERY_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false, castEditingEnabled: false });
+    process.env.CAST_EDITING_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: true, castEditingEnabled: true });
+    process.env.CAST_DISCOVERY_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false, castEditingEnabled: true });
+  });
+  it("keeps cast editing off until explicitly enabled by the operator", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ castEditingEnabled: false });
+    process.env.CAST_EDITING_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castEditingEnabled: true });
+    process.env.CAST_EDITING_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ castEditingEnabled: false });
+  });
   it("defaults Story Memory to Max and preserves explicit operator restrictions", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ storyMemoryCapability: "r3", storyMemoryEnforceEnabled: true });

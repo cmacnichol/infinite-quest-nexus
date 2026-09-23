@@ -25,6 +25,7 @@ import type {
 } from "../../application/src/system-archives/ports.js";
 import type { OwnerScope } from "../../application/src/generation/types.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
+import { exportCampaignCast } from "./campaign-cast-portability.js";
 
 type ExportRepositoryOptions = Readonly<{
   pageSize?: number;
@@ -1119,7 +1120,13 @@ async function* streamDomain(
     if (result.rows.length === 0) return;
     for (const row of result.rows) {
       cursor = row.sort_key;
-      const envelope = parseEnvelope(domain, row.envelope);
+      let candidate = row.envelope;
+      if (domain === "campaigns") {
+        const source = candidate as { sourceId: string; record: Record<string, unknown> };
+        const cast = await exportCampaignCast(client, { ownerUserId, campaignId: source.sourceId });
+        if (cast) candidate = { ...source, record: { ...source.record, cast } };
+      }
+      const envelope = parseEnvelope(domain, candidate);
       if (skipping) {
         if (envelope.sourceId === afterId) skipping = false;
         continue;

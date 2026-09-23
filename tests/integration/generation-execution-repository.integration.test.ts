@@ -42,6 +42,10 @@ import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { sha256Hex } from "../../packages/contracts/src/hash.js";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
+import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
+import { withTransaction } from "../../packages/database/src/pool.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -165,6 +169,36 @@ integration("PostgreSQL generation execution repository", () => {
     expect(await repository.markCommitting(scope)).toBe(true);
     return { repository, scope, job };
   }
+  it("atomically commits accepted narration and its prepared discovery job", async () => {
+    const imported = await campaign(), ready = await readyAcceptedCommit(imported.campaignId, "cast-acceptance");
+    const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null,
+      candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }],
+      presetSystemPrompt: "", parameters: {}, endpointReference: "fixture", credentialReference: providerProfileId,
+      profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+    const execution = { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) };
+    const before = (await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count;
+    const input = acceptedCommitInput({ ...ready, story: supersedingStory([]) });
+    await expect(ready.repository.commitAcceptedTurn({ ...input, castDiscoveryExecution: { ...execution,
+      plan: { ...execution.plan, requestTimeoutMs: 1 } } })).rejects.toThrow();
+    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count).toBe(before);
+    expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [ready.job.id])).rows[0].status).toBe("committing");
+    const commitStarted = performance.now();
+    const accepted = await ready.repository.commitAcceptedTurn({ ...input, castDiscoveryExecution: execution });
+    if (process.env.CAST_TEST_TIMINGS === "true") process.stdout.write(JSON.stringify({ measurement: "accepted_story_commit_with_discovery_enqueue",
+      elapsedMs: performance.now() - commitStarted, discoveryProviderCalls: 0, fixture: "deterministic_local_postgres" }) + "\n");
+    const discovery = (await pool.query("SELECT turn_id,owner_user_id,source,execution_snapshot,status FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows;
+    expect(discovery).toHaveLength(1);
+    expect(discovery[0]).toMatchObject({ turn_id: accepted.turnId, owner_user_id: ownerUserId, status: "queued", execution_snapshot: execution });
+    expect(discovery[0].source.paragraphs.map((p: { text: string }) => p.text).join("")).toBe(input.story.narration);
+    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count).toBe(before + 1);
+  });
+  it("preserves an accepted story and records failed discovery when admission is unavailable", async () => {
+    const imported = await campaign(), ready = await readyAcceptedCommit(imported.campaignId, "cast-admission-outage");
+    const accepted = await ready.repository.commitAcceptedTurn({ ...acceptedCommitInput({ ...ready, story: supersedingStory([]) }), castDiscoveryUnavailable: true });
+    expect((await pool.query("SELECT turn_id,status,diagnostic_code FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows)
+      .toEqual([{ turn_id: accepted.turnId, status: "failed", diagnostic_code: "admission_unavailable" }]);
+    expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [ready.job.id])).rows[0].status).toBe("completed");
+  });
 
   async function readyFinalKeepCommit(campaignId: string, workerId: string, story = supersedingStory([])) {
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
@@ -886,7 +920,12 @@ integration("PostgreSQL generation execution repository", () => {
       open_threads: ["Learn why the keeper gave the warning."],
       tracker_updates: [{ name: "Observatory repair", value: "complete" }]
     });
-    const committed = await repository.commitAcceptedTurn(acceptedCommitInput({ scope, job, story }));
+    const committed = await repository.commitAcceptedTurn({ ...acceptedCommitInput({ scope, job, story }), castDiscoveryUnavailable: true });
+    const replacementDiscovery = (await pool.query("SELECT turn_id,source,timeline_revision FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows;
+    expect(replacementDiscovery).toHaveLength(1);
+    expect(replacementDiscovery[0].turn_id).toBe(committed.turnId);
+    expect(replacementDiscovery[0].source.paragraphs.map((p: { text: string }) => p.text).join("")).toBe(story.narration);
+    expect(replacementDiscovery[0].timeline_revision).toBe((await pool.query("SELECT timeline_revision FROM campaign_cast_state WHERE campaign_id=$1", [imported.campaignId])).rows[0].timeline_revision);
 
     await expect(pool.query<{
       rpg_stats: unknown;
@@ -1283,6 +1322,44 @@ integration("PostgreSQL generation execution repository", () => {
     } else {
       await expect(repository.commitAcceptedTurn(acceptedCommitInput({ scope, job: job!, story: supersedingStory([]) }))).rejects.toMatchObject({ code: "stale_campaign" });
     }
+  });
+
+  it.each(["load", "commit"])("fences changed captured v4 cast authority at %s", async (phase) => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Preserve captured cast authority.");
+    // Queue capability wiring is a later slice; seed the explicit saved v4 reader here.
+    await withTransaction(pool, async (client) => {
+      const captured = await resolveGenerationAuthoritySnapshot(client, {
+        ownerUserId, campaignId: imported.campaignId, operationKind: "append",
+        expectedTurnNumber: 3, baseIdentityVersion: "generation-base-v4"
+      });
+      await client.query("UPDATE generation_jobs SET generation_base_identity=$2::jsonb WHERE id=$1",
+        [queued.id, JSON.stringify(captured.baseIdentity)]);
+    });
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `cast-${phase}-fence-worker`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId };
+    const job = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    expect(job).not.toBeNull();
+    if (phase === "commit") {
+      await repository.markGenerating(scope); await repository.markValidating(scope); await repository.markCommitting(scope);
+    }
+    // Defense in depth against out-of-band mutation; normal cast writes reject active generation.
+    await pool.query(`INSERT INTO campaign_cast_state(campaign_id,owner_user_id,revision)
+      VALUES($1,$2,1) ON CONFLICT(campaign_id) DO UPDATE SET revision=campaign_cast_state.revision+1`,
+    [imported.campaignId, ownerUserId]);
+    if (phase === "load") {
+      await expect(repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+      expect((await pool.query("SELECT error_code FROM generation_jobs WHERE id=$1", [queued.id])).rows[0])
+        .toMatchObject({ error_code: "generation_authority_stale" });
+    } else {
+      await expect(repository.commitAcceptedTurn(acceptedCommitInput({ scope, job: job!, story: supersedingStory([]) })))
+        .rejects.toMatchObject({ code: "stale_campaign" });
+    }
+    expect((await pool.query("SELECT active_turn_number FROM campaigns WHERE id=$1", [imported.campaignId])).rows[0])
+      .toMatchObject({ active_turn_number: 2 });
   });
 
   it("applies lease and phase mutations only to the claimed owner, worker, and source state", async () => {

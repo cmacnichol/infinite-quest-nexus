@@ -124,6 +124,35 @@ function dependencies(controller: AbortController) {
 }
 
 describe("runtime role generation composition", () => {
+  it.each(["api", "all"] as const)("forwards cast context capability to new-job capture in the %s role", async (role) => {
+    const controller = new AbortController(), { values } = dependencies(controller);
+    await dispatchRuntimeRole({ ...config(role), castContextEnabled: true }, pool, controller.signal, values, providerTransport, generationEvents);
+    expect(values.createApiGeneration).toHaveBeenCalledWith(pool, apiGenerationProviders, expect.objectContaining({ castContextEnabled: true }));
+  });
+  it.each(["api", "all"] as const)("supplies API discovery recovery collaborators in the %s role", async (role) => {
+    const controller = new AbortController(), { values } = dependencies(controller), roleConfig = config(role);
+    const cast = { retryDiscovery: async () => ({ jobId: "fixture", retryGeneration: 1 }) } as never;
+    const createApiCast = vi.fn(() => cast);
+    await dispatchRuntimeRole(roleConfig, pool, controller.signal, { ...values, createApiCast }, providerTransport, generationEvents);
+    expect(createApiCast).toHaveBeenCalledWith(pool, roleConfig, apiGenerationProviders);
+    expect(values.buildServer).toHaveBeenCalledWith(expect.objectContaining({ cast }));
+  });
+  it.each(["worker", "all"] as const)("wires the discovery worker only when enabled in the %s role", async (role) => {
+    for (const enabled of [false, true]) {
+      const controller = new AbortController(), { values } = dependencies(controller);
+      const castDiscovery = { runNext: vi.fn(async () => false) };
+      const factory = vi.fn(() => castDiscovery);
+      const startWorker = vi.fn<RuntimeRoleDependencies["runWorker"]>(async () => undefined);
+      const roleConfig = { ...config(role), castDiscoveryEnabled: enabled };
+      await dispatchRuntimeRole(roleConfig, pool, controller.signal, { ...values, runWorker: startWorker, createWorkerCastDiscovery: factory }, providerTransport, generationEvents);
+      expect(factory).toHaveBeenCalledTimes(enabled ? 1 : 0);
+      const workerDependencies = startWorker.mock.calls[0]![3];
+      if (enabled) {
+        expect(factory).toHaveBeenCalledWith(pool, roleConfig, workerGenerationProviders);
+        expect(workerDependencies.castDiscovery).toBe(castDiscovery);
+      } else expect(workerDependencies).not.toHaveProperty("castDiscovery");
+    }
+  });
   it.each([
     ["worker", false], ["worker", true], ["all", false], ["all", true]
   ] as const)("%s production scheduler claims authoring only when rollout is %s", async (role, enabled) => {

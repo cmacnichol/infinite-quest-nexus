@@ -1,4 +1,15 @@
 import { z } from "zod";
+import { portableCampaignCastSchema, portableCastReferences } from "./campaign-cast.js";
+
+/** Shared preview/commit boundary for the optional versioned cast extension. */
+export function validateCampaignArchiveCast(value: unknown, turns: ReadonlySet<string>): void {
+  if (value === undefined) return;
+  if (value && typeof value === "object" && "formatVersion" in value && value.formatVersion !== 1) {
+    throw new Error("cast_archive_version_unsupported");
+  }
+  const cast = portableCampaignCastSchema.parse(value);
+  if (portableCastReferences(cast).turns.some((id) => !turns.has(id))) throw new Error("cast_archive_reference_invalid");
+}
 
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const SHA_256_PATTERN = /^[a-f0-9]{64}$/;

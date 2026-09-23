@@ -32,6 +32,7 @@ import {
   resumeActiveGenerationConflict
 } from "./story-generation-monitor.js";
 import { handleStoryEscape } from "./story-keyboard.js";
+import { createLegacyCastPanel } from "./campaign-cast-panel.js";
 import {
   createChoiceDraftSelection,
   resetChoiceDraftSelection,
@@ -82,6 +83,11 @@ const initialization = new Promise((resolve, reject) => {
 
 const apiClient = composition.api;
 const illustrationApi = composition.illustrations;
+const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.cast,
+  campaignId: () => state.campaignId, generationActive: () => responseGenerationIsActive(),
+  openProtagonist: () => { void openEditCharacterProfile(); },
+  navigateToTurn: async (turn) => { await ensureCompleteTurnHistory(); navigateToTurn(turn); }
+}) : null;
 // ── DOM Helpers ────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 const escapeHtml = (text) => {
@@ -224,6 +230,7 @@ function clickedDialogBackdrop(dialog, event) {
 }
 
 function requestModalDismissal(dialog) {
+  if (dialog.id === "campaignCastDialog") { castPanel?.requestClose(); return; }
   requestDiscardChanges(dialog, () => dialog.close());
 }
 
@@ -3462,6 +3469,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   initializeNavigationMenus();
+  const castButton = $("btnOpenCast");
+  if (castButton && castPanel) castButton.addEventListener("click", () => {
+    closeNavigationMenus(); void castPanel.open(document.querySelector('[aria-controls="storySetupMenu"]'));
+  });
 
   // Navigation menu items
   const btnOpenWorldSetup = $("btnOpenWorldSetup");

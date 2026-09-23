@@ -39,7 +39,7 @@ it("prepares the complete v2 operation and stream catalog without loading live r
   expect(loadLiveRuntime).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
   globalThis.fetch = originalFetch;
-  expect(plan.requests).toHaveLength(17);
+  expect(plan.requests).toHaveLength(18);
   expect(plan.profileId).toBeNull();
   expect(plan.safePlan).toMatchObject({
     model: "deepseek/deepseek-v3.2-exp",
@@ -47,8 +47,8 @@ it("prepares the complete v2 operation and stream catalog without loading live r
     configuredCandidateOrder: ["novita/fp8"],
     pricingScope: "hypothetical_explicit_candidate_set",
     targetPreset: "@preset/nexus-nsfw",
-    requestCount: 17,
-    maxInferenceCostUsd: 0.766301
+    requestCount: 18,
+    maxInferenceCostUsd: 0.811377
   });
   expect(JSON.stringify(plan.safePlan)).not.toContain("Synthetic lantern");
   expect(JSON.stringify(plan.safePlan)).not.toContain("secret");
@@ -63,7 +63,7 @@ it("rejects invalid execution ceilings and non-canonical target metadata before 
     { ...options, contextTokens: 163_839 }
   ]) expect(() => prepareStructuredOutputProbe(invalid)).toThrow();
 
-  expect(() => prepareStructuredOutputProbe({ ...options, maxCalls: 16 })).toThrow(/17/);
+  expect(() => prepareStructuredOutputProbe({ ...options, maxCalls: 17 })).toThrow(/18/);
   expect(() => prepareStructuredOutputProbe({ ...options, maxOutputTokens: 2047 })).toThrow(/2048/);
 });
 
@@ -73,7 +73,7 @@ it("serializes registered strict schemas for the exact selected full route and d
 
   expect(plan.safePlan.largestBodyByteCount).toBe(largest);
   expect(plan.safePlan.routeConfigHash).toMatch(/^[a-f0-9]{64}$/);
-  expect(plan.safePlan.maxInferenceCostUsd).toBe(0.766301);
+  expect(plan.safePlan.maxInferenceCostUsd).toBe(0.811377);
   for (const request of plan.requests) {
     const body = JSON.parse(request.body);
     expect(body.provider).toEqual({ require_parameters: true, only: ["novita/fp8"] });
@@ -149,12 +149,12 @@ it("qualifies the complete v2 catalog and round-trips proposed records through t
   const result = await runStructuredOutputProbe(plan, execute, { now: "2026-09-18T18:52:22.331Z" });
 
   expect(result.failure).toBeNull();
-  expect(result.proposedRecords).toHaveLength(17);
+  expect(result.proposedRecords).toHaveLength(18);
   expect(result.proposedRecords.every((record) => record.version === 2 && record.adapterProtocol === "text-schema-adapter-v2")).toBe(true);
   expect(result.proposedRecords.every((record) => record.endpointIdentity === plan.endpointIdentity
     && record.routeConfigHash === plan.routeConfigHash
     && record.providerRoutingSlugs[0] === "novita/fp8")).toBe(true);
-  expect(result.currentWorkerInvocationCoverage).toHaveLength(17);
+  expect(result.currentWorkerInvocationCoverage).toHaveLength(18);
 
   const directory = join(tmpdir(), `iq-probe-records-${Date.now()}-${Math.random()}`);
   const recordsPath = join(directory, "records.json");
@@ -163,7 +163,7 @@ it("qualifies the complete v2 catalog and round-trips proposed records through t
   try {
     await writeFile(recordsPath, JSON.stringify(result.proposedRecords));
     const loaded = loadSchemaVerificationFile(recordsPath, { now: () => Date.parse("2026-09-18T18:52:22.331Z") });
-    expect(loaded.records).toHaveLength(17);
+    expect(loaded.records).toHaveLength(18);
     const capabilities = createProviderResponseFormatCapabilities({ records: loaded.records, registryDigest: loaded.digest, now: () => Date.parse("2026-09-18T18:52:22.331Z") });
     for (const record of result.proposedRecords) {
       const eligibility = capabilities.eligibilityV2({
@@ -187,8 +187,8 @@ it("rejects stale price evidence and refuses execution before runtime loading wh
     "--execute", "--model", options.model, "--route", options.route,
     "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken),
     "--price-observed-at", options.priceObservedAt, "--context-tokens", String(options.contextTokens),
-    "--max-calls", "17", "--max-output-tokens", "2048", "--max-input-tokens", "163840",
-    "--max-cost-usd", "0.766301", "--accept-max-cost-usd", "0.766301",
+    "--max-calls", "18", "--max-output-tokens", "2048", "--max-input-tokens", "163840",
+    "--max-cost-usd", "0.811377", "--accept-max-cost-usd", "0.811377",
     "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved"
   ], { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow(/private --report/);
   expect(loadLiveRuntime).not.toHaveBeenCalled();
@@ -214,8 +214,8 @@ it.each([
   const args = [
     "--execute", "--model", options.model, "--route", options.route,
     "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken),
-    "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "17", "--max-output-tokens", "2048",
-    "--max-input-tokens", "163840", "--max-cost-usd", "0.766301", "--accept-max-cost-usd", "0.766301",
+    "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "18", "--max-output-tokens", "2048",
+    "--max-input-tokens", "163840", "--max-cost-usd", "0.811377", "--accept-max-cost-usd", "0.811377",
     "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
   ];
   args[args.indexOf(changedFlag) + 1] = changedValue;
@@ -248,7 +248,7 @@ it("sets the standalone runtime role for documented execute arguments and attemp
   }));
   try {
     await expect(probeCli([
-      "--execute", "--model", options.model, "--route", options.route, "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken), "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "17", "--max-output-tokens", "2048", "--max-input-tokens", "163840", "--max-cost-usd", "0.766301", "--accept-max-cost-usd", "0.766301", "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
+      "--execute", "--model", options.model, "--route", options.route, "--input-usd-per-token", String(options.inputUsdPerToken), "--output-usd-per-token", String(options.outputUsdPerToken), "--price-observed-at", options.priceObservedAt, "--context-tokens", "163840", "--max-calls", "18", "--max-output-tokens", "2048", "--max-input-tokens", "163840", "--max-cost-usd", "0.811377", "--accept-max-cost-usd", "0.811377", "--profile-id", "11111111-1111-4111-8111-111111111111", "--execution-authorization", "approved", "--report", report
     ], { loadLiveRuntime, now: () => new Date(options.priceObservedAt) })).rejects.toThrow(/Probe execution failed/);
     expect(poolEnd).toHaveBeenCalledTimes(1);
     expect(transportClose).toHaveBeenCalledTimes(1);

@@ -16,7 +16,6 @@ import type {
   MemoryTransactionContext
 } from "../../application/src/memory/index.js";
 import { MEMORY_PUBLIC_FAILURE_MESSAGE } from "../../application/src/memory/index.js";
-import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import { MAX_CONTINUITY_OPEN_THREADS } from "../../contracts/src/story-prompt.js";
 import { textModelSelectionSchema } from "../../contracts/src/provider-selection.js";
@@ -32,7 +31,6 @@ import {
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
   buildAcceptedTurnFictionMemory,
   buildCanonicalChronicleFacts,
-  buildChronicleEntityCatalog,
   chronicleContentHash,
   embeddingEligibility,
   modelAwareEmbeddingPrefixes,
@@ -49,6 +47,7 @@ import {
 import { estimateTokens } from "../../domain/src/text.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+import { loadChronicleEntityCatalog } from "./chronicle-entity-catalog.js";
 import { enqueuePostgresChronicleChunkIndex } from "./chronicle-chunk-repository.js";
 import { applyPostgresStateCorrection, projectStateCorrection } from "./chronicle-state-correction-repository.js";
 import {
@@ -89,14 +88,6 @@ type EmbeddingConfigRow = Readonly<{
   embedding_query_prefix: string | null;
   retrieval_implementation: "legacy_hybrid" | "chunked_hybrid";
   retrieval_shadow_enabled: boolean;
-}>;
-
-type CampaignProjectionRow = Readonly<{
-  id: string;
-  world_version_id: string;
-  world_content: Record<string, unknown>;
-  character_snapshot: Record<string, unknown> | null;
-  character_profile: Record<string, unknown> | null;
 }>;
 
 export type ChronicleTransactionEmbeddingProvider = Readonly<{
@@ -256,21 +247,6 @@ function json(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-async function loadCampaignProjection(
-  client: DatabaseClient,
-  scope: CampaignWorldVersionMemoryScope,
-): Promise<CampaignProjectionRow> {
-  const result = await client.query<CampaignProjectionRow>(
-    `SELECT c.id, c.world_version_id, wv.content AS world_content,
-            c.character_snapshot, c.character_profile
-       FROM campaigns c
-       JOIN world_versions wv ON wv.id = c.world_version_id AND wv.owner_user_id = c.owner_user_id
-      WHERE c.id = $1 AND c.owner_user_id = $2`,
-    [scope.campaignId, scope.ownerUserId]
-  );
-  return requireCampaignWorldVersionScope(scope, result.rows[0]);
-}
-
 type ProjectedFactRow = Readonly<{
   id: string;
   source_turn_id: string | null;
@@ -416,15 +392,9 @@ async function projectCanonicalFacts(
 async function storeDerivedMemories(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["storeDerivedTurnMemories"]>[1],
+  capturedCatalog?: readonly EntityReference[],
 ): Promise<void> {
-  const campaign = await loadCampaignProjection(client, scope);
-  const entityCatalog = scope.derived.entityCatalog
-    ? scope.derived.entityCatalog as readonly EntityReference[]
-    : buildChronicleEntityCatalog({
-      worldContent: campaign.world_content,
-      characterSnapshot: campaign.character_snapshot,
-      characterProfile: campaign.character_profile
-    });
+  const entityCatalog = capturedCatalog ?? await loadChronicleEntityCatalog(client, scope);
   const hasContinuitySummary = scope.derived.continuitySummary !== undefined;
   const summary = sanitizeChronicleFictionString(scope.derived.continuitySummary, 20_000);
   const threads = sanitizeChronicleMemoryLines(scope.derived.openThreads, MAX_CONTINUITY_OPEN_THREADS);
@@ -490,9 +460,8 @@ async function storeDerivedMemories(
 async function writeAcceptedFiction(
   client: DatabaseClient,
   scope: Parameters<MemoryGenerationTransactionPort["writeAcceptedTurnFiction"]>[1],
-  options: Readonly<{ importance?: number; reindexed?: boolean }> = {},
+  options: Readonly<{ importance?: number; reindexed?: boolean; entityCatalog?: readonly EntityReference[] }> = {},
 ): Promise<void> {
-  const campaign = await loadCampaignProjection(client, scope);
   const memory = buildAcceptedTurnFictionMemory({
     accepted: true,
     action: scope.action,
@@ -500,11 +469,7 @@ async function writeAcceptedFiction(
     inputMode: scope.inputMode
   }, scope.ordinal);
   if (!memory) throw new Error("Accepted turn fiction memory was unexpectedly excluded.");
-  const entityCatalog = buildChronicleEntityCatalog({
-    worldContent: campaign.world_content,
-    characterSnapshot: campaign.character_snapshot,
-    characterProfile: campaign.character_profile
-  });
+  const entityCatalog = options.entityCatalog ?? await loadChronicleEntityCatalog(client, scope);
   const entities = resolveEntityMetadata(memory.content, entityCatalog);
   await client.query(
     `INSERT INTO chronicle_memories (
@@ -603,12 +568,7 @@ export async function rebuildImportedCampaignCanonicalFactProjections(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
 ): Promise<void> {
-  const campaign = await loadCampaignProjection(client, scope);
-  const entityCatalog = buildChronicleEntityCatalog({
-    worldContent: campaign.world_content,
-    characterSnapshot: campaign.character_snapshot,
-    characterProfile: campaign.character_profile
-  });
+  const entityCatalog = await loadChronicleEntityCatalog(client, scope);
   const turns = await client.query<Pick<RebuildTurnRow, "id" | "turn_number" | "state_snapshot_private">>(
     `SELECT id, turn_number, state_snapshot_private
        FROM turns
@@ -655,12 +615,7 @@ async function rebuildMemories(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
 ): Promise<number> {
-  const campaign = await loadCampaignProjection(client, scope);
-  const entityCatalog = buildChronicleEntityCatalog({
-    worldContent: campaign.world_content,
-    characterSnapshot: campaign.character_snapshot,
-    characterProfile: campaign.character_profile
-  });
+  const entityCatalog = await loadChronicleEntityCatalog(client, scope);
   const turns = await client.query<RebuildTurnRow>(
     `SELECT turn_row.id, turn_row.turn_number, turn_row.action, turn_row.input_mode,
             effective.effective_narration AS narration, turn_row.state_snapshot_private
@@ -724,14 +679,15 @@ async function rebuildMemories(
       inputMode: turn.input_mode
     }, {
       importance: Math.min(1, 0.45 + turn.turn_number / Math.max(20, turns.rows.length * 2)),
-      reindexed: true
+      reindexed: true,
+      entityCatalog
     });
     await storeDerivedMemories(client, {
       ...scope,
       turnId: turn.id,
       ordinal: turn.turn_number,
       derived: derivedFromStateSnapshot(turn.state_snapshot_private, entityCatalog)
-    });
+    }, entityCatalog);
     await applyEditsAt(turn.turn_number);
   }
   return turns.rows.length;

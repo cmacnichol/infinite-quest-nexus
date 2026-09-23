@@ -1,9 +1,10 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
+import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
-import { canonicalEvidenceJson, isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, hasGenerationCharacterAuthority, isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
 export { planGenerationPromptContext } from "./generation-context-planner.js";
 import {
@@ -216,6 +217,7 @@ type GenerationCostAttribution = Readonly<{
 }>;
 
 export type GenerationExecutionCollaborators = Readonly<{
+  prepareCastDiscoveryExecution?(input: { ownerUserId: string; execution: RuntimeTextExecution }): Promise<CastDiscoveryExecution>;
   memory: MemoryGenerationTransactionPort;
   illustration: IllustrationGenerationTransactionPort;
   /** Resolves optional illustration route metadata before the accepted-turn transaction begins. */
@@ -1914,6 +1916,16 @@ async function executeLoadedGeneration(
     return false;
   }
   const frozenPromptEnvelope = job.prompt_snapshot;
+  if ((frozenStoryMemoryPolicySnapshot?.castContext === true) !== isGenerationBaseIdentityV4(job.generation_base_identity)) {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id, ownerUserId: job.owner_user_id, workerId, providerResponseId: null, providerFinishReason: null,
+      errorCode: "story_memory_cast_base_mismatch", errorMessage: "Saved cast capability does not match the captured generation base.",
+      recoveryMetadata: { reason: "story_memory_cast_base_mismatch", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }), "saving incompatible cast authority recovery state");
+    return false;
+  }
   const reviewMode = frozenStoryMemoryPolicySnapshot?.policy.continuityReview ?? "off";
   let promptSnapshot: ReturnType<typeof readPromptSnapshot>;
   try {
@@ -2007,7 +2019,9 @@ async function executeLoadedGeneration(
     const legacyExecutionProtocol = generationPolicy
       ? generationExecutionProtocolIdentity(basePromptProtocol, generationPolicy) : basePromptProtocol;
     expectedExecutionProtocol = hasFrozenStoryMemoryPolicy
-      ? `story-memory-v1|${legacyExecutionProtocol}`
+      ? frozenStoryMemoryPolicySnapshot?.castContext
+        ? `story-memory-cast-v1|${frozenStoryMemoryPolicySnapshot.promptProtocol}|${frozenStoryMemoryPolicySnapshot.contextProtocol}|${legacyExecutionProtocol}`
+        : `story-memory-v1|${legacyExecutionProtocol}`
       : frozenStoryPromptContractProtocol
         ? `story-prompt-v1|${frozenStoryPromptContractProtocol}|${legacyExecutionProtocol}`
         : legacyExecutionProtocol;
@@ -2517,7 +2531,7 @@ async function executeLoadedGeneration(
       const planned = planGenerationPromptContext(
         generationContext, provider, storySystemPrompt, safeAction, safeGuidance,
         storyLength, job.resolved_input_mode, configuredCampaignContextBudget, inputTokenLimit,
-        isGenerationBaseIdentityV3(generationContext.baseIdentity) ? job.id : undefined,
+        hasGenerationCharacterAuthority(generationContext.baseIdentity) ? job.id : undefined,
         hasFrozenStoryMemoryPolicy ? "story_memory" : "legacy",
         frozenStoryMemoryPolicySnapshot?.policy
       );
@@ -4449,6 +4463,17 @@ async function executeLoadedGeneration(
         return true;
       }
     }
+    if (collaborators.prepareCastDiscoveryExecution && !orchestration.castDiscoveryAdmission) {
+      let admission: NonNullable<GenerationOrchestrationState["castDiscoveryAdmission"]>;
+      try {
+        admission = { status: "ready", execution: await collaborators.prepareCastDiscoveryExecution({ ownerUserId: job.owner_user_id, execution: provider }) };
+      } catch {
+        admission = { status: "unavailable" };
+        logger.warn({ event: "cast_discovery_admission_unavailable", generationJobId: job.id });
+      }
+      orchestration = await persistOrchestration(repository, scope, job, { castDiscoveryAdmission: admission });
+    }
+    const castAdmission = collaborators.prepareCastDiscoveryExecution ? orchestration.castDiscoveryAdmission : undefined;
     assertActiveGenerationUpdate(await repository.markCommitting(scope), "entering commit");
     const acceptedCommitCollaborators: AcceptedGenerationCommitCollaborators = {
       memory: collaborators.memory,
@@ -4483,6 +4508,8 @@ async function executeLoadedGeneration(
       orchestration,
       fictionAction: safeAction,
       ...(illustrationTextExecutionSnapshot ? { illustrationTextExecutionSnapshot } : {}),
+      ...(castAdmission?.status === "ready" ? { castDiscoveryExecution: castAdmission.execution }
+        : castAdmission?.status === "unavailable" ? { castDiscoveryUnavailable: true } : {}),
       collaborators: acceptedCommitCollaborators,
       onIllustrationEnqueueError(error, acceptedTurnId) {
         logger.warn({

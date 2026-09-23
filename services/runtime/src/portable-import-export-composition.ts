@@ -1,3 +1,4 @@
+import { validateCampaignArchiveCast } from "../../../packages/contracts/src/archives.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
@@ -803,6 +804,8 @@ async function campaignZip(
     }
   }
   const normalized = normalizeCurrentCampaign(rawCampaign, world);
+  validateCampaignArchiveCast(recordValue(rawCampaign.archiveRecords).cast,
+    new Set(rawCampaign.turns.map((turn) => String(recordValue(turn).id))));
   const campaign = normalized.campaign;
   validateCurrentCampaignReferences(manifest, campaign, world);
   const grouped = new Map<string, ArchiveAssetRecord[]>();

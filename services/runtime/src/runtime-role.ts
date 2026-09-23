@@ -89,6 +89,10 @@ export type RuntimeRoleDependencies = Readonly<{
     signal: AbortSignal,
   ): AuthoringWorkerApplication;
   createApiAuthoring(pool: DatabasePool): AuthoringApplication;
+  createApiCast?(pool: DatabasePool, config: RuntimeConfig,
+    providers: ApiProviderApplicationComposition["generation"]): NonNullable<BuildServerOptions["cast"]>;
+  createWorkerCastDiscovery?(pool: DatabasePool, config: RuntimeConfig,
+    providers: WorkerProviderApplicationComposition["generation"]): NonNullable<WorkerDependencies["castDiscovery"]>;
   buildServer(options: BuildServerOptions): Promise<RuntimeServer>;
   runWorker(
     pool: DatabasePool,
@@ -159,7 +163,8 @@ export async function dispatchRuntimeRole(
     );
     const generation = dependencies.createApiGeneration(pool, providerGraph.generation, {
       installedCapability: config.storyMemoryCapability ?? null,
-      enforceEnabled: config.storyMemoryEnforceEnabled === true
+      enforceEnabled: config.storyMemoryEnforceEnabled === true,
+      ...(config.castContextEnabled === true ? { castContextEnabled: true } : {})
     });
     const illustration = dependencies.createApiIllustration(pool, providerGraph.illustration);
     const memory = dependencies.createApiMemory(pool, providerGraph.chronicle);
@@ -169,6 +174,7 @@ export async function dispatchRuntimeRole(
     const server = await dependencies.buildServer({
       config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign, authoring,
       infiniteWorldsProviders: providerGraph.infiniteWorlds,
+      ...(dependencies.createApiCast ? { cast: dependencies.createApiCast(pool, config, providerGraph.generation) } : {}),
     });
     await server.listen({ host: config.host, port: config.port });
     await waitForAbort(signal);
@@ -190,6 +196,8 @@ export async function dispatchRuntimeRole(
       generation,
       illustration: workerIllustration,
       generationIllustration: illustration,
+      ...(config.castDiscoveryEnabled === true && dependencies.createWorkerCastDiscovery
+        ? { castDiscovery: dependencies.createWorkerCastDiscovery(pool, config, providerGraph.generation) } : {}),
       memory: dependencies.createWorkerMemory(pool, providerGraph.chronicle),
       authoring
     });
@@ -204,7 +212,8 @@ export async function dispatchRuntimeRole(
   const workerProviderGraph = dependencies.createWorkerProviders(pool, config.credentialEncryptionKey, providerTransport);
   const apiGeneration = dependencies.createApiGeneration(pool, apiProviderGraph.generation, {
     installedCapability: config.storyMemoryCapability ?? null,
-    enforceEnabled: config.storyMemoryEnforceEnabled === true
+    enforceEnabled: config.storyMemoryEnforceEnabled === true,
+    ...(config.castContextEnabled === true ? { castContextEnabled: true } : {})
   });
   const illustration = dependencies.createApiIllustration(pool, apiProviderGraph.illustration);
   const memory = dependencies.createApiMemory(pool, apiProviderGraph.chronicle);
@@ -225,12 +234,15 @@ export async function dispatchRuntimeRole(
   const server = await dependencies.buildServer({
     config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign, authoring: apiAuthoring,
     infiniteWorldsProviders: apiProviderGraph.infiniteWorlds,
+    ...(dependencies.createApiCast ? { cast: dependencies.createApiCast(pool, config, apiProviderGraph.generation) } : {}),
   });
   await server.listen({ host: config.host, port: config.port });
   await dependencies.runWorker(pool, config, signal, {
     generation: workerGeneration,
     illustration: workerIllustration,
     generationIllustration: workerIllustrationTransactions,
+    ...(config.castDiscoveryEnabled === true && dependencies.createWorkerCastDiscovery
+      ? { castDiscovery: dependencies.createWorkerCastDiscovery(pool, config, workerProviderGraph.generation) } : {}),
     memory: dependencies.createWorkerMemory(pool, workerProviderGraph.chronicle),
     authoring
   });

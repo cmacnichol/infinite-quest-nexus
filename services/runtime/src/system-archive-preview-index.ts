@@ -9,6 +9,7 @@ import {
   type SystemRecordEnvelope,
 } from "../../../packages/contracts/src/index.js";
 import { ArchiveError } from "../../api/src/archive-io.js";
+import { portableCastReferences } from "../../../packages/contracts/src/campaign-cast.js";
 
 type WorldContent = Extract<
   SystemRecordEnvelope,
@@ -339,6 +340,15 @@ export class SystemArchivePreviewIndex {
         }
         break;
       case "campaigns":
+        if (envelope.record.cast) {
+          const references = portableCastReferences(envelope.record.cast);
+          for (const id of references.turns) this.#require("turns", id, envelope.sourceId);
+          for (const id of references.worlds) this.#require("world-versions", id);
+          // Embedded cast records consume the same bounded preview accounting as
+          // top-level authority, rather than hiding an unbounded nested ledger.
+          for (const _person of envelope.record.cast.characters) this.#reserveRelationship();
+          for (const _event of envelope.record.cast.events) this.#reserveRelationship();
+        }
         this.#insertRecord(
           envelope.domain,
           envelope.sourceId,

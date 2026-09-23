@@ -142,6 +142,8 @@ import {
   registerSystemArchiveRoutes,
 } from "./system-archive-routes.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
+import { registerCampaignCastRoutes } from "./campaign-cast-routes.js";
+import type { CampaignCastApplication } from "../../../packages/application/src/campaign-cast/index.js";
 import { registerAuthoringRoutes } from "./authoring-routes.js";
 import { acquireAdmission, releaseAdmission } from "./admission-service.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
@@ -179,6 +181,7 @@ export type BuildServerOptions = {
   infiniteWorldsProviders: InfiniteWorldsImportProviderCollaborators;
   /** Provider-free durable proposal commands, composed by the runtime role. */
   authoring?: AuthoringApplication;
+  cast?: CampaignCastApplication;
   createApiAssets?: (pool: DatabasePool, roots: Readonly<{ archiveRoot: string; assetRoot: string }>) => Promise<ApiAssetComposition>;
   createApiPortable?: (options: ApiPortableImportExportCompositionOptions) => Promise<ApiPortableImportExportComposition>;
   createApiSystemArchive?: (options: Readonly<{
@@ -450,6 +453,7 @@ export async function buildServer({
   providers,
   infiniteWorldsProviders,
   authoring,
+  cast,
   createApiAssets = createApiAssetComposition,
   createApiPortable = createApiPortableImportExportComposition,
   createApiSystemArchive = createApiSystemArchiveComposition,
@@ -625,6 +629,10 @@ export async function buildServer({
     portable: apiPortable.portable,
     resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
   });
+  if (cast) await app.register(registerCampaignCastRoutes, {
+    application: cast, enabled: config.castEditingEnabled === true,
+    resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) })
+  });
   if (authoring) {
     await app.register(registerAuthoringRoutes, {
       application: authoring,
@@ -719,6 +727,7 @@ export async function buildServer({
     application: applicationMetadata(),
     capabilities: {
       systemArchive: config.systemArchiveEnabled === true,
+      castEditing: config.castEditingEnabled === true && cast !== undefined,
       nativeTextExecutionPlans: config.nativeTextExecutionPlanAdmission === true
     },
   }));

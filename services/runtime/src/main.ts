@@ -1,6 +1,7 @@
 import { createDatabasePool, loadRuntimeConfig } from "../../../packages/database/src/index.js";
 import { migrateDatabase, waitForDatabaseMigrations } from "../../../packages/database/src/migrate.js";
 import { buildServer } from "../../api/src/server.js";
+import { createApiCampaignCastApplication, createWorkerCampaignCastApplication } from "./campaign-cast-composition.js";
 import { runWorker } from "../../worker/src/worker.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { createProviderNetworkPolicy } from "../../../packages/security/src/provider-network-policy.js";
@@ -55,12 +56,12 @@ await runRuntimeLifecycle(config, abortController, {
     createApiProviders: (pool, credentialSecret, transport) => createApiProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
-        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true }
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }
     ),
     createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
-        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true }
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true, textProviderConcurrency: config.textProviderConcurrency ?? 2 }
     ),
     createProviderApiAdapter: createProviderApplicationAdapter,
     createApiGeneration: (pool, providers, operatorConfig) => createApiGenerationApplication(
@@ -72,6 +73,7 @@ await runRuntimeLifecycle(config, abortController, {
     createWorkerMemory: createWorkerMemoryApplication,
     createWorkerIllustration: createWorkerIllustrationApplication,
     createWorkerGeneration: createWorkerGenerationApplication,
+    createWorkerCastDiscovery: (pool, config, providers) => createWorkerCampaignCastApplication(pool, config, providers.preparedTextExecutor),
     createWorkerAuthoring: (pool, providers, signal) => createRuntimeAuthoringWorkerApplication({
       pool, providers, signal, sha256: (value) => createHash("sha256").update(value).digest("hex"),
       nativePresetPlansEnabled: config.nativeTextExecutionPlanAdmission === true
@@ -81,6 +83,7 @@ await runRuntimeLifecycle(config, abortController, {
       (value) => createHash("sha256").update(value).digest("hex"),
       { nativePresetPlansEnabled: config.nativeTextExecutionPlanAdmission === true }
     ),
+    createApiCast: createApiCampaignCastApplication,
     buildServer,
     runWorker
   }, providerTransport, generationEvents)

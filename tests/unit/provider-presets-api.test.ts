@@ -72,7 +72,7 @@ describe("provider Presets API", () => {
     const client = api(async () => new Response(JSON.stringify({ error: "Not Found", message: "Not Found", correlationId: "old-server", details: {} }), { status: 404, headers: { "content-type": "application/json" } }));
     await expect(client.listSaved(providerId, { offset: 0, limit: 50 })).rejects.toBeInstanceOf(ProviderPresetsUnsupportedError);
     expect(nativePresetSupport({ application: { name: "Infinite Quest Nexus", version: "old", commit: null, builtAt: null }, capabilities: { systemArchive: true } } as never)).toEqual({ state: "unsupported" });
-    expect(nativePresetSupport({ application: { name: "Infinite Quest Nexus", version: "new", commit: null, builtAt: null }, capabilities: { systemArchive: true, nativeTextExecutionPlans: true } })).toEqual({ state: "supported" });
+    expect(nativePresetSupport({ application: { name: "Infinite Quest Nexus", version: "new", commit: null, builtAt: null }, capabilities: { systemArchive: true, nativeTextExecutionPlans: true, castEditing: false } })).toEqual({ state: "supported" });
   });
 
   it("does not turn a detail-level missing Preset into an old-server error", async () => {

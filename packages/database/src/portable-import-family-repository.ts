@@ -35,6 +35,7 @@ import {
 } from "./import-repository.js";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
+import { importCampaignCast } from "./campaign-cast-portability.js";
 import {
   preseedAcceptedTurnSnapshotFactIds,
   remapAcceptedTurnSnapshotFactReferences,
@@ -1538,6 +1539,8 @@ async function commitRichPortableCampaign(
     database, input.owner.ownerUserId, input.destination.worldId, input.destination.worldVersionId,
     campaignId, maps, input.publishedAssets,
   );
+  await importCampaignCast(database, { ownerUserId: input.owner.ownerUserId, campaignId }, archiveRecords.cast,
+    { turns: maps.turn, worlds: new Map([[String(worldPayload.sourceWorldVersionId), input.destination.worldVersionId]]) });
   if (input.createdWorld) {
     await database.query(
       "UPDATE world_versions SET content=$2::jsonb WHERE id=$1 AND owner_user_id=$3",

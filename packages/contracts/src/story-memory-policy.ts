@@ -6,6 +6,7 @@ import {
   STORY_MEMORY_CONTEXT_POLICY_VERSION,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION
 } from "./story-prompt.js";
+import { CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION } from "./story-prompt.js";
 
 type DeepReadonly<T> = T extends readonly (infer U)[] ? readonly DeepReadonly<U>[]
   : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
@@ -170,14 +171,20 @@ export function resolveStoryMemoryPolicy(input: Readonly<{
 export const storyMemoryPolicySnapshotSchema = z.object({
   policy: storyMemoryPolicySchema,
   policyHash: z.string().regex(/^[a-f0-9]{64}$/),
-  contextProtocol: z.literal(STORY_MEMORY_CONTEXT_POLICY_VERSION),
+  contextProtocol: z.union([z.literal(STORY_MEMORY_CONTEXT_POLICY_VERSION), z.literal(CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION)]),
+  castContext: z.literal(true).optional(),
   promptProtocol: z.union([
     z.literal(LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION),
     z.literal(PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION),
-    z.literal(STORY_MEMORY_PROMPT_PROTOCOL_VERSION)
+    z.literal(STORY_MEMORY_PROMPT_PROTOCOL_VERSION), z.literal(CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)
   ]),
   providerConfigurationFingerprint: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict().superRefine((value, context) => {
+  const cast = value.castContext === true;
+  if (cast !== (value.contextProtocol === CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION)
+    || cast !== (value.promptProtocol === CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)) {
+    context.addIssue({ code: "custom", message: "Cast context requires matching frozen capability and protocols." });
+  }
   if (storyMemoryPolicyHash(value.policy) !== value.policyHash) context.addIssue({ code: "custom", path: ["policyHash"], message: "Policy hash does not match the frozen policy." });
 });
 

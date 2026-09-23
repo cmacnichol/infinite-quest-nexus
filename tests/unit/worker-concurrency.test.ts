@@ -324,6 +324,25 @@ describe("worker concurrency scheduler", () => {
     });
     expect(authoring).not.toHaveBeenCalled();
   });
+  it("runs discovery at capacity one while story work continues, and honors its independent gate", async () => {
+    for (const enabled of [false, true]) {
+      const controller = new AbortController(), pending = deferred<boolean>();
+      const castDiscovery = vi.fn(() => pending.promise);
+      const generation = { claimNext: vi.fn(async () => null), executeClaimed: vi.fn(async () => false) };
+      const running = runWorker(pool, { ...workerConfig(1), castDiscoveryEnabled: enabled }, controller.signal, {
+        generation, illustration: inertWorkerIllustration, memory: inertWorkerMemory,
+        optionalLanes: { ...idleOptionalLanes(), castDiscovery }
+      });
+      await vi.waitFor(() => expect(generation.claimNext.mock.calls.length).toBeGreaterThan(2));
+      expect(castDiscovery).toHaveBeenCalledTimes(enabled ? 1 : 0);
+      controller.abort();
+      try {
+        if (enabled) await vi.waitFor(() => expect(log.info).toHaveBeenCalledWith(expect.objectContaining({
+          event: "worker_draining_jobs", castDiscoveryJobs: 1, illustrationJobs: 0, chronicleJobs: 0, assetJobs: 0
+        })));
+      } finally { pending.resolve(true); await running; }
+    }
+  });
 
   it("waits one poll interval before refilling cleanup while other lanes still run with authoring disabled", async () => {
     const controller = new AbortController();
