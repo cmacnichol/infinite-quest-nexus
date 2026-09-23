@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { refreshCastChronicleMetadata } from "./campaign-cast-chronicle-metadata.js";
 import { castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
 import { createCastCandidateRepository } from "./campaign-cast-candidate-repository.js";
@@ -223,7 +224,10 @@ export async function rebuildCastWithClient(client: DatabaseClient, scope: CastS
   const campaign = await lockCampaign(client, scope), state = await readState(client, scope);
   const value = await snapshot(client, scope, campaign, state,
     { turnNumber: turnNumber ?? campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 });
-  if (turnNumber === undefined) await cacheSnapshot(client, scope, value);
+  if (turnNumber === undefined) {
+    await cacheSnapshot(client, scope, value);
+    await refreshCastChronicleMetadata(client, scope, value);
+  }
   return value;
 }
 
@@ -286,7 +290,7 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
 }
 
 async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: Campaign, state: State,
-  batch: CastBatch, requestHash: string, publicCharacterId?: string): Promise<CastBatchReceipt> {
+  batch: CastBatch, requestHash: string, publicCharacterId?: string, deferMetadataRefresh = false): Promise<CastBatchReceipt> {
   const payload: StoredCommand[] = batch.commands.map((command) => ({ command,
     ...(command.kind === "create" ? { characterId: publicCharacterId ?? randomUUID() } : {}),
     ...(command.kind === "observe" ? { observationId: randomUUID() } : {}) }));
@@ -300,6 +304,9 @@ async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: 
   await client.query("UPDATE campaign_cast_state SET revision=$3 WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId, receipt.revision]);
   const value = await snapshot(client, scope, campaign, { ...state, revision: receipt.revision }, batch.boundary);
   await cacheSnapshot(client, scope, value);
+  if (!deferMetadataRefresh && batch.commands.some((command) => command.kind === "create" || command.kind === "identity")) {
+    await refreshCastChronicleMetadata(client, scope, value);
+  }
   if (publicCharacterId) {
     receipt.result = { character: value.characters.find((person) => person.id === publicCharacterId)!, revision: value.revision, boundary: value.boundary };
     await client.query("UPDATE campaign_cast_events SET receipt=$2 WHERE id=$1", [receipt.eventId, JSON.stringify(receipt)]);
@@ -308,7 +315,8 @@ async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: 
 }
 
 /** Discovery publication and its receipt share the caller's transaction. */
-export async function applyCastBatchWithClient(client: DatabaseClient, rawScope: CastScope, rawBatch: CastBatch): Promise<CastBatchReceipt> {
+export async function applyCastBatchWithClient(client: DatabaseClient, rawScope: CastScope, rawBatch: CastBatch,
+  options: { deferMetadataRefresh?: boolean } = {}): Promise<CastBatchReceipt> {
   const scope = castScopeSchema.parse(rawScope), batch = castBatchSchema.parse(rawBatch);
   const campaign = await lockCampaign(client, scope);
   const state = await initialize(client, scope, campaign);
@@ -319,7 +327,7 @@ export async function applyCastBatchWithClient(client: DatabaseClient, rawScope:
     return castBatchReceiptSchema.parse(prior.receipt);
   }
   assertBoundary(campaign, state, batch.boundary, true);
-  return persistBatch(client, scope, campaign, state, batch, requestHash);
+  return persistBatch(client, scope, campaign, state, batch, requestHash, undefined, options.deferMetadataRefresh);
 }
 
 export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { editingEnabled?: boolean; discoveryEnabled?: boolean } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
@@ -431,6 +439,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const state = await readState(client, scope);
         const value = await snapshot(client, scope, campaign, state, { turnNumber: campaign.active_turn_number, timelineRevision: state?.timeline_revision ?? 0 });
         await cacheSnapshot(client, scope, value);
+        await refreshCastChronicleMetadata(client, scope, value);
         return value;
       });
     },

@@ -36,6 +36,43 @@ integration("campaign cast PostgreSQL foundation", () => {
     return { scope: { ownerUserId, campaignId }, worldVersionId, evidence: turns[0]!, later: turns[1]!, boundary: { turnNumber: 2, timelineRevision: 0 } };
   }
 
+  it("refreshes scoped Chronicle identity metadata without changing content or embedding state", async () => {
+    const f = await fixture(), foreign = await fixture(), repo = createPostgresCampaignCastRepository(pool);
+    const seed = async (target: typeof f) => {
+      const id = randomUUID();
+      await pool.query(`INSERT INTO chronicle_memories(id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata)
+        VALUES($1,$2,$3,$4,$5,'turn_fiction',1,'Sera meets the Silver Watcher.',8,0.5,'{}','{}','{"unchanged":true}')`,
+      [id, ownerUserId, target.scope.campaignId, target.worldVersionId, target.evidence.turnId]);
+      return id;
+    };
+    const id = await seed(f), foreignId = await seed(foreign);
+    await pool.query("INSERT INTO turns(owner_user_id,campaign_id,turn_number,narration) SELECT $1,$2,n,'Sera meets the Silver Watcher.' FROM generate_series(3,262) n", [ownerUserId, f.scope.campaignId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=262 WHERE id=$1", [f.scope.campaignId]);
+    f.boundary.turnNumber = 262;
+    await pool.query(`INSERT INTO chronicle_memories(owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata)
+      SELECT $1,$2,$3,id,'turn_fiction',turn_number,narration,8,0.5,'{}','{}','{}' FROM turns WHERE campaign_id=$2 AND turn_number>=3`,
+    [ownerUserId, f.scope.campaignId, f.worldVersionId]);
+    const factId = randomUUID();
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,1,0,'Sera knows the road.','sera knows the road.',1)`, [factId, ownerUserId, f.scope.campaignId, f.worldVersionId, f.evidence.turnId]);
+    const before = (await pool.query("SELECT content,content_hash,metadata FROM chronicle_memories WHERE id=$1", [id])).rows[0];
+    const receipt = await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: "metadata-create", commands: [
+      { kind: "create", name: "Sera", aliases: ["Silver Watcher"], origin: { kind: "manual" } }
+    ] });
+    const characterId = receipt.characterIds[0]!;
+    expect((await pool.query("SELECT entity_ids FROM chronicle_memories WHERE id=$1", [id])).rows[0].entity_ids).toContain(`campaign:${characterId}`);
+    expect((await pool.query("SELECT count(*)::integer n FROM chronicle_memories WHERE campaign_id=$1 AND entity_ids @> $2::text[]", [f.scope.campaignId, [`campaign:${characterId}`]])).rows[0].n).toBe(261);
+    expect((await pool.query("SELECT entity_ids FROM campaign_canonical_facts WHERE id=$1", [factId])).rows[0].entity_ids).toContain(`campaign:${characterId}`);
+    expect((await pool.query("SELECT entity_ids FROM chronicle_memories WHERE id=$1", [foreignId])).rows[0].entity_ids).toEqual([]);
+    expect((await pool.query("SELECT content,content_hash,metadata FROM chronicle_memories WHERE id=$1", [id])).rows[0]).toEqual(before);
+    await repo.applyBatch(f.scope, { boundary: f.boundary, idempotencyKey: "metadata-rename", commands: [
+      { kind: "identity", characterId, name: "Vela", aliases: [] }
+    ] });
+    expect((await pool.query("SELECT entity_ids FROM chronicle_memories WHERE id=$1", [id])).rows[0].entity_ids).not.toContain(`campaign:${characterId}`);
+    expect((await pool.query("SELECT count(*)::integer n FROM chronicle_memories WHERE campaign_id=$1 AND entity_ids @> $2::text[]", [f.scope.campaignId, [`campaign:${characterId}`]])).rows[0].n).toBe(0);
+    expect((await pool.query("SELECT entity_ids FROM campaign_canonical_facts WHERE id=$1", [factId])).rows[0].entity_ids).not.toContain(`campaign:${characterId}`);
+  });
+
   it("binds cast changes only to explicitly requested v4 generation bases", async () => {
     const f = await fixture(), repo = createPostgresCampaignCastRepository(pool);
     await pool.query("INSERT INTO campaign_state(campaign_id,owner_user_id) VALUES($1,$2) ON CONFLICT DO NOTHING", [f.scope.campaignId, ownerUserId]);

@@ -23,6 +23,7 @@ import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider
 import { createApiCampaignCastApplication, createWorkerCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
+import { applyValidatedCastDiscovery } from "../../packages/database/src/campaign-cast-discovery-publication.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -579,6 +580,29 @@ describe("durable cast discovery", () => {
   const proposal = (existingCharacterId: string | null = null) => ({ version: 1 as const, characters: [{ localKey: "mara", name: "Mara", aliases: [] as string[], existingCharacterId,
     identityEvidence: [{ paragraphId: "p1", quote: "Mara has blue eyes." }], observations: [{ field: "appearance.description" as const,
       value: "blue eyes", mode: "fact" as const, speakerCharacterId: null, paragraphId: "p1", quote: "Mara has blue eyes." }] }] });
+
+  it("refreshes Chronicle metadata once for a multi-character publication chunk", async () => {
+    const f = await fixture();
+    await pool.query("UPDATE turns SET narration='Mara has blue eyes. Sera has green eyes.' WHERE id=$1", [f.turnIds[0]]);
+    await f.enqueue();
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("metadata"))!;
+    const output = proposal();
+    output.characters.push({ ...output.characters[0]!, localKey: "sera", name: "Sera",
+      identityEvidence: [{ paragraphId: "p1", quote: "Sera has green eyes." }], observations: [] });
+    await repo.checkpoint(job, output);
+    let scans = 0;
+    expect(await repo.publish(job, (client, current) => applyValidatedCastDiscovery(new Proxy(client, {
+      get(target, property) {
+        if (property === "query") return (sql: string, values: unknown[]) => {
+          if (sql.includes("SELECT id,content,entity_ids FROM chronicle_memories")) scans++;
+          return target.query(sql, values);
+        };
+        const value = Reflect.get(target, property); return typeof value === "function" ? value.bind(target) : value;
+      }
+    }), current))).toBe("complete");
+    expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.filter((person) => person.origin.kind === "discovered")).toHaveLength(2);
+    expect(scans).toBe(1);
+  });
 
   it("publishes validated sparse identities and evidence from the durable checkpoint", async () => {
     const f = await fixture(); await f.enqueue();

@@ -4,6 +4,7 @@ import { validateCastDiscovery } from "../../domain/src/campaign-cast-discovery.
 import { castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
 import { stableStringify } from "../../domain/src/text.js";
 import { applyCastBatchWithClient, initializeCastWithClient } from "./campaign-cast-repository.js";
+import { refreshCastChronicleMetadata } from "./campaign-cast-chronicle-metadata.js";
 import type { CastDiscoveryClaim } from "./campaign-cast-job-repository.js";
 import type { DatabaseClient } from "./pool.js";
 
@@ -50,7 +51,8 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
     const key = `discovery:${claim.id}:${claim.chunkOrdinal}:${candidate.localKey}`;
     if (!characterId) {
       const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:identity`,
-        commands: [{ kind: "create", name: candidate.name, aliases: candidate.aliases, origin: resolvedOrigin, evidence: evidence(candidate.identityEvidence[0]!) }] });
+        commands: [{ kind: "create", name: candidate.name, aliases: candidate.aliases, origin: resolvedOrigin, evidence: evidence(candidate.identityEvidence[0]!) }] },
+      { deferMetadataRefresh: true });
       characterId = receipt.characterIds[0]!; characterIds.push(characterId);
     }
     const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:observations`, commands: [
@@ -62,6 +64,8 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
     accepted++;
     current = await initializeCastWithClient(client, claim.scope);
   }
+  // Refresh once using the complete roster, so shared aliases remain ambiguous.
+  if (characterIds.length) await refreshCastChronicleMetadata(client, claim.scope, current);
   for (const item of unresolved) {
     await client.query(`INSERT INTO campaign_cast_discovery_candidates(owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(job_id,chunk_ordinal,local_key) DO NOTHING`,
