@@ -7,6 +7,7 @@ import { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } from
 import { applyCastBatchWithClient, createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -40,6 +41,47 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("accounts discovery calls under a live chunk lease and attributes cost once to its accepted turn", async () => {
+    const f = await fixture();
+    await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
+      [f.execution.providerProfileId, ownerUserId, randomUUID()]);
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), claim = (await jobs.claim("accounting"))!;
+    const accounting = createPostgresPreparedTextAttemptRepository(pool);
+    const reservation = { kind: "cast_discovery" as const, ownerUserId, jobId: claim.id,
+      chunkOrdinal: claim.chunkOrdinal, claimAttempt: claim.attempt, leaseToken: claim.leaseToken };
+    const input = { logicalReservation: reservation, planProvenance: { planHash: f.execution.plan.planHash, preset: null },
+      candidateOrdinal: 0, candidate: { modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 },
+      request: { body: "{}", payloadHash: "a".repeat(64) } };
+    const attempt = await accounting.reserve(input);
+    expect(attempt).not.toBeNull();
+    expect((await accounting.reserve(input))?.id).toBe(attempt!.id);
+    for (const invalid of [{ leaseToken: randomUUID() }, { ownerUserId: randomUUID() }, { chunkOrdinal: 1 }, { claimAttempt: 2 }]) {
+      expect(await accounting.markDispatched({ ...reservation, ...invalid }, attempt!.id, input.request.payloadHash)).toBeNull();
+    }
+    expect(await accounting.markDispatched(reservation, attempt!.id, input.request.payloadHash)).toMatchObject({ status: "dispatched" });
+    const completion = { outcome: "succeeded" as const, providerResponseId: "cast-fixture", returnedModel: "fixture",
+      returnedProviderRoute: null, emittedOutput: true, usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+      reportedCost: { amount: "0.001", currency: "USD" } };
+    expect(await accounting.complete(reservation, attempt!.id, completion)).toMatchObject({ status: "completed" });
+    expect(await accounting.complete(reservation, attempt!.id, completion)).toBeNull();
+    expect((await pool.query("SELECT campaign_id,turn_id,category,operation FROM provider_cost_events WHERE local_call_id=$1", [attempt!.id])).rows)
+      .toEqual([{ campaign_id: f.scope.campaignId, turn_id: f.turnIds[0], category: "story", operation: "cast_discovery" }]);
+    expect(await accounting.summarize({ kind: "job", ownerUserId, logicalKind: "cast_discovery", scopeId: claim.id }))
+      .toMatchObject({ attemptCount: 1, completedCount: 1, observedUsage: completion.usage, reportedCosts: [completion.reportedCost] });
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [claim.id]);
+    expect(await accounting.reserve({ ...input, candidateOrdinal: 1 })).toBeNull();
+    const replacement = (await jobs.claim("replacement"))!;
+    const retryReservation = { ...reservation, claimAttempt: replacement.attempt, leaseToken: replacement.leaseToken };
+    expect(await accounting.reserve(input)).toBeNull();
+    const retry = await accounting.reserve({ ...input, logicalReservation: retryReservation });
+    expect(retry).not.toBeNull(); expect(retry!.id).not.toBe(attempt!.id);
+    await pool.query("UPDATE campaign_cast_state SET timeline_revision=timeline_revision+1 WHERE campaign_id=$1", [f.scope.campaignId]);
+    expect(await accounting.markDispatched(retryReservation, retry!.id, input.request.payloadHash)).toBeNull();
+    await pool.query("UPDATE campaign_cast_state SET timeline_revision=timeline_revision-1 WHERE campaign_id=$1", [f.scope.campaignId]);
+    await jobs.checkpoint(replacement, emptyOutput);
+    expect(await accounting.markDispatched(retryReservation, retry!.id, input.request.payloadHash)).toBeNull();
+  });
   const applied = async () => ({ characterIds: [], observationIds: [] });
   const proposal = (existingCharacterId: string | null = null) => ({ version: 1 as const, characters: [{ localKey: "mara", name: "Mara", aliases: [] as string[], existingCharacterId,
     identityEvidence: [{ paragraphId: "p1", quote: "Mara has blue eyes." }], observations: [{ field: "appearance.description" as const,

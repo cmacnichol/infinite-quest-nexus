@@ -40,6 +40,7 @@ type CampaignCostAttribution = Readonly<{
 }>;
 
 function reservationKey(value: LogicalReservation): string {
+  if (value.kind === "cast_discovery") return `${value.jobId}:${value.chunkOrdinal}:${value.claimAttempt}`;
   if (value.kind === "story") return `${value.generationJobId}:${value.invocationId}`;
   if (value.kind === "authoring") return `${value.jobId}:${value.stageId}:${value.jobGeneration}:${value.stageGeneration}:${value.operation}`;
   if (value.kind === "illustration") return `${value.promptJobId}:${value.claimAttempt}:${value.operation}`;
@@ -118,6 +119,22 @@ function record(row: AttemptRow): PhysicalAttemptRecord {
 
 async function hasLiveReservation(client: DatabaseClient, value: LogicalReservation): Promise<boolean> {
   if (value.kind === "direct") return true;
+  if (value.kind === "cast_discovery") {
+    const parent = (await client.query("SELECT campaign_id FROM campaign_cast_discovery_jobs WHERE id=$1 AND owner_user_id=$2", [value.jobId, value.ownerUserId])).rows[0];
+    if (!parent) return false;
+    // Serialize against source changes in the same campaign-before-job order as discovery publication.
+    const campaign = (await client.query("SELECT active_turn_number FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR KEY SHARE", [parent.campaign_id, value.ownerUserId])).rows[0];
+    if (!campaign) return false;
+    const result = await client.query(`SELECT 1 FROM campaign_cast_discovery_jobs job
+      JOIN campaign_cast_state state ON state.campaign_id=job.campaign_id AND state.owner_user_id=job.owner_user_id
+      JOIN effective_turn_narrations source ON source.turn_id=job.turn_id AND source.campaign_id=job.campaign_id AND source.owner_user_id=job.owner_user_id
+      WHERE job.id=$1 AND job.owner_user_id=$2 AND job.status='running' AND job.chunk_ordinal=$3 AND job.attempt=$4
+        AND job.lease_token=$5 AND job.lease_expires_at>clock_timestamp() AND job.checkpoint IS NULL
+        AND job.timeline_revision=state.timeline_revision AND job.narration_revision=source.correction_revision
+        AND job.turn_number<=$6 FOR UPDATE OF job`,
+    [value.jobId, value.ownerUserId, value.chunkOrdinal, value.claimAttempt, value.leaseToken, campaign.active_turn_number]);
+    return Boolean(result.rows[0]);
+  }
   if (value.kind === "story") {
     const result = await client.query(
       `SELECT 1 FROM generation_jobs job
@@ -156,6 +173,18 @@ async function lockCampaignCostAttribution(
   client: DatabaseClient,
   reservation: LogicalReservation,
 ): Promise<CampaignCostAttribution | null> {
+  if (reservation.kind === "cast_discovery") {
+    // hasLiveReservation already holds the campaign and job locks for this transaction.
+    const result = await client.query<{ campaign_id: string; turn_id: string; provider_profile_id: string; provider_type: string }>(
+      `SELECT job.campaign_id,job.turn_id,profile.id AS provider_profile_id,profile.provider_type
+        FROM campaign_cast_discovery_jobs job JOIN provider_profiles profile
+          ON profile.id::text=job.execution_snapshot->>'providerProfileId' AND profile.owner_user_id=job.owner_user_id
+        WHERE job.id=$1 AND job.owner_user_id=$2 AND profile.provider_role='text' FOR KEY SHARE OF profile`,
+      [reservation.jobId, reservation.ownerUserId]);
+    const row = result.rows[0];
+    return row ? { campaignId: row.campaign_id, turnId: row.turn_id, providerProfileId: row.provider_profile_id,
+      providerType: row.provider_type, generationJobId: null, category: "story", operation: "cast_discovery" } : null;
+  }
   if (reservation.kind !== "story" && reservation.kind !== "illustration") return null;
   const parent = reservation.kind === "story"
     ? await client.query<{ provider_profile_id: string | null }>(
@@ -271,7 +300,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
     async summarize(scope) {
       const logicalKind = scope.kind === "logical" ? scope.reservation.kind : scope.logicalKind;
       const ownerUserId = scope.kind === "logical" ? scope.reservation.ownerUserId : scope.ownerUserId;
-      const scopeField = { story: "generationJobId", authoring: "jobId", illustration: "promptJobId", direct: "requestScopeId" }[logicalKind];
+      const scopeField = { story: "generationJobId", authoring: "jobId", illustration: "promptJobId", direct: "requestScopeId", cast_discovery: "jobId" }[logicalKind];
       const result = scope.kind === "logical"
         ? await pool.query<{ status: string; usage: unknown; reported_cost: unknown }>(
           `SELECT status,usage,reported_cost FROM prepared_text_physical_attempts
@@ -376,7 +405,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
       return withTransaction(pool, async (client) => {
         if (!await hasLiveReservation(client, reservation)) return null;
         const attribution = await lockCampaignCostAttribution(client, reservation);
-        if ((reservation.kind === "story" || reservation.kind === "illustration") && !attribution) return null;
+        if ((reservation.kind === "story" || reservation.kind === "illustration" || reservation.kind === "cast_discovery") && !attribution) return null;
         const updated = await client.query<{ id: string }>(
           `UPDATE prepared_text_physical_attempts
               SET status='completed',outcome=$5,failure_reason=$6,provider_response_id=coalesce(provider_response_id,$7),

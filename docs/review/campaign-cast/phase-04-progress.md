@@ -71,4 +71,17 @@ Verification at this checkpoint:
 - `corepack pnpm check` passed. Bounded independent source review found no remaining blocker in the alias-collision and world-reuse fixes; the reviewer did not independently rerun PostgreSQL.
 - Browser and live-provider checks were not run for these unwired backend changes. No deployment or production data changes occurred.
 
-Automatic discovery is still not enabled or connected to generation acceptance. The next required slice is lease-bound physical-attempt accounting and frozen runtime execution, followed by acceptance/lifecycle wiring and the status/resolution UI.
+Automatic discovery is still not enabled or connected to generation acceptance. Frozen runtime execution, acceptance/lifecycle wiring, and the status/resolution UI remain required.
+
+## Physical-attempt accounting checkpoint
+
+Migration `0106_cast_discovery_physical_attempts.sql` adds the distinct `cast_discovery` reservation kind to the existing physical-attempt ledger. No request-scoped authoring bypass is used. Its down migration refuses to remove the kind while accounting rows exist; operational rollback should disable discovery and retain cost evidence.
+
+The reservation binds the owner, discovery job, chunk ordinal, extraction attempt, and lease token. Repository operations lock campaign before job, reject expired/replaced leases, changed timeline or narration revisions, and already-checkpointed output. Reclaim gets a separate attempt identity while repeated reservation of the same request remains idempotent. Successful accounting completion writes actual usage and reported cost once, attributed to the accepted source turn with Story category and `cast_discovery` operation. Existing Story, authoring, illustration, and direct reservations retain their paths.
+
+- RED: a live discovery reservation was rejected by the old repository. GREEN: the same regression now reserves, dispatches, completes, summarizes, and attributes cost once.
+- PostgreSQL selection: **8 files, 152 passed, 11 skipped**. Includes discovery, existing provider/authoring accounting, migration upgrades, archives, generation events, and adapter contracts.
+- Focused prepared executor, route execution, and migration-order unit tests: **29 passed**.
+- Repository checks and TypeScript passed; `git diff --check` passed.
+- Bounded independent source review found no concrete correctness, security, or deadlock flaw. Reviewer did not rerun PostgreSQL independently.
+- No live provider call, browser change, deployment, or production database operation occurred. The reservation path is verified against disposable PostgreSQL; an actual discovery worker remains pending.
