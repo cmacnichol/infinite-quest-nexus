@@ -56,6 +56,25 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("captures pinned playable identities with fiction hints and preserves their world provenance", async () => {
+    const f = await fixture();
+    await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({
+      playableCharacters: [{ id: "mara-playable", name: "Mara", characterText: "Mara has blue eyes.",
+        profile: { identity: { aliases: ["Watcher"] }, appearance: { eyes: "blue eyes" }, story: { role: "gatekeeper" }, secretExtension: "PRIVATE_MARKER" },
+        rpgStats: [{ name: "Strength", value: 20 }], source: { private: "PRIVATE_MARKER" } }],
+      entities: [{ id: "iven", kind: "npc", name: "Iven", description: "Iven is a ferryman." }]
+    })]);
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("world"))!;
+    expect(job.identities.worldCharacters).toContainEqual(expect.objectContaining({ entityId: "mara-playable", name: "Mara", aliases: ["Watcher"], identityHints: expect.arrayContaining(["blue eyes"]) }));
+    expect(job.identities.worldCharacters).toContainEqual(expect.objectContaining({ entityId: "iven", identityHints: ["Iven is a ferryman."] }));
+    expect(JSON.stringify(job.identities)).not.toContain("PRIVATE_MARKER");
+    expect(JSON.stringify(job.identities)).not.toContain("Strength");
+    await jobs.checkpoint(job, proposal());
+    expect(await jobs.publish(job)).toBe("complete");
+    expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find((person) => person.name === "Mara")?.origin)
+      .toEqual({ kind: "world", worldVersionId: f.versionId, entityId: "mara-playable" });
+  });
   it("stops actual fallback dispatch after two calls while allowing the next source chunk", async () => {
     const f = await fixture();
     await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], "Mara waits by the bridge. ".repeat(900)]);

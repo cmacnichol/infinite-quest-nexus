@@ -10,7 +10,7 @@
 
 **Spec:** [Shared specification](2026-09-22-campaign-cast.md). Dependency: phase 03 accepted.
 
-**Progress (2026-09-23):** Contracts, evidence validation, source segmentation, queue/checkpoints, validated publication, physical accounting, recoverable application flow, frozen direct/preset execution, default-off worker composition, atomic acceptance enqueue, same-campaign lifecycle reconciliation, forward coverage, legacy status display, and reviewed candidate attach/create resolution are implemented. Failed-discovery retry, shared provider/attempt limits, bounded world identity selection, and branch/transfer enrollment remain pending; see [checkpoint and remaining work](../../review/campaign-cast/phase-04-progress.md). The overall exit gate is not complete.
+**Progress (2026-09-23):** Contracts, evidence validation, source segmentation, queue/checkpoints, validated publication, physical accounting and dispatch limits, recoverable application flow, frozen direct/preset execution, default-off worker composition, atomic acceptance enqueue, same-campaign lifecycle reconciliation, forward coverage, legacy status display, reviewed candidate attach/create resolution, and bounded pinned-world identity hints are implemented. Failed-discovery retry, shared provider concurrency, and branch/transfer enrollment remain pending; see [checkpoint and remaining work](../../review/campaign-cast/phase-04-progress.md). The overall exit gate is not complete.
 
 ## Global constraints
 

@@ -2,7 +2,15 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: physical dispatch budget
+## Latest checkpoint: pinned world identities and bounded hints
+
+Captured world identities now include playable characters and explicit character/person/NPC entities (including legacy entity maps). Only allowlisted fiction fields supply identity hints; mechanics, credentials, extension fields, and oversized hint values are excluded. New occurrences retain the pinned world-version and source character ID. Conflicting declarations with the same ID remain visible to validation and require review, including when their names differ.
+
+Provider input selects source-mentioned names/aliases plus the protagonist, with at most 24 identities and 2,000 estimated tokens for the identity section. Each entry carries at most four aliases and four short complete hints; it does not truncate a biography into apparent evidence. The full captured roster remains available for conservative collision validation, so omitted prompt entries do not authorize automatic duplicates. Source narration remains complete and the existing final request-budget check still applies.
+
+RED/GREEN tests reproduced missing playable identities and unbounded input. Integration then exposed the entity-only origin persistence guard; it now accepts pinned playable origins. Review reproduced duplicate-ID conflation and unsafe identity aliases, both corrected with failing regressions. The reviewer independently passed 23 focused unit tests. Final verification: **4,381 unit tests passed (348 files; 44 existing skips), 71 PostgreSQL tests passed (all five cast suites), repository/TypeScript and whitespace checks passed**. The initial full-unit run hit the known nested pnpm-version mismatch; the Corepack wrapper on PATH fixed the harness and the full rerun passed. Logs: `.tmp/campaign-cast/identity-{all-unit,pg-green,check}.log`, with initial failures in `identity-{unit-red,pg-red,review-red}.log`. No UI surface or production data changed, and no live provider was called.
+
+## Physical dispatch budget
 
 Discovery now permits at most two physical provider dispatches per job/source chunk, shared across fallback candidates and reclaimed logical attempts. The existing job lock serializes reservation and dispatch checks. Unsent reservations do not consume this budget; dispatched calls with unknown outcomes do. Publication of an obtained checkpoint remains recoverable without another paid call, and the next chunk has an independent allowance. Other prepared execution kinds retain their existing behavior.
 
@@ -61,8 +69,8 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 ## Remaining implementation
 
 1. Finish failed-discovery retry controls. Candidate listing/resolution, forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0107 for further additive schema changes.
-2. Frozen preparation, provider composition, and the worker lane are wired below. Verify global concurrency and the physical-attempt ceiling across preset fallback plus logical retries.
-3. Finish pinned-world playable-character selection and bounded identity hints. Atomic accepted-turn enqueue, forward enrollment, and contiguous coverage are implemented below.
+2. Frozen preparation, provider composition, and the worker lane are wired below. Implement shared provider concurrency; the two-dispatch ceiling across preset fallback and logical retries is verified.
+3. Pinned-world playable-character selection and bounded identity hints are implemented above. Atomic accepted-turn enqueue, forward enrollment, and contiguous coverage are also implemented.
 4. Same-campaign lifecycle reconciliation is implemented below. Finish branch/transfer discovery enrollment and coverage. Existing phase-02 approvals cover these source integrations.
 5. Retry API and legacy UI, then complete phase-04 PostgreSQL and browser acceptance gates. Status and candidate-resolution flows have passed the scoped checks below.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.

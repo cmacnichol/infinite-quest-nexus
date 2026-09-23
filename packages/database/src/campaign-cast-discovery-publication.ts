@@ -1,7 +1,7 @@
 import { castDiscoveryIdentitySnapshotSchema, type CastDiscoveryIdentitySnapshot } from "../../contracts/src/campaign-cast-discovery.js";
 import type { CastEvidence, CastScope } from "../../contracts/src/campaign-cast.js";
 import { validateCastDiscovery } from "../../domain/src/campaign-cast-discovery.js";
-import { buildScopedEntityCatalog } from "../../domain/src/entity-references.js";
+import { castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
 import { stableStringify } from "../../domain/src/text.js";
 import { applyCastBatchWithClient, initializeCastWithClient } from "./campaign-cast-repository.js";
 import type { CastDiscoveryClaim } from "./campaign-cast-job-repository.js";
@@ -12,8 +12,7 @@ export async function captureCastDiscoveryIdentities(client: DatabaseClient, sco
   const cast = await initializeCastWithClient(client, scope);
   const world = (await client.query(`SELECT c.world_version_id,w.content FROM campaigns c JOIN world_versions w ON w.id=c.world_version_id AND w.owner_user_id=c.owner_user_id
     WHERE c.id=$1 AND c.owner_user_id=$2`, [scope.campaignId, scope.ownerUserId])).rows[0];
-  const worldCharacters = buildScopedEntityCatalog({ worldContent: world.content }).filter((ref) => /^(?:character|person|npc)$/iu.test(ref.kind))
-    .map((ref) => ({ entityId: ref.id.slice("world:".length), name: ref.displayName, aliases: ref.aliases.filter((alias) => alias !== ref.displayName) }));
+  const worldCharacters = castDiscoveryWorldIdentities(world.content);
   return castDiscoveryIdentitySnapshotSchema.parse({ revision: cast.revision, characters: cast.characters, worldVersionId: world.world_version_id, worldCharacters });
 }
 

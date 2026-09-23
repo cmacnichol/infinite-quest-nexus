@@ -11,12 +11,27 @@ export function buildCastDiscoveryInput(input: {
   source: CastDiscoverySource; knownCharacters: CastCharacter[]; worldCharacters?: CastDiscoveryWorldIdentity[];
 }): string {
   const source = castDiscoverySourceSchema.parse(input.source);
+  const narration = source.paragraphs.map((paragraph) => paragraph.text).join("\n");
+  const relevant = (person: { name: string; aliases: string[] }) => [person.name, ...person.aliases].some((alias) => contains(narration, alias));
+  const knownCharacters: { id: string; name: string; aliases: string[]; profile: CastCharacter["profile"]; protagonist: boolean }[] = [];
+  const worldCharacters: CastDiscoveryWorldIdentity[] = [];
+  const fits = () => knownCharacters.length + worldCharacters.length <= 24
+    && estimateTokens(stableStringify({ knownCharacters, worldCharacters })) <= 2000;
+  const candidates = input.knownCharacters.filter((person) => person.origin.kind === "protagonist" || relevant(person))
+    .sort((a, b) => Number(b.origin.kind === "protagonist") - Number(a.origin.kind === "protagonist") || a.id.localeCompare(b.id));
+  for (const person of candidates) {
+    const profile = Object.fromEntries(Object.entries(person.profile).filter(([, value]) => value.length <= 256).slice(0, 4));
+    knownCharacters.push({ id: person.id, name: person.name, aliases: person.aliases.slice(0, 4), profile, protagonist: person.origin.kind === "protagonist" });
+    if (!fits()) knownCharacters.pop();
+  }
+  for (const person of (input.worldCharacters ?? []).filter(relevant).sort((a, b) => a.entityId.localeCompare(b.entityId))) {
+    worldCharacters.push({ entityId: person.entityId, name: person.name, aliases: person.aliases.slice(0, 4),
+      identityHints: (person.identityHints ?? []).filter((hint) => hint.length <= 256).slice(0, 4) });
+    if (!fits()) worldCharacters.pop();
+  }
   return stableStringify({ protocol: CAST_DISCOVERY_PROTOCOL,
     source: { turnNumber: source.turnNumber, paragraphs: source.paragraphs },
-    knownCharacters: input.knownCharacters.map((person) => ({ id: person.id, name: person.name, aliases: person.aliases,
-      profile: person.profile, protagonist: person.origin.kind === "protagonist" })),
-    worldCharacters: (input.worldCharacters ?? []).map((person) => ({ entityId: person.entityId, name: person.name,
-      aliases: person.aliases, identityHints: person.identityHints ?? [] })) });
+    knownCharacters, worldCharacters });
 }
 
 export function buildCastDiscoverySource(input: Omit<CastDiscoverySource, "sourceHash" | "paragraphs"> & { narration: string }): CastDiscoverySource {
@@ -148,7 +163,8 @@ function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: bo
       hold("identity_needs_review"); continue;
     }
     const worldMatches = (input.worldCharacters ?? []).filter((person) => [person.name, ...person.aliases].some((alias) => terms.includes(normalizeEntityTerm(alias)) && contains(identityText, alias)));
-    if (!candidate.existingCharacterId && worldMatches.length > 1) { hold("identity_needs_review"); continue; }
+    if (!candidate.existingCharacterId && (worldMatches.length > 1 || worldMatches.some((match) =>
+      (input.worldCharacters ?? []).filter((person) => person.entityId === match.entityId).length > 1))) { hold("identity_needs_review"); continue; }
     if (!candidate.existingCharacterId && worldMatches[0] && !corroborates(worldMatches[0], worldMatches[0].identityHints ?? [])) {
       hold("identity_needs_review"); continue;
     }

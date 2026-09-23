@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { castDiscoveryOutputSchema, castDiscoverySourceSchema } from "../../packages/contracts/src/campaign-cast-discovery.js";
 import { buildCastDiscoverySource, buildCastDiscoveryInput, chunkCastDiscoverySource, validateCastDiscovery, validateResolvedCastDiscovery } from "../../packages/domain/src/campaign-cast-discovery.js";
+import { estimateTokens } from "../../packages/domain/src/text.js";
 import type { CastCharacter } from "../../packages/contracts/src/campaign-cast.js";
 
 const scope = { ownerUserId: "11111111-1111-4111-8111-111111111111", campaignId: "22222222-2222-4222-8222-222222222222" };
@@ -12,6 +13,15 @@ const candidate = (overrides = {}) => ({ localKey: "mara", name: "Mara", aliases
 const known = (id: string, name = "Mara"): CastCharacter => ({ id, name, aliases: ["the Watcher"], origin: { kind: "manual" },
   profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 });
 describe("cast discovery evidence boundary", () => {
+  it("holds different names that share a world provenance ID instead of conflating them", () => {
+    const result = validateCastDiscovery({ source: source(), output: { version: 1, characters: [candidate()] }, knownCharacters: [],
+      worldVersionId: "55555555-5555-4555-8555-555555555555", worldCharacters: [
+        { entityId: "shared", name: "Mara", aliases: [], identityHints: ["blue eyes"] },
+        { entityId: "shared", name: "Iven", aliases: [], identityHints: ["green eyes"] }
+      ] });
+    expect(result.accepted).toEqual([]);
+    expect(result.unresolved[0]?.code).toBe("identity_needs_review");
+  });
   it("accepts an explicit identity decision while retaining evidence and attribution checks", () => {
     const person = known("44444444-4444-4444-8444-444444444444", "Mara Reed");
     const input = { source: source(), candidate: candidate(), knownCharacters: [person], characterId: person.id };
@@ -33,6 +43,24 @@ describe("cast discovery evidence boundary", () => {
     expect(input).not.toContain(scope.ownerUserId);
     expect(input).not.toContain(scope.campaignId);
     expect(input).not.toContain(source().sourceHash);
+  });
+  it("bounds prompt identities while retaining the protagonist and relevant same-name alternatives", () => {
+    const protagonist = { ...known("11111111-4444-4444-8444-444444444444"), name: "Hero", origin: { kind: "protagonist" as const, selectedCharacterId: "hero" } };
+    const crowd = Array.from({ length: 100 }, (_, i) => ({ ...known(`44444444-4444-4444-8444-${String(i).padStart(12, "0")}`),
+      name: `Person ${i}`, aliases: [], profile: { "story.background": "Long biography. ".repeat(100) } }));
+    const relevant = { ...known("55555555-4444-4444-8444-444444444444"), profile: { "appearance.description": "blue eyes" } };
+    const worldCharacters = [{ entityId: "mara-a", name: "Mara", aliases: [], identityHints: ["blue eyes"] },
+      { entityId: "mara-b", name: "Mara", aliases: [], identityHints: ["green eyes"] },
+      ...crowd.map((person) => ({ entityId: person.id, name: person.name, aliases: [], identityHints: [] }))];
+    const wire = JSON.parse(buildCastDiscoveryInput({ source: source(), knownCharacters: [...crowd, relevant, protagonist], worldCharacters }));
+    expect(wire.knownCharacters.map((person: { id: string }) => person.id)).toEqual([protagonist.id, relevant.id]);
+    expect(wire.worldCharacters.map((person: { entityId: string }) => person.entityId)).toEqual(["mara-a", "mara-b"]);
+    const crowded = JSON.parse(buildCastDiscoveryInput({ source: source(crowd.map((person) => person.name).join(". ")),
+      knownCharacters: [...crowd, protagonist], worldCharacters }));
+    expect(crowded.knownCharacters[0].id).toBe(protagonist.id);
+    expect(crowded.knownCharacters.length + crowded.worldCharacters.length).toBeLessThanOrEqual(24);
+    expect(estimateTokens(JSON.stringify({ knownCharacters: crowded.knownCharacters, worldCharacters: crowded.worldCharacters }))).toBeLessThanOrEqual(2000);
+    expect(crowded.source.paragraphs[0].text).toContain("Person 99");
   });
   it("requires aliases and corroborating traits to describe the proposed identity", () => {
     const narration = "Mara waits. Iven has blue eyes.";

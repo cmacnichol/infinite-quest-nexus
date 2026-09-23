@@ -54,6 +54,8 @@ Campaign Archives and System Archives embed version 1 cast authority: identities
 
 ## Verification and recovery
 
+Discovery recognizes both playable characters and character/person/NPC entities from the campaign's pinned world version. It sends source-relevant identities plus the protagonist, capped at 24 entries and 2,000 estimated identity tokens; the complete captured roster remains available for identity validation. Hints contain short complete fiction values only. Ambiguous names or conflicting world IDs require explicit review instead of automatic merging. This selection affects extraction only; generation-context integration remains phase 05.
+
 Automatic discovery allows two physical provider dispatches per job/source chunk across fallback routes and worker reclaims. Unknown dispatched outcomes consume the allowance; unsent reservations and checkpoint publication do not. Later chunks receive their own allowance. This does not provide shared provider concurrency across API/worker replicas; that release gate and explicit user Retry remain pending. An exhausted allowance currently surfaces through the generic discovery provider-failure diagnostic.
 
 See the [phase 02 handoff](../review/campaign-cast/phase-02.md) for verification evidence and remaining gates. Cast projections are rebuilt from retained authority and revalidate source narration on reads. Accepted turns and user edits remain the recovery sources; do not repair a disagreement by rewriting the cached profile directly.

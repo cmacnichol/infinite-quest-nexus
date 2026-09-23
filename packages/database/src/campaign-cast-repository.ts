@@ -13,6 +13,7 @@ import { CampaignCastError, type CampaignCastRepositoryPort, type CampaignCastWr
 import { castEvidenceOrder, projectCastProfile, validateCastFiction } from "../../domain/src/campaign-cast.js";
 import { characterFictionAuthority } from "../../domain/src/character-fiction-authority.js";
 import { buildScopedEntityCatalog } from "../../domain/src/entity-references.js";
+import { castDiscoveryWorldIdentities } from "../../domain/src/campaign-cast-world-identities.js";
 import { sha256, stableStringify, truncateAtBoundary } from "../../domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 
@@ -215,7 +216,8 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
       if (command.origin.worldVersionId !== campaign.world_version_id) throw new Error("Invalid cast world origin.");
       const world = (await client.query("SELECT content FROM world_versions WHERE id=$1 AND owner_user_id=$2", [campaign.world_version_id, scope.ownerUserId])).rows[0]?.content;
       const entityId = command.origin.entityId;
-      if (!buildScopedEntityCatalog({ worldContent: world }).some((entity) => entity.id === `world:${entityId}`)) throw new Error("World identity not found.");
+      if (!buildScopedEntityCatalog({ worldContent: world }).some((entity) => entity.id === `world:${entityId}`)
+        && !castDiscoveryWorldIdentities(world).some((person) => person.entityId === entityId)) throw new Error("World identity not found.");
     }
     const first = command.evidence?.kind === "turn" ? command.evidence.turnNumber : boundary.turnNumber;
     await client.query("INSERT INTO campaign_cast_characters(id,owner_user_id,campaign_id,origin,first_observed_turn) VALUES($1,$2,$3,$4,$5)",
