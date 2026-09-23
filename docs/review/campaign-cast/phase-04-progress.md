@@ -25,7 +25,7 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 ## Remaining implementation
 
 1. Connect the durable queue below to unresolved candidates, contiguous coverage, and runtime capability handling. Migration 0104 now exists; use the next ordered migration for further additive schema changes.
-2. Freeze routing at admission without a provider call inside acceptance. Use the existing prepared-request executor and physical-attempt cost ledger with a new lease-bound discovery reservation; do not disguise discovery as a direct authoring request.
+2. Wire the frozen preparation and prepared executor below into provider composition and the worker lane. Admission must happen before acceptance, with no provider call inside its transaction. Verify global concurrency and the physical-attempt ceiling across preset fallback plus logical retries.
 3. Wire atomic accepted-turn enqueue to the validated publication seam below. Complete pinned-world playable-character selection and bounded identity hints before provider dispatch.
 4. Lifecycle cancellation/re-enqueue for corrections, replacement, rewind, branches, and transfer. Existing phase-02 approvals cover these source integrations.
 5. Status/retry/candidate-resolution API and legacy UI, then actual PostgreSQL and browser acceptance gates.
@@ -97,3 +97,16 @@ This is the application flow, not yet a registered runtime worker lane. Its extr
 - Repository checks and TypeScript passed after correcting application imports to use the contracts package entrypoint.
 - Independent bounded review found no blocker and independently ran the initial seven worker unit tests. The eighth uncertain-commit regression was added afterward and passed locally.
 - No live-provider or browser check was run; no production data or deployment was changed.
+
+## Frozen runtime execution checkpoint
+
+`prepareCastDiscoveryExecution` resolves one immutable text route and the exact nonstream `cast_discovery` response contract, with the discovery prompt protocol and a 30-second request deadline. Direct models require exact schema qualification; presets retain their resolved route authority. The queued snapshot now persists this admission, including its serialization configuration. Persistence validates provider binding, frozen route authority, and the plan derived from the trusted discovery prompt. Older development jobs without admission can still be read, but runtime dispatch fails closed.
+
+`createCastDiscoveryExtractor` serializes the complete fiction-and-identity request against the frozen route's context/output allowance before calling the existing prepared executor with a discovery lease reservation. Oversized requests fail without a paid dispatch. Malformed or output-limited responses cannot become completed coverage. The extractor never re-resolves a mutable preset or invokes the provider directly. This adapter remains unwired to the production worker lane and acceptance path.
+
+Independent review found a direct-model binding defect: the shared binding helper checked preset plans more strictly than direct plans. A regression reproduced dispatch with a changed prompt and recomputed hash. Both persistence and dispatch now explicitly validate direct route authority and compare the trusted derived plan; the regression passes. The reviewer reran all six adapter tests and found no remaining blocker in that bounded fix.
+
+- Discovery PostgreSQL file: **21 passed**, including both direct and preset paths through persisted admission, the real prepared executor, physical accounting, checkpointing, and validated publication. These tests use a deterministic provider and assert the actual serialized request, timeout, cast authority, and attributed cost. Changed provider binding and rehashed altered prompts are rejected before enqueue.
+- Discovery/worker/authoring/prepared-executor selection: **78 passed** before the final direct-binding regression; all six adapter tests passed again afterward.
+- Full unit suite with four workers: **347 files passed; 4,365 passed, 44 skipped**. Repository checks, TypeScript, and `git diff --check` passed.
+- No live model call, browser change, deployment, or production database operation occurred.

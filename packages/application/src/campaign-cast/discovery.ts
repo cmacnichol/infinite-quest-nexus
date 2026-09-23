@@ -1,7 +1,11 @@
 import { castDiscoveryOutputSchema, type CastDiscoveryIdentitySnapshot, type CastDiscoveryOutput, type CastDiscoverySource,
-  type CastScope, type TextExecutionPlan } from "@infinite-quest/contracts";
+  type CastScope, type TextExecutionPlan, type TextExecutionRouteBasis, type FrozenResponseContractsV2 } from "@infinite-quest/contracts";
 
-export type CastDiscoveryExecution = { providerProfileId: string; plan: TextExecutionPlan };
+export type CastDiscoveryExecution = { providerProfileId: string; plan: TextExecutionPlan;
+  /** Older development jobs may lack admission; runtime fails closed. */
+  admission?: { routeBasis: TextExecutionRouteBasis; frozenResponseContracts: FrozenResponseContractsV2;
+    providerType: "openrouter" | "openai_compatible"; configuration: Readonly<Record<string, unknown>> };
+};
 export type CastDiscoveryClaim = {
   id: string; scope: CastScope; source: CastDiscoverySource; chunkOrdinal: number; chunkCount: number;
   execution: CastDiscoveryExecution; attempt: number; leaseToken: string; output: CastDiscoveryOutput | null;

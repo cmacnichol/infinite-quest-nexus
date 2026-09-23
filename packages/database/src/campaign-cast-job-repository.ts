@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CAST_DISCOVERY_PROTOCOL, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
 import { castScopeSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
-import { readTextExecutionPlan } from "../../contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, readTextExecutionPlan, readTextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
+import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, readFrozenResponseContractsV2 } from "../../contracts/src/generation-response-contract.js";
+import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../contracts/src/prompt-library.js";
 import { buildCastDiscoverySource, chunkCastDiscoverySource } from "../../domain/src/campaign-cast-discovery.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
@@ -14,11 +16,25 @@ type AppliedDiscovery = { characterIds: string[]; observationIds: string[]; vali
 const diagnostics = z.enum(["provider_timeout", "provider_failed", "invalid_output", "source_requires_manual_scan", "publication_failed"]);
 
 function readExecution(value: unknown): CastDiscoveryExecution {
-  const parsed = z.object({ providerProfileId: z.uuid(), plan: z.unknown() }).strict().parse(value);
+  const parsed = z.object({ providerProfileId: z.uuid(), plan: z.unknown(), admission: z.object({
+    routeBasis: z.unknown(), frozenResponseContracts: z.unknown(), providerType: z.enum(["openrouter", "openai_compatible"]),
+    configuration: z.record(z.string(), z.unknown()) }).strict().optional() }).strict().parse(value);
   const providerProfileId = parsed.providerProfileId;
   const plan = readTextExecutionPlan(parsed.plan);
   if (!plan || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || plan.requestTimeoutMs !== 30000) throw new Error("Invalid cast discovery execution snapshot.");
-  return { providerProfileId, plan };
+  if (!parsed.admission) return { providerProfileId, plan };
+  const routeBasis = readTextExecutionRouteBasis(parsed.admission.routeBasis);
+  const frozenResponseContracts = readFrozenResponseContractsV2(parsed.admission.frozenResponseContracts);
+  if (routeBasis.credentialReference !== providerProfileId || frozenResponseContracts.queuedPolicy.providerProfileId !== providerProfileId) {
+    throw new Error("Invalid cast discovery provider binding.");
+  }
+  if (plan.selection.kind === "model") {
+    assertDirectResponseContractRouteBasisAuthority(frozenResponseContracts.queuedPolicy, routeBasis);
+    if (deriveTextExecutionPlan(routeBasis, CAST_DISCOVERY_SYSTEM_PROMPT).planHash !== plan.planHash) throw new Error("Invalid cast discovery plan binding.");
+  }
+  bindFrozenResponseContractInvocationV2({ frozen: frozenResponseContracts, routeBasis, plan,
+    invocationKey: "cast_discovery:nonstream", operation: "cast_discovery", trustedOperationPrompt: CAST_DISCOVERY_SYSTEM_PROMPT });
+  return { providerProfileId, plan, admission: { ...parsed.admission, routeBasis, frozenResponseContracts } };
 }
 
 /** Caller owns the accepted-turn transaction. No provider or nested transaction occurs here. */

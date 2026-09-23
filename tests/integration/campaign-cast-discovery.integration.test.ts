@@ -9,6 +9,12 @@ import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../pack
 import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
 import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 import { runCastDiscoveryOnce } from "../../packages/application/src/campaign-cast/discovery.js";
+import { prepareCastDiscoveryExecution, createCastDiscoveryExtractor } from "../../services/runtime/src/campaign-cast-discovery-adapter.js";
+import { createPreparedTextExecutor } from "../../services/runtime/src/prepared-text-executor.js";
+import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
+import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
+import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -42,6 +48,47 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it.each(["preset", "model"] as const)("persists frozen %s admission and executes discovery through physical accounting into validated cast authority", async (routeKind) => {
+    const f = await fixture();
+    await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
+      [f.execution.providerProfileId, ownerUserId, randomUUID()]);
+    let calls = 0;
+    const execution: RuntimeTextExecution = { id: f.execution.providerProfileId, name: "Fixture", providerRole: "text", providerType: "openrouter",
+      model: "fixture", contextWindowTokens: 32768, maxOutputTokens: 2048, temperature: 0.2, requestTimeoutMs: 120000,
+      configuration: {}, executionRevision: "revision", authorityRevision: "authority", endpointIdentity: "endpoint",
+      textSelection: routeKind === "preset" ? { kind: "openrouter_preset", slug: "fixture" } : { kind: "model", modelId: "fixture" }, async execute(request, policy) {
+        calls++;
+        expect(request.preparedRequest?.body).toContain("Mara has blue eyes.");
+        expect(request.preparedRequest?.body).toContain("infinite_quest_cast_discovery_v1");
+        expect(policy?.requestTimeoutMs).toBe(30000);
+        return { content: JSON.stringify(proposal()), responseId: "cast-runtime-fixture", finishReason: "stop", outputLimited: false,
+          modelInstanceId: "fixture", usage: { inputTokens: 17, outputTokens: 19, totalTokens: 36 },
+          reportedCost: { amount: "0.002", currency: "USD" }, rawMetadata: {} };
+      } };
+    const responseFormatCapabilities = createProviderResponseFormatCapabilities({ now: () => Date.parse("2026-09-20T00:00:00.000Z"), records: [{
+      version: 2, providerType: "openrouter", endpointIdentity: "endpoint", model: "fixture", routeConfigHash: capabilityRouteConfigHash({}),
+      adapterProtocol: "text-schema-adapter-v2", operation: "cast_discovery", schemaHash: getProviderOutputSchemaV2("cast_discovery").schemaHash,
+      streaming: false, verifiedAt: "2026-09-19T00:00:00.000Z", expiresAt: "2027-09-19T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+    }] });
+    const frozen = await prepareCastDiscoveryExecution({ ownerUserId, execution, responseFormatCapabilities, ports: {
+      async resolvePreset() { return { slug: "fixture", name: "Fixture", versionId: "v1", version: 1, configHash: "a".repeat(64),
+        config: { model: "fixture" }, systemPrompt: "Frozen preset." }; },
+      async discoverModels() { return [{ id: "fixture", contextWindowTokens: 32768, maxOutputTokens: 2048,
+        responseFormatAdvertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-20T00:00:00.000Z" } }]; }
+    } });
+    await expect(withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!,
+      execution: { ...frozen, providerProfileId: randomUUID() }, enabled: true }))).rejects.toThrow("Invalid cast discovery provider binding");
+    await expect(withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!,
+      execution: { ...frozen, plan: deriveTextExecutionPlan(frozen.admission!.routeBasis, "Changed prompt and recomputed hash.") }, enabled: true }))).rejects.toThrow();
+    await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: frozen, enabled: true }));
+    const extractor = createCastDiscoveryExtractor({ executor: createPreparedTextExecutor({ attempts: createPostgresPreparedTextAttemptRepository(pool),
+      async loadAuthority(owner, profile) { expect(owner).toBe(ownerUserId); expect(profile).toBe(execution.id); return execution; } }) });
+    expect(await runCastDiscoveryOnce({ workerId: "runtime", repository: createCastDiscoveryJobRepository(pool, () => true), extractor })).toBe("complete");
+    expect(calls).toBe(1);
+    expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find((p) => p.name === "Mara")?.profile)
+      .toEqual({ "appearance.description": "blue eyes" });
+    expect((await pool.query("SELECT operation FROM provider_cost_events WHERE campaign_id=$1", [f.scope.campaignId])).rows).toEqual([{ operation: "cast_discovery" }]);
+  });
   it("accounts discovery calls under a live chunk lease and attributes cost once to its accepted turn", async () => {
     const f = await fixture();
     await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
