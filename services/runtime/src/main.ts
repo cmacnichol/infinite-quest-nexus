@@ -56,7 +56,7 @@ await runRuntimeLifecycle(config, abortController, {
     createApiProviders: (pool, credentialSecret, transport) => createApiProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
-        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true }
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true }
     ),
     createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
       pool,
@@ -83,7 +83,8 @@ await runRuntimeLifecycle(config, abortController, {
       (value) => createHash("sha256").update(value).digest("hex"),
       { nativePresetPlansEnabled: config.nativeTextExecutionPlanAdmission === true }
     ),
-    buildServer: (options) => buildServer({ ...options, cast: createApiCampaignCastApplication(options.pool, options.config) }),
+    createApiCast: createApiCampaignCastApplication,
+    buildServer,
     runWorker
   }, providerTransport, generationEvents)
 });

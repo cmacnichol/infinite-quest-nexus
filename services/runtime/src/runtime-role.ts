@@ -89,6 +89,8 @@ export type RuntimeRoleDependencies = Readonly<{
     signal: AbortSignal,
   ): AuthoringWorkerApplication;
   createApiAuthoring(pool: DatabasePool): AuthoringApplication;
+  createApiCast?(pool: DatabasePool, config: RuntimeConfig,
+    providers: ApiProviderApplicationComposition["generation"]): NonNullable<BuildServerOptions["cast"]>;
   createWorkerCastDiscovery?(pool: DatabasePool, config: RuntimeConfig,
     providers: WorkerProviderApplicationComposition["generation"]): NonNullable<WorkerDependencies["castDiscovery"]>;
   buildServer(options: BuildServerOptions): Promise<RuntimeServer>;
@@ -171,6 +173,7 @@ export async function dispatchRuntimeRole(
     const server = await dependencies.buildServer({
       config, pool, generation, illustration, memory, providers, generationEvents, worldCampaign, authoring,
       infiniteWorldsProviders: providerGraph.infiniteWorlds,
+      ...(dependencies.createApiCast ? { cast: dependencies.createApiCast(pool, config, providerGraph.generation) } : {}),
     });
     await server.listen({ host: config.host, port: config.port });
     await waitForAbort(signal);
@@ -229,6 +232,7 @@ export async function dispatchRuntimeRole(
   const server = await dependencies.buildServer({
     config, pool, generation: apiGeneration, illustration, memory, providers, generationEvents, worldCampaign, authoring: apiAuthoring,
     infiniteWorldsProviders: apiProviderGraph.infiniteWorlds,
+    ...(dependencies.createApiCast ? { cast: dependencies.createApiCast(pool, config, apiProviderGraph.generation) } : {}),
   });
   await server.listen({ host: config.host, port: config.port });
   await dependencies.runWorker(pool, config, signal, {

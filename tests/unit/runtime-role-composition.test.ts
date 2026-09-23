@@ -124,6 +124,14 @@ function dependencies(controller: AbortController) {
 }
 
 describe("runtime role generation composition", () => {
+  it.each(["api", "all"] as const)("supplies API discovery recovery collaborators in the %s role", async (role) => {
+    const controller = new AbortController(), { values } = dependencies(controller), roleConfig = config(role);
+    const cast = { retryDiscovery: async () => ({ jobId: "fixture", retryGeneration: 1 }) } as never;
+    const createApiCast = vi.fn(() => cast);
+    await dispatchRuntimeRole(roleConfig, pool, controller.signal, { ...values, createApiCast }, providerTransport, generationEvents);
+    expect(createApiCast).toHaveBeenCalledWith(pool, roleConfig, apiGenerationProviders);
+    expect(values.buildServer).toHaveBeenCalledWith(expect.objectContaining({ cast }));
+  });
   it.each(["worker", "all"] as const)("wires the discovery worker only when enabled in the %s role", async (role) => {
     for (const enabled of [false, true]) {
       const controller = new AbortController(), { values } = dependencies(controller);

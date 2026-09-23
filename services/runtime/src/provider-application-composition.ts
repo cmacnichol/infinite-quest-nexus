@@ -83,6 +83,7 @@ export type ProviderConsumerRuntime = Readonly<{
 }>;
 
 export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Readonly<{
+  prepareCastDiscoveryExecution?(input: { ownerUserId: string; execution: RuntimeTextExecution }): Promise<CastDiscoveryExecution>;
   prompts: GenerationPromptPort;
   costs: GenerationCostPort;
   reads: Pick<ProviderCostPort, "getTurnCosts">;
@@ -94,7 +95,6 @@ export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Reado
 }>;
 
 export type WorkerGenerationProviderCollaborators = ApiGenerationProviderCollaborators & Readonly<{
-  prepareCastDiscoveryExecution?(input: { ownerUserId: string; execution: RuntimeTextExecution }): Promise<CastDiscoveryExecution>;
   attributeCosts: Pick<ProviderCostPort, "attributeGenerationCostsToTurn">;
   preparedTextExecutor: PreparedAuthoringTextExecutor;
 }>;
@@ -392,6 +392,8 @@ function createInternals(
       return result;
     },
     generation: Object.freeze({ ...runtime, prompts: generationPrompts, costs: generationCosts, reads: costs, responseFormatCapabilities, responseFormatInventory: base.runtime.inventory,
+      ...(options.castDiscoveryEnabled === true ? { prepareCastDiscoveryExecution: (input: { ownerUserId: string; execution: RuntimeTextExecution }) =>
+        prepareCastDiscoveryExecution({ ...input, ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
       loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
         bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model) }),
     workerGeneration: Object.freeze({

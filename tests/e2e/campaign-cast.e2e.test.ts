@@ -8,6 +8,59 @@ const protagonistId = "66666666-6666-4666-8666-666666666666";
 const candidateId = "88888888-8888-4888-8888-888888888888";
 const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
 
+test("legacy discovery retry requires refresh after conflict and respects editing capability loss", async ({ page }) => {
+  const api = await fixture(page);
+  let requests = 0;
+  await page.route("**/cast/discovery", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({
+    enabled: true, state: "failed", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: 0, unresolvedCount: 0,
+    firstGap: { turnNumber: 1, jobId: candidateId, status: "failed", diagnosticCode: "provider_failed" }
+  }) }));
+  await page.route(`**/cast/discovery/${candidateId}/retry`, (route) => {
+    requests++;
+    return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ code: "cast_revision_conflict",
+      error: "CampaignCastError", message: "Conflict", correlationId: "fixture", details: {} }) });
+  });
+  await open(page);
+  const dialog = page.locator("#campaignCastDialog"), retry = dialog.getByRole("button", { name: "Retry character tracking", exact: true });
+  await retry.click(); await expect(retry).toBeDisabled();
+  await expect(dialog).toContainText("Refresh characters before retrying");
+  if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/retry-conflict-desktop.png`, fullPage: true });
+  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await expect(retry).toBeEnabled();
+  api.disable();
+  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click(); await expect(retry).toBeDisabled();
+  expect(requests).toBe(1);
+});
+
+test("legacy retries character discovery only and retains the request key after a recovery failure", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await fixture(page);
+  let queued = false;
+  const retries: any[] = [], storyWrites: string[] = [];
+  page.on("request", (request) => { if (request.method() === "POST" && !request.url().includes("/cast/")) storyWrites.push(request.url()); });
+  await page.route(`**/cast/discovery`, (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify({
+    enabled: true, state: queued ? "catching_up" : "failed", activeTurnNumber: 1, coverageStartTurn: 1, trackedThroughTurn: 0, unresolvedCount: 0,
+    firstGap: { turnNumber: 1, jobId: candidateId, status: queued ? "queued" : "failed", diagnosticCode: queued ? null : "admission_unavailable" }
+  }) }));
+  await page.route(`**/cast/discovery/${candidateId}/retry`, (route) => {
+    retries.push(route.request().postDataJSON());
+    if (retries.length === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "cast_discovery_unavailable", error: "CampaignCastError", message: "Unavailable", correlationId: "fixture", details: {} }) });
+    queued = true;
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ jobId: candidateId, retryGeneration: 1 }) });
+  });
+  await open(page);
+  const dialog = page.locator("#campaignCastDialog"), retry = dialog.getByRole("button", { name: "Retry character tracking", exact: true });
+  await expect(dialog).toContainText("Your story is saved");
+  await retry.click(); await expect(dialog).toContainText("Check the text provider settings");
+  if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/retry-recovery-390.png`, fullPage: true });
+  await retry.click(); await expect(dialog).toContainText("Character tracking is catching up");
+  expect(retries).toHaveLength(2); expect(retries[0]).toEqual(retries[1]);
+  expect(retries[0]).toMatchObject({ expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 } });
+  expect(storyWrites).toEqual([]);
+  await expect(retry).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.locator("#storyArea")).toContainText("Mara waits at the gate");
+});
+
 async function fixture(page: Page) {
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },

@@ -167,6 +167,31 @@ export function createLegacyCastPanel(options: {
         : `Tracking starts at turn ${discovery.coverageStartTurn}; no turns in this range are complete yet.`);
       if (discovery.unresolvedCount) status(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
       if (discovery.unresolvedCount) dialog.append(button("Review character matches", () => { void loadCandidates(); }));
+      if (discovery.state === "failed" && discovery.firstGap?.diagnosticCode === "source_requires_manual_scan") {
+        status("This turn is too large for automatic character tracking. It needs a history scan.");
+      } else if (discovery.enabled && discovery.state === "failed" && discovery.firstGap?.jobId) {
+        const jobId = discovery.firstGap.jobId, token = epoch;
+        const request = { expectedCastRevision: list!.revision, expectedBoundary: list!.boundary, idempotencyKey: crypto.randomUUID() };
+        const feedback = node("p"); feedback.setAttribute("role", "status");
+        const retry = button("Retry character tracking", () => { void submitRetry(); }, !enabled || options.generationActive());
+        async function submitRetry() {
+          if (!current(token) || !enabled || options.generationActive() || retry.disabled) return;
+          retry.disabled = true; feedback.textContent = "Preparing character tracking retry…";
+          try {
+            await options.api.retryDiscovery(campaign, jobId, request);
+            if (current(token)) await loadRoster();
+          } catch (error) {
+            if (!current(token)) return;
+            const code = (error as { statusCode?: number }).statusCode;
+            feedback.textContent = code === 409
+              ? "The story or cast changed, or generation is active. Refresh characters before retrying."
+              : code === 503 ? "Character tracking could not restart. Check the text provider settings and tracking availability, then try again. Your story is saved."
+                : "Could not confirm the character tracking retry. Try again to check the same request. Your story is saved.";
+            retry.disabled = code === 409 || !enabled || options.generationActive();
+          }
+        }
+        dialog.append(retry, feedback);
+      }
     }
     dialog.append(button("Refresh characters", () => { void loadRoster(); }));
     const controls = node("form"); controls.className = "cast-toolbar";

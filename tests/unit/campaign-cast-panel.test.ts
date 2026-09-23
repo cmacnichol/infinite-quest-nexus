@@ -9,7 +9,7 @@ describe("legacy cast panel", () => {
     const person = { id: "11111111-1111-4111-8111-111111111111", name: "<img src=x onerror=alert(1)>", aliases: [],
       origin: { kind: "manual" as const }, profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 };
     const authority = { revision: 1, boundary: { turnNumber: 0, timelineRevision: 0 }, capabilities: { castEditing: true } };
-    const api = { candidates: async () => ({ revision: 1, boundary: authority.boundary, candidates: [], nextCursor: null }),
+    const api = { retryDiscovery: async () => { throw new Error("not used"); }, candidates: async () => ({ revision: 1, boundary: authority.boundary, candidates: [], nextCursor: null }),
       resolveCandidate: async () => { throw new Error("not used"); },
       discoveryStatus: async () => ({ enabled: true, state: "catching_up" as const, activeTurnNumber: 3,
       coverageStartTurn: 2, trackedThroughTurn: 2, unresolvedCount: 1,

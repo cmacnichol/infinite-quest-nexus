@@ -2,7 +2,17 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: explicit retry persistence
+## Latest checkpoint: Retry API and legacy recovery control
+
+`POST /api/v1/campaigns/:campaignId/cast/discovery/:jobId/retry` now accepts the cast revision, current boundary, and idempotency key. The application validates the request and the runtime uses the guarded persistence operation. Existing frozen admissions are reused. An admission-unavailable job first passes a rolled-back validation transaction, then prepares the campaign's selected/default text provider outside the transaction and rechecks all guards before queuing. Provider preparation failures return a sanitized recovery error and retain the failed job. API and combined runtime roles receive these collaborators explicitly.
+
+Legacy Characters now exposes **Retry character tracking** for eligible failed jobs. It retains the request key after uncertain/recovery failures, requires refresh after a conflict, disables writes during generation or capability loss, and never posts to story generation. Oversized sources show a history-scan explanation instead of an ineffective automatic retry. The button refreshes tracking status after acceptance; no automatic retry loop is introduced.
+
+Verification: initial API and browser regressions failed before wiring. **4,384 unit tests passed (348 files; 44 existing skips), 79 PostgreSQL tests passed (five cast suites), and 10 legacy browser tests passed**. The PostgreSQL test uses a single-connection pool to prove provider preparation does not retain a transaction connection; provider failure and source races leave retry generation zero. Repository/TypeScript and whitespace checks passed after correcting an exact-optional-property composition error. Review found no actionable issue. Browser plugin was unavailable, so repository Playwright was used. Screenshots `.tmp/campaign-cast/retry-screenshots/retry-{recovery-390,conflict-desktop}.png` were inspected with no clipped controls. Logs: `.tmp/campaign-cast/retry-{api-red,api-green,api-integration,api-unit,api-check,browser-red,browser-green}.log`. No live provider, production data, or deployment changed.
+
+Shared provider concurrency and the final phase-04 acceptance audit remain before phases 05–06. Discovery remains default off.
+
+## Explicit retry persistence
 
 Migration `0108_campaign_cast_discovery_retry` adds a retry generation and scoped idempotency receipts. The internal `retryFailed` operation locks campaign then job, validates current source, expected cast/boundary, capability, and active-generation exclusion, and atomically queues one retry. Concurrent repeated clicks return the same generation. Completed chunks, receipts, parsed checkpoints, and prior physical accounting remain intact. Retries without a parsed checkpoint recapture current identities. A replacement frozen admission can be supplied by a runtime caller only after preparation outside the transaction; admission-unavailable jobs otherwise reject retry.
 
@@ -84,11 +94,11 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 
 ## Remaining implementation
 
-1. Finish failed-discovery retry controls using the verified persistence foundation above. Candidate listing/resolution, forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0108 for further additive schema changes.
+1. Retry persistence, admission recovery, API, and legacy controls are implemented above. Candidate listing/resolution, forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0108 for further additive schema changes.
 2. Frozen preparation, provider composition, and the worker lane are wired below. Implement shared provider concurrency; the two-dispatch ceiling across preset fallback and logical retries is verified.
 3. Pinned-world playable-character selection and bounded identity hints are implemented above. Atomic accepted-turn enqueue, forward enrollment, and contiguous coverage are also implemented.
 4. Same-campaign lifecycle reconciliation and branch/transfer forward enrollment are implemented. Copied authority does not claim historical extraction coverage.
-5. Retry API and legacy UI, then complete phase-04 PostgreSQL and browser acceptance gates. Status and candidate-resolution flows have passed the scoped checks below.
+5. Complete the phase-04 requirement-by-requirement PostgreSQL and browser acceptance audit. Retry, status, and candidate-resolution flows have passed the scoped checks above.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
 
 Do not mark phase 04 complete or claim pin/ignore already affects generation. Existing plans remain authoritative; this checkpoint only completes an initial part of task 1 and registers the future provider operation.

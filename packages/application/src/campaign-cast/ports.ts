@@ -14,7 +14,8 @@ export interface CampaignCastWritePort {
 
 export class CampaignCastError extends Error {
   constructor(readonly code: "cast_not_found" | "cast_revision_conflict" | "cast_generation_active"
-    | "cast_idempotency_conflict" | "cast_invalid_request" | "cast_editing_disabled" | "cast_protagonist_read_only") {
+    | "cast_idempotency_conflict" | "cast_invalid_request" | "cast_editing_disabled" | "cast_protagonist_read_only"
+    | "cast_discovery_disabled" | "cast_discovery_admission_required" | "cast_discovery_unavailable") {
     super(code.replaceAll("_", " "));
   }
 }

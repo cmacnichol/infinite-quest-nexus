@@ -144,7 +144,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
       const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), request = retryCastDiscoverySchema.parse(rawRequest);
       return withTransaction(pool, async (client) => {
         const cast = await initializeCastWithClient(client, scope);
-        if (!enabled()) throw new CampaignCastError("cast_editing_disabled");
+        if (!enabled()) throw new CampaignCastError("cast_discovery_disabled");
         const job = (await client.query("SELECT * FROM campaign_cast_discovery_jobs WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3 FOR UPDATE",
           [id, scope.campaignId, scope.ownerUserId])).rows[0];
         if (!job) throw new CampaignCastError("cast_not_found");
@@ -166,7 +166,7 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
           AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
         [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
         if (!job.chunks.length || job.chunk_ordinal >= job.chunks.length) throw new CampaignCastError("cast_invalid_request");
-        if (job.execution_snapshot.unavailable && !replacement) throw new CampaignCastError("cast_invalid_request");
+        if (job.execution_snapshot.unavailable && !replacement) throw new CampaignCastError("cast_discovery_admission_required");
         const execution = readExecution(replacement ?? job.execution_snapshot);
         const generation = job.retry_generation + 1;
         await client.query(`UPDATE campaign_cast_discovery_jobs SET status='queued',attempt=0,retry_generation=$2,

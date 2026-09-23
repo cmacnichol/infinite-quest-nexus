@@ -20,7 +20,7 @@ import type { RuntimeTextExecution } from "../../services/runtime/src/provider-c
 import { createProviderResponseFormatCapabilities } from "../../services/runtime/src/provider-response-format-capabilities.js";
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
-import { createWorkerCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
+import { createApiCampaignCastApplication, createWorkerCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 
@@ -56,6 +56,50 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it.each(["provider failure", "source race"])("leaves failed discovery intact on retry admission %s", async (mode) => {
+    const f = await fixture();
+    const id = (await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client,
+      { scope: f.scope, turnId: f.turnIds[0]!, enabled: true, admissionUnavailable: true })))!;
+    const application = createApiCampaignCastApplication(pool, { castEditingEnabled: true, castDiscoveryEnabled: true }, {
+      resolution: { async resolveDirect() { return { status: "resolved", providerProfileId: f.execution.providerProfileId }; } },
+      execution: { async text() { return { id: f.execution.providerProfileId }; } },
+      async prepareCastDiscoveryExecution() {
+        if (mode === "provider failure") throw new Error("PRIVATE_PROVIDER_DIAGNOSTIC");
+        await pool.query("UPDATE turns SET narration='Changed source.' WHERE id=$1", [f.turnIds[0]]);
+        return f.execution;
+      }
+    } as never);
+    await expect(application.retryDiscovery(f.scope, id, { expectedCastRevision: 0,
+      expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "recovery" }))
+      .rejects.toMatchObject({ code: mode === "provider failure" ? "cast_discovery_unavailable" : "cast_revision_conflict" });
+    expect((await pool.query("SELECT status,retry_generation FROM campaign_cast_discovery_jobs WHERE id=$1", [id])).rows[0])
+      .toEqual({ status: "failed", retry_generation: 0 });
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_discovery_retries WHERE job_id=$1", [id])).rows[0].n).toBe(0);
+  });
+  it("reprepares failed admission outside the retry transaction through the owner-bound API", async () => {
+    const f = await fixture();
+    const jobId = (await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client,
+      { scope: f.scope, turnId: f.turnIds[0]!, enabled: true, admissionUnavailable: true })))!;
+    const single = createDatabasePool(process.env.TEST_DATABASE_URL!, 1);
+    let preparations = 0;
+    const providers = { resolution: { async resolveDirect(input: unknown) {
+      expect(input).toMatchObject({ ownerUserId, providerRole: "text" }); return { status: "resolved", providerProfileId: f.execution.providerProfileId };
+    } }, execution: { async text() { return { id: f.execution.providerProfileId }; } },
+      async prepareCastDiscoveryExecution() { preparations++; await single.query("SELECT 1"); return f.execution; } };
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(single,
+      { castEditingEnabled: true, castDiscoveryEnabled: true }, providers as never), enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const url = `/api/v1/campaigns/${f.scope.campaignId}/cast/discovery/${jobId}/retry`;
+      const payload = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "retry-http" };
+      expect((await app.inject({ method: "POST", url, payload: { ...payload, ownerUserId: randomUUID() } })).statusCode).toBe(422);
+      const response = await app.inject({ method: "POST", url, payload }); expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ jobId, retryGeneration: 1 });
+      expect((await app.inject({ method: "POST", url, payload })).json()).toEqual(response.json());
+      expect(preparations).toBe(1);
+      expect((await createCastDiscoveryJobRepository(pool, () => true).claim("http-retry"))?.execution).toEqual(f.execution);
+    } finally { await app.close(); await single.end(); }
+  });
   it("preserves completed chunks and parsed output through an explicit retry", async () => {
     const f = await fixture();
     await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], "Mara waits. ".repeat(2000)]);
@@ -77,10 +121,10 @@ describe("durable cast discovery", () => {
     const id = (await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client,
       { scope: f.scope, turnId: f.turnIds[0]!, enabled: true, admissionUnavailable: true })))!;
     const request = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "retry" };
-    await expect(createCastDiscoveryJobRepository(pool, () => false).retryFailed(f.scope, id, request, f.execution)).rejects.toMatchObject({ code: "cast_editing_disabled" });
+    await expect(createCastDiscoveryJobRepository(pool, () => false).retryFailed(f.scope, id, request, f.execution)).rejects.toMatchObject({ code: "cast_discovery_disabled" });
     await expect(jobs.retryFailed({ ...f.scope, ownerUserId: randomUUID() }, id, request, f.execution)).rejects.toMatchObject({ code: "cast_not_found" });
     await expect(jobs.retryFailed(f.scope, id, { ...request, expectedCastRevision: 99 }, f.execution)).rejects.toMatchObject({ code: "cast_revision_conflict" });
-    await expect(jobs.retryFailed(f.scope, id, request)).rejects.toMatchObject({ code: "cast_invalid_request" });
+    await expect(jobs.retryFailed(f.scope, id, request)).rejects.toMatchObject({ code: "cast_discovery_admission_required" });
     await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
       [f.execution.providerProfileId, ownerUserId, randomUUID()]);
     const generation = (await pool.query(`INSERT INTO generation_jobs(owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status)
