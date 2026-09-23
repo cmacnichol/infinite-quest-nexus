@@ -63,13 +63,15 @@ describe("cast discovery runtime execution", () => {
     expect(saved.admission?.frozenResponseContracts.contracts["cast_discovery:nonstream"]).toBeDefined();
     expect(f.execution.execute).not.toHaveBeenCalled(); expect(f.ports.resolvePreset).toHaveBeenCalledTimes(1);
   });
-  it("dispatches checked frozen bytes with a discovery reservation and bounded fiction input", async () => {
+  it.each([0, 2])("dispatches checked frozen bytes with retry generation %i and bounded fiction input", async (retryGeneration) => {
     const f = await claim();
+    f.value.retryGeneration = retryGeneration;
     const execute = vi.fn<PreparedAuthoringTextExecutor["execute"]>(async () => result);
     const extractor = createCastDiscoveryExtractor({ executor: { execute } });
     expect(await extractor.extract(f.value)).toEqual({ version: 1, characters: [] });
     const call = execute.mock.calls[0]![0];
-    expect(call.logicalReservation).toEqual({ kind: "cast_discovery", ownerUserId: id, jobId: id, chunkOrdinal: 0, claimAttempt: 1, leaseToken: id });
+    expect(call.logicalReservation).toEqual({ kind: "cast_discovery", ownerUserId: id, jobId: id, chunkOrdinal: 0, claimAttempt: 1,
+      ...(retryGeneration ? { retryGeneration } : {}), leaseToken: id });
     expect(call.operation).toBe("cast_discovery"); expect(call.invocationKey).toBe("cast_discovery:nonstream");
     expect(call.preparedRequest?.body).toContain('"response_format"');
     expect(call.preparedRequest?.body).toContain("Mara waits.");

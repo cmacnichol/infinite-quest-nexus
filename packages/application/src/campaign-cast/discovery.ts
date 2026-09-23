@@ -8,7 +8,7 @@ export type CastDiscoveryExecution = { providerProfileId: string; plan: TextExec
 };
 export type CastDiscoveryClaim = {
   id: string; scope: CastScope; source: CastDiscoverySource; chunkOrdinal: number; chunkCount: number;
-  execution: CastDiscoveryExecution; attempt: number; leaseToken: string; output: CastDiscoveryOutput | null;
+  execution: CastDiscoveryExecution; attempt: number; retryGeneration?: number; leaseToken: string; output: CastDiscoveryOutput | null;
   identities: CastDiscoveryIdentitySnapshot;
 };
 export type CastDiscoveryDiagnostic = "provider_timeout" | "provider_failed" | "invalid_output" | "source_requires_manual_scan" | "publication_failed";

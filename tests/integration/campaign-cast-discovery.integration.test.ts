@@ -56,6 +56,76 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("preserves completed chunks and parsed output through an explicit retry", async () => {
+    const f = await fixture();
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], "Mara waits. ".repeat(2000)]);
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), first = (await jobs.claim("first"))!;
+    await jobs.checkpoint(first, emptyOutput); expect(await jobs.publish(first)).toBe("next_chunk");
+    const second = (await jobs.claim("second"))!; await jobs.checkpoint(second, emptyOutput);
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET status='failed',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [first.id]);
+    const cast = await createPostgresCampaignCastRepository(pool).current(f.scope);
+    await jobs.retryFailed(f.scope, first.id, { expectedCastRevision: cast.revision, expectedBoundary: cast.boundary, idempotencyKey: "retry-publication" });
+    const retry = (await jobs.claim("recover"))!;
+    expect(retry).toMatchObject({ chunkOrdinal: 1, output: emptyOutput, retryGeneration: 1, attempt: 0, identities: second.identities });
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_discovery_receipts WHERE job_id=$1", [first.id])).rows[0].n).toBe(1);
+    expect(["next_chunk", "complete"]).toContain(await jobs.publish(retry));
+    expect((await pool.query("SELECT count(*)::integer n FROM prepared_text_physical_attempts WHERE logical_reservation->>'jobId'=$1", [first.id])).rows[0].n).toBe(0);
+  });
+  it("fences disabled, foreign, stale and active-generation retries and requires prepared admission", async () => {
+    const f = await fixture(), jobs = createCastDiscoveryJobRepository(pool, () => true);
+    const id = (await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client,
+      { scope: f.scope, turnId: f.turnIds[0]!, enabled: true, admissionUnavailable: true })))!;
+    const request = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "retry" };
+    await expect(createCastDiscoveryJobRepository(pool, () => false).retryFailed(f.scope, id, request, f.execution)).rejects.toMatchObject({ code: "cast_editing_disabled" });
+    await expect(jobs.retryFailed({ ...f.scope, ownerUserId: randomUUID() }, id, request, f.execution)).rejects.toMatchObject({ code: "cast_not_found" });
+    await expect(jobs.retryFailed(f.scope, id, { ...request, expectedCastRevision: 99 }, f.execution)).rejects.toMatchObject({ code: "cast_revision_conflict" });
+    await expect(jobs.retryFailed(f.scope, id, request)).rejects.toMatchObject({ code: "cast_invalid_request" });
+    await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
+      [f.execution.providerProfileId, ownerUserId, randomUUID()]);
+    const generation = (await pool.query(`INSERT INTO generation_jobs(owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status)
+      VALUES($1,$2,$3,$4,2,'Continue','queued') RETURNING id`, [ownerUserId, f.scope.campaignId, f.execution.providerProfileId, randomUUID()])).rows[0];
+    await expect(jobs.retryFailed(f.scope, id, request, f.execution)).rejects.toMatchObject({ code: "cast_generation_active" });
+    await pool.query("UPDATE generation_jobs SET status='failed' WHERE id=$1", [generation.id]);
+    expect(await jobs.retryFailed(f.scope, id, request, f.execution)).toEqual({ jobId: id, retryGeneration: 1 });
+    const recovered = (await jobs.claim("reprepared"))!; expect(recovered.execution).toEqual(f.execution);
+    await pool.query("UPDATE turns SET narration='Changed narration.' WHERE id=$1", [f.turnIds[0]]);
+    await expect(jobs.retryFailed(f.scope, id, request, f.execution)).rejects.toMatchObject({ code: "cast_revision_conflict" });
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_discovery_retries WHERE job_id=$1", [id])).rows[0].n).toBe(1);
+  });
+  it("retries failed discovery idempotently with a fresh paid-call allowance and retains prior accounting", async () => {
+    const f = await fixture(); await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), first = (await jobs.claim("first"))!;
+    const accounting = createPostgresPreparedTextAttemptRepository(pool);
+    const reservation = { kind: "cast_discovery" as const, ownerUserId, jobId: first.id, chunkOrdinal: 0, claimAttempt: first.attempt, leaseToken: first.leaseToken };
+    const input = { logicalReservation: reservation, planProvenance: { planHash: f.execution.plan.planHash, preset: null },
+      candidateOrdinal: 0, candidate: { modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }, request: { body: "{}", payloadHash: "a".repeat(64) } };
+    for (const candidateOrdinal of [0, 1]) {
+      const attempt = (await accounting.reserve({ ...input, candidateOrdinal }))!;
+      expect(await accounting.markDispatched(reservation, attempt.id, input.request.payloadHash)).not.toBeNull();
+    }
+    await jobs.fail(first, "provider_failed");
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET available_at=clock_timestamp() WHERE id=$1", [first.id]);
+    const second = (await jobs.claim("second"))!; await jobs.fail(second, "provider_failed");
+    const request = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "explicit-retry" };
+    const results = await Promise.all([jobs.retryFailed(f.scope, first.id, request), jobs.retryFailed(f.scope, first.id, request)]);
+    expect(results[0]).toEqual({ jobId: first.id, retryGeneration: 1 }); expect(results[1]).toEqual(results[0]);
+    const retried = (await jobs.claim("user-retry"))!;
+    expect(retried).toMatchObject({ id: first.id, attempt: 1, chunkOrdinal: 0, retryGeneration: 1 });
+    expect(await jobs.retryFailed(f.scope, first.id, request)).toEqual(results[0]);
+    const nextReservation = { ...reservation, retryGeneration: 1, claimAttempt: retried.attempt, leaseToken: retried.leaseToken };
+    const paid = (await accounting.reserve({ ...input, logicalReservation: nextReservation }))!;
+    expect(paid).not.toBeNull();
+    expect(await accounting.markDispatched(nextReservation, paid.id, input.request.payloadHash)).not.toBeNull();
+    const secondPaid = (await accounting.reserve({ ...input, logicalReservation: nextReservation, candidateOrdinal: 1 }))!;
+    expect(await accounting.markDispatched(nextReservation, secondPaid.id, input.request.payloadHash)).not.toBeNull();
+    expect(await accounting.reserve({ ...input, logicalReservation: nextReservation, candidateOrdinal: 2 })).toBeNull();
+    expect(await accounting.reserve(input)).toBeNull();
+    expect((await pool.query("SELECT count(*)::integer n FROM prepared_text_physical_attempts WHERE logical_reservation->>'jobId'=$1 AND dispatched_at IS NOT NULL", [first.id])).rows[0].n).toBe(4);
+    await expect(jobs.retryFailed(f.scope, first.id, { ...request, expectedCastRevision: 99 })).rejects.toMatchObject({ code: "cast_idempotency_conflict" });
+    const migration = await readFile(resolve("database/migrations/0108_campaign_cast_discovery_retry.sql"), "utf8");
+    await expect(withTransaction(pool, (client) => client.query(migration.split("-- Down Migration")[1]!))).rejects.toThrow(/Retain cast retry generations/);
+  });
   it("captures pinned playable identities with fiction hints and preserves their world provenance", async () => {
     const f = await fixture();
     await pool.query("UPDATE world_versions SET content=$2 WHERE id=$1", [f.versionId, JSON.stringify({

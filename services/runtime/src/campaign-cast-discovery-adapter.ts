@@ -64,7 +64,7 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
         ownerUserId: claim.scope.ownerUserId, providerProfileId: claim.execution.providerProfileId, operation: "cast_discovery",
         invocationKey: "cast_discovery:nonstream", trustedOperationPrompt: CAST_DISCOVERY_SYSTEM_PROMPT, request, preparedRequest,
         logicalReservation: { kind: "cast_discovery", ownerUserId: claim.scope.ownerUserId, jobId: claim.id,
-          chunkOrdinal: claim.chunkOrdinal, claimAttempt: claim.attempt, leaseToken: claim.leaseToken } });
+          chunkOrdinal: claim.chunkOrdinal, claimAttempt: claim.attempt, ...(claim.retryGeneration ? { retryGeneration: claim.retryGeneration } : {}), leaseToken: claim.leaseToken } });
       if (result.outputLimited) return null;
       try { return JSON.parse(result.content) as unknown; } catch { return null; }
     } catch (error) {

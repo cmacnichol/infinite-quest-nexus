@@ -40,6 +40,11 @@ export const castDiscoveryIdentitySnapshotSchema = z.object({
 }).strict();
 export type CastDiscoveryIdentitySnapshot = z.infer<typeof castDiscoveryIdentitySnapshotSchema>;
 
+export const retryCastDiscoverySchema = z.object(castWriteBase).strict();
+export const castDiscoveryRetryResultSchema = z.object({ jobId: z.uuid(), retryGeneration: z.number().int().positive() }).strict();
+export type RetryCastDiscovery = z.infer<typeof retryCastDiscoverySchema>;
+export type CastDiscoveryRetryResult = z.infer<typeof castDiscoveryRetryResultSchema>;
+
 export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), limit: z.coerce.number().int().min(1).max(50).default(20) }).strict();
 export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.string().min(1).max(100), proposal: castDiscoveryCandidateSchema,
   source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative() }).strict() }).strict();

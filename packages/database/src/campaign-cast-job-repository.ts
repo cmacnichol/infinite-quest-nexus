@@ -9,6 +9,9 @@ import { buildCastDiscoverySource, chunkCastDiscoverySource } from "../../domain
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 import { applyValidatedCastDiscovery, captureCastDiscoveryIdentities } from "./campaign-cast-discovery-publication.js";
+import { initializeCastWithClient } from "./campaign-cast-repository.js";
+import { CampaignCastError } from "../../application/src/campaign-cast/ports.js";
+import { retryCastDiscoverySchema, castDiscoveryRetryResultSchema, type RetryCastDiscovery } from "../../contracts/src/campaign-cast-discovery.js";
 
 import type { CastDiscoveryClaim, CastDiscoveryExecution } from "../../application/src/campaign-cast/discovery.js";
 export type { CastDiscoveryClaim, CastDiscoveryExecution } from "../../application/src/campaign-cast/discovery.js";
@@ -108,7 +111,7 @@ function claimFromRow(value: unknown): CastDiscoveryClaim {
   const ordinal = z.number().int().nonnegative();
   const row = z.object({ id: z.uuid(), campaign_id: z.uuid(), owner_user_id: z.uuid(), turn_id: z.uuid(), turn_number: ordinal,
     narration_revision: ordinal, timeline_revision: ordinal, source_hash: z.string(), source: castDiscoverySourceSchema,
-    chunks: z.array(castDiscoverySourceSchema).min(1).max(32), chunk_ordinal: ordinal, attempt: ordinal.max(2),
+    chunks: z.array(castDiscoverySourceSchema).min(1).max(32), chunk_ordinal: ordinal, attempt: ordinal.max(2), retry_generation: ordinal,
     lease_token: z.uuid(), checkpoint: castDiscoveryOutputSchema.nullable(), execution_snapshot: z.unknown(), identity_snapshot: castDiscoveryIdentitySnapshotSchema }).parse(value);
   const chunks = row.chunks;
   const bound = (source: CastDiscoverySource) => source.turnId === row.turn_id && source.turnNumber === row.turn_number
@@ -122,7 +125,7 @@ function claimFromRow(value: unknown): CastDiscoveryClaim {
   if (!chunks[row.chunk_ordinal]) throw new Error("Invalid discovery chunk checkpoint.");
   return { id: z.uuid().parse(row.id), scope: castScopeSchema.parse({ ownerUserId: row.owner_user_id, campaignId: row.campaign_id }),
     source: chunks[row.chunk_ordinal]!, chunkOrdinal: row.chunk_ordinal, chunkCount: chunks.length, execution: readExecution(row.execution_snapshot),
-    attempt: row.attempt, leaseToken: z.uuid().parse(row.lease_token), output: row.checkpoint === null ? null : castDiscoveryOutputSchema.parse(row.checkpoint), identities: row.identity_snapshot };
+    attempt: row.attempt, retryGeneration: row.retry_generation, leaseToken: z.uuid().parse(row.lease_token), output: row.checkpoint === null ? null : castDiscoveryOutputSchema.parse(row.checkpoint), identities: row.identity_snapshot };
 }
 
 async function lockLiveClaim(client: DatabaseClient, claim: CastDiscoveryClaim) {
@@ -136,6 +139,45 @@ async function lockLiveClaim(client: DatabaseClient, claim: CastDiscoveryClaim) 
 
 export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: () => boolean) {
   return {
+    /** Explicit user retry. Any replacement admission must be prepared before this transaction. */
+    async retryFailed(rawScope: CastScope, rawId: string, rawRequest: RetryCastDiscovery, replacement?: CastDiscoveryExecution) {
+      const scope = castScopeSchema.parse(rawScope), id = z.uuid().parse(rawId), request = retryCastDiscoverySchema.parse(rawRequest);
+      return withTransaction(pool, async (client) => {
+        const cast = await initializeCastWithClient(client, scope);
+        if (!enabled()) throw new CampaignCastError("cast_editing_disabled");
+        const job = (await client.query("SELECT * FROM campaign_cast_discovery_jobs WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3 FOR UPDATE",
+          [id, scope.campaignId, scope.ownerUserId])).rows[0];
+        if (!job) throw new CampaignCastError("cast_not_found");
+        const turn = (await client.query("SELECT turn_number,correction_revision,effective_narration FROM effective_turn_narrations WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3",
+          [job.turn_id, scope.campaignId, scope.ownerUserId])).rows[0];
+        if (!turn || job.status === "cancelled" || job.timeline_revision !== cast.boundary.timelineRevision
+          || job.turn_number > cast.boundary.turnNumber || turn.turn_number !== job.turn_number || turn.correction_revision !== job.narration_revision
+          || sha256(turn.effective_narration) !== job.source_hash) throw new CampaignCastError("cast_revision_conflict");
+        const requestHash = sha256(stableStringify({ id, request }));
+        const receipt = (await client.query("SELECT request_hash,retry_generation FROM campaign_cast_discovery_retries WHERE job_id=$1 AND idempotency_key=$2",
+          [id, request.idempotencyKey])).rows[0];
+        if (receipt) {
+          if (receipt.request_hash !== requestHash) throw new CampaignCastError("cast_idempotency_conflict");
+          return castDiscoveryRetryResultSchema.parse({ jobId: id, retryGeneration: receipt.retry_generation });
+        }
+        if (job.status !== "failed" || cast.revision !== request.expectedCastRevision
+          || stableStringify(cast.boundary) !== stableStringify(request.expectedBoundary)) throw new CampaignCastError("cast_revision_conflict");
+        if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
+          AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
+        [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
+        if (!job.chunks.length || job.chunk_ordinal >= job.chunks.length) throw new CampaignCastError("cast_invalid_request");
+        if (job.execution_snapshot.unavailable && !replacement) throw new CampaignCastError("cast_invalid_request");
+        const execution = readExecution(replacement ?? job.execution_snapshot);
+        const generation = job.retry_generation + 1;
+        await client.query(`UPDATE campaign_cast_discovery_jobs SET status='queued',attempt=0,retry_generation=$2,
+          execution_snapshot=$3,identity_snapshot=CASE WHEN checkpoint IS NULL THEN NULL ELSE identity_snapshot END,
+          lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,diagnostic_code=NULL,available_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`,
+        [id, generation, JSON.stringify(execution)]);
+        await client.query(`INSERT INTO campaign_cast_discovery_retries(job_id,campaign_id,owner_user_id,idempotency_key,request_hash,retry_generation)
+          VALUES($1,$2,$3,$4,$5,$6)`, [id, scope.campaignId, scope.ownerUserId, request.idempotencyKey, requestHash, generation]);
+        return castDiscoveryRetryResultSchema.parse({ jobId: id, retryGeneration: generation });
+      });
+    },
     async claim(workerId: string): Promise<CastDiscoveryClaim | null> {
       if (!enabled()) return null;
       const worker = z.string().trim().min(1).max(200).parse(workerId);

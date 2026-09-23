@@ -40,7 +40,7 @@ type CampaignCostAttribution = Readonly<{
 }>;
 
 function reservationKey(value: LogicalReservation): string {
-  if (value.kind === "cast_discovery") return `${value.jobId}:${value.chunkOrdinal}:${value.claimAttempt}`;
+  if (value.kind === "cast_discovery") return `${value.jobId}:${value.chunkOrdinal}:${value.claimAttempt}${value.retryGeneration ? `:retry:${value.retryGeneration}` : ""}`;
   if (value.kind === "story") return `${value.generationJobId}:${value.invocationId}`;
   if (value.kind === "authoring") return `${value.jobId}:${value.stageId}:${value.jobGeneration}:${value.stageGeneration}:${value.operation}`;
   if (value.kind === "illustration") return `${value.promptJobId}:${value.claimAttempt}:${value.operation}`;
@@ -122,8 +122,9 @@ async function hasDiscoveryDispatchBudget(client: DatabaseClient, value: Logical
   if (value.kind !== "cast_discovery") return true;
   const row = (await client.query(`SELECT count(*)::integer AS dispatched FROM prepared_text_physical_attempts
     WHERE owner_user_id=$1 AND logical_kind='cast_discovery' AND logical_reservation->>'jobId'=$2
-      AND logical_reservation->>'chunkOrdinal'=$3 AND dispatched_at IS NOT NULL`,
-  [value.ownerUserId, value.jobId, String(value.chunkOrdinal)])).rows[0];
+      AND logical_reservation->>'chunkOrdinal'=$3 AND dispatched_at IS NOT NULL
+      AND COALESCE(logical_reservation->>'retryGeneration','0')=$4`,
+  [value.ownerUserId, value.jobId, String(value.chunkOrdinal), String(value.retryGeneration ?? 0)])).rows[0];
   return row.dispatched < 2;
 }
 
@@ -141,8 +142,8 @@ async function hasLiveReservation(client: DatabaseClient, value: LogicalReservat
       WHERE job.id=$1 AND job.owner_user_id=$2 AND job.status='running' AND job.chunk_ordinal=$3 AND job.attempt=$4
         AND job.lease_token=$5 AND job.lease_expires_at>clock_timestamp() AND job.checkpoint IS NULL
         AND job.timeline_revision=state.timeline_revision AND job.narration_revision=source.correction_revision
-        AND job.turn_number<=$6 FOR UPDATE OF job`,
-    [value.jobId, value.ownerUserId, value.chunkOrdinal, value.claimAttempt, value.leaseToken, campaign.active_turn_number]);
+        AND job.turn_number<=$6 AND job.retry_generation=$7 FOR UPDATE OF job`,
+    [value.jobId, value.ownerUserId, value.chunkOrdinal, value.claimAttempt, value.leaseToken, campaign.active_turn_number, value.retryGeneration ?? 0]);
     return Boolean(result.rows[0]);
   }
   if (value.kind === "story") {

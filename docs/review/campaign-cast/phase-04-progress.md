@@ -2,7 +2,17 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: branch and transfer enrollment
+## Latest checkpoint: explicit retry persistence
+
+Migration `0108_campaign_cast_discovery_retry` adds a retry generation and scoped idempotency receipts. The internal `retryFailed` operation locks campaign then job, validates current source, expected cast/boundary, capability, and active-generation exclusion, and atomically queues one retry. Concurrent repeated clicks return the same generation. Completed chunks, receipts, parsed checkpoints, and prior physical accounting remain intact. Retries without a parsed checkpoint recapture current identities. A replacement frozen admission can be supplied by a runtime caller only after preparation outside the transaction; admission-unavailable jobs otherwise reject retry.
+
+Physical reservations and dispatch counts now distinguish explicit retry generations while preserving the legacy generation-zero reservation key. Each new user-authorized generation allows two dispatches per chunk; old leases cannot use it. Operational retry receipts are excluded from portable archives. Down migration refuses to remove nonzero generations while retry jobs remain; operator rollback should disable discovery and retain accounting.
+
+Verification: the initial explicit-retry regression failed before implementation. **4,382 unit tests passed (348 files; 44 existing skips)** and **159 PostgreSQL tests passed (nine files; 10 Windows secure-filesystem skips)**, covering cast, migrations, generation acceptance, adapter matrix, and System Archives. The tests include concurrent idempotency, fresh two-call limits with retained prior rows, checkpoint recovery without payment, stale/foreign/disabled/generation guards, prepared admission, and guarded down migration. Bounded review found no actionable issue. Logs: `.tmp/campaign-cast/retry-{red,green,integration,unit,check}.log`.
+
+This is persistence groundwork, not a released Retry control. API/application orchestration, runtime admission recovery, distinct disabled/recovery diagnostics, and the legacy button still need wiring and browser verification. No live-provider, production-data, or deployment change occurred.
+
+## Branch and transfer enrollment
 
 Branches and world transfers of an enrolled campaign now inherit forward enrollment at `throughTurn + 1`. Copied character authority does not establish extraction coverage for earlier history. Discovery jobs, failures, leases, and pending proposals stay in the source campaign; a newly accepted destination turn uses its own normal admission. Unenrolled sources remain unenrolled until their first eligible accepted turn. This introduces no provider call or historical scan during copying and works within the existing branch/transfer transaction.
 
@@ -74,7 +84,7 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 
 ## Remaining implementation
 
-1. Finish failed-discovery retry controls. Candidate listing/resolution, forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0107 for further additive schema changes.
+1. Finish failed-discovery retry controls using the verified persistence foundation above. Candidate listing/resolution, forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0108 for further additive schema changes.
 2. Frozen preparation, provider composition, and the worker lane are wired below. Implement shared provider concurrency; the two-dispatch ceiling across preset fallback and logical retries is verified.
 3. Pinned-world playable-character selection and bounded identity hints are implemented above. Atomic accepted-turn enqueue, forward enrollment, and contiguous coverage are also implemented.
 4. Same-campaign lifecycle reconciliation and branch/transfer forward enrollment are implemented. Copied authority does not claim historical extraction coverage.
