@@ -35,6 +35,11 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   asset_references: "portable_authority",
   assets: "portable_authority",
   campaign_canonical_facts: "portable_authority",
+  campaign_cast_state: "portable_authority",
+  campaign_cast_characters: "portable_authority",
+  campaign_cast_events: "portable_authority",
+  campaign_cast_observations: "portable_authority",
+  campaign_cast_profiles: "rebuildable",
   campaign_character_profile_edits: "portable_authority",
   campaign_illustration_configs: "portable_authority",
   campaign_memory_configs: "portable_authority",
@@ -130,6 +135,22 @@ function sourceColumns(
  * migration schema, so adding a column requires an explicit portability ruling.
  */
 export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
+  campaign_cast_state: sourceColumns({
+    portable_exact: ["campaign_id", "revision", "timeline_revision"],
+    owner_remapped: ["owner_user_id"]
+  }),
+  campaign_cast_characters: sourceColumns({
+    portable_exact: ["id", "campaign_id", "origin", "world_version_id", "world_entity_id", "first_observed_turn", "created_at"],
+    owner_remapped: ["owner_user_id"]
+  }),
+  campaign_cast_events: sourceColumns({
+    portable_exact: ["id", "campaign_id", "sequence", "effective_turn_number", "timeline_revision", "idempotency_key", "request_hash", "payload", "receipt", "created_at"],
+    owner_remapped: ["owner_user_id"]
+  }),
+  campaign_cast_observations: sourceColumns({
+    portable_exact: ["id", "campaign_id", "character_id", "event_id", "sequence", "field", "value", "mode", "speaker_character_id", "evidence", "source_turn_id", "narration_revision", "source_hash", "world_version_id", "supersedes_observation_id", "created_at"],
+    owner_remapped: ["owner_user_id"]
+  }),
   activity_events: sourceColumns({
     portable_exact: ["id", "campaign_id", "event_type", "correlation_id", "created_at"],
     portable_sanitized: ["details"],

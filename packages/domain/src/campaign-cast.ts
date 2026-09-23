@@ -36,6 +36,8 @@ export function projectCastProfile(input: ProjectCastProfileInput): CastProfile 
   const observations = input.observations.map((value) => castObservationSchema.parse(value));
   const byId = new Map(observations.map((value) => [value.id, value]));
   if (byId.size !== observations.length) throw new Error("Duplicate cast observation ID.");
+  if (new Set(observations.map((value) => value.characterId)).size > 1) throw new Error("Invalid cast character scope or supersession.");
+  const sequences = new Map(observations.map((value, index) => [value.id, index]));
   const superseded = new Set<string>();
   for (const observation of observations) {
     validateCastFiction(observation.value);
@@ -43,7 +45,7 @@ export function projectCastProfile(input: ProjectCastProfileInput): CastProfile 
     const prior = byId.get(observation.supersedesObservationId);
     if (!prior || prior.id === observation.id || prior.characterId !== observation.characterId
       || prior.field !== observation.field || prior.mode !== "fact" || observation.mode !== "fact"
-      || compareEvidence(prior.evidence, observation.evidence) >= 0) {
+      || (compareEvidence(prior.evidence, observation.evidence) || sequences.get(prior.id)! - sequences.get(observation.id)!) >= 0) {
       throw new Error("Invalid cast observation supersession.");
     }
     superseded.add(prior.id);

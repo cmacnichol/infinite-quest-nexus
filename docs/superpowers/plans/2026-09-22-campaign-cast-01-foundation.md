@@ -44,8 +44,8 @@ Two characters with the same name must retain distinct IDs; explicit blank overr
 
 ## Task 1: strict contracts and pure projection
 
-- [ ] Add schemas for the shared types and bounded profile fields. Reject extra mutation keys, invalid UUIDs, unsupported fields, and mechanically contaminated fiction fields; do not silently strip meaningful invalid user input.
-- [ ] Write projection tests before implementation. Representative behavior:
+- [x] Add schemas for the shared types and bounded profile fields. Reject extra mutation keys, invalid UUIDs, unsupported fields, and mechanically contaminated fiction fields; do not silently strip meaningful invalid user input.
+- [x] Write projection tests before implementation. Representative behavior:
 
 ```ts
 expect(projectCastProfile({ observations: [], overrides: [
@@ -56,22 +56,22 @@ expect(projectCastProfile({ observations: [], overrides: [
 ] })).toEqual({ "appearance.description": "" });
 ```
 
-- [ ] Add source-ordered observations for the same field, a claim, and an explicit supersession. Assert claims never become facts and invalid supersession references fail before projection.
-- [ ] Run the two new unit suites; capture failure from missing behavior, then implement projection and validation and rerun to green.
-- [ ] Use deterministic ordering by effective source turn/revision, then recorded sequence; reject competing unsuperseded static attributes as unresolved rather than arbitrarily overwriting. Dynamic `state.*` and goals can advance from later supported observations. User overrides always win.
-- [ ] Commit the contract/domain slice after focused tests pass.
+- [x] Add source-ordered observations for the same field, a claim, and an explicit supersession. Assert claims never become facts and invalid supersession references fail before projection.
+- [x] Run the two new unit suites; capture failure from missing behavior, then implement projection and validation and rerun to green.
+- [x] Use deterministic ordering by effective source turn/revision, then recorded sequence; reject competing unsuperseded static attributes as unresolved rather than arbitrarily overwriting. Dynamic `state.*` and goals can advance from later supported observations. User overrides always win.
+- [x] Commit the contract/domain slice after focused tests pass.
 
 ## Task 2: relational storage and protagonist identity
 
-- [ ] Add `campaign_cast_state` (one row per owner/campaign, cast revision, timeline revision), `campaign_cast_characters` (UUID identity, origin, first effective boundary), `campaign_cast_events` (identity/profile/override/pin/ignore events), `campaign_cast_observations` (field values and evidence), and `campaign_cast_profiles` (rebuildable current projection).
-- [ ] Store user edits as events, not destructive updates to prior evidence. Store accepted-source hashes and narration correction revisions. A source change invalidates the corresponding observation revision.
-- [ ] Enforce composite foreign keys through `(owner_user_id, campaign_id)` for all children and through the same campaign for source turns and superseded observations. Add unique protagonist-per-campaign and world-origin-per-campaign constraints. Do not make names or aliases unique.
-- [ ] Index campaign + effective turn + event sequence, campaign + character ID, and source turn + narration revision. Add an idempotency key unique within campaign for event batches.
-- [ ] Build the protagonist identity lazily inside the first cast write/initialization transaction; link to the campaign, tolerate a null selected-character ID, and read effective profile from the existing protagonist path.
-- [ ] Write real-PostgreSQL cases for identical names, concurrent initialization, foreign source rejection, event-batch replay, and projection rebuild. A second initialization must return the same protagonist cast ID.
-- [ ] Run `corepack pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-repository.integration.test.ts`; capture RED, implement repository, rerun GREEN.
-- [ ] Classify identities/events/observations/state as `portable_authority`, profiles as `rebuildable`. Phase 02 must complete archive handlers before public writes are enabled.
-- [ ] Commit migration/repository changes separately from unrelated prompt or provider work.
+- [x] Add `campaign_cast_state` (one row per owner/campaign, cast revision, timeline revision), `campaign_cast_characters` (UUID identity, origin, first effective boundary), `campaign_cast_events` (identity/profile/override/pin/ignore events), `campaign_cast_observations` (field values and evidence), and `campaign_cast_profiles` (rebuildable current projection).
+- [x] Store user edits as events, not destructive updates to prior evidence. Store accepted-source hashes and narration correction revisions. A source change invalidates the corresponding observation revision.
+- [x] Enforce composite foreign keys through `(owner_user_id, campaign_id)` for all children and through the same campaign for source turns and superseded observations. Add unique protagonist-per-campaign and world-origin-per-campaign constraints. Do not make names or aliases unique.
+- [x] Index campaign + effective turn + event sequence, campaign + character ID, and source turn + narration revision. Add an idempotency key unique within campaign for event batches.
+- [x] Build the protagonist identity lazily inside the first cast write/initialization transaction; link to the campaign, tolerate a null selected-character ID, and read effective profile from the existing protagonist path.
+- [x] Write real-PostgreSQL cases for identical names, concurrent initialization, foreign source rejection, event-batch replay, and projection rebuild. A second initialization must return the same protagonist cast ID.
+- [x] Run `corepack pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-repository.integration.test.ts`; capture RED, implement repository, rerun GREEN.
+- [x] Classify identities/events/observations/state as `portable_authority`, profiles as `rebuildable`. Phase 02 must complete archive handlers before public writes are enabled.
+- [x] Commit migration/repository changes separately from unrelated prompt or provider work.
 
 ## Exit gate and rollback
 

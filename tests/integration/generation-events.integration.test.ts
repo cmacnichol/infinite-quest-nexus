@@ -676,7 +676,8 @@ integration("generation job notification delivery", () => {
           "0098_illustration_text_execution_snapshot",
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
-          "0101_durable_campaign_physical_attempt_costs"
+          "0101_durable_campaign_physical_attempt_costs",
+          "0102_campaign_cast"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

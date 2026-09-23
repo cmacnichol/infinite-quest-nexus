@@ -55,4 +55,13 @@ describe("campaign cast projection", () => {
   it("rejects duplicate observation IDs instead of hiding corrupt evidence", () => {
     expect(() => projectCastProfile({ observations: [observation(1, "blue eyes"), observation(1, "brown eyes")], overrides: [] })).toThrow(/duplicate/i);
   });
+  it("rejects mixed character inputs even when no supersession is requested", () => {
+    expect(() => projectCastProfile({ observations: [observation(1, "blue eyes"), observation(2, "blue eyes", { characterId: uuid(50) })], overrides: [] })).toThrow(/character/i);
+  });
+  it("orders same-source supersession by recorded sequence", () => {
+    const first = observation(1, "blue eyes");
+    const correction = observation(2, "brown eyes", { evidence: first.evidence, supersedesObservationId: first.id });
+    expect(projectCastProfile({ observations: [first, correction], overrides: [] })).toEqual({ "appearance.description": "brown eyes" });
+    expect(() => projectCastProfile({ observations: [correction, first], overrides: [] })).toThrow(/supersession/i);
+  });
 });
