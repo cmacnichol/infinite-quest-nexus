@@ -12,6 +12,8 @@ import { createPostgresTurnCorrectionRepository } from "../../packages/database/
 import { memoryGeneration } from "../helpers/memory-applications.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { campaignTransferPreviewRequestSchema, campaignTransferCommitRequestSchema } from "../../packages/contracts/src/campaign-transfer.js";
+import { readCastDiscoveryStatus } from "../../packages/database/src/campaign-cast-status-repository.js";
+import { enqueueCastDiscoveryWithClient } from "../../packages/database/src/campaign-cast-job-repository.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 integration("campaign cast lifecycle", () => {
@@ -30,6 +32,40 @@ integration("campaign cast lifecycle", () => {
     const repo = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
     return { scope, repo };
   }
+  it.each(["branch", "transfer"] as const)("starts inherited %s discovery after copied history without copying jobs or claiming old coverage", async (operation) => {
+    const { scope, repo } = await fixture();
+    const initial = await repo.current(scope);
+    const sourceTurnId = (await pool.query("SELECT id FROM turns WHERE campaign_id=$1 AND turn_number=1", [scope.campaignId])).rows[0].id;
+    await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope, turnId: sourceTurnId, enabled: true, admissionUnavailable: true }));
+    let campaignId: string, throughTurn: number;
+    if (operation === "branch") {
+      throughTurn = 1;
+      campaignId = (await branchCampaign(pool, scope.campaignId, { targetTurnNumber: throughTurn, title: "Tracking branch" })).id;
+    } else {
+      throughTurn = initial.boundary.turnNumber;
+      const target = await fixture();
+      const targetWorldVersionId = (await pool.query("SELECT world_version_id FROM campaigns WHERE id=$1", [target.scope.campaignId])).rows[0].world_version_id;
+      const request = campaignTransferPreviewRequestSchema.parse({ targetWorldVersionId });
+      const preview = await previewCampaignWorldTransfer(pool, scope.campaignId, request);
+      campaignId = (await transferCampaignWorld(pool, scope.campaignId, campaignTransferCommitRequestSchema.parse({ ...request,
+        idempotencyKey: randomUUID(), expectedActiveTurnNumber: preview.expectedActiveTurnNumber,
+        expectedStateRevision: preview.expectedStateRevision, sourceFingerprint: preview.sourceFingerprint }))).targetCampaignId;
+    }
+    const destination = { ownerUserId, campaignId };
+    expect(await readCastDiscoveryStatus(pool, destination, true)).toMatchObject({ coverageStartTurn: throughTurn + 1,
+      trackedThroughTurn: throughTurn, firstGap: null, unresolvedCount: 0 });
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [campaignId])).rows[0].n).toBe(0);
+    const turnId = randomUUID();
+    await withTransaction(pool, async (client) => {
+      await client.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,$4,'Mara waits.')", [turnId, ownerUserId, campaignId, throughTurn + 1]);
+      await client.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [campaignId, throughTurn + 1]);
+      await enqueueCastDiscoveryWithClient(client, { scope: destination, turnId, enabled: true, admissionUnavailable: true });
+    });
+    expect(await readCastDiscoveryStatus(pool, destination, true)).toMatchObject({ coverageStartTurn: throughTurn + 1,
+      trackedThroughTurn: throughTurn, state: "failed", firstGap: { turnNumber: throughTurn + 1, diagnosticCode: "admission_unavailable" } });
+    expect((await readCastDiscoveryStatus(pool, scope, true)).coverageStartTurn).toBe(1);
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [scope.campaignId])).rows[0].n).toBe(1);
+  });
   it("branches only retained identities, remaps IDs and preserves user blanks", async () => {
     const { scope, repo } = await fixture();
     await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [scope.campaignId]);
@@ -43,6 +79,7 @@ integration("campaign cast lifecycle", () => {
       expect.objectContaining({ id: expect.not.stringMatching(early.character.id), name: "Mara", profile: { "appearance.description": "" } })
     ]);
     expect(value.characters.filter((c) => c.origin.kind === "protagonist")).toHaveLength(1);
+    expect((await readCastDiscoveryStatus(pool, { ownerUserId, campaignId: branch.id }, true)).coverageStartTurn).toBeNull();
   });
   it("rewinds edits permanently and fences stale batches even after turn numbers advance again", async () => {
     const { scope, repo } = await fixture();

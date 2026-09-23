@@ -2,7 +2,13 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: pinned world identities and bounded hints
+## Latest checkpoint: branch and transfer enrollment
+
+Branches and world transfers of an enrolled campaign now inherit forward enrollment at `throughTurn + 1`. Copied character authority does not establish extraction coverage for earlier history. Discovery jobs, failures, leases, and pending proposals stay in the source campaign; a newly accepted destination turn uses its own normal admission. Unenrolled sources remain unenrolled until their first eligible accepted turn. This introduces no provider call or historical scan during copying and works within the existing branch/transfer transaction.
+
+Verification: both production-path enrollment regressions failed before implementation and passed afterward. **73 PostgreSQL tests passed** across all five cast suites; the strengthened source-job isolation assertions then passed in the **9-test lifecycle suite**. Repository/TypeScript and whitespace checks passed. Bounded review found no actionable issue. Logs: `.tmp/campaign-cast/copy-enrollment-{red,green,lifecycle,check}.log`. No UI code changed, so no browser run was made for this backend checkpoint; no live-provider or production-data changes occurred.
+
+## Pinned world identities and bounded hints
 
 Captured world identities now include playable characters and explicit character/person/NPC entities (including legacy entity maps). Only allowlisted fiction fields supply identity hints; mechanics, credentials, extension fields, and oversized hint values are excluded. New occurrences retain the pinned world-version and source character ID. Conflicting declarations with the same ID remain visible to validation and require review, including when their names differ.
 
@@ -71,7 +77,7 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 1. Finish failed-discovery retry controls. Candidate listing/resolution, forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0107 for further additive schema changes.
 2. Frozen preparation, provider composition, and the worker lane are wired below. Implement shared provider concurrency; the two-dispatch ceiling across preset fallback and logical retries is verified.
 3. Pinned-world playable-character selection and bounded identity hints are implemented above. Atomic accepted-turn enqueue, forward enrollment, and contiguous coverage are also implemented.
-4. Same-campaign lifecycle reconciliation is implemented below. Finish branch/transfer discovery enrollment and coverage. Existing phase-02 approvals cover these source integrations.
+4. Same-campaign lifecycle reconciliation and branch/transfer forward enrollment are implemented. Copied authority does not claim historical extraction coverage.
 5. Retry API and legacy UI, then complete phase-04 PostgreSQL and browser acceptance gates. Status and candidate-resolution flows have passed the scoped checks below.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
 

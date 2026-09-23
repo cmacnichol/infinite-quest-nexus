@@ -34,7 +34,7 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
 /** Copy only retained authority, using explicit mappings supplied by the caller. */
 export async function copyCampaignCast(client: DatabaseClient, source: CastScope, destination: CastScope,
   throughTurn: number, turnIds: ReadonlyMap<string, string>): Promise<void> {
-  const state = (await client.query("SELECT revision FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2", [source.campaignId, source.ownerUserId])).rows[0];
+  const state = (await client.query("SELECT revision,coverage_start_turn FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2", [source.campaignId, source.ownerUserId])).rows[0];
   if (!state) return;
   await rebuildCastWithClient(client, source, throughTurn);
   // Keep historical identities used by claims even when their introduction no
@@ -74,7 +74,9 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
     if (!mapped) throw new Error(`Invalid retained cast reference: ${key}`);
     return mapped;
   };
-  await client.query("INSERT INTO campaign_cast_state(owner_user_id,campaign_id,revision) VALUES($1,$2,$3)", [destination.ownerUserId, destination.campaignId, state.revision]);
+  // Inherit forward enrollment, never operational jobs or an assertion that copied history was scanned.
+  await client.query("INSERT INTO campaign_cast_state(owner_user_id,campaign_id,revision,coverage_start_turn) VALUES($1,$2,$3,$4)",
+    [destination.ownerUserId, destination.campaignId, state.revision, state.coverage_start_turn === null ? null : throughTurn + 1]);
   for (const person of people) {
     let origin = castOriginSchema.parse(person.origin);
     if (origin.kind === "protagonist") {
