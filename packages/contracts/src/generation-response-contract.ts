@@ -367,6 +367,7 @@ const authoringInvocationSchemas = {
 } as const;
 
 export function responseContractOperationV2MatchesInvocation(operation: ResponseContractOperationV2, invocationKey: z.infer<typeof responseInvocationKeyV2Schema>): boolean {
+  if (operation === "cast_discovery") return invocationKey === "cast_discovery:nonstream";
   if (operation === "story_choice_repair") return invocationKey === "choices:nonstream";
   if (operation === "story_continuity_review") return invocationKey === "continuity_review:nonstream";
   if (operation === "rpg_assessment" || operation === "event_trigger_before" || operation === "event_trigger_after" || operation === "scene_coverage_validation" || operation === "event_coverage_validation") {

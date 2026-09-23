@@ -10,6 +10,8 @@
 
 **Spec:** [Shared specification](2026-09-22-campaign-cast.md). Dependency: phase 03 accepted.
 
+**Progress (2026-09-23):** Initial contracts, conservative evidence validation, source segmentation, and separate provider-operation registration are verified. Durable execution and UI remain pending; see [checkpoint and remaining work](../../review/campaign-cast/phase-04-progress.md). No exit gate is complete.
+
 ## Global constraints
 
 Shared constraints apply. Discovery is a separate operation, not an addition to the story model's output schema. Never send source content to the image endpoint. Retain successful accepted stories on all extraction failures. No relationships, automatic merge, or historical backfill in this phase.

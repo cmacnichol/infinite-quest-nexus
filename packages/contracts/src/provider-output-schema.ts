@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { sha256Hex } from "./hash.js";
+import { castFieldSchema } from "./campaign-cast.js";
 
 /**
  * Provider-facing response envelopes for new version-two execution contracts.
@@ -9,7 +10,7 @@ import { sha256Hex } from "./hash.js";
 export const providerOutputSchemaOperationV2Schema = z.enum([
   "story", "choices", "continuity_review", "rpg_assessment", "event_trigger_before", "event_trigger_after",
   "scene_coverage", "event_coverage", "world_outline", "world_seed_character", "standalone_character",
-  "character_organizer", "source_extraction", "source_synthesis", "source_character", "illustration_prompt_refinement"
+  "character_organizer", "source_extraction", "source_synthesis", "source_character", "illustration_prompt_refinement", "cast_discovery"
 ]);
 export type ProviderOutputSchemaOperationV2 = z.infer<typeof providerOutputSchemaOperationV2Schema>;
 
@@ -25,7 +26,7 @@ export const responseContractOperationV2Schema = z.enum([
   "world_outline", "world_outline_repair", "world_seed_character", "world_seed_character_repair",
   "standalone_character", "standalone_character_repair", "character_organizer", "character_organizer_repair",
   "source_extraction", "source_extraction_repair", "source_synthesis", "source_synthesis_repair",
-  "source_character", "source_character_repair", "illustration_prompt_refinement"
+  "source_character", "source_character_repair", "illustration_prompt_refinement", "cast_discovery"
 ]);
 export type ResponseContractOperationV2 = z.infer<typeof responseContractOperationV2Schema>;
 
@@ -188,7 +189,16 @@ function entry(operation: ProviderOutputSchemaOperationV2, version: string, name
   return deepFreeze({ operation, version, name, schema: frozen, schemaHash: stableJsonHash(frozen), requiresOpenTrackerObjects });
 }
 
+const castEvidence = { paragraphId: string(1, 200), quote: string(1, 1000) };
+const castDiscovery = closed({ version: { const: 1 }, characters: { type: "array", maxItems: 20, items: closed({
+  localKey: string(1, 100), name: text(200), aliases: stringList(20, 200), existingCharacterId: { anyOf: [uuidSchema, { type: "null" }] },
+  identityEvidence: { type: "array", minItems: 1, maxItems: 8, items: closed(castEvidence) },
+  observations: { type: "array", maxItems: 20, items: closed({ ...castEvidence, field: { enum: castFieldSchema.options }, value: string(1, 2000),
+    mode: { enum: ["fact", "claim"] }, speakerCharacterId: { anyOf: [uuidSchema, { type: "null" }] } }) }
+}) } });
+
 const registry: Readonly<Record<ProviderOutputSchemaOperationV2, ProviderOutputSchemaV2>> = deepFreeze({
+  cast_discovery: entry("cast_discovery", "cast-discovery-v1", "infinite_quest_cast_discovery_v1", castDiscovery),
   story: entry("story", "story-native-v2", "infinite_quest_story_native_v2", story, true),
   choices: entry("choices", "choices-v2", "infinite_quest_choices_v2", choices),
   continuity_review: entry("continuity_review", "continuity-review-v2", "infinite_quest_continuity_review_v2", continuityReview),

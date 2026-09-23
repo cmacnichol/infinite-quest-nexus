@@ -8,6 +8,7 @@ import type { SchemaVerificationV2 } from "../../packages/contracts/src/text-res
 import { authoringStageOutputSchema, authoringWorldOutlineSchema } from "../../packages/contracts/src/authoring.js";
 import { characterProfileOrganizationResultSchema, playableCharacterSchema } from "../../packages/contracts/src/world-library.js";
 import { sourceFactSchema } from "../../packages/contracts/src/source-authoring.js";
+import { castDiscoveryOutputSchema } from "../../packages/contracts/src/campaign-cast-discovery.js";
 import { stableStringify } from "../../packages/domain/src/text.js";
 import { buildContinuityReviewInput, validateContinuityReview } from "../../packages/story-engine/src/continuity-review.js";
 import { activatedEventsFromResponse, parseRpgAssessment } from "../../packages/story-engine/src/mechanics.js";
@@ -30,7 +31,7 @@ export const DEFAULT_STRUCTURED_OUTPUT_PROBE: Readonly<Omit<ProbeInput, "profile
   inputUsdPerToken: 0.00000027,
   outputUsdPerToken: 0.00000041,
   contextTokens: 163_840,
-  maxCalls: 17,
+  maxCalls: 18,
   maxOutputTokens: 2_048,
   temperature: 0,
   priceObservedAt: ""
@@ -74,7 +75,7 @@ function requireExact(input: ProbeInput) {
   if (input.model !== CANONICAL_MODEL) throw new Error("--model must be the canonical deepseek/deepseek-v3.2-exp target.");
   if (!/^[a-z0-9][a-z0-9._/-]*$/i.test(input.route) || !input.route.includes("/")) throw new Error("--route must be a full configured provider routing slug.");
   if (input.contextTokens !== REQUIRED_CONTEXT_TOKENS) throw new Error("--context-tokens must be 163840 for this prepared target.");
-  if (input.maxCalls !== REQUIRED_MAX_CALLS) throw new Error("--max-calls must be exactly 17.");
+  if (input.maxCalls !== REQUIRED_MAX_CALLS) throw new Error(`--max-calls must be exactly ${REQUIRED_MAX_CALLS}.`);
   if (input.maxOutputTokens !== REQUIRED_MAX_OUTPUT_TOKENS) throw new Error("--max-output-tokens must be exactly 2048.");
   if (![input.inputUsdPerToken, input.outputUsdPerToken].every((value) => Number.isFinite(value) && value > 0)) throw new Error("Per-token prices must be positive finite values.");
   if (!Number.isFinite(Date.parse(input.priceObservedAt)) || new Date(input.priceObservedAt).toISOString() !== input.priceObservedAt) throw new Error("--price-observed-at must be a canonical ISO timestamp.");
@@ -103,6 +104,8 @@ function story() {
 
 function responseFor(operation: ProbeOperation): unknown {
   switch (operation) {
+    case "cast_discovery": return { version: 1, characters: [{ localKey: "synthetic", name: "Synthetic traveler", aliases: [], existingCharacterId: null,
+      identityEvidence: [{ paragraphId: "p1", quote: "Synthetic traveler waits." }], observations: [] }] };
     case "story": return story();
     case "choices": return { choices: story().choices, custom_action_suggestion: story().custom_action_suggestion };
     case "continuity_review": return { version: "story-continuity-review-v1", verdict: "pass", findings: [] };
@@ -163,6 +166,7 @@ function validateResponse(operation: ProbeOperation, value: unknown): { ok: true
       authoringStageOutputSchema.parse({ kind: "source_world", proposal: { world: { title: "Synthetic", genre: "Fantasy", tone: "Measured", premise: "Synthetic", backgroundStory: "Synthetic", firstAction: "Begin", rules: "" } },
         mappings: result.fields.map((field: Record<string, unknown>) => ({ target: "world", path: field.path, value: field.value, supportingFactIds: field.supportingFactIds })), expansionCandidates: [] });
     } else if (operation === "illustration_prompt_refinement") parseRefinedPrompt(JSON.stringify(value));
+    else if (operation === "cast_discovery") castDiscoveryOutputSchema.parse(value);
     return { ok: true };
   } catch { return { ok: false, reason: "application_parser" }; }
 }
