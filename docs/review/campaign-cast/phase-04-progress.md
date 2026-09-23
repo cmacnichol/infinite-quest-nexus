@@ -26,7 +26,7 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 
 1. Connect the durable queue below to unresolved candidates, contiguous coverage, and runtime capability handling. Migration 0104 now exists; use the next ordered migration for further additive schema changes.
 2. Wire the frozen preparation and prepared executor below into provider composition and the worker lane. Admission must happen before acceptance, with no provider call inside its transaction. Verify global concurrency and the physical-attempt ceiling across preset fallback plus logical retries.
-3. Wire atomic accepted-turn enqueue to the validated publication seam below. Complete pinned-world playable-character selection and bounded identity hints before provider dispatch.
+3. Finish pinned-world playable-character selection and bounded identity hints. Atomic accepted-turn enqueue is implemented below; forward enrollment and contiguous coverage still need integration.
 4. Lifecycle cancellation/re-enqueue for corrections, replacement, rewind, branches, and transfer. Existing phase-02 approvals cover these source integrations.
 5. Status/retry/candidate-resolution API and legacy UI, then actual PostgreSQL and browser acceptance gates.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
@@ -121,3 +121,11 @@ The worker and combined runtime roles now compose the discovery application with
 - Repository checks and TypeScript passed after fixing a test spy signature. `git diff --check` passed.
 - Independent review identified shutdown counts indexed by lane position. RED/GREEN reproduced discovery being labeled as illustration; counters now look up lane names and include discovery explicitly. Discovery participates in the existing shutdown drain.
 - Generation acceptance still does not enqueue discovery. No browser or live-provider verification applies to this backend registration, and no production runtime was started or changed.
+
+## Accepted-turn integration checkpoint
+
+Generation prepares discovery metadata outside the accepted-turn transaction, saves ready/unavailable admission in private orchestration, and reuses it on resume. The provider composition exposes preparation only when discovery is enabled. The accepted append/replacement transaction enqueues from the persisted effective narration and current cast timeline. Invalid enqueue state rolls back both writes. A metadata/preparation outage instead saves a failed discovery job with `admission_unavailable` while accepting the story; later discovery work cannot claim through that failed gap until recovery is implemented.
+
+Tests cover ready, unavailable, saved, and disabled preparation, including one narration call despite an admission outage. PostgreSQL tests cover atomic rollback/retry, the accepted source, failed admission without story rejection, and replacement source/timeline binding. Independent bounded review found no blocker and ran all 80 generation-executor unit tests.
+
+Verification: **58 PostgreSQL tests passed** across generation acceptance and discovery; **347 unit files passed, 4,372 tests passed, 44 skipped**. Repository checks, TypeScript, and `git diff --check` passed. The first PostgreSQL run exposed a test expectation using `complete` instead of the existing generation status `completed`; correcting that expectation produced the passing rerun. No live provider or browser verification was performed, and no production runtime or data was changed. Lifecycle recovery, enrollment/coverage, candidate controls, provider/attempt limits, and phases 05–06 are still required.

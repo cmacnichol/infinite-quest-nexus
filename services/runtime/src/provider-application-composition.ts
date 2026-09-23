@@ -34,6 +34,7 @@ import type { TemplateWorldInput } from "../../../packages/domain/src/world-temp
 import {
   createRuntimeProviderAdapter,
   type RuntimeProviderAdapter,
+  type RuntimeTextExecution,
   type RuntimeProviderExecutionPort
 } from "./provider-credential-transport-adapter.js";
 import type { SourceAuthoringModelInventory } from "./source-authoring-budget.js";
@@ -45,6 +46,8 @@ import {
 import { createProviderResponseFormatCapabilities, type ProviderResponseFormatCapabilities } from "./provider-response-format-capabilities.js";
 import type { SchemaVerification, SchemaVerificationV2 } from "@infinite-quest/contracts";
 import type { DirectAuthoringTextPlanOptions, PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
+import { prepareCastDiscoveryExecution } from "./campaign-cast-discovery-adapter.js";
+import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { createPreparedTextExecutor } from "./prepared-text-executor.js";
 
 type ProviderCompositionOptions = Readonly<{
@@ -55,6 +58,7 @@ type ProviderCompositionOptions = Readonly<{
   clock?: () => number;
   /** One admission switch is supplied unchanged to API enqueue and every worker graph. */
   nativeTextExecutionPlanAdmission?: boolean;
+  castDiscoveryEnabled?: boolean;
 }>;
 
 export type ProviderApplicationTransaction = Readonly<{
@@ -90,6 +94,7 @@ export type ApiGenerationProviderCollaborators = ProviderConsumerRuntime & Reado
 }>;
 
 export type WorkerGenerationProviderCollaborators = ApiGenerationProviderCollaborators & Readonly<{
+  prepareCastDiscoveryExecution?(input: { ownerUserId: string; execution: RuntimeTextExecution }): Promise<CastDiscoveryExecution>;
   attributeCosts: Pick<ProviderCostPort, "attributeGenerationCostsToTurn">;
   preparedTextExecutor: PreparedAuthoringTextExecutor;
 }>;
@@ -390,6 +395,8 @@ function createInternals(
       loadQueuedTextProfile: (client: DatabaseClient, ownerUserId: string, providerProfileId: string, model?: string) =>
         bind(client).runtime.execution.text({ ownerUserId }, providerProfileId, "text", model) }),
     workerGeneration: Object.freeze({
+      ...(options.castDiscoveryEnabled === true ? { prepareCastDiscoveryExecution: (input: { ownerUserId: string; execution: RuntimeTextExecution }) =>
+        prepareCastDiscoveryExecution({ ...input, ports: authoringTextPlans.ports, responseFormatCapabilities }) } : {}),
       ...runtime,
       prompts: generationPrompts,
       costs: generationCosts,

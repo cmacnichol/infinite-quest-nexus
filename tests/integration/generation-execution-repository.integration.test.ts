@@ -42,6 +42,8 @@ import { sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { sha256Hex } from "../../packages/contracts/src/hash.js";
+import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -165,6 +167,33 @@ integration("PostgreSQL generation execution repository", () => {
     expect(await repository.markCommitting(scope)).toBe(true);
     return { repository, scope, job };
   }
+  it("atomically commits accepted narration and its prepared discovery job", async () => {
+    const imported = await campaign(), ready = await readyAcceptedCommit(imported.campaignId, "cast-acceptance");
+    const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null,
+      candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }],
+      presetSystemPrompt: "", parameters: {}, endpointReference: "fixture", credentialReference: providerProfileId,
+      profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+    const execution = { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) };
+    const before = (await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count;
+    const input = acceptedCommitInput({ ...ready, story: supersedingStory([]) });
+    await expect(ready.repository.commitAcceptedTurn({ ...input, castDiscoveryExecution: { ...execution,
+      plan: { ...execution.plan, requestTimeoutMs: 1 } } })).rejects.toThrow();
+    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count).toBe(before);
+    expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [ready.job.id])).rows[0].status).toBe("committing");
+    const accepted = await ready.repository.commitAcceptedTurn({ ...input, castDiscoveryExecution: execution });
+    const discovery = (await pool.query("SELECT turn_id,owner_user_id,source,execution_snapshot,status FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows;
+    expect(discovery).toHaveLength(1);
+    expect(discovery[0]).toMatchObject({ turn_id: accepted.turnId, owner_user_id: ownerUserId, status: "queued", execution_snapshot: execution });
+    expect(discovery[0].source.paragraphs.map((p: { text: string }) => p.text).join("")).toBe(input.story.narration);
+    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count).toBe(before + 1);
+  });
+  it("preserves an accepted story and records failed discovery when admission is unavailable", async () => {
+    const imported = await campaign(), ready = await readyAcceptedCommit(imported.campaignId, "cast-admission-outage");
+    const accepted = await ready.repository.commitAcceptedTurn({ ...acceptedCommitInput({ ...ready, story: supersedingStory([]) }), castDiscoveryUnavailable: true });
+    expect((await pool.query("SELECT turn_id,status,diagnostic_code FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows)
+      .toEqual([{ turn_id: accepted.turnId, status: "failed", diagnostic_code: "admission_unavailable" }]);
+    expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [ready.job.id])).rows[0].status).toBe("completed");
+  });
 
   async function readyFinalKeepCommit(campaignId: string, workerId: string, story = supersedingStory([])) {
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
@@ -886,7 +915,12 @@ integration("PostgreSQL generation execution repository", () => {
       open_threads: ["Learn why the keeper gave the warning."],
       tracker_updates: [{ name: "Observatory repair", value: "complete" }]
     });
-    const committed = await repository.commitAcceptedTurn(acceptedCommitInput({ scope, job, story }));
+    const committed = await repository.commitAcceptedTurn({ ...acceptedCommitInput({ scope, job, story }), castDiscoveryUnavailable: true });
+    const replacementDiscovery = (await pool.query("SELECT turn_id,source,timeline_revision FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows;
+    expect(replacementDiscovery).toHaveLength(1);
+    expect(replacementDiscovery[0].turn_id).toBe(committed.turnId);
+    expect(replacementDiscovery[0].source.paragraphs.map((p: { text: string }) => p.text).join("")).toBe(story.narration);
+    expect(replacementDiscovery[0].timeline_revision).toBe((await pool.query("SELECT timeline_revision FROM campaign_cast_state WHERE campaign_id=$1", [imported.campaignId])).rows[0].timeline_revision);
 
     await expect(pool.query<{
       rpg_stats: unknown;

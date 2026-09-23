@@ -10,7 +10,7 @@
 
 **Spec:** [Shared specification](2026-09-22-campaign-cast.md). Dependency: phase 03 accepted.
 
-**Progress (2026-09-23):** Contracts, evidence validation, source segmentation, queue/checkpoints, validated publication, physical accounting, recoverable application flow, and frozen direct/preset runtime execution are verified. Production composition and acceptance wiring, lifecycle wiring, coverage, candidate resolution, and UI remain pending; see [checkpoint and remaining work](../../review/campaign-cast/phase-04-progress.md). No exit gate is complete.
+**Progress (2026-09-23):** Contracts, evidence validation, source segmentation, queue/checkpoints, validated publication, physical accounting, recoverable application flow, frozen direct/preset execution, default-off worker composition, and atomic acceptance enqueue are verified. Lifecycle wiring, coverage, candidate resolution, shared provider/attempt limits, and UI remain pending; see [checkpoint and remaining work](../../review/campaign-cast/phase-04-progress.md). No exit gate is complete.
 
 ## Global constraints
 

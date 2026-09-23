@@ -39,10 +39,12 @@ function readExecution(value: unknown): CastDiscoveryExecution {
 
 /** Caller owns the accepted-turn transaction. No provider or nested transaction occurs here. */
 export async function enqueueCastDiscoveryWithClient(client: DatabaseClient, input: {
-  scope: CastScope; turnId: string; execution: CastDiscoveryExecution; enabled: boolean;
+  scope: CastScope; turnId: string; execution?: CastDiscoveryExecution; admissionUnavailable?: boolean; enabled: boolean;
 }): Promise<string | null> {
   if (!input.enabled) return null;
-  const scope = castScopeSchema.parse(input.scope), execution = readExecution(input.execution);
+  if (!input.execution && input.admissionUnavailable !== true) throw new Error("Discovery admission is required.");
+  if (input.execution && input.admissionUnavailable) throw new Error("Conflicting discovery admission.");
+  const scope = castScopeSchema.parse(input.scope), execution = input.execution ? readExecution(input.execution) : { unavailable: true };
   const campaign = (await client.query("SELECT active_turn_number FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR UPDATE", [scope.campaignId, scope.ownerUserId])).rows[0];
   if (!campaign) throw new Error("Campaign not found.");
   const turn = (await client.query(`SELECT turn_number,correction_revision,effective_narration FROM effective_turn_narrations
@@ -58,7 +60,8 @@ export async function enqueueCastDiscoveryWithClient(client: DatabaseClient, inp
     ON CONFLICT(campaign_id,turn_id,narration_revision,timeline_revision,protocol) DO NOTHING RETURNING id`,
   [scope.ownerUserId, scope.campaignId, source.turnId, source.turnNumber, source.narrationRevision, source.timelineRevision,
     source.sourceHash, CAST_DISCOVERY_PROTOCOL, JSON.stringify(source), JSON.stringify(chunks.chunks), JSON.stringify(execution),
-    chunks.status === "ready" ? "queued" : "failed", chunks.status === "ready" ? null : chunks.status]);
+    input.admissionUnavailable || chunks.status !== "ready" ? "failed" : "queued",
+    input.admissionUnavailable ? "admission_unavailable" : chunks.status === "ready" ? null : chunks.status]);
   if (result.rows[0]) return result.rows[0].id;
   const prior = (await client.query(`SELECT id,source_hash FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND turn_id=$2
     AND narration_revision=$3 AND timeline_revision=$4 AND protocol=$5`, [scope.campaignId, source.turnId, source.narrationRevision, source.timelineRevision, CAST_DISCOVERY_PROTOCOL])).rows[0];

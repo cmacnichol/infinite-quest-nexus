@@ -96,6 +96,11 @@ describe("provider application composition capability cache transactions", () =>
       .toBe(worker.illustration.illustrationTextPlans?.preparedExecutor);
     expect(worker.generation.preparedTextExecutor)
       .toBe(worker.worldGeneration.authoringTextPlans?.preparedExecutor);
+    expect(worker.generation.prepareCastDiscoveryExecution).toBeUndefined();
+    const discoveryWorker = createWorkerProviderApplicationComposition(pool as never, {
+      credentialSecret: "test-secret", transport, castDiscoveryEnabled: true
+    });
+    expect(discoveryWorker.generation.prepareCastDiscoveryExecution).toBeTypeOf("function");
   });
 
   it("uses the canonical empty registry digest through API queue and worker frozen-contract parsing", async () => {

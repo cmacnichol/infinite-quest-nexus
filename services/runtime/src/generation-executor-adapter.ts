@@ -1,6 +1,7 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
+import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson, isGenerationBaseIdentityV3 } from "../../../packages/application/src/memory/generation-context.js";
@@ -216,6 +217,7 @@ type GenerationCostAttribution = Readonly<{
 }>;
 
 export type GenerationExecutionCollaborators = Readonly<{
+  prepareCastDiscoveryExecution?(input: { ownerUserId: string; execution: RuntimeTextExecution }): Promise<CastDiscoveryExecution>;
   memory: MemoryGenerationTransactionPort;
   illustration: IllustrationGenerationTransactionPort;
   /** Resolves optional illustration route metadata before the accepted-turn transaction begins. */
@@ -4449,6 +4451,17 @@ async function executeLoadedGeneration(
         return true;
       }
     }
+    if (collaborators.prepareCastDiscoveryExecution && !orchestration.castDiscoveryAdmission) {
+      let admission: NonNullable<GenerationOrchestrationState["castDiscoveryAdmission"]>;
+      try {
+        admission = { status: "ready", execution: await collaborators.prepareCastDiscoveryExecution({ ownerUserId: job.owner_user_id, execution: provider }) };
+      } catch {
+        admission = { status: "unavailable" };
+        logger.warn({ event: "cast_discovery_admission_unavailable", generationJobId: job.id });
+      }
+      orchestration = await persistOrchestration(repository, scope, job, { castDiscoveryAdmission: admission });
+    }
+    const castAdmission = collaborators.prepareCastDiscoveryExecution ? orchestration.castDiscoveryAdmission : undefined;
     assertActiveGenerationUpdate(await repository.markCommitting(scope), "entering commit");
     const acceptedCommitCollaborators: AcceptedGenerationCommitCollaborators = {
       memory: collaborators.memory,
@@ -4483,6 +4496,8 @@ async function executeLoadedGeneration(
       orchestration,
       fictionAction: safeAction,
       ...(illustrationTextExecutionSnapshot ? { illustrationTextExecutionSnapshot } : {}),
+      ...(castAdmission?.status === "ready" ? { castDiscoveryExecution: castAdmission.execution }
+        : castAdmission?.status === "unavailable" ? { castDiscoveryUnavailable: true } : {}),
       collaborators: acceptedCommitCollaborators,
       onIllustrationEnqueueError(error, acceptedTurnId) {
         logger.warn({

@@ -61,7 +61,7 @@ await runRuntimeLifecycle(config, abortController, {
     createWorkerProviders: (pool, credentialSecret, transport) => createWorkerProviderApplicationComposition(
       pool,
       { credentialSecret, transport, schemaVerifications: schemaVerification.records, schemaVerificationDigest: schemaVerification.digest,
-        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true }
+        nativeTextExecutionPlanAdmission: config.nativeTextExecutionPlanAdmission === true, castDiscoveryEnabled: config.castDiscoveryEnabled === true }
     ),
     createProviderApiAdapter: createProviderApplicationAdapter,
     createApiGeneration: (pool, providers, operatorConfig) => createApiGenerationApplication(
