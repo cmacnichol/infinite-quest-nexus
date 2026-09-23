@@ -472,7 +472,8 @@ describe("durable cast discovery", () => {
   it.each([
     { routeKind: "preset", outcome: "success", scan: false }, { routeKind: "model", outcome: "success", scan: false },
     { routeKind: "model", outcome: "timeout", scan: false }, { routeKind: "model", outcome: "malformed", scan: false },
-    { routeKind: "model", outcome: "success", scan: true }, { routeKind: "model", outcome: "timeout", scan: true }
+    { routeKind: "model", outcome: "success", scan: true }, { routeKind: "model", outcome: "timeout", scan: true },
+    { routeKind: "model", outcome: "paused", scan: true }
   ] as const)("executes frozen $routeKind discovery with $outcome through physical accounting (scan=$scan)", async ({ routeKind, outcome, scan }) => {
     const f = await fixture();
     const acceptedBefore = (await pool.query("SELECT id,narration,accepted_at FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows;
@@ -510,11 +511,33 @@ describe("durable cast discovery", () => {
     if (scan) await createCastBackfillRepository(pool, () => true).start(f.scope,
       { fromTurn: 1, throughTurn: 1, expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "runtime-scan" }, frozen);
     else await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[0]!, execution: frozen, enabled: true }));
-    const executor = createPreparedTextExecutor({ attempts: createPostgresPreparedTextAttemptRepository(pool),
+    const attempts = createPostgresPreparedTextAttemptRepository(pool);
+    let pauseDispatch = outcome === "paused";
+    const executor = createPreparedTextExecutor({ attempts: { ...attempts, async reserve(input) {
+      if (pauseDispatch) {
+        const scans = createCastBackfillRepository(pool, () => true), active = (await scans.latest(f.scope))!;
+        await scans.control(f.scope, active.id, "pause");
+      }
+      return attempts.reserve(input);
+    } },
       async loadAuthority(owner, profile) { expect(owner).toBe(ownerUserId); expect(profile).toBe(execution.id); return execution; } });
     expect(await createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: false }, executor).runNext("disabled")).toBe(false);
     expect(calls).toBe(0);
     const worker = createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: true, castBackfillEnabled: scan }, executor);
+    if (outcome === "paused") {
+      const scans = createCastBackfillRepository(pool, () => true), active = (await scans.latest(f.scope))!;
+      for (let n = 0; n < 3; n++) {
+        expect(await worker.runNext("pause-before-dispatch")).toBe(false);
+        expect(calls).toBe(0);
+        expect((await pool.query("SELECT status,attempt,diagnostic_code FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows)
+          .toEqual([{ status: "queued", attempt: 0, diagnostic_code: null }]);
+        await scans.control(f.scope, active.id, "resume");
+      }
+      pauseDispatch = false;
+      expect(await worker.runNext("after-resume")).toBe(true);
+      expect(calls).toBe(1);
+      return;
+    }
     const extractionStarted = performance.now();
     expect(await worker.runNext("runtime")).toBe(outcome === "success");
     if (process.env.CAST_TEST_TIMINGS === "true") process.stdout.write(JSON.stringify({ measurement: "discovery_worker_tick", routeKind, outcome,

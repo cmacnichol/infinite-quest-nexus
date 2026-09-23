@@ -16,7 +16,7 @@ import { retryCastDiscoverySchema, castDiscoveryRetryResultSchema, type RetryCas
 import type { CastDiscoveryClaim, CastDiscoveryExecution } from "../../application/src/campaign-cast/discovery.js";
 export type { CastDiscoveryClaim, CastDiscoveryExecution } from "../../application/src/campaign-cast/discovery.js";
 type AppliedDiscovery = { characterIds: string[]; observationIds: string[]; validationSummary?: { accepted: number; unresolved: number; rejected: { localKey: string; code: string }[] } };
-const diagnostics = z.enum(["provider_timeout", "provider_failed", "invalid_output", "source_requires_manual_scan", "publication_failed"]);
+const diagnostics = z.enum(["provider_timeout", "provider_failed", "invalid_output", "source_requires_manual_scan", "publication_failed", "dispatch_deferred"]);
 
 export function readCastDiscoveryExecution(value: unknown): CastDiscoveryExecution {
   const parsed = z.object({ providerProfileId: z.uuid(), plan: z.unknown(), admission: z.object({
@@ -202,11 +202,10 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
           AND f.scan_id IS NULL AND f.status NOT IN ('complete','cancelled')) THEN 0 ELSE 1 END,c.id
         FOR UPDATE OF c SKIP LOCKED LIMIT 1`, [scansEnabled()])).rows[0];
         if (!candidate || !enabled()) return null;
-        // An expired paused/disabled scan lease must not retain the unique running slot.
+        // Expired scan leases must release the running slot before forward work wins priority.
         await client.query(`UPDATE campaign_cast_discovery_jobs j SET status='queued',lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL
           WHERE campaign_id=$1 AND status='running' AND lease_expires_at<=clock_timestamp()
-            AND scan_id IS NOT NULL AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=j.scan_id AND s.status='paused'))`,
-        [candidate.id, scansEnabled()]);
+            AND scan_id IS NOT NULL`, [candidate.id]);
         const job = (await client.query(`SELECT * FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND status NOT IN ('complete','cancelled')
           AND (scan_id IS NULL OR ($2::boolean AND EXISTS (SELECT 1 FROM campaign_cast_scans s WHERE s.id=scan_id AND s.status IN ('queued','running'))))
           ORDER BY CASE WHEN scan_id IS NULL THEN 0 ELSE 1 END,turn_number,created_at,id FOR UPDATE LIMIT 1`, [candidate.id, scansEnabled()])).rows[0];
@@ -238,6 +237,22 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
       return withTransaction(pool, async (client) => {
         const live = await lockLiveClaim(client, claim);
         if (!live) return false;
+        if (code === "dispatch_deferred") {
+          // A pause can win after claim but before reserve/dispatch. Refund only
+          // an unused claim; physical calls from this lease remain accounted.
+          const calls = (await client.query(`SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE logical_reservation->>'leaseToken'=$5)::int AS current_lease
+            FROM prepared_text_physical_attempts WHERE owner_user_id=$1 AND logical_kind='cast_discovery'
+              AND logical_reservation->>'jobId'=$2 AND logical_reservation->>'chunkOrdinal'=$3
+              AND COALESCE(logical_reservation->>'retryGeneration','0')=$4 AND dispatched_at IS NOT NULL`,
+          [claim.scope.ownerUserId, claim.id, String(claim.chunkOrdinal), String(claim.retryGeneration ?? 0), claim.leaseToken])).rows[0];
+          const exhausted = calls.total >= 2;
+          await client.query(`UPDATE campaign_cast_discovery_jobs SET status=$2,attempt=GREATEST(0,attempt-$3),
+            lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,diagnostic_code=$4,
+            available_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1`,
+          [claim.id, exhausted ? "failed" : "queued", !exhausted && calls.current_lease === 0 ? 1 : 0, exhausted ? "provider_failed" : null]);
+          return true;
+        }
         await client.query(`UPDATE campaign_cast_discovery_jobs SET status=$2,diagnostic_code=$3,lease_token=NULL,lease_owner=NULL,lease_expires_at=NULL,
           available_at=clock_timestamp()+interval '5 seconds',updated_at=clock_timestamp() WHERE id=$1`,
         [claim.id, live.row.attempt < 2 ? "retry_wait" : "failed", code]);

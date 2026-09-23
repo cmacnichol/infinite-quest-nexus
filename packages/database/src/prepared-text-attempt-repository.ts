@@ -128,7 +128,7 @@ async function hasDiscoveryDispatchBudget(client: DatabaseClient, value: Logical
   return row.dispatched < 2;
 }
 
-async function hasLiveReservation(client: DatabaseClient, value: LogicalReservation): Promise<boolean> {
+async function hasLiveReservation(client: DatabaseClient, value: LogicalReservation, beforeDispatch = false): Promise<boolean> {
   if (value.kind === "direct") return true;
   if (value.kind === "cast_discovery") {
     const parent = (await client.query("SELECT campaign_id FROM campaign_cast_discovery_jobs WHERE id=$1 AND owner_user_id=$2", [value.jobId, value.ownerUserId])).rows[0];
@@ -142,8 +142,11 @@ async function hasLiveReservation(client: DatabaseClient, value: LogicalReservat
       WHERE job.id=$1 AND job.owner_user_id=$2 AND job.status='running' AND job.chunk_ordinal=$3 AND job.attempt=$4
         AND job.lease_token=$5 AND job.lease_expires_at>clock_timestamp() AND job.checkpoint IS NULL
         AND job.timeline_revision=state.timeline_revision AND job.narration_revision=source.correction_revision
-        AND job.turn_number<=$6 AND job.retry_generation=$7 FOR UPDATE OF job`,
-    [value.jobId, value.ownerUserId, value.chunkOrdinal, value.claimAttempt, value.leaseToken, campaign.active_turn_number, value.retryGeneration ?? 0]);
+        AND job.turn_number<=$6 AND job.retry_generation=$7
+        AND (NOT $8::boolean OR job.scan_id IS NULL OR EXISTS (
+          SELECT 1 FROM campaign_cast_scans scan WHERE scan.id=job.scan_id AND scan.status IN ('queued','running')))
+        FOR UPDATE OF job`,
+    [value.jobId, value.ownerUserId, value.chunkOrdinal, value.claimAttempt, value.leaseToken, campaign.active_turn_number, value.retryGeneration ?? 0, beforeDispatch]);
     return Boolean(result.rows[0]);
   }
   if (value.kind === "story") {
@@ -325,7 +328,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
     },
     async reserve(input) {
       return withTransaction(pool, async (client) => {
-        if (!await hasLiveReservation(client, input.logicalReservation)) return null;
+        if (!await hasLiveReservation(client, input.logicalReservation, true)) return null;
         const key = reservationKey(input.logicalReservation);
         const existing = await client.query<AttemptRow>(
           `SELECT id,status,logical_reservation,plan_hash,requested_preset_slug,requested_preset_version_id,
@@ -368,7 +371,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
 
     async markDispatched(reservation, attemptId, expectedPayloadHash) {
       return withTransaction(pool, async (client) => {
-        if (!await hasLiveReservation(client, reservation)) return null;
+        if (!await hasLiveReservation(client, reservation, true)) return null;
         if (!await hasDiscoveryDispatchBudget(client, reservation)) return null;
         const updated = await client.query<{ id: string }>(
           `UPDATE prepared_text_physical_attempts SET status='dispatched',dispatched_at=clock_timestamp()

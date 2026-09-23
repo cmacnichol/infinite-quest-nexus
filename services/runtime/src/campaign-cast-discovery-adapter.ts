@@ -68,6 +68,7 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
       if (result.outputLimited) return null;
       try { return JSON.parse(result.content) as unknown; } catch { return null; }
     } catch (error) {
+      if (error instanceof PreparedRouteTerminalError && error.code === "prepared_route_lease_lost") throw new CastDiscoveryExtractionError("dispatch_deferred");
       if (error instanceof ContextBudgetError) throw new CastDiscoveryExtractionError("source_requires_manual_scan");
       if (error instanceof PreparedRouteTerminalError && error.reason === "deadline") throw new CastDiscoveryExtractionError("provider_timeout");
       throw new CastDiscoveryExtractionError("provider_failed");

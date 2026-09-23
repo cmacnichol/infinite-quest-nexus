@@ -41,17 +41,22 @@ export function createCastBackfillRepository(pool: DatabasePool, enabled = () =>
         const item = (await client.query("SELECT source FROM campaign_cast_scan_sources WHERE scan_id=$1 AND turn_number=$2", [id, request.turnNumber])).rows[0];
         if (!item) throw new CampaignCastError("cast_not_found");
         const source = castDiscoverySourceSchema.parse(item.source);
-        const job = (await client.query(`SELECT id,execution_snapshot FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND owner_user_id=$2
+        const job = (await client.query(`SELECT id,status,retry_generation,execution_snapshot FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 AND owner_user_id=$2
           AND turn_id=$3 AND narration_revision=$4 AND timeline_revision=$5 AND source_hash=$6 AND protocol=$7`,
         [scope.campaignId, scope.ownerUserId, source.turnId, source.narrationRevision, source.timelineRevision, source.sourceHash, CAST_DISCOVERY_PROTOCOL])).rows[0];
         if (!job) throw new CampaignCastError("cast_invalid_request");
         const replacement = job.execution_snapshot.unavailable
           ? readCastDiscoveryExecution((await client.query("SELECT execution_snapshot FROM campaign_cast_scans WHERE id=$1", [id])).rows[0].execution_snapshot)
           : undefined;
-        await createCastDiscoveryJobRepository(pool, enabled, enabled).retryFailed(scope, job.id, {
+        const retry = await createCastDiscoveryJobRepository(pool, enabled, enabled).retryFailed(scope, job.id, {
           expectedCastRevision: request.expectedCastRevision, expectedBoundary: request.expectedBoundary,
           idempotencyKey: `scan:${id}:${sha256(request.idempotencyKey)}`
         }, replacement, client);
+        // Only a newly authorized retry becomes scan work. Receipt replay must not
+        // reassign a completed job or work subsequently authorized elsewhere.
+        if (job.status === "failed" && retry.retryGeneration > job.retry_generation) {
+          await client.query("UPDATE campaign_cast_discovery_jobs SET scan_id=$2 WHERE id=$1", [job.id, id]);
+        }
         const retried = (await client.query("SELECT status FROM campaign_cast_discovery_jobs WHERE id=$1", [job.id])).rows[0];
         await client.query("UPDATE campaign_cast_scan_sources SET status=$3 WHERE scan_id=$1 AND turn_number=$2",
           [id, request.turnNumber, retried.status === "complete" ? "complete" : retried.status === "failed" ? "failed" : "pending"]);

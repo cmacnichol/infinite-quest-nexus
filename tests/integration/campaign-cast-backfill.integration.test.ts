@@ -12,6 +12,7 @@ import Fastify from "fastify";
 import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
 import { createApiCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 
 describe("accepted-history scan preview", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -42,6 +43,38 @@ describe("accepted-history scan preview", () => {
       request: { fromTurn: 1, throughTurn: 3, expectedBoundary: { turnNumber: 3, timelineRevision: 0 }, idempotencyKey: "scan" },
       execution: { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) } };
   }
+  it.each([false, true])("preserves later facts and manual overrides during older scans with honest contiguous coverage (manual=%s)", async manual => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    await pool.query("UPDATE turns SET narration=CASE WHEN turn_number=3 THEN 'Mara is known as Watcher. Mara stands at the tower.' ELSE 'Mara is known as Watcher. Mara stands at the harbor.' END WHERE campaign_id=$1", [f.scope.campaignId]);
+    const acceptedBefore = (await pool.query("SELECT id,narration,accepted_at FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows;
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[2]!, execution: f.execution, enabled: true }));
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    const proposal = (location: string, characterId: string | null) => ({ version: 1 as const, characters: [{ localKey: "mara", name: "Mara", aliases: ["Watcher"], existingCharacterId: characterId,
+      identityEvidence: [{ paragraphId: "p1", quote: `Mara is known as Watcher. Mara stands at the ${location}.` }], observations: [{ field: "state.location" as const,
+        value: location, mode: "fact" as const, speakerCharacterId: null, paragraphId: "p1", quote: `Mara stands at the ${location}.` }] }] });
+    const forward = (await jobs.claim("newer-fact"))!;
+    await jobs.checkpoint(forward, proposal("tower", null));
+    expect(await jobs.publish(forward)).toBe("complete");
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const current = await editor.current(f.scope), mara = current.characters.find(character => character.name === "Mara")!;
+    expect(mara.profile["state.location"]).toBe("tower");
+    if (manual) await editor.edit(f.scope, mara.id, { expectedCastRevision: current.revision, expectedCharacterRevision: mara.revision,
+      expectedBoundary: current.boundary, idempotencyKey: "manual-location", setOverrides: { "state.location": "garden" } });
+    const scan = await scans.start(f.scope, { ...f.request, fromTurn: 2 }, f.execution);
+    await scans.scheduleNext();
+    const historical = (await jobs.claim("older-fact"))!;
+    expect(historical.source.turnNumber).toBe(2);
+    await jobs.checkpoint(historical, proposal("harbor", mara.id));
+    expect(await jobs.publish(historical)).toBe("complete");
+    await scans.scheduleNext();
+    expect(await scans.get(f.scope, scan.id)).toMatchObject({ status: "complete", completeTurns: 2 });
+    expect(await editor.discoveryStatus(f.scope)).toMatchObject({ coverageStartTurn: 2, trackedThroughTurn: 3 });
+    const detail = await editor.detail(f.scope, mara.id);
+    expect(detail.character.profile["state.location"]).toBe(manual ? "garden" : "tower");
+    expect(detail.observations.map(observation => observation.value).sort()).toEqual(["harbor", "tower"]);
+    expect((await pool.query("SELECT id,narration,accepted_at FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows).toEqual(acceptedBefore);
+    expect((await pool.query("SELECT count(*)::int n FROM generation_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(0);
+  });
   it("previews selected work without enrolling cast, enqueueing jobs or returning execution credentials", async () => {
     const f = await fixture();
     const result = await createCastBackfillRepository(pool).preview(f.scope, f.request, f.execution);
@@ -187,6 +220,68 @@ describe("accepted-history scan preview", () => {
     await scans.control(f.scope, scan.id, "cancel");
     expect(await jobs.publish(historical)).toBe("lost_lease");
     expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_receipts WHERE job_id=$1", [historical.id])).rows[0].n).toBe(0);
+  });
+  it("fences undispatched scan calls on pause while retaining accounting for a running response", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
+      [f.execution.providerProfileId, ownerUserId, randomUUID()]);
+    const scan = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true), claim = (await jobs.claim("pause-before-dispatch"))!;
+    const accounting = createPostgresPreparedTextAttemptRepository(pool);
+    const reservation = { kind: "cast_discovery" as const, ownerUserId, jobId: claim.id,
+      chunkOrdinal: claim.chunkOrdinal, claimAttempt: claim.attempt, leaseToken: claim.leaseToken };
+    const input = { logicalReservation: reservation, planProvenance: { planHash: f.execution.plan.planHash, preset: null },
+      candidateOrdinal: 0, candidate: { modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 },
+      request: { body: "{}", payloadHash: "a".repeat(64) } };
+    const attempt = (await accounting.reserve(input))!;
+    await scans.control(f.scope, scan.id, "pause");
+    expect(await accounting.markDispatched(reservation, attempt.id, input.request.payloadHash)).toBeNull();
+    expect(await accounting.reserve(input)).toBeNull();
+    await scans.control(f.scope, scan.id, "resume");
+    expect(await accounting.markDispatched(reservation, attempt.id, input.request.payloadHash)).not.toBeNull();
+    await scans.control(f.scope, scan.id, "pause");
+    expect(await accounting.complete(reservation, attempt.id, { outcome: "succeeded", providerResponseId: "paused-response", returnedModel: "fixture",
+      returnedProviderRoute: null, emittedOutput: true, usage: null, reportedCost: null })).toMatchObject({ status: "completed" });
+    expect(await jobs.checkpoint(claim, { version: 1, characters: [] })).toBe(true);
+  });
+  it("does not refund exhausted physical calls when a later reservation is denied", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    await scans.start(f.scope, f.request, f.execution); await scans.scheduleNext();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true), claim = (await jobs.claim("spent-budget"))!;
+    const accounting = createPostgresPreparedTextAttemptRepository(pool);
+    const reservation = { kind: "cast_discovery" as const, ownerUserId, jobId: claim.id,
+      chunkOrdinal: claim.chunkOrdinal, claimAttempt: claim.attempt, leaseToken: claim.leaseToken };
+    const input = { logicalReservation: reservation, planProvenance: { planHash: f.execution.plan.planHash, preset: null },
+      candidateOrdinal: 0, candidate: { modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 },
+      request: { body: "{}", payloadHash: "a".repeat(64) } };
+    for (let candidateOrdinal = 0; candidateOrdinal < 2; candidateOrdinal++) {
+      const attempt = (await accounting.reserve({ ...input, candidateOrdinal }))!;
+      expect(await accounting.markDispatched(reservation, attempt.id, input.request.payloadHash)).not.toBeNull();
+    }
+    expect(await accounting.reserve({ ...input, candidateOrdinal: 2 })).toBeNull();
+    expect(await jobs.fail(claim, "dispatch_deferred")).toBe(true);
+    expect((await pool.query("SELECT status,attempt,diagnostic_code FROM campaign_cast_discovery_jobs WHERE id=$1", [claim.id])).rows[0])
+      .toEqual({ status: "failed", attempt: 1, diagnostic_code: "provider_failed" });
+    expect(await jobs.claim("no-further-paid-call")).toBeNull();
+  });
+  it("releases an expired active scan lease when newer forward work wins priority", async () => {
+    const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
+    await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    const historical = (await jobs.claim("expired-history"))!;
+    await jobs.checkpoint(historical, { version: 1, characters: [] });
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [historical.id]);
+    await withTransaction(pool, client => enqueueCastDiscoveryWithClient(client, { scope: f.scope, turnId: f.turnIds[2]!, execution: f.execution, enabled: true }));
+    const forward = (await jobs.claim("new-forward"))!;
+    expect(forward.source.turnNumber).toBe(3);
+    expect(await jobs.publish(historical)).toBe("lost_lease");
+    await jobs.checkpoint(forward, { version: 1, characters: [] });
+    await jobs.publish(forward);
+    const resumed = (await jobs.claim("resume-history"))!;
+    expect(resumed).toMatchObject({ id: historical.id, attempt: historical.attempt, output: { version: 1, characters: [] } });
+    expect(await jobs.publish(resumed)).toBe("complete");
   });
   it.each([false, true])("cancels scans at the lifecycle boundary without converting scan jobs to forward work (scheduled=%s)", async scheduled => {
     const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
@@ -362,5 +457,14 @@ describe("accepted-history scan preview", () => {
       expectedBoundary: cast.boundary, idempotencyKey: "recover-admission" })).toMatchObject({ status: "paused", failedTurns: 0 });
     expect((await pool.query("SELECT execution_snapshot,retry_generation FROM campaign_cast_discovery_jobs WHERE id=$1", [jobId])).rows[0])
       .toEqual({ execution_snapshot: f.execution, retry_generation: 1 });
+    const jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    expect(await jobs.claim("paused-recovered-scan")).toBeNull();
+    await scans.control(f.scope, scan.id, "resume");
+    expect(await createCastDiscoveryJobRepository(pool, () => true, () => false).claim("disabled-recovered-scan")).toBeNull();
+    const recovered = (await jobs.claim("resumed-recovered-scan"))!;
+    expect(recovered.id).toBe(jobId);
+    await jobs.checkpoint(recovered, { version: 1, characters: [] });
+    await scans.control(f.scope, scan.id, "cancel");
+    expect(await jobs.publish(recovered)).toBe("lost_lease");
   });
 });

@@ -11,7 +11,7 @@ export type CastDiscoveryClaim = {
   execution: CastDiscoveryExecution; attempt: number; retryGeneration?: number; leaseToken: string; output: CastDiscoveryOutput | null;
   identities: CastDiscoveryIdentitySnapshot;
 };
-export type CastDiscoveryDiagnostic = "provider_timeout" | "provider_failed" | "invalid_output" | "source_requires_manual_scan" | "publication_failed";
+export type CastDiscoveryDiagnostic = "provider_timeout" | "provider_failed" | "invalid_output" | "source_requires_manual_scan" | "publication_failed" | "dispatch_deferred";
 export type CastDiscoveryPublication = "disabled" | "lost_lease" | "stale_source" | "generation_active" | "complete" | "next_chunk";
 export interface CastDiscoveryJobPort {
   claim(workerId: string): Promise<CastDiscoveryClaim | null>;
@@ -27,7 +27,7 @@ export interface CastDiscoveryWorkerApplication {
   runNext(workerId: string): Promise<boolean>;
 }
 export class CastDiscoveryExtractionError extends Error {
-  constructor(readonly diagnostic: "provider_timeout" | "provider_failed" | "source_requires_manual_scan") {
+  constructor(readonly diagnostic: "provider_timeout" | "provider_failed" | "source_requires_manual_scan" | "dispatch_deferred") {
     super(diagnostic);
     this.name = "CastDiscoveryExtractionError";
   }
@@ -36,7 +36,7 @@ export class CastDiscoveryExtractionError extends Error {
 /** One durable chunk per tick. Story acceptance and its provider calls are never retried here. */
 export async function runCastDiscoveryOnce(input: {
   workerId: string; repository: CastDiscoveryJobPort; extractor: CastDiscoveryExtractorPort;
-}): Promise<CastDiscoveryPublication | "idle" | "failed" | "checkpoint_failed" | "publication_failed"> {
+}): Promise<CastDiscoveryPublication | "idle" | "failed" | "deferred" | "checkpoint_failed" | "publication_failed"> {
   const claim = await input.repository.claim(input.workerId);
   if (!claim) return "idle";
   if (claim.output === null) {
@@ -45,7 +45,7 @@ export async function runCastDiscoveryOnce(input: {
       value = await input.extractor.extract(claim);
     } catch (error) {
       const diagnostic = error instanceof CastDiscoveryExtractionError ? error.diagnostic : "provider_failed";
-      return await input.repository.fail(claim, diagnostic) ? "failed" : "lost_lease";
+      return await input.repository.fail(claim, diagnostic) ? diagnostic === "dispatch_deferred" ? "deferred" : "failed" : "lost_lease";
     }
     const parsed = castDiscoveryOutputSchema.safeParse(value);
     if (!parsed.success) return await input.repository.fail(claim, "invalid_output") ? "failed" : "lost_lease";

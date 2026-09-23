@@ -1,6 +1,6 @@
 # Campaign cast phase 06 progress
 
-Phase 05 was accepted in `ba81924a`; its [acceptance record](phase-05-acceptance.md) includes the shared test-bootstrap limitation. Phase 06 is active and not accepted. The user scope remains legacy Story UI only; replacement UI work is deferred. Relationships remain out of scope.
+Phase 05 was accepted in `ba81924a`; its [acceptance record](phase-05-acceptance.md) includes the shared test-bootstrap limitation. Phase 06 is accepted at the legacy-only scope; see the [final acceptance record](phase-06-acceptance.md). The chronological entries below retain their original checkpoint status. Replacement UI and relationships remain deferred.
 
 ## Initial range and progress contracts
 
@@ -87,3 +87,9 @@ Added the shared scan client and legacy **Scan earlier story** panel with explic
 Verification: 14 legacy Playwright tests passed, including desktop/mobile scan controls and retry recovery; 4,436 unit tests passed and 44 skipped. Screenshots in `screenshots/phase-06/scan-*.png` were visually inspected at 1280px and 390px. Browser assertions verify route identity, no JavaScript errors and no Vite overlay. The fixture has a known optional PhotoSwipe stylesheet 404; only that exact resource/error is excluded from console assertions. Browser APIs are fixtures, not PostgreSQL or live-provider integration. Logs: `.tmp/campaign-cast/phase6-ui-{unit,final}.log`.
 
 Backend review identified two outstanding regressions to reproduce and fix before acceptance: an expired active scan lease can retain the unique running slot when forward work wins priority; scan-authorized retry of a reused forward failure can bypass scan controls. Full historical publication/coverage acceptance remains outstanding.
+
+## Final scheduler and dispatch corrections
+
+Both review findings reproduced against PostgreSQL and were fixed: expired scan leases release the running slot before forward priority selection, and newly scan-authorized retries retain scan provenance/control. Follow-up review verified those paths. The physical reservation/dispatch boundary now checks scan status, while in-flight completion remains allowed. A composed executor/worker regression exposed pause being counted as provider failure; internal dispatch deferral now requeues unused claims without spending their allowance. Exhausted physical budgets still fail and require explicit retry. Regression evidence includes three successive zero-call pauses followed by exactly one successful dispatch.
+
+Historical publication tests scan older location evidence after newer discovery, with and without a manual override. Both retain current authority, preserve observations at their original source turns, report coverage beginning at turn 2 rather than implying turn 1 was scanned, and leave accepted narration unchanged. Final PostgreSQL run passed 102 tests across five affected suites. Complete unit tests passed 4,436 with 44 pre-existing skips; repository checks passed. The final budget refinement is additionally covered by the final PostgreSQL run. Browser evidence remains 14 passing legacy tests with the known fixture stylesheet exclusion. Detailed requirement mapping and limitations are recorded in the acceptance document.
