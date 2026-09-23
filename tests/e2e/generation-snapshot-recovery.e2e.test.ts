@@ -5,7 +5,7 @@ import { generationJobSnapshotSchema, generationResultSchema } from "../../packa
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 
 for (const surface of ["legacy", "web-next"] as const) {
-  test(`${surface} loads the saved turn after rejected stream and polling snapshots without refresh or regeneration`, async ({ page }, testInfo) => {
+  test(`${surface} loads the saved turn after a rejected stream frame without refresh or regeneration`, async ({ page }, testInfo) => {
     const payloads = quietLeafApiPayloads({ pendingGeneration: true });
     const jobId = payloads.syncStatus.pendingGeneration!.id;
     const turn = { ...payloads.turns.turns[0]!, id: "77777777-7777-4777-8777-777777777777", turnNumber: 2,
@@ -24,7 +24,6 @@ for (const surface of ["legacy", "web-next"] as const) {
     const writes: string[] = [];
     const errors: string[] = [];
     let resultLoaded = false;
-    let pollingReads = 0;
     page.on("pageerror", error => errors.push(error.message));
     await page.route("**/api/v1/**", async route => {
       const request = route.request();
@@ -50,10 +49,7 @@ for (const surface of ["legacy", "web-next"] as const) {
       if (path === `/api/v1/generation-jobs/${jobId}/stream`) return route.fulfill({
         contentType: "text/event-stream", body: 'data: {"invalid":true}\n\n'
       });
-      if (path === `/api/v1/generation-jobs/${jobId}`) {
-        pollingReads += 1;
-        return respond(pollingReads === 1 ? { invalid: true } : completed);
-      }
+      if (path === `/api/v1/generation-jobs/${jobId}`) return respond(completed);
       if (path === `/api/v1/generation-jobs/${jobId}/result`) {
         resultLoaded = true;
         return respond(result);
@@ -77,7 +73,6 @@ for (const surface of ["legacy", "web-next"] as const) {
     expect(reads.filter(path => path === `/api/v1/generation-jobs/${jobId}/stream`)).toHaveLength(1);
     expect(reads).toContain(`/api/v1/generation-jobs/${jobId}`);
     expect(reads).toContain(`/api/v1/generation-jobs/${jobId}/result`);
-    expect(pollingReads).toBeGreaterThanOrEqual(2);
     expect(writes).toEqual([]);
     expect(errors).toEqual([]);
     await page.screenshot({ path: process.env.SNAPSHOT_RECOVERY_SCREENSHOTS

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { discoverOpenRouterPreset, discoverOpenRouterPresets, validateOpenRouterPresetConfig } from "../../packages/story-engine/src/openrouter-presets.js";
+import { discoverOpenRouterPreset, discoverOpenRouterPresets } from "../../packages/story-engine/src/openrouter-presets.js";
 import type { ProviderTransport } from "../../packages/story-engine/src/provider-transport.js";
 
 const profile = {
@@ -19,20 +19,6 @@ function transport(responses: readonly Response[]): ProviderTransport {
 }
 
 describe("OpenRouter preset metadata discovery", () => {
-  it.each([true, false])("preserves response caching enabled=%s and bounded TTL", (enabled) => {
-    for (const ttl of [1, 300, 86400]) {
-      const config = { models: ["test/model"], cache_enabled: enabled, cache_ttl_seconds: ttl };
-      expect(validateOpenRouterPresetConfig(config)).toEqual(config);
-    }
-  });
-
-  it.each([
-    { cache_enabled: "true" }, { cache_enabled: null },
-    ...[0, -1, 86401, 1.5, "300", null].map((ttl) => ({ cache_ttl_seconds: ttl }))
-  ])("rejects invalid cache configuration %j", (config) => {
-    expect(() => validateOpenRouterPresetConfig(config)).toThrow();
-  });
-
   it("walks each returned page offset from the documented data envelope without prompt disclosure", async () => {
     const calls: string[] = [];
     const pages = [

@@ -91,7 +91,7 @@ function deepFreeze<T>(value: T): T {
 }
 
 function parameterFields(config: Readonly<Record<string, unknown>>): TextGenerationParameters {
-  const source = Object.fromEntries(Object.entries(config).filter(([key]) => !["model", "models", "provider", "cache_enabled", "cache_ttl_seconds"].includes(key)));
+  const source = Object.fromEntries(Object.entries(config).filter(([key]) => key !== "model" && key !== "models" && key !== "provider"));
   return freeze(textGenerationParametersSchema.parse(source));
 }
 
@@ -232,12 +232,6 @@ function createRouteBasis(inputs: ResolvedPlanInputs): TextExecutionRouteBasis {
     candidates: inputs.candidates,
     presetSystemPrompt: inputs.presetSystemPrompt,
     parameters: inputs.parameters,
-    ...(inputs.preset && (inputs.preset.config.cache_enabled !== undefined || inputs.preset.config.cache_ttl_seconds !== undefined) ? {
-      responseCache: {
-        ...(inputs.preset.config.cache_enabled === undefined ? {} : { enabled: inputs.preset.config.cache_enabled }),
-        ...(inputs.preset.config.cache_ttl_seconds === undefined ? {} : { ttlSeconds: inputs.preset.config.cache_ttl_seconds })
-      }
-    } : {}),
     endpointReference: inputs.profile.endpointReference,
     credentialReference: inputs.profile.credentialReference,
     profileRevision: inputs.profile.profileRevision,

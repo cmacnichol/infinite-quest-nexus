@@ -76,28 +76,21 @@ async function* runPollSession(
   let consecutiveFailures = 0;
 
   while (!signal.aborted) {
-    let snapshot: import("@infinite-quest/contracts").GenerationStreamSnapshot;
+    let snapshot: Awaited<ReturnType<PollSessionOptions["api"]["get"]>>;
     try {
       const bridge = toAbortSignal(signal);
       try {
-        const response = await options.api.get(jobId, bridge.signal);
-        const parsed = generationStreamSnapshotSchema.safeParse(response);
-        if (!parsed.success) {
-          throw new ApiContractError("Invalid generation status response.", {
-            phase: "response", kind: "response_schema_mismatch", method: "GET", path: `/generation-jobs/${jobId}`
-          });
-        }
-        snapshot = parsed.data;
+        snapshot = await options.api.get(jobId, bridge.signal);
       } finally {
         bridge.dispose();
       }
     } catch (cause) {
       if (signal.aborted) return;
       if (cause instanceof GenerationWorkflowProtocolError) throw cause;
-      const invalidSnapshot = cause instanceof ApiContractError;
-      if (!invalidSnapshot && !isTransientPollingError(cause)) throw cause;
-      // A rejected status response is not evidence that the durable job failed.
-      // Keep the last validated state and reconcile the same job after backoff.
+      if (cause instanceof ApiContractError) {
+        throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause });
+      }
+      if (!isTransientPollingError(cause)) throw cause;
 
       consecutiveFailures += 1;
       const waitMilliseconds = pollingFailureDelay(
@@ -106,10 +99,10 @@ async function* runPollSession(
         cause,
         options.clock
       );
-      if (invalidSnapshot || consecutiveFailures >= 2) {
+      if (consecutiveFailures >= 2) {
         yield {
           kind: "degraded",
-          reason: invalidSnapshot ? "invalid_snapshot" : "poll_failed",
+          reason: "poll_failed",
           consecutiveFailures
         };
       }
@@ -118,9 +111,13 @@ async function* runPollSession(
     }
 
     if (signal.aborted) return;
+    const parsed = generationStreamSnapshotSchema.safeParse(snapshot);
+    if (!parsed.success) {
+      throw new GenerationWorkflowProtocolError("invalid_snapshot", { cause: parsed.error });
+    }
     consecutiveFailures = 0;
-    yield { kind: "snapshot", snapshot };
-    if (isTerminalSnapshot(snapshot)) return;
+    yield { kind: "snapshot", snapshot: parsed.data };
+    if (isTerminalSnapshot(parsed.data)) return;
     await waitForNextPoll(options, POLL_INTERVAL_MS, signal);
   }
 }
@@ -137,7 +134,7 @@ function isTransientPollingError(cause: unknown): cause is TypeError | NexusApiE
 function pollingFailureDelay(
   consecutiveFailures: number,
   random: () => number,
-  cause: unknown,
+  cause: TypeError | NexusApiError,
   clock: PollSessionOptions["clock"]
 ): number {
   const randomValue = random();

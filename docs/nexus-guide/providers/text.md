@@ -14,12 +14,6 @@ The advertised loaded-model context length is used when available. A provider pr
 
 ## OpenRouter saved presets
 
-Nexus supports preset response caching through `cache_enabled` (boolean) and
-`cache_ttl_seconds` (an integer from 1 through 86400). These settings are frozen
-with queued work and sent as OpenRouter cache headers for each selected route.
-They do not replace the structured-output JSON schema. Omitted settings retain
-OpenRouter's defaults; explicit `false` disables response caching.
-
 Saved OpenRouter preset routes must use concrete model IDs that can be frozen with a queued generation. Nexus rejects OpenRouter's `~` family aliases, `openrouter/auto`, and `openrouter/free`, including surrounding whitespace. It does not reject another concrete ID merely because it contains `latest` or begins with `openrouter/`.
 
 When an OpenRouter preset includes one of the deliberately unsupported public configuration fields `tools`, `stop`, or `transforms`, the provider response identifies that field by name. Other unknown or private configuration names remain the generic `config` diagnostic, and Nexus does not expose remote configuration values or messages.

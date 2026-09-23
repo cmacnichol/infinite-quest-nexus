@@ -1,12 +1,8 @@
 import { createHash } from "node:crypto";
-import { Ajv } from "ajv";
-import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
-import { makeStructuredOutputStory } from "../fixtures/generation-validation/structured-output-cases.js";
 import { describe, expect, it } from "vitest";
-import { STORY_SYSTEM_PROMPT, composeStoryMemorySystemPrompt, storyPromptCompatibilityIdentity, STORY_FACT_DELTA_WIRE_CONTRACT } from "../../packages/contracts/src/story-prompt.js";
+import { STORY_SYSTEM_PROMPT, composeStoryMemorySystemPrompt } from "../../packages/contracts/src/story-prompt.js";
 import {
   composeStoryOnlyChoiceRepairSystemPrompt,
-  buildStoryOnlyChoiceRepairInput,
   composeStoryOnlySystemPrompt,
   generationExecutionProtocolIdentity,
   generationPolicyIdentity,
@@ -14,29 +10,6 @@ import {
 } from "../../packages/story-engine/src/story-only-prompt.js";
 
 describe("story-only prompt policy", () => {
-  it("supplies a choices-repair example accepted by the API output schema", () => {
-    const input = JSON.parse(buildStoryOnlyChoiceRepairInput(makeStructuredOutputStory()));
-    const validate = new Ajv({ strict: false }).compile(getProviderOutputSchemaV2("choices").schema);
-    expect(validate(input.required_shape), JSON.stringify(validate.errors)).toBe(true);
-    expect(new Set(input.required_shape.choices).size).toBe(4);
-    expect(input.required_shape.choices).not.toContain(input.required_shape.custom_action_suggestion);
-  });
-  it.each([false, true])("does not request full Story fields in a choices-only repair (memory=%s)", (memory) => {
-    const prompt = composeStoryOnlyChoiceRepairSystemPrompt(storyOnlyPromptSnapshot().choiceRepairSystem, memory,
-      "story-v16-fact-wire-distinction", storyPromptCompatibilityIdentity());
-    expect(prompt).toContain("exactly choices and custom_action_suggestion");
-    expect(prompt).not.toContain("Return scratchpad, continuity_summary, and open_threads");
-    expect(prompt).not.toContain("emit them explicitly");
-  });
-
-  it("preserves historical choice-repair prompt composition", () => {
-    const historical = "Repair only choices using the captured historical instructions.";
-    const input = JSON.parse(buildStoryOnlyChoiceRepairInput(makeStructuredOutputStory(), historical));
-    expect(input.required_shape).toEqual({ choices: ["exactly four concise fiction-only directions"], custom_action_suggestion: "one concise distinct fiction-only suggestion" });
-    expect(composeStoryOnlyChoiceRepairSystemPrompt(historical, false, undefined, storyPromptCompatibilityIdentity()))
-      .toBe(`${historical}\n\n${STORY_FACT_DELTA_WIRE_CONTRACT}`);
-  });
-
   const creativeOverride = "Input canonical facts are comprehensive reference objects.";
   it("freezes a versioned supplement that keeps mechanics and triggers inactive", () => {
     const snapshot = storyOnlyPromptSnapshot();

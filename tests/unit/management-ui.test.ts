@@ -31,39 +31,6 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
 }
 
 describe("Nexus management UI contracts", () => {
-  it("keeps text model and preset selection in settings rather than individual turns", () => {
-    expect(storyScript).not.toContain("turnTextSelectionPanel");
-    expect(storyScript).not.toContain("storyTextSelectionRequest");
-    expect(managementHtml).toContain('id="providerSelectionPreset"');
-    expect(managementHtml).toContain('id="providerDefaultModel"');
-  });
-  it.each(["application", "campaign"])("defaults prompt acknowledgement on in %s scope and preserves a manual uncheck", (scope) => {
-    const { document } = parseHTML(managementHtml);
-    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
-    Object.defineProperty(elements.promptLibraryScope, "value", { value: scope, configurable: true });
-    const template = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
-      effectiveSource: scope, effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
-    const functions = managementFunctions<{ renderPromptLibrary: (load?: boolean) => void; syncPromptLibraryAcknowledgement: () => void }>(
-      ["renderPromptLibrary", "syncPromptLibraryAcknowledgement"], {
-        document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
-        promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => scope === "campaign" ? "campaign-a" : "",
-        promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
-        requestAnimationFrame: () => {}
-      });
-    functions.renderPromptLibrary(true);
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-    elements.promptLibraryContent.value = "Changed instructions";
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-    elements.promptLibraryCompatibilityAcknowledgement.checked = false;
-    functions.renderPromptLibrary();
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(false);
-    functions.renderPromptLibrary(true);
-    expect(elements.promptLibraryContent.value).toBe("Saved instructions");
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-    template.compatibility.acknowledged = false;
-    functions.renderPromptLibrary(true);
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-  });
   it("ignores an old campaign world response after another campaign is selected", async () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));

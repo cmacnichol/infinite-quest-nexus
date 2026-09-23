@@ -46,7 +46,6 @@ export type PreparedProviderRequest = Readonly<{
   payloadHash: string;
   operation: ProviderRequestOperation;
   budgetAudit: ProviderRequestBudgetAudit | null;
-  responseCache?: TextExecutionPlan["responseCache"];
 }>;
 
 export type ProviderRequestSerializationOptions = Readonly<{
@@ -180,7 +179,6 @@ function serializeProviderRequestInternal(
     contract: PreparedResponseContractV2;
     candidate: TextRouteCandidate;
     parameters: TextGenerationParameters;
-    responseCache?: PreparedProviderRequest["responseCache"];
   }>
 ): PreparedProviderRequest {
   const boundPresetContract = boundPreset?.contract;
@@ -264,8 +262,7 @@ function serializeProviderRequestInternal(
         } : responseContract?.mode === "json_object" ? { response_format: { type: "json_object" } } : options.responseFormat === false ? {} : { response_format: { type: "json_object" } }),
         ...(request.onChunk ? { stream: true, stream_options: { include_usage: true } } : {})
       };
-  const prepared = prepare(payload, options);
-  return boundPreset?.responseCache === undefined ? prepared : Object.freeze({ ...prepared, responseCache: boundPreset.responseCache });
+  return prepare(payload, options);
 }
 
 /** Generic callers cannot serialize a bare preset-trusted response contract. */
@@ -334,7 +331,7 @@ export function serializeBoundFrozenPresetProviderRequest(
   const candidate = bound.candidate;
   const frozenProfile = frozenPresetProfile(profile, candidate, bound.plan.parameters);
   return serializeProviderRequestInternal(frozenProfile, request, options, {
-    contract: bound.contract, candidate, parameters: bound.plan.parameters, responseCache: bound.plan.responseCache
+    contract: bound.contract, candidate, parameters: bound.plan.parameters
   });
 }
 
@@ -479,7 +476,7 @@ export function serializeCheckedBoundFrozenPresetProviderRequest(
       throw new Error("Bound frozen preset serialization cannot accept a caller-supplied response contract.");
     }
     return serializeProviderRequestInternal(candidateProfile, candidateRequest, serializationOptions, {
-      contract: bound.contract, candidate, parameters: bound.plan.parameters, responseCache: bound.plan.responseCache
+      contract: bound.contract, candidate, parameters: bound.plan.parameters
     });
   });
 }

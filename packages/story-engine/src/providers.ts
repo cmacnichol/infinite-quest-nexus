@@ -761,13 +761,7 @@ export async function sendPreparedProviderRequest(
     profile,
     prepared.operation,
     url,
-    { method: "POST", headers: {
-      ...headers(profile, url),
-      ...(profile.providerType === "openrouter" && prepared.responseCache?.enabled !== undefined
-        ? { "X-OpenRouter-Cache": String(prepared.responseCache.enabled) } : {}),
-      ...(profile.providerType === "openrouter" && prepared.responseCache?.ttlSeconds !== undefined
-        ? { "X-OpenRouter-Cache-TTL": String(prepared.responseCache.ttlSeconds) } : {})
-    }, body: prepared.body },
+    { method: "POST", headers: headers(profile, url), body: prepared.body },
     transport,
     signal
   );

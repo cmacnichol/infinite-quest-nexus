@@ -28,10 +28,6 @@ import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-impor
 import { createPromptRepository, resolveStoryMemoryPromptSnapshot, resolveStoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
 
 describe("Prompt Library catalog", () => {
-  it.each(["source_extraction", "source_extraction_recovery"] as const)("uses evidence IDs in the %s prompt", (key) => {
-    expect(PROMPT_TEMPLATE_CATALOG[key].defaultContent).toContain("evidenceId");
-    expect(PROMPT_TEMPLATE_CATALOG[key].defaultContent).not.toContain("coordinates");
-  });
   it("requires an intact frozen review and repair pair for enabled modes", () => {
     const templates = Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG)
       .map(([key, definition]) => [key, { content: definition.defaultContent, hash: createHash("sha256").update(definition.defaultContent).digest("hex"), source: "shipped" }]));

@@ -16,21 +16,6 @@ Native text execution is controlled by one runtime setting, `NATIVE_TEXT_EXECUTI
 
 Backend/contracts and worker compatibility must be present before UI admission. A selector becoming visible is a consequence of the server capability advertisement; it is not the deployment gate itself.
 
-For local Compose, set `NATIVE_TEXT_EXECUTION_PLAN_ADMISSION=true` in the ignored
-`.env` only after completing steps 1–4, then recreate the combined application
-service with `docker compose up -d --no-deps infinitequest-app`. A plain
-`docker compose restart` does not apply changed environment settings. For Swarm,
-export the same setting in the deployment shell before rendering/deploying the
-stack; both API and worker services receive it. Do not assume Swarm reads the
-Compose `.env` file automatically.
-
-If the legacy provider editor has no Model/Preset switch or preset dropdown,
-check `/api/v1/meta`: `capabilities.nativeTextExecutionPlans` must be `true`.
-When it is false, a saved preset is preserved but cannot be reselected through
-the native controls. After activation, reload Nexus, edit a Story text OpenRouter
-profile, select Preset, and use Refresh to populate the preset dropdown. Concrete
-Model profiles retain their existing model picker while admission is off.
-
 ## Unsupported configuration response
 
 Do not save or enqueue a preset that uses unsupported tools, transforms, stop configuration, conflicting routing order/sort, unbounded candidate arrays, or unknown context capacity without an explicit conservative cap. Preserve the saved unavailable selection for display with a finite diagnostic. Never replace it with the first model or public endpoint. A Model with missing, expired, operation-mismatched, stream-mismatched, schema-mismatched, or route-mismatched verification blocks before inference. A trusted Preset retains its configured routes and schema on every attempt; provider schema failure is terminal and visible without standard-JSON fallback.

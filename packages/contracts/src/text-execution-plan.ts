@@ -35,7 +35,6 @@ const textExecutionRouteShape = {
   preset: z.object({ slug: z.string().trim().min(1).max(200), versionId: z.string().trim().min(1).max(500), configHash: hashSchema }).strict().nullable(),
   candidates: z.array(textRouteCandidateSchema).min(1).max(32), presetSystemPrompt: z.string().max(200_000),
   parameters: textGenerationParametersSchema, endpointReference: z.string().trim().min(1).max(500),
-  responseCache: z.object({ enabled: z.boolean().optional(), ttlSeconds: positiveIntegerSchema.max(86400).optional() }).strict().optional(),
   credentialReference: z.string().trim().min(1).max(500).nullable(), profileRevision: z.string().trim().min(1).max(500),
   authorityRevision: z.string().trim().min(1).max(500).optional(), requestTimeoutMs: positiveIntegerSchema.optional(),
   protocolVersion: z.string().trim().min(1).max(500)
@@ -117,7 +116,6 @@ export function deriveTextExecutionPlan(routeBasisValue: unknown, operationPromp
     candidates: basis.candidates,
     presetSystemPrompt: basis.presetSystemPrompt,
     parameters: basis.parameters,
-    ...(basis.responseCache === undefined ? {} : { responseCache: basis.responseCache }),
     prompt,
     promptHash: sha256Hex(prompt),
     endpointReference: basis.endpointReference,

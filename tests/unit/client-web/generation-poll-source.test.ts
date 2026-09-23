@@ -211,12 +211,7 @@ describe("generation polling session", () => {
       errorMessage: rawFailure
     } as unknown as GenerationJobSnapshot;
 
-    const events = await collect(options({ api: apiQueue(rawSnapshot, snapshot({ status: "completed" })) }));
-    expect(events).toEqual([
-      { kind: "degraded", reason: "invalid_snapshot", consecutiveFailures: 1 },
-      { kind: "snapshot", snapshot: projected({ status: "completed" }) }
-    ]);
-    expect(JSON.stringify(events)).not.toContain(rawFailure);
+    await expect(collect(options({ api: apiQueue(rawSnapshot) }))).rejects.toMatchObject({ kind: "invalid_snapshot" });
   });
 
   it("polls immediately, strips durable timestamps, waits 1500 ms, and never overlaps reads", async () => {
@@ -324,31 +319,23 @@ describe("generation polling session", () => {
     await expect(collect(options({ api: apiQueue(error) }))).rejects.toBe(error);
   });
 
-  it("recovers from contract errors and invalid projections without accepting rejected data", async () => {
+  it("maps API contract errors and invalid projections to invalid-snapshot protocol errors", async () => {
     const contractError = new ApiContractError("schema mismatch", {
-      phase: "response", kind: "response_schema_mismatch", method: "GET", path: "/generation-jobs/job"
+      phase: "response",
+      kind: "response_schema_mismatch",
+      method: "GET",
+      path: "/generation-jobs/job"
     });
-    const api = apiQueue(contractError, { ...snapshot(), expectedTurnNumber: 0 } as GenerationJobSnapshot,
-      snapshot({ status: "completed" }));
-    const delay = immediateDelay();
-    expect(await collect(options({ api, delay }))).toEqual([
-      { kind: "degraded", reason: "invalid_snapshot", consecutiveFailures: 1 },
-      { kind: "degraded", reason: "invalid_snapshot", consecutiveFailures: 2 },
-      { kind: "snapshot", snapshot: projected({ status: "completed" }) }
-    ]);
-    expect(delay.waits).toEqual([1500, 3000]);
-    expect(api.maximumActive).toBe(1);
-  });
+    const contractFailure = collect(options({ api: apiQueue(contractError) }));
+    const projectionFailure = collect(options({
+      api: apiQueue({ ...snapshot(), expectedTurnNumber: 0 } as GenerationJobSnapshot)
+    }));
 
-  it("stops polling when aborted after an invalid snapshot", async () => {
-    const abortSignal = signal();
-    const api = apiQueue({ invalid: true } as unknown as GenerationJobSnapshot);
-    const iterator = createPollSession(options({ api }), jobId, abortSignal);
-    await expect(iterator.next()).resolves.toMatchObject({ value: { kind: "degraded", reason: "invalid_snapshot" } });
-    abortSignal.abort();
-    await expect(iterator.next()).resolves.toMatchObject({ done: true });
-    expect(api.calls).toBe(1);
-    expect(abortSignal.listenerCount()).toBe(0);
+    for (const result of [contractFailure, projectionFailure]) {
+      const error = await result.catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(GenerationWorkflowProtocolError);
+      expect(error).toMatchObject({ kind: "invalid_snapshot" });
+    }
   });
 
   it("rethrows an existing workflow protocol error unchanged", async () => {
