@@ -54,4 +54,6 @@ Campaign Archives and System Archives embed version 1 cast authority: identities
 
 ## Verification and recovery
 
+Automatic discovery allows two physical provider dispatches per job/source chunk across fallback routes and worker reclaims. Unknown dispatched outcomes consume the allowance; unsent reservations and checkpoint publication do not. Later chunks receive their own allowance. This does not provide shared provider concurrency across API/worker replicas; that release gate and explicit user Retry remain pending. An exhausted allowance currently surfaces through the generic discovery provider-failure diagnostic.
+
 See the [phase 02 handoff](../review/campaign-cast/phase-02.md) for verification evidence and remaining gates. Cast projections are rebuilt from retained authority and revalidate source narration on reads. Accepted turns and user edits remain the recovery sources; do not repair a disagreement by rewriting the cached profile directly.

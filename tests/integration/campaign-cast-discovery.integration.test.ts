@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { executePresetRoutes } from "../../packages/story-engine/src/preset-route-execution.js";
 import Fastify from "fastify";
 import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
 import { createCampaignCastApplication } from "../../packages/application/src/campaign-cast/use-cases.js";
@@ -55,6 +56,58 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("stops actual fallback dispatch after two calls while allowing the next source chunk", async () => {
+    const f = await fixture();
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], "Mara waits by the bridge. ".repeat(900)]);
+    await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
+      [f.execution.providerProfileId, ownerUserId, randomUUID()]);
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), first = (await jobs.claim("routes"))!;
+    const attempts = createPostgresPreparedTextAttemptRepository(pool);
+    let calls = 0;
+    const execute = (job: typeof first) => executePresetRoutes({
+      candidates: [0, 1, 2].map((ordinal) => ({ modelId: `fixture-${ordinal}`, providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 })),
+      planProvenance: { planHash: f.execution.plan.planHash, preset: null },
+      logicalReservation: { kind: "cast_discovery", ownerUserId, jobId: job.id, chunkOrdinal: job.chunkOrdinal, claimAttempt: job.attempt, leaseToken: job.leaseToken },
+      attempts, prepareCandidate: () => ({ body: "{}", payloadHash: "a".repeat(64) }),
+      invoke: async () => { calls++; throw { routeFailureReason: "provider_unavailable" }; },
+      totalDeadlineMs: 30000, sleep: async () => undefined
+    });
+    await expect(execute(first)).rejects.toMatchObject({ code: "prepared_route_lease_lost" });
+    expect(calls).toBe(2);
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [first.id]);
+    const retry = (await jobs.claim("retry"))!;
+    await expect(execute(retry)).rejects.toMatchObject({ code: "prepared_route_lease_lost" });
+    expect(calls).toBe(2);
+    // Publishing an already obtained checkpoint is unpaid and must remain recoverable.
+    await jobs.checkpoint(retry, emptyOutput);
+    expect(await jobs.publish(retry)).toBe("next_chunk");
+    const next = (await jobs.claim("next"))!;
+    expect(next.chunkOrdinal).toBe(1);
+    await expect(execute(next)).rejects.toMatchObject({ code: "prepared_route_lease_lost" });
+    expect(calls).toBe(4);
+    expect((await pool.query("SELECT chunk, count(*)::integer n FROM (SELECT logical_reservation->>'chunkOrdinal' chunk FROM prepared_text_physical_attempts WHERE logical_reservation->>'jobId'=$1 AND dispatched_at IS NOT NULL AND status='completed') attempts GROUP BY chunk ORDER BY chunk", [first.id])).rows)
+      .toEqual([{ chunk: "0", n: 2 }, { chunk: "1", n: 2 }]);
+  });
+  it("shares a two-dispatch chunk budget across fallback candidates and reclaimed logical attempts", async () => {
+    const f = await fixture(); await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), first = (await jobs.claim("first"))!;
+    const accounting = createPostgresPreparedTextAttemptRepository(pool);
+    const reservation = { kind: "cast_discovery" as const, ownerUserId, jobId: first.id, chunkOrdinal: 0, claimAttempt: first.attempt, leaseToken: first.leaseToken };
+    const input = { logicalReservation: reservation, planProvenance: { planHash: f.execution.plan.planHash, preset: null },
+      candidateOrdinal: 0, candidate: { modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 },
+      request: { body: "{}", payloadHash: "a".repeat(64) } };
+    const reserved = await Promise.all([0, 1, 2].map((candidateOrdinal) => accounting.reserve({ ...input, candidateOrdinal })));
+    expect(reserved.every(Boolean)).toBe(true);
+    const dispatched = await Promise.all(reserved.map((attempt) => accounting.markDispatched(reservation, attempt!.id, input.request.payloadHash)));
+    expect(dispatched.filter(Boolean)).toHaveLength(2);
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [first.id]);
+    const retry = (await jobs.claim("retry"))!;
+    expect(retry.attempt).toBe(2);
+    const nextReservation = { ...reservation, claimAttempt: retry.attempt, leaseToken: retry.leaseToken };
+    expect(await accounting.reserve({ ...input, logicalReservation: nextReservation })).toBeNull();
+    expect((await pool.query("SELECT count(*)::integer n FROM prepared_text_physical_attempts WHERE logical_reservation->>'jobId'=$1 AND dispatched_at IS NOT NULL", [first.id])).rows[0].n).toBe(2);
+  });
   it("records an automatically confirmed identity even when no profile fact changes", async () => {
     const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
     await pool.query("UPDATE campaigns SET active_turn_number=0 WHERE id=$1", [f.scope.campaignId]);

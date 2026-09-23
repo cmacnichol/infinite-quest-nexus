@@ -117,6 +117,16 @@ function record(row: AttemptRow): PhysicalAttemptRecord {
   };
 }
 
+/** Caller holds the discovery job lock from hasLiveReservation; count all logical retries. */
+async function hasDiscoveryDispatchBudget(client: DatabaseClient, value: LogicalReservation): Promise<boolean> {
+  if (value.kind !== "cast_discovery") return true;
+  const row = (await client.query(`SELECT count(*)::integer AS dispatched FROM prepared_text_physical_attempts
+    WHERE owner_user_id=$1 AND logical_kind='cast_discovery' AND logical_reservation->>'jobId'=$2
+      AND logical_reservation->>'chunkOrdinal'=$3 AND dispatched_at IS NOT NULL`,
+  [value.ownerUserId, value.jobId, String(value.chunkOrdinal)])).rows[0];
+  return row.dispatched < 2;
+}
+
 async function hasLiveReservation(client: DatabaseClient, value: LogicalReservation): Promise<boolean> {
   if (value.kind === "direct") return true;
   if (value.kind === "cast_discovery") {
@@ -335,6 +345,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
             || stableStringify(prior.provider_policy) !== stableStringify(input.candidate.providerPolicy)) return null;
           return record(prior);
         }
+        if (!await hasDiscoveryDispatchBudget(client, input.logicalReservation)) return null;
         const inserted = await client.query<AttemptRow>(
           `INSERT INTO prepared_text_physical_attempts (
              owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,
@@ -357,6 +368,7 @@ export function createPostgresPreparedTextAttemptRepository(pool: DatabasePool):
     async markDispatched(reservation, attemptId, expectedPayloadHash) {
       return withTransaction(pool, async (client) => {
         if (!await hasLiveReservation(client, reservation)) return null;
+        if (!await hasDiscoveryDispatchBudget(client, reservation)) return null;
         const updated = await client.query<{ id: string }>(
           `UPDATE prepared_text_physical_attempts SET status='dispatched',dispatched_at=clock_timestamp()
             WHERE id=$1 AND owner_user_id=$2 AND logical_kind=$3 AND reservation_key=$4

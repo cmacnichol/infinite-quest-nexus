@@ -2,7 +2,15 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: reviewed identity resolution
+## Latest checkpoint: physical dispatch budget
+
+Discovery now permits at most two physical provider dispatches per job/source chunk, shared across fallback candidates and reclaimed logical attempts. The existing job lock serializes reservation and dispatch checks. Unsent reservations do not consume this budget; dispatched calls with unknown outcomes do. Publication of an obtained checkpoint remains recoverable without another paid call, and the next chunk has an independent allowance. Other prepared execution kinds retain their existing behavior.
+
+Verification: the original concurrent regression failed with three dispatches before the limit and passed afterward. All **35 discovery PostgreSQL tests**, **75 other provider/accounting PostgreSQL tests**, and **28 route executor unit tests** passed; the other integration suites retained **14 platform-gated skips**. Repository/TypeScript checks passed. A bounded independent review found no actionable issue. Logs: `.tmp/campaign-cast/dispatch-{green,accounting,unit,check}.log`. An initial unit command named a nonexistent config and failed at startup; the corrected default-config run passed. No browser surface changed, and no live-provider or production verification occurred.
+
+Shared provider concurrency remains an open release gate: current lane limits do not coordinate API, worker, and replicas. Explicit Retry also remains pending and must define a durable authorized budget generation rather than silently resetting paid-call accounting. Budget exhaustion currently uses the existing sanitized provider-failure path; no dedicated user diagnostic is exposed yet.
+
+## Reviewed identity resolution
 
 The owner-scoped candidate API now lists pending source-current proposals with bounded pagination and accepts revision-checked attach/create decisions. Resolution locks the campaign before the candidate, rejects stale source/timeline and active generation, preserves manual names/aliases/overrides, applies only evidence that passes existing quote/attribution/fiction guards, and stores an idempotent resolution receipt in the same transaction as authority. Explicit identity decisions bypass automatic identity corroboration only; they cannot authorize invented or unsupported profile facts. Manual resolution uses the editing gate and remains available with discovery disabled.
 
