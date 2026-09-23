@@ -157,6 +157,18 @@ async function fixture(page: Page) {
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}`);
   await expect(page.locator("#storyTitle")).toHaveText("Cast fixture");
   return { characters, writes, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
+    publishDiscovery: () => {
+      revision++; trackingComplete = true; pendingMatch = false;
+      let person = characters.find((character) => character.origin.kind === "discovered");
+      if (!person) {
+        person = { id: "88888888-8888-4888-8888-888888888888", name: "Mara", aliases: ["The Watcher"],
+          origin: { kind: "discovered" }, profile: {}, pinned: false, ignored: false, revision: 0,
+          firstObservedTurn: 1, lastObservedTurn: 1 };
+        characters.push(person);
+      }
+      person.revision++;
+      person.profile = { "appearance.description": "blue eyes", "story.role": "gatekeeper", ...overrides.get(person.id) };
+    },
     finishTracking: () => { trackingComplete = true; }, trackingUnavailable: () => { trackingUnavailable = true; } };
 }
 async function open(page: Page) {
@@ -164,6 +176,30 @@ async function open(page: Page) {
   await page.locator("#btnOpenCast").click();
   await expect(page.getByRole("dialog", { name: "Characters", exact: true })).toBeVisible();
 }
+
+test("legacy renders completed discovery and preserves edited and ignored characters on refresh", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
+  const api = await fixture(page); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await expect(dialog.getByRole("button", { name: "Mara", exact: true })).toHaveCount(0);
+  api.publishDiscovery();
+  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click();
+  await expect(dialog).toContainText("Character tracking is up to date");
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await expect(dialog.getByLabel("Appearance", { exact: true })).toHaveValue("blue eyes");
+  await dialog.getByLabel("Appearance", { exact: true }).fill("green eyes");
+  await dialog.getByLabel("Ignore character", { exact: true }).check();
+  await dialog.getByRole("button", { name: "Save character", exact: true }).click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  api.publishDiscovery();
+  await dialog.getByRole("button", { name: "Back to characters", exact: true }).click();
+  await expect(dialog).toContainText("Ignored");
+  await dialog.getByRole("button", { name: "Mara", exact: true }).click();
+  await expect(dialog.getByLabel("Appearance", { exact: true })).toHaveValue("green eyes");
+  await expect(dialog.getByLabel("Ignore character", { exact: true })).toBeChecked();
+  expect(api.writes).toHaveLength(1);
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/discovery-refresh-390.png` });
+});
 
 for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict and capability loss at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 1000 });

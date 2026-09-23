@@ -1,6 +1,6 @@
 # Campaign cast phase 04 progress
 
-Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
+Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **accepted for the legacy UI scope**, default off and not deployed. See the [requirement audit](phase-04-acceptance.md) for current evidence, capability/deployment corrections and limitations. The active goal still includes phases 05–06. Earlier checkpoints below describe their state at the time.
 
 ## Latest checkpoint: shared text provider capacity
 

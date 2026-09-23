@@ -229,6 +229,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     );
   }
   const systemArchiveAllowLimitIncrease = booleanSetting("SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE", false);
+  const castEditingEnabled = booleanSetting("CAST_EDITING_ENABLED", false);
 
   return {
     role: roleValue as RuntimeConfig["role"],
@@ -272,8 +273,8 @@ export function loadRuntimeConfig(): RuntimeConfig {
     }, systemArchiveAllowLimitIncrease),
     credentialEncryptionKey: secretSetting("CREDENTIAL_ENCRYPTION_KEY"),
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
-    castEditingEnabled: booleanSetting("CAST_EDITING_ENABLED", false),
-    castDiscoveryEnabled: booleanSetting("CAST_DISCOVERY_ENABLED", false),
+    castEditingEnabled,
+    castDiscoveryEnabled: booleanSetting("CAST_DISCOVERY_ENABLED", false) && castEditingEnabled,
     textProviderConcurrency: requiredIntegerSetting("TEXT_PROVIDER_CONCURRENCY", 2, 1, 1000),
     storyMemoryCapability: storyMemoryCapabilitySetting(),
     storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", true),

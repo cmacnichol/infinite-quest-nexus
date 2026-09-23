@@ -16,6 +16,16 @@ describe("deployment security configuration", () => {
     ["compose.yaml", "infinitequest-app"],
     ["deploy/swarm/stack.yaml", "infinitequest-api"],
     ["deploy/swarm/stack.yaml", "infinitequest-worker"]
+  ])("shares default-off cast capabilities and text capacity across %s %s", (path, service) => {
+    const environment = serviceEnvironment(readFileSync(path, "utf8"), service);
+    expect(environment).toContain("CAST_EDITING_ENABLED: ${CAST_EDITING_ENABLED:-false}");
+    expect(environment).toContain("CAST_DISCOVERY_ENABLED: ${CAST_DISCOVERY_ENABLED:-false}");
+    expect(environment).toContain("TEXT_PROVIDER_CONCURRENCY: ${TEXT_PROVIDER_CONCURRENCY:-2}");
+  });
+  it.each([
+    ["compose.yaml", "infinitequest-app"],
+    ["deploy/swarm/stack.yaml", "infinitequest-api"],
+    ["deploy/swarm/stack.yaml", "infinitequest-worker"]
   ])("defaults %s %s to Max while forwarding explicit operator overrides", (path, service) => {
     const environment = serviceEnvironment(readFileSync(path, "utf8"), service);
     expect(environment).toContain("STORY_MEMORY_CAPABILITY: ${STORY_MEMORY_CAPABILITY:-r3}");

@@ -56,11 +56,15 @@ describe("runtime security configuration", () => {
     process.env.TEXT_PROVIDER_CONCURRENCY = "0";
     expect(() => loadRuntimeConfig()).toThrow();
   });
-  it("keeps automatic cast discovery off independently of editing", () => {
+  it("requires editing capability before enabling automatic cast discovery", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false });
     process.env.CAST_DISCOVERY_ENABLED = "true";
-    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: true, castEditingEnabled: false });
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false, castEditingEnabled: false });
+    process.env.CAST_EDITING_ENABLED = "true";
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: true, castEditingEnabled: true });
+    process.env.CAST_DISCOVERY_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false, castEditingEnabled: true });
   });
   it("keeps cast editing off until explicitly enabled by the operator", () => {
     minimumEnvironment();

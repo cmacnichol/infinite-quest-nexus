@@ -180,7 +180,10 @@ integration("PostgreSQL generation execution repository", () => {
       plan: { ...execution.plan, requestTimeoutMs: 1 } } })).rejects.toThrow();
     expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [imported.campaignId])).rows[0].count).toBe(before);
     expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [ready.job.id])).rows[0].status).toBe("committing");
+    const commitStarted = performance.now();
     const accepted = await ready.repository.commitAcceptedTurn({ ...input, castDiscoveryExecution: execution });
+    if (process.env.CAST_TEST_TIMINGS === "true") process.stdout.write(JSON.stringify({ measurement: "accepted_story_commit_with_discovery_enqueue",
+      elapsedMs: performance.now() - commitStarted, discoveryProviderCalls: 0, fixture: "deterministic_local_postgres" }) + "\n");
     const discovery = (await pool.query("SELECT turn_id,owner_user_id,source,execution_snapshot,status FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [imported.campaignId])).rows;
     expect(discovery).toHaveLength(1);
     expect(discovery[0]).toMatchObject({ turn_id: accepted.turnId, owner_user_id: ownerUserId, status: "queued", execution_snapshot: execution });

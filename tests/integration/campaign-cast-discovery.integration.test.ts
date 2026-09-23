@@ -462,8 +462,12 @@ describe("durable cast discovery", () => {
     expect((await pool.query("SELECT status FROM campaign_cast_discovery_candidates WHERE job_id=$1", [priorId])).rows[0].status).toBe("cancelled");
     expect((await pool.query("SELECT status,timeline_revision FROM campaign_cast_discovery_jobs WHERE id=$1", [otherId])).rows[0]).toEqual({ status: "queued", timeline_revision: 0 });
   });
-  it.each(["preset", "model"] as const)("persists frozen %s admission and executes discovery through physical accounting into validated cast authority", async (routeKind) => {
+  it.each([
+    { routeKind: "preset", outcome: "success" }, { routeKind: "model", outcome: "success" },
+    { routeKind: "model", outcome: "timeout" }, { routeKind: "model", outcome: "malformed" }
+  ] as const)("executes frozen $routeKind discovery with $outcome through physical accounting", async ({ routeKind, outcome }) => {
     const f = await fixture();
+    const acceptedBefore = (await pool.query("SELECT id,narration,accepted_at FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows;
     await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,$3,'openrouter','https://fixture.invalid')",
       [f.execution.providerProfileId, ownerUserId, randomUUID()]);
     let calls = 0;
@@ -475,7 +479,8 @@ describe("durable cast discovery", () => {
         expect(request.preparedRequest?.body).toContain("Mara has blue eyes.");
         expect(request.preparedRequest?.body).toContain("infinite_quest_cast_discovery_v1");
         expect(policy?.requestTimeoutMs).toBe(30000);
-        return { content: JSON.stringify(proposal()), responseId: "cast-runtime-fixture", finishReason: "stop", outputLimited: false,
+        if (outcome === "timeout") throw Object.assign(new Error("Deterministic provider deadline"), { routeFailureReason: "deadline" });
+        return { content: outcome === "malformed" ? "{incomplete" : JSON.stringify(proposal()), responseId: "cast-runtime-fixture", finishReason: "stop", outputLimited: false,
           modelInstanceId: "fixture", usage: { inputTokens: 17, outputTokens: 19, totalTokens: 36 },
           reportedCost: { amount: "0.002", currency: "USD" }, rawMetadata: {} };
       } };
@@ -499,8 +504,27 @@ describe("durable cast discovery", () => {
       async loadAuthority(owner, profile) { expect(owner).toBe(ownerUserId); expect(profile).toBe(execution.id); return execution; } });
     expect(await createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: false }, executor).runNext("disabled")).toBe(false);
     expect(calls).toBe(0);
-    expect(await createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: true }, executor).runNext("runtime")).toBe(true);
+    const worker = createWorkerCampaignCastApplication(pool, { castDiscoveryEnabled: true }, executor);
+    const extractionStarted = performance.now();
+    expect(await worker.runNext("runtime")).toBe(outcome === "success");
+    if (process.env.CAST_TEST_TIMINGS === "true") process.stdout.write(JSON.stringify({ measurement: "discovery_worker_tick", routeKind, outcome,
+      elapsedMs: performance.now() - extractionStarted, discoveryProviderCalls: calls, narrationProviderCalls: 0,
+      fixture: "deterministic_local_postgres" }) + "\n");
     expect(calls).toBe(1);
+    if (outcome !== "success") {
+      const diagnostic = outcome === "timeout" ? "provider_timeout" : "invalid_output";
+      expect((await pool.query("SELECT status,diagnostic_code,checkpoint FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows)
+        .toEqual([{ status: "retry_wait", diagnostic_code: diagnostic, checkpoint: null }]);
+      await pool.query("UPDATE campaign_cast_discovery_jobs SET available_at=clock_timestamp() WHERE campaign_id=$1", [f.scope.campaignId]);
+      expect(await worker.runNext("retry")).toBe(false);
+      expect(await worker.runNext("exhausted")).toBe(false);
+      expect(calls).toBe(2);
+      expect((await pool.query("SELECT status,diagnostic_code FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows)
+        .toEqual([{ status: "failed", diagnostic_code: diagnostic }]);
+      expect((await pool.query("SELECT id,narration,accepted_at FROM turns WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows).toEqual(acceptedBefore);
+      expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.some((p) => p.name === "Mara")).toBe(false);
+      return;
+    }
     expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.find((p) => p.name === "Mara")?.profile)
       .toEqual({ "appearance.description": "blue eyes" });
     expect((await pool.query("SELECT operation FROM provider_cost_events WHERE campaign_id=$1", [f.scope.campaignId])).rows).toEqual([{ operation: "cast_discovery" }]);
