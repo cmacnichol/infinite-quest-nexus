@@ -24,7 +24,7 @@ describe("accepted-history scan preview", () => {
   }, 60000);
   afterEach(async () => { await pool.query("DELETE FROM campaigns WHERE id=ANY($1::uuid[])", [campaignIds.splice(0)]); });
   afterAll(async () => { await pool?.end(); });
-  async function fixture() {
+  async function fixture(timeoutMs = 30000) {
     const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), providerProfileId = randomUUID();
     campaignIds.push(campaignId);
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Scan fixture')", [worldId, ownerUserId]);
@@ -38,11 +38,50 @@ describe("accepted-history scan preview", () => {
     const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "scan-fixture" }, preset: null,
       candidates: [{ modelId: "scan-fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }],
       presetSystemPrompt: "", parameters: {}, endpointReference: "fixture-endpoint", credentialReference: providerProfileId,
-      profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+      profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: timeoutMs, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
     return { scope: { ownerUserId, campaignId }, turnIds,
       request: { fromTurn: 1, throughTurn: 3, expectedBoundary: { turnNumber: 3, timelineRevision: 0 }, idempotencyKey: "scan" },
       execution: { providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, CAST_DISCOVERY_SYSTEM_PROMPT) } };
   }
+  it("adopts a new scan policy without resetting an exhausted job's explicit retry budget", async () => {
+    const f = await fixture(), modern = await fixture(120000);
+    const scans = createCastBackfillRepository(pool, () => true), jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    const old = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    const first = (await jobs.claim("old-scan"))!;
+    await jobs.fail(first, "provider_timeout");
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET available_at=clock_timestamp() WHERE id=$1", [first.id]);
+    await jobs.fail((await jobs.claim("old-scan"))!, "provider_timeout");
+    await scans.control(f.scope, old.id, "cancel");
+    const fresh = await scans.start(f.scope, { ...f.request, idempotencyKey: "fresh-policy" }, modern.execution);
+    await scans.scheduleNext();
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET available_at=clock_timestamp() WHERE id=$1", [first.id]);
+    expect(await jobs.claim("budget-still-exhausted")).toBeNull();
+    await scans.scheduleNext();
+    const cast = await createPostgresCampaignCastRepository(pool).current(f.scope);
+    const request = { turnNumber: 1, expectedCastRevision: cast.revision, expectedBoundary: cast.boundary, idempotencyKey: "explicit-retry" };
+    await scans.retry(f.scope, fresh.id, request);
+    await scans.retry(f.scope, fresh.id, request);
+    const recovered = (await jobs.claim("new-policy"))!;
+    expect(recovered).toMatchObject({ id: first.id, retryGeneration: 1, attempt: 1, chunkOrdinal: 0, execution: modern.execution });
+    const lease = (await pool.query("SELECT extract(epoch FROM (lease_expires_at-clock_timestamp())) AS remaining FROM campaign_cast_discovery_jobs WHERE id=$1", [first.id])).rows[0];
+    expect(Number(lease.remaining)).toBeGreaterThan(170);
+    expect(Number(lease.remaining)).toBeLessThanOrEqual(180);
+  });
+  it("retains a paid checkpoint and its frozen plan when a new scan adopts cancelled work", async () => {
+    const f = await fixture(), modern = await fixture(120000);
+    const scans = createCastBackfillRepository(pool, () => true), jobs = createCastDiscoveryJobRepository(pool, () => true, () => true);
+    const old = await scans.start(f.scope, f.request, f.execution);
+    await scans.scheduleNext();
+    const first = (await jobs.claim("checkpoint-old-plan"))!;
+    await jobs.checkpoint(first, { version: 1, characters: [] });
+    await scans.control(f.scope, old.id, "cancel");
+    await scans.start(f.scope, { ...f.request, idempotencyKey: "fresh-checkpoint" }, modern.execution);
+    await scans.scheduleNext();
+    const recovered = (await jobs.claim("publish-paid-checkpoint"))!;
+    expect(recovered).toMatchObject({ id: first.id, attempt: 1, execution: f.execution, output: { version: 1, characters: [] } });
+    expect(await jobs.publish(recovered)).toBe("complete");
+  });
   it.each([false, true])("preserves later facts and manual overrides during older scans with honest contiguous coverage (manual=%s)", async manual => {
     const f = await fixture(), scans = createCastBackfillRepository(pool, () => true);
     await pool.query("UPDATE turns SET narration=CASE WHEN turn_number=3 THEN 'Mara is known as Watcher. Mara stands at the tower.' ELSE 'Mara is known as Watcher. Mara stands at the harbor.' END WHERE campaign_id=$1", [f.scope.campaignId]);

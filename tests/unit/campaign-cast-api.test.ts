@@ -4,6 +4,18 @@ import Fastify from "fastify";
 import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
 import { apiErrorEnvelopeSchema } from "../../packages/contracts/src/http.js";
 describe("cast browser adapter", () => {
+  it("requests the filtered matches view", async () => {
+    let requested = "";
+    const api = createCampaignCastApi({ basePath: "/api/v1", session: { authorization: async () => ({}), onUnauthorized: async () => false },
+      fetchImpl: async url => {
+        requested = String(url);
+        return new Response(JSON.stringify({ revision: 0, boundary: { turnNumber: 0, timelineRevision: 0 }, candidates: [], nextCursor: null }),
+          { headers: { "content-type": "application/json" } });
+      } });
+    await api.candidates("campaign", { view: "matches", limit: 1 });
+    expect(requested).toContain("view=matches");
+    expect(requested).toContain("limit=1");
+  });
   it("validates scan ranges before dispatch and preserves explicit Start keys", async () => {
     const sent: unknown[] = [];
     const progress = { id: "11111111-1111-4111-8111-111111111111", fromTurn: 1, throughTurn: 3,

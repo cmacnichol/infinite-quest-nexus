@@ -2,6 +2,12 @@ import { z } from "zod";
 import { castCharacterSchema, castFieldSchema, castScopeSchema, castBoundarySchema, castWriteBase, castWriteResultSchema } from "./campaign-cast.js";
 
 export const CAST_DISCOVERY_PROTOCOL = "cast-discovery-v1";
+export const CAST_DISCOVERY_TIMEOUT_MS = 120000;
+export const CAST_DISCOVERY_MAX_OUTPUT_TOKENS = 4096;
+// Existing durable jobs retain their original frozen execution policy.
+export function isCastDiscoveryTimeout(value: unknown): value is number {
+  return value === 30000 || value === CAST_DISCOVERY_TIMEOUT_MS;
+}
 export const castDiscoveryStatusSchema = z.object({
   enabled: z.boolean(), activeTurnNumber: z.number().int().nonnegative(),
   coverageStartTurn: z.number().int().positive().nullable(), trackedThroughTurn: z.number().int().nonnegative().nullable(),
@@ -45,8 +51,10 @@ export const castDiscoveryRetryResultSchema = z.object({ jobId: z.uuid(), retryG
 export type RetryCastDiscovery = z.infer<typeof retryCastDiscoverySchema>;
 export type CastDiscoveryRetryResult = z.infer<typeof castDiscoveryRetryResultSchema>;
 
-export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), limit: z.coerce.number().int().min(1).max(50).default(20) }).strict();
+export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), limit: z.coerce.number().int().min(1).max(50).default(20),
+  view: z.enum(["all", "matches"]).default("all") }).strict();
 export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.string().min(1).max(100), proposal: castDiscoveryCandidateSchema,
+  resolvedCharacterId: z.uuid().optional(),
   source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative() }).strict() }).strict();
 export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
   candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();
@@ -54,7 +62,8 @@ export const resolveCastCandidateSchema = z.discriminatedUnion("action", [
   z.object({ ...castWriteBase, action: z.literal("attach"), characterId: z.uuid() }).strict(),
   z.object({ ...castWriteBase, action: z.literal("create") }).strict()
 ]);
-export const castCandidateResolutionSchema = castWriteResultSchema.extend({ candidateId: z.uuid(), observationIds: z.array(z.uuid()).max(20) });
+export const castCandidateResolutionSchema = castWriteResultSchema.extend({ candidateId: z.uuid(), observationIds: z.array(z.uuid()).max(20),
+  pendingObservations: z.array(z.object({ index: z.number().int().min(0).max(19), reason: z.string().min(1).max(100) }).strict()).max(20).optional() });
 export type CastCandidateQuery = z.infer<typeof castCandidateQuerySchema>;
 export type CastCandidateList = z.infer<typeof castCandidateListSchema>;
 export type ResolveCastCandidate = z.infer<typeof resolveCastCandidateSchema>;

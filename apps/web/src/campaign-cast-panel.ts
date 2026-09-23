@@ -47,7 +47,7 @@ export function createLegacyCastPanel(options: {
     const p = node("p", message); p.setAttribute("role", "status"); dialog.append(p); return p;
   }
   const current = (token: number) => token === epoch && campaign === options.campaignId();
-  async function loadRoster(cursor?: string) {
+  async function loadRoster(cursor?: string, notice?: string) {
     const token = ++epoch; editor = null; latest = null; latestRoster = null;
     shell("Characters"); status("Loading characters…");
     try {
@@ -62,6 +62,7 @@ export function createLegacyCastPanel(options: {
       scanData = scanResult.status === "fulfilled" ? scanResult.value : null;
       list = cursor && list ? { ...response, characters: [...list.characters, ...response.characters] } : response;
       enabled = response.capabilities.castEditing; renderRoster();
+      if (notice) status(notice);
     } catch (error) {
       if (!current(token)) return;
       shell("Characters"); status(`Could not load characters: ${message(error)}`);
@@ -88,7 +89,7 @@ export function createLegacyCastPanel(options: {
     const token = ++epoch; editor = null;
     shell("Character matches"); status("Loading matches…");
     try {
-      const matches = await options.api.candidates(campaign, cursor ? { cursor } : {});
+      const matches = await options.api.candidates(campaign, { view: "matches", ...(cursor ? { cursor } : {}) });
       if (!current(token)) return;
       shell("Character matches");
       dialog.append(button("Back to characters", () => { void loadRoster(); }));
@@ -107,11 +108,17 @@ export function createLegacyCastPanel(options: {
     const token = ++epoch;
     shell(`Review ${candidate.proposal.name}`);
     dialog.append(button("Back to matches", () => { void loadCandidates(); }));
-    status("Decide whether this person is already in your cast or is a separate character. Existing names and your edits are preserved.");
+    status(candidate.resolvedCharacterId
+      ? "This identity is already saved. These proposed details remain unverified and have not been applied. You can enter confirmed details in the character editor; the original evidence remains pending."
+      : "Decide whether this person is already in your cast or is a separate character. Only supported details will be applied; disputed details will remain pending. Existing names and your edits are preserved.");
     dialog.append(button(`Source turn ${candidate.source.turnNumber}`, () => { requestClose(); void options.navigateToTurn(candidate.source.turnNumber); }));
     for (const citation of candidate.proposal.identityEvidence) dialog.append(node("blockquote", citation.quote));
     for (const observation of candidate.proposal.observations) {
       dialog.append(node("p", `Proposed ${fields.find(([field]) => field === observation.field)?.[1] ?? "detail"}: ${observation.value}`), node("blockquote", observation.quote));
+    }
+    if (candidate.resolvedCharacterId) {
+      dialog.append(button("Edit saved character", () => { void openDetail(candidate.resolvedCharacterId!); }));
+      return;
     }
     const controls = node("fieldset"); controls.className = "cast-match-controls"; controls.disabled = !enabled || options.generationActive();
     if (controls.disabled) status(!enabled ? "Character editing is disabled." : "Finish or resolve the current generation before reviewing matches.");
@@ -163,8 +170,11 @@ export function createLegacyCastPanel(options: {
       }
       busy = true; controls.disabled = true; feedback.textContent = "Saving identity decision…";
       try {
-        await options.api.resolveCandidate(campaign, candidate.id, submitted);
-        if (current(token)) await loadRoster();
+        const saved = await options.api.resolveCandidate(campaign, candidate.id, submitted);
+        if (current(token)) {
+          const pending = saved.pendingObservations?.length ?? 0;
+          await loadRoster(undefined, pending ? `Identity saved. ${pending} proposed ${pending === 1 ? "detail still needs" : "details still need"} review and ${pending === 1 ? "was" : "were"} not applied.` : undefined);
+        }
       } catch (error) {
         if (!current(token)) return;
         feedback.textContent = (error as { statusCode?: number }).statusCode === 409

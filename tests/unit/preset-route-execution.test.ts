@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createSharedTextProviderCapacity } from "../../services/runtime/src/text-provider-capacity.js";
 
 import {
   PreparedRouteTerminalError,
@@ -68,6 +69,24 @@ const planProvenance = {
 } as const;
 
 describe("preset route execution", () => {
+  it.each([false, true])("preserves capacity deadline versus caller cancellation (cancel=%s)", async (cancel) => {
+    const capacity = createSharedTextProviderCapacity({ tryAcquire: async () => "lease", release: async () => {} }, 1);
+    const repository = attempts();
+    const complete = vi.spyOn(repository, "complete");
+    const controller = new AbortController();
+    const invoke = vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+      if (cancel) controller.abort();
+      if (!signal.aborted) await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+      signal.throwIfAborted();
+      return { content: "unreachable", responseId: null };
+    });
+    await expect(capacity.withPermit({ timeoutMs: 30, signal: controller.signal }, signal => executePresetRoutes({
+      candidates, planProvenance, logicalReservation: storyReservation, attempts: repository, signal,
+      prepareCandidate: () => ({ body: "{}", payloadHash: "hash-0" }), invoke, totalDeadlineMs: 1000
+    }))).rejects.toMatchObject({ reason: cancel ? "cancelled" : "deadline" });
+    expect(complete.mock.calls[0]?.[2].failureReason).toBe(cancel ? "cancelled" : "deadline");
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
   it.each([
     { only: ["deepinfra"], ignore: [], accepted: true },
     { only: ["other"], ignore: [], accepted: false },

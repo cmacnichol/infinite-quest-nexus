@@ -9,6 +9,7 @@ import { createProviderResponseFormatCapabilities } from "../../services/runtime
 import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-capability-cache.js";
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { deriveTextExecutionPlan } from "../../packages/contracts/src/text-execution-plan.js";
+import { PreparedRouteTerminalError } from "../../packages/story-engine/src/preset-route-execution.js";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const result = { content: '{"version":1,"characters":[]}', responseId: "fixture", finishReason: "stop", outputLimited: false,
@@ -57,11 +58,23 @@ describe("cast discovery runtime execution", () => {
   it("freezes a distinct nonstream discovery plan before dispatch", async () => {
     const f = fixture();
     const saved = await prepareCastDiscoveryExecution({ ownerUserId: id, ...f });
-    expect(saved.plan).toMatchObject({ protocolVersion: "cast-discovery-v1", requestTimeoutMs: 30000,
-      candidates: [{ modelId: "frozen-model" }] });
+    expect(saved.plan).toMatchObject({ protocolVersion: "cast-discovery-v1", requestTimeoutMs: 120000,
+      candidates: [{ modelId: "frozen-model", maxOutputTokens: 2048 }] });
     expect(saved.plan.prompt).toContain(CAST_DISCOVERY_SYSTEM_PROMPT);
     expect(saved.admission?.frozenResponseContracts.contracts["cast_discovery:nonstream"]).toBeDefined();
     expect(f.execution.execute).not.toHaveBeenCalled(); expect(f.ports.resolvePreset).toHaveBeenCalledTimes(1);
+  });
+  it("caps large profile and preset output allowances before freezing the request", async () => {
+    const f = fixture();
+    const execution = { ...f.execution, maxOutputTokens: 48000, contextWindowTokens: 163840 };
+    f.ports.discoverModels.mockResolvedValue([{ id: "frozen-model", contextWindowTokens: 163840, maxOutputTokens: 48000 }]);
+    const ports = { ...f.ports, resolvePreset: async () => ({ ...(await f.ports.resolvePreset()), config: { model: "frozen-model", max_tokens: 48000 } }) };
+    const saved = await prepareCastDiscoveryExecution({ ownerUserId: id, execution, ports });
+    expect(saved.plan.candidates[0]?.maxOutputTokens).toBe(4096);
+    const c = await claim(); c.value.execution = saved;
+    const execute = vi.fn<PreparedAuthoringTextExecutor["execute"]>(async () => result);
+    await createCastDiscoveryExtractor({ executor: { execute } }).extract(c.value);
+    expect(JSON.parse(execute.mock.calls[0]![0].preparedRequest!.body).max_tokens).toBe(4096);
   });
   it.each([0, 2])("dispatches checked frozen bytes with retry generation %i and bounded fiction input", async (retryGeneration) => {
     const f = await claim();
@@ -94,5 +107,12 @@ describe("cast discovery runtime execution", () => {
     const execute = vi.fn<PreparedAuthoringTextExecutor["execute"]>(async () => result);
     await expect(createCastDiscoveryExtractor({ executor: { execute } }).extract(f.value)).rejects.toMatchObject({ diagnostic: "provider_failed" });
     expect(execute).not.toHaveBeenCalled();
+  });
+  it("reports a capacity deadline as provider_timeout", async () => {
+    const f = await claim();
+    const execute = vi.fn<PreparedAuthoringTextExecutor["execute"]>(async () => {
+      throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Capacity deadline exceeded");
+    });
+    await expect(createCastDiscoveryExtractor({ executor: { execute } }).extract(f.value)).rejects.toMatchObject({ diagnostic: "provider_timeout" });
   });
 });

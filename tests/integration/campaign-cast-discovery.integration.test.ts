@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { castDiscoveryOutputSchema } from "../../packages/contracts/src/campaign-cast-discovery.js";
 import { executePresetRoutes } from "../../packages/story-engine/src/preset-route-execution.js";
 import Fastify from "fastify";
 import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
@@ -333,6 +334,104 @@ describe("durable cast discovery", () => {
     expect((await editor.current(afterReplacement.scope)).characters.find((p) => p.name === "Mara Reed"))
       .toMatchObject({ firstObservedTurn: 0, lastObservedTurn: 0, profile: {} });
   });
+  it.each([
+    { action: "create" as const, allDisputed: false }, { action: "attach" as const, allDisputed: false },
+    { action: "create" as const, allDisputed: true }
+  ])("saves $action identity while retaining disputed details (all disputed=$allDisputed)", async ({ action, allDisputed }) => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const narration = `Mara has blue eyes.${allDisputed ? ' "Welcome," she says.' : ''}\n\nMara says, "Mara is the gatekeeper."`;
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], narration]);
+    const target = action === "attach" ? await editor.create(f.scope, { expectedCastRevision: 0,
+      expectedBoundary: { turnNumber: 1, timelineRevision: 0 }, idempotencyKey: "target", name: "Mara", aliases: [], profile: {} }) : null;
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("disputed-details"))!;
+    const output = castDiscoveryOutputSchema.parse(proposal());
+    output.characters[0]!.observations.push({ field: "story.role", value: "the gatekeeper", mode: "fact", speakerCharacterId: null,
+      paragraphId: "p2", quote: 'Mara says, "Mara is the gatekeeper."' });
+    await jobs.checkpoint(job, output); await jobs.publish(job);
+    const pending = await editor.candidates(f.scope, {}), candidate = pending.candidates[0]!;
+    const request = { action, ...(target ? { characterId: target.character.id } : {}), expectedCastRevision: pending.revision,
+      expectedBoundary: pending.boundary, idempotencyKey: "save-identity" };
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(pool,
+      { castEditingEnabled: true, castDiscoveryEnabled: true }), enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const url = `/api/v1/campaigns/${f.scope.campaignId}/cast/candidates/${candidate.id}/resolve`;
+      const response = await app.inject({ method: "POST", url, payload: request });
+      expect(response.statusCode).toBe(200);
+      const saved = response.json();
+      expect(saved.character.profile).toEqual(allDisputed ? {} : { "appearance.description": "blue eyes" });
+      expect(saved.pendingObservations).toEqual(allDisputed
+        ? [{ index: 0, reason: "claim_not_fact" }, { index: 1, reason: "claim_not_fact" }]
+        : [{ index: 1, reason: "claim_not_fact" }]);
+      expect(saved.observationIds).toHaveLength(allDisputed ? 0 : 1);
+      expect((await app.inject({ method: "POST", url, payload: request })).json()).toEqual(saved);
+      expect((await app.inject({ method: "POST", url, payload: { ...request, idempotencyKey: "duplicate" } })).statusCode).toBe(409);
+      const remaining = await editor.candidates(f.scope, {});
+      expect((await editor.candidates(f.scope, { view: "matches" })).candidates).toEqual([]);
+      expect(remaining.candidates[0]).toMatchObject({ id: candidate.id, resolvedCharacterId: saved.character.id,
+        proposal: { observations: allDisputed ? output.characters[0]!.observations : [output.characters[0]!.observations[1]] } });
+      expect((await editor.current(f.scope)).characters.filter(person => person.name === "Mara")).toHaveLength(1);
+      const row = (await pool.query("SELECT status,proposal FROM campaign_cast_discovery_candidates WHERE id=$1", [candidate.id])).rows[0];
+      expect(row).toEqual({ status: "pending", proposal: output.characters[0] });
+    } finally { await app.close(); }
+  });
+  it.each(["self-alias", "second-person"])("attaches reviewed %s evidence without renaming or duplicating the target", async mode => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const name = mode === "self-alias" ? "714" : "Mara Reed";
+    const narration = mode === "self-alias" ? "714 has blue eyes." : "You have blue eyes.";
+    await pool.query("UPDATE turns SET narration=$2 WHERE id=$1", [f.turnIds[0], narration]);
+    const target = await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "existing-target", name, aliases: ["The Guide"], profile: { "story.role": "guide" } });
+    const output = castDiscoveryOutputSchema.parse(proposal());
+    Object.assign(output.characters[0]!, { name, aliases: mode === "self-alias" ? [name] : [],
+      identityEvidence: [{ paragraphId: "p1", quote: narration }] });
+    output.characters[0]!.observations[0]!.quote = narration;
+    await f.enqueue(); const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("attach-regression"))!;
+    await jobs.checkpoint(job, output); await jobs.publish(job);
+    const pending = await editor.candidates(f.scope, {}), id = pending.candidates[0]!.id;
+    const request = { action: "attach", characterId: target.character.id, expectedCastRevision: pending.revision,
+      expectedBoundary: pending.boundary, idempotencyKey: "confirmed-attachment" };
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(pool,
+      { castEditingEnabled: true, castDiscoveryEnabled: true }), enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const url = `/api/v1/campaigns/${f.scope.campaignId}/cast/candidates/${id}/resolve`;
+      const response = await app.inject({ method: "POST", url, payload: request });
+      expect(response.statusCode).toBe(200);
+      const saved = response.json();
+      expect(saved.character).toMatchObject({ id: target.character.id, name, aliases: ["The Guide"], profile: { "story.role": "guide" } });
+      expect(saved.observationIds).toHaveLength(mode === "self-alias" ? 1 : 0);
+      expect(saved.pendingObservations).toHaveLength(mode === "self-alias" ? 0 : 1);
+      expect((await app.inject({ method: "POST", url, payload: request })).json()).toEqual(saved);
+      expect((await editor.candidates(f.scope, { view: "matches" })).candidates).toEqual([]);
+      expect((await editor.current(f.scope)).characters.filter(person => person.name === name)).toHaveLength(1);
+    } finally { await app.close(); }
+  });
+  it("filters ignored identities before match pagination without hiding same-name unresolved people", async () => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const created = await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "ignored-person", name: "Mara", aliases: [], profile: {} });
+    await editor.edit(f.scope, created.character.id, { expectedCastRevision: created.revision, expectedCharacterRevision: created.character.revision,
+      expectedBoundary: created.boundary, idempotencyKey: "ignore-person", ignored: true });
+    await f.enqueue(); const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("match-list"))!;
+    const ids = ["10000000-0000-4000-8000-000000000001", "20000000-0000-4000-8000-000000000002", "30000000-0000-4000-8000-000000000003"];
+    for (const [index, id] of ids.entries()) await pool.query(`INSERT INTO campaign_cast_discovery_candidates
+      (id,owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason) VALUES($1,$2,$3,$4,0,$5,$6,$7,'identity_needs_review')`,
+      [id, ownerUserId, f.scope.campaignId, job.id, String(index), JSON.stringify(job.source),
+        JSON.stringify(proposal(index === 0 ? created.character.id : null).characters[0])]);
+    const first = await editor.candidates(f.scope, { view: "matches", limit: 1 });
+    expect(first.candidates.map(person => person.id)).toEqual([ids[1]]);
+    expect(first.nextCursor).toBe(ids[1]);
+    const second = await editor.candidates(f.scope, { view: "matches", limit: 1, cursor: first.nextCursor! });
+    expect(second.candidates.map(person => person.id)).toEqual([ids[2]]);
+    expect(second.nextCursor).toBeNull();
+    expect((await editor.candidates(f.scope, {})).candidates).toHaveLength(3);
+    const current = await editor.current(f.scope), person = current.characters.find(person => person.id === created.character.id)!;
+    await editor.edit(f.scope, person.id, { expectedCastRevision: current.revision, expectedCharacterRevision: person.revision,
+      expectedBoundary: current.boundary, idempotencyKey: "unignore-person", ignored: false });
+    expect((await editor.candidates(f.scope, { view: "matches", limit: 1 })).candidates[0]?.id).toBe(ids[0]);
+  });
   it("rejects disabled, foreign, stale, active-generation and unsupported candidate resolutions without partial writes", async () => {
     const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
     await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
@@ -352,7 +451,7 @@ describe("durable cast discovery", () => {
     await expect(editor.resolveCandidate(f.scope, id, request)).rejects.toMatchObject({ code: "cast_generation_active" });
     await pool.query("UPDATE generation_jobs SET status='failed' WHERE id=$1", [generation.id]);
     const malformed = proposal().characters[0]!;
-    malformed.observations[0]!.value = "invented purple eyes";
+    malformed.identityEvidence[0]!.quote = "invented identity evidence";
     await pool.query("UPDATE campaign_cast_discovery_candidates SET proposal=$2 WHERE id=$1", [id, JSON.stringify(malformed)]);
     await expect(editor.resolveCandidate(f.scope, id, request)).rejects.toMatchObject({ code: "cast_invalid_request" });
     expect((await editor.current(f.scope)).revision).toBe(pending.revision);
@@ -487,7 +586,7 @@ describe("durable cast discovery", () => {
         calls++;
         expect(request.preparedRequest?.body).toContain("Mara has blue eyes.");
         expect(request.preparedRequest?.body).toContain("infinite_quest_cast_discovery_v1");
-        expect(policy?.requestTimeoutMs).toBe(30000);
+        expect(policy?.requestTimeoutMs).toBe(120000);
         if (outcome === "timeout") throw Object.assign(new Error("Deterministic provider deadline"), { routeFailureReason: "deadline" });
         return { content: outcome === "malformed" ? "{incomplete" : JSON.stringify(proposal()), responseId: "cast-runtime-fixture", finishReason: "stop", outputLimited: false,
           modelInstanceId: "fixture", usage: { inputTokens: 17, outputTokens: 19, totalTokens: 36 },

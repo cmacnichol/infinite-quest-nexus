@@ -143,8 +143,28 @@ test("legacy retries character discovery only and retains the request key after 
   await expect(page.locator("#storyArea")).toContainText("Mara waits at the gate");
 });
 
-async function fixture(page: Page) {
+for (const width of [1280, 390]) test(`legacy filters handled identities from matches at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 1000 });
+  const api = await fixture(page, true);
+  await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Review character matches", exact: true }).click();
+  await dialog.getByRole("button", { name: "Review Mara", exact: true }).click();
+  if (width === 390) {
+    await dialog.getByLabel("Existing character", { exact: true }).selectOption(protagonistId);
+    await dialog.getByRole("button", { name: "Attach to selected character", exact: true }).click();
+  } else await dialog.getByRole("button", { name: "Create separate character", exact: true }).click();
+  await expect(dialog).toContainText("Identity saved. 1 proposed detail still needs review");
+  await dialog.getByRole("button", { name: "Review character matches", exact: true }).click();
+  await expect(dialog).toContainText("No character matches need review");
+  await expect(dialog.getByRole("button", { name: "Review Mara", exact: true })).toHaveCount(0);
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/filtered-matches-${width}.png` });
+  expect(api.writes).toHaveLength(1);
+});
+
+async function fixture(page: Page, deferredDetails = false) {
   let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
+  let resolvedCharacterId: string | undefined;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },
     profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }];
   const overrides = new Map<string, Record<string, string>>();
@@ -167,20 +187,24 @@ async function fixture(page: Page) {
         enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1,
         coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0,
         firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } });
-      if (id === "candidates") return send(route, { revision, boundary, nextCursor: null, candidates: pendingMatch ? [{ id: candidateId,
+      if (id === "candidates") return send(route, { revision, boundary, nextCursor: null, candidates: pendingMatch && !(url.searchParams.get("view") === "matches" && resolvedCharacterId) ? [{ id: candidateId,
+        ...(resolvedCharacterId ? { resolvedCharacterId } : {}),
         reason: "identity_needs_review", proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
-          identityEvidence: [{ paragraphId: "p1", quote: turn.narration }], observations: [] },
+          identityEvidence: [{ paragraphId: "p1", quote: turn.narration }], observations: deferredDetails ? [{ field: "story.role", value: "gatekeeper",
+            mode: "fact", speakerCharacterId: null, paragraphId: "p1", quote: turn.narration }] : [] },
         source: { turnId: turn.id, turnNumber: 1, narrationRevision: 0 } }] : [] });
       if (id === `candidates/${candidateId}/resolve`) {
         const input = request.postDataJSON(); writes.push(input);
         if (!enabled) return send(route, { code: "cast_editing_disabled" }, 503);
         if (input.expectedCastRevision !== revision) return send(route, { code: "cast_revision_conflict" }, 409);
-        revision++; pendingMatch = false;
+        revision++; pendingMatch = deferredDetails;
         const person = input.action === "attach" ? characters.find((p) => p.id === input.characterId) : {
           id: crypto.randomUUID(), name: "Mara", aliases: [], profile: {}, origin: { kind: "discovered" },
           pinned: false, ignored: false, revision: 1, firstObservedTurn: 1, lastObservedTurn: 1 };
         if (input.action === "create") characters.push(person);
-        return send(route, { candidateId, character: person, revision, boundary, observationIds: [] });
+        resolvedCharacterId = person.id;
+        return send(route, { candidateId, character: person, revision, boundary, observationIds: [],
+          ...(deferredDetails ? { pendingObservations: [{ index: 0, reason: "claim_not_fact" }] } : {}) });
       }
       if (request.method() !== "GET") {
         const input = request.postDataJSON(); writes.push(input);

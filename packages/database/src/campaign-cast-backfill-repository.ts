@@ -139,8 +139,12 @@ export function createCastBackfillRepository(pool: DatabasePool, enabled = () =>
           if (existing && existing.status !== "cancelled") return false;
           const jobId = await enqueueCastDiscoveryWithClient(client, { scope, turnId: source.turnId,
             execution: readCastDiscoveryExecution(scan.execution_snapshot), enabled: true });
-          await client.query(`UPDATE campaign_cast_discovery_jobs SET scan_id=$2,status=CASE WHEN status='cancelled' THEN 'queued' ELSE status END,
-            updated_at=clock_timestamp() WHERE id=$1`, [jobId, scan.id]);
+          // A new user-requested scan may adopt cancelled work under its newly
+          // frozen plan. Keep paid checkpoints and all retry/attempt accounting.
+          await client.query(`UPDATE campaign_cast_discovery_jobs SET scan_id=$2,
+            execution_snapshot=CASE WHEN status='cancelled' AND checkpoint IS NULL THEN $3::jsonb ELSE execution_snapshot END,
+            status=CASE WHEN status='cancelled' THEN 'queued' ELSE status END,
+            updated_at=clock_timestamp() WHERE id=$1`, [jobId, scan.id, JSON.stringify(readCastDiscoveryExecution(scan.execution_snapshot))]);
           await client.query(`UPDATE campaign_cast_state SET coverage_start_turn=LEAST(coverage_start_turn,$2) WHERE campaign_id=$1`, [scope.campaignId, scan.from_turn]);
           await client.query("UPDATE campaign_cast_scans SET status='running',updated_at=clock_timestamp() WHERE id=$1", [scan.id]);
           return true;

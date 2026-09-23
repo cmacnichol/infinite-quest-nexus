@@ -1,4 +1,4 @@
-import { CAST_DISCOVERY_PROTOCOL, CAST_DISCOVERY_SYSTEM_PROMPT, bindFrozenResponseContractInvocationV2,
+import { CAST_DISCOVERY_PROTOCOL, CAST_DISCOVERY_TIMEOUT_MS, CAST_DISCOVERY_MAX_OUTPUT_TOKENS, isCastDiscoveryTimeout, CAST_DISCOVERY_SYSTEM_PROMPT, bindFrozenResponseContractInvocationV2,
   assertDirectResponseContractRouteBasisAuthority, deriveTextExecutionPlan, readTextExecutionPlan } from "@infinite-quest/contracts";
 import { CastDiscoveryExtractionError, type CastDiscoveryExecution, type CastDiscoveryExtractorPort } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { buildCastDiscoveryInput } from "../../../packages/domain/src/campaign-cast-discovery.js";
@@ -19,7 +19,8 @@ export async function prepareCastDiscoveryExecution(input: {
   if (input.execution.providerRole !== "text" || !["openrouter", "openai_compatible"].includes(input.execution.providerType)) {
     throw new Error("Cast discovery requires a schema-capable text provider.");
   }
-  const execution = { ...input.execution, requestTimeoutMs: 30000 };
+  const execution = { ...input.execution, requestTimeoutMs: CAST_DISCOVERY_TIMEOUT_MS,
+    maxOutputTokens: Math.min(input.execution.maxOutputTokens, CAST_DISCOVERY_MAX_OUTPUT_TOKENS) };
   const prepared = await prepareAuthoringTextExecution({ ownerUserId: input.ownerUserId, execution, ports: input.ports,
     protocolVersion: CAST_DISCOVERY_PROTOCOL, operationPrompts: { cast_discovery: CAST_DISCOVERY_SYSTEM_PROMPT } });
   const admission = prepareTextResponseContractAdmission({ execution, selection: prepared.routeBasis.selection,
@@ -36,7 +37,7 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
   return { async extract(claim) {
     const { admission } = claim.execution;
     const plan = readTextExecutionPlan(claim.execution.plan);
-    if (!admission || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || plan.requestTimeoutMs !== 30000) {
+    if (!admission || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || !isCastDiscoveryTimeout(plan.requestTimeoutMs)) {
       throw new CastDiscoveryExtractionError("provider_failed");
     }
     if (plan.selection.kind === "model") {
@@ -50,7 +51,7 @@ export function createCastDiscoveryExtractor(input: { executor: PreparedAuthorin
     const candidate = plan.candidates[0]!;
     const profile = { providerType: admission.providerType, baseUrl: "", model: candidate.modelId,
       contextWindowTokens: candidate.contextWindowTokens, maxOutputTokens: candidate.maxOutputTokens,
-      temperature: plan.parameters.temperature ?? 0, requestTimeoutMs: 30000, configuration: admission.configuration };
+      temperature: plan.parameters.temperature ?? 0, requestTimeoutMs: plan.requestTimeoutMs, configuration: admission.configuration };
     const binding = { frozen: admission.frozenResponseContracts, routeBasis: admission.routeBasis, plan,
       invocationKey: "cast_discovery:nonstream" as const, operation: "cast_discovery" as const, trustedOperationPrompt: CAST_DISCOVERY_SYSTEM_PROMPT };
     const checkedOptions = { inputLimit: candidate.contextWindowTokens - candidate.maxOutputTokens,

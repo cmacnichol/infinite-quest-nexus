@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { logger } from "../../../packages/logger/src/index.js";
+import { PreparedRouteTerminalError } from "../../../packages/story-engine/src/preset-route-execution.js";
 
 type CapacityRepository = Readonly<{
   tryAcquire(limit: number, leaseMs: number): Promise<string | null>;
@@ -19,7 +20,9 @@ export function createSharedTextProviderCapacity(repository: CapacityRepository,
       throw new RangeError("Invalid text provider capacity timeout");
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error("Text provider capacity deadline exceeded")), options.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(new PreparedRouteTerminalError(
+      "prepared_route_deadline_exceeded", "deadline", "Text provider capacity deadline exceeded"
+    )), options.timeoutMs);
     const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
     const deadline = Date.now() + options.timeoutMs;
     let lease: string | null = null;
@@ -30,7 +33,10 @@ export function createSharedTextProviderCapacity(repository: CapacityRepository,
         // The grace period allows an aborted transport to finish closing. Expiry
         // recovers capacity after process loss; it cannot cancel remote work.
         lease = await repository.tryAcquire(limit, Math.max(1, deadline - Date.now()) + 5000);
-        if (!lease) await delay(pollMs, undefined, { signal });
+        if (!lease) {
+          try { await delay(pollMs, undefined, { signal }); }
+          catch (error) { signal.throwIfAborted(); throw error; }
+        }
       }
       signal.throwIfAborted();
       permit = { active: true, dispatching: false, signal };

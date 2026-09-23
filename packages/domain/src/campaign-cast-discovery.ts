@@ -126,8 +126,24 @@ export function validateResolvedCastDiscovery(input: {
   source: CastDiscoverySource; candidate: unknown; knownCharacters: CastCharacter[]; characterId: string | null;
 }): CastDiscoveryValidation {
   const candidate = castDiscoveryOutputSchema.parse({ version: 1, characters: [input.candidate] }).characters[0]!;
+  const aliases = candidate.aliases.filter(alias => normalizeEntityTerm(alias) !== normalizeEntityTerm(candidate.name));
   return validateDiscovery({ source: input.source, knownCharacters: input.knownCharacters,
-    output: { version: 1, characters: [{ ...candidate, existingCharacterId: input.characterId }] } }, true);
+    output: { version: 1, characters: [{ ...candidate, aliases, existingCharacterId: input.characterId }] } }, true);
+}
+
+/** Identity approval never approves unsupported attributes. Retain their indexes for later review. */
+export function resolveCastDiscoveryEvidence(input: Parameters<typeof validateResolvedCastDiscovery>[0]) {
+  const proposal = castDiscoveryOutputSchema.parse({ version: 1, characters: [input.candidate] }).characters[0]!;
+  const identity = validateResolvedCastDiscovery({ ...input, candidate: { ...proposal, observations: [] } }).accepted[0];
+  const pendingObservations: { index: number; reason: string }[] = [];
+  if (!identity) return { candidate: null, pendingObservations };
+  const observations: CastDiscoveryCandidate["observations"] = [];
+  proposal.observations.forEach((observation, index) => {
+    const checked = validateResolvedCastDiscovery({ ...input, candidate: { ...proposal, observations: [observation] } });
+    if (checked.accepted.length) observations.push(observation);
+    else pendingObservations.push({ index, reason: checked.rejected[0]?.code ?? checked.unresolved[0]!.code });
+  });
+  return { candidate: { ...identity, observations }, pendingObservations };
 }
 function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: boolean): CastDiscoveryValidation {
   const source = castDiscoverySourceSchema.parse(input.source), output = castDiscoveryOutputSchema.parse(input.output);
@@ -147,8 +163,12 @@ function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: bo
     try { validateCastFiction(candidate.name); candidate.aliases.forEach(validateCastFiction); candidate.observations.forEach((observation) => validateCastFiction(observation.value)); }
     catch { reject("non_fiction_value"); continue; }
     const identityText = candidate.identityEvidence.map((evidence) => evidence.quote).join("\n");
-    if (!contains(identityText, candidate.name) || candidate.aliases.some((alias) => !contains(identityText, alias))) { hold("identity_not_supported"); continue; }
-    if (candidate.aliases.some((alias) => !explicitlyLinksAlias(identityText, candidate.name, alias))) { hold("alias_not_supported"); continue; }
+    // The user's selected existing identity can resolve pronouns or an unproven
+    // proposed alias. This identity-only pass never approves attribute evidence,
+    // changes the target's name/aliases, or relaxes automatic discovery.
+    const confirmedAttachment = explicitIdentity && candidate.existingCharacterId !== null && candidate.observations.length === 0;
+    if (!confirmedAttachment && (!contains(identityText, candidate.name) || candidate.aliases.some((alias) => !contains(identityText, alias)))) { hold("identity_not_supported"); continue; }
+    if (!confirmedAttachment && candidate.aliases.some((alias) => !explicitlyLinksAlias(identityText, candidate.name, alias))) { hold("alias_not_supported"); continue; }
     if (candidate.identityEvidence.some((evidence) => prospective.test(paragraphs.get(evidence.paragraphId)!))) { hold("non_actual_identity"); continue; }
     if (/^(?:crowd|people|guards|villagers|everyone|someone|a person)$/iu.test(candidate.name)) { hold("insufficient_identity"); continue; }
     const terms = [candidate.name, ...candidate.aliases].map(normalizeEntityTerm);

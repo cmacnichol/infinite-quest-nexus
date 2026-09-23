@@ -44,7 +44,7 @@ describe("shared text provider capacity", () => {
   it("times out waiting without invoking provider work and honors caller cancellation", async () => {
     const { capacity, live } = fixture(); live.add("busy");
     const work = vi.fn();
-    await expect(capacity.withPermit({ timeoutMs: 10 }, work)).rejects.toThrow();
+    await expect(capacity.withPermit({ timeoutMs: 10 }, work)).rejects.toMatchObject({ reason: "deadline" });
     expect(work).not.toHaveBeenCalled();
     const controller = new AbortController();
     const pending = capacity.withPermit({ timeoutMs: 1000, signal: controller.signal }, work);

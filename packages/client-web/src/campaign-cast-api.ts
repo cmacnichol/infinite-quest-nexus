@@ -45,7 +45,7 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
     },
     candidates: (campaignId: string, input: Partial<CastCandidateQuery> = {}) => {
       const path = `${pathFor(campaignId)}/candidates`, query = validatedRequest(castCandidateQuerySchema, input, "GET", path);
-      const search = new URLSearchParams({ limit: String(query.limit), ...(query.cursor ? { cursor: query.cursor } : {}) });
+      const search = new URLSearchParams({ limit: String(query.limit), view: query.view, ...(query.cursor ? { cursor: query.cursor } : {}) });
       return http.request({ method: "GET", path: `${path}?${search}`, responseSchema: castCandidateListSchema });
     },
     resolveCandidate: (campaignId: string, id: string, input: ResolveCastCandidate) => {

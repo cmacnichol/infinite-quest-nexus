@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CAST_DISCOVERY_PROTOCOL, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
+import { CAST_DISCOVERY_PROTOCOL, isCastDiscoveryTimeout, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
 import { castScopeSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
 import { deriveTextExecutionPlan, readTextExecutionPlan, readTextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
 import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, readFrozenResponseContractsV2 } from "../../contracts/src/generation-response-contract.js";
@@ -24,7 +24,7 @@ export function readCastDiscoveryExecution(value: unknown): CastDiscoveryExecuti
     configuration: z.record(z.string(), z.unknown()) }).strict().optional() }).strict().parse(value);
   const providerProfileId = parsed.providerProfileId;
   const plan = readTextExecutionPlan(parsed.plan);
-  if (!plan || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || plan.requestTimeoutMs !== 30000) throw new Error("Invalid cast discovery execution snapshot.");
+  if (!plan || plan.protocolVersion !== CAST_DISCOVERY_PROTOCOL || !isCastDiscoveryTimeout(plan.requestTimeoutMs)) throw new Error("Invalid cast discovery execution snapshot.");
   if (!parsed.admission) return { providerProfileId, plan };
   const routeBasis = readTextExecutionRouteBasis(parsed.admission.routeBasis);
   const frozenResponseContracts = readFrozenResponseContractsV2(parsed.admission.frozenResponseContracts);
@@ -215,10 +215,11 @@ export function createCastDiscoveryJobRepository(pool: DatabasePool, enabled: ()
           return null;
         }
         const token = randomUUID();
+        const leaseMs = readExecution(job.execution_snapshot).plan.requestTimeoutMs! + 60000;
         const identities = job.identity_snapshot ?? await captureCastDiscoveryIdentities(client, { ownerUserId: job.owner_user_id, campaignId: job.campaign_id });
         const result = await client.query(`UPDATE campaign_cast_discovery_jobs SET status='running',lease_token=$2,lease_owner=$3,
-          lease_expires_at=clock_timestamp()+interval '90 seconds',attempt=attempt+CASE WHEN checkpoint IS NULL THEN 1 ELSE 0 END,
-          identity_snapshot=$4,updated_at=clock_timestamp() WHERE id=$1 RETURNING *`, [job.id, token, worker, JSON.stringify(identities)]);
+          lease_expires_at=clock_timestamp()+($5::integer * interval '1 millisecond'),attempt=attempt+CASE WHEN checkpoint IS NULL THEN 1 ELSE 0 END,
+          identity_snapshot=$4,updated_at=clock_timestamp() WHERE id=$1 RETURNING *`, [job.id, token, worker, JSON.stringify(identities), leaseMs]);
         return claimFromRow(result.rows[0]);
       });
     },

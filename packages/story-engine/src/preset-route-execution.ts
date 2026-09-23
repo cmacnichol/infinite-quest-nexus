@@ -224,6 +224,16 @@ function assertReturnedIdentity(candidate: TextRouteCandidate, value: Readonly<{
   }
 }
 
+function abortFailureReason(signal: AbortSignal | undefined): "deadline" | "cancelled" {
+  return classifyPresetRouteFailure(signal?.reason).reason === "deadline" ? "deadline" : "cancelled";
+}
+
+function routeAbortError(signal: AbortSignal | undefined, attemptId: string | null = null): PreparedRouteTerminalError {
+  const reason = abortFailureReason(signal);
+  return new PreparedRouteTerminalError(reason === "deadline" ? "prepared_route_deadline_exceeded" : "prepared_route_cancelled",
+    reason, reason === "deadline" ? "The prepared route deadline elapsed." : "The prepared route was cancelled.", attemptId, { cause: signal?.reason });
+}
+
 function routeAbortSignal(signal: AbortSignal | undefined, remainingMs: number): Readonly<{
   signal: AbortSignal;
   timedOut(): boolean;
@@ -231,9 +241,7 @@ function routeAbortSignal(signal: AbortSignal | undefined, remainingMs: number):
 }> {
   const controller = new AbortController();
   let timedOut = false;
-  const cancel = () => controller.abort(new PreparedRouteTerminalError(
-    "prepared_route_cancelled", "cancelled", "The prepared route was cancelled.", null, { cause: signal?.reason }
-  ));
+  const cancel = () => controller.abort(routeAbortError(signal));
   if (signal?.aborted) cancel();
   else signal?.addEventListener("abort", cancel, { once: true });
   const timer = setTimeout(() => {
@@ -296,7 +304,7 @@ export async function executePresetRoutes<T extends Readonly<{
     const candidate = input.candidates[candidateOrdinal]!;
     const remaining = input.totalDeadlineMs - (now() - startedAt);
     if (remaining <= 0) throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "The prepared route deadline elapsed.");
-    if (input.signal?.aborted) throw new PreparedRouteTerminalError("prepared_route_cancelled", "cancelled", "The prepared route was cancelled.");
+    if (input.signal?.aborted) throw routeAbortError(input.signal);
     const preparedRequest = input.prepareCandidate(candidate, candidateOrdinal);
     const attempt = await input.attempts.reserve({
       logicalReservation: input.logicalReservation, planProvenance: input.planProvenance,
@@ -320,7 +328,7 @@ export async function executePresetRoutes<T extends Readonly<{
       throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "The prepared route deadline elapsed before dispatch.", attempt.id);
     }
     if (input.signal?.aborted) {
-      throw new PreparedRouteTerminalError("prepared_route_cancelled", "cancelled", "The prepared route was cancelled before dispatch.", attempt.id);
+      throw routeAbortError(input.signal, attempt.id);
     }
     const dispatched = await input.attempts.markDispatched(input.logicalReservation, attempt.id, preparedRequest.payloadHash);
     if (!dispatched || dispatched.status !== "dispatched") {
@@ -339,7 +347,7 @@ export async function executePresetRoutes<T extends Readonly<{
         throw Object.assign(new Error("The prepared route deadline elapsed after dispatch."), { routeFailureReason: "deadline" });
       }
       if (input.signal?.aborted) {
-        throw Object.assign(new Error("The prepared route was cancelled after dispatch."), { routeFailureReason: "cancelled" });
+        throw routeAbortError(input.signal, attempt.id);
       }
       const value = await input.invoke({
         candidate, candidateOrdinal, preparedRequest, signal: routeAbort.signal,
@@ -382,7 +390,7 @@ export async function executePresetRoutes<T extends Readonly<{
       const classified = classifyPresetRouteFailure(error);
       const failure = routeAbort.timedOut()
         ? { ...classified, reason: "deadline" as const }
-        : input.signal?.aborted ? { ...classified, reason: "cancelled" as const } : classified;
+        : input.signal?.aborted ? { ...classified, reason: abortFailureReason(input.signal) } : classified;
       const observed = {
         ...failure,
         emittedOutput: emittedOutput || failure.emittedOutput,
@@ -420,7 +428,7 @@ export async function executePresetRoutes<T extends Readonly<{
         try {
           await sleep(delay, waitAbort.signal);
         } catch (waitError) {
-          const waitFailure = waitAbort.timedOut() ? "deadline" : input.signal?.aborted ? "cancelled" : classifyPresetRouteFailure(waitError).reason;
+          const waitFailure = waitAbort.timedOut() ? "deadline" : input.signal?.aborted ? abortFailureReason(input.signal) : classifyPresetRouteFailure(waitError).reason;
           const code = waitFailure === "deadline" ? "prepared_route_deadline_exceeded"
             : waitFailure === "cancelled" ? "prepared_route_cancelled" : "prepared_route_terminal";
           throw new PreparedRouteTerminalError(code, waitFailure,

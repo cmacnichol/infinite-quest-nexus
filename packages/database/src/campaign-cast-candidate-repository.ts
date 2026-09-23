@@ -3,7 +3,7 @@ import { castScopeSchema, type CastScope, type CastEvidence } from "../../contra
 import { castCandidateQuerySchema, castCandidateListSchema, castCandidateResolutionSchema, castDiscoverySourceSchema,
   resolveCastCandidateSchema, type CastCandidateQuery, type ResolveCastCandidate } from "../../contracts/src/campaign-cast-discovery.js";
 import { CampaignCastError } from "../../application/src/campaign-cast/ports.js";
-import { validateResolvedCastDiscovery } from "../../domain/src/campaign-cast-discovery.js";
+import { resolveCastDiscoveryEvidence } from "../../domain/src/campaign-cast-discovery.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { initializeCastWithClient, applyCastBatchWithClient } from "./campaign-cast-repository.js";
 import { withTransaction, type DatabasePool } from "./pool.js";
@@ -14,16 +14,24 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
       const scope = castScopeSchema.parse(rawScope), query = castCandidateQuerySchema.parse(input);
       return withTransaction(pool, async (client) => {
         const cast = await initializeCastWithClient(client, scope);
-        const rows = (await client.query(`SELECT p.id,p.reason,p.proposal,p.source FROM campaign_cast_discovery_candidates p
+        const rows = (await client.query(`SELECT p.id,p.reason,p.proposal,p.source,p.resolution_receipt FROM campaign_cast_discovery_candidates p
           JOIN effective_turn_narrations n ON n.turn_id=(p.source->>'turnId')::uuid AND n.campaign_id=p.campaign_id AND n.owner_user_id=p.owner_user_id
           WHERE p.campaign_id=$1 AND p.owner_user_id=$2 AND p.status='pending' AND ($3::uuid IS NULL OR p.id>$3)
+            AND ($7::boolean=false OR (p.resolution_receipt IS NULL
+              AND NOT (COALESCE(p.proposal->>'existingCharacterId','')=ANY($8::text[]))))
             AND (p.source->>'timelineRevision')::integer=$4 AND n.turn_number<=$5
             AND n.correction_revision=(p.source->>'narrationRevision')::integer
             AND encode(digest(n.effective_narration,'sha256'),'hex')=p.source->>'sourceHash'
           ORDER BY p.id LIMIT $6`, [scope.campaignId, scope.ownerUserId, query.cursor ?? null, cast.boundary.timelineRevision,
-          cast.boundary.turnNumber, query.limit + 1])).rows;
-        const candidates = rows.slice(0, query.limit).map((row) => ({ id: row.id, reason: row.reason, proposal: row.proposal,
-          source: { turnId: row.source.turnId, turnNumber: row.source.turnNumber, narrationRevision: row.source.narrationRevision } }));
+          cast.boundary.turnNumber, query.limit + 1, query.view === "matches", cast.characters.filter(person => person.ignored).map(person => person.id)])).rows;
+        const candidates = rows.slice(0, query.limit).map((row) => {
+          const saved = row.resolution_receipt ? castCandidateResolutionSchema.parse(row.resolution_receipt.result) : null;
+          const pending = saved?.pendingObservations;
+          return { id: row.id, reason: row.reason,
+            proposal: pending ? { ...row.proposal, observations: pending.map(item => row.proposal.observations[item.index]) } : row.proposal,
+            ...(saved ? { resolvedCharacterId: saved.character.id } : {}),
+            source: { turnId: row.source.turnId, turnNumber: row.source.turnNumber, narrationRevision: row.source.narrationRevision } };
+        });
         return castCandidateListSchema.parse({ revision: cast.revision, boundary: cast.boundary, candidates,
           nextCursor: rows.length > query.limit ? candidates.at(-1)!.id : null });
       });
@@ -55,9 +63,9 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         if ((await client.query(`SELECT id FROM generation_jobs WHERE campaign_id=$1 AND owner_user_id=$2
           AND status IN ('queued','replacement_queued','assessing','generating','validating','committing','recoverable') LIMIT 1`,
         [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_generation_active");
-        const validated = validateResolvedCastDiscovery({ source, candidate: row.proposal, knownCharacters: cast.characters,
+        const validated = resolveCastDiscoveryEvidence({ source, candidate: row.proposal, knownCharacters: cast.characters,
           characterId: request.action === "attach" ? request.characterId : null });
-        const candidate = validated.accepted[0];
+        const candidate = validated.candidate;
         if (!candidate) throw new CampaignCastError("cast_invalid_request");
         const evidence = (quote: { paragraphId: string; quote: string }): Extract<CastEvidence, { kind: "turn" }> => ({ kind: "turn",
           turnId: source.turnId, turnNumber: source.turnNumber, narrationRevision: source.narrationRevision, sourceHash: source.sourceHash, ...quote });
@@ -76,9 +84,9 @@ export function createCastCandidateRepository(pool: DatabasePool, editingEnabled
         ] });
         cast = await initializeCastWithClient(client, scope);
         const result = castCandidateResolutionSchema.parse({ candidateId: id, character: cast.characters.find((person) => person.id === characterId),
-          revision: cast.revision, boundary: cast.boundary, observationIds: receipt.observationIds });
-        await client.query("UPDATE campaign_cast_discovery_candidates SET status='resolved',resolution_receipt=$2 WHERE id=$1",
-          [id, JSON.stringify({ idempotencyKey: request.idempotencyKey, requestHash, result })]);
+          revision: cast.revision, boundary: cast.boundary, observationIds: receipt.observationIds, pendingObservations: validated.pendingObservations });
+        await client.query("UPDATE campaign_cast_discovery_candidates SET status=$3,resolution_receipt=$2 WHERE id=$1",
+          [id, JSON.stringify({ idempotencyKey: request.idempotencyKey, requestHash, result }), validated.pendingObservations.length ? "pending" : "resolved"]);
         return result;
       });
     }
