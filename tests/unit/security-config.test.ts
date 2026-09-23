@@ -28,6 +28,7 @@ const securitySettingNames = [
   "SYSTEM_ARCHIVE_ENABLED",
   "CAST_EDITING_ENABLED",
   "CAST_DISCOVERY_ENABLED",
+  "TEXT_PROVIDER_CONCURRENCY",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
   "SYSTEM_ARCHIVE_CHUNK_BYTES",
   "SYSTEM_ARCHIVE_ALLOW_LIMIT_INCREASE",
@@ -47,6 +48,14 @@ function minimumEnvironment(): void {
 }
 
 describe("runtime security configuration", () => {
+  it("bounds shared text provider capacity", () => {
+    minimumEnvironment();
+    expect(loadRuntimeConfig()).toMatchObject({ textProviderConcurrency: 2 });
+    process.env.TEXT_PROVIDER_CONCURRENCY = "3";
+    expect(loadRuntimeConfig()).toMatchObject({ textProviderConcurrency: 3 });
+    process.env.TEXT_PROVIDER_CONCURRENCY = "0";
+    expect(() => loadRuntimeConfig()).toThrow();
+  });
   it("keeps automatic cast discovery off independently of editing", () => {
     minimumEnvironment();
     expect(loadRuntimeConfig()).toMatchObject({ castDiscoveryEnabled: false });

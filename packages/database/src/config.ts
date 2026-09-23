@@ -64,6 +64,7 @@ export type RuntimeConfig = {
   worldSharingEnabled?: boolean;
   castEditingEnabled?: boolean;
   castDiscoveryEnabled?: boolean;
+  textProviderConcurrency?: number;
   /** Operator capability ceiling; defaults to R3 for Max campaign memory. */
   storyMemoryCapability?: "r1" | "r2" | "r3" | null;
   /** Enables R3 enforce enrollments; enabled by default for Max. */
@@ -273,6 +274,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     worldSharingEnabled: booleanSetting("WORLD_SHARING_ENABLED", false),
     castEditingEnabled: booleanSetting("CAST_EDITING_ENABLED", false),
     castDiscoveryEnabled: booleanSetting("CAST_DISCOVERY_ENABLED", false),
+    textProviderConcurrency: requiredIntegerSetting("TEXT_PROVIDER_CONCURRENCY", 2, 1, 1000),
     storyMemoryCapability: storyMemoryCapabilitySetting(),
     storyMemoryEnforceEnabled: booleanSetting("STORY_MEMORY_ENFORCE_ENABLED", true),
     security: {

@@ -49,6 +49,8 @@ import type { DirectAuthoringTextPlanOptions, PreparedAuthoringTextExecutor } fr
 import { prepareCastDiscoveryExecution } from "./campaign-cast-discovery-adapter.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { createPreparedTextExecutor } from "./prepared-text-executor.js";
+import { createTextProviderCapacityRepository } from "../../../packages/database/src/text-provider-capacity-repository.js";
+import { createSharedTextProviderCapacity } from "./text-provider-capacity.js";
 
 type ProviderCompositionOptions = Readonly<{
   credentialSecret: string;
@@ -59,6 +61,7 @@ type ProviderCompositionOptions = Readonly<{
   /** One admission switch is supplied unchanged to API enqueue and every worker graph. */
   nativeTextExecutionPlanAdmission?: boolean;
   castDiscoveryEnabled?: boolean;
+  textProviderConcurrency?: number;
 }>;
 
 export type ProviderApplicationTransaction = Readonly<{
@@ -194,6 +197,9 @@ function createInternals(
   pool: DatabasePool,
   options: ProviderCompositionOptions,
 ) {
+  const capacity = options.castDiscoveryEnabled === true
+    ? createSharedTextProviderCapacity(createTextProviderCapacityRepository(pool), options.textProviderConcurrency ?? 2)
+    : undefined;
   const responseFormatCapabilities = createProviderResponseFormatCapabilities({
     ...(options.schemaVerifications ? { records: options.schemaVerifications } : {}),
     ...(options.schemaVerificationDigest ? { registryDigest: options.schemaVerificationDigest } : {}),
@@ -213,6 +219,7 @@ function createInternals(
       credentialSecret: options.credentialSecret,
       transport: options.transport,
       health: providerRepositories.health,
+      ...(capacity ? { capacity } : {}),
       responseFormatCapabilities: capabilities
     });
     const rawApplication = createProviderApplication({
@@ -246,6 +253,7 @@ function createInternals(
 
   const base = bind(pool);
   const preparedTextExecutor = createPreparedTextExecutor({
+    ...(capacity ? { capacity } : {}),
     attempts: createPostgresPreparedTextAttemptRepository(pool),
     loadAuthority: (ownerUserId, providerProfileId, model) => base.runtime.execution.text(
       { ownerUserId }, providerProfileId, "text", model

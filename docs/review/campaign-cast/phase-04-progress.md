@@ -2,7 +2,17 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: Retry API and legacy recovery control
+## Latest checkpoint: shared text provider capacity
+
+When discovery is enabled, API and worker provider graphs now share PostgreSQL leases through migration `0109_text_provider_capacity`. `TEXT_PROVIDER_CONCURRENCY` defaults to two; every participating replica must use the same gate and limit. The guard acquires capacity before prepared physical-attempt reservation, shares that permit across sequential fallbacks, and prevents parallel nested dispatch from bypassing the limit. Ordinary text/intent calls use the same guard. Images and embeddings remain independent. Queue waiting consumes the request deadline, caller cancellation reaches transport, and no database connection is retained while a permit is used. Expiry recovers abandoned leases; it cannot guarantee cancellation of remote processing after process loss.
+
+Independent review found that a failed lease-release query could replace successful paid output. A RED/GREEN regression reproduced the issue; cleanup now logs a sanitized event and preserves either valid output or the original provider error. The reviewer verified the correction and independently passed 13 affected unit tests.
+
+Verification: **4,393 unit tests passed across 349 files, with 44 existing skips**. The ten-file PostgreSQL run passed 163 tests, skipped ten Windows secure-filesystem cases, and failed one migration-order test. That complete migration suite then passed all 28 tests in isolation; the initial failure remains recorded in the log. The new two-pool capacity tests passed, proving the shared limit, connection release, expiry recovery, and token-specific cleanup. Repository/TypeScript checks and whitespace checks passed. Logs: `.tmp/campaign-cast/capacity-{wiring-red,unit-final,check-final,integration,migrations-rerun}.log`. No visible UI changed, so browser verification was not repeated. No live provider, deployment, or production data changed.
+
+The final phase-04 acceptance audit remains before phases 05–06. Discovery remains default off. Earlier checkpoints below describe their state at the time.
+
+## Retry API and legacy recovery control
 
 `POST /api/v1/campaigns/:campaignId/cast/discovery/:jobId/retry` now accepts the cast revision, current boundary, and idempotency key. The application validates the request and the runtime uses the guarded persistence operation. Existing frozen admissions are reused. An admission-unavailable job first passes a rolled-back validation transaction, then prepares the campaign's selected/default text provider outside the transaction and rechecks all guards before queuing. Provider preparation failures return a sanitized recovery error and retain the failed job. API and combined runtime roles receive these collaborators explicitly.
 
@@ -10,7 +20,7 @@ Legacy Characters now exposes **Retry character tracking** for eligible failed j
 
 Verification: initial API and browser regressions failed before wiring. **4,384 unit tests passed (348 files; 44 existing skips), 79 PostgreSQL tests passed (five cast suites), and 10 legacy browser tests passed**. The PostgreSQL test uses a single-connection pool to prove provider preparation does not retain a transaction connection; provider failure and source races leave retry generation zero. Repository/TypeScript and whitespace checks passed after correcting an exact-optional-property composition error. Review found no actionable issue. Browser plugin was unavailable, so repository Playwright was used. Screenshots `.tmp/campaign-cast/retry-screenshots/retry-{recovery-390,conflict-desktop}.png` were inspected with no clipped controls. Logs: `.tmp/campaign-cast/retry-{api-red,api-green,api-integration,api-unit,api-check,browser-red,browser-green}.log`. No live provider, production data, or deployment changed.
 
-Shared provider concurrency and the final phase-04 acceptance audit remain before phases 05–06. Discovery remains default off.
+At this checkpoint shared provider concurrency and the final phase-04 acceptance audit remained before phases 05–06.
 
 ## Explicit retry persistence
 

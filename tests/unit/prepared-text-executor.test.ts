@@ -13,6 +13,7 @@ import {
   type ProviderResult
 } from "../../packages/story-engine/src/providers.js";
 import { createPreparedTextExecutor } from "../../services/runtime/src/prepared-text-executor.js";
+import { createSharedTextProviderCapacity } from "../../services/runtime/src/text-provider-capacity.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -103,6 +104,24 @@ function authority(execute: (request: ProviderRequest) => Promise<ProviderResult
 }
 
 describe("prepared text executor stream durability", () => {
+  it("waits for capacity before reserving or charging a physical attempt", async () => {
+    const attempts = repository(vi.fn());
+    const reserve = vi.spyOn(attempts, "reserve");
+    let available = false;
+    const leases = { tryAcquire: vi.fn(async () => available ? "lease" : null), release: vi.fn(async () => {}) };
+    const capacity = createSharedTextProviderCapacity(leases, 1, 1);
+    const dispatch = vi.fn(async () => result());
+    const executor = createPreparedTextExecutor({ attempts, capacity,
+      loadAuthority: async () => authority((request) => capacity.execute({ timeoutMs: 2000,
+        ...(request.abortSignal ? { signal: request.abortSignal } : {}) }, dispatch)) });
+    const pending = executor.execute(executionInput(vi.fn()));
+    await vi.waitFor(() => expect(leases.tryAcquire).toHaveBeenCalled());
+    expect(reserve).not.toHaveBeenCalled(); expect(dispatch).not.toHaveBeenCalled();
+    available = true;
+    await pending;
+    expect(reserve).toHaveBeenCalledTimes(1); expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(leases.release).toHaveBeenCalledTimes(1);
+  });
   it("waits for durable output evidence before exposing a provider chunk", async () => {
     let release!: (value: PhysicalAttemptRecord) => void;
     const persisted = new Promise<PhysicalAttemptRecord>((resolve) => { release = resolve; });

@@ -19,6 +19,7 @@ import type { ProviderRequest, ProviderResult, TextProviderProfile } from "../..
 import type { FrozenResponseContractsV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
+import type { TextProviderCapacity } from "./text-provider-capacity.js";
 
 function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
   const completeRejectedDraft = validateCompleteRejectedDraft(request.rejectedResponse);
@@ -61,9 +62,10 @@ function serializationProfile(candidate: TextExecutionRouteBasis["candidates"][n
 
 export function createPreparedTextExecutor(input: Readonly<{
   attempts: PhysicalAttemptRepository;
+  capacity?: TextProviderCapacity;
   loadAuthority(ownerUserId: string, providerProfileId: string, model: string): Promise<RuntimeTextExecution>;
 }>): PreparedAuthoringTextExecutor {
-  return {
+  const executor: PreparedAuthoringTextExecutor = {
     summarize: (scope) => input.attempts.summarize(scope),
     async execute(execution) {
       if (!execution.logicalReservation) {
@@ -87,6 +89,7 @@ export function createPreparedTextExecutor(input: Readonly<{
         logicalReservation: execution.logicalReservation,
         attempts: input.attempts,
         totalDeadlineMs: requestTimeoutMs,
+        ...(execution.request.abortSignal ? { signal: execution.request.abortSignal } : {}),
         prepareCandidate(candidate, candidateOrdinal) {
           if (plan.selection.kind === "model") {
             if (candidateOrdinal !== 0 || !execution.preparedRequest) {
@@ -186,4 +189,12 @@ export function createPreparedTextExecutor(input: Readonly<{
         ...(physicalAccounting ? { physicalAccounting } : {}) };
     }
   };
+  const capacity = input.capacity;
+  return capacity ? {
+    ...executor,
+    execute: (execution) => capacity.withPermit({
+      timeoutMs: readTextExecutionPlan(execution.plan).requestTimeoutMs ?? 300_000,
+      ...(execution.request.abortSignal ? { signal: execution.request.abortSignal } : {})
+    }, (signal) => executor.execute({ ...execution, request: { ...execution.request, abortSignal: signal } }))
+  } : executor;
 }

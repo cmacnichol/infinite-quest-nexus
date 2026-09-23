@@ -145,7 +145,7 @@ function importReport(input: Readonly<{
       sourceApplication: "0.1.0",
       sourceMigration: input.sourceMigration ?? "0095_story_memory_capability_enrollment",
       destinationApplication: "0.1.0",
-      destinationMigration: input.destinationMigration ?? "0108_campaign_cast_discovery_retry",
+      destinationMigration: input.destinationMigration ?? "0109_text_provider_capacity",
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -825,7 +825,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0108_campaign_cast_discovery_retry",
+      sourceMigration: "0109_text_provider_capacity",
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -1249,7 +1249,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(preview).toMatchObject({
       formatVersion: 2,
       sourceApplication: "0.1.0",
-      sourceMigration: "0108_campaign_cast_discovery_retry",
+      sourceMigration: "0109_text_provider_capacity",
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -1277,7 +1277,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0108_campaign_cast_discovery_retry",
+        latestMigration: "0109_text_provider_capacity",
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1311,9 +1311,9 @@ integration("deterministic owner-wide System Archive export", () => {
         versions: {
           archiveFormat: 2,
           sourceApplication: "0.1.0",
-          sourceMigration: "0108_campaign_cast_discovery_retry",
+          sourceMigration: "0109_text_provider_capacity",
           destinationApplication: "0.1.0",
-          destinationMigration: "0108_campaign_cast_discovery_retry",
+          destinationMigration: "0109_text_provider_capacity",
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1346,7 +1346,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0108_campaign_cast_discovery_retry",
+            latestMigration: "0109_text_provider_capacity",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1387,7 +1387,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0108_campaign_cast_discovery_retry",
+            latestMigration: "0109_text_provider_capacity",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1424,7 +1424,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0108_campaign_cast_discovery_retry",
+            latestMigration: "0109_text_provider_capacity",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1476,7 +1476,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0108_campaign_cast_discovery_retry",
+            latestMigration: "0109_text_provider_capacity",
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4139,7 +4139,7 @@ integration("deterministic owner-wide System Archive export", () => {
         archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0108_campaign_cast_discovery_retry",
+          latestMigration: "0109_text_provider_capacity",
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4629,7 +4629,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0108_campaign_cast_discovery_retry",
+            latestMigration: "0109_text_provider_capacity",
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4685,7 +4685,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0108_campaign_cast_discovery_retry",
+      latestMigration: "0109_text_provider_capacity",
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",

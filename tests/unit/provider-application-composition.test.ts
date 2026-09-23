@@ -5,6 +5,8 @@ import { createQueuedResponsePolicyResolver } from "../../services/runtime/src/g
 import { resolveGenerationResponseContracts } from "../../services/runtime/src/generation-response-contract.js";
 import { readFrozenResponseContracts, readQueuedResponsePolicy } from "../../packages/contracts/src/generation-response-contract.js";
 import { createHash } from "node:crypto";
+import { createRuntimeProviderAdapter } from "../../services/runtime/src/provider-credential-transport-adapter.js";
+import { createSharedTextProviderCapacity } from "../../services/runtime/src/text-provider-capacity.js";
 
 const ownerUserId = "00000000-0000-4000-8000-000000000001";
 const providerProfileId = "00000000-0000-4000-8000-000000000002";
@@ -75,6 +77,48 @@ function listModels(composition: ReturnType<typeof createApiProviderApplicationC
 }
 
 describe("provider application composition capability cache transactions", () => {
+  it("allows image and embedding execution while text capacity is exhausted", async () => {
+    const leases = { tryAcquire: vi.fn(async () => null), release: vi.fn(async () => {}) };
+    const capacity = createSharedTextProviderCapacity(leases, 1);
+    const fetch = vi.fn(async (_profile: unknown, operation: string) => new Response(JSON.stringify({ data:
+      operation === "embedding generation" ? [{ index: 0, embedding: [0.1, 0.2] }] : [{ b64_json: "aW1hZ2U=" }]
+    }), { headers: { "content-type": "application/json" } }));
+    let role = "embedding";
+    const adapter = createRuntimeProviderAdapter({ capacity,
+      database: { query: vi.fn(async () => ({ rows: [{ ...profile("model"), provider_role: role }], rowCount: 1 })) } as never,
+      credentialSecret: "test-secret", health: { recordHealth: vi.fn() },
+      transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() } });
+    const embedding = await adapter.execution.embedding({ ownerUserId }, providerProfileId, "embedding");
+    expect((await embedding.embed(["A traveller arrives."])).embeddings).toHaveLength(1);
+    role = "image";
+    const image = await adapter.execution.image({ ownerUserId }, providerProfileId);
+    await image.submit({ prompt: "A traveller arrives.", size: "1024x1024", aspectRatio: "1:1", quality: "auto", outputFormat: "png" });
+    expect(fetch).toHaveBeenCalledTimes(2); expect(leases.tryAcquire).not.toHaveBeenCalled();
+  });
+  it("guards ordinary API and worker text dispatches when discovery is enabled", async () => {
+    for (const create of [createApiProviderApplicationComposition, createWorkerProviderApplicationComposition]) {
+      const live = new Set<string>();
+      const query = vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql.includes("FROM provider_profiles")) return { rows: [profile("story-model")], rowCount: 1 };
+        if (sql.includes("count(*)")) return { rows: [{ count: live.size }] };
+        if (sql.startsWith("INSERT INTO text_provider_capacity_leases")) live.add(String(values![0]));
+        if (sql.startsWith("DELETE FROM text_provider_capacity_leases WHERE id")) live.delete(String(values![0]));
+        return { rows: [], rowCount: 1 };
+      });
+      const pool = { query, connect: vi.fn(async () => ({ query, release: vi.fn() })) };
+      const fetch = vi.fn(async () => {
+        expect(live.size).toBe(1);
+        return new Response(JSON.stringify({ choices: [{ message: { content: "A traveller arrives." }, finish_reason: "stop" }] }),
+          { headers: { "content-type": "application/json" } });
+      });
+      const graph = create(pool as never, { credentialSecret: "test-secret", castDiscoveryEnabled: true,
+        transport: { fetch, validateSdkEndpoint: vi.fn(), close: vi.fn() } });
+      const execution = await graph.generation.execution.text({ ownerUserId }, providerProfileId, "text");
+      await execution.execute({ systemPrompt: "Tell a story.", input: "Continue." });
+      expect(fetch).toHaveBeenCalledTimes(1); expect(live.size).toBe(0);
+      expect(query.mock.calls.some(([sql]) => sql.startsWith("INSERT INTO text_provider_capacity_leases"))).toBe(true);
+    }
+  });
   it("shares one default-off prepared executor across every API and worker text consumer graph", () => {
     const pool = { connect: vi.fn(), query: vi.fn() };
     const transport = { fetch: vi.fn(), validateSdkEndpoint: vi.fn(), close: vi.fn() };

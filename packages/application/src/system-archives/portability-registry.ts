@@ -42,6 +42,7 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   campaign_cast_profiles: "rebuildable",
   campaign_cast_discovery_jobs: "operational",
   campaign_cast_discovery_retries: "operational",
+  text_provider_capacity_leases: "operational",
   campaign_cast_discovery_receipts: "operational",
   campaign_cast_discovery_candidates: "operational",
   campaign_character_profile_edits: "portable_authority",
