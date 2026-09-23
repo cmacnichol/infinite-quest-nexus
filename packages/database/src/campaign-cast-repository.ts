@@ -255,6 +255,21 @@ async function persistBatch(client: DatabaseClient, scope: CastScope, campaign: 
   return receipt;
 }
 
+/** Discovery publication and its receipt share the caller's transaction. */
+export async function applyCastBatchWithClient(client: DatabaseClient, rawScope: CastScope, rawBatch: CastBatch): Promise<CastBatchReceipt> {
+  const scope = castScopeSchema.parse(rawScope), batch = castBatchSchema.parse(rawBatch);
+  const campaign = await lockCampaign(client, scope);
+  const state = await initialize(client, scope, campaign);
+  const requestHash = sha256(stableStringify(batch));
+  const prior = (await client.query("SELECT request_hash,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, batch.idempotencyKey])).rows[0];
+  if (prior) {
+    if (prior.request_hash !== requestHash) throw new Error("Cast idempotency key reused with different content.");
+    return castBatchReceiptSchema.parse(prior.receipt);
+  }
+  assertBoundary(campaign, state, batch.boundary, true);
+  return persistBatch(client, scope, campaign, state, batch, requestHash);
+}
+
 export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { editingEnabled?: boolean } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
   async function write(rawScope: CastScope, characterId: string | null, raw: CreateCastCharacter | EditCastCharacter): Promise<CastWriteResult> {
     const scope = castScopeSchema.parse(rawScope);
@@ -367,19 +382,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
       });
     },
     async applyBatch(rawScope, rawBatch) {
-      const scope = castScopeSchema.parse(rawScope), batch: CastBatch = castBatchSchema.parse(rawBatch);
-      return withTransaction(pool, async (client) => {
-        const campaign = await lockCampaign(client, scope);
-        const state = await initialize(client, scope, campaign);
-        const requestHash = sha256(stableStringify(batch));
-        const prior = (await client.query("SELECT request_hash,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3", [scope.campaignId, scope.ownerUserId, batch.idempotencyKey])).rows[0];
-        if (prior) {
-          if (prior.request_hash !== requestHash) throw new Error("Cast idempotency key reused with different content.");
-          return castBatchReceiptSchema.parse(prior.receipt);
-        }
-        assertBoundary(campaign, state, batch.boundary, true);
-        return persistBatch(client, scope, campaign, state, batch, requestHash);
-      });
+      return withTransaction(pool, (client) => applyCastBatchWithClient(client, rawScope, rawBatch));
     }
   };
 }

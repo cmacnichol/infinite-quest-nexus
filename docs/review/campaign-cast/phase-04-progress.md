@@ -24,11 +24,33 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 
 ## Remaining implementation
 
-1. Durable queue, receipts, unresolved candidates, leases, chunk checkpoints, retries, contiguous coverage, and capability handling. Next migration is 0104; read the deployment runbook before creating it.
+1. Connect the durable queue below to unresolved candidates, contiguous coverage, and runtime capability handling. Migration 0104 now exists; use the next ordered migration for further additive schema changes.
 2. Freeze routing at admission without a provider call inside acceptance. Use the existing prepared-request executor and physical-attempt cost ledger with a new lease-bound discovery reservation; do not disguise discovery as a direct authoring request.
-3. Atomic accepted-turn enqueue and publication with campaign/timeline/source/character revision checks. Defer publication during active or recoverable generation. Add same-client cast persistence seams and allow protagonist observations without editing its authoritative profile; update portability validation accordingly.
+3. Wire atomic accepted-turn enqueue and validated publication using the implemented campaign/timeline/source fences and same-client cast seam. Capture and reconcile character revisions, and allow protagonist observations without editing its authoritative profile; update portability validation accordingly.
 4. Lifecycle cancellation/re-enqueue for corrections, replacement, rewind, branches, and transfer. Existing phase-02 approvals cover these source integrations.
 5. Status/retry/candidate-resolution API and legacy UI, then actual PostgreSQL and browser acceptance gates.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
 
 Do not mark phase 04 complete or claim pin/ignore already affects generation. Existing plans remain authoritative; this checkpoint only completes an initial part of task 1 and registers the future provider operation.
+
+## Durable queue checkpoint
+
+Migration `0104_campaign_cast_discovery.sql` adds scoped jobs and chunk receipts, classified as operational. Applied identity authority remains in cast events. Source identity includes timeline revision because accepted-turn replacement can reuse a narration correction ordinal. Job/chunk receipts make replay idempotent on that source identity. Down migration removes the new operational tables; ordinary rollback should disable discovery and retain recovery records.
+
+`enqueueCastDiscoveryWithClient` uses the caller's transaction and freezes a validated execution plan, complete source, and all chunks. It does nothing while disabled. This seam is **not yet called by generation acceptance**. It performs no provider calls. The current execution snapshot contains provider profile ID and text plan; frozen response-contract/route-basis admission still needs completion before runtime dispatch.
+
+`createCastDiscoveryJobRepository` supplies claim, checkpoint, fail, and transactional publish. It locks campaign before job, processes sources in order, allows one running job per campaign, issues at most two extraction attempts, and fences old workers with a random lease token. Parsed checkpoints survive a new worker lease without incrementing the extraction attempt. The one automatic retry waits five seconds. Failed gaps block subsequent sources. Publication checks current source hash/revision/timeline and defers during all queued, replacement, assessing, generating, validating, committing, and recoverable generation states. Gate-off publication retains its checkpoint.
+
+`applyCastBatchWithClient` exposes the existing cast batch implementation without a nested transaction. Publication callbacks can use it to atomically commit cast authority and the discovery receipt. This is an internal database seam; it is not a public API, provider write capability, or replacement for the pending validator/application layer. Current tests use deterministic callback output, not a model or worker adapter. Protagonist observations remain pending.
+
+Deserialization validates source and chunk headers against the scoped job row and checks complete text hashes. Invalid persisted source bindings fail closed and roll back the attempted claim. Lifecycle cancellation, explicit retry, failure diagnostics for corrupt rows, candidate resolution, and coverage still need application integration.
+
+Verification:
+
+- Discovery PostgreSQL suite: **11 passed**, including caller-transaction rollback, idempotent enqueue, checkpoint restart, stale lease rejection, two abandoned attempts, source ordering, generation deferral, publication rollback with actual cast authority, multi-chunk completion, and corrupted source binding.
+- Existing cast persistence/lifecycle/portability selection: **33 passed** before the final additional discovery regressions. Cast repository/API plus discovery selection subsequently passed **26 tests** before those final regression additions.
+- Broader migration/archive/generation/adapter selection: **110 passed, 11 skipped, one migration-runner failure**. The failing maintenance-migration test reported `0001_initial_nexus` preceding already-run `0078_system_archive_jobs`; an isolated rerun of the complete migration suite passed **28/28**. The ordering failure was not reproduced; its cause is unproven.
+- Full unit rerun with four workers: **345 files, 4,351 passed, 44 existing skips**. The preceding unrestricted run timed out in the two existing repository-scanning tests `task-14e3e8-composition-parity-boundaries` and `task-14e3h-legacy-authority-removal`; both passed in the full rerun. Final source-binding changes were verified with all 11 discovery PostgreSQL tests and TypeScript.
+- Repository checks and TypeScript passed. Independent bounded queue review found no concrete blocker; suggested stale-worker and lease-exhaustion tests were added and passed.
+
+The task-owned disposable PostgreSQL container `infinitequest-cast-phase4` is available on localhost port 55439 for continued verification. Its URL is only in ignored `.tmp/campaign-cast/database-url.txt`; do not print or commit it. No production database was used. No new browser check applies to this backend-only checkpoint.

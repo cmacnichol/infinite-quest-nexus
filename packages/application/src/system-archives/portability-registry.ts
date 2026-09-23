@@ -40,6 +40,8 @@ export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   campaign_cast_events: "portable_authority",
   campaign_cast_observations: "portable_authority",
   campaign_cast_profiles: "rebuildable",
+  campaign_cast_discovery_jobs: "operational",
+  campaign_cast_discovery_receipts: "operational",
   campaign_character_profile_edits: "portable_authority",
   campaign_illustration_configs: "portable_authority",
   campaign_memory_configs: "portable_authority",
