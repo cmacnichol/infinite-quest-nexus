@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { castCharacterSchema, castFieldSchema, castScopeSchema } from "./campaign-cast.js";
+import { castCharacterSchema, castFieldSchema, castScopeSchema, castBoundarySchema, castWriteBase, castWriteResultSchema } from "./campaign-cast.js";
 
 export const CAST_DISCOVERY_PROTOCOL = "cast-discovery-v1";
 export const castDiscoveryStatusSchema = z.object({
@@ -39,3 +39,18 @@ export const castDiscoveryIdentitySnapshotSchema = z.object({
     aliases: z.array(z.string().min(1).max(200)).max(20), identityHints: z.array(z.string().min(1).max(2000)).max(20).optional() }).strict())
 }).strict();
 export type CastDiscoveryIdentitySnapshot = z.infer<typeof castDiscoveryIdentitySnapshotSchema>;
+
+export const castCandidateQuerySchema = z.object({ cursor: z.uuid().optional(), limit: z.coerce.number().int().min(1).max(50).default(20) }).strict();
+export const castPendingCandidateSchema = z.object({ id: z.uuid(), reason: z.string().min(1).max(100), proposal: castDiscoveryCandidateSchema,
+  source: z.object({ turnId: z.uuid(), turnNumber: z.number().int().positive(), narrationRevision: z.number().int().nonnegative() }).strict() }).strict();
+export const castCandidateListSchema = z.object({ revision: z.number().int().nonnegative(), boundary: castBoundarySchema,
+  candidates: z.array(castPendingCandidateSchema).max(50), nextCursor: z.uuid().nullable() }).strict();
+export const resolveCastCandidateSchema = z.discriminatedUnion("action", [
+  z.object({ ...castWriteBase, action: z.literal("attach"), characterId: z.uuid() }).strict(),
+  z.object({ ...castWriteBase, action: z.literal("create") }).strict()
+]);
+export const castCandidateResolutionSchema = castWriteResultSchema.extend({ candidateId: z.uuid(), observationIds: z.array(z.uuid()).max(20) });
+export type CastCandidateQuery = z.infer<typeof castCandidateQuerySchema>;
+export type CastCandidateList = z.infer<typeof castCandidateListSchema>;
+export type ResolveCastCandidate = z.infer<typeof resolveCastCandidateSchema>;
+export type CastCandidateResolution = z.infer<typeof castCandidateResolutionSchema>;

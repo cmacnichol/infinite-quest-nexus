@@ -603,4 +603,7 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
 .cast-field-group > div { margin-top: 14px; }
 .cast-editor button { white-space: normal; }
 .cast-comparison { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cast-match-controls { display: grid; gap: 10px; min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
+.cast-match-controls input, .cast-match-controls select { width: 100%; min-width: 0; box-sizing: border-box; }
+.cast-match-controls button, .cast-dialog blockquote { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 480px) { .cast-dialog { padding: 16px; } .cast-toolbar label { width: 100%; } }

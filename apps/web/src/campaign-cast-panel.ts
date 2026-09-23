@@ -1,7 +1,7 @@
 import { canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, type CastEditorState } from "@infinite-quest/client-core";
 import type { CampaignCastApi } from "@infinite-quest/client-web";
-import type { CastDetail, CastDiscoveryStatus, CastField, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import type { CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 
 const fields: [CastField, string][] = [
   ["identity.pronouns", "Pronouns"], ["story.role", "Role"], ["story.background", "Background"],
@@ -64,6 +64,96 @@ export function createLegacyCastPanel(options: {
       dialog.append(button("Retry loading", () => { void loadRoster(); }));
     }
   }
+  async function loadCandidates(cursor?: string) {
+    const token = ++epoch; editor = null;
+    shell("Character matches"); status("Loading matches…");
+    try {
+      const matches = await options.api.candidates(campaign, cursor ? { cursor } : {});
+      if (!current(token)) return;
+      shell("Character matches");
+      dialog.append(button("Back to characters", () => { void loadRoster(); }));
+      for (const candidate of matches.candidates) {
+        dialog.append(button(`Review ${candidate.proposal.name}`, () => renderCandidate(matches, candidate)), node("p", `Source: turn ${candidate.source.turnNumber}`));
+      }
+      if (!matches.candidates.length) status("No character matches need review.");
+      if (matches.nextCursor) dialog.append(button("More matches", () => { void loadCandidates(matches.nextCursor!); }));
+    } catch (error) {
+      if (!current(token)) return;
+      shell("Character matches"); status(message(error));
+      dialog.append(button("Retry loading matches", () => { void loadCandidates(); }), button("Back to characters", () => { void loadRoster(); }));
+    }
+  }
+  function renderCandidate(matches: CastCandidateList, candidate: CastCandidateList["candidates"][number]) {
+    const token = ++epoch;
+    shell(`Review ${candidate.proposal.name}`);
+    dialog.append(button("Back to matches", () => { void loadCandidates(); }));
+    status("Decide whether this person is already in your cast or is a separate character. Existing names and your edits are preserved.");
+    dialog.append(button(`Source turn ${candidate.source.turnNumber}`, () => { requestClose(); void options.navigateToTurn(candidate.source.turnNumber); }));
+    for (const citation of candidate.proposal.identityEvidence) dialog.append(node("blockquote", citation.quote));
+    for (const observation of candidate.proposal.observations) {
+      dialog.append(node("p", `Proposed ${fields.find(([field]) => field === observation.field)?.[1] ?? "detail"}: ${observation.value}`), node("blockquote", observation.quote));
+    }
+    const controls = node("fieldset"); controls.className = "cast-match-controls"; controls.disabled = !enabled || options.generationActive();
+    if (controls.disabled) status(!enabled ? "Character editing is disabled." : "Finish or resolve the current generation before reviewing matches.");
+    const searchLabel = node("label", "Find existing character"), search = node("input");
+    searchLabel.htmlFor = "cast-match-search"; search.id = "cast-match-search"; search.type = "search"; search.maxLength = 200;
+    const selectLabel = node("label", "Existing character"), select = node("select");
+    selectLabel.htmlFor = "cast-match-target"; select.id = "cast-match-target";
+    let busy = false, searchEpoch = 0, submitted: ResolveCastCandidate | null = null;
+    const feedback = node("p"); feedback.setAttribute("role", "status");
+    const preview = node("section"); preview.setAttribute("role", "region"); preview.setAttribute("aria-label", "Selected character");
+    let targets: List["characters"] = [];
+    const attach = button("Attach to selected character", () => { void resolve("attach"); }, true);
+    const populate = (people: List["characters"]) => {
+      targets = people; preview.replaceChildren();
+      select.replaceChildren(); const blank = node("option", "Choose a character"); blank.value = ""; select.append(blank);
+      const label = (person: List["characters"][number]) => `${person.name}${person.aliases.length ? ` (${person.aliases.join(", ")})` : ""}${person.profile["story.role"] ? ` · ${person.profile["story.role"]}` : ""} · last seen turn ${person.lastObservedTurn}`;
+      for (const person of people) {
+        const text = label(person), duplicate = people.some((other) => other.id !== person.id && label(other) === text);
+        const option = node("option", duplicate ? `${text} · ${person.id}` : text);
+        option.value = person.id; select.append(option);
+      }
+      attach.disabled = true;
+    };
+    select.addEventListener("change", () => {
+      attach.disabled = !select.value; preview.replaceChildren();
+      const person = targets.find((target) => target.id === select.value);
+      if (!person) return;
+      preview.append(node("h3", person.name), node("p", `First seen turn ${person.firstObservedTurn}; last seen turn ${person.lastObservedTurn}.`));
+      for (const [field, label] of fields) if (person.profile[field] !== undefined) preview.append(node("p", `${label}: ${person.profile[field]}`));
+    });
+    populate(list?.characters ?? []);
+    const searchButton = button("Search characters", async () => {
+      const searchToken = ++searchEpoch;
+      try {
+        const found = await options.api.list(campaign, { query: search.value, limit: 50 });
+        if (!current(token) || busy || searchToken !== searchEpoch) return;
+        enabled = found.capabilities.castEditing; controls.disabled = !enabled || options.generationActive();
+        populate(found.characters); feedback.textContent = found.nextCursor ? "More characters match. Refine the search to find the right person." : "";
+      } catch (error) { if (current(token) && searchToken === searchEpoch) feedback.textContent = message(error); }
+    });
+    controls.append(searchLabel, search, searchButton, selectLabel, select, attach,
+      button("Create separate character", () => { void resolve("create"); }));
+    dialog.append(controls, preview, feedback);
+    async function resolve(action: "attach" | "create") {
+      if (busy || !enabled || options.generationActive() || action === "attach" && !select.value) return;
+      const decision = action === "create" ? { action } : { action, characterId: select.value };
+      if (!submitted || submitted.action !== action || action === "attach" && submitted.action === "attach" && submitted.characterId !== select.value) {
+        submitted = { ...decision, expectedCastRevision: matches.revision, expectedBoundary: matches.boundary, idempotencyKey: crypto.randomUUID() };
+      }
+      busy = true; controls.disabled = true; feedback.textContent = "Saving identity decision…";
+      try {
+        await options.api.resolveCandidate(campaign, candidate.id, submitted);
+        if (current(token)) await loadRoster();
+      } catch (error) {
+        if (!current(token)) return;
+        feedback.textContent = (error as { statusCode?: number }).statusCode === 409
+          ? "The story or cast changed. Reload matches before deciding again." : `Could not apply the evidence: ${message(error)}`;
+        dialog.append(button("Reload matches", () => { void loadCandidates(); }));
+        busy = false; controls.disabled = !enabled || options.generationActive();
+      }
+    }
+  }
   function renderRoster() {
     shell("Characters");
     if (!discovery) status("Character tracking status is unavailable. Saved characters are still available.");
@@ -76,6 +166,7 @@ export function createLegacyCastPanel(options: {
         ? `Tracked turns ${discovery.coverageStartTurn}–${discovery.trackedThroughTurn}. Earlier turns are not included.`
         : `Tracking starts at turn ${discovery.coverageStartTurn}; no turns in this range are complete yet.`);
       if (discovery.unresolvedCount) status(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
+      if (discovery.unresolvedCount) dialog.append(button("Review character matches", () => { void loadCandidates(); }));
     }
     dialog.append(button("Refresh characters", () => { void loadRoster(); }));
     const controls = node("form"); controls.className = "cast-toolbar";

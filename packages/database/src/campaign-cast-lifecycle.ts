@@ -17,7 +17,7 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
     const retained = event.payload.filter((item: { command: unknown }) => {
       const command = castCommandSchema.parse(item.command);
       return command.kind === "create" && command.evidence?.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber
-        || command.kind === "observe" && command.evidence.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber;
+        || (command.kind === "observe" || command.kind === "mention") && command.evidence.kind === "turn" && command.evidence.turnNumber <= boundary.turnNumber;
     });
     if (retained.length) await client.query("UPDATE campaign_cast_events SET payload=$2,receipt=receipt-'result' WHERE id=$1", [event.id, JSON.stringify(retained)]);
     else await client.query("DELETE FROM campaign_cast_events WHERE id=$1", [event.id]);
@@ -90,6 +90,7 @@ export async function copyCampaignCast(client: DatabaseClient, source: CastScope
       const command = castCommandSchema.parse(item.command);
       if (command.kind === "create") return characterIds.has(item.characterId!);
       if (command.kind === "observe") return observationIds.has(item.observationId!);
+      if (command.kind === "mention") return characterIds.has(command.characterId) && turnIds.has(command.evidence.turnId);
       return event.effective_turn_number <= throughTurn && characterIds.has(command.characterId);
     });
     if (!payload.length) continue;

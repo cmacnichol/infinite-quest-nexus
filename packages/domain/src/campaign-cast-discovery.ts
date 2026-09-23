@@ -99,10 +99,22 @@ function explicitlyLinksAlias(text: string, name: string, alias: string) {
 }
 
 /** Lexical guards establish bounded provenance, not a general semantic truth proof. */
-export function validateCastDiscovery(input: {
+type DiscoveryValidationInput = {
   source: CastDiscoverySource; output: unknown; knownCharacters: CastCharacter[];
   worldCharacters?: CastDiscoveryWorldIdentity[]; worldVersionId?: string;
+};
+export function validateCastDiscovery(input: DiscoveryValidationInput): CastDiscoveryValidation {
+  return validateDiscovery(input, false);
+}
+/** An explicit user decision resolves identity only; all source and field guards remain. */
+export function validateResolvedCastDiscovery(input: {
+  source: CastDiscoverySource; candidate: unknown; knownCharacters: CastCharacter[]; characterId: string | null;
 }): CastDiscoveryValidation {
+  const candidate = castDiscoveryOutputSchema.parse({ version: 1, characters: [input.candidate] }).characters[0]!;
+  return validateDiscovery({ source: input.source, knownCharacters: input.knownCharacters,
+    output: { version: 1, characters: [{ ...candidate, existingCharacterId: input.characterId }] } }, true);
+}
+function validateDiscovery(input: DiscoveryValidationInput, explicitIdentity: boolean): CastDiscoveryValidation {
   const source = castDiscoverySourceSchema.parse(input.source), output = castDiscoveryOutputSchema.parse(input.output);
   const paragraphs = new Map(source.paragraphs.map((paragraph) => [paragraph.id, paragraph.text]));
   const known = new Map(input.knownCharacters.map((person) => [person.id, person]));
@@ -126,13 +138,13 @@ export function validateCastDiscovery(input: {
     if (/^(?:crowd|people|guards|villagers|everyone|someone|a person)$/iu.test(candidate.name)) { hold("insufficient_identity"); continue; }
     const terms = [candidate.name, ...candidate.aliases].map(normalizeEntityTerm);
     const matches = input.knownCharacters.filter((person) => [person.name, ...person.aliases].some((alias) => terms.includes(normalizeEntityTerm(alias)) && contains(identityText, alias)));
-    if (matches.length > 1 || matches.length === 1 && candidate.existingCharacterId !== matches[0]!.id
-      || candidate.existingCharacterId && !matches.some((person) => person.id === candidate.existingCharacterId)) { hold("identity_needs_review"); continue; }
+    if (!explicitIdentity && (matches.length > 1 || matches.length === 1 && candidate.existingCharacterId !== matches[0]!.id
+      || candidate.existingCharacterId && !matches.some((person) => person.id === candidate.existingCharacterId))) { hold("identity_needs_review"); continue; }
     const corroborates = (person: { name: string; aliases: string[] }, hints: string[]) =>
       person.aliases.some((alias) => normalizeEntityTerm(alias) !== normalizeEntityTerm(person.name)
         && explicitlyLinksAlias(identityText, person.name, alias))
       || hints.some((value) => value.trim().length >= 3 && directlyAttributes(identityText, [person.name, ...person.aliases], value));
-    if (candidate.existingCharacterId && !corroborates(known.get(candidate.existingCharacterId)!, Object.values(known.get(candidate.existingCharacterId)!.profile))) {
+    if (!explicitIdentity && candidate.existingCharacterId && !corroborates(known.get(candidate.existingCharacterId)!, Object.values(known.get(candidate.existingCharacterId)!.profile))) {
       hold("identity_needs_review"); continue;
     }
     const worldMatches = (input.worldCharacters ?? []).filter((person) => [person.name, ...person.aliases].some((alias) => terms.includes(normalizeEntityTerm(alias)) && contains(identityText, alias)));

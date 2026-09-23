@@ -5,10 +5,11 @@ const campaignId = "11111111-1111-4111-8111-111111111111";
 const worldId = "33333333-3333-4333-8333-333333333333";
 const versionId = "44444444-4444-4444-8444-444444444444";
 const protagonistId = "66666666-6666-4666-8666-666666666666";
+const candidateId = "88888888-8888-4888-8888-888888888888";
 const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
 
 async function fixture(page: Page) {
-  let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false;
+  let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false, pendingMatch = true;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },
     profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }];
   const overrides = new Map<string, Record<string, string>>();
@@ -29,8 +30,23 @@ async function fixture(page: Page) {
       const id = path.split("/cast/")[1];
       if (id === "discovery") return trackingUnavailable ? send(route, {}, 503) : send(route, {
         enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1,
-        coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: 1,
+        coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: pendingMatch ? 1 : 0,
         firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } });
+      if (id === "candidates") return send(route, { revision, boundary, nextCursor: null, candidates: pendingMatch ? [{ id: candidateId,
+        reason: "identity_needs_review", proposal: { localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
+          identityEvidence: [{ paragraphId: "p1", quote: turn.narration }], observations: [] },
+        source: { turnId: turn.id, turnNumber: 1, narrationRevision: 0 } }] : [] });
+      if (id === `candidates/${candidateId}/resolve`) {
+        const input = request.postDataJSON(); writes.push(input);
+        if (!enabled) return send(route, { code: "cast_editing_disabled" }, 503);
+        if (input.expectedCastRevision !== revision) return send(route, { code: "cast_revision_conflict" }, 409);
+        revision++; pendingMatch = false;
+        const person = input.action === "attach" ? characters.find((p) => p.id === input.characterId) : {
+          id: crypto.randomUUID(), name: "Mara", aliases: [], profile: {}, origin: { kind: "discovered" },
+          pinned: false, ignored: false, revision: 1, firstObservedTurn: 1, lastObservedTurn: 1 };
+        if (input.action === "create") characters.push(person);
+        return send(route, { candidateId, character: person, revision, boundary, observationIds: [] });
+      }
       if (request.method() !== "GET") {
         const input = request.postDataJSON(); writes.push(input);
         if (!enabled) return send(route, { code: "cast_editing_disabled" }, 503);
@@ -152,6 +168,39 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   await expect(dialog.getByRole("button", { name: "Save character", exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+});
+for (const action of ["create", "attach"] as const) test(`legacy cast reviews a source and resolves it by ${action}`, async ({ page }) => {
+  await page.setViewportSize({ width: action === "create" ? 1440 : 390, height: 1000 });
+  const api = await fixture(page); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Review character matches", exact: true }).click();
+  await dialog.getByRole("button", { name: "Review Mara", exact: true }).click();
+  await expect(dialog).toContainText("Mara waits at the gate.");
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/review-${action}.png` });
+  if (action === "attach") {
+    await dialog.getByLabel("Existing character", { exact: true }).selectOption(protagonistId);
+    await dialog.getByRole("button", { name: "Attach to selected character", exact: true }).click();
+  } else await dialog.getByRole("button", { name: "Create separate character", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Review character matches", exact: true })).toHaveCount(0);
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(api.writes[0].action).toBe(action);
+  expect(api.characters).toHaveLength(action === "create" ? 2 : 1);
+});
+test("legacy candidate review distinguishes same-name targets and previews their profiles", async ({ page }) => {
+  const api = await fixture(page);
+  for (const [id, role] of [["99999999-9999-4999-8999-999999999999", "eastern guide"], ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "western guide"]]) {
+    api.characters.push({ id, name: "Mara", aliases: [], origin: { kind: "manual" }, profile: { "story.role": role },
+      pinned: false, ignored: false, revision: 0, firstObservedTurn: 1, lastObservedTurn: 1 });
+  }
+  await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Load more characters", exact: true }).click();
+  await dialog.getByRole("button", { name: "Review character matches", exact: true }).click();
+  await dialog.getByRole("button", { name: "Review Mara", exact: true }).click();
+  const options = await dialog.getByLabel("Existing character", { exact: true }).locator("option").allTextContents();
+  expect(new Set(options).size).toBe(options.length);
+  await dialog.getByLabel("Existing character", { exact: true }).selectOption("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  await expect(dialog.getByRole("region", { name: "Selected character" })).toContainText("western guide");
 });
 test("legacy cast keeps characters available when tracking status fails", async ({ page }) => {
   const api = await fixture(page); api.trackingUnavailable(); await open(page);

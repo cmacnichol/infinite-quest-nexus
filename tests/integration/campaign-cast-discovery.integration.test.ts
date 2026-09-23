@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import Fastify from "fastify";
+import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
+import { createCampaignCastApplication } from "../../packages/application/src/campaign-cast/use-cases.js";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -18,6 +21,7 @@ import { capabilityRouteConfigHash } from "../../services/runtime/src/provider-c
 import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { createWorkerCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
+import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -29,7 +33,7 @@ describe("durable cast discovery", () => {
   }, 60000);
   afterAll(async () => { await pool?.end(); });
   afterEach(async () => { await pool.query("DELETE FROM campaigns WHERE id=ANY($1::uuid[])", [campaignIds.splice(0)]); });
-  async function fixture(count = 1) {
+  async function fixture(count = 1, initialize = true) {
     const worldId = randomUUID(), versionId = randomUUID(), campaignId = randomUUID(), providerProfileId = randomUUID();
     campaignIds.push(campaignId);
     await pool.query("INSERT INTO worlds(id,owner_user_id,title) VALUES($1,$2,'Discovery fixture')", [worldId, ownerUserId]);
@@ -41,7 +45,7 @@ describe("durable cast discovery", () => {
       await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,$4,'Mara has blue eyes.')", [id, ownerUserId, campaignId, n]);
     }
     const scope = { ownerUserId, campaignId };
-    await createPostgresCampaignCastRepository(pool).initialize(scope);
+    if (initialize) await createPostgresCampaignCastRepository(pool).initialize(scope);
     const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null,
       candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }],
       presetSystemPrompt: "", parameters: {}, endpointReference: "fixture-endpoint", credentialReference: providerProfileId,
@@ -51,6 +55,128 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("records an automatically confirmed identity even when no profile fact changes", async () => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await pool.query("UPDATE campaigns SET active_turn_number=0 WHERE id=$1", [f.scope.campaignId]);
+    const person = await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 },
+      idempotencyKey: "existing", name: "Mara", aliases: [], profile: { "appearance.description": "blue eyes" } });
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [f.scope.campaignId]);
+    await f.enqueue(); const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("mention"))!;
+    const candidate = proposal().characters[0]!;
+    await jobs.checkpoint(job, { version: 1, characters: [{ ...candidate, existingCharacterId: person.character.id, observations: [] }] });
+    expect(await jobs.publish(job)).toBe("complete");
+    expect((await editor.current(f.scope)).characters.find((p) => p.id === person.character.id))
+      .toMatchObject({ firstObservedTurn: 0, lastObservedTurn: 1, profile: { "appearance.description": "blue eyes" } });
+  });
+  it("lists and resolves pending identities through the owner-bound HTTP API", async () => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "existing", name: "Mara", aliases: [], profile: {} });
+    await f.enqueue(); const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("http"))!;
+    await jobs.checkpoint(job, proposal()); await jobs.publish(job);
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createCampaignCastApplication(editor), enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const base = `/api/v1/campaigns/${f.scope.campaignId}/cast/candidates`;
+      const response = await app.inject({ method: "GET", url: base }); expect(response.statusCode).toBe(200);
+      const pending = response.json(), url = `${base}/${pending.candidates[0].id}/resolve`;
+      const payload = { expectedCastRevision: pending.revision, expectedBoundary: pending.boundary, idempotencyKey: "http-resolve", action: "create" };
+      expect((await app.inject({ method: "POST", url, payload: { ...payload, ownerUserId: randomUUID() } })).statusCode).toBe(422);
+      const resolved = await app.inject({ method: "POST", url, payload }); expect(resolved.statusCode).toBe(200);
+      expect(resolved.json().character.name).toBe("Mara");
+      expect((await app.inject({ method: "POST", url, payload })).json()).toEqual(resolved.json());
+      expect((await app.inject({ method: "GET", url: base })).json().candidates).toEqual([]);
+    } finally { await app.close(); }
+  });
+  it.each(["attach", "create"] as const)("resolves a held identity by explicit %s with a replayable receipt and portable evidence", async (action) => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    const existing = await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "existing", name: "Mara", aliases: [], profile: { "appearance.description": "green eyes" } });
+    await f.enqueue();
+    const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("held"))!;
+    await jobs.checkpoint(job, proposal()); await jobs.publish(job);
+    const pending = await editor.candidates(f.scope, {});
+    expect(pending.candidates).toHaveLength(1);
+    const candidateId = pending.candidates[0]!.id;
+    const request = { expectedCastRevision: pending.revision, expectedBoundary: pending.boundary, idempotencyKey: "resolve-one",
+      ...(action === "attach" ? { action, characterId: existing.character.id } : { action }) };
+    const resolved = await editor.resolveCandidate(f.scope, candidateId, request);
+    expect(resolved.character.id === existing.character.id).toBe(action === "attach");
+    expect(resolved.character.profile["appearance.description"]).toBe(action === "attach" ? "green eyes" : "blue eyes");
+    expect(await editor.resolveCandidate(f.scope, candidateId, request)).toEqual(resolved);
+    expect((await editor.candidates(f.scope, {})).candidates).toEqual([]);
+    await expect(editor.resolveCandidate(f.scope, candidateId, { ...request, expectedCastRevision: 999 })).rejects.toMatchObject({ code: "cast_idempotency_conflict" });
+    const archive = await withTransaction(pool, (client) => exportCampaignCast(client, f.scope));
+    expect(archive?.events.some((event) => event.commands.some((item) => item.command.kind === "mention"))).toBe(true);
+    expect((await editor.detail(f.scope, resolved.character.id)).identityEvents.some((event) => event.evidence.kind === "turn")).toBe(true);
+    expect((await pool.query("SELECT count(*)::integer n FROM campaign_cast_observations WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(1);
+  });
+  it("preserves source-backed identity mentions through export and scoped import without inventing profile facts", async () => {
+    const f = await fixture(2), destination = await fixture(2, false);
+    const editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await pool.query("UPDATE campaigns SET active_turn_number=0 WHERE id=$1", [f.scope.campaignId]);
+    const person = await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 },
+      idempotencyKey: "manual", name: "Mara Reed", aliases: [], profile: {} });
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [f.scope.campaignId]);
+    await f.enqueue(1);
+    const job = (await createCastDiscoveryJobRepository(pool, () => true).claim("mention"))!;
+    const evidence = { kind: "turn" as const, turnId: job.source.turnId, turnNumber: 2, narrationRevision: 0,
+      sourceHash: job.source.sourceHash, paragraphId: "p1", quote: "Mara has blue eyes." };
+    await editor.applyBatch(f.scope, { boundary: { turnNumber: 2, timelineRevision: 0 }, idempotencyKey: "reviewed-mention",
+      commands: [{ kind: "mention", characterId: person.character.id, evidence }] });
+    const archive = await withTransaction(pool, (client) => exportCampaignCast(client, f.scope));
+    expect(archive?.events.some((event) => event.commands.some((item) => item.command.kind === "mention"))).toBe(true);
+    await withTransaction(pool, (client) => importCampaignCast(client, destination.scope, archive,
+      { turns: new Map(f.turnIds.map((id, index) => [id, destination.turnIds[index]!])), worlds: new Map() }));
+    const imported = (await editor.current(destination.scope)).characters.find((p) => p.name === "Mara Reed")!;
+    expect(imported).toMatchObject({ profile: {}, firstObservedTurn: 0, lastObservedTurn: 2 });
+    expect(imported.id).not.toBe(person.character.id);
+    const source = (await pool.query("SELECT payload FROM campaign_cast_events WHERE campaign_id=$1 ORDER BY sequence DESC LIMIT 1", [destination.scope.campaignId])).rows[0].payload[0].command.evidence;
+    expect(source.turnId).toBe(destination.turnIds[1]);
+    await pool.query("UPDATE turns SET narration='Iven waits.' WHERE id=$1", [destination.turnIds[1]]);
+    expect((await editor.current(destination.scope)).characters.find((p) => p.id === imported.id)?.lastObservedTurn).toBe(0);
+    await pool.query("DELETE FROM turns WHERE id=$1", [f.turnIds[1]]);
+    const replacementId = randomUUID();
+    await pool.query("INSERT INTO turns(id,owner_user_id,campaign_id,turn_number,narration) VALUES($1,$2,$3,2,'Iven waits.')", [replacementId, ownerUserId, f.scope.campaignId]);
+    const replacedArchive = await withTransaction(pool, (client) => exportCampaignCast(client, f.scope));
+    const afterReplacement = await fixture(2, false);
+    await withTransaction(pool, (client) => importCampaignCast(client, afterReplacement.scope, replacedArchive,
+      { turns: new Map([[f.turnIds[0]!, afterReplacement.turnIds[0]!], [replacementId, afterReplacement.turnIds[1]!]]), worlds: new Map() }));
+    expect((await editor.current(afterReplacement.scope)).characters.find((p) => p.name === "Mara Reed"))
+      .toMatchObject({ firstObservedTurn: 0, lastObservedTurn: 0, profile: {} });
+  });
+  it("rejects disabled, foreign, stale, active-generation and unsupported candidate resolutions without partial writes", async () => {
+    const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });
+    await editor.create(f.scope, { expectedCastRevision: 0, expectedBoundary: { turnNumber: 1, timelineRevision: 0 },
+      idempotencyKey: "existing", name: "Mara", aliases: [], profile: {} });
+    await f.enqueue(); const jobs = createCastDiscoveryJobRepository(pool, () => true), job = (await jobs.claim("held"))!;
+    await jobs.checkpoint(job, proposal()); await jobs.publish(job);
+    const pending = await editor.candidates(f.scope, {}), id = pending.candidates[0]!.id;
+    const request = { action: "create" as const, expectedCastRevision: pending.revision, expectedBoundary: pending.boundary, idempotencyKey: "guarded" };
+    await expect(createPostgresCampaignCastRepository(pool).resolveCandidate(f.scope, id, request)).rejects.toMatchObject({ code: "cast_editing_disabled" });
+    await expect(editor.resolveCandidate({ ...f.scope, ownerUserId: randomUUID() }, id, request)).rejects.toMatchObject({ code: "cast_not_found" });
+    await expect(editor.resolveCandidate(f.scope, id, { ...request, expectedCastRevision: 999 })).rejects.toMatchObject({ code: "cast_revision_conflict" });
+    await expect(editor.resolveCandidate(f.scope, id, { ...request, action: "attach", characterId: randomUUID() })).rejects.toMatchObject({ code: "cast_invalid_request" });
+    const profile = randomUUID();
+    await pool.query("INSERT INTO provider_profiles(id,owner_user_id,name,provider_type,base_url) VALUES($1,$2,'Fixture','openrouter','https://fixture.invalid')", [profile, ownerUserId]);
+    const generation = (await pool.query(`INSERT INTO generation_jobs(owner_user_id,campaign_id,provider_profile_id,idempotency_key,expected_turn_number,action,status)
+      VALUES($1,$2,$3,$4,2,'Continue','queued') RETURNING id`, [ownerUserId, f.scope.campaignId, profile, randomUUID()])).rows[0];
+    await expect(editor.resolveCandidate(f.scope, id, request)).rejects.toMatchObject({ code: "cast_generation_active" });
+    await pool.query("UPDATE generation_jobs SET status='failed' WHERE id=$1", [generation.id]);
+    const malformed = proposal().characters[0]!;
+    malformed.observations[0]!.value = "invented purple eyes";
+    await pool.query("UPDATE campaign_cast_discovery_candidates SET proposal=$2 WHERE id=$1", [id, JSON.stringify(malformed)]);
+    await expect(editor.resolveCandidate(f.scope, id, request)).rejects.toMatchObject({ code: "cast_invalid_request" });
+    expect((await editor.current(f.scope)).revision).toBe(pending.revision);
+    expect((await pool.query("SELECT status,resolution_receipt FROM campaign_cast_discovery_candidates WHERE id=$1", [id])).rows[0])
+      .toEqual({ status: "pending", resolution_receipt: null });
+    await withTransaction(pool, async (client) => {
+      await client.query("UPDATE turns SET narration='Iven waits.' WHERE id=$1", [f.turnIds[0]]);
+      await applyCastBoundaryChange(client, f.scope, { turnNumber: 1, changeKey: "candidate-correction" });
+    });
+    await expect(editor.resolveCandidate(f.scope, id, request)).rejects.toMatchObject({ code: "cast_revision_conflict" });
+    expect((await editor.candidates(f.scope, {})).candidates).toEqual([]);
+  });
   it("backfills forward enrollment when upgrading an existing discovery database", async () => {
     const f = await fixture(3), untracked = await fixture();
     await f.enqueue(1); const discarded = await f.enqueue(2);

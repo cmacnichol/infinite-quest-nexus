@@ -20,7 +20,7 @@ export async function exportCampaignCast(client: DatabaseClient, scope: CastScop
     commands: event.commands.map((raw: unknown) => castStoredCommandSchema.parse(raw)).filter((item: ReturnType<typeof castStoredCommandSchema.parse>) => item.command.kind !== "observe" || observationIds.has(item.observationId))
       .map((item: ReturnType<typeof castStoredCommandSchema.parse>) => {
         const command = item.command;
-        return command.kind === "create" && command.evidence?.kind === "turn" && !turnIds.has(command.evidence.turnId)
+        return (command.kind === "create" || command.kind === "mention") && command.evidence?.kind === "turn" && !turnIds.has(command.evidence.turnId)
           ? { ...item, command: { ...command, evidence: { ...command.evidence, invalidated: true } } } : item;
       }) })).filter((event) => event.commands.length > 0);
   return portableCampaignCastSchema.parse({ formatVersion: 1, revision: state.revision, characters, events: retained });
@@ -64,7 +64,7 @@ export async function importCampaignCast(client: DatabaseClient, scope: CastScop
         : { ...command, characterId: requireId(characterIds, command.characterId), ...(command.kind === "observe" ? {
           evidence: evidence(command.evidence), speakerCharacterId: command.speakerCharacterId ? requireId(characterIds, command.speakerCharacterId) : null,
           supersedesObservationId: command.supersedesObservationId ? requireId(observationIds, command.supersedesObservationId) : null
-        } : {}) }
+        } : command.kind === "mention" ? { evidence: evidence(command.evidence) } : {}) }
     });
   }) }));
   // Validate all mapped sources against destination scope before the first cast write.
@@ -74,10 +74,10 @@ export async function importCampaignCast(client: DatabaseClient, scope: CastScop
   for (const event of events) {
     if (event.effectiveTurnNumber > campaign.active_turn_number) throw new Error("cast_archive_boundary_invalid");
     for (const { command } of event.commands) {
-      if (!((command.kind === "create" || command.kind === "observe") && command.evidence)) continue;
+      if (!((command.kind === "create" || command.kind === "observe" || command.kind === "mention") && command.evidence)) continue;
       const source = command.evidence;
       if (source.kind === "turn") {
-        if (source.invalidated && command.kind === "create") continue;
+        if (source.invalidated && (command.kind === "create" || command.kind === "mention")) continue;
         const turn = (await client.query("SELECT turn_number FROM turns WHERE id=$1 AND campaign_id=$2 AND owner_user_id=$3", [source.turnId, scope.campaignId, scope.ownerUserId])).rows[0];
         if (!turn || turn.turn_number !== source.turnNumber) throw new Error("cast_archive_reference_invalid");
       } else if (source.kind === "world") {

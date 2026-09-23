@@ -2,7 +2,19 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: forward coverage and legacy status
+## Latest checkpoint: reviewed identity resolution
+
+The owner-scoped candidate API now lists pending source-current proposals with bounded pagination and accepts revision-checked attach/create decisions. Resolution locks the campaign before the candidate, rejects stale source/timeline and active generation, preserves manual names/aliases/overrides, applies only evidence that passes existing quote/attribution/fiction guards, and stores an idempotent resolution receipt in the same transaction as authority. Explicit identity decisions bypass automatic identity corroboration only; they cannot authorize invented or unsupported profile facts. Manual resolution uses the editing gate and remains available with discovery disabled.
+
+A durable `mention` command records source-backed identity decisions even when no profile facts change. It updates last-seen/revision without editing profile values, supports protagonist evidence, appears in character source history, survives branch/rewind/import mapping, and invalidates with its narration. Automatic publication also records confirmed mentions with no observations. Missing-turn mention evidence exports explicitly invalidated, preserving historical decisions without requiring deleted source IDs during import. Operational candidate receipts remain excluded from archives; applied mentions are portable cast events.
+
+The legacy Characters panel provides Review character matches, source quotes and turn links, bounded existing-character search, profile previews, and explicit attach or separate-character creation. Identical labels receive a stable ID fallback. Unsaved editor flows remain unchanged; candidate resolution uses its own replay key and shows stale-write failures with Reload matches. Candidate reason codes remain operational rather than prose inserted into Story.
+
+RED/GREEN evidence covered explicit identity validation, durable mention portability, attach/create resolution, HTTP owner binding, no-profile-change last-seen updates, missing-turn import recovery, and ambiguous same-name browser selectors. Final verification: **4,375 unit tests passed (347 files; 44 existing skips), 117 PostgreSQL tests passed (6 files; 4 secure-filesystem platform-gated skips), and 8 legacy browser tests passed**. Repository/type checks and diff checks passed. Independent review identified the missing-turn archive edge case and ambiguous target labels; both received failing regressions before their fixes, and final review found no remaining actionable issue. The reviewer did not independently rerun PostgreSQL/browser checks.
+
+Screenshots inspected: `.tmp/campaign-cast/candidate-screenshots/review-create.png` (desktop) and `review-attach.png` (390px). Controls fit both viewports. Logs: `.tmp/campaign-cast/candidates-{unit,integration,browser,check}.log`; RED browser logs are `candidates-browser-red.log` and `candidates-target-red.log`. Browser plugin was unavailable; repository Playwright ran the rendered tests. No live provider, production-data mutation, or deployment occurred. Discovery Retry, provider-wide capacity, aggregate physical-attempt limits, bounded world/playable identities, and branch/transfer enrollment remain release gates; phases 05–06 remain pending.
+
+## Forward coverage and legacy status
 
 Migration `0107_campaign_cast_coverage` persists forward enrollment at the first eligible accepted source and backfills existing active discovery jobs. Enrollment clears when rewind removes its entire range. The scoped, single-statement status read checks current effective narration and timeline, stops coverage at missing/failed revisions, and counts pending identity reviews separately. Correcting a completed turn withdraws its coverage until its new source completes. Coverage is operational and excluded from portable archives.
 
@@ -40,11 +52,11 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 
 ## Remaining implementation
 
-1. Finish unresolved candidate resolution and retry controls. Forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0107 for further additive schema changes.
+1. Finish failed-discovery retry controls. Candidate listing/resolution, forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0107 for further additive schema changes.
 2. Frozen preparation, provider composition, and the worker lane are wired below. Verify global concurrency and the physical-attempt ceiling across preset fallback plus logical retries.
 3. Finish pinned-world playable-character selection and bounded identity hints. Atomic accepted-turn enqueue, forward enrollment, and contiguous coverage are implemented below.
 4. Same-campaign lifecycle reconciliation is implemented below. Finish branch/transfer discovery enrollment and coverage. Existing phase-02 approvals cover these source integrations.
-5. Retry/candidate-resolution API and legacy UI, then complete phase-04 PostgreSQL and browser acceptance gates. Status API/display have passed the scoped checks below.
+5. Retry API and legacy UI, then complete phase-04 PostgreSQL and browser acceptance gates. Status and candidate-resolution flows have passed the scoped checks below.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
 
 Do not mark phase 04 complete or claim pin/ignore already affects generation. Existing plans remain authoritative; this checkpoint only completes an initial part of task 1 and registers the future provider operation.

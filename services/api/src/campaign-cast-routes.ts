@@ -6,18 +6,21 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
   application: CampaignCastApplication; enabled: boolean; resolveOwner(): Promise<{ ownerUserId: string }>;
 }) {
   const base = "/api/v1/campaigns/:campaignId/cast";
-  const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional() });
-  for (const [method, path] of [["GET", base], ["POST", base], ["GET", `${base}/discovery`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
+  const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional() });
+  for (const [method, path] of [["GET", base], ["POST", base], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],
+    ["POST", `${base}/candidates/:candidateId/resolve`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
     app.route({ method, url: path, bodyLimit: 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params);
         const scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
         const capabilities = { castEditing: options.enabled };
         if (path === `${base}/discovery`) return await options.application.discoveryStatus(scope);
+        if (path === `${base}/candidates`) return await options.application.candidates(scope, request.query as never);
         if (method === "GET") return ids.characterId
           ? { ...await options.application.detail(scope, ids.characterId), capabilities }
           : { ...await options.application.list(scope, request.query as never), capabilities };
         if (!options.enabled) throw new CampaignCastError("cast_editing_disabled");
+        if (ids.candidateId) return await options.application.resolveCandidate(scope, ids.candidateId, request.body as never);
         if (method === "POST") return reply.code(201).send(await options.application.create(scope, request.body as never));
         return await options.application.edit(scope, ids.characterId!, request.body as never);
       } catch (error) {

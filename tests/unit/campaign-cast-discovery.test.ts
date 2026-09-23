@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { castDiscoveryOutputSchema, castDiscoverySourceSchema } from "../../packages/contracts/src/campaign-cast-discovery.js";
-import { buildCastDiscoverySource, buildCastDiscoveryInput, chunkCastDiscoverySource, validateCastDiscovery } from "../../packages/domain/src/campaign-cast-discovery.js";
+import { buildCastDiscoverySource, buildCastDiscoveryInput, chunkCastDiscoverySource, validateCastDiscovery, validateResolvedCastDiscovery } from "../../packages/domain/src/campaign-cast-discovery.js";
 import type { CastCharacter } from "../../packages/contracts/src/campaign-cast.js";
 
 const scope = { ownerUserId: "11111111-1111-4111-8111-111111111111", campaignId: "22222222-2222-4222-8222-222222222222" };
@@ -12,6 +12,16 @@ const candidate = (overrides = {}) => ({ localKey: "mara", name: "Mara", aliases
 const known = (id: string, name = "Mara"): CastCharacter => ({ id, name, aliases: ["the Watcher"], origin: { kind: "manual" },
   profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 });
 describe("cast discovery evidence boundary", () => {
+  it("accepts an explicit identity decision while retaining evidence and attribution checks", () => {
+    const person = known("44444444-4444-4444-8444-444444444444", "Mara Reed");
+    const input = { source: source(), candidate: candidate(), knownCharacters: [person], characterId: person.id };
+    expect(validateResolvedCastDiscovery(input).accepted[0]?.existingCharacterId).toBe(person.id);
+    expect(validateResolvedCastDiscovery({ ...input, characterId: null }).accepted[0]?.resolvedOrigin).toEqual({ kind: "discovered" });
+    expect(validateResolvedCastDiscovery({ ...input, candidate: candidate({ identityEvidence: [{ paragraphId: "p1", quote: "invented" }] }) }).accepted).toEqual([]);
+    expect(validateResolvedCastDiscovery({ ...input, candidate: candidate({ observations: [{ field: "appearance.description", value: "green eyes",
+      mode: "fact", speakerCharacterId: null, paragraphId: "p1", quote: "Mara has blue eyes." }] }) }).accepted).toEqual([]);
+    expect(validateResolvedCastDiscovery({ ...input, characterId: "55555555-5555-4555-8555-555555555555" }).rejected[0]?.code).toBe("unknown_character_id");
+  });
   it("projects only source fiction and identity hints into the extraction input", () => {
     const person = known("44444444-4444-4444-8444-444444444444");
     const input = buildCastDiscoveryInput({ source: source(), knownCharacters: [person],

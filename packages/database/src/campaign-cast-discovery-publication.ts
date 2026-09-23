@@ -26,7 +26,7 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
   const rejected = [...first.rejected], unresolved = [...first.unresolved];
   const characterIds: string[] = [], observationIds: string[] = [];
   let accepted = 0;
-  const evidence = (citation: { paragraphId: string; quote: string }): CastEvidence => ({ kind: "turn", turnId: claim.source.turnId,
+  const evidence = (citation: { paragraphId: string; quote: string }): Extract<CastEvidence, { kind: "turn" }> => ({ kind: "turn", turnId: claim.source.turnId,
     turnNumber: claim.source.turnNumber, narrationRevision: claim.source.narrationRevision, sourceHash: claim.source.sourceHash,
     paragraphId: citation.paragraphId, quote: citation.quote });
   for (const candidate of first.accepted) {
@@ -54,12 +54,12 @@ export async function applyValidatedCastDiscovery(client: DatabaseClient, claim:
         commands: [{ kind: "create", name: candidate.name, aliases: candidate.aliases, origin: resolvedOrigin, evidence: evidence(candidate.identityEvidence[0]!) }] });
       characterId = receipt.characterIds[0]!; characterIds.push(characterId);
     }
-    if (candidate.observations.length) {
-      const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:observations`,
-        commands: candidate.observations.map((observation) => ({ kind: "observe", characterId: characterId!, field: observation.field, value: observation.value,
-          mode: observation.mode, speakerCharacterId: observation.speakerCharacterId, evidence: evidence(observation), supersedesObservationId: null })) });
-      observationIds.push(...receipt.observationIds);
-    }
+    const receipt = await applyCastBatchWithClient(client, claim.scope, { boundary: current.boundary, idempotencyKey: `${key}:observations`, commands: [
+      { kind: "mention", characterId, evidence: evidence(candidate.identityEvidence[0]!) },
+      ...candidate.observations.map((observation) => ({ kind: "observe" as const, characterId: characterId!, field: observation.field, value: observation.value,
+        mode: observation.mode, speakerCharacterId: observation.speakerCharacterId, evidence: evidence(observation), supersedesObservationId: null }))
+    ] });
+    observationIds.push(...receipt.observationIds);
     accepted++;
     current = await initializeCastWithClient(client, claim.scope);
   }

@@ -60,6 +60,7 @@ export const castCommandSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("create"), name, aliases: z.array(name).max(20), origin: castOriginSchema,
     evidence: castEvidenceSchema.optional() }).strict(),
   z.object({ kind: z.literal("observe"), ...castObservationSchema.omit({ id: true }).shape }).strict(),
+  z.object({ kind: z.literal("mention"), characterId: z.uuid(), evidence: castEvidenceSchema.options[0] }).strict(),
   z.object({ kind: z.literal("override"), characterId: z.uuid(), field: castFieldSchema, value: z.string().max(2000) }).strict(),
   z.object({ kind: z.literal("clear_override"), characterId: z.uuid(), field: castFieldSchema }).strict(),
   z.object({ kind: z.literal("identity"), characterId: z.uuid(), name, aliases: z.array(name).max(20) }).strict(),
@@ -78,7 +79,7 @@ export type CastCommand = z.infer<typeof castCommandSchema>;
 export type CastBatch = z.infer<typeof castBatchSchema>;
 export type CastBatchReceipt = z.infer<typeof castBatchReceiptSchema>;
 
-const castWriteBase = {
+export const castWriteBase = {
   expectedCastRevision: ordinal, expectedBoundary: castBoundarySchema,
   idempotencyKey: z.string().min(1).max(200)
 };
@@ -120,7 +121,7 @@ export const portableCampaignCastSchema = z.object({
     || value.characters.filter((person) => person.origin.kind === "protagonist").length > 1) fail();
   for (const event of value.events) for (const item of event.commands) {
     const command = item.command;
-    if ((command.kind === "create" || command.kind === "observe") && command.evidence?.kind === "turn"
+    if ((command.kind === "create" || command.kind === "observe" || command.kind === "mention") && command.evidence?.kind === "turn"
       && command.evidence.turnNumber > event.effectiveTurnNumber) fail();
     if (command.kind === "create") {
       const person = item.characterId ? characters.get(item.characterId) : undefined;
@@ -132,7 +133,7 @@ export const portableCampaignCastSchema = z.object({
         || JSON.stringify(characters.get(item.characterId)?.origin) !== JSON.stringify(command.origin)) fail();
       else created.add(item.characterId);
     } else {
-      const protagonistEvidence = command.kind === "observe" && characters.get(command.characterId)?.origin.kind === "protagonist";
+      const protagonistEvidence = (command.kind === "observe" || command.kind === "mention") && characters.get(command.characterId)?.origin.kind === "protagonist";
       if (!characters.has(command.characterId) || !created.has(command.characterId) && !protagonistEvidence
         || characters.get(command.characterId)!.firstObservedTurn > event.effectiveTurnNumber) fail();
       if (command.kind === "observe") {
@@ -152,7 +153,7 @@ export function portableCastReferences(cast: PortableCampaignCast): { turns: str
   const turns = new Set<string>(), worlds = new Set<string>();
   for (const person of cast.characters) if (person.origin.kind === "world") worlds.add(person.origin.worldVersionId);
   for (const event of cast.events) for (const { command } of event.commands) {
-    if ((command.kind !== "create" && command.kind !== "observe") || !command.evidence) continue;
+    if ((command.kind !== "create" && command.kind !== "observe" && command.kind !== "mention") || !command.evidence) continue;
     if (command.evidence.kind === "turn" && !command.evidence.invalidated) turns.add(command.evidence.turnId);
     if (command.evidence.kind === "world") worlds.add(command.evidence.worldVersionId);
   }

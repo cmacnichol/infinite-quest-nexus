@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
+import { createCastCandidateRepository } from "./campaign-cast-candidate-repository.js";
 import { z } from "zod";
 import {
   castBatchSchema, castBatchReceiptSchema, castBoundarySchema, castCharacterSchema,
@@ -111,6 +112,11 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
     }
   }
   const people = new Map<string, CastCharacter>();
+  const mentions: { characterId: string; turnNumber: number }[] = [];
+  for (const event of events) for (const { command } of event.payload) if (command.kind === "mention"
+    && command.evidence.turnNumber <= boundary.turnNumber && await evidenceIsCurrent(client, scope, campaign, command.evidence)) {
+    mentions.push({ characterId: command.characterId, turnNumber: command.evidence.turnNumber });
+  }
   const overrides = new Map<string, Map<string, CastOverride>>();
   for (const row of characterRows) {
     if (row.origin.kind !== "protagonist") continue;
@@ -119,7 +125,7 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
   }
   for (const event of events) for (const stored of event.payload) {
     const command = stored.command;
-    if (command.kind === "observe") continue;
+    if (command.kind === "observe" || command.kind === "mention") continue;
     if (command.kind === "create") {
       const evidence = command.evidence;
       const row = characterRows.find((row) => row.id === stored.characterId);
@@ -130,8 +136,9 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
         // retain the same identity. Do not resurrect the invalid earlier source.
         const supportingTurns = current.filter((item) => item.characterId === row.id && validIds.has(item.id))
           .map((item) => castEvidenceOrder(item.evidence)[0]);
+        supportingTurns.push(...mentions.filter((item) => item.characterId === row.id).map((item) => item.turnNumber));
         for (const edit of events) if (edit.effective_turn_number <= boundary.turnNumber && edit.payload.some((item) =>
-          item.command.kind !== "create" && item.command.kind !== "observe" && item.command.characterId === row.id)) supportingTurns.push(edit.effective_turn_number);
+          item.command.kind !== "create" && item.command.kind !== "observe" && item.command.kind !== "mention" && item.command.characterId === row.id)) supportingTurns.push(edit.effective_turn_number);
         if (!supportingTurns.length) continue;
         firstTurn = Math.min(...supportingTurns);
       }
@@ -155,8 +162,9 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
   }
   for (const person of people.values()) {
     const own = current.filter((observation) => observation.characterId === person.id && validIds.has(observation.id));
-    person.lastObservedTurn = Math.max(person.firstObservedTurn, ...own.map((observation) => castEvidenceOrder(observation.evidence)[0]));
-    person.revision += own.length;
+    const ownMentions = mentions.filter((item) => item.characterId === person.id);
+    person.lastObservedTurn = Math.max(person.firstObservedTurn, ...own.map((observation) => castEvidenceOrder(observation.evidence)[0]), ...ownMentions.map((item) => item.turnNumber));
+    person.revision += own.length + ownMentions.length;
     if (person.origin.kind === "protagonist") continue;
     person.profile = projectCastProfile({ observations: own, overrides: [...(overrides.get(person.id)?.values() ?? [])] });
     validateCastFiction(person.name);
@@ -214,7 +222,11 @@ async function applyCommand(client: DatabaseClient, scope: CastScope, campaign: 
       [stored.characterId, scope.ownerUserId, scope.campaignId, JSON.stringify(command.origin), first]);
     return;
   }
-  await assertSupportingCharacter(client, scope, command.characterId, command.kind === "observe");
+  await assertSupportingCharacter(client, scope, command.characterId, command.kind === "observe" || command.kind === "mention");
+  if (command.kind === "mention") {
+    if (!await evidenceIsCurrent(client, scope, campaign, command.evidence)) throw new Error("Invalid cast mention evidence.");
+    return;
+  }
   if (command.kind === "identity") { validateCastFiction(command.name); command.aliases.forEach(validateCastFiction); }
   if (command.kind === "override") validateCastFiction(command.value);
   if (command.kind !== "observe") return;
@@ -333,6 +345,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
     create: (scope, request) => write(scope, null, request),
     edit: (scope, id, request) => write(scope, z.uuid().parse(id), request),
     discoveryStatus: (scope) => readCastDiscoveryStatus(pool, scope, options.discoveryEnabled === true),
+    ...createCastCandidateRepository(pool, options.editingEnabled === true),
     async current(rawScope) {
       const scope = castScopeSchema.parse(rawScope);
       return withTransaction(pool, async (client) => {
@@ -355,6 +368,10 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
         const identityEvents: CastDetail["identityEvents"] = [];
         const events = (await client.query("SELECT id,effective_turn_number,payload,receipt FROM campaign_cast_events WHERE campaign_id=$1 AND owner_user_id=$2 AND effective_turn_number <= $3 ORDER BY sequence", [scope.campaignId, scope.ownerUserId, boundary.turnNumber])).rows.map((row) => eventSchema.parse(row));
         for (const event of events) for (const { command, characterId } of event.payload) {
+          if (command.kind === "mention" && command.characterId === id) {
+            identityEvents.push({ eventId: event.id, effectiveTurnNumber: event.effective_turn_number,
+              name: character.name, aliases: character.aliases, evidence: command.evidence });
+          }
           if (command.kind === "create" && characterId === id || command.kind === "identity" && command.characterId === id) {
             identityEvents.push({ eventId: event.id, effectiveTurnNumber: event.effective_turn_number,
               name: command.name, aliases: command.aliases,

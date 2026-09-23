@@ -1,7 +1,10 @@
 import type { CastScope, CastBoundary, CastSnapshot, CastBatch, CastBatchReceipt } from "./types.js";
-import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetail, CastDiscoveryStatus } from "@infinite-quest/contracts";
+import type { CreateCastCharacter, EditCastCharacter, CastWriteResult, CastDetail, CastDiscoveryStatus,
+  CastCandidateList, CastCandidateQuery, ResolveCastCandidate, CastCandidateResolution } from "@infinite-quest/contracts";
 
 export interface CampaignCastWritePort {
+  candidates(scope: CastScope, query: Partial<CastCandidateQuery>): Promise<CastCandidateList>;
+  resolveCandidate(scope: CastScope, id: string, request: ResolveCastCandidate): Promise<CastCandidateResolution>;
   discoveryStatus(scope: CastScope): Promise<CastDiscoveryStatus>;
   create(scope: CastScope, request: CreateCastCharacter): Promise<CastWriteResult>;
   edit(scope: CastScope, id: string, request: EditCastCharacter): Promise<CastWriteResult>;
