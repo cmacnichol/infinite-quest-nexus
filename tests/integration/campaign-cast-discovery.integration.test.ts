@@ -8,6 +8,7 @@ import { applyCastBatchWithClient, createPostgresCampaignCastRepository } from "
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
 import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
+import { runCastDiscoveryOnce } from "../../packages/application/src/campaign-cast/discovery.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -97,6 +98,21 @@ describe("durable cast discovery", () => {
     expect(mara).toMatchObject({ origin: { kind: "discovered" }, profile: { "appearance.description": "blue eyes" } });
     expect((await createPostgresCampaignCastRepository(pool).detail(f.scope, mara.id)).observations[0]?.evidence)
       .toMatchObject({ turnId: f.turnIds[0], narrationRevision: 0, quote: "Mara has blue eyes." });
+  });
+  it("recovers application publication from its durable response without repeating extraction or changing accepted narration", async () => {
+    const f = await fixture(); await f.enqueue();
+    const repository = createCastDiscoveryJobRepository(pool, () => true);
+    let calls = 0;
+    const extractor = { async extract() { calls++; return proposal(); } };
+    expect(await runCastDiscoveryOnce({ workerId: "first", extractor,
+      repository: { ...repository, async publish() { throw new Error("simulated publication interruption"); } } })).toBe("publication_failed");
+    const saved = (await pool.query("SELECT id,checkpoint FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [f.scope.campaignId])).rows[0];
+    expect(saved.checkpoint).toEqual(proposal());
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [saved.id]);
+    expect(await runCastDiscoveryOnce({ workerId: "recovered", extractor, repository })).toBe("complete");
+    expect(calls).toBe(1);
+    expect((await createPostgresCampaignCastRepository(pool).current(f.scope)).characters.some((p) => p.name === "Mara")).toBe(true);
+    expect((await pool.query("SELECT narration FROM turns WHERE campaign_id=$1", [f.scope.campaignId])).rows).toEqual([{ narration: "Mara has blue eyes." }]);
   });
   it("captures identities before extraction and preserves a later manual override", async () => {
     const f = await fixture(), editor = createPostgresCampaignCastRepository(pool, { editingEnabled: true });

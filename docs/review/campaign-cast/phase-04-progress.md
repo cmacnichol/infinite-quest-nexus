@@ -85,3 +85,15 @@ The reservation binds the owner, discovery job, chunk ordinal, extraction attemp
 - Repository checks and TypeScript passed; `git diff --check` passed.
 - Bounded independent source review found no concrete correctness, security, or deadlock flaw. Reviewer did not rerun PostgreSQL independently.
 - No live provider call, browser change, deployment, or production database operation occurred. The reservation path is verified against disposable PostgreSQL; an actual discovery worker remains pending.
+
+## Worker application-flow checkpoint
+
+`runCastDiscoveryOnce` now owns one claimed chunk's extract/validate/checkpoint/publish sequence through application ports. Claim/execution types live in the application layer and remain re-exported by the database module for its existing consumers. New output is schema-validated before checkpointing. Reclaimed checkpointed output skips extraction. A lost lease prevents publication; malformed output or extraction failure enters the repository's durable retry policy with a sanitized diagnostic. Uncertain checkpoint commits and publication errors leave recovery state intact instead of triggering another provider call.
+
+This is the application flow, not yet a registered runtime worker lane. Its extractor port must still be implemented using frozen admission, exact request budgeting, provider concurrency controls, and the lease-bound prepared executor. Acceptance, lifecycle, status, candidate resolution, and phases 05–06 remain pending.
+
+- Worker and evidence unit selection: **24 passed**, including uncertain checkpoint commit recovery.
+- Complete discovery PostgreSQL file: **19 passed**. The new application recovery regression interrupts publication after saving the response, reclaims the lease, confirms one extraction call total, and verifies both the created character and unchanged accepted narration.
+- Repository checks and TypeScript passed after correcting application imports to use the contracts package entrypoint.
+- Independent bounded review found no blocker and independently ran the initial seven worker unit tests. The eighth uncertain-commit regression was added afterward and passed locally.
+- No live-provider or browser check was run; no production data or deployment was changed.

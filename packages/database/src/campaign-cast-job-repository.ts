@@ -1,19 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { CAST_DISCOVERY_PROTOCOL, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoveryIdentitySnapshot, type CastDiscoveryOutput, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
+import { CAST_DISCOVERY_PROTOCOL, castDiscoveryIdentitySnapshotSchema, castDiscoveryOutputSchema, castDiscoverySourceSchema, type CastDiscoverySource } from "../../contracts/src/campaign-cast-discovery.js";
 import { castScopeSchema, type CastScope } from "../../contracts/src/campaign-cast.js";
-import { readTextExecutionPlan, type TextExecutionPlan } from "../../contracts/src/text-execution-plan.js";
+import { readTextExecutionPlan } from "../../contracts/src/text-execution-plan.js";
 import { buildCastDiscoverySource, chunkCastDiscoverySource } from "../../domain/src/campaign-cast-discovery.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import { withTransaction, type DatabaseClient, type DatabasePool } from "./pool.js";
 import { applyValidatedCastDiscovery, captureCastDiscoveryIdentities } from "./campaign-cast-discovery-publication.js";
 
-export type CastDiscoveryExecution = { providerProfileId: string; plan: TextExecutionPlan };
-export type CastDiscoveryClaim = {
-  id: string; scope: CastScope; source: CastDiscoverySource; chunkOrdinal: number; chunkCount: number;
-  execution: CastDiscoveryExecution; attempt: number; leaseToken: string; output: CastDiscoveryOutput | null;
-  identities: CastDiscoveryIdentitySnapshot;
-};
+import type { CastDiscoveryClaim, CastDiscoveryExecution } from "../../application/src/campaign-cast/discovery.js";
+export type { CastDiscoveryClaim, CastDiscoveryExecution } from "../../application/src/campaign-cast/discovery.js";
 type AppliedDiscovery = { characterIds: string[]; observationIds: string[]; validationSummary?: { accepted: number; unresolved: number; rejected: { localKey: string; code: string }[] } };
 const diagnostics = z.enum(["provider_timeout", "provider_failed", "invalid_output", "source_requires_manual_scan", "publication_failed"]);
 
