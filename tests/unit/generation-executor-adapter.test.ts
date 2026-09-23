@@ -374,6 +374,41 @@ describe("generation executor adapter", () => {
     return { job, provider, dependencies, completed };
   }
 
+  it("rejects an oversized frozen request before creating its primary reservation", () => {
+    const { job, provider } = contractDispatchFixture();
+    expect(() => preparePrimaryReservation(provider, job, "story_generation", {
+      systemPrompt: "Rules", input: "History. ".repeat(10_000)
+    }, true)).toThrow(expect.objectContaining({ code: "context_budget_exceeded", scope: "provider_request" }));
+  });
+
+  it("keeps pre-dispatch budget rejection retryable without creating an interrupted-output review", async () => {
+    const { job, provider } = contractDispatchFixture();
+    provider.maxOutputTokens = 1;
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async (_scope, value) => { job.orchestration_private = value; return true; }),
+      pauseForReview: vi.fn(async () => true), markRecoverable: vi.fn(async () => true), markFailed: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(), recordAttempt: vi.fn()
+    } as unknown as GenerationExecutionRepository;
+    const collaborators = {
+      memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
+      promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(), attributeGenerationCostsToTurn: vi.fn()
+    } as unknown as GenerationExecutionCollaborators;
+    const executor = createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators });
+    for (const attempts of [1, 2]) {
+      job.attempts = attempts;
+      await executor.execute({ workerId: "pre-dispatch-budget", leaseSeconds: 30, claim: { ...claim, attempts } });
+      expect(repository.markRecoverable).toHaveBeenLastCalledWith(expect.objectContaining({ errorCode: "continuity_output_budget_exceeded" }));
+      expect(job.orchestration_private?.primaryReservation).toBeUndefined();
+    }
+    expect(repository.pauseForReview).not.toHaveBeenCalled();
+    expect(repository.markFailed).not.toHaveBeenCalled();
+    expect(provider.execute).not.toHaveBeenCalled();
+    expect(repository.recordAttempt).not.toHaveBeenCalled();
+    expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
+  });
+
   it("rejects a new-mode provider result whose prepared request differs from its reservation", async () => {
     const { job, provider, dependencies, completed } = contractDispatchFixture();
     provider.execute = vi.fn(async () => ({ content: "{}", responseId: "result", finishReason: "stop", outputLimited: false, modelInstanceId: "test", usage: {}, reportedCost: null, rawMetadata: {}, preparedRequest: { body: "{\\\"tampered\\\":true}", payloadHash: sha256("{\\\"tampered\\\":true}") } }));

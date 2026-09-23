@@ -45,6 +45,24 @@ function createTestProviderTransport(fetcher: typeof fetch): ProviderTransport {
 }
 
 describe("provider request serialization", () => {
+  it.each(["openrouter", "lmstudio"] as const)("sends and audits the bounded review reserve through %s transport", async (providerType) => {
+    const reviewProfile = { ...profile, providerType, contextWindowTokens: 40_000, maxOutputTokens: 32_000 };
+    const sent: string[] = [];
+    const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (String(_url).endsWith("/api/v1/models")) return new Response(JSON.stringify({ models: [{ key: "loaded-instance-id", loaded_instances: [{ id: "loaded-instance-id" }] }] }), { status: 200 });
+      sent.push(String(init?.body));
+      return new Response(JSON.stringify(providerType === "lmstudio"
+        ? { response_id: "r", output: [{ type: "message", content: "{}" }], stats: { total_output_tokens: 16_384 } }
+        : { id: "r", choices: [{ message: { content: "{}" }, finish_reason: "stop" }] }), { status: 200 });
+    });
+    const request = { systemPrompt: "Review only.", input: "Archive evidence. ".repeat(1800), canonicalBudgeting: true, budgetOutput: { kind: "continuity_review" as const } };
+    const prepared = serializeCheckedProviderRequest(reviewProfile, request, { inputLimit: 40_000 - 16_384, count: (s) => Math.ceil(s.length / 3), output: request.budgetOutput });
+    expect(prepared.budgetAudit?.outputReserveTokens).toBe(16_384);
+    const result = await callTextProvider(reviewProfile, request, createTestProviderTransport(fetcher as typeof fetch));
+    if (providerType === "lmstudio") expect(result.outputLimited).toBe(true);
+    expect(JSON.parse(sent[0]!)[providerType === "lmstudio" ? "max_output_tokens" : "max_tokens"]).toBe(16_384);
+    expect(sent[0]).toBe(prepared.body);
+  });
   it.each([false, true])("rejects checked response-format option %s alongside a prepared contract before counting", (responseFormat) => {
     const count = vi.fn(() => 0);
     const responseContract = { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true } as const;

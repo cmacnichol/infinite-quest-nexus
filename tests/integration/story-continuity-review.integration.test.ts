@@ -2,6 +2,7 @@ import { vi } from "vitest";
 import { createPostgresGenerationExecutionRepository, reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
 import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
 import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
+import { estimateStoryTokens } from "../../packages/story-engine/src/token-estimate.js";
 import { createApiIllustrationApplication } from "../../services/runtime/src/illustration-composition.js";
 import { apiMemoryApplication } from "../helpers/memory-applications.js";
 import { workerProviderGraph } from "../helpers/provider-application-fixtures.js";
@@ -1676,7 +1677,7 @@ integration("T17 durable continuity review", () => {
       baseUrl: `http://127.0.0.1:${address.port}`,
       defaultModel: "@preset/keep",
       contextWindowTokens: 65_536,
-      maxOutputTokens: 4_096,
+      maxOutputTokens: 48_000,
       temperature: 0,
       enabled: true,
       configuration: { textResponseFormatPolicy: "auto" },
@@ -1738,10 +1739,12 @@ integration("T17 durable continuity review", () => {
       expect(input.preparedRequest?.body).toBeDefined();
     }
     const durableNativeRequests = (await pool.query<{
-      orchestrationPrivate: { primaryReservation: { requestBody: string }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
+      orchestrationPrivate: { primaryReservation: { requestBody: string }; primaryResult: { contextDiagnostics: { requestTokens: number } }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
     }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestrationPrivate;
     const preparedBodies = preparedTextExecutor.mock.calls.map(([input]) => input.preparedRequest!.body);
+    expect(preparedBodies.map((body) => JSON.parse(body).max_tokens)).toEqual([48_000, 16_384]);
     expect(preparedBodies[0]).toBe(durableNativeRequests.primaryReservation.requestBody);
+    expect(durableNativeRequests.primaryResult.contextDiagnostics.requestTokens).toBe(estimateStoryTokens(preparedBodies[0]!));
     expect(preparedBodies.map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
     expect(verifyTextExecutionRouteAuthority).toHaveBeenCalled();
     const candidate = (await pool.query<{ candidate: { storyHash: string; story: { narration: string } } }>(
@@ -2186,6 +2189,28 @@ integration("T17 durable continuity review", () => {
     if (mutation === "provider" || initialTemperature !== undefined) await pool.query("UPDATE provider_profiles SET temperature=0 WHERE id=$1", [providerId]);
     expect(loadIllustration).not.toHaveBeenCalled();
     expect(await runGenerationJob(pool, `duplicate-${randomUUID()}`, 30, credentialSecret)).toBe(false);
+  });
+
+  it("preserves the candidate and exposes review budget counts when complete evidence cannot fit", async () => {
+    await pool.query("UPDATE provider_profiles SET context_window_tokens=20000 WHERE id=$1", [providerId]);
+    try {
+      const { job, application, campaignId } = await enqueue("enforce");
+      primaryNarration = "The lantern shines. ".repeat(900).trim();
+      requests.length = 0;
+      const before = (await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [campaignId])).rows[0].count;
+      await runGenerationJob(pool, `review-overflow-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
+      expect(await application.getReview({ ownerUserId, jobId: job.id })).toMatchObject({ stage: "continuity", canKeep: true });
+      const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
+      expect(saved.contextDiagnostic).toMatchObject({ code: "context_budget_exceeded", operation: "story_continuity_review", scope: "provider_request", requiredTokens: expect.any(Number), availableTokens: 20_000 });
+      expect(saved.contextDiagnostic.requiredTokens).toBeGreaterThan(20_000);
+      expect(saved.generationReview.gateCandidate.story).toEqual(saved.validatedMainDraft.story);
+      expect(saved.generationReview.gateCandidate.story.narration.replace(/\s+/g, " ")).toBe(primaryNarration);
+      expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [campaignId])).rows[0].count).toBe(before);
+      expect(requests).toHaveLength(1);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET context_window_tokens=65536 WHERE id=$1", [providerId]);
+    }
   });
 
   it.each(["observe", "enforce"] as const)("%s handles unavailable evidence and defers artwork until acceptance", async (mode) => {

@@ -89,6 +89,7 @@ import {
   serializeCheckedBoundFrozenPresetProviderRequest,
   serializeProviderRequest,
   serializeCheckedProviderRequest,
+  effectiveRequestOutputTokens,
   fictionGuidanceForEvents,
   fictionGuidanceForRoll,
   formatNarrationParagraphs,
@@ -1127,12 +1128,13 @@ function prepareCheckedFrozenCampaignRequest(
   const canonicalRequest = {
     systemPrompt: preparedRequest.systemPrompt,
     input: preparedRequest.input,
+    ...(preparedRequest.budgetOutput ? { budgetOutput: preparedRequest.budgetOutput } : {}),
     ...(preparedRequest.recoveryInput ? { recoveryInput: preparedRequest.recoveryInput } : {}),
     ...(preparedRequest.rejectedResponse ? { completeRejectedDraft: { content: preparedRequest.rejectedResponse, complete: true as const } } : {}),
     ...(preparedRequest.onChunk ? { onChunk: preparedRequest.onChunk } : {})
   };
   const checkedOptions = {
-    inputLimit: effectiveContextWindowTokens(provider, job) - effectiveMaxOutputTokens(provider, job),
+    inputLimit: effectiveContextWindowTokens(provider, job) - effectiveRequestOutputTokens(effectiveMaxOutputTokens(provider, job), preparedRequest),
     count: estimateStoryTokens,
     countMode: "estimated" as const,
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
@@ -1218,6 +1220,12 @@ export function preparePrimaryReservation(
   }
   const job = jobOrRequest as GenerationExecutionPayload;
   const operation = operationOrHasFrozenContracts as StoryCostOperation;
+  // A pre-dispatch rejection must not leave a reservation that a later claim
+  // would interpret as an interrupted provider request.
+  if (hasFrozenContracts) {
+    const checked = prepareCheckedFrozenCampaignRequest(provider, job, operation, request, preboundPlan);
+    if (checked) return checked;
+  }
   const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
   const preparedRequest = bindCampaignTextExecutionPlan(job, request, executionPlan);
   const presetBinding = boundFrozenPresetRequestBinding(job, operation, typeof request.onChunk === "function", request.systemPrompt, executionPlan);
@@ -1519,12 +1527,13 @@ export async function callCampaignTextProvider(
   const canonicalRequest = {
     systemPrompt: preparedRequest.systemPrompt,
     input: preparedRequest.input,
+    ...(preparedRequest.budgetOutput ? { budgetOutput: preparedRequest.budgetOutput } : {}),
     ...(preparedRequest.recoveryInput ? { recoveryInput: preparedRequest.recoveryInput } : {}),
     ...(preparedRequest.rejectedResponse ? { completeRejectedDraft: { content: preparedRequest.rejectedResponse, complete: true as const } } : {}),
     ...(preparedRequest.onChunk ? { onChunk: preparedRequest.onChunk } : {})
   };
   const checkedOptions = {
-    inputLimit: effectiveContextWindowTokens(provider, job) - effectiveMaxOutputTokens(provider, job),
+    inputLimit: effectiveContextWindowTokens(provider, job) - effectiveRequestOutputTokens(effectiveMaxOutputTokens(provider, job), preparedRequest),
     count: estimateStoryTokens,
     countMode: "estimated",
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
@@ -2354,6 +2363,8 @@ async function executeLoadedGeneration(
     };
     const inputs = await phase("orchestration_loading", async () => job.orchestration_inputs);
     let orchestration = job.orchestration_private || {};
+    const savedReviewBudgetDiagnostic = orchestration.contextDiagnostic?.operation === "story_continuity_review"
+      && orchestration.contextDiagnostic.code === "context_budget_exceeded" ? orchestration.contextDiagnostic : null;
     if (job.orchestration_private?.queuedResponsePolicy && !orchestration.logicalAttempt) {
       orchestration = await persistOrchestration(repository, scope, job, {
         logicalAttempt: {
@@ -2522,6 +2533,17 @@ async function executeLoadedGeneration(
       });
     }
 
+    const frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
+    const frozenContracts = frozenResponseContracts?.contracts;
+    const initialLogicalAttempt = (orchestration.logicalAttempt?.id ?? job.id) === job.id;
+    // Use the captured delivery choice for both context packing and dispatch.
+    const usesV2FrozenDelivery = frozenResponseContracts?.version === 2 && frozenContracts !== undefined;
+    const supportsStreaming = usesV2FrozenDelivery
+      ? frozenContracts["story:stream"] !== undefined
+      : Boolean(provider.configuration
+        && (provider.configuration.streaming === true
+          || provider.configuration.streamingSupport === true));
+    const streamsPrimary = supportsStreaming && (usesV2FrozenDelivery ? initialLogicalAttempt : job.attempts === 1);
     const promptPreparation = await phase("prompt_preparation", async () => {
       const safeGuidance = [
         ...(stages.allowRpgAssessment ? fictionGuidanceForRoll(orchestration.roll || null) : []),
@@ -2533,7 +2555,11 @@ async function executeLoadedGeneration(
         storyLength, job.resolved_input_mode, configuredCampaignContextBudget, inputTokenLimit,
         hasGenerationCharacterAuthority(generationContext.baseIdentity) ? job.id : undefined,
         hasFrozenStoryMemoryPolicy ? "story_memory" : "legacy",
-        frozenStoryMemoryPolicySnapshot?.policy
+        frozenStoryMemoryPolicySnapshot?.policy,
+        frozenContracts ? (input) => serializeFrozenCampaignRequest(provider, job, "story_generation", {
+          systemPrompt: storySystemPrompt, input,
+          ...(streamsPrimary ? { onChunk: () => undefined } : {})
+        }, storyTextExecutionPlan).body : undefined
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
@@ -2944,27 +2970,10 @@ async function executeLoadedGeneration(
       }
     };
 
-    const frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
-    const frozenContracts = frozenResponseContracts?.contracts;
     const unboundStoryRequest = {
       systemPrompt: storySystemPrompt,
       input: storyInput
     };
-    // A frozen selection follows its durable logical attempt, never a lease
-    // reclaim counter. Legacy jobs retain their historical first-claim rule.
-    const initialLogicalAttempt = (orchestration.logicalAttempt?.id ?? job.id) === job.id;
-    // For a v2 frozen contract, the queued invocation closure is the durable
-    // delivery decision. Re-reading profile configuration here would let a
-    // later ordinary settings edit turn a reserved stream body into a
-    // non-stream request (or vice versa). Legacy jobs retain their historical
-    // live-profile stream selection.
-    const usesV2FrozenDelivery = frozenResponseContracts?.version === 2 && frozenContracts !== undefined;
-    const supportsStreaming = usesV2FrozenDelivery
-      ? frozenContracts["story:stream"] !== undefined
-      : Boolean(provider.configuration
-        && (provider.configuration.streaming === true
-          || provider.configuration.streamingSupport === true));
-    const streamsPrimary = supportsStreaming && (usesV2FrozenDelivery ? initialLogicalAttempt : job.attempts === 1);
     const storyRequest = bindCampaignResponseContract(job, "story_generation", unboundStoryRequest);
     const primaryRequest = bindCampaignResponseContract(job, "story_generation", streamsPrimary
       ? { ...unboundStoryRequest, onChunk }
@@ -4245,6 +4254,8 @@ async function executeLoadedGeneration(
         throw Object.assign(new Error("Saved continuity review belongs to a different final story."), { code: "generation_checkpoint_incompatible" });
       }
       let checkpoint: ContinuityReviewCheckpoint;
+      let reviewBudgetDiagnostic = existing.success && existing.data.status === "completed" && existing.data.verdict === "unavailable"
+        ? savedReviewBudgetDiagnostic : null;
       if (existing.success && existing.data.status === "completed") checkpoint = existing.data;
       else if (existing.success) {
         // A prior lease may have dispatched the call. Do not silently duplicate
@@ -4274,11 +4285,19 @@ async function executeLoadedGeneration(
           checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"] };
         } catch (error) {
           if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "") || isV2PreparedContractFailure(error, job)) throw error;
+          if (error instanceof ContextBudgetError) {
+            reviewBudgetDiagnostic = projectSafeGenerationDiagnostic({
+              code: error.code, operation: "story_continuity_review", action: "adjust_context", scope: error.scope,
+              requiredTokens: error.requiredTokens, availableTokens: error.availableTokens,
+              countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
+            });
+          }
           checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null };
         }
       }
       const reviewDiagnostic = projectSafeGenerationDiagnostic({
         ...(orchestration.contextDiagnostic ?? {}), code: "context_ready", operation: "story_generation", action: "adjust_context",
+        ...(reviewBudgetDiagnostic ?? {}),
         review: { status: checkpoint.verdict === "pass" ? "passed" : checkpoint.verdict, automaticRepair: "not_consumed" }
       })!;
       orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint, ...(finalManifest ? { sourceEvidenceManifest: finalManifest } : {}), contextDiagnostic: reviewDiagnostic });

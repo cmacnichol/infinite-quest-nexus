@@ -9,6 +9,7 @@ import type { PhysicalAttemptRepository } from "../../../packages/story-engine/s
 import { executePresetRoutes, PreparedRouteTerminalError } from "../../../packages/story-engine/src/preset-route-execution.js";
 import {
   estimatedInputSafetyAllowanceTokens,
+  effectiveRequestOutputTokens,
   serializeCheckedBoundFrozenPresetProviderRequest,
   validateCompleteRejectedDraft,
   type BoundFrozenPresetProviderRequestBinding,
@@ -26,6 +27,7 @@ function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
   return {
     systemPrompt: request.systemPrompt,
     input: request.input,
+    ...(request.budgetOutput ? { budgetOutput: request.budgetOutput } : {}),
     ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
     ...(completeRejectedDraft ? { completeRejectedDraft } : {}),
     ...(request.onChunk ? { onChunk: request.onChunk } : {})
@@ -99,7 +101,7 @@ export function createPreparedTextExecutor(input: Readonly<{
           }
           const prepared = serializeCheckedBoundFrozenPresetProviderRequest(
             serializationProfile(candidate), canonical, binding(execution, routeBasis!, candidateOrdinal), {
-              inputLimit: candidate.contextWindowTokens - candidate.maxOutputTokens,
+              inputLimit: candidate.contextWindowTokens - effectiveRequestOutputTokens(candidate.maxOutputTokens, canonical),
               count: estimateStoryTokens,
               countMode: "estimated",
               safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,

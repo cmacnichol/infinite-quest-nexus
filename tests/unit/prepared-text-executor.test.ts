@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
-import { textExecutionPlanHash, type TextExecutionPlan } from "../../packages/contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, textExecutionPlanHash, textExecutionRouteBasisHash, type TextExecutionPlan } from "../../packages/contracts/src/text-execution-plan.js";
+import { frozenResponseContractsV2SelectionHash } from "../../packages/contracts/src/generation-response-contract.js";
+import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { serializeCheckedBoundFrozenPresetProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 import type {
   PhysicalAttemptRecord,
   PhysicalAttemptRepository
@@ -122,6 +125,57 @@ describe("prepared text executor stream durability", () => {
     expect(reserve).toHaveBeenCalledTimes(1); expect(dispatch).toHaveBeenCalledTimes(1);
     expect(leases.release).toHaveBeenCalledTimes(1);
   });
+  it.each([48_000, 8_000])("keeps the frozen review body and effective output limit with a %i route reserve", async (maxOutputTokens) => {
+    const routeDraft = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "review" },
+      preset: { slug: "review", versionId: "v1", configHash: hash("preset") },
+      candidates: [{ modelId: "model-a", providerPolicy: { only: ["route-a"] }, contextWindowTokens: 65_536, maxOutputTokens }],
+      presetSystemPrompt: "Review instructions.", parameters: { temperature: 0.2 }, endpointReference: "endpoint-a",
+      credentialReference: "profile-a", profileRevision: "profile-v1", authorityRevision: "authority-v1",
+      requestTimeoutMs: 2_000, protocolVersion: "text-schema-adapter-v2"
+    };
+    const routeBasis = { ...routeDraft, routeBasisHash: textExecutionRouteBasisHash({ ...routeDraft, routeBasisHash: hash("basis") }) };
+    const invocationKey = "continuity_review:nonstream" as const;
+    const operation = "story_continuity_review" as const;
+    const policy = {
+      version: 2 as const, policy: "required" as const, providerProfileId: "11111111-1111-4111-8111-111111111111",
+      admission: { mode: "json_schema" as const, basis: "preset_trusted" as const },
+      authority: { kind: "preset_trusted" as const, routeBasisHash: routeBasis.routeBasisHash, selection: routeBasis.selection,
+        endpointReference: "endpoint-a", credentialReference: "profile-a", authorityRevision: "authority-v1", profileRevision: "profile-v1" },
+      operationClosureVersion: 2 as const, invocationKeys: [invocationKey]
+    };
+    const schema = getProviderOutputSchemaV2("continuity_review");
+    const selected = {
+      version: 2 as const, queuedPolicy: policy, selectedAt: "2026-09-22T00:00:00.000Z", capabilityEvidenceHash: hash("capability"),
+      contracts: { [invocationKey]: { version: 2 as const, mode: "json_schema" as const, admission: policy.admission,
+        operation: "continuity_review" as const, streaming: false, forbidFormatFallback: true as const,
+        schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+        authority: { kind: "preset_trusted" as const, routeBasisHash: routeBasis.routeBasisHash } } }
+    };
+    const frozen = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
+    const trustedOperationPrompt = "Check the final story.";
+    const reviewPlan = deriveTextExecutionPlan(routeBasis, trustedOperationPrompt);
+    const request = { systemPrompt: reviewPlan.prompt, input: "Complete evidence. ".repeat(2_500), budgetOutput: { kind: "continuity_review" as const } };
+    const expectedOutputTokens = Math.min(maxOutputTokens, 16_384);
+    const preparedRequest = serializeCheckedBoundFrozenPresetProviderRequest({
+      providerType: "openrouter", baseUrl: "", model: "model-a", contextWindowTokens: 65_536, maxOutputTokens, temperature: 0.2
+    }, request, { frozen, routeBasis, plan: reviewPlan, invocationKey, operation, trustedOperationPrompt }, {
+      inputLimit: 65_536 - expectedOutputTokens, count: (value) => Math.ceil(value.length / 3), output: request.budgetOutput
+    });
+    const execute = vi.fn(async (sent: ProviderRequest) => {
+      expect(sent.preparedRequest?.body).toBe(preparedRequest.body);
+      expect(sent.preparedRequest?.payloadHash).toBe(preparedRequest.payloadHash);
+      expect(JSON.parse(sent.preparedRequest!.body).max_tokens).toBe(expectedOutputTokens);
+      return result();
+    });
+    const executor = createPreparedTextExecutor({ attempts: repository(vi.fn()), loadAuthority: async () => authority(execute) });
+    await expect(executor.execute({ ...executionInput(vi.fn()), plan: reviewPlan, operation, request, preparedRequest,
+      routeBasis, frozenResponseContracts: frozen, invocationKey, trustedOperationPrompt
+    })).resolves.toMatchObject({ content: "accepted" });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(routeBasis.candidates[0]!.maxOutputTokens).toBe(maxOutputTokens);
+  });
+
   it("waits for durable output evidence before exposing a provider chunk", async () => {
     let release!: (value: PhysicalAttemptRecord) => void;
     const persisted = new Promise<PhysicalAttemptRecord>((resolve) => { release = resolve; });

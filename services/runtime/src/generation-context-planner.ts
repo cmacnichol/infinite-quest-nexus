@@ -170,7 +170,8 @@ export function planGenerationPromptContext(
   inputLimit: number,
   attemptId?: string,
   promptRoute: "legacy" | "story_memory" = "legacy",
-  policy?: StoryMemoryPolicy
+  policy?: StoryMemoryPolicy,
+  serializeStoryRequest?: (input: string) => string
 ) {
   const authority = context.authority;
   const castSnapshot = isGenerationBaseIdentityV4(context.baseIdentity) ? authority.castSnapshot : undefined;
@@ -251,6 +252,7 @@ export function planGenerationPromptContext(
     // binding retains its credential and destination outside this planner.
     baseUrl: ""
   };
+  const serialize = serializeStoryRequest ?? ((input: string) => serializeProviderRequest(serializationProfile, { systemPrompt, input }).body);
   const authorityRevision = sha256(stableStringify({ baseIdentity: context.baseIdentity, authority }));
   const blocks = [
     { id: "authority", revision: authorityRevision, content: stableStringify(authorityContext), protected: true, priority: 0, ordinal: 0, scope: "authority" },
@@ -292,12 +294,10 @@ export function planGenerationPromptContext(
     contextSafetyAllowanceTokens: 0,
     serializeContext: (selected: readonly Readonly<{ id: string }>[]) => stableStringify(promptContext(selected)),
     contextValue: promptContext,
-    serializeRequest: (selected: ReturnType<typeof promptContext>) => serializeProviderRequest(serializationProfile, {
-      systemPrompt,
-      input: promptRoute === "story_memory"
+    serializeRequest: (selected: ReturnType<typeof promptContext>) => serialize(promptRoute === "story_memory"
         ? buildStoryMemoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
         : buildStoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
-    }).body,
+    ),
     protectedScope: "campaign_context" as const
   });
   const protectedComponents = {
@@ -405,7 +405,7 @@ export function planGenerationPromptContext(
   const storyInput = promptRoute === "story_memory"
     ? buildStoryMemoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode)
     : buildStoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode);
-  const requestBody = serializeProviderRequest(serializationProfile, { systemPrompt, input: storyInput }).body;
+  const requestBody = serialize(storyInput);
   return {
     layerDiagnostics: {
       ...(castSelection ? { cast: { allocatedTokens: castAllocatedTokens, estimatedTokens: castSelection.estimatedTokens,

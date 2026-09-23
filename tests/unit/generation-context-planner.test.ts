@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { storyMemoryPolicySchema, defaultStoryMemoryPolicy } from "../../packages/contracts/src/story-memory-policy.js";
-import { estimateStoryTokens, serializeProviderRequest } from "../../packages/story-engine/src/index.js";
+import { estimateStoryTokens, estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../packages/story-engine/src/index.js";
+import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import { sha256 } from "../../packages/domain/src/index.js";
 import { bindManifestToProducingRequest } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
@@ -80,6 +81,29 @@ describe("layered generation context planner", () => {
     const worldCast = planGenerationPromptContext(context, plannerProvider(), "System", "Visit The Watcher", [],
       { profile: "brief", minWords: 100, maxWords: 120 }, mode, 32_000, 31_900, characterId, "story_memory", defaultStoryMemoryPolicy("r1"));
     expect(worldCast.sourceManifest!.entries.some((entry) => entry.source.kind === "cast" && entry.semanticRole === "world_reference" && entry.content.includes("harbor keeper"))).toBe(true);
+  });
+  it.each([false, true])("packs against the final schema request and streaming envelope (%s)", (streaming) => {
+    const context: any = plannerContext(null);
+    context.candidates = [{ id: "history", turnId: null, ordinal: 1, kind: "canonical_fact", content: "The harbor remains closed. ".repeat(150), tokenEstimate: 1000, rank: 1 }];
+    const provider = { ...plannerProvider() as any, baseUrl: "", providerType: "openrouter" as const };
+    const schema = getProviderOutputSchema("story");
+    const responseContract = { version: 1, mode: "json_schema", operation: "story", streaming,
+      schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+      providerRoutingSlugs: ["provider/region"] as string[], routeConfigHash: "b".repeat(64), adapterProtocol: "text-schema-adapter-v1", forbidFormatFallback: true } as const;
+    const serialize = (input: string) => serializeProviderRequest(provider, {
+      systemPrompt: "System", input, responseContract, ...(streaming ? { onChunk: () => undefined } : {})
+    }).body;
+    const args = [context, provider, "System", "Continue", [] as string[], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 100_000] as const;
+    const baseline = planGenerationPromptContext(...args, 100_000);
+    const inputLimit = baseline.contextPlan.requestTokens + estimatedInputSafetyAllowanceTokens(baseline.contextPlan.requestTokens) + 10;
+    const finalTokens = estimateStoryTokens(serialize(baseline.storyInput));
+    expect(finalTokens + estimatedInputSafetyAllowanceTokens(finalTokens)).toBeGreaterThan(inputLimit);
+
+    const planned = planGenerationPromptContext(...args, inputLimit, "22222222-2222-4222-8222-222222222222", "legacy", undefined, serialize);
+    expect(planned.promptContext.chronicle).toEqual([]);
+    expect(planned.contextPlan.serializedRequest).toBe(serialize(planned.storyInput));
+    expect(planned.contextPlan.requestTokens + planned.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(inputLimit);
+    expect(() => bindManifestToProducingRequest(planned.sourceManifest!, serialize(planned.storyInput))).not.toThrow();
   });
   it("binds selected entity and relationship evidence to the exact provider request", () => {
     const context: any = plannerContext(null);

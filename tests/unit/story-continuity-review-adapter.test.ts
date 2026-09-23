@@ -56,6 +56,26 @@ describe("exact continuity review provider request", () => {
     expect(repair.request.systemPrompt).toContain(CAST_STORY_AUTHORITY_CONTRACT);
     expect(repair.requiredEvidenceIds).toContain(castEntry.id);
   });
+  it("fits a complete large review using a review-only output reserve", () => {
+    const largeEntry = createStoryEvidence({ source: { kind: "state_edit", id: "state", revision: "1", turnNumber: 1 }, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null }, { text: "The archive remains intact. ".repeat(11_000) });
+    const largeBody = { ...body, entries: [largeEntry], requiredReviewEvidenceIds: [largeEntry.id] };
+    const largeManifest = { ...largeBody, manifestHash: generationEvidenceManifestHash(largeBody) };
+    const largeProvider = { ...provider, contextWindowTokens: 163_840, maxOutputTokens: 48_000 };
+    const prepared = prepare({ provider: largeProvider, manifest: largeManifest });
+    expect(prepared.input.evidence).toHaveLength(1);
+    expect(prepared.input.evidence[0]!.content).toBe(largeEntry.content);
+    expect(prepared.input.draft.narration).toBe(draft.narration);
+    expect(JSON.parse(prepared.body).max_tokens).toBe(16_384);
+    expect(prepared.requestTokens + prepared.safetyAllowanceTokens + 48_000).toBeGreaterThan(163_840);
+    expect(prepared.requestTokens + prepared.safetyAllowanceTokens + 16_384).toBeLessThanOrEqual(163_840);
+    expect(JSON.parse(prepareContinuityRepair({ provider: largeProvider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft, findings: [] }).body).max_tokens).toBe(48_000);
+  });
+
+  it("reports token counts when even the bounded review cannot fit", () => {
+    expect(() => prepare({ effectiveContextWindowTokens: 1100 })).toThrow(expect.objectContaining({
+      code: "context_budget_exceeded", scope: "provider_request", requiredTokens: expect.any(Number), availableTokens: 1100
+    }));
+  });
   it("measures the same complete transport body and excludes private scratchpad", () => {
     const prepared = prepare();
     expect(prepared.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, prepared.request).body);
@@ -63,7 +83,7 @@ describe("exact continuity review provider request", () => {
     expect(prepared.body).toContain(entry.content);
     expect(prepared.request).not.toHaveProperty("previousResponseId");
     expect(prepared.request.responseFormatFallback).toBe("forbid");
-    expect(prepared.request.budgetOutput).toBeUndefined();
+    expect(prepared.request.budgetOutput).toEqual({ kind: "continuity_review" });
   });
   it("composes a frozen execution prompt before review and repair bodies are measured", () => {
     const compose = vi.fn((operationPrompt: string) => ({
@@ -105,7 +125,7 @@ describe("exact continuity review provider request", () => {
   it("rejects missing manifest entries, changed producing request and overflow before dispatch", () => {
     expect(() => prepare({ manifest: { ...manifest, entries: [] } })).toThrow();
     expect(() => prepare({ producingRequestHash: "a".repeat(64) })).toThrow();
-    expect(() => prepare({ effectiveContextWindowTokens: 1100 })).toThrow(/continuity_review_unavailable/);
+    expect(() => prepare({ effectiveContextWindowTokens: 1100 })).toThrow(expect.objectContaining({ code: "context_budget_exceeded" }));
     expect(provider.execute).not.toHaveBeenCalled();
   });
   it("requires the frozen prompt pair and preserves manifest requiredness", () => {

@@ -4,7 +4,7 @@ import type { PreparedResponseContract, PreparedResponseContractV2 } from "../..
 import { PreparedResponseContractError, classifyResponseFormatFailure } from "./provider-response-format.js";
 import { logger } from "../../logger/src/index.js";
 import { ProviderDestinationNotAllowedError } from "../../security/src/provider-network-policy.js";
-import { estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, serializeProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
+import { effectiveRequestOutputTokens, estimatedInputSafetyAllowanceTokens, serializeCheckedProviderRequest, serializeLegacyProviderRequest, serializeProviderRequest, validateCompleteRejectedDraft } from "./provider-request.js";
 import { resolveEffectiveContextWindowTokens } from "./context-budget.js";
 import { estimateStoryTokens } from "./token-estimate.js";
 import type { CanonicalProviderRequest, PreparedProviderRequest, ProviderOutputBudget } from "./provider-request.js";
@@ -1065,6 +1065,7 @@ function canonicalRequest(request: ProviderRequest): CanonicalProviderRequest {
   return {
     systemPrompt: request.systemPrompt,
     input: request.input,
+    ...(request.budgetOutput ? { budgetOutput: request.budgetOutput } : {}),
     ...(request.recoveryInput ? { recoveryInput: request.recoveryInput } : {}),
     ...(completeRejectedDraft ? { completeRejectedDraft } : {}),
     ...(request.onChunk ? { onChunk: request.onChunk } : {})
@@ -1077,7 +1078,7 @@ function checkedStoryRequest(profile: TextProviderProfile, request: ProviderRequ
     request.effectiveContextWindowTokens
   );
   return serializeCheckedProviderRequest(profile, canonicalRequest(request), {
-    inputLimit: effectiveContextWindowTokens - profile.maxOutputTokens,
+    inputLimit: effectiveContextWindowTokens - effectiveRequestOutputTokens(profile.maxOutputTokens, request),
     count: estimateStoryTokens,
     countMode: "estimated",
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
@@ -1293,6 +1294,7 @@ export async function callTextProvider(
   request: ProviderRequest,
   transport: ProviderTransport = defaultProviderTransport()
 ): Promise<ProviderResult> {
+  profile = { ...profile, maxOutputTokens: effectiveRequestOutputTokens(profile.maxOutputTokens, request) };
   return profile.providerType === "lmstudio"
     ? callLmStudio(profile, request, transport)
     : callOpenAiCompatible(profile, request, transport);

@@ -32,6 +32,12 @@ export type CanonicalProviderRequest = Readonly<
   }
 >;
 
+/** Review-output-v1: findings have their own ceiling; story/repair reserves stay unchanged.
+ * The effective limit is serialized into the hash-bound request, including preset routes. */
+export function effectiveRequestOutputTokens(configured: number, request: Pick<ProviderRequest, "budgetOutput">): number {
+  return request.budgetOutput?.kind === "continuity_review" ? Math.min(configured, 16_384) : configured;
+}
+
 /** Task 5 supplies this text-free audit after measuring the serialized request. */
 export type ProviderRequestBudgetAudit = Readonly<{
   countMode: "estimated" | "exact";
@@ -184,6 +190,7 @@ function serializeProviderRequestInternal(
   }>
 ): PreparedProviderRequest {
   const boundPresetContract = boundPreset?.contract;
+  profile = { ...profile, maxOutputTokens: effectiveRequestOutputTokens(profile.maxOutputTokens, request) };
   if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) throw new Error("A prepared response contract cannot use legacy response-format options.");
   if (options.responseContract && request.responseContract) throw new Error("A prepared response contract may be supplied only once.");
   const responseContract = boundPresetContract ?? (options.responseContract || request.responseContract
@@ -400,6 +407,7 @@ function serializeCheckedProviderRequestWith(
   options: CheckedProviderRequestOptions,
   serialize: ProviderRequestSerializer
 ): PreparedProviderRequest {
+  profile = { ...profile, maxOutputTokens: effectiveRequestOutputTokens(profile.maxOutputTokens, request) };
   if ((options.responseContract || request.responseContract) && options.responseFormat !== undefined) {
     throw new Error("A prepared response contract cannot use legacy response-format options.");
   }

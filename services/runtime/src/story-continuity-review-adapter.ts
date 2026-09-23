@@ -4,7 +4,8 @@ import { generationEvidenceManifestHash, generationEvidenceManifestSchema, type 
 import type { StoryTurnOutput } from "../../../packages/contracts/src/story-prompt.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { CONTINUITY_REVIEW_CONTRACT, buildContinuityReviewInput, validateContinuityReview, type ContinuityReviewInput } from "../../../packages/story-engine/src/continuity-review.js";
-import { estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
+import { effectiveRequestOutputTokens, estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
+import { ContextBudgetError } from "../../../packages/story-engine/src/context-budget.js";
 import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
 import type { ProviderRequest } from "../../../packages/story-engine/src/providers.js";
 import type { PreparedResponseContract } from "../../../packages/contracts/src/text-response-format.js";
@@ -132,7 +133,8 @@ ${CONTINUITY_REVIEW_CONTRACT}${castContract}`, input.prepareSystemPrompt);
   const unboundRequest: ProviderRequest = { systemPrompt: systemPrompt.systemPrompt,
     input: stableStringify({ protocol: "story-continuity-review-v1", producingRequestHash: input.producingRequestHash, manifestHash: manifest.manifestHash, ...projection }),
     canonicalBudgeting: true, responseFormatFallback: "forbid",
-    ...(input.responseContract ? { responseContract: input.responseContract, budgetOutput: { kind: "continuity_review" as const } } : {})
+    budgetOutput: { kind: "continuity_review" },
+    ...(input.responseContract ? { responseContract: input.responseContract } : {})
   };
   const request = input.bindRequest?.(unboundRequest, systemPrompt.textExecutionPlan) ?? unboundRequest;
   const prepared = input.serializeRequest?.(request, systemPrompt.textExecutionPlan)
@@ -140,7 +142,9 @@ ${CONTINUITY_REVIEW_CONTRACT}${castContract}`, input.prepareSystemPrompt);
   const requestTokens = estimateStoryTokens(prepared.body);
   const safetyAllowanceTokens = estimatedInputSafetyAllowanceTokens(requestTokens);
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
-  if (!Number.isSafeInteger(limit) || requestTokens + safetyAllowanceTokens + input.provider.maxOutputTokens > limit) throw new ContinuityReviewUnavailableError();
+  if (!Number.isSafeInteger(limit)) throw new ContinuityReviewUnavailableError();
+  const requiredTokens = requestTokens + safetyAllowanceTokens + effectiveRequestOutputTokens(input.provider.maxOutputTokens, request);
+  if (requiredTokens > limit) throw new ContextBudgetError("context_budget_exceeded", requiredTokens, limit, undefined, { scope: "provider_request" });
   return { request, body: prepared.body, requestHash: prepared.payloadHash, input: projection, manifestHash: manifest.manifestHash, requestTokens, safetyAllowanceTokens,
     ...(systemPrompt.textExecutionPlan ? { textExecutionPlan: systemPrompt.textExecutionPlan } : {}) };
 }
