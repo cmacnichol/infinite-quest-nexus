@@ -1,7 +1,7 @@
 import { canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorField, prepareCastSubmission,
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, type CastEditorState } from "@infinite-quest/client-core";
 import type { CampaignCastApi } from "@infinite-quest/client-web";
-import type { CastDetail, CastField, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import type { CastDetail, CastDiscoveryStatus, CastField, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
 
 const fields: [CastField, string][] = [
   ["identity.pronouns", "Pronouns"], ["story.role", "Role"], ["story.background", "Background"],
@@ -20,6 +20,7 @@ export function createLegacyCastPanel(options: {
   let campaign = "", epoch = 0, editor: CastEditorState | null = null, list: List | null = null;
   let enabled = false, query = "", latest: CastDetail | null = null, returnFocus: HTMLElement | null = null;
   let latestRoster: List | null = null;
+  let discovery: CastDiscoveryStatus | null = null;
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => {
     const result = document.createElement(tag); result.textContent = text; return result;
   };
@@ -48,8 +49,13 @@ export function createLegacyCastPanel(options: {
     const token = ++epoch; editor = null; latest = null; latestRoster = null;
     shell("Characters"); status("Loading characters…");
     try {
-      const response = await options.api.list(campaign, { query, ...(cursor ? { cursor } : {}) });
+      const [rosterResult, discoveryResult] = await Promise.allSettled([
+        options.api.list(campaign, { query, ...(cursor ? { cursor } : {}) }), options.api.discoveryStatus(campaign)
+      ]);
       if (!current(token)) return;
+      if (rosterResult.status === "rejected") throw rosterResult.reason;
+      const response = rosterResult.value;
+      discovery = discoveryResult.status === "fulfilled" ? discoveryResult.value : null;
       list = cursor && list ? { ...response, characters: [...list.characters, ...response.characters] } : response;
       enabled = response.capabilities.castEditing; renderRoster();
     } catch (error) {
@@ -60,6 +66,18 @@ export function createLegacyCastPanel(options: {
   }
   function renderRoster() {
     shell("Characters");
+    if (!discovery) status("Character tracking status is unavailable. Saved characters are still available.");
+    else {
+      const messages = { disabled: "Automatic character tracking is disabled.", not_enrolled: "Character tracking starts with the next accepted turn.",
+        catching_up: "Character tracking is catching up.", failed: `Character tracking stopped at turn ${discovery.firstGap?.turnNumber}. Your story is saved.`,
+        complete: "Character tracking is up to date." };
+      status(messages[discovery.state]);
+      if (discovery.coverageStartTurn !== null) status(discovery.trackedThroughTurn! >= discovery.coverageStartTurn
+        ? `Tracked turns ${discovery.coverageStartTurn}–${discovery.trackedThroughTurn}. Earlier turns are not included.`
+        : `Tracking starts at turn ${discovery.coverageStartTurn}; no turns in this range are complete yet.`);
+      if (discovery.unresolvedCount) status(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
+    }
+    dialog.append(button("Refresh characters", () => { void loadRoster(); }));
     const controls = node("form"); controls.className = "cast-toolbar";
     const label = node("label", "Find a character"); label.htmlFor = "cast-search";
     const search = node("input"); search.id = "cast-search"; search.type = "search"; search.value = query; search.maxLength = 200;

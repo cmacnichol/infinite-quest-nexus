@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
@@ -50,6 +51,57 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it("backfills forward enrollment when upgrading an existing discovery database", async () => {
+    const f = await fixture(3), untracked = await fixture();
+    await f.enqueue(1); const discarded = await f.enqueue(2);
+    await pool.query("UPDATE campaign_cast_discovery_jobs SET status='cancelled' WHERE id=$1", [discarded]);
+    const migration = await readFile(resolve("database/migrations/0107_campaign_cast_coverage.sql"), "utf8");
+    await withTransaction(pool, async (client) => {
+      await client.query(migration.split("-- Down Migration")[1]!);
+      await client.query(migration.split("-- Down Migration")[0]!);
+    });
+    expect(await createPostgresCampaignCastRepository(pool, { discoveryEnabled: true }).discoveryStatus(f.scope))
+      .toMatchObject({ coverageStartTurn: 2, trackedThroughTurn: 1 });
+    expect(await createPostgresCampaignCastRepository(pool).discoveryStatus(untracked.scope)).toMatchObject({ coverageStartTurn: null });
+  });
+  it("withdraws completed coverage after correction and clears enrollment when rewound before its start", async () => {
+    const f = await fixture(2); await f.enqueue(1);
+    const repo = createCastDiscoveryJobRepository(pool, () => true), job = (await repo.claim("coverage"))!;
+    await repo.checkpoint(job, emptyOutput); await repo.publish(job, applied);
+    const cast = createPostgresCampaignCastRepository(pool, { discoveryEnabled: true });
+    expect(await cast.discoveryStatus(f.scope)).toMatchObject({ state: "complete", coverageStartTurn: 2, trackedThroughTurn: 2 });
+    await withTransaction(pool, async (client) => {
+      await client.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id)
+        SELECT owner_user_id,campaign_id,turn_id,1,'Iven has green eyes.',source_hash,'user_edit',owner_user_id FROM campaign_cast_discovery_jobs WHERE id=$1`, [job.id]);
+      await applyCastBoundaryChange(client, f.scope, { turnNumber: 2, changeKey: "coverage-correction" });
+    });
+    expect(await cast.discoveryStatus(f.scope)).toMatchObject({ state: "catching_up", coverageStartTurn: 2, trackedThroughTurn: 1 });
+    await withTransaction(pool, async (client) => {
+      await applyCastBoundaryChange(client, f.scope, { turnNumber: 1, changeKey: "coverage-rewind" });
+      await client.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [f.scope.campaignId]);
+    });
+    expect(await cast.discoveryStatus(f.scope)).toMatchObject({ state: "not_enrolled", coverageStartTurn: null, trackedThroughTurn: null });
+  });
+  it("reports forward-only contiguous coverage, failed gaps, and unresolved review separately", async () => {
+    const f = await fixture(4);
+    const cast = createPostgresCampaignCastRepository(pool, { discoveryEnabled: true });
+    expect(await cast.discoveryStatus(f.scope)).toMatchObject({ state: "not_enrolled", coverageStartTurn: null, trackedThroughTurn: null });
+    const start = await f.enqueue(1);
+    const repo = createCastDiscoveryJobRepository(pool, () => true), first = (await repo.claim("coverage"))!;
+    await repo.checkpoint(first, emptyOutput); await repo.publish(first, applied);
+    await f.enqueue(3);
+    expect(await cast.discoveryStatus(f.scope)).toMatchObject({ state: "catching_up", coverageStartTurn: 2, trackedThroughTurn: 2,
+      activeTurnNumber: 4, firstGap: { turnNumber: 3, jobId: null, status: "missing" }, unresolvedCount: 0 });
+    const failed = await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client,
+      { scope: f.scope, turnId: f.turnIds[2]!, enabled: true, admissionUnavailable: true }));
+    expect(await cast.discoveryStatus(f.scope)).toMatchObject({ state: "failed", trackedThroughTurn: 2,
+      firstGap: { jobId: failed, status: "failed", diagnosticCode: "admission_unavailable" } });
+    await pool.query(`INSERT INTO campaign_cast_discovery_candidates(owner_user_id,campaign_id,job_id,chunk_ordinal,local_key,source,proposal,reason)
+      SELECT owner_user_id,campaign_id,id,0,'mara',source,'{}','ambiguous' FROM campaign_cast_discovery_jobs WHERE id=$1`, [start]);
+    expect(await cast.discoveryStatus(f.scope)).toMatchObject({ trackedThroughTurn: 2, unresolvedCount: 1 });
+    expect(await createPostgresCampaignCastRepository(pool).discoveryStatus(f.scope)).toMatchObject({ enabled: false, state: "disabled", trackedThroughTurn: 2 });
+    await expect(cast.discoveryStatus({ ...f.scope, ownerUserId: randomUUID() })).rejects.toMatchObject({ code: "cast_not_found" });
+  });
   it("rebases retained discovery checkpoints and fences leases across an idempotent rewind boundary", async () => {
     const f = await fixture(2);
     const retainedId = await f.enqueue(), discardedId = await f.enqueue(1);

@@ -25,6 +25,8 @@ export async function applyCastBoundaryChange(client: DatabaseClient, scope: Cas
   await client.query("DELETE FROM campaign_cast_characters WHERE campaign_id=$1 AND owner_user_id=$2 AND first_observed_turn>$3", [scope.campaignId, scope.ownerUserId, boundary.turnNumber]);
   await client.query(`UPDATE campaign_cast_state SET timeline_revision=timeline_revision+1,revision=revision+1,last_boundary_change_key=$3
     WHERE campaign_id=$1 AND owner_user_id=$2`, [scope.campaignId, scope.ownerUserId, boundary.changeKey]);
+  await client.query(`UPDATE campaign_cast_state SET coverage_start_turn=NULL
+    WHERE campaign_id=$1 AND owner_user_id=$2 AND coverage_start_turn>$3`, [scope.campaignId, scope.ownerUserId, boundary.turnNumber]);
   await rebuildCastWithClient(client, scope);
   await reconcileCastDiscoveryBoundary(client, scope, boundary.turnNumber);
 }

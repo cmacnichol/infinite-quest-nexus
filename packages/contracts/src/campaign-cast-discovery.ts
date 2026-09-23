@@ -2,6 +2,17 @@ import { z } from "zod";
 import { castCharacterSchema, castFieldSchema, castScopeSchema } from "./campaign-cast.js";
 
 export const CAST_DISCOVERY_PROTOCOL = "cast-discovery-v1";
+export const castDiscoveryStatusSchema = z.object({
+  enabled: z.boolean(), activeTurnNumber: z.number().int().nonnegative(),
+  coverageStartTurn: z.number().int().positive().nullable(), trackedThroughTurn: z.number().int().nonnegative().nullable(),
+  state: z.enum(["disabled", "not_enrolled", "catching_up", "failed", "complete"]),
+  unresolvedCount: z.number().int().nonnegative(),
+  firstGap: z.object({ turnNumber: z.number().int().positive(), jobId: z.uuid().nullable(),
+    status: z.enum(["missing", "queued", "running", "retry_wait", "failed", "cancelled"]),
+    diagnosticCode: z.enum(["admission_unavailable", "provider_timeout", "provider_failed", "invalid_output",
+      "source_requires_manual_scan", "publication_failed"]).nullable() }).strict().nullable()
+}).strict();
+export type CastDiscoveryStatus = z.infer<typeof castDiscoveryStatusSchema>;
 const evidence = z.object({ paragraphId: z.string().min(1).max(200), quote: z.string().min(1).max(1000) }).strict();
 export const castDiscoveryCandidateSchema = z.object({
   localKey: z.string().min(1).max(100), name: z.string().trim().min(1).max(200),

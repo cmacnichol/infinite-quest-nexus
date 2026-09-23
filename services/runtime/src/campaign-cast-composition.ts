@@ -8,8 +8,9 @@ import { createCastDiscoveryExtractor } from "./campaign-cast-discovery-adapter.
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 import { logger } from "../../../packages/logger/src/index.js";
 
-export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castEditingEnabled">) {
-  return createCampaignCastApplication(createPostgresCampaignCastRepository(pool, { editingEnabled: config.castEditingEnabled === true }));
+export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castEditingEnabled" | "castDiscoveryEnabled">) {
+  return createCampaignCastApplication(createPostgresCampaignCastRepository(pool, {
+    editingEnabled: config.castEditingEnabled === true, discoveryEnabled: config.castDiscoveryEnabled === true }));
 }
 
 export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castDiscoveryEnabled">,

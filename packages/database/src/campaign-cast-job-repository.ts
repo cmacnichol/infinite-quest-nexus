@@ -51,6 +51,8 @@ export async function enqueueCastDiscoveryWithClient(client: DatabaseClient, inp
     WHERE turn_id=$1 AND campaign_id=$2 AND owner_user_id=$3`, [input.turnId, scope.campaignId, scope.ownerUserId])).rows[0];
   if (!turn || turn.turn_number > campaign.active_turn_number) throw new Error("Accepted source not found.");
   await client.query("INSERT INTO campaign_cast_state(owner_user_id,campaign_id) VALUES($1,$2) ON CONFLICT(campaign_id) DO NOTHING", [scope.ownerUserId, scope.campaignId]);
+  await client.query("UPDATE campaign_cast_state SET coverage_start_turn=COALESCE(coverage_start_turn,$3) WHERE campaign_id=$1 AND owner_user_id=$2",
+    [scope.campaignId, scope.ownerUserId, turn.turn_number]);
   const state = (await client.query("SELECT timeline_revision FROM campaign_cast_state WHERE campaign_id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows[0];
   const source = buildCastDiscoverySource({ scope, turnId: input.turnId, turnNumber: turn.turn_number,
     narrationRevision: turn.correction_revision, timelineRevision: state.timeline_revision, narration: turn.effective_narration });

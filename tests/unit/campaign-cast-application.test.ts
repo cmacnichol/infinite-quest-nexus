@@ -7,6 +7,14 @@ import type { CampaignCastWritePort } from "../../packages/application/src/campa
 const base = { expectedCastRevision: 2, expectedCharacterRevision: 1,
   expectedBoundary: { turnNumber: 4, timelineRevision: 0 }, idempotencyKey: "edit-1" };
 describe("cast editing application boundary", () => {
+  it("keeps saved characters readable when discovery status fails", async () => {
+    const scope = { ownerUserId: "11111111-1111-4111-8111-111111111111", campaignId: "22222222-2222-4222-8222-222222222222" };
+    const repository = { current: async () => ({ revision: 0, boundary: { turnNumber: 0, timelineRevision: 0 }, characters: [] }),
+      discoveryStatus: async () => { throw new Error("status unavailable"); } } as unknown as CampaignCastWritePort;
+    const app = createCampaignCastApplication(repository);
+    await expect(app.list(scope)).resolves.toMatchObject({ characters: [], nextCursor: null });
+    await expect(app.discoveryStatus(scope)).rejects.toThrow("status unavailable");
+  });
   it("preserves intentional blanks and rejects ambiguous reset/set and empty edits", () => {
     expect(editCastCharacterSchema.parse({ ...base, setOverrides: { "appearance.description": "" } }).setOverrides)
       .toEqual({ "appearance.description": "" });

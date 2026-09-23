@@ -7,12 +7,13 @@ export async function registerCampaignCastRoutes(app: FastifyInstance, options: 
 }) {
   const base = "/api/v1/campaigns/:campaignId/cast";
   const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional() });
-  for (const [method, path] of [["GET", base], ["POST", base], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
+  for (const [method, path] of [["GET", base], ["POST", base], ["GET", `${base}/discovery`], ["GET", `${base}/:characterId`], ["PATCH", `${base}/:characterId`]] as const) {
     app.route({ method, url: path, bodyLimit: 64 * 1024, handler: async (request, reply) => {
       try {
         const ids = params.parse(request.params);
         const scope = { ...await options.resolveOwner(), campaignId: ids.campaignId };
         const capabilities = { castEditing: options.enabled };
+        if (path === `${base}/discovery`) return await options.application.discoveryStatus(scope);
         if (method === "GET") return ids.characterId
           ? { ...await options.application.detail(scope, ids.characterId), capabilities }
           : { ...await options.application.list(scope, request.query as never), capabilities };

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { castSnapshotSchema, castDetailSchema, castListQuerySchema, createCastCharacterSchema, editCastCharacterSchema,
+import { castSnapshotSchema, castDetailSchema, castListQuerySchema, createCastCharacterSchema, editCastCharacterSchema, castDiscoveryStatusSchema,
   castWriteResultSchema, type CastListQuery, type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
 import { createNexusHttpClient, type NexusHttpClientOptions } from "./http-client.js";
 import { validatedRequest } from "./api-client.js";
@@ -13,6 +13,7 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
   const http = createNexusHttpClient(options);
   const pathFor = (campaignId: string) => `/campaigns/${encodeURIComponent(campaignId)}/cast`;
   return {
+    discoveryStatus: (campaignId: string) => http.request({ method: "GET", path: `${pathFor(campaignId)}/discovery`, responseSchema: castDiscoveryStatusSchema }),
     async list(campaignId: string, input: Partial<CastListQuery> = {}) {
       const path = pathFor(campaignId), query = validatedRequest(castListQuerySchema, input, "GET", path);
       const search = new URLSearchParams({ limit: String(query.limit), query: query.query });

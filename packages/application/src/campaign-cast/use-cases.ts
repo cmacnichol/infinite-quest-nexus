@@ -2,9 +2,13 @@ import { castScopeSchema, castListQuerySchema, createCastCharacterSchema, editCa
   castWriteResultSchema, castDetailSchema, type CastScope, type CastListQuery,
   type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
 import { CampaignCastError, type CampaignCastWritePort } from "./ports.js";
+import { castDiscoveryStatusSchema } from "@infinite-quest/contracts";
 
 export function createCampaignCastApplication(repository: CampaignCastWritePort) {
   return {
+    async discoveryStatus(scope: CastScope) {
+      return castDiscoveryStatusSchema.parse(await repository.discoveryStatus(castScopeSchema.parse(scope)));
+    },
     async list(scope: CastScope, input: Partial<CastListQuery> = {}) {
       const query = castListQuerySchema.parse(input);
       const value = await repository.current(castScopeSchema.parse(scope));

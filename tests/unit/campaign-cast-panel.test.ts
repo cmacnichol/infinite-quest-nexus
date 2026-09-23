@@ -9,7 +9,10 @@ describe("legacy cast panel", () => {
     const person = { id: "11111111-1111-4111-8111-111111111111", name: "<img src=x onerror=alert(1)>", aliases: [],
       origin: { kind: "manual" as const }, profile: {}, pinned: false, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 };
     const authority = { revision: 1, boundary: { turnNumber: 0, timelineRevision: 0 }, capabilities: { castEditing: true } };
-    const api = { list: async () => ({ ...authority, characters: [person], nextCursor: null, trackedThroughTurn: 0, coverageStartTurn: 0, discoveryStatus: "off" as const }),
+    const api = { discoveryStatus: async () => ({ enabled: true, state: "catching_up" as const, activeTurnNumber: 3,
+      coverageStartTurn: 2, trackedThroughTurn: 2, unresolvedCount: 1,
+      firstGap: { turnNumber: 3, jobId: null, status: "missing" as const, diagnosticCode: null } }),
+      list: async () => ({ ...authority, characters: [person], nextCursor: null }),
       detail: async () => ({ ...authority, character: person, observations: [], overrides: [], identityEvents: [], unresolvedCandidateIds: [], editorDestination: null }),
       create: async () => { throw new Error("offline"); }, edit: async () => { throw new Error("offline"); } };
     let generationActive = true;
@@ -18,6 +21,9 @@ describe("legacy cast panel", () => {
     const dialog = document.querySelector("dialog")!;
     dialog.showModal = () => dialog.setAttribute("open", ""); dialog.close = () => dialog.removeAttribute("open");
     await panel.open();
+    expect(dialog.textContent).toContain("Character tracking is catching up");
+    expect(dialog.textContent).toContain("Tracked turns 2–2");
+    expect(dialog.textContent).toContain("1 character match needs review");
     expect(dialog.querySelector("img")).toBeNull();
     expect(dialog.textContent).toContain("Finish or resolve the current generation");
     expect([...dialog.querySelectorAll("button")].some((button) => button.textContent === "Add character")).toBe(false);

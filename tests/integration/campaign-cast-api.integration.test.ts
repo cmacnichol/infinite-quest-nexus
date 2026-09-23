@@ -32,6 +32,16 @@ integration("campaign cast editing API", () => {
     const write = { expectedCastRevision: 0, expectedBoundary: { turnNumber: 0, timelineRevision: 0 }, idempotencyKey: randomUUID() };
     return { app, base, campaignId, write };
   }
+  it("reads discovery status while editing is disabled and rejects unknown campaigns", async () => {
+    const { app, base } = await fixture(false);
+    try {
+      const response = await app.inject({ method: "GET", url: `${base}/discovery` });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ enabled: false, state: "disabled", activeTurnNumber: 0,
+        coverageStartTurn: null, trackedThroughTurn: null, unresolvedCount: 0, firstGap: null });
+      expect((await app.inject({ method: "GET", url: `/api/v1/campaigns/${randomUUID()}/cast/discovery` })).statusCode).toBe(404);
+    } finally { await app.close(); }
+  });
   it("creates sparse characters and preserves a blank override and the original replay receipt", async () => {
     const { app, base, write } = await fixture();
     try {

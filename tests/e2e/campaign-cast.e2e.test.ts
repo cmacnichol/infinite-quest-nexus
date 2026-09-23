@@ -8,7 +8,7 @@ const protagonistId = "66666666-6666-4666-8666-666666666666";
 const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
 
 async function fixture(page: Page) {
-  let revision = 0, enabled = true, conflict = false;
+  let revision = 0, enabled = true, conflict = false, trackingComplete = false, trackingUnavailable = false;
   const characters: any[] = [{ id: protagonistId, name: "Iven", aliases: [], origin: { kind: "protagonist", selectedCharacterId: null },
     profile: {}, pinned: false, ignored: false, revision: 0, firstObservedTurn: 0, lastObservedTurn: 1 }];
   const overrides = new Map<string, Record<string, string>>();
@@ -27,6 +27,10 @@ async function fixture(page: Page) {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (path.includes("/cast")) {
       const id = path.split("/cast/")[1];
+      if (id === "discovery") return trackingUnavailable ? send(route, {}, 503) : send(route, {
+        enabled: true, state: trackingComplete ? "complete" : "catching_up", activeTurnNumber: 1,
+        coverageStartTurn: 1, trackedThroughTurn: trackingComplete ? 1 : 0, unresolvedCount: 1,
+        firstGap: trackingComplete ? null : { turnNumber: 1, jobId: null, status: "missing", diagnosticCode: null } });
       if (request.method() !== "GET") {
         const input = request.postDataJSON(); writes.push(input);
         if (!enabled) return send(route, { code: "cast_editing_disabled" }, 503);
@@ -59,7 +63,7 @@ async function fixture(page: Page) {
       const cursor = url.searchParams.get("cursor"), offset = cursor ? matches.findIndex((person) => person.id === cursor) + 1 : 0;
       const page = matches.slice(offset, offset + 2);
       return send(route, { revision, boundary, characters: page,
-        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, trackedThroughTurn: 0, coverageStartTurn: 1, discoveryStatus: "off", capabilities: { castEditing: enabled } });
+        nextCursor: offset + page.length < matches.length ? page.at(-1).id : null, capabilities: { castEditing: enabled } });
     }
     if (path === "/api/v1/session") return send(route, { user: { id: worldId, displayName: "Fixture owner", settings: { autoSubmitTurnChoices: true, continuousReading: false, defaultTurnControlStyle: "flexible_action" } }, authentication: "deferred" });
     if (path === "/api/v1/meta") return send(route, { application: { name: "Nexus", version: "test", commit: null, builtAt: null }, capabilities: { castEditing: enabled, systemArchive: false } });
@@ -83,7 +87,8 @@ async function fixture(page: Page) {
   await page.route(`**/story/${campaignId}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? 43173}/story/${campaignId}`);
   await expect(page.locator("#storyTitle")).toHaveText("Cast fixture");
-  return { characters, writes, conflict: () => { conflict = true; }, disable: () => { enabled = false; } };
+  return { characters, writes, conflict: () => { conflict = true; }, disable: () => { enabled = false; },
+    finishTracking: () => { trackingComplete = true; }, trackingUnavailable: () => { trackingUnavailable = true; } };
 }
 async function open(page: Page) {
   await page.getByRole("button", { name: "Setup", exact: true }).click();
@@ -96,6 +101,15 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   const api = await fixture(page); await open(page);
   const dialog = page.locator("#campaignCastDialog");
+  await expect(dialog).toContainText("Character tracking is catching up");
+  await expect(dialog).toContainText("1 character match needs review");
+  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click();
+  await expect(dialog).toContainText("Tracking starts at turn 1");
+  if (screenshotRoot) await dialog.screenshot({ path: `${screenshotRoot}/tracking-${width}.png` });
+  api.finishTracking();
+  await dialog.getByRole("button", { name: "Refresh characters", exact: true }).click();
+  await expect(dialog).toContainText("Character tracking is up to date");
+  await expect(dialog).toContainText("Tracked turns 1–1");
   await dialog.getByRole("button", { name: "Add character", exact: true }).click();
   await dialog.getByLabel("Name", { exact: true }).fill("Mara");
   await dialog.getByLabel("Aliases (one per line)").fill("The Watcher");
@@ -138,6 +152,14 @@ for (const width of [1440, 390]) test(`legacy cast add, edit, reset, conflict an
   await expect(dialog.getByRole("button", { name: "Save character", exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+});
+test("legacy cast keeps characters available when tracking status fails", async ({ page }) => {
+  const api = await fixture(page); api.trackingUnavailable(); await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await expect(dialog).toContainText("Character tracking status is unavailable");
+  await expect(dialog.getByRole("button", { name: "Iven", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Add character", exact: true })).toBeEnabled();
+  expect(api.writes).toEqual([]);
 });
 test("legacy cast protects unsaved drafts and restores keyboard focus", async ({ page }) => {
   await fixture(page); await open(page);

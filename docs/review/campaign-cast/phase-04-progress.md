@@ -2,7 +2,17 @@
 
 Updated 2026-09-23 on `codex/campaign-cast`, after phase 03 commit `da74d713`. Phase 04 is **in progress**, not released. The active goal still includes phases 04–06. Legacy `/story` remains the requested UI surface.
 
-## Latest checkpoint: discovery history reconciliation
+## Latest checkpoint: forward coverage and legacy status
+
+Migration `0107_campaign_cast_coverage` persists forward enrollment at the first eligible accepted source and backfills existing active discovery jobs. Enrollment clears when rewind removes its entire range. The scoped, single-statement status read checks current effective narration and timeline, stops coverage at missing/failed revisions, and counts pending identity reviews separately. Correcting a completed turn withdraws its coverage until its new source completes. Coverage is operational and excluded from portable archives.
+
+The application, GET `/cast/discovery` route, and validated browser adapter expose capability, enrollment, contiguous watermark, first gap, and unresolved count. Legacy `/story` Characters displays that status and refreshes it with the roster. A status outage does not prevent reading or editing saved characters. The old constant-zero/off fields were removed from the cast snapshot contract so they cannot contradict the dedicated status read. Candidate resolution and retry controls are still pending.
+
+Verification: **4,374 unit tests passed (347 files; 44 existing skips); 145 PostgreSQL tests passed (9 files; 10 secure-filesystem platform-gated skips on Windows); 5 legacy Playwright tests passed**. Repository/type checks and diff whitespace checks passed. PostgreSQL selection covered all cast integration suites plus migration, generation events, adapter matrix, and System Archive suites. The additive upgrade test exercised existing-job enrollment, and archive checks verify exhaustive source-column classification. Browser checks covered 1440px and 390px viewports, refresh from pending to complete, unavailable status with an accessible roster, and existing editing/conflict flows. Screenshots were inspected at `.tmp/campaign-cast/coverage-screenshots/tracking-{1440,390}.png`; no clipped controls were found. Browser plugin was unavailable, so repository Playwright was used. No live provider or production/deployment change occurred.
+
+The initial coverage/API/UI tests failed before their implementations. Review also identified roster/status query coupling; its regression failed before the isolation fix and passed afterward. The reviewer independently reran the seven application/API/panel tests. Initial archive verification caught the omitted enrollment-column classification; it was corrected and the full affected PostgreSQL selection passed. Final logs: `.tmp/campaign-cast/coverage-{unit,integration,browser,check}.log`.
+
+## Discovery history reconciliation
 
 The existing correction, rewind, and accepted-turn replacement transaction now reconciles already-enrolled discovery jobs after rebuilding cast authority. Changed/discarded sources are cancelled along with pending identity candidates; changed retained narration receives a fresh source using the saved admission. Unchanged sources retain their job ID, published chunk receipts, checkpoint, attempts, and failures while advancing to the current timeline. All active leases are revoked, preventing an older worker from publishing or checkpointing against the changed history. Repeated lifecycle notification remains idempotent. This does not enroll branch/transfer destinations or report contiguous coverage yet.
 
@@ -30,11 +40,11 @@ The domain validator rejects unknown character IDs and fabricated quotations. Am
 
 ## Remaining implementation
 
-1. Connect the durable queue below to unresolved candidates, contiguous coverage, and runtime capability handling. Migration 0104 now exists; use the next ordered migration for further additive schema changes.
+1. Finish unresolved candidate resolution and retry controls. Forward enrollment, contiguous coverage, and runtime capability status are implemented. Use the next ordered migration after 0107 for further additive schema changes.
 2. Frozen preparation, provider composition, and the worker lane are wired below. Verify global concurrency and the physical-attempt ceiling across preset fallback plus logical retries.
-3. Finish pinned-world playable-character selection and bounded identity hints. Atomic accepted-turn enqueue is implemented below; forward enrollment and contiguous coverage still need integration.
+3. Finish pinned-world playable-character selection and bounded identity hints. Atomic accepted-turn enqueue, forward enrollment, and contiguous coverage are implemented below.
 4. Same-campaign lifecycle reconciliation is implemented below. Finish branch/transfer discovery enrollment and coverage. Existing phase-02 approvals cover these source integrations.
-5. Status/retry/candidate-resolution API and legacy UI, then actual PostgreSQL and browser acceptance gates.
+5. Retry/candidate-resolution API and legacy UI, then complete phase-04 PostgreSQL and browser acceptance gates. Status API/display have passed the scoped checks below.
 6. Phase 05 bounded generation-context integration and phase 06 explicit history scanning, as separate plan slices.
 
 Do not mark phase 04 complete or claim pin/ignore already affects generation. Existing plans remain authoritative; this checkpoint only completes an initial part of task 1 and registers the future provider operation.

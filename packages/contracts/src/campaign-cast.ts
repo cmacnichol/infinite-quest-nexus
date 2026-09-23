@@ -41,9 +41,7 @@ export const castCharacterSchema = z.object({
   firstObservedTurn: ordinal, lastObservedTurn: ordinal
 }).strict().refine((value) => value.lastObservedTurn >= value.firstObservedTurn, "Invalid character chronology.");
 export const castSnapshotSchema = z.object({
-  revision: ordinal, boundary: castBoundarySchema, characters: z.array(castCharacterSchema),
-  trackedThroughTurn: ordinal, coverageStartTurn: ordinal,
-  discoveryStatus: z.enum(["off", "current", "pending", "failed"])
+  revision: ordinal, boundary: castBoundarySchema, characters: z.array(castCharacterSchema)
 }).strict();
 
 export type CastScope = z.infer<typeof castScopeSchema>;

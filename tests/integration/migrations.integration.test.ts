@@ -137,7 +137,7 @@ integration("standard database migration runner", () => {
       );
 
       await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
-        .resolves.toEqual(["0101_durable_campaign_physical_attempt_costs", "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts"]);
+        .resolves.toEqual(["0101_durable_campaign_physical_attempt_costs", "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage"]);
       expect((await isolatedPool.query<{ local_call_id: string; amount: string; category: string }>(
         `SELECT local_call_id::text,amount::text,category FROM provider_cost_events
           WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY category,amount`, [ownerUserId, campaign.id]
@@ -214,7 +214,7 @@ integration("standard database migration runner", () => {
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -1912,7 +1912,7 @@ END;
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2921,7 +2921,7 @@ END;
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage"
       ]);
 
       // The additive nullable generation-policy column is present after the upgrade;

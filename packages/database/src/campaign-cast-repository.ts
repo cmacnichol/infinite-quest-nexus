@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readCastDiscoveryStatus } from "./campaign-cast-status-repository.js";
 import { z } from "zod";
 import {
   castBatchSchema, castBatchReceiptSchema, castBoundarySchema, castCharacterSchema,
@@ -161,8 +162,7 @@ async function snapshot(client: DatabaseClient, scope: CastScope, campaign: Camp
     validateCastFiction(person.name);
     person.aliases.forEach(validateCastFiction);
   }
-  return castSnapshotSchema.parse({ revision: state?.revision ?? 0, boundary, characters: [...people.values()],
-    trackedThroughTurn: 0, coverageStartTurn: 0, discoveryStatus: "off" });
+  return castSnapshotSchema.parse({ revision: state?.revision ?? 0, boundary, characters: [...people.values()] });
 }
 
 async function cacheSnapshot(client: DatabaseClient, scope: CastScope, value: CastSnapshot): Promise<void> {
@@ -278,7 +278,7 @@ export async function applyCastBatchWithClient(client: DatabaseClient, rawScope:
   return persistBatch(client, scope, campaign, state, batch, requestHash);
 }
 
-export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { editingEnabled?: boolean } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
+export function createPostgresCampaignCastRepository(pool: DatabasePool, options: { editingEnabled?: boolean; discoveryEnabled?: boolean } = {}): CampaignCastRepositoryPort & CampaignCastWritePort {
   async function write(rawScope: CastScope, characterId: string | null, raw: CreateCastCharacter | EditCastCharacter): Promise<CastWriteResult> {
     const scope = castScopeSchema.parse(rawScope);
     const request = characterId ? editCastCharacterSchema.parse(raw) : createCastCharacterSchema.parse(raw);
@@ -332,6 +332,7 @@ export function createPostgresCampaignCastRepository(pool: DatabasePool, options
   return {
     create: (scope, request) => write(scope, null, request),
     edit: (scope, id, request) => write(scope, z.uuid().parse(id), request),
+    discoveryStatus: (scope) => readCastDiscoveryStatus(pool, scope, options.discoveryEnabled === true),
     async current(rawScope) {
       const scope = castScopeSchema.parse(rawScope);
       return withTransaction(pool, async (client) => {
