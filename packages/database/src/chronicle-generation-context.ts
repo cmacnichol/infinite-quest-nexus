@@ -8,6 +8,7 @@ import {
   type GenerationContextCandidate
 } from "../../application/src/memory/generation-context.js";
 import type { DatabaseClient } from "./pool.js";
+import { castGenerationSnapshotSchema } from "../../contracts/src/campaign-cast-context.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { characterFictionAuthority, stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
 import { loadPostgresChronicleGenerationCandidates } from "./chronicle-context-repository.js";
@@ -170,6 +171,7 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
     worldVersionId: scope.worldVersionId,
     query: scope.query,
     throughTurnNumber: baseTurnNumber,
+    ...(authorityContext.authority.castSnapshot ? { castSnapshot: castGenerationSnapshotSchema.parse(authorityContext.authority.castSnapshot) } : {}),
     ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
     ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy })
   }, dependencies, options);

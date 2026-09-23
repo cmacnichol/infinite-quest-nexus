@@ -2,8 +2,9 @@ import { normalizeStoryEvidenceSource, verifyStoryEvidenceSpan, type StorySource
 import { createHash } from "node:crypto";
 import type { ChronicleContextPreview, MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
 import type { StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
+import { castGenerationSnapshotSchema, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 type ChronicleRetrievalScope = Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1]
-  & Readonly<{ storyMemoryPolicy?: StoryMemoryPolicySnapshot }>;
+  & Readonly<{ storyMemoryPolicy?: StoryMemoryPolicySnapshot; castSnapshot?: CastGenerationSnapshot }>;
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import {
@@ -34,6 +35,7 @@ import {
   expandEntityQuery,
   matchEntityReferences,
   normalizeEntityTerm,
+  resolveEntityMetadata,
   type EntityReference
 } from "../../domain/src/entity-references.js";
 import {
@@ -445,7 +447,11 @@ async function loadContextMemories(
   entityCatalog: readonly EntityReference[] = [],
 ): Promise<ContextMemoryRow[]> {
   const limits = generationChronicleRetrievalLimits(scope.request.retrievalBudgetTokens);
-  const boundedQueries = scope.storyMemoryPolicy ? planBalancedChronicleQueries({ action: scope.request.query }).variants.map((variant) => variant.query) : null;
+  const castAliases = scope.castSnapshot ? matchEntityReferences(scope.request.query, entityCatalog)
+    .filter(({ entity }) => entity.source === "campaign")
+    .flatMap(({ entity }) => [entity.displayName, ...entity.aliases]).slice(0, 24)
+    .map((alias) => `"${alias.replaceAll('"', ' ')}"`) : [];
+  const boundedQueries = scope.storyMemoryPolicy ? [...planBalancedChronicleQueries({ action: scope.request.query }).variants.map((variant) => variant.query), ...castAliases] : null;
   const lookupQuery = boundedQueries ? boundedQueries[0] ?? "" : query.trim();
   const rankExpression = (document: string, parameter: number) => boundedQueries
     ? `COALESCE((SELECT max(ts_rank_cd(${document}, websearch_to_tsquery('english', fragment))) FROM unnest($${parameter}::text[]) fragment), 0::real)`
@@ -551,6 +557,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     throughTurnNumber: number;
     retrievalBudgetTokens?: number;
     storyMemoryPolicy?: StoryMemoryPolicySnapshot;
+    castSnapshot?: CastGenerationSnapshot;
   }>,
   dependencies: ChronicleGenerationTransactionDependencies,
   options: Readonly<{ useSavepoints?: boolean }> = {},
@@ -560,6 +567,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     campaignId: scope.campaignId,
     worldVersionId: scope.worldVersionId,
     ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
+    ...(scope.castSnapshot ? { castSnapshot: scope.castSnapshot } : {}),
     request: {
       // This request initializes retrieval only. It is never rendered or used
       // as a generation budget; selected parents retain their full content.
@@ -1583,7 +1591,7 @@ function cutoffSafeEntityCatalog(
 ): readonly EntityReference[] {
   if (throughTurnNumber === undefined) return catalog;
   return catalog.flatMap((entity) => {
-    if (entity.source === "world") return [entity];
+    if (entity.source === "world" || entity.source === "campaign") return [entity];
     const aliases = entity.aliases.filter((alias) => aliasAttestedByMemories(entity, alias, memories));
     if (!aliases.length) return [];
     const displayName = aliases.some((alias) => normalizeEntityTerm(alias) === normalizeEntityTerm(entity.displayName))
@@ -1602,7 +1610,7 @@ function chunkQueryPlanInput(
     const authorizedMemories = memories.filter((memory) => memory.entity_ids.includes(entity.id));
     if (!authorizedMemories.length) return [];
     const historicallyAttested = scope.request.throughTurnNumber === undefined
-      || entity.source === "world"
+      || entity.source === "world" || entity.source === "campaign"
       || aliasAttestedByMemories(entity, matchedAlias, authorizedMemories);
     if (!historicallyAttested) return [];
     const catalogTerms = new Set([entity.displayName, ...entity.aliases]
@@ -2181,10 +2189,16 @@ export async function loadChronicleRetrievalStage(
   // Preview is always a sanitized retrieval projection. Complete corrected
   // authority belongs exclusively to loadPostgresChronicleGenerationContext.
   const currentContinuity: CurrentContinuity | null = null;
+  const cast = scope.castSnapshot ? castGenerationSnapshotSchema.parse(scope.castSnapshot) : undefined;
+  if (cast && (!scope.storyMemoryPolicy?.castContext || cast.scope.ownerUserId !== scope.ownerUserId
+    || cast.scope.campaignId !== scope.campaignId || cast.worldVersionId !== scope.worldVersionId
+    || cast.boundary.turnNumber !== scope.request.throughTurnNumber)) throw new Error("Captured cast does not match retrieval scope.");
   const completeEntityCatalog = buildChronicleEntityCatalog({
     worldContent: campaign.world_content,
     characterSnapshot: campaign.character_snapshot,
-    characterProfile: campaign.character_profile
+    characterProfile: campaign.character_profile,
+    // Ignored cards still participate in ambiguity; ignoring is not identity deletion.
+    ...(cast ? { campaignCharacters: cast.characters, worldVersionId: cast.worldVersionId } : {})
   });
   let entityCatalog: readonly EntityReference[] = completeEntityCatalog;
   let entityExpandedQuery: string;
@@ -2203,12 +2217,21 @@ export async function loadChronicleRetrievalStage(
       scope.request.throughTurnNumber
     );
     entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
-    queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
+    queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).flatMap(({ entity }) => [entity.id, ...(entity.equivalentIds ?? [])]);
     memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds, entityCatalog);
   } else {
     entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
-    queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).map((match) => match.entity.id);
+    queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).flatMap(({ entity }) => [entity.id, ...(entity.equivalentIds ?? [])]);
     memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds, entityCatalog);
+  }
+  if (cast) {
+    // Rebuild only this private retrieval projection when persisted metadata is behind.
+    // The captured catalog cannot grant authority or change accepted source text.
+    memories = memories.map((memory) => {
+      const metadata = resolveEntityMetadata(memory.content, entityCatalog);
+      return { ...memory, entity_ids: [...new Set([...memory.entity_ids.filter((id) => !id.startsWith("campaign:")), ...metadata.entityIds])],
+        entities: [...new Set([...memory.entities, ...metadata.entities])] };
+    });
   }
   // Count only the already owner/campaign/world-version/cutoff-filtered rows.
   // This safe aggregate lets callers verify scope eligibility without exposing

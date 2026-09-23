@@ -7,6 +7,7 @@ import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/
 import type { ChronicleGenerationTransactionDependencies } from "../../packages/database/src/chronicle-repository.js";
 import { HISTORICAL_FACT_POOL_SQL, historicalFactAliasPatterns } from "../../packages/database/src/chronicle-historical-fact-pool.js";
 import { writeFile } from "node:fs/promises";
+import type { CastGenerationSnapshot } from "../../packages/contracts/src/campaign-cast-context.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 const unavailable = async (): Promise<never> => { throw new Error("This lexical fixture must never call a provider."); };
@@ -46,14 +47,48 @@ integration("Historical fact candidate lanes", () => {
       [ownerUserId, scope.campaignId, scope.worldVersionId, content, index, ids, ordinal]);
       return result.rows[0]!.id;
     };
-    const read = async (query: string, enrolled = true, cutoff = 3) => {
+    const read = async (query: string, enrolled = true, cutoff = 3, castSnapshot?: CastGenerationSnapshot) => {
       const client = await pool.connect();
       try { return await loadPostgresChronicleGenerationCandidates(client, { ...scope, query, throughTurnNumber: cutoff, retrievalBudgetTokens: 32_000,
-        ...(enrolled ? { storyMemoryPolicy } : {}) }, dependencies, { useSavepoints: false }); }
+        ...(enrolled ? { storyMemoryPolicy: castSnapshot ? { ...storyMemoryPolicy, castContext: true,
+          promptProtocol: "story-v17-campaign-cast", contextProtocol: "current-continuity-v4" } : storyMemoryPolicy } : {}),
+        ...(castSnapshot ? { castSnapshot } : {}) }, dependencies, { useSavepoints: false }); }
       finally { client.release(); }
     };
     return { ...scope, fact, read };
   }
+
+  it("retrieves older cast-name facts through a captured alias with stale derived entity IDs", async () => {
+    const value = await fixture(500);
+    const wanted = await value.fact("Mara hides the silver compass.", 0);
+    const foreign = await fixture();
+    const foreignFact = await foreign.fact("Mara hides a foreign campaign secret.", 0);
+    const characterId = crypto.randomUUID();
+    const cast: CastGenerationSnapshot = { version: "cast-context-v1", scope: { ownerUserId, campaignId: value.campaignId }, worldVersionId: value.worldVersionId,
+      revision: 1, boundary: { turnNumber: 3, timelineRevision: 0 }, coverageStartTurn: 1, trackedThroughTurn: 3, discoveryStatus: "current",
+      characters: [{ id: characterId, name: "Mara", aliases: ["The Watcher"], origin: { kind: "manual" }, profile: {}, pinned: false, ignored: false,
+        revision: 1, firstObservedTurn: 1, lastObservedTurn: 1 }], details: [{ characterId, observations: [], overrides: [] }] };
+    const result = await value.read("Ask The Watcher", true, 3, cast);
+    expect(result.candidates.map((candidate) => candidate.id)).toContain(wanted);
+    expect(result.candidates.map((candidate) => candidate.id)).not.toContain(foreignFact);
+    expect((await value.read("Ask The Watcher")).candidates.map((candidate) => candidate.id)).not.toContain(wanted);
+    await expect(value.read("Ask The Watcher", true, 3, { ...cast, scope: { ...cast.scope, campaignId: foreign.campaignId } })).rejects.toThrow(/cast/i);
+    await expect(value.read("Ask The Watcher", true, 2, cast)).rejects.toThrow(/cast/i);
+    expect((await pool.query("SELECT entity_ids FROM campaign_canonical_facts WHERE id=$1", [wanted])).rows[0].entity_ids).toEqual([]);
+    const otherId = crypto.randomUUID();
+    const ambiguous = { ...cast, characters: [...cast.characters, { ...cast.characters[0]!, id: otherId, name: "Sera" }],
+      details: [...cast.details, { characterId: otherId, observations: [], overrides: [] }] };
+    expect((await value.read("Ask The Watcher", true, 3, ambiguous)).candidates.map((candidate) => candidate.id)).not.toContain(wanted);
+    ambiguous.characters[1]!.ignored = true;
+    expect((await value.read("Ask The Watcher", true, 3, ambiguous)).candidates.map((candidate) => candidate.id)).not.toContain(wanted);
+    await pool.query("INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration) SELECT $1,$2,n,'Wait',CASE WHEN n=77 THEN 'Mara conceals the silver compass.' ELSE 'The courtyard is quiet.' END FROM generate_series(4,500) n", [ownerUserId, value.campaignId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=500 WHERE id=$1", [value.campaignId]);
+    await pool.query(`INSERT INTO chronicle_memories(owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata)
+      SELECT $1,$2,$3,id,'turn_fiction',turn_number,narration,10,0.5,'{}','{}','{}' FROM turns WHERE campaign_id=$2`, [ownerUserId, value.campaignId, value.worldVersionId]);
+    const laterCast = { ...cast, boundary: { ...cast.boundary, turnNumber: 500 }, trackedThroughTurn: 500 };
+    expect((await value.read("Ask The Watcher", true, 500, laterCast)).candidates.some((candidate) => candidate.ordinal === 77 && candidate.kind === "turn_fiction")).toBe(true);
+    expect((await value.read("Ask The Watcher", true, 500)).candidates.some((candidate) => candidate.ordinal === 77 && candidate.kind === "turn_fiction")).toBe(false);
+  });
 
   it("recalls old exact and entity-linked facts before 300 newer distractors, preserving legacy calibration", async () => {
     const value = await fixture();
