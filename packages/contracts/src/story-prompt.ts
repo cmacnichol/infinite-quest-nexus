@@ -17,6 +17,10 @@ export const LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v14-continuity
 export const PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v15-canonical-fact-format";
 export const STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v16-fact-wire-distinction";
 export const STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v3";
+/** Explicit opt-in; historical Story Memory constants remain frozen. */
+export const CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION = "story-v17-campaign-cast";
+export const CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v4";
+export const CAST_STORY_AUTHORITY_CONTRACT = "Campaign cast authority: use only the selected cast records and supplied evidence. User field overrides govern current portrayal from their effective turn, including intentional empty values. Older conflicting facts remain dated historical evidence; do not restore them as current attributes or treat compliance with a correction as a contradiction. Immutable world rules still apply; unresolved conflicts require uncertainty. Cast coverage is bounded: when tracking is incomplete, use accepted recent history for intervening events, and never infer that an omitted character or field is absent. Aliases identify the supplied stable character only when unambiguous. Prose relationship guidance is not a structured relationship record.";
 export const MAX_CONTINUITY_OPEN_THREADS = 500;
 
 /**
@@ -318,12 +322,16 @@ export function composeStoryPromptSystemPrompt(
 export function storyMemoryPromptCompatibilityIdentity(): string {
   return `${STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
 }
+export function castStoryMemoryPromptCompatibilityIdentity(): string {
+  return `${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
+}
 
 export function previousStoryMemoryPromptCompatibilityIdentity(): string {
   return `${PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${STORY_PROMPT_SCHEMA_VERSION}|${STORY_MEMORY_CONTEXT_POLICY_VERSION}`;
 }
 
 export function storyMemoryMandatoryContract(promptProtocol: string = STORY_MEMORY_PROMPT_PROTOCOL_VERSION): string {
+  if (promptProtocol === CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) return `${STORY_MEMORY_MANDATORY_CONTRACT}\n${CAST_STORY_AUTHORITY_CONTRACT}`;
   if (promptProtocol === STORY_MEMORY_PROMPT_PROTOCOL_VERSION) return STORY_MEMORY_MANDATORY_CONTRACT;
   if (promptProtocol === PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) return PREVIOUS_STORY_MEMORY_MANDATORY_CONTRACT;
   throw new Error("Unsupported Story Memory mandatory contract protocol.");

@@ -246,7 +246,9 @@ function executionProtocolIdentity(
   storyPromptContractProtocol?: string
 ): string {
   const legacyIdentity = generationExecutionProtocolIdentity(promptProtocol, generationPolicy);
-  if (storyMemoryPolicy) return `story-memory-v1|${legacyIdentity}`;
+  if (storyMemoryPolicy) return storyMemoryPolicy.castContext
+    ? `story-memory-cast-v1|${storyMemoryPolicy.promptProtocol}|${storyMemoryPolicy.contextProtocol}|${legacyIdentity}`
+    : `story-memory-v1|${legacyIdentity}`;
   return storyPromptContractProtocol ? `story-prompt-v1|${storyPromptContractProtocol}|${legacyIdentity}` : legacyIdentity;
 }
 
@@ -534,7 +536,7 @@ export function createPostgresGenerationCommandRepository(
           operationKind: "append",
           expectedTurnNumber: campaign.active_turn_number + 1,
           ...(storyMemoryPolicy ? {
-            baseIdentityVersion: "generation-base-v3" as const,
+            baseIdentityVersion: storyMemoryPolicy.castContext ? "generation-base-v4" as const : "generation-base-v3" as const,
             captureRecentWindow: storyMemoryPolicy.policy.recentTurnTarget > 1
           } : {})
         });
@@ -727,7 +729,7 @@ export function createPostgresGenerationCommandRepository(
           operationKind: "replace_latest",
           expectedTurnNumber: campaign.active_turn_number,
           ...(storyMemoryPolicy ? {
-            baseIdentityVersion: "generation-base-v3" as const,
+            baseIdentityVersion: storyMemoryPolicy.castContext ? "generation-base-v4" as const : "generation-base-v3" as const,
             captureRecentWindow: storyMemoryPolicy.policy.recentTurnTarget > 1
           } : {})
         });

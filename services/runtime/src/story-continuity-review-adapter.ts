@@ -1,4 +1,5 @@
 import { assertContinuityReviewPromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
+import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../../packages/contracts/src/story-prompt.js";
 import { generationEvidenceManifestHash, generationEvidenceManifestSchema, type GenerationEvidenceManifest } from "../../../packages/application/src/memory/generation-context.js";
 import type { StoryTurnOutput } from "../../../packages/contracts/src/story-prompt.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
@@ -13,6 +14,11 @@ import type { RuntimeTextExecution } from "./provider-credential-transport-adapt
 export class ContinuityReviewUnavailableError extends Error {
   readonly code = "continuity_review_unavailable";
   constructor() { super("continuity_review_unavailable: the complete bound review could not be prepared or verified."); }
+}
+function castAuthorityContract(protocolIdentity: string | undefined, manifest: GenerationEvidenceManifest): string {
+  const enabled = protocolIdentity === castStoryMemoryPromptCompatibilityIdentity();
+  if (!enabled && manifest.entries.some((entry) => entry.source.kind === "cast")) throw new ContinuityReviewUnavailableError();
+  return enabled ? `\n\n${CAST_STORY_AUTHORITY_CONTRACT}` : "";
 }
 export type PreparedContinuityReview = Readonly<{
   request: ProviderRequest; body: string; requestHash: string; input: ContinuityReviewInput;
@@ -53,6 +59,7 @@ export function prepareContinuityRepair(input: Readonly<{
   const manifest = generationEvidenceManifestSchema.parse(input.manifest);
   const prompts = assertContinuityReviewPromptSnapshot(input.promptSnapshot, "enforce");
   const repairPrompt = prompts.continuityReview!.repair;
+  const castContract = castAuthorityContract(prompts.storyMemoryCompatibility?.protocolIdentity, manifest);
   const projection = (draft: StoryTurnOutput) => buildContinuityReviewInput({ draft, direction: input.direction, evidence: [], requiredEvidenceIds: [] });
   const rejected = projection(input.rejectedDraft); const original = projection(input.originalMain ?? input.rejectedDraft);
   const required = new Set(manifest.requiredReviewEvidenceIds);
@@ -64,7 +71,7 @@ export function prepareContinuityRepair(input: Readonly<{
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
   const prepare = (entries: GenerationEvidenceManifest["entries"]): PreparedContinuityRepair | null => {
     const systemPrompt = prepareSystemPrompt(
-      `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.`,
+      `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.${castContract}`,
       input.prepareSystemPrompt
     );
     const unboundRequest: ProviderRequest = {
@@ -112,6 +119,7 @@ export function prepareContinuityReview(input: Readonly<{
   const manifest = parsed.data;
   const prompts = assertContinuityReviewPromptSnapshot(input.promptSnapshot, input.reviewMode);
   const reviewPrompt = prompts.continuityReview!.review;
+  const castContract = castAuthorityContract(prompts.storyMemoryCompatibility?.protocolIdentity, manifest);
   const projection = buildContinuityReviewInput({ draft: input.draft, direction: input.direction,
     // All selected entries must be supplied; omitted retrieval candidates are not part of this review scope.
     requiredEvidenceIds: manifest.requiredReviewEvidenceIds,
@@ -120,7 +128,7 @@ export function prepareContinuityReview(input: Readonly<{
   });
   const systemPrompt = prepareSystemPrompt(`${reviewPrompt.content}
 
-${CONTINUITY_REVIEW_CONTRACT}`, input.prepareSystemPrompt);
+${CONTINUITY_REVIEW_CONTRACT}${castContract}`, input.prepareSystemPrompt);
   const unboundRequest: ProviderRequest = { systemPrompt: systemPrompt.systemPrompt,
     input: stableStringify({ protocol: "story-continuity-review-v1", producingRequestHash: input.producingRequestHash, manifestHash: manifest.manifestHash, ...projection }),
     canonicalBudgeting: true, responseFormatFallback: "forbid",

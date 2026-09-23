@@ -16,6 +16,7 @@ import {
 } from "../../contracts/src/prompt-library.js";
 import {
   STORY_PROMPT_PROTOCOL_VERSION,
+  castStoryMemoryPromptCompatibilityIdentity,
   storyPromptProtocolIdentity
 } from "../../contracts/src/story-prompt.js";
 import type {
@@ -167,11 +168,12 @@ function resolveContinuityPromptPair(rows: readonly OverrideRow[]): NonNullable<
 export async function resolveStoryMemoryPromptSnapshot(
   database: DatabaseClient,
   scope: PromptScope,
-  continuityReviewMode: "off" | "observe" | "enforce" = "off"
+  continuityReviewMode: "off" | "observe" | "enforce" = "off",
+  castContext = false
 ): Promise<PromptSnapshotV2> {
   const templates = await resolveSnapshot(database, scope, true, "story_memory");
   const storyMemoryCompatibility = {
-    protocolIdentity: storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity,
+    protocolIdentity: castContext ? castStoryMemoryPromptCompatibilityIdentity() : storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity,
     templateHashes: {
       story_system: templates.story_system.hash,
       event_extension: templates.event_extension.hash

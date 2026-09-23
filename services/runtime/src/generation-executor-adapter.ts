@@ -4,7 +4,7 @@ import { prepareGenerationReview } from "./generation-review-adapter.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
-import { canonicalEvidenceJson, hasGenerationCharacterAuthority } from "../../../packages/application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, hasGenerationCharacterAuthority, isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
 export { planGenerationPromptContext } from "./generation-context-planner.js";
 import {
@@ -1916,6 +1916,16 @@ async function executeLoadedGeneration(
     return false;
   }
   const frozenPromptEnvelope = job.prompt_snapshot;
+  if ((frozenStoryMemoryPolicySnapshot?.castContext === true) !== isGenerationBaseIdentityV4(job.generation_base_identity)) {
+    assertActiveGenerationUpdate(await repository.markRecoverable({
+      jobId: job.id, ownerUserId: job.owner_user_id, workerId, providerResponseId: null, providerFinishReason: null,
+      errorCode: "story_memory_cast_base_mismatch", errorMessage: "Saved cast capability does not match the captured generation base.",
+      recoveryMetadata: { reason: "story_memory_cast_base_mismatch", diagnostic: {
+        code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue"
+      } }
+    }), "saving incompatible cast authority recovery state");
+    return false;
+  }
   const reviewMode = frozenStoryMemoryPolicySnapshot?.policy.continuityReview ?? "off";
   let promptSnapshot: ReturnType<typeof readPromptSnapshot>;
   try {
@@ -2009,7 +2019,9 @@ async function executeLoadedGeneration(
     const legacyExecutionProtocol = generationPolicy
       ? generationExecutionProtocolIdentity(basePromptProtocol, generationPolicy) : basePromptProtocol;
     expectedExecutionProtocol = hasFrozenStoryMemoryPolicy
-      ? `story-memory-v1|${legacyExecutionProtocol}`
+      ? frozenStoryMemoryPolicySnapshot?.castContext
+        ? `story-memory-cast-v1|${frozenStoryMemoryPolicySnapshot.promptProtocol}|${frozenStoryMemoryPolicySnapshot.contextProtocol}|${legacyExecutionProtocol}`
+        : `story-memory-v1|${legacyExecutionProtocol}`
       : frozenStoryPromptContractProtocol
         ? `story-prompt-v1|${frozenStoryPromptContractProtocol}|${legacyExecutionProtocol}`
         : legacyExecutionProtocol;

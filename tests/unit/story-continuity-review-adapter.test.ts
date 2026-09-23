@@ -5,6 +5,7 @@ import { createStoryEvidence, generationEvidenceManifestHash } from "../../packa
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
+import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 const requestHash = sha256("producing-request");
 const entry = createStoryEvidence({ source: { kind: "state_edit", id: "state", revision: "1", turnNumber: 1 }, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null }, { text: "Mira waits at the lighthouse." });
 const body = { version: "generation-evidence-v1" as const, attemptId: "00000000-0000-4000-8000-000000000001", producingRequestHash: requestHash, entries: [entry], requiredReviewEvidenceIds: [entry.id] };
@@ -14,6 +15,24 @@ const provider = { id: "p", name: "Fake", providerRole: "text", providerType: "o
 const promptSnapshot = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])), continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
 const prepare = (overrides = {}) => prepareContinuityReview({ provider, manifest, producingRequestHash: requestHash, promptSnapshot, reviewMode: "observe", direction: "Wait", draft, ...overrides });
 describe("exact continuity review provider request", () => {
+  it("binds cast precedence to frozen v17 review and repair without changing old prompts", () => {
+    const castEntry = createStoryEvidence({ source: { kind: "cast", id: "mara:edit", revision: "1", turnNumber: 1 },
+      semanticRole: "corrected_state", rank: 0, selectionGroup: "cast", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1",
+      form: "complete", spans: [], canonicalFactId: null }, { text: "Mara has green eyes from turn 1." });
+    const castBody = { ...body, entries: [castEntry], requiredReviewEvidenceIds: [castEntry.id] };
+    const castManifest = { ...castBody, manifestHash: generationEvidenceManifestHash(castBody) };
+    const castPrompts = { ...promptSnapshot, storyMemoryCompatibility: { protocolIdentity: castStoryMemoryPromptCompatibilityIdentity(),
+      templateHashes: { story_system: promptSnapshot.templates.story_system!.hash, event_extension: promptSnapshot.templates.event_extension!.hash } } };
+    expect(prepare().request.systemPrompt).not.toContain(CAST_STORY_AUTHORITY_CONTRACT);
+    expect(() => prepare({ manifest: castManifest })).toThrow();
+    const review = prepare({ manifest: castManifest, promptSnapshot: castPrompts });
+    expect(review.request.systemPrompt).toContain(CAST_STORY_AUTHORITY_CONTRACT);
+    expect(review.input.evidence[0]).toMatchObject({ role: "corrected_state", sourceKind: "cast", required: true });
+    const repair = prepareContinuityRepair({ provider, manifest: castManifest, promptSnapshot: castPrompts,
+      direction: "Visit Mara", rejectedDraft: draft, findings: [] });
+    expect(repair.request.systemPrompt).toContain(CAST_STORY_AUTHORITY_CONTRACT);
+    expect(repair.requiredEvidenceIds).toContain(castEntry.id);
+  });
   it("measures the same complete transport body and excludes private scratchpad", () => {
     const prepared = prepare();
     expect(prepared.body).toBe(serializeProviderRequest({ ...provider, baseUrl: "" }, prepared.request).body);

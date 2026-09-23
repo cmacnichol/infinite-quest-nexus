@@ -2268,6 +2268,22 @@ describe("generation executor adapter", () => {
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])("rejects mismatched cast policy and captured base before provider loading: %s", async (castContext) => {
+    const policy = defaultStoryMemoryPolicy("r1");
+    const job = completeGenerationExecutionPayload();
+    if (castContext) job.context_options = { ...job.context_options, storyMemoryPolicy: {
+      policy, policyHash: storyMemoryPolicyHash(policy), castContext: true, contextProtocol: "current-continuity-v4",
+      promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64)
+    } } as never;
+    else job.generation_base_identity = { ...job.generation_base_identity, version: "generation-base-v4" } as never;
+    const repository = { ...guardedRepository(), loadExecutionPayload: vi.fn(async () => job), markRecoverable: vi.fn(async () => true) };
+    const collaborators = rejectedCollaborators();
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(false);
+    expect(collaborators.loadTextExecution).not.toHaveBeenCalled();
+    expect(repository.markRecoverable).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "story_memory_cast_base_mismatch" }));
+  });
+
   it("refuses an unsupported future Story Memory policy before loading its provider and publishes discard recovery", async () => {
     const policy = defaultStoryMemoryPolicy("r2");
     const job = completeGenerationExecutionPayload();

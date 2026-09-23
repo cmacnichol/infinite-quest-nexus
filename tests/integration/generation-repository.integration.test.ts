@@ -20,6 +20,7 @@ import { readTurnReportedCostsForTest } from "../helpers/provider-application-fi
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
 import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { resolveStoryMemoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -86,19 +87,21 @@ integration("PostgreSQL generation command repository", () => {
     });
   }
 
-  function enrolledPolicyRepository() {
+  function enrolledPolicyRepository(castContext = false) {
     const policy = defaultStoryMemoryPolicy("r1");
     return createPostgresGenerationCommandRepository(pool, {
-      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) =>
-        loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) => castContext
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: scopeOwnerUserId, campaignId, scope: "campaign" }, "off", true)
+        : loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
       promptProtocolVersion: providerPromptProtocolVersion,
       readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
         readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
       resolveStoryMemoryPolicySnapshot: async () => ({
         policy,
         policyHash: storyMemoryPolicyHash(policy),
-        contextProtocol: "current-continuity-v3",
-        promptProtocol: "story-v14-continuity-context",
+        contextProtocol: castContext ? "current-continuity-v4" : "current-continuity-v3",
+        promptProtocol: castContext ? "story-v17-campaign-cast" : "story-v14-continuity-context",
+        ...(castContext ? { castContext: true as const } : {}),
         providerConfigurationFingerprint: "a".repeat(64)
       })
     });
@@ -639,6 +642,23 @@ integration("PostgreSQL generation command repository", () => {
         characterProfileFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/)
       }) })
     ]));
+  });
+
+  it("freezes cast capability, v4 base and v17 prompt for append and replacement", async () => {
+    const commands = enrolledPolicyRepository(true);
+    for (const replacement of [false, true]) {
+      const imported = await campaign();
+      const scope = { ownerUserId, campaignId: imported.campaignId };
+      const job = replacement ? await commands.enqueueReplacement(scope, replacementRequest("Visit Mara."))
+        : await commands.enqueueAppend(scope, appendRequest("Visit Mara."));
+      const row = (await pool.query("SELECT generation_base_identity,context_options,prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id])).rows[0];
+      expect(row.generation_base_identity).toMatchObject({ version: "generation-base-v4", castRevision: 0,
+        castFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), baseTurnNumber: replacement ? 1 : 2 });
+      expect(row.context_options.storyMemoryPolicy).toMatchObject({ castContext: true, promptProtocol: "story-v17-campaign-cast", contextProtocol: "current-continuity-v4" });
+      expect(row.prompt_snapshot.storyMemoryCompatibility.protocolIdentity).toBe("story-v17-campaign-cast|story-output-v2|current-continuity-v4");
+      expect(row.prompt_protocol_version).toContain("story-v17-campaign-cast");
+      await commands.cancel({ ownerUserId, jobId: job.id });
+    }
   });
 
   function replacementRequest(

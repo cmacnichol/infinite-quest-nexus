@@ -10,6 +10,7 @@ import {
   STORY_PROSE_GUIDANCE,
   previousStoryMemoryPromptCompatibilityIdentity,
   storyMemoryPromptCompatibilityIdentity,
+  castStoryMemoryPromptCompatibilityIdentity,
   storyPromptCompatibilityIdentity
 } from "./story-prompt.js";
 
@@ -115,7 +116,7 @@ const storyMemoryCompatibilitySchema = z.object({
   protocolIdentity: z.union([
     z.literal(legacyStoryMemoryPromptCompatibilityIdentity),
     z.literal(previousStoryMemoryPromptCompatibilityIdentity()),
-    z.literal(storyMemoryPromptCompatibilityIdentity())
+    z.literal(storyMemoryPromptCompatibilityIdentity()), z.literal(castStoryMemoryPromptCompatibilityIdentity())
   ]),
   templateHashes: z.object({
     story_system: z.string().regex(/^[a-f0-9]{64}$/),
