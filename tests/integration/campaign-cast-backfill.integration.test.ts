@@ -8,6 +8,9 @@ import { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } from
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
 import { applyCastBoundaryChange } from "../../packages/database/src/campaign-cast-lifecycle.js";
+import Fastify from "fastify";
+import { registerCampaignCastRoutes } from "../../services/api/src/campaign-cast-routes.js";
+import { createApiCampaignCastApplication } from "../../services/runtime/src/campaign-cast-composition.js";
 
 describe("accepted-history scan preview", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -244,5 +247,70 @@ describe("accepted-history scan preview", () => {
     expect(await scans.scheduleNext()).toBe(true);
     expect((await createCastDiscoveryJobRepository(pool, () => true, () => true).claim("other-campaign"))?.scope).toEqual(ready.scope);
     expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_discovery_jobs WHERE campaign_id=$1", [busy.scope.campaignId])).rows[0].n).toBe(0);
+  });
+  it("exposes owner-bound preview, idempotent Start and controls with provider preparation outside the transaction", async () => {
+    const f = await fixture(), single = createDatabasePool(process.env.TEST_DATABASE_URL!, 1);
+    let preparations = 0;
+    const providers = { resolution: { async resolveDirect() { return { status: "resolved", providerProfileId: f.execution.providerProfileId }; } },
+      execution: { async text() { return { id: f.execution.providerProfileId }; } },
+      async prepareCastDiscoveryExecution() { preparations++; await single.query("SELECT 1"); return f.execution; } };
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(single,
+      { castEditingEnabled: true, castDiscoveryEnabled: true, castBackfillEnabled: true }, providers as never),
+      enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const base = `/api/v1/campaigns/${f.scope.campaignId}/cast/scans`;
+      expect((await app.inject({ method: "POST", url: `${base}/preview`, payload: { ...f.request, ownerUserId: randomUUID() } })).statusCode).toBe(422);
+      expect((await app.inject({ method: "POST", url: `/api/v1/campaigns/${randomUUID()}/cast/scans/preview`, payload: f.request })).statusCode).toBe(404);
+      expect(preparations).toBe(0);
+      const preview = await app.inject({ method: "POST", url: `${base}/preview`, payload: f.request });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json()).toMatchObject({ turnCount: 3, estimatedChunkRequests: 3 });
+      const started = await app.inject({ method: "POST", url: base, payload: f.request });
+      expect(started.statusCode).toBe(201);
+      const scan = started.json();
+      expect((await app.inject({ method: "POST", url: base, payload: f.request })).json()).toEqual(scan);
+      expect(preparations).toBe(2);
+      expect((await app.inject({ method: "GET", url: base })).json()).toMatchObject({ scan, capabilities: { castBackfill: true } });
+      expect((await app.inject({ method: "POST", url: `${base}/${scan.id}/pause`, payload: {} })).json()).toMatchObject({ status: "paused" });
+      expect((await app.inject({ method: "POST", url: `${base}/${scan.id}/resume`, payload: {} })).json()).toMatchObject({ status: "queued" });
+      expect((await app.inject({ method: "POST", url: `${base}/${scan.id}/cancel`, payload: {} })).json()).toMatchObject({ status: "cancelled" });
+      expect((await app.inject({ method: "GET", url: `${base}/${scan.id}` })).json()).toMatchObject({ status: "cancelled" });
+    } finally { await app.close(); await single.end(); }
+  });
+  it.each(["provider failure", "boundary race"])("leaves no scan after API preparation encounters %s", async mode => {
+    const f = await fixture();
+    const providers = { resolution: { async resolveDirect() { return { status: "resolved", providerProfileId: f.execution.providerProfileId }; } },
+      execution: { async text() { return { id: f.execution.providerProfileId }; } },
+      async prepareCastDiscoveryExecution() {
+        if (mode === "provider failure") throw new Error("PRIVATE_PROVIDER_CREDENTIAL_DETAIL");
+        await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [f.scope.campaignId]);
+        return f.execution;
+      } };
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(pool,
+      { castEditingEnabled: true, castDiscoveryEnabled: true, castBackfillEnabled: true }, providers as never),
+      enabled: true, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const response = await app.inject({ method: "POST", url: `/api/v1/campaigns/${f.scope.campaignId}/cast/scans`, payload: f.request });
+      expect(response.statusCode).toBe(mode === "provider failure" ? 503 : 409);
+      expect(response.json().code).toBe(mode === "provider failure" ? "cast_discovery_unavailable" : "cast_revision_conflict");
+      expect(response.body).not.toContain("PRIVATE_PROVIDER");
+      expect((await pool.query("SELECT count(*)::int n FROM campaign_cast_scans WHERE campaign_id=$1", [f.scope.campaignId])).rows[0].n).toBe(0);
+    } finally { await app.close(); }
+  });
+  it("keeps progress and cancellation available through the API with editing and backfill disabled", async () => {
+    const f = await fixture(), scan = await createCastBackfillRepository(pool, () => true).start(f.scope, f.request, f.execution);
+    const app = Fastify();
+    await app.register(registerCampaignCastRoutes, { application: createApiCampaignCastApplication(pool,
+      { castEditingEnabled: false, castDiscoveryEnabled: false, castBackfillEnabled: false }),
+      enabled: false, resolveOwner: async () => ({ ownerUserId }) });
+    try {
+      const base = `/api/v1/campaigns/${f.scope.campaignId}/cast/scans`;
+      expect((await app.inject({ method: "GET", url: base })).json()).toMatchObject({ scan, capabilities: { castBackfill: false } });
+      expect((await app.inject({ method: "POST", url: base, payload: f.request })).statusCode).toBe(503);
+      expect((await app.inject({ method: "POST", url: `${base}/${scan.id}/resume`, payload: {} })).statusCode).toBe(503);
+      expect((await app.inject({ method: "POST", url: `${base}/${scan.id}/cancel`, payload: {} })).json()).toMatchObject({ status: "cancelled" });
+    } finally { await app.close(); }
   });
 });

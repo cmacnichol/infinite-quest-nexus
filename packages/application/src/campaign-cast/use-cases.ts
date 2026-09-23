@@ -2,13 +2,16 @@ import { castScopeSchema, castListQuerySchema, createCastCharacterSchema, editCa
   castWriteResultSchema, castDetailSchema, type CastScope, type CastListQuery,
   type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
 import { CampaignCastError, type CampaignCastWritePort } from "./ports.js";
+import type { CastBackfillApplication } from "./backfill.js";
 import { castDiscoveryStatusSchema, castCandidateQuerySchema, castCandidateListSchema, resolveCastCandidateSchema,
   castCandidateResolutionSchema, retryCastDiscoverySchema, castDiscoveryRetryResultSchema, type RetryCastDiscovery,
   type CastDiscoveryRetryResult, type CastCandidateQuery, type ResolveCastCandidate } from "@infinite-quest/contracts";
 
 export function createCampaignCastApplication(repository: CampaignCastWritePort,
-  discovery?: { retryFailed(scope: CastScope, id: string, request: RetryCastDiscovery): Promise<CastDiscoveryRetryResult> }) {
+  discovery?: { retryFailed(scope: CastScope, id: string, request: RetryCastDiscovery): Promise<CastDiscoveryRetryResult> },
+  scans?: CastBackfillApplication) {
   return {
+    ...(scans ? { scans } : {}),
     async retryDiscovery(scope: CastScope, id: string, request: RetryCastDiscovery) {
       const parsedScope = castScopeSchema.parse(scope), parsedRequest = retryCastDiscoverySchema.parse(request);
       if (!discovery) throw new CampaignCastError("cast_discovery_disabled");

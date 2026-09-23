@@ -1,4 +1,14 @@
 import { castBackfillRequestSchema, type CastBackfillRequest, type CastBoundary } from "@infinite-quest/contracts";
+import type { CastScope, CastBackfillPreview, CastBackfillProgress } from "@infinite-quest/contracts";
+
+export interface CastBackfillApplication {
+  enabled: boolean;
+  preview(scope: CastScope, request: CastBackfillRequest): Promise<CastBackfillPreview>;
+  start(scope: CastScope, request: CastBackfillRequest): Promise<CastBackfillProgress>;
+  latest(scope: CastScope): Promise<CastBackfillProgress | null>;
+  get(scope: CastScope, id: string): Promise<CastBackfillProgress>;
+  control(scope: CastScope, id: string, action: "pause" | "resume" | "cancel"): Promise<CastBackfillProgress>;
+}
 
 export function validateCastBackfillRange(input: {
   request: CastBackfillRequest;

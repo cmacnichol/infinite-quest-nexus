@@ -59,3 +59,13 @@ RED/GREEN: the configuration expectation failed before the flag existed; two com
 API, scan retry, legacy UI and the complete phase-06 acceptance audit remain outstanding. No runtime Start endpoint is exposed yet.
 
 Full unit verification after runtime wiring: 4,434 passed and 44 skipped across 352 files (`.tmp/campaign-cast/phase6-runtime-unit.log`). Diff checks passed. Browser and live-provider verification remain unperformed for this backend/runtime slice.
+
+## Scan HTTP application
+
+Added owner-scoped preview/Start/latest/get/pause/resume/cancel under `/cast/scans`. The latest response includes the independent backfill capability. The application validates request contracts before preparing the server-selected provider, verifies campaign ownership before metadata access, and performs provider preparation outside database transactions. Start revalidates accepted history and boundary after preparation. Idempotent replays read the original scan before provider preparation, so retries do not depend on current provider availability. Read/cancel are available with both editing and backfill disabled. Provider failures return a sanitized recovery code without leaking private details.
+
+RED/GREEN: the route test returned 404 before registration; the complete request flow then passed against real PostgreSQL with a one-connection pool, including a preparation callback that needs that connection. Additional tests cover provider failure, history changing during preparation and disabled-mode controls. Final affected PostgreSQL run: 86 passed across backfill, discovery, lifecycle and portability. TypeScript passed after correcting an exact-optional-property error; diff checks passed. Logs: `.tmp/campaign-cast/phase6-api-{red,green,pg}.log`.
+
+Still required: explicit failed-source retry API, shared client and rendered legacy scan controls, complete source/coverage/publication audit and phase acceptance. All feature flags remain unchanged/default-off; no live provider or deployment was used.
+
+Full unit verification after API wiring: 4,434 passed and 44 skipped across 352 files (`.tmp/campaign-cast/phase6-api-unit.log`). Documentation link targets and diff checks passed. Rendered browser verification remains for the upcoming legacy UI slice.

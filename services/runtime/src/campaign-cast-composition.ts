@@ -9,8 +9,9 @@ import { createCastDiscoveryExtractor } from "./campaign-cast-discovery-adapter.
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 import { logger } from "../../../packages/logger/src/index.js";
 import { createCastBackfillRepository } from "../../../packages/database/src/campaign-cast-backfill-repository.js";
+import { createApiCastBackfillApplication } from "./campaign-cast-backfill-composition.js";
 
-export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castEditingEnabled" | "castDiscoveryEnabled">,
+export function createApiCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castEditingEnabled" | "castDiscoveryEnabled" | "castBackfillEnabled">,
   providers?: Pick<ApiGenerationProviderCollaborators, "execution" | "resolution" | "prepareCastDiscoveryExecution">) {
   const jobs = createCastDiscoveryJobRepository(pool, () => config.castEditingEnabled === true && config.castDiscoveryEnabled === true);
   return createCampaignCastApplication(createPostgresCampaignCastRepository(pool, {
@@ -35,7 +36,7 @@ export function createApiCampaignCastApplication(pool: DatabasePool, config: Pic
       // Recheck all guards after metadata I/O, including races with corrections and other retries.
       return jobs.retryFailed(scope, id, request, execution);
     }
-  });
+  }, createApiCastBackfillApplication(pool, config, providers));
 }
 
 export function createWorkerCampaignCastApplication(pool: DatabasePool, config: Pick<RuntimeConfig, "castDiscoveryEnabled" | "castBackfillEnabled">,

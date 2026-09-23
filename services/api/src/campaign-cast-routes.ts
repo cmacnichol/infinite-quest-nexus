@@ -1,10 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { CampaignCastError, type CampaignCastApplication } from "../../../packages/application/src/campaign-cast/index.js";
+import { registerCampaignCastScanRoutes } from "./campaign-cast-scan-routes.js";
 
 export async function registerCampaignCastRoutes(app: FastifyInstance, options: {
   application: CampaignCastApplication; enabled: boolean; resolveOwner(): Promise<{ ownerUserId: string }>;
 }) {
+  await registerCampaignCastScanRoutes(app, { ...(options.application.scans ? { application: options.application.scans } : {}), resolveOwner: options.resolveOwner });
   const base = "/api/v1/campaigns/:campaignId/cast";
   const params = z.object({ campaignId: z.uuid(), characterId: z.uuid().optional(), candidateId: z.uuid().optional(), jobId: z.uuid().optional() });
   for (const [method, path] of [["GET", base], ["POST", base], ["GET", `${base}/discovery`], ["GET", `${base}/candidates`],

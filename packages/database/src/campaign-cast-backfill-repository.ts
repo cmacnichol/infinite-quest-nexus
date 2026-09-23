@@ -27,6 +27,26 @@ async function readProgress(client: DatabaseClient, scope: CastScope, id: string
 
 export function createCastBackfillRepository(pool: DatabasePool, enabled = () => false) {
   return {
+    async latest(rawScope: CastScope) {
+      const scope = castScopeSchema.parse(rawScope);
+      return withTransaction(pool, async client => {
+        if (!(await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_user_id=$2", [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_not_found");
+        const row = (await client.query("SELECT id FROM campaign_cast_scans WHERE campaign_id=$1 AND owner_user_id=$2 ORDER BY created_at DESC,id DESC LIMIT 1",
+          [scope.campaignId, scope.ownerUserId])).rows[0];
+        return row ? readProgress(client, scope, row.id) : null;
+      });
+    },
+    async replayStart(rawScope: CastScope, rawRequest: CastBackfillRequest) {
+      const scope = castScopeSchema.parse(rawScope), request = castBackfillRequestSchema.parse(rawRequest);
+      return withTransaction(pool, async client => {
+        if (!(await client.query("SELECT id FROM campaigns WHERE id=$1 AND owner_user_id=$2 FOR UPDATE", [scope.campaignId, scope.ownerUserId])).rows.length) throw new CampaignCastError("cast_not_found");
+        const prior = (await client.query("SELECT id,request_hash FROM campaign_cast_scans WHERE campaign_id=$1 AND owner_user_id=$2 AND idempotency_key=$3",
+          [scope.campaignId, scope.ownerUserId, request.idempotencyKey])).rows[0];
+        if (!prior) return null;
+        if (prior.request_hash !== sha256(stableStringify(request))) throw new CampaignCastError("cast_idempotency_conflict");
+        return readProgress(client, scope, prior.id);
+      });
+    },
     async scheduleNext() {
       if (!enabled()) return false;
       return withTransaction(pool, async client => {
