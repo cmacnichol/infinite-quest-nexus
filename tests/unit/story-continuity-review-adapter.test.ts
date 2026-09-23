@@ -15,6 +15,29 @@ const provider = { id: "p", name: "Fake", providerRole: "text", providerType: "o
 const promptSnapshot = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])), continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
 const prepare = (overrides = {}) => prepareContinuityReview({ provider, manifest, producingRequestHash: requestHash, promptSnapshot, reviewMode: "observe", direction: "Wait", draft, ...overrides });
 describe("exact continuity review provider request", () => {
+  it.each(["protected", "historical_fact"] as const)("keeps a current cast correction and conflicting %s canonical fact distinct through a scoped review pass", async (selectionGroup) => {
+    const correction = createStoryEvidence({ source: { kind: "cast", id: "mara:eyes", revision: "2", turnNumber: 8 },
+      semanticRole: "corrected_state", rank: 0, selectionGroup: "cast", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1",
+      form: "complete", spans: [], canonicalFactId: null }, { text: "Mara has gray eyes from turn 8." });
+    const historical = createStoryEvidence({ source: { kind: "canonical_fact", id: "10000000-0000-4000-8000-000000000001", revision: "0", turnNumber: 1 },
+      semanticRole: "canonical_fact", rank: 1, selectionGroup, sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1",
+      form: "complete", spans: [], canonicalFactId: "10000000-0000-4000-8000-000000000001" }, { text: "Mara has blue eyes." });
+    const reviewBody = { ...body, entries: [correction, historical], requiredReviewEvidenceIds: [correction.id] };
+    const prepared = prepare({ manifest: { ...reviewBody, manifestHash: generationEvidenceManifestHash(reviewBody) },
+      draft: { ...draft, narration: "Mara's gray eyes follow the road." },
+      promptSnapshot: { ...promptSnapshot, storyMemoryCompatibility: { protocolIdentity: castStoryMemoryPromptCompatibilityIdentity(),
+        templateHashes: { story_system: promptSnapshot.templates.story_system!.hash, event_extension: promptSnapshot.templates.event_extension!.hash } } } });
+    expect(prepared.request.systemPrompt).toContain(CAST_STORY_AUTHORITY_CONTRACT);
+    expect(prepared.input.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: correction.id, role: "corrected_state", required: true }),
+      expect.objectContaining({ id: historical.id, role: "canonical_fact", content: historical.content })
+    ]));
+    const result = await executePreparedContinuityReview({ ...provider, execute: async () => ({
+      content: JSON.stringify({ version: "story-continuity-review-v1", verdict: "pass", findings: [] }), outputLimited: false,
+      preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) }
+    }) } as typeof provider, prepared);
+    expect(result.review.verdict).toBe("pass");
+  });
   it("binds cast precedence to frozen v17 review and repair without changing old prompts", () => {
     const castEntry = createStoryEvidence({ source: { kind: "cast", id: "mara:edit", revision: "1", turnNumber: 1 },
       semanticRole: "corrected_state", rank: 0, selectionGroup: "cast", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1",

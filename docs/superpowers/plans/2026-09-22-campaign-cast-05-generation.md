@@ -44,8 +44,8 @@ Returning character after a long absence; alias shared by two characters; cast l
 
 ## Task 1: extend identity catalog and retrieval
 
-- [ ] Extend `EntityCatalogInput` with `campaignCharacters?: readonly CastCharacter[]` and add source `campaign`; use IDs `campaign:<uuid>`. Keep world and protagonist IDs compatible with persisted historical metadata. Export the new selector from the domain barrel.
-- [ ] Test that an unknown discovery remains heuristic until admitted to the cast, then both name and accepted alias resolve to the same stable campaign ID. Shared aliases remain ambiguous; do not select both characters as if identity were certain.
+- [x] Extend `EntityCatalogInput` with `campaignCharacters?: readonly CastCharacter[]` and add source `campaign`; use IDs `campaign:<uuid>`. Keep world and protagonist IDs compatible with persisted historical metadata. Export the new selector from the domain barrel.
+- [x] Test that an unknown discovery remains heuristic until admitted to the cast, then both name and accepted alias resolve to the same stable campaign ID. Shared aliases remain ambiguous; do not select both characters as if identity were certain.
 
 ```ts
 expect(selectCastContext({
@@ -56,30 +56,30 @@ expect(selectCastContext({
 }).records).toEqual([]);
 ```
 
-- [ ] Consume campaign occurrences linked to world entities by phase 04; context reads must not create new identities. Keep world immutable defaults and campaign observations distinct in the fiction projection and deduplicate equivalent world/campaign references without losing provenance.
-- [ ] Resolve conflicting user override versus an older canonical prose fact explicitly: the current field override is portrayal authority from its effective boundary; preserve the older fact as dated historical evidence. Include this precedence in the prompt and reviewer contracts, and test that an override does not trigger a false continuity rejection. Do not rewrite unrelated historical facts.
-- [ ] Enrich Chronicle metadata for accepted source turns already carrying the discovered character. Reindex derived entity IDs for affected evidence and aliases; do not require an embedding regeneration to make lexical/ID retrieval useful.
-- [ ] Preserve scoped fallback retrieval when derived metadata is behind. Indexing state cannot grant source authority or mutate the accepted ledger.
-- [ ] Run entity/catalog/context unit tests RED/GREEN and commit.
+- [x] Consume campaign occurrences linked to world entities by phase 04; context reads must not create new identities. Keep world immutable defaults and campaign observations distinct in the fiction projection and deduplicate equivalent world/campaign references without losing provenance.
+- [x] Resolve conflicting user override versus an older canonical prose fact explicitly: the current field override is portrayal authority from its effective boundary; preserve the older fact as dated historical evidence. Include this precedence in the prompt and reviewer contracts, and test that an override does not trigger a false continuity rejection. Do not rewrite unrelated historical facts.
+- [x] Enrich Chronicle metadata for accepted source turns already carrying the discovered character. Reindex derived entity IDs for affected evidence and aliases; do not require an embedding regeneration to make lexical/ID retrieval useful.
+- [x] Preserve scoped fallback retrieval when derived metadata is behind. Indexing state cannot grant source authority or mutate the accepted ledger.
+- [x] Run entity/catalog/context unit tests RED/GREEN and commit.
 
 ## Task 2: bounded character context and freshness semantics
 
-- [ ] Select directly named and present characters first, then characters tied to active threads, then pinned/recent relevant characters. Ignore supporting characters marked ignored. Do not include unresolved identity candidates as factual profiles.
-- [ ] Begin with a cast budget of `min(3000, floor(0.10 * availableContextTokens))` inside the existing total budget, not in addition to it. Treat this as a tunable initial policy, not a proven optimum. Preserve the protagonist's existing protected authority and do not include a duplicate protagonist card.
-- [ ] Serialize compact identity, relevant overrides, stable established traits, and last-known dynamic facts with their source turns. Drop whole optional fields/records deterministically when over budget; never cut a field mid-value or silently omit a user correction while including a conflicting automatic value. Surface omitted record/field counts in diagnostics.
-- [ ] If tracking is behind the generation base, include current user overrides and clearly dated stable observations; omit stale dynamic `state.*` values from asserted current state. Include a coverage notice in private context and rely on the existing accepted recent-turn/Chronicle paths for intervening story events. Do not wait indefinitely, rerun narration, or claim all characters are current.
-- [ ] For edits while generation is active, preserve phase 02's 409 rule. For background discovery, preserve phase 04's publication deferral. Capture the cast snapshot under existing campaign locks and verify its fingerprint at commit as defense in depth.
-- [ ] Add snapshot tests for budget overflow, complete field omission, zero available cast budget, ignored characters, shared aliases, and stale dynamic location. Verify final serialized request estimates, not only the character block's estimate.
-- [ ] Run focused planner/authority suites RED/GREEN; commit selection and snapshot changes.
+- [x] Select directly named and present characters first, then characters tied to active threads, then pinned/recent relevant characters. Ignore supporting characters marked ignored. Do not include unresolved identity candidates as factual profiles.
+- [x] Begin with a cast budget of `min(3000, floor(0.10 * availableContextTokens))` inside the existing total budget, not in addition to it. Treat this as a tunable initial policy, not a proven optimum. Preserve the protagonist's existing protected authority and do not include a duplicate protagonist card.
+- [x] Serialize compact identity, relevant overrides, stable established traits, and last-known dynamic facts with their source turns. Drop whole optional fields/records deterministically when over budget; never cut a field mid-value or silently omit a user correction while including a conflicting automatic value. Surface omitted record/field counts in diagnostics.
+- [x] If tracking is behind the generation base, include current user overrides and clearly dated stable observations; omit stale dynamic `state.*` values from asserted current state. Include a coverage notice in private context and rely on the existing accepted recent-turn/Chronicle paths for intervening story events. Do not wait indefinitely, rerun narration, or claim all characters are current.
+- [x] For edits while generation is active, preserve phase 02's 409 rule. For background discovery, preserve phase 04's publication deferral. Capture the cast snapshot under existing campaign locks and verify its fingerprint at commit as defense in depth.
+- [x] Add snapshot tests for budget overflow, complete field omission, zero available cast budget, ignored characters, shared aliases, and stale dynamic location. Verify final serialized request estimates, not only the character block's estimate.
+- [x] Run focused planner/authority suites RED/GREEN; commit selection and snapshot changes.
 
 ## Task 3: exact provider payload, review, and next-turn proof
 
-- [ ] Add a new explicit prompt/base protocol for cast-enabled jobs and backward-compatible readers. Frozen older jobs never acquire new cast context mid-retry. Include cast operation capability in the execution policy snapshot.
-- [ ] Bind selected cast documents into the producing-request source manifest. Review can cite only records actually serialized; a rejected/unresolved candidate cannot supply a contradiction finding. Add cast source support to the corresponding strict schemas and review adapter tests.
-- [ ] Write a composed real-PostgreSQL test with deterministic narration and extraction providers: discover Mara, accept alias evidence, apply a user correction, advance several turns, reference the alias, capture the actual outgoing request, commit, and inspect the next generation's snapshot. Assert stable ID, correct override, source turn, and no foreign campaign content.
-- [ ] Add lag, failed extraction, concurrent publication deferral, historical retry, corrected narration, branch-before-introduction, oversized cast, and disabled-capability cases. Assert legacy Action and Story Direction paths either consume the new versioned cast authority correctly or remain on the explicitly disabled compatible path; do not silently claim both are supported.
-- [ ] Run `corepack pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-generation.integration.test.ts` plus affected story-continuity/generation tests and type checks. Document which play modes are enabled; basic release requires both active Story input modes to preserve their existing mechanics semantics.
-- [ ] Enable `castContext` only after payload/commit/replay tests pass. Preserve existing total context ceilings; no provider configuration or campaign-budget increase is part of this phase.
+- [x] Add a new explicit prompt/base protocol for cast-enabled jobs and backward-compatible readers. Frozen older jobs never acquire new cast context mid-retry. Include cast operation capability in the execution policy snapshot.
+- [x] Bind selected cast documents into the producing-request source manifest. Review can cite only records actually serialized; a rejected/unresolved candidate cannot supply a contradiction finding. Add cast source support to the corresponding strict schemas and review adapter tests.
+- [x] Write a composed real-PostgreSQL test with deterministic narration and extraction providers: discover Mara, accept alias evidence, apply a user correction, advance several turns, reference the alias, capture the actual outgoing request, commit, and inspect the next generation's snapshot. Assert stable ID, correct override, source turn, and no foreign campaign content.
+- [x] Add lag, failed extraction, concurrent publication deferral, historical retry, corrected narration, branch-before-introduction, oversized cast, and disabled-capability cases. Assert legacy Action and Story Direction paths either consume the new versioned cast authority correctly or remain on the explicitly disabled compatible path; do not silently claim both are supported.
+- [x] Run `corepack pnpm exec vitest run --config vitest.integration.config.ts tests/integration/campaign-cast-generation.integration.test.ts` plus affected story-continuity/generation tests and type checks. Document which play modes are enabled; basic release requires both active Story input modes to preserve their existing mechanics semantics.
+- [x] Enable `castContext` only after payload/commit/replay tests pass. Preserve existing total context ceilings; no provider configuration or campaign-budget increase is part of this phase.
 
 ## Exit gate and rollback
 

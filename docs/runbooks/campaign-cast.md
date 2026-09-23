@@ -14,7 +14,7 @@ Phases 02–03 provide manual supporting-character APIs, history/backup integrat
 
 ## Generation context gate
 
-`CAST_CONTEXT_ENABLED` defaults to `false` in runtime configuration, Compose and Swarm. It takes effect only when `CAST_EDITING_ENABLED` and `CAST_DISCOVERY_ENABLED` are also true. Configure all replicas consistently. The capability applies to newly queued jobs for campaigns enrolled in Story Memory; Story Memory Off retains its compatible generation path. The phase-05 acceptance audit is still pending; this flag has not been enabled in a deployment.
+`CAST_CONTEXT_ENABLED` defaults to `false` in runtime configuration, Compose and Swarm. It takes effect only when `CAST_EDITING_ENABLED` and `CAST_DISCOVERY_ENABLED` are also true. Configure all replicas consistently. The capability applies to newly queued jobs for campaigns enrolled in Story Memory; Story Memory Off retains its compatible generation path. The [phase-05 acceptance audit](../review/campaign-cast/phase-05-acceptance.md) records deterministic Action/Story Direction proof and the shared test-bootstrap limitation; this flag has not been enabled in a deployment.
 
 Enabled jobs freeze cast authority with `generation-base-v4`, `story-v17-campaign-cast` and `current-continuity-v4`. Both Action and Story Direction include selected, source-linked cast records within existing context ceilings. User field corrections take precedence from their effective turn. Incomplete tracking is disclosed in private context, with stale dynamic fields omitted rather than asserted as current. Existing history remains available as dated evidence. The initial cast allocation is at most 3,000 tokens and 10% of available context; it does not increase campaign or provider budgets.
 

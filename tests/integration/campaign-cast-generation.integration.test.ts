@@ -69,7 +69,9 @@ integration("campaign cast composed generation", () => {
     return { ownerUserId, campaignId: imported.campaignId };
   }
 
-  it.each([["action", true], ["scene", true], ["action", false], ["scene", false]] as const)("preserves %s generation through request, commit and next snapshot with cast=%s", async (mode, enabled) => {
+  it.each([["action", true, false, false], ["scene", true, false, false], ["action", false, false, false], ["scene", false, false, false],
+    ["action", true, true, false], ["scene", true, true, false], ["action", false, false, true], ["scene", false, false, true]] as const)
+    ("preserves %s generation with cast=%s, commit race=%s and historical retry=%s", async (mode, enabled, race, historicalRetry) => {
     const scope = await campaign(), foreign = await campaign(true);
     const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true, discoveryEnabled: true });
     await cast.initialize(scope);
@@ -100,10 +102,10 @@ integration("campaign cast composed generation", () => {
       .toEqual([expect.objectContaining({ validation_summary: { accepted: 1, unresolved: 0, rejected: [] } })]);
     const current = await cast.current(scope), person = current.characters.find((item) => item.name === "Mara")!;
     expect(person).toMatchObject({ origin: { kind: "discovered" }, aliases: ["Silver Watcher"] });
-    const edited = await cast.edit(scope, person.id, { expectedCastRevision: current.revision, expectedCharacterRevision: person.revision,
+    let edited = await cast.edit(scope, person.id, { expectedCastRevision: current.revision, expectedCharacterRevision: person.revision,
       expectedBoundary: current.boundary, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "gray eyes" } });
     await saveStoryMemoryEnrollment(pool, scope, { capability: "r3", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: false });
-    const enqueue = () => commands(enabled).enqueueAppend(scope, generationRequestSchema.parse({ action: "The Silver Watcher returns to the road.",
+    const enqueue = (castEnabled = enabled) => commands(castEnabled).enqueueAppend(scope, generationRequestSchema.parse({ action: "The Silver Watcher returns to the road.",
       providerProfileId, idempotencyKey: randomUUID(), requestedInputMode: mode, resolvedInputMode: mode, inputModeSource: "explicit",
       context: { budgetTokens: 16000, compression: "full", recentTurns: 2 } }));
     const queued = await enqueue();
@@ -119,6 +121,14 @@ integration("campaign cast composed generation", () => {
         model: "cast-test", endpointIdentity: sha256("http://127.0.0.1:9911"), contextWindowTokens: 32768, maxOutputTokens: 4096, temperature: 0, requestTimeoutMs: 5000, configuration: { textResponseFormatPolicy: "auto" },
         execute: async (request: { input?: string }) => {
           requests.push({ operation, input: String(request.input) });
+          if (race && operation === "story_generation") {
+            await expect(cast.edit(scope, person.id, { expectedCastRevision: edited.revision, expectedCharacterRevision: edited.character.revision,
+              expectedBoundary: edited.boundary, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "amber eyes" } }))
+              .rejects.toMatchObject({ code: "cast_generation_active" });
+            // Simulate an out-of-band writer bypassing the public active-generation guard.
+            await cast.applyBatch(scope, { boundary: edited.boundary, idempotencyKey: randomUUID(),
+              commands: [{ kind: "override", characterId: person.id, field: "appearance.description", value: "amber eyes" }] });
+          }
           const content = operation === "scene_coverage_validation"
             ? JSON.stringify({ covered: true, missing_required_beats: [], contradictions: [] })
             : JSON.stringify({ narration: "Mara returns to the road, her gray eyes following the rain.",
@@ -132,14 +142,41 @@ integration("campaign cast composed generation", () => {
       promptFromSnapshot: (snapshot, key) => (snapshot as Record<string, { content?: string }> | undefined)?.[key as PromptTemplateKey]?.content ?? PROMPT_TEMPLATE_CATALOG[key].defaultContent,
       recordProfileCost: async () => null, attributeGenerationCostsToTurn: async () => undefined
     };
-    const repository = createPostgresGenerationExecutionRepository(pool);
+    const baseRepository = createPostgresGenerationExecutionRepository(pool), commitErrors: unknown[] = [];
+    const repository = { ...baseRepository, async commitAcceptedTurn(input: Parameters<typeof baseRepository.commitAcceptedTurn>[0]) {
+      try { return await baseRepository.commitAcceptedTurn(input); }
+      catch (error) { commitErrors.push(error); throw error; }
+    } };
     const claim = await repository.claimNext({ workerId: "cast-generation", leaseSeconds: 30 });
     expect(claim?.jobId).toBe(queued.id);
-    const executed = await createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId: "cast-generation", leaseSeconds: 30 });
+    const executed = historicalRetry
+      ? await repository.markFailed({ ownerUserId, jobId: queued.id, workerId: "cast-generation", errorCode: "generation_failed",
+        errorMessage: "Synthetic interruption before provider dispatch.", recoveryMetadata: {} })
+      : await createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: claim!, workerId: "cast-generation", leaseSeconds: 30 });
     expect(executed, JSON.stringify((await pool.query("SELECT status,error_code,error_message FROM generation_jobs WHERE id=$1", [queued.id])).rows)).toBe(true);
-    expect((await pool.query("SELECT status,error_code,error_message FROM generation_jobs WHERE id=$1", [queued.id])).rows)
+    if (historicalRetry) {
+      expect((await pool.query("SELECT status FROM generation_jobs WHERE id=$1", [queued.id])).rows[0].status).toBe("failed");
+      const frozen = (await pool.query("SELECT generation_base_identity,context_options,prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id])).rows[0];
+      edited = await cast.edit(scope, person.id, { expectedCastRevision: edited.revision, expectedCharacterRevision: edited.character.revision,
+        expectedBoundary: edited.boundary, idempotencyKey: randomUUID(), setOverrides: { "appearance.description": "violet eyes" } });
+      await commands(true).retry({ ownerUserId, jobId: queued.id });
+      expect((await pool.query("SELECT generation_base_identity,context_options,prompt_snapshot,prompt_protocol_version FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]).toEqual(frozen);
+      const retried = await repository.claimNext({ workerId: "cast-generation", leaseSeconds: 30 });
+      expect(retried?.jobId).toBe(queued.id);
+      expect(await createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: retried!, workerId: "cast-generation", leaseSeconds: 30 })).toBe(true);
+    }
+    if (race) {
+      expect(commitErrors).toEqual([expect.objectContaining({ code: "stale_campaign" })]);
+      expect((await pool.query("SELECT status,error_code,result_turn_id FROM generation_jobs WHERE id=$1", [queued.id])).rows)
+        .toEqual([{ status: "failed", error_code: "generation_failed", result_turn_id: null }]);
+      expect((await pool.query("SELECT active_turn_number FROM campaigns WHERE id=$1", [scope.campaignId])).rows[0].active_turn_number).toBe(8);
+      expect(requests.find((request) => request.operation === "story_generation")!.input).toContain("gray eyes");
+      return;
+    }
+    expect((await pool.query("SELECT status,error_code,error_message FROM generation_jobs WHERE id=$1", [queued.id])).rows,
+      JSON.stringify((await pool.query("SELECT orchestration_private->'generationReview'->'reasons' AS reasons FROM generation_jobs WHERE id=$1", [queued.id])).rows))
       .toEqual([{ status: "completed", error_code: null, error_message: null }]);
-    const outgoing = requests.find((request) => request.operation === "story_generation")!;
+    const outgoing = requests.findLast((request) => request.operation === "story_generation")!;
     expect(outgoing).toBeDefined();
     const payload = JSON.parse(outgoing.input).authoritative_context;
     expect(JSON.parse(outgoing.input).current_turn_input.mode).toBe(mode);
@@ -150,17 +187,19 @@ integration("campaign cast composed generation", () => {
       expect(payload.cast.notice).toContain("incomplete");
       expect(JSON.stringify(payload.cast)).not.toContain('"state.location"');
     } else expect(payload).not.toHaveProperty("cast");
+    if (historicalRetry) expect(outgoing.input).not.toContain("violet eyes");
     expect(outgoing.input).not.toContain("FOREIGN_CAST_SECRET");
     expect(outgoing.input).not.toContain("FOREIGN_CAST_PROFILE");
     expect(outgoing.input).not.toContain(foreignPerson.character.id);
     const job = (await pool.query("SELECT status,result_turn_id FROM generation_jobs WHERE id=$1", [queued.id])).rows[0];
     expect(job).toMatchObject({ status: "completed", result_turn_id: expect.any(String) });
-    const next = await enqueue();
+    const nextEnabled = enabled || historicalRetry;
+    const next = await enqueue(nextEnabled);
     const authority = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client,
-      { ...scope, operationKind: "append", expectedTurnNumber: 10, baseIdentityVersion: enabled ? "generation-base-v4" : "generation-base-v3" }));
-    if (enabled) {
+      { ...scope, operationKind: "append", expectedTurnNumber: 10, baseIdentityVersion: nextEnabled ? "generation-base-v4" : "generation-base-v3" }));
+    if (nextEnabled) {
       expect(authority.castSnapshot).toMatchObject({ revision: edited.revision, boundary: { turnNumber: 9 },
-        characters: expect.arrayContaining([expect.objectContaining({ id: person.id, profile: expect.objectContaining({ "appearance.description": "gray eyes" }) })]) });
+        characters: expect.arrayContaining([expect.objectContaining({ id: person.id, profile: expect.objectContaining({ "appearance.description": historicalRetry ? "violet eyes" : "gray eyes" }) })]) });
       if (!("castFingerprint" in authority.baseIdentity)) throw new Error("Next generation did not capture cast authority.");
       expect((await pool.query("SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [next.id])).rows[0].generation_base_identity.castFingerprint)
         .toBe(authority.baseIdentity.castFingerprint);
