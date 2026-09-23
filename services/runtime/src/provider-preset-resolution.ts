@@ -41,6 +41,8 @@ export type TextExecutionPlanProfile = Readonly<{
   endpointReference: string;
   credentialReference: string | null;
   protocolVersion: string;
+  /** Send the preset reference so OpenRouter owns routing for new Story jobs. */
+  presetRouting?: "openrouter";
 }>;
 
 export type TextExecutionPlanOverrides = Readonly<{
@@ -229,7 +231,9 @@ function createRouteBasis(inputs: ResolvedPlanInputs): TextExecutionRouteBasis {
     version: PLAN_VERSION,
     selection: inputs.selection,
     preset: inputs.preset ? { slug: inputs.preset.slug, versionId: inputs.preset.versionId, configHash: inputs.configHash! } : null,
-    candidates: inputs.candidates,
+    candidates: inputs.selection.kind === "openrouter_preset" && inputs.profile.presetRouting === "openrouter"
+      ? [{ ...inputs.candidates[0]!, modelId: `@preset/${inputs.selection.slug}`, providerPolicy: {} }]
+      : inputs.candidates,
     presetSystemPrompt: inputs.presetSystemPrompt,
     parameters: inputs.parameters,
     ...(inputs.preset && (inputs.preset.config.cache_enabled !== undefined || inputs.preset.config.cache_ttl_seconds !== undefined) ? {

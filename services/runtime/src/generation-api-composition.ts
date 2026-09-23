@@ -276,7 +276,8 @@ function createQueuedTextExecutionPreparation(
           providerType: profile.providerType, selection, contextWindowTokens: profile.contextWindowTokens,
           maxOutputTokens: profile.maxOutputTokens, endpointReference: profile.endpointIdentity ?? profile.id,
           credentialReference: profile.id, requestTimeoutMs: profile.requestTimeoutMs,
-          parameters: { temperature: profile.temperature }, protocolVersion: "text-execution-route-basis-v2"
+          parameters: { temperature: profile.temperature }, presetRouting: "openrouter",
+          protocolVersion: "story-openrouter-preset-v1"
         },
         ports: {
           resolvePreset: async ({ ownerUserId, providerProfileId: id, slug }) =>

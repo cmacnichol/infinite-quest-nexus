@@ -65,6 +65,18 @@ function input(overrides: Record<string, unknown> = {}) {
 }
 
 describe("preset execution-plan resolution", () => {
+  it("keeps one preset-reference route when OpenRouter owns Story routing", async () => {
+    const request = input();
+    const basis = await resolveTextExecutionRouteBasis({ ...request,
+      profile: { ...request.profile, presetRouting: "openrouter", protocolVersion: "story-openrouter-preset-v1" }
+    });
+    expect(basis.selection).toEqual({ kind: "openrouter_preset", slug: "night-shift" });
+    expect(basis.candidates).toEqual([{ modelId: "@preset/night-shift", providerPolicy: {},
+      contextWindowTokens: 16_000, maxOutputTokens: 1_000 }]);
+    expect(deriveTextExecutionPlan(basis, "Write the turn.").candidates).toEqual(basis.candidates);
+    expect(basis.preset?.versionId).toBe("preset-version-4");
+  });
+
   it.each([true, false])("freezes preset cache settings separately from generation parameters: %s", async (enabled) => {
     const request = input();
     const basis = await resolveTextExecutionRouteBasis({ ...request, ports: {

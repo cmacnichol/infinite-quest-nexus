@@ -363,7 +363,11 @@ export async function executePresetRoutes<T extends Readonly<{
         }
       });
       receivedValue = value;
-      assertReturnedIdentity(candidate, value);
+      // A preset-reference request delegates model/provider choice to OpenRouter.
+      // Concrete historical routes retain their exact returned-identity checks.
+      const remotePreset = input.candidates.length === 1 && input.planProvenance.preset
+        && candidate.modelId === `@preset/${input.planProvenance.preset.slug}`;
+      if (!remotePreset) assertReturnedIdentity(candidate, value);
       const providerResponseId = value.providerResponseId ?? value.responseId ?? responseEvidence.providerResponseId;
       const completed = await input.attempts.complete(input.logicalReservation, attempt.id, {
         outcome: "succeeded", providerResponseId: providerResponseId ?? null,
