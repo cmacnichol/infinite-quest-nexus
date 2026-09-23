@@ -2,6 +2,7 @@ import { canSaveCastEditor, createCastEditor, changeCastEditor, setCastEditorFie
   failCastSubmission, reapplyCastDraft, reapplyNewCastDraft, type CastEditorState } from "@infinite-quest/client-core";
 import type { CampaignCastApi } from "@infinite-quest/client-web";
 import type { CastDetail, CastDiscoveryStatus, CastField, CastCandidateList, ResolveCastCandidate, CreateCastCharacter, EditCastCharacter } from "@infinite-quest/contracts";
+import { renderLegacyCastScan } from "./campaign-cast-scan-panel.js";
 
 const fields: [CastField, string][] = [
   ["identity.pronouns", "Pronouns"], ["story.role", "Role"], ["story.background", "Background"],
@@ -11,7 +12,7 @@ const fields: [CastField, string][] = [
 ];
 type List = Awaited<ReturnType<CampaignCastApi["list"]>>;
 export function createLegacyCastPanel(options: {
-  api: CampaignCastApi; campaignId(): string | null; generationActive(): boolean;
+  api: Omit<CampaignCastApi, "scans"> & Partial<Pick<CampaignCastApi, "scans">>; campaignId(): string | null; generationActive(): boolean;
   openProtagonist(): void; navigateToTurn(turn: number): Promise<void>; confirmDiscard?: () => boolean;
 }) {
   const dialog = document.createElement("dialog");
@@ -21,6 +22,7 @@ export function createLegacyCastPanel(options: {
   let enabled = false, query = "", latest: CastDetail | null = null, returnFocus: HTMLElement | null = null;
   let latestRoster: List | null = null;
   let discovery: CastDiscoveryStatus | null = null;
+  let scanData: Awaited<ReturnType<CampaignCastApi["scans"]["latest"]>> | null = null;
   const node = <K extends keyof HTMLElementTagNameMap>(tag: K, text = "") => {
     const result = document.createElement(tag); result.textContent = text; return result;
   };
@@ -49,19 +51,37 @@ export function createLegacyCastPanel(options: {
     const token = ++epoch; editor = null; latest = null; latestRoster = null;
     shell("Characters"); status("Loading characters…");
     try {
-      const [rosterResult, discoveryResult] = await Promise.allSettled([
-        options.api.list(campaign, { query, ...(cursor ? { cursor } : {}) }), options.api.discoveryStatus(campaign)
+      const [rosterResult, discoveryResult, scanResult] = await Promise.allSettled([
+        options.api.list(campaign, { query, ...(cursor ? { cursor } : {}) }), options.api.discoveryStatus(campaign),
+        options.api.scans?.latest(campaign) ?? Promise.resolve(null)
       ]);
       if (!current(token)) return;
       if (rosterResult.status === "rejected") throw rosterResult.reason;
       const response = rosterResult.value;
       discovery = discoveryResult.status === "fulfilled" ? discoveryResult.value : null;
+      scanData = scanResult.status === "fulfilled" ? scanResult.value : null;
       list = cursor && list ? { ...response, characters: [...list.characters, ...response.characters] } : response;
       enabled = response.capabilities.castEditing; renderRoster();
     } catch (error) {
       if (!current(token)) return;
       shell("Characters"); status(`Could not load characters: ${message(error)}`);
       dialog.append(button("Retry loading", () => { void loadRoster(); }));
+    }
+  }
+  async function loadScan() {
+    if (!options.api.scans) return;
+    const token = ++epoch; editor = null; shell("Scan earlier story"); status("Loading scan…");
+    try {
+      const [data, roster, tracking] = await Promise.all([options.api.scans.latest(campaign), options.api.list(campaign), options.api.discoveryStatus(campaign).catch(() => null)]);
+      if (!current(token)) return;
+      scanData = data; list = roster; discovery = tracking;
+      shell("Scan earlier story"); dialog.append(button("Back to characters", () => { void loadRoster(); }));
+      renderLegacyCastScan(dialog, { api: options.api.scans, campaignId: campaign, authority: roster, data, discovery: tracking,
+        current: () => current(token), generationActive: options.generationActive, refresh: loadScan });
+    } catch (error) {
+      if (!current(token)) return;
+      shell("Scan earlier story"); status(message(error));
+      dialog.append(button("Refresh scan", () => { void loadScan(); }), button("Back to characters", () => { void loadRoster(); }));
     }
   }
   async function loadCandidates(cursor?: string) {
@@ -168,8 +188,10 @@ export function createLegacyCastPanel(options: {
       if (discovery.unresolvedCount) status(`${discovery.unresolvedCount} character ${discovery.unresolvedCount === 1 ? "match needs" : "matches need"} review.`);
       if (discovery.unresolvedCount) dialog.append(button("Review character matches", () => { void loadCandidates(); }));
       if (discovery.state === "failed" && discovery.firstGap?.diagnosticCode === "source_requires_manual_scan") {
-        status("This turn is too large for automatic character tracking. It needs a history scan.");
-      } else if (discovery.enabled && discovery.state === "failed" && discovery.firstGap?.jobId) {
+        status("This turn exceeds automatic tracking limits. Review or add its characters manually.");
+      } else if (discovery.enabled && discovery.state === "failed" && discovery.firstGap?.jobId
+        && !(scanData?.scan && !["complete", "cancelled"].includes(scanData.scan.status)
+          && discovery.firstGap.turnNumber >= scanData.scan.fromTurn && discovery.firstGap.turnNumber <= scanData.scan.throughTurn)) {
         const jobId = discovery.firstGap.jobId, token = epoch;
         const request = { expectedCastRevision: list!.revision, expectedBoundary: list!.boundary, idempotencyKey: crypto.randomUUID() };
         const feedback = node("p"); feedback.setAttribute("role", "status");
@@ -194,6 +216,7 @@ export function createLegacyCastPanel(options: {
       }
     }
     dialog.append(button("Refresh characters", () => { void loadRoster(); }));
+    if (scanData && (scanData.capabilities.castBackfill || scanData.scan)) dialog.append(button("Scan earlier story", () => { void loadScan(); }));
     const controls = node("form"); controls.className = "cast-toolbar";
     const label = node("label", "Find a character"); label.htmlFor = "cast-search";
     const search = node("input"); search.id = "cast-search"; search.type = "search"; search.value = query; search.maxLength = 200;

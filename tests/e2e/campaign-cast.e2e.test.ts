@@ -8,6 +8,88 @@ const protagonistId = "66666666-6666-4666-8666-666666666666";
 const candidateId = "88888888-8888-4888-8888-888888888888";
 const screenshotRoot = process.env.CAST_SCREENSHOT_ROOT;
 
+for (const width of [1280, 390]) test(`legacy previews and controls an explicit history scan at ${width}px`, async ({ page }) => {
+  const pageErrors: string[] = [];
+  const consoleErrors: { text: string; url: string }[] = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") consoleErrors.push({ text: message.text(), url: message.location().url }); });
+  await page.setViewportSize({ width, height: 1000 });
+  await fixture(page);
+  let scan: any = null;
+  const starts: any[] = [];
+  const boundary = { turnNumber: 1, timelineRevision: 0 };
+  await page.route("**/cast/scans**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    const send = (value: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify(value) });
+    if (path.endsWith("/preview")) return send({ fromTurn: 1, throughTurn: 1, boundary, turnCount: 1, estimatedChunkRequests: 1,
+      completedChunkReceipts: 0, completedTurns: 0, manualScanTurns: [], providerProfileId: versionId, selection: { kind: "model", modelId: "fixture-model" } });
+    if (route.request().method() === "GET") return send({ scan, capabilities: { castBackfill: true } });
+    if (path.endsWith("/scans")) {
+      starts.push(route.request().postDataJSON());
+      scan = { id: candidateId, fromTurn: 1, throughTurn: 1, completeTurns: 0, failedTurns: 0, firstFailedTurn: null, pendingReviewCount: 0, status: "queued" };
+    } else scan.status = path.endsWith("/pause") ? "paused" : path.endsWith("/resume") ? "queued" : "cancelled";
+    return send(scan);
+  });
+  await open(page);
+  await expect(page).toHaveURL(new RegExp(`/story/${campaignId}$`));
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Start scan", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Preview scan", exact: true }).click();
+  await expect(dialog).toContainText("fixture-model");
+  await expect(dialog).toContainText("1 estimated request");
+  expect(starts).toEqual([]);
+  if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/scan-preview-${width}.png`, fullPage: true });
+  await dialog.getByRole("button", { name: "Start scan", exact: true }).click();
+  await expect(dialog).toContainText("0 of 1 turns complete");
+  expect(starts).toHaveLength(1);
+  expect(starts[0]).toMatchObject({ fromTurn: 1, throughTurn: 1, expectedBoundary: boundary });
+  await dialog.getByRole("button", { name: "Pause scan", exact: true }).click();
+  await expect(dialog).toContainText("Scan paused");
+  await dialog.getByRole("button", { name: "Resume scan", exact: true }).click();
+  await expect(dialog).toContainText("Scan queued");
+  await dialog.getByRole("button", { name: "Cancel scan", exact: true }).click();
+  await expect(dialog).toContainText("Scan cancelled");
+  await expect(dialog).toContainText("keeps characters already discovered");
+  if (screenshotRoot) await page.screenshot({ path: `${screenshotRoot}/scan-cancelled-${width}.png`, fullPage: true });
+  expect(pageErrors).toEqual([]);
+  // The isolated Vite fixture does not copy the optional PhotoSwipe stylesheet.
+  expect(consoleErrors.filter(error => !(error.url.endsWith("/vendor/photoswipe/photoswipe.css")
+    && error.text === "Failed to load resource: the server responded with a status of 404 (Not Found)"))).toEqual([]);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+});
+
+test("legacy retains a failed scan retry key and keeps cancellation available after capability loss", async ({ page }) => {
+  const fixtureApi = await fixture(page);
+  let enabled = true;
+  const scan = { id: candidateId, fromTurn: 1, throughTurn: 1, completeTurns: 0, failedTurns: 1, firstFailedTurn: 1, pendingReviewCount: 2, status: "failed" };
+  const retries: any[] = [];
+  await page.route("**/cast/scans**", route => {
+    const path = new URL(route.request().url()).pathname;
+    const send = (value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+    if (route.request().method() === "GET") return send({ scan, capabilities: { castBackfill: enabled } });
+    if (path.endsWith("/retry")) {
+      retries.push(route.request().postDataJSON());
+      return send({ code: "cast_discovery_unavailable", error: "CampaignCastError", message: "Unavailable", correlationId: "fixture", details: {} }, 503);
+    }
+    scan.status = "cancelled"; return send(scan);
+  });
+  await open(page);
+  const dialog = page.locator("#campaignCastDialog");
+  await dialog.getByRole("button", { name: "Scan earlier story", exact: true }).click();
+  await expect(dialog).toContainText("2 character matches need review");
+  const retry = dialog.getByRole("button", { name: "Retry turn 1", exact: true });
+  await retry.click(); await expect(dialog).toContainText("Could not update the scan");
+  await retry.click(); await expect(dialog).toContainText("Could not update the scan");
+  expect(retries).toHaveLength(2); expect(retries[0]).toEqual(retries[1]);
+  enabled = false;
+  fixtureApi.trackingUnavailable();
+  await dialog.getByRole("button", { name: "Refresh scan", exact: true }).click();
+  await expect(retry).toBeDisabled();
+  await dialog.getByRole("button", { name: "Cancel scan", exact: true }).click();
+  await expect(dialog).toContainText("Scan cancelled");
+});
+
 test("legacy discovery retry requires refresh after conflict and respects editing capability loss", async ({ page }) => {
   const api = await fixture(page);
   let requests = 0;

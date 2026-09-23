@@ -79,3 +79,11 @@ RED/GREEN: the HTTP retry test failed before the route existed; admission recove
 Remaining: shared client and legacy scan controls with browser evidence, then full phase-06 audit. During UI integration, keep failed scan recovery on the scan retry route so scan progress and discovery accounting remain atomic; audit interaction with the existing generic discovery Retry button. No feature flag was enabled and no live provider/deployment was used.
 
 Full unit verification after retry: 4,435 passed and 44 skipped across 352 files (`.tmp/campaign-cast/phase6-retry-unit.log`). Diff checks passed. Browser verification remains outstanding until the legacy scan UI is implemented.
+
+## Legacy scan controls
+
+Added the shared scan client and legacy **Scan earlier story** panel with explicit range preview, model/request estimate, Start, progress, pause/resume/cancel and failed-turn retry. Start is unavailable before preview. Recovery preserves request keys; stale authority requires refresh. Read/cancel remain available after capability loss. Pending identity decisions are shown separately. Web-next remains deferred by user scope.
+
+Verification: 14 legacy Playwright tests passed, including desktop/mobile scan controls and retry recovery; 4,436 unit tests passed and 44 skipped. Screenshots in `screenshots/phase-06/scan-*.png` were visually inspected at 1280px and 390px. Browser assertions verify route identity, no JavaScript errors and no Vite overlay. The fixture has a known optional PhotoSwipe stylesheet 404; only that exact resource/error is excluded from console assertions. Browser APIs are fixtures, not PostgreSQL or live-provider integration. Logs: `.tmp/campaign-cast/phase6-ui-{unit,final}.log`.
+
+Backend review identified two outstanding regressions to reproduce and fix before acceptance: an expired active scan lease can retain the unique running slot when forward work wins priority; scan-authorized retry of a reused forward failure can bypass scan controls. Full historical publication/coverage acceptance remains outstanding.

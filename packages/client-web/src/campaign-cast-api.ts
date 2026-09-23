@@ -5,6 +5,8 @@ import { castSnapshotSchema, castDetailSchema, castListQuerySchema, createCastCh
   type CastListQuery, type CreateCastCharacter, type EditCastCharacter } from "@infinite-quest/contracts";
 import { createNexusHttpClient, type NexusHttpClientOptions } from "./http-client.js";
 import { validatedRequest } from "./api-client.js";
+import { castBackfillRequestSchema, castBackfillPreviewSchema, castBackfillProgressSchema, castBackfillRetrySchema,
+  type CastBackfillRequest, type CastBackfillRetry } from "@infinite-quest/contracts";
 
 const capabilities = z.object({ castEditing: z.boolean() });
 export const castListResponseSchema = castSnapshotSchema.extend({ nextCursor: z.uuid().nullable(), capabilities });
@@ -15,6 +17,28 @@ export function createCampaignCastApi(options: NexusHttpClientOptions = {
   const http = createNexusHttpClient(options);
   const pathFor = (campaignId: string) => `/campaigns/${encodeURIComponent(campaignId)}/cast`;
   return {
+    scans: {
+      latest: (campaignId: string) => http.request({ method: "GET", path: `${pathFor(campaignId)}/scans`,
+        responseSchema: z.object({ scan: castBackfillProgressSchema.nullable(), capabilities: z.object({ castBackfill: z.boolean() }) }) }),
+      get: (campaignId: string, id: string) => http.request({ method: "GET", path: `${pathFor(campaignId)}/scans/${encodeURIComponent(id)}`, responseSchema: castBackfillProgressSchema }),
+      async preview(campaignId: string, input: CastBackfillRequest) {
+        const path = `${pathFor(campaignId)}/scans/preview`, value = validatedRequest(castBackfillRequestSchema, input, "POST", path);
+        return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castBackfillPreviewSchema });
+      },
+      async start(campaignId: string, input: CastBackfillRequest) {
+        const path = `${pathFor(campaignId)}/scans`, value = validatedRequest(castBackfillRequestSchema, input, "POST", path);
+        return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castBackfillProgressSchema });
+      },
+      async control(campaignId: string, id: string, action: "pause" | "resume" | "cancel") {
+        const operation = z.enum(["pause", "resume", "cancel"]).parse(action);
+        return http.request({ method: "POST", path: `${pathFor(campaignId)}/scans/${encodeURIComponent(id)}/${operation}`,
+          body: { kind: "json", value: {} }, responseSchema: castBackfillProgressSchema });
+      },
+      async retry(campaignId: string, id: string, input: CastBackfillRetry) {
+        const path = `${pathFor(campaignId)}/scans/${encodeURIComponent(id)}/retry`, value = validatedRequest(castBackfillRetrySchema, input, "POST", path);
+        return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castBackfillProgressSchema });
+      }
+    },
     retryDiscovery: (campaignId: string, id: string, input: RetryCastDiscovery) => {
       const path = `${pathFor(campaignId)}/discovery/${encodeURIComponent(id)}/retry`, value = validatedRequest(retryCastDiscoverySchema, input, "POST", path);
       return http.request({ method: "POST", path, body: { kind: "json", value }, responseSchema: castDiscoveryRetryResultSchema });
