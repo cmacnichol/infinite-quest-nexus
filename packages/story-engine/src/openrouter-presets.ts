@@ -8,6 +8,7 @@ const MAX_PROMPT_LENGTH = 200_000;
 const MAX_CONFIG_DEPTH = 16;
 const MAX_MODELS = 32;
 const MAX_PROVIDER_ARRAY = 64;
+const CACHE_PARAMETERS = new Set(["cache_enabled", "cache_ttl_seconds"]);
 const PRESET_PARAMETERS = new Set(["model", "models", "temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty", "min_p", "top_a", "seed", "max_tokens", "max_completion_tokens", "provider"]);
 const PUBLIC_UNSUPPORTED_PRESET_FIELDS = new Set(["tools", "stop", "transforms"]);
 const PROVIDER_PARAMETERS = new Set(["order", "only", "ignore", "allow_fallbacks", "require_parameters", "data_collection", "sort", "quantizations", "enforce_distillable_text", "preferred_min_throughput", "preferred_max_latency", "max_price", "zdr"]);
@@ -99,7 +100,7 @@ function positiveInt(value: unknown): number {
 }
 
 function unsupported(field: string): never {
-  const safeField = PUBLIC_UNSUPPORTED_PRESET_FIELDS.has(field) || PRESET_PARAMETERS.has(field) || field === "provider" ||
+  const safeField = PUBLIC_UNSUPPORTED_PRESET_FIELDS.has(field) || PRESET_PARAMETERS.has(field) || CACHE_PARAMETERS.has(field) || field === "provider" ||
     (field.startsWith("provider.") && PROVIDER_PARAMETERS.has(field.slice("provider.".length))) ||
     (field.startsWith("provider.max_price.") && MAX_PRICE_PARAMETERS.has(field.slice("provider.max_price.".length)))
     ? field : "config";
@@ -154,9 +155,11 @@ function providerConfig(value: unknown): Readonly<Record<string, unknown>> {
 export function validateOpenRouterPresetConfig(value: unknown): Readonly<Record<string, unknown>> {
   const source = record(value);
   const result: Record<string, unknown> = {};
-  for (const field of Object.keys(source)) if (!PRESET_PARAMETERS.has(field)) unsupported(field);
+  for (const field of Object.keys(source)) if (!PRESET_PARAMETERS.has(field) && !CACHE_PARAMETERS.has(field)) unsupported(field);
   for (const [field, candidate] of Object.entries(source)) {
     switch (field) {
+      case "cache_enabled": if (typeof candidate !== "boolean") unsupported(field); result[field] = candidate; break;
+      case "cache_ttl_seconds": result[field] = positiveInteger(candidate, field); if ((candidate as number) > 86400) unsupported(field); break;
       case "model": if (typeof candidate !== "string" || !candidate.trim()) unsupported(field); result[field] = candidate; break;
       case "models": result[field] = stringList(candidate, field, MAX_MODELS); break;
       case "temperature": result[field] = finiteNumber(candidate, field, 0, 2); break;

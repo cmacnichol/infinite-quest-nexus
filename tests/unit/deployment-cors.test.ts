@@ -51,6 +51,15 @@ describe("deployment security configuration", () => {
     expect(environment).toContain("CSP_IMAGE_ALLOWED_ORIGINS: ${CSP_IMAGE_ALLOWED_ORIGINS:-}");
   });
 
+  it.each([
+    ["compose.yaml", "infinitequest-app"],
+    ["deploy/swarm/stack.yaml", "infinitequest-api"],
+    ["deploy/swarm/stack.yaml", "infinitequest-worker"]
+  ])("forwards the default-off native preset admission gate to %s %s", (path, service) => {
+    const environment = serviceEnvironment(readFileSync(path, "utf8"), service);
+    expect(environment).toContain("NATIVE_TEXT_EXECUTION_PLAN_ADMISSION: ${NATIVE_TEXT_EXECUTION_PLAN_ADMISSION:-false}");
+  });
+
   it("forwards the provider network allowlist to Swarm workers", () => {
     const environment = serviceEnvironment(readFileSync("deploy/swarm/stack.yaml", "utf8"), "infinitequest-worker");
 
