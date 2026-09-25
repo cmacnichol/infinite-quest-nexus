@@ -259,6 +259,7 @@ describe("generation response-contract executor operation matrix", () => {
   it("freezes story-native-v3 for preset routes and keeps v2 for direct models verified only for v2", () => {
     const preset = resolveGenerationResponseContractsV2({ queuedPolicy: presetPolicy, capabilityEvidenceHash: "0".repeat(64) });
     expect(preset.contracts["story:stream"]?.schemaVersion).toBe("story-native-v3");
+    expect(preset.contracts["story:nonstream"]?.schemaVersion).toBe("story-native-v3");
     const direct = resolveGenerationResponseContractsV2({
       queuedPolicy: modelPolicy, capabilityEvidenceHash: "0".repeat(64),
       eligible: (operation, streaming, schema) => operation === "story" && schema.version === "story-native-v3"
@@ -267,5 +268,14 @@ describe("generation response-contract executor operation matrix", () => {
     });
     expect(direct.contracts["story:stream"]?.schemaVersion).toBe("story-native-v2");
     expect(direct.contracts["story:nonstream"]?.schemaVersion).toBe("story-native-v2");
+  });
+
+  it("throws when no registered story version verifies for a direct model", () => {
+    expect(() => resolveGenerationResponseContractsV2({
+      queuedPolicy: modelPolicy, capabilityEvidenceHash: "0".repeat(64),
+      eligible: (operation, streaming, schema) => operation === "story"
+        ? { status: "unsupported", reason: "schema_incompatible", verification: null }
+        : verifiedEligibility(operation, streaming, schema)
+    })).toThrow(/does not have a verified response contract/i);
   });
 });

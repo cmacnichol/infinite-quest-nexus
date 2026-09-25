@@ -101,6 +101,90 @@ describe("generation response-contract production preflight collaborators", () =
     });
   });
 
+  it("falls back to a story-native-v2 admission when only the legacy schema verifies", async () => {
+    const legacyStorySchema = getProviderOutputSchemaV2("story", "story-native-v2");
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => ({
+        ...profile,
+        textSelection: { kind: "model" as const, modelId: profile.model },
+        executionRevision: "execution",
+        authorityRevision: "authority",
+        configuration: {}
+      })),
+      responseFormatCapabilities: {
+        registryDigest,
+        now: () => "2026-09-19T00:00:00.000Z",
+        // The preferred story-native-v3 schema hash is deliberately never satisfied here;
+        // every other candidate (including story-native-v2) verifies.
+        eligibilityV2: vi.fn((input) => (input.operation === "story" && input.schemaHash !== legacyStorySchema.schemaHash)
+          ? { status: "unsupported", reason: "schema_incompatible", verification: null }
+          : {
+            status: "verified",
+            verification: {
+              version: 2, providerType: "openrouter", endpointIdentity: profile.endpointIdentity,
+              model: profile.model, routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+              operation: input.operation, schemaHash: input.schemaHash, streaming: input.streaming,
+              verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+              providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+            }
+          })
+      }
+    } as never;
+
+    const queued = await createQueuedResponsePolicyResolver(apiProviders, true)({} as never, {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: profile.model,
+      operationKind: "append", generationPolicy: { playMode: "legacy" }, storyMemoryPolicy: null,
+      preparedTextExecution: {
+        providerProfileId: profile.id, selection: { kind: "model", modelId: profile.model },
+        executionRevision: "execution", authorityRevision: "authority", endpointIdentity: profile.endpointIdentity,
+        advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-19T00:00:00.000Z" }
+      }
+    } as never);
+
+    const policy = readQueuedResponsePolicyV2(queued);
+    expect(policy).toMatchObject({ version: 2, policy: "required", admission: { basis: "model_verified" } });
+    expect(policy.admission.basis === "model_verified" && policy.admission.verification.schemaHash).toBe(legacyStorySchema.schemaHash);
+    expect(policy.admission.basis === "model_verified" && policy.admission.verification.operation).toBe("story");
+  });
+
+  it("rejects enqueue when no registered story schema version verifies", async () => {
+    const apiProviders = {
+      loadQueuedTextProfile: vi.fn(async () => ({
+        ...profile,
+        textSelection: { kind: "model" as const, modelId: profile.model },
+        executionRevision: "execution",
+        authorityRevision: "authority",
+        configuration: {}
+      })),
+      responseFormatCapabilities: {
+        registryDigest,
+        now: () => "2026-09-19T00:00:00.000Z",
+        eligibilityV2: vi.fn((input) => input.operation === "story"
+          ? { status: "unsupported", reason: "schema_incompatible", verification: null }
+          : {
+            status: "verified",
+            verification: {
+              version: 2, providerType: "openrouter", endpointIdentity: profile.endpointIdentity,
+              model: profile.model, routeConfigHash: capabilityRouteConfigHash({}), adapterProtocol: "text-schema-adapter-v2",
+              operation: input.operation, schemaHash: input.schemaHash, streaming: input.streaming,
+              verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+              providerRoutingSlugs: [], nativeOpenTrackerObjects: true
+            }
+          })
+      }
+    } as never;
+
+    await expect(createQueuedResponsePolicyResolver(apiProviders, true)({} as never, {
+      ownerUserId: "owner", campaignId: "campaign", providerProfileId: profile.id, requestedModel: profile.model,
+      operationKind: "append", generationPolicy: { playMode: "legacy" }, storyMemoryPolicy: null,
+      preparedTextExecution: {
+        providerProfileId: profile.id, selection: { kind: "model", modelId: profile.model },
+        executionRevision: "execution", authorityRevision: "authority", endpointIdentity: profile.endpointIdentity,
+        advertisement: { supportedParameters: ["response_format", "structured_outputs"], discoveredAt: "2026-09-19T00:00:00.000Z" }
+      }
+    } as never)).rejects.toMatchObject({ kind: "conflict", details: { reason: "provider_profile_changed_refresh_required" } });
+  });
+
   it("checks only current owner-scoped authority for a resumed frozen route", async () => {
     const { result, providers } = collaborators();
     const basis = {
