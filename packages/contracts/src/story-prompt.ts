@@ -7,6 +7,8 @@ export const PREVIOUS_STORY_PROMPT_PROTOCOL_VERSION = "story-v15-canonical-fact-
 /** The immutable story wire contract shared by newly queued prompts and the engine. */
 export const STORY_PROMPT_PROTOCOL_VERSION = "story-v16-fact-wire-distinction";
 export const STORY_PROMPT_SCHEMA_VERSION = "story-output-v2";
+/** Wire-only Story schema: narration arrives as paragraphs and is joined at the provider boundary. */
+export const STORY_PARAGRAPH_WIRE_SCHEMA_VERSION = "story-native-v3";
 export const STORY_CONTEXT_POLICY_VERSION = "current-continuity-v2";
 /**
  * The Story Memory route is explicitly opted into by a frozen job policy.

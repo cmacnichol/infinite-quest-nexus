@@ -17,7 +17,7 @@ import { resolveTextExecutionRouteBasis } from "./provider-preset-resolution.js"
 import type { TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { normalizeTextSelection } from "../../../packages/contracts/src/provider-selection.js";
 import { normalizeNewTextResponsePolicy, resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
-import { getProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2, selectProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { responseContractInvocationClosureV2 } from "./generation-response-contract.js";
 import { resolveEffectiveTextExecutionOverrides } from "./text-execution-overrides.js";
@@ -101,7 +101,7 @@ export function createQueuedResponsePolicyResolver(
         };
       }
       const routeConfigHash = capabilityRouteConfigHash(profile.configuration);
-      const eligibility = (operation: Parameters<typeof getProviderOutputSchemaV2>[0], streaming: boolean) => providers.responseFormatCapabilities.eligibilityV2({
+      const eligibility = (operation: Parameters<typeof getProviderOutputSchemaV2>[0], streaming: boolean, schema: ProviderOutputSchemaV2) => providers.responseFormatCapabilities.eligibilityV2({
         advertisement: preparedTextExecution.advertisement,
         providerType: profile.providerType as "openrouter" | "openai_compatible",
         endpointIdentity: profile.endpointIdentity ?? "",
@@ -109,23 +109,31 @@ export function createQueuedResponsePolicyResolver(
         routeConfigHash,
         adapterProtocol: "text-schema-adapter-v2",
         operation,
-        schemaHash: getProviderOutputSchemaV2(operation).schemaHash,
+        schemaHash: schema.schemaHash,
         streaming,
         now: providers.responseFormatCapabilities.now()
       });
-      // Do not save a partial direct-model closure. Every current Story
-      // operation is checked against its advertised capability and exact file
-      // verification before the insert transaction captures its authority.
+      const keysByOperation = new Map<Parameters<typeof getProviderOutputSchemaV2>[0], boolean[]>();
       for (const key of invocationKeys) {
         const [operation, delivery] = key.split(":") as [Parameters<typeof getProviderOutputSchemaV2>[0], "stream" | "nonstream"];
-        const current = eligibility(operation, delivery === "stream");
-        if (current.status !== "verified" || !current.verification) {
-          throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
-        }
+        keysByOperation.set(operation, [...(keysByOperation.get(operation) ?? []), delivery === "stream"]);
+      }
+      // Do not save a partial direct-model closure. Every current operation is
+      // checked against its advertised capability and exact file verification
+      // before the insert transaction captures its authority. One version is
+      // chosen per operation, the same way the resolver chooses one later.
+      const chosenSchemas = new Map<Parameters<typeof getProviderOutputSchemaV2>[0], ProviderOutputSchemaV2>();
+      for (const [operation, streamings] of keysByOperation) {
+        const selected = selectProviderOutputSchemaV2(operation, (schema) => streamings.every((streaming) => {
+          const current = eligibility(operation, streaming, schema);
+          return current.status === "verified" && Boolean(current.verification);
+        }));
+        if (!selected) throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+        chosenSchemas.set(operation, selected);
       }
       const admission = resolveResponseContractAdmission({
         selection,
-        directEligibility: () => eligibility("story", false)
+        directEligibility: () => eligibility("story", false, chosenSchemas.get("story")!)
       });
       const routeBasis = preparedTextExecution.routeBasis;
       if (routeBasis && (routeBasis.selection.kind !== "model" || routeBasis.selection.modelId !== selection.modelId)) {

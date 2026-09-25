@@ -8,6 +8,7 @@ import {
   resolveResponseFormatEligibilityV2
 } from "../../packages/application/src/providers/response-format.js";
 import {
+  findProviderOutputSchemaV2,
   getProviderOutputSchemaV2,
   providerOutputSchemaOperationV2Schema,
   stableJsonHash
@@ -53,7 +54,7 @@ const sourceField = { path: "world.rules", value: "Keep faith.", supportingFactI
 const validEnvelopeFixtures = {
   cast_discovery: { version: 1, characters: [{ localKey: "mara", name: "Mara", aliases: [], existingCharacterId: null,
     identityEvidence: [{ paragraphId: "p1", quote: "Mara waits." }], observations: [] }] },
-  story: { narration: "The door opens.", choices: ["Enter", "Wait", "Call", "Leave"], custom_action_suggestion: "Listen", scratchpad: "", tracker_updates: [{ any: { nested: true } }], image_prompt: "", continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] },
+  story: { narration_paragraphs: ["The door opens."], choices: ["Enter", "Wait", "Call", "Leave"], custom_action_suggestion: "Listen", scratchpad: "", tracker_updates: [{ any: { nested: true } }], image_prompt: "", continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] },
   choices: { choices: ["Enter", "Wait", "Call", "Leave"], custom_action_suggestion: "Listen" },
   continuity_review: { version: "story-continuity-review-v1", verdict: "pass", findings: [] },
   rpg_assessment: { stat_id: "courage", difficulty_modifier: 0, rationale: "A hard choice.", favorable_outcome: "The guard yields.", setback_outcome: "The guard resists." },
@@ -169,9 +170,12 @@ describe("native response-contract admission", () => {
       expect(Object.isFrozen(schema.schema)).toBe(true);
     }
     expect(getProviderOutputSchemaV2("event_coverage").schema).not.toEqual(getProviderOutputSchemaV2("scene_coverage").schema);
-    for (const operation of ["story", "choices", "continuity_review"] as const) {
+    for (const operation of ["choices", "continuity_review"] as const) {
       expect(getProviderOutputSchemaV2(operation).schema).toEqual(getProviderOutputSchema(operation).schema);
     }
+    // story-native-v3 is the newly preferred wire shape (paragraphs, not a single narration string);
+    // v2 stays the parity fixture against the frozen v1 legacy schema.
+    expect(findProviderOutputSchemaV2("story", "story-native-v2")!.schema).toEqual(getProviderOutputSchema("story").schema);
   });
 
   it("accepts each documented wire envelope and rejects operation-specific nested malformed envelopes before local semantic parsing", () => {

@@ -4,9 +4,10 @@ import {
   findProviderOutputSchemaV2,
   findProviderOutputSchemaV2ByHash,
   getProviderOutputSchemaV2,
-  providerOutputSchemaVersionsV2
+  providerOutputSchemaVersionsV2,
+  selectProviderOutputSchemaV2
 } from "../../packages/contracts/src/provider-output-schema.js";
-import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
+import { storyTurnOutputSchema, STORY_PARAGRAPH_WIRE_SCHEMA_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { continuityReviewSchema } from "../../packages/contracts/src/story-continuity-review.js";
 import { sha256, stableStringify } from "../../packages/domain/src/text.js";
 import { buildContinuityReviewInput, validateContinuityReview } from "../../packages/story-engine/src/continuity-review.js";
@@ -192,5 +193,31 @@ describe("versioned v2 schema catalog", () => {
     const preferred = getProviderOutputSchemaV2("story");
     expect(findProviderOutputSchemaV2ByHash("story", preferred.schemaHash)).toBe(preferred);
     expect(findProviderOutputSchemaV2ByHash("story", "f".repeat(64))).toBeUndefined();
+  });
+});
+
+describe("story-native-v3 paragraph wire schema", () => {
+  const v3 = getProviderOutputSchemaV2("story", STORY_PARAGRAPH_WIRE_SCHEMA_VERSION);
+  const validate = new Ajv({ strict: false, allErrors: true }).compile(v3.schema);
+  const base = makeStructuredOutputStory();
+  const { narration: _narration, ...withoutNarration } = base;
+
+  it("is preferred and requires narration_paragraphs instead of narration", () => {
+    expect(getProviderOutputSchemaV2("story").version).toBe(STORY_PARAGRAPH_WIRE_SCHEMA_VERSION);
+    expect(validate({ ...withoutNarration, narration_paragraphs: ["“Stay,” Mara says.", "You nod."] })).toBe(true);
+    expect(validate(base)).toBe(false);
+    expect(validate({ ...withoutNarration, narration_paragraphs: [] })).toBe(false);
+  });
+
+  it("carries no prose pattern on paragraph items", () => {
+    const items = (v3.schema as any).properties.narration_paragraphs.items;
+    expect(items.pattern).toBeUndefined();
+    expect(items.minLength).toBe(1);
+  });
+
+  it("selects the first acceptable version", () => {
+    expect(selectProviderOutputSchemaV2("story", () => true)?.version).toBe("story-native-v3");
+    expect(selectProviderOutputSchemaV2("story", (schema) => schema.version === "story-native-v2")?.version).toBe("story-native-v2");
+    expect(selectProviderOutputSchemaV2("story", () => false)).toBeNull();
   });
 });

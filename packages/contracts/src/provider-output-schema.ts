@@ -126,14 +126,18 @@ const characterProfile = closed({
   unclassifiedNotes: optionalText(200_000)
 });
 
-const story = closed({
-  narration: text(200_000), choices: { type: "array", minItems: 4, maxItems: 4, items: text(2_000) }, custom_action_suggestion: text(2_000),
+const storyProperties = {
+  choices: { type: "array", minItems: 4, maxItems: 4, items: text(2_000) }, custom_action_suggestion: text(2_000),
   scratchpad: optionalText(100_000), tracker_updates: { type: "array", maxItems: 200, items: { type: "object", additionalProperties: true } },
   image_prompt: optionalText(20_000), continuity_summary: optionalText(20_000), canonical_facts: stringList(100, 4_000),
   superseded_facts: { type: "array", maxItems: 0, items: text(4_000) },
   canonical_fact_updates: { type: "array", maxItems: 100, items: closed({ content: text(4_000), supersedes_fact_ids: { type: "array", maxItems: 100, items: uuidSchema } }) },
   open_threads: stringList(500, 4_000)
-});
+} as const;
+// Key order matters for the v2 hash: narration stays first, exactly as before.
+const story = closed({ narration: text(200_000), ...storyProperties });
+/** v3 needs no JSON escapes: paragraph boundaries are array items. */
+const storyParagraphs = closed({ narration_paragraphs: { type: "array", minItems: 1, maxItems: 400, items: string(1, 20_000) }, ...storyProperties });
 const choices = closed({ choices: { type: "array", minItems: 4, maxItems: 4, items: text(2_000) }, custom_action_suggestion: text(2_000) });
 const outputLocation = closed({ path: string(0, undefined, pointer), start: { type: "integer", minimum: 0 }, end: { type: "integer", minimum: 1 }, quote: string(1, 1_000) });
 const sourceBasis = closed({ kind: { const: "source" }, evidenceId: string(64, 64, "^[a-f0-9]{64}$"), quote: string(1, 1_000) });
@@ -219,9 +223,18 @@ const preferredRegistry: Readonly<Record<ProviderOutputSchemaOperationV2, Provid
 
 /** Every addressable wire version per operation, preferred first. Never remove
  * a version that a frozen job may still reference. */
-const versionedRegistry: Readonly<Record<ProviderOutputSchemaOperationV2, readonly ProviderOutputSchemaV2[]>> = deepFreeze(
-  Object.fromEntries(Object.entries(preferredRegistry).map(([operation, schema]) => [operation, [schema]])) as Record<ProviderOutputSchemaOperationV2, ProviderOutputSchemaV2[]>
-);
+const versionedRegistry: Readonly<Record<ProviderOutputSchemaOperationV2, readonly ProviderOutputSchemaV2[]>> = deepFreeze({
+  ...(Object.fromEntries(Object.entries(preferredRegistry).map(([operation, schema]) => [operation, [schema]])) as Record<ProviderOutputSchemaOperationV2, ProviderOutputSchemaV2[]>),
+  story: [entry("story", "story-native-v3", "infinite_quest_story_paragraphs_v3", storyParagraphs, true), preferredRegistry.story]
+});
+
+/** Picks one version for an operation: the first, in preference order, that the caller accepts. */
+export function selectProviderOutputSchemaV2(
+  operation: ProviderOutputSchemaOperationV2,
+  accepts: (schema: ProviderOutputSchemaV2) => boolean
+): ProviderOutputSchemaV2 | null {
+  return versionedRegistry[operation].find(accepts) ?? null;
+}
 
 export function providerOutputSchemaVersionsV2(operation: ProviderOutputSchemaOperationV2): readonly ProviderOutputSchemaV2[] {
   return versionedRegistry[operation];

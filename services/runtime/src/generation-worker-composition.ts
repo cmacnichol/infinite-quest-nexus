@@ -13,7 +13,6 @@ import {
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import { withTransaction } from "../../../packages/database/src/pool.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
-import { getProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import type { ModelParameterAdvertisement } from "../../../packages/contracts/src/text-response-format.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
@@ -138,8 +137,7 @@ export function createGenerationExecutionCollaborators(
         return resolveGenerationResponseContractsV2({
           queuedPolicy,
           capabilityEvidenceHash: () => sha256(stableStringify({ advertisement: advertised, verificationEvidence })),
-          eligible: (operation, streaming) => {
-            const schema = getProviderOutputSchemaV2(operation);
+          eligible: (operation, streaming, schema) => {
             const result = providers.responseFormatCapabilities.eligibilityV2({
               advertisement: advertised as never,
               providerType: profile.providerType as "openrouter" | "openai_compatible",
