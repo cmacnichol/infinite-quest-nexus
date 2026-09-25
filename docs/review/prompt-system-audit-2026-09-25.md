@@ -4,6 +4,13 @@ Read-only audit of InfiniteQuest's prompt infrastructure and the prompts that pr
 
 Starting leads were verified rather than repeated: [Mindy dialogue audit](mindy-transferred-dialogue-audit-2026-09-25.md), [tone audit](turn-generation-tone-audit-2026-09-23.md), and [tone update](turn-generation-tone-update-2026-09-23.md).
 
+> **Update (same day):** the authorized Step 1 probe ([structured-output escape probe](structured-output-escape-probe-2026-09-25.md)) resolved F1's mechanism and F11:
+> - Schema-constrained decoding on this route produces no escapes with or without the `pattern`, and with `strict:false`. **R2's pattern removal would not fix F1.**
+> - OpenRouter does inject the preset system prompt server-side.
+> - A strict schema with typographic quotes and a `narration_paragraphs` array returned all fields with quoted, paragraphed dialogue in 4 of 4 samples.
+>
+> The findings below are otherwise unchanged.
+
 Line references point to the current working tree. Some cited files have uncommitted changes: `story-prompt.ts`, `prompt-library.ts`, `provider-request.ts`, `context-budget.ts`, and `story-continuity-review-adapter.ts`.
 
 ---
