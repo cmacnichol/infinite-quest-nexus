@@ -2,6 +2,7 @@ import { Ajv } from "ajv";
 import { describe, expect, it } from "vitest";
 import {
   findProviderOutputSchemaV2,
+  findProviderOutputSchemaV2ByHash,
   getProviderOutputSchemaV2,
   providerOutputSchemaVersionsV2
 } from "../../packages/contracts/src/provider-output-schema.js";
@@ -185,5 +186,11 @@ describe("versioned v2 schema catalog", () => {
   it("rejects an unknown version", () => {
     expect(findProviderOutputSchemaV2("story", "story-native-v999")).toBeUndefined();
     expect(() => getProviderOutputSchemaV2("story", "story-native-v999")).toThrow(/Unknown story schema version/);
+  });
+
+  it("resolves a registered version from its schema hash for persisted evidence that only carries a hash", () => {
+    const preferred = getProviderOutputSchemaV2("story");
+    expect(findProviderOutputSchemaV2ByHash("story", preferred.schemaHash)).toBe(preferred);
+    expect(findProviderOutputSchemaV2ByHash("story", "f".repeat(64))).toBeUndefined();
   });
 });

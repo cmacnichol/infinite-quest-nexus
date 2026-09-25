@@ -282,6 +282,19 @@ describe("native response-contract admission", () => {
     })).toThrow(/invalid or incompatible/i);
   });
 
+  it("rejects a direct v2 policy whose verification schema hash matches no registered catalog version", () => {
+    expect(() => readQueuedResponsePolicyV2({
+      version: 2, policy: "required", providerProfileId: profileId,
+      admission: { mode: "json_schema", basis: "model_verified", verification: {
+        version: 2, providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", routeConfigHash: digest,
+        adapterProtocol: "text-schema-adapter-v2", operation: "event_coverage", schemaHash: "f".repeat(64), streaming: false,
+        verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z", providerRoutingSlugs: [], nativeOpenTrackerObjects: false
+      } },
+      authority: { kind: "model_verified", providerProfileId: profileId, providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a", providerConfigurationHash: digest, routeConfigHash: digest, verificationRegistryHash: digest },
+      operationClosureVersion: 2, invocationKeys: ["event_coverage:nonstream"]
+    })).toThrow(/invalid or incompatible/i);
+  });
+
   it("rejects contradictory direct verification evidence and a Story contract without native tracker support", () => {
     const eventSchema = getProviderOutputSchemaV2("event_coverage");
     const directPolicy = {

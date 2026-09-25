@@ -231,6 +231,12 @@ export function findProviderOutputSchemaV2(operation: ProviderOutputSchemaOperat
   return versionedRegistry[operation]?.find((entry) => entry.version === version);
 }
 
+/** Resolves a registered version from persisted evidence that only carries a schema hash, not a
+ * version string (e.g. SchemaVerificationV2). Never throws. */
+export function findProviderOutputSchemaV2ByHash(operation: ProviderOutputSchemaOperationV2, schemaHash: string): ProviderOutputSchemaV2 | undefined {
+  return versionedRegistry[operation]?.find((entry) => entry.schemaHash === schemaHash);
+}
+
 /** Returns an immutable strict wire schema; callers must retain their local semantic parser. */
 export function getProviderOutputSchemaV2(operation: ProviderOutputSchemaOperationV2, version?: string): ProviderOutputSchemaV2 {
   if (version === undefined) return versionedRegistry[operation][0]!;

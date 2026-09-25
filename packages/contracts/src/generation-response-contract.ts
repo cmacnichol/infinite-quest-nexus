@@ -11,6 +11,7 @@ import {
 } from "./text-response-format.js";
 import {
   findProviderOutputSchemaV2,
+  findProviderOutputSchemaV2ByHash,
   getProviderOutputSchemaV2,
   providerOutputSchemaOperationV2Schema,
   responseContractOperationV2Schema,
@@ -207,16 +208,21 @@ export const queuedResponsePolicyV2Schema = z.object({
     });
     if (!key) context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must cover a permitted invocation." });
     else {
-      try {
-        assertModelVerifiedResponseContractEvidence({
-          verification: admission.verification,
-          authority,
-          operation: admission.verification.operation,
-          streaming: admission.verification.streaming,
-          schemaVersion: getProviderOutputSchemaV2(admission.verification.operation).version
-        });
-      } catch {
+      const matchedSchema = findProviderOutputSchemaV2ByHash(admission.verification.operation, admission.verification.schemaHash);
+      if (!matchedSchema) {
         context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must bind exact authority and catalog evidence." });
+      } else {
+        try {
+          assertModelVerifiedResponseContractEvidence({
+            verification: admission.verification,
+            authority,
+            operation: admission.verification.operation,
+            streaming: admission.verification.streaming,
+            schemaVersion: matchedSchema.version
+          });
+        } catch {
+          context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must bind exact authority and catalog evidence." });
+        }
       }
     }
   }
