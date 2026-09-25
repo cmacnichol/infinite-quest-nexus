@@ -90,10 +90,12 @@ function characterProfile() {
   };
 }
 
+const SYNTHETIC_STORY_NARRATION = "A synthetic traveler studies a quiet marker.";
+
 function story() {
   const tracker_updates = [{ name: "Synthetic trust", value: "watchful", metadata: { history: [null, true, 2, { note: "nested" }], active: false, empty: {} } }];
   return {
-    narration: "A synthetic traveler studies a quiet marker.",
+    narration: SYNTHETIC_STORY_NARRATION,
     choices: ["Inspect the marker.", "Wait nearby.", "Follow the trail.", "Return to camp."],
     custom_action_suggestion: "Describe a careful next step.", scratchpad: "", tracker_updates,
     image_prompt: "", continuity_summary: "A synthetic scene remains unresolved.",
@@ -102,11 +104,17 @@ function story() {
   };
 }
 
+/** Wire-shaped synthetic story response for whichever schema version is being probed. */
+function storyWireResponse(schemaVersion: string = getProviderOutputSchemaV2("story").version): unknown {
+  const { narration, ...rest } = story();
+  return schemaVersion === "story-native-v3" ? { narration_paragraphs: [narration], ...rest } : { narration, ...rest };
+}
+
 function responseFor(operation: ProbeOperation): unknown {
   switch (operation) {
     case "cast_discovery": return { version: 1, characters: [{ localKey: "synthetic", name: "Synthetic traveler", aliases: [], existingCharacterId: null,
       identityEvidence: [{ paragraphId: "p1", quote: "Synthetic traveler waits." }], observations: [] }] };
-    case "story": return story();
+    case "story": return storyWireResponse();
     case "choices": return { choices: story().choices, custom_action_suggestion: story().custom_action_suggestion };
     case "continuity_review": return { version: "story-continuity-review-v1", verdict: "pass", findings: [] };
     case "rpg_assessment": return { stat_id: "synthetic-stat", difficulty_modifier: 0, rationale: "Synthetic rationale.", favorable_outcome: "A synthetic success.", setback_outcome: "A synthetic setback." };
