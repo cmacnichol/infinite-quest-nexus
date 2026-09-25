@@ -3,6 +3,7 @@ export * from "./context-budget.js";
 export * from "./credentials.js";
 export * from "./mechanics.js";
 export * from "./narration-formatting.js";
+export * from "./narration-paragraphs.js";
 export * from "./output.js";
 export * from "./provider-response.js";
 export * from "./provider-request.js";
