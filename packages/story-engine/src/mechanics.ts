@@ -230,10 +230,10 @@ export function parseEventExtension(content: string, mainNarration: string) {
   if (!quoteStyleInsensitive(normalizedNarration).startsWith(quoteStyleInsensitive(normalizedMainNarration))) {
     throw new Error("Event extension rewrote the validated main narration.");
   }
-  const appendedNarration = normalizedNarration.slice(normalizedMainNarration.length).trim();
-  if (!appendedNarration) throw new Error("Event extension did not append fiction.");
-  // Accepted text keeps the validated prefix bytes; only the appended passage comes from the model.
-  const narration = `${normalizedMainNarration}\n\n${appendedNarration}`;
+  const suffix = normalizedNarration.slice(normalizedMainNarration.length);
+  if (!suffix.trim()) throw new Error("Event extension did not append fiction.");
+  // Accepted text keeps the validated prefix bytes followed by the model's own suffix exactly as emitted.
+  const narration = `${normalizedMainNarration}${suffix}`;
   const fields = [narration, extension.scratchpad, extension.continuity_summary, extension.image_prompt, ...extension.open_threads, ...extension.canonical_facts, JSON.stringify(extension.tracker_updates)];
   if (fields.some(containsMechanicsLanguage)) throw new Error("Mechanics language detected in event extension.");
   return { ...extension, narration };
