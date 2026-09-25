@@ -58,7 +58,7 @@ export function prepareResponseContract(value: unknown): AnyPreparedResponseCont
   const contract = (value && typeof value === "object" && (value as { version?: unknown }).version === 2
     ? preparedResponseContractV2Schema : preparedResponseContractSchema).parse(value);
   if (contract.mode === "json_schema") {
-    const source = contract.version === 2 ? getProviderOutputSchemaV2(contract.operation) : getProviderOutputSchema(contract.operation);
+    const source = contract.version === 2 ? getProviderOutputSchemaV2(contract.operation, contract.schemaVersion) : getProviderOutputSchema(contract.operation);
     if (contract.schemaHash !== source.schemaHash || contract.schemaVersion !== source.version || contract.schemaName !== source.name) {
       throw new Error("Prepared response contract does not match the registered schema identity.");
     }

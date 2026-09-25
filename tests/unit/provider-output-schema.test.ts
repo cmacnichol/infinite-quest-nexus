@@ -1,5 +1,10 @@
 import { Ajv } from "ajv";
 import { describe, expect, it } from "vitest";
+import {
+  findProviderOutputSchemaV2,
+  getProviderOutputSchemaV2,
+  providerOutputSchemaVersionsV2
+} from "../../packages/contracts/src/provider-output-schema.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { continuityReviewSchema } from "../../packages/contracts/src/story-continuity-review.js";
 import { sha256, stableStringify } from "../../packages/domain/src/text.js";
@@ -160,5 +165,25 @@ describe("provider output schema registry", () => {
     expect(getProviderOutputSchema("choices").version).toBe("choices-v1");
     expect(getProviderOutputSchema("continuity_review").version).toBe("continuity-review-v1");
     expect(structuredOutputFactId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe("versioned v2 schema catalog", () => {
+  it("returns the preferred version by default and every registered version by name", () => {
+    const versions = providerOutputSchemaVersionsV2("story");
+    expect(versions.length).toBeGreaterThanOrEqual(1);
+    expect(getProviderOutputSchemaV2("story")).toBe(versions[0]);
+    for (const entry of versions) expect(getProviderOutputSchemaV2("story", entry.version)).toBe(entry);
+  });
+
+  it("keeps story-native-v2 addressable with its original hash", () => {
+    const legacy = findProviderOutputSchemaV2("story", "story-native-v2");
+    expect(legacy?.name).toBe("infinite_quest_story_native_v2");
+    expect(legacy?.schemaHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("rejects an unknown version", () => {
+    expect(findProviderOutputSchemaV2("story", "story-native-v999")).toBeUndefined();
+    expect(() => getProviderOutputSchemaV2("story", "story-native-v999")).toThrow(/Unknown story schema version/);
   });
 });

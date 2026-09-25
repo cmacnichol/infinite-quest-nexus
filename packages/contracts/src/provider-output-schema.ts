@@ -197,7 +197,7 @@ const castDiscovery = closed({ version: { const: 1 }, characters: { type: "array
     mode: { enum: ["fact", "claim"] }, speakerCharacterId: { anyOf: [uuidSchema, { type: "null" }] } }) }
 }) } });
 
-const registry: Readonly<Record<ProviderOutputSchemaOperationV2, ProviderOutputSchemaV2>> = deepFreeze({
+const preferredRegistry: Readonly<Record<ProviderOutputSchemaOperationV2, ProviderOutputSchemaV2>> = deepFreeze({
   cast_discovery: entry("cast_discovery", "cast-discovery-v1", "infinite_quest_cast_discovery_v1", castDiscovery),
   story: entry("story", "story-native-v2", "infinite_quest_story_native_v2", story, true),
   choices: entry("choices", "choices-v2", "infinite_quest_choices_v2", choices),
@@ -217,7 +217,24 @@ const registry: Readonly<Record<ProviderOutputSchemaOperationV2, ProviderOutputS
   illustration_prompt_refinement: entry("illustration_prompt_refinement", "illustration-prompt-refinement-v1", "infinite_quest_illustration_prompt_refinement_v1", illustrationPrompt)
 });
 
+/** Every addressable wire version per operation, preferred first. Never remove
+ * a version that a frozen job may still reference. */
+const versionedRegistry: Readonly<Record<ProviderOutputSchemaOperationV2, readonly ProviderOutputSchemaV2[]>> = deepFreeze(
+  Object.fromEntries(Object.entries(preferredRegistry).map(([operation, schema]) => [operation, [schema]])) as Record<ProviderOutputSchemaOperationV2, ProviderOutputSchemaV2[]>
+);
+
+export function providerOutputSchemaVersionsV2(operation: ProviderOutputSchemaOperationV2): readonly ProviderOutputSchemaV2[] {
+  return versionedRegistry[operation];
+}
+
+export function findProviderOutputSchemaV2(operation: ProviderOutputSchemaOperationV2, version: string): ProviderOutputSchemaV2 | undefined {
+  return versionedRegistry[operation]?.find((entry) => entry.version === version);
+}
+
 /** Returns an immutable strict wire schema; callers must retain their local semantic parser. */
-export function getProviderOutputSchemaV2(operation: ProviderOutputSchemaOperationV2): ProviderOutputSchemaV2 {
-  return registry[operation];
+export function getProviderOutputSchemaV2(operation: ProviderOutputSchemaOperationV2, version?: string): ProviderOutputSchemaV2 {
+  if (version === undefined) return versionedRegistry[operation][0]!;
+  const found = findProviderOutputSchemaV2(operation, version);
+  if (!found) throw new Error(`Unknown ${operation} schema version ${version}.`);
+  return found;
 }
