@@ -1,3 +1,6 @@
+import { CONTINUITY_REVIEW_PROMPT_CATALOG, PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
+import { prepareContinuityReview, estimateContinuityReviewPlanningTokens } from "../../services/runtime/src/story-continuity-review-adapter.js";
+import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { describe, expect, it } from "vitest";
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { storyMemoryPolicySchema, defaultStoryMemoryPolicy } from "../../packages/contracts/src/story-memory-policy.js";
@@ -36,6 +39,54 @@ function run(context: any, limit = 32_000) {
   return planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [], { profile: "brief", minWords: 100, maxWords: 120 }, "scene", limit, limit - 100, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
 }
 describe("layered generation context planner", () => {
+  it("fits the final review with a full 48000-token output reserve by pruning optional history before generation", () => {
+    const context: any = plannerContext(null);
+    context.candidates = Array.from({ length: 20 }, (_, i) => ({ id: `history-${i}`, turnId: null, ordinal: i, kind: "turn_fiction",
+      content: "The harbor keeper records the tide. ".repeat(1500), tokenEstimate: 17500, rank: i }));
+    const provider = { ...plannerProvider() as any, contextWindowTokens: 163_840, maxOutputTokens: 48_000 };
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const prompts = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])),
+      continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
+    const reviewArgs = (manifest: NonNullable<ReturnType<typeof run>["sourceManifest"]>) => ({ provider, manifest, producingRequestHash: manifest.producingRequestHash,
+      promptSnapshot: prompts, reviewMode: "enforce" as const, direction: "Wait" });
+    const args = [context, provider, "System", "Wait", [] as string[], { profile: "extended", minWords: 1200, maxWords: 2000 }, "scene", 128_000, 115_840,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined] as const;
+    const baseline = planGenerationPromptContext(...args);
+    const planned = planGenerationPromptContext(...args, (manifest) => estimateContinuityReviewPlanningTokens({ ...reviewArgs(manifest), candidateOutputTokens: 48_000 }));
+    expect(planned.promptContext.chronicle.length).toBeLessThan(baseline.promptContext.chronicle.length);
+    const draft = storyTurnOutputSchema.parse({ narration: "The keeper waits beside the harbor. ".repeat(500), choices: ["Wait", "Go", "Look", "Listen"], custom_action_suggestion: "Wait", scratchpad: "",
+      tracker_updates: [], image_prompt: "Harbor", continuity_summary: "The keeper waits.", open_threads: [], canonical_facts: [], canonical_fact_updates: [], superseded_facts: [] });
+    const finalReview = prepareContinuityReview({ ...reviewArgs(planned.sourceManifest!), draft });
+    expect(finalReview.requestTokens + finalReview.safetyAllowanceTokens + 48_000).toBeLessThanOrEqual(163_840);
+    expect(JSON.parse(finalReview.body).max_tokens).toBe(48_000);
+  });
+
+  it("packs recent and world evidence together when review headroom is tighter", () => {
+    const context = recentContext();
+    context.recentTurns = [context.recentTurns[1]];
+    context.authority.worldReferenceSource = {
+      worldVersionId: "11111111-1111-4111-8111-111111111111",
+      worldContent: { entities: [{ id: "relay", name: "Sable Relay", description: "The Sable Relay remembers every oath." }] }
+    };
+    const reviewInputTokens = (manifest: NonNullable<ReturnType<typeof run>["sourceManifest"]>) =>
+      24_000 + (manifest.entries.some((entry) => entry.selectionGroup === "recent") ? 1200 : 0)
+        + (manifest.entries.some((entry) => entry.semanticRole === "world_reference") ? 1200 : 0);
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Ask the Sable Relay about its oath.", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r3"), undefined, reviewInputTokens);
+    const reviewTokens = reviewInputTokens(result.sourceManifest!);
+    expect(reviewTokens + estimatedInputSafetyAllowanceTokens(reviewTokens)).toBeLessThanOrEqual(31_900);
+    expect(result.layerDiagnostics.omitted.length).toBeGreaterThan(0);
+  });
+  it("does not measure continuity review when the frozen policy disables it", () => {
+    let reviewMeasurements = 0;
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "off" });
+    const result = planGenerationPromptContext(recentContext(), plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, () => { reviewMeasurements++; return 100_000; });
+    expect(reviewMeasurements).toBe(0);
+    expect(result.promptContext.recentTurns).toHaveLength(2);
+  });
   it.each(["action", "scene"] as const)("sends bounded cast corrections with exact evidence in %s mode", (mode) => {
     const context: any = plannerContext({ source: "none", name: "", characterText: "", profile: null });
     const characterId = "11111111-1111-4111-8111-111111111111";

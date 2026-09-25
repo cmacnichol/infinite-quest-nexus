@@ -521,6 +521,7 @@ export type GenerationOrchestrationState = {
   /** Complete primary response captured before parsing or any destructive validator/repair stage. */
   primaryResult?: {
     version: 1;
+    interruptedOutput?: { rawOutput: string; diagnostic: GenerationFailureDiagnostic; recovered: boolean };
     requestBody: string;
     requestPayloadHash: string;
     response: ProviderResult;

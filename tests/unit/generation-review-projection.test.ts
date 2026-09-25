@@ -9,6 +9,15 @@ import { generationReviewPresentation } from "../../packages/client-core/src/gen
 const reviewId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 describe("generation review public projection", () => {
+  test("explains interrupted candidate recovery with fixed public text", () => {
+    const detail = projectGenerationReviewDetailResponse({
+      version: 1, reviewId, revision: 1, state: "pending", stage: "continuity", candidateScope: "final",
+      reasons: ["provider_interrupted"], canKeep: true, canRetry: false,
+      narration: "Mira waits.", choices: ["Wait."], retryDescription: "Retry.", retryFailure: null, omittedFindingCount: 0,
+      findings: [{ code: "provider_interrupted", message: "PRIVATE_PROVIDER_ERROR" }]
+    });
+    expect(detail?.findings).toEqual([{ code: "provider_interrupted", message: "The provider stream was interrupted. A complete candidate passed validation and was preserved for your decision." }]);
+  });
   test("projects the same safe review identity for polling and streams without private checkpoint data", () => {
     const privateCanary = "PRIVATE_REVIEW_PROMPT_CANARY";
     const source = {

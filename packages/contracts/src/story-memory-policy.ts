@@ -21,7 +21,12 @@ export const storyMemorySettingsSchema = z.object({
   availableLevels: z.array(storyMemoryLevelSchema)
 }).strict();
 export type StoryMemorySettings = Readonly<z.infer<typeof storyMemorySettingsSchema>>;
-export const storyMemorySettingsUpdateSchema = z.object({ level: storyMemoryLevelSchema }).strict();
+export const storyMemorySettingsUpdateSchema = z.object({
+  level: storyMemoryLevelSchema,
+  continuityReviewEnabled: z.boolean().default(false)
+}).strict().refine((value) => !value.continuityReviewEnabled || value.level === "max", {
+  message: "Continuity review requires Max memory.", path: ["continuityReviewEnabled"]
+});
 export const storyMemoryRankAggregationSchema = z.enum(["legacy_sum", "query_family_max_v1"]);
 export const storyMemorySelectionReasonSchema = z.enum([
   "selected", "context_limit", "request_limit", "recent_gap", "unsupported_world_shape",

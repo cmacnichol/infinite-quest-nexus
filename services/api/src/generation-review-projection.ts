@@ -15,6 +15,7 @@ const reasonMessages: Record<GenerationReviewReasonCode, string> = {
   invalid_choices: "The candidate choices do not meet the required structure.",
   invalid_structure: "The candidate does not meet the required story structure.",
   output_incomplete: "The candidate output is incomplete.",
+  provider_interrupted: "The provider stream was interrupted. A complete candidate passed validation and was preserved for your decision.",
   mechanics_contamination: "The candidate contains game mechanics language.",
   event_coverage_failed: "The candidate does not cover required story events.",
   candidate_stale: "The candidate no longer matches the current campaign authority.",

@@ -1774,7 +1774,7 @@ export async function buildServer({
     return saveStoryMemorySettings(pool, { ownerUserId, campaignId: uuidSchema.parse(request.params.campaignId) }, update.level, {
       installedCapability: config.storyMemoryCapability ?? null,
       enforceEnabled: config.storyMemoryEnforceEnabled === true
-    });
+    }, update.continuityReviewEnabled);
   });
 
   app.put<{ Params: { campaignId: string } }>("/api/v1/campaigns/:campaignId/story-memory-enrollment", async (request) => {

@@ -1,7 +1,7 @@
 import type { GenerationReviewReasonCode, GenerationReviewStage } from "@infinite-quest/contracts";
 
 const keepableReasonCodes = new Set<GenerationReviewReasonCode>([
-  "scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable"
+  "scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable", "provider_interrupted"
 ]);
 
 export type GenerationReviewEligibility = Readonly<{
@@ -16,5 +16,6 @@ export function canKeepGenerationCandidate(input: GenerationReviewEligibility): 
     && input.stageComplete && input.reasons.length > 0
     && ((input.stage === "scene_coverage" && input.candidateScope === "main")
       || (input.stage === "continuity" && input.candidateScope === "final"))
-    && input.reasons.every((reason) => keepableReasonCodes.has(reason));
+    && input.reasons.every((reason) => keepableReasonCodes.has(reason))
+    && (!input.reasons.includes("provider_interrupted") || input.stage === "continuity" && input.candidateScope === "final");
 }

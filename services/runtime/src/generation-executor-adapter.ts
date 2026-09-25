@@ -1,6 +1,7 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
-import { prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
+import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
+import { recoverInterruptedStory } from "../../../packages/story-engine/src/interrupted-story.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
@@ -703,7 +704,7 @@ function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): stri
 
 function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: string, responseContractDiagnostic: string | null = null): GenerationFailureDiagnostic {
   const transport = providerTransportErrorDetails(error);
-  const code = responseContractDiagnostic
+  const code = preparedRouteTerminalError(error)?.reason === "deadline" ? "provider_request_timeout" : responseContractDiagnostic
     ?? (transport
     ? (transport.timedOut ? "provider_request_timeout" : "provider_transport_error")
     : safeLogErrorCode(errorCodeFrom(error) || "generation_failed", "generation_failed"));
@@ -2091,7 +2092,7 @@ async function executeLoadedGeneration(
           || candidate.worldId !== job.world_id || candidate.worldVersionId !== (job.world_version_id || null)
           || canonicalEvidenceJson(candidate.baseIdentity) !== canonicalEvidenceJson(job.generation_base_identity)
           || candidate.protocol.version !== job.prompt_protocol_version
-          || candidate.protocol.promptHash !== promptSnapshot.continuityReview?.review.hash
+          || candidate.protocol.promptHash !== (promptSnapshot.continuityReview?.review.hash ?? sha256(""))
           || candidate.policyHash !== frozenStoryMemoryPolicySnapshot?.policyHash
           || candidate.storyHash !== sha256(canonicalEvidenceJson(story))
           || mechanicsLeakFields(story).length
@@ -2559,7 +2560,15 @@ async function executeLoadedGeneration(
         frozenContracts ? (input) => serializeFrozenCampaignRequest(provider, job, "story_generation", {
           systemPrompt: storySystemPrompt, input,
           ...(streamsPrimary ? { onChunk: () => undefined } : {})
-        }, storyTextExecutionPlan).body : undefined
+        }, storyTextExecutionPlan).body : undefined,
+        frozenStoryMemoryPolicySnapshot && frozenStoryMemoryPolicySnapshot.policy.continuityReview !== "off"
+          ? (manifest) => estimateContinuityReviewPlanningTokens({
+            provider, manifest, producingRequestHash: manifest.producingRequestHash,
+            promptSnapshot: frozenPromptEnvelope, reviewMode: frozenStoryMemoryPolicySnapshot.policy.continuityReview as "observe" | "enforce",
+            direction: safeAction, candidateOutputTokens: effectiveMaxOutputTokens(provider, job),
+            prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
+            ...(frozenContracts ? { serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan) } : {})
+          }) : undefined
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
@@ -2818,10 +2827,12 @@ async function executeLoadedGeneration(
     let singleSectionDetected = false;
     let lastPartialUpdate = 0;
     let lastPartialContent = "";
+    let latestStreamContent = "";
     let lastStreamLogAt = 0;
     let lastStreamLogChars = 0;
     let lastStreamPersistWarningAt = 0;
     const onChunk = async (_delta: string, accumulated: string) => {
+      latestStreamContent = accumulated;
       const now = Date.now();
       // Persisting progress is throttled, but segment detection must inspect
       // every changed chunk. A fast final chunk can complete the narration
@@ -3060,8 +3071,35 @@ async function executeLoadedGeneration(
       return true;
     }
     const dispatchedPrimary = !validatedDraft && !savedChoiceRepair?.originalResponse && !capturedPrimary;
-    let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", () =>
-      callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest, storyTextExecutionPlan));
+    let interruptedOutput = capturedPrimary?.interruptedOutput;
+    let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", async () => {
+      try {
+        return await callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest, storyTextExecutionPlan);
+      } catch (error) {
+        const route = preparedRouteTerminalError(error);
+        if (route?.reason === "cancelled" || (!providerTransportErrorDetails(error) && route?.reason !== "deadline")) throw error;
+        const failure = preparedResponseContractError(error);
+        if (frozenContracts && !failure) throw error;
+        const rawOutput = failure?.partialContent || latestStreamContent;
+        if (!rawOutput || rawOutput.length > 1_000_000) throw error;
+        const recovered = recoverInterruptedStory(rawOutput);
+        const diagnostic = failureDiagnosticFor(error, job.attempts, "story_generation");
+        interruptedOutput = { rawOutput, diagnostic, recovered: recovered !== null };
+        // Preserve failure evidence. A recovered object still traverses every
+        // validator and requires an explicit final Keep before it can commit.
+        orchestration = await persistOrchestration(repository, scope, job, { lastFailureDiagnostic: diagnostic });
+        return {
+          content: recovered ? JSON.stringify(recovered) : rawOutput,
+          responseId: failure?.responseId ?? "", finishReason: "", outputLimited: !recovered,
+          modelInstanceId: failure?.returnedModel ?? provider.model,
+          returnedModel: failure?.returnedModel ?? null, returnedProviderRoute: failure?.returnedProviderRoute ?? null,
+          usage: { inputTokens: failure?.observedUsage?.inputTokens ?? 0, outputTokens: failure?.observedUsage?.outputTokens ?? 0,
+            totalTokens: failure?.observedUsage?.totalTokens ?? 0 }, usageReported: Boolean(failure?.observedUsage),
+          observedUsage: failure?.observedUsage ?? null, reportedCost: failure?.observedReportedCost ?? null, rawMetadata: {},
+          ...(failure ? { preparedRequest: failure.preparedRequest } : {})
+        } satisfies ProviderResult;
+      }
+    });
     if (dispatchedPrimary) {
       const preparedPrimary = preparedRequestForResult(result, provider, primaryRequest);
       orchestration = await persistOrchestration(repository, scope, job, {
@@ -3069,6 +3107,7 @@ async function executeLoadedGeneration(
           version: 1, requestBody: preparedPrimary.body, requestPayloadHash: preparedPrimary.payloadHash,
           response: result, sentFactIds: sentCanonicalFactIds(preparedPrimary.body),
           rawOutputReference: `generation-primary:${job.id}:${job.attempts}`,
+          ...(interruptedOutput ? { interruptedOutput } : {}),
           providerConfigurationHash: effectiveProviderConfigurationHash(provider, job),
           contextFingerprint, contextDiagnostics, chronicleRetrieval
         }
@@ -3127,7 +3166,7 @@ async function executeLoadedGeneration(
         },
         providerResponseId: result.responseId || null,
         finishReason: result.finishReason || null,
-        rawOutput: result.content || null,
+        rawOutput: interruptedOutput?.rawOutput ?? (result.content || null),
         validationErrors: initialValidationErrors,
         overwrite: true
       });
@@ -3205,7 +3244,7 @@ async function executeLoadedGeneration(
       const diagnostic = !result.content.trim()
         ? emptyOutputFailureDiagnostic(initialAttemptNumber)
         : rejectedCandidateFailureDiagnostic(reason, initialAttemptNumber);
-      if (diagnostic) {
+      if (diagnostic && !interruptedOutput) {
         orchestration = await persistOrchestration(repository, scope, job, {
           lastFailureDiagnostic: diagnostic
         });
@@ -3213,6 +3252,7 @@ async function executeLoadedGeneration(
       assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "pausing rejected primary candidate for review");
       return true;
     };
+    if (interruptedOutput && !interruptedOutput.recovered) return pauseRejectedMain("structure", "output_incomplete");
     if (generationPolicy?.playMode === "story_only" && validatedDraft && parsed.ok) {
       const checkpointChoices = parseStoryOnlyOutput(JSON.stringify(parsed.story));
       if (!checkpointChoices.ok) {
@@ -4493,6 +4533,38 @@ async function executeLoadedGeneration(
       orchestration = await persistOrchestration(repository, scope, job, { castDiscoveryAdmission: admission });
     }
     const castAdmission = collaborators.prepareCastDiscoveryExecution ? orchestration.castDiscoveryAdmission : undefined;
+    if (interruptedOutput) {
+      if (!job.world_id || !frozenStoryMemoryPolicySnapshot || !orchestration.primaryResult || !orchestration.validatedMainDraft) {
+        throw Object.assign(new Error("Interrupted candidate lacks its frozen recovery binding."), { code: "generation_checkpoint_incompatible" });
+      }
+      const producingResponse = orchestration.extension?.response ?? result;
+      const candidate: GenerationReviewCandidate = {
+        scope: "final", story: committedStory, storyHash: sha256(canonicalEvidenceJson(committedStory)),
+        rawOutputReference: orchestration.primaryResult.rawOutputReference ?? null,
+        producingRequestHash: sha256(orchestration.extension?.producingRequestBody ?? orchestration.validatedMainDraft.requestBody), producingResponseId: producingResponse.responseId || null,
+        sentFactIds: [...finalSentFactIds], ownerUserId: job.owner_user_id, campaignId: job.campaign_id,
+        worldId: job.world_id, worldVersionId: job.world_version_id || null,
+        baseTurnNumber: job.generation_base_identity.baseTurnNumber, expectedTurnNumber: job.expected_turn_number,
+        policy: frozenStoryMemoryPolicySnapshot.policy, policyHash: frozenStoryMemoryPolicySnapshot.policyHash,
+        baseIdentity: job.generation_base_identity,
+        protocol: { version: job.prompt_protocol_version, promptHash: promptSnapshot.continuityReview?.review.hash ?? sha256("") },
+        provider: { type: provider.providerType, profileId: job.provider_profile_id, configurationHash: effectiveProviderConfigurationHash(provider, job) },
+        resumeDependencies: {
+          generationContext: { contextFingerprint, contextDiagnostics, chronicleRetrieval },
+          producingProviderResult: structuredClone(producingResponse) as Record<string, unknown>,
+          stageState: { validatedMainDraft: orchestration.validatedMainDraft },
+          frozenCommitInputs: { inputs, fictionAction: safeAction,
+            provider: { id: provider.id, providerType: provider.providerType, model: provider.model },
+            orchestration, finalSentFactIds: [...finalSentFactIds] },
+          replacementTarget: job.replacement_turn_id ? { id: job.replacement_turn_id } : null
+        }
+      };
+      const gate = prepareGenerationReview({ candidate, stage: "continuity", reasons: ["provider_interrupted"],
+        operationKind: job.operation_kind, replacementTurnId: job.replacement_turn_id,
+        eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: false } });
+      assertActiveGenerationUpdate(await repository.pauseForReview(scope, gate), "preserving interrupted candidate for explicit Keep");
+      return true;
+    }
     assertActiveGenerationUpdate(await repository.markCommitting(scope), "entering commit");
     const acceptedCommitCollaborators: AcceptedGenerationCommitCollaborators = {
       memory: collaborators.memory,

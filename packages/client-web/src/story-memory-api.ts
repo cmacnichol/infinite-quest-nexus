@@ -5,7 +5,7 @@ import { validatedRequest } from "./api-client.js";
 
 export interface StoryMemoryApi {
   get(campaignId: string, signal?: AbortSignal): Promise<StoryMemorySettings>;
-  update(campaignId: string, value: { level: StoryMemoryLevel }, signal?: AbortSignal): Promise<StoryMemorySettings>;
+  update(campaignId: string, value: { level: StoryMemoryLevel; continuityReviewEnabled?: boolean }, signal?: AbortSignal): Promise<StoryMemorySettings>;
 }
 
 export function createStoryMemoryApi(options: NexusHttpClientOptions = {

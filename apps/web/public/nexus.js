@@ -182,8 +182,10 @@ function campaignStoryMemoryDescription(settings) {
 function renderCampaignStoryMemorySettings(settings, { draftLevel = null, message = null, disabled = false } = {}) {
   const selector = elements.campaignStoryMemoryLevel;
   const status = elements.campaignStoryMemoryStatus;
+  const checkbox = elements.campaignContinuityReviewEnabled;
   if (!settings) {
     selector.disabled = true;
+    checkbox.disabled = true;
     status.textContent = message || "Story Memory controls are unavailable for this campaign.";
     status.className = "field-note";
     return;
@@ -195,6 +197,8 @@ function renderCampaignStoryMemorySettings(settings, { draftLevel = null, messag
   }
   selector.value = draftLevel || settings.level;
   selector.disabled = disabled || !selectedCampaign;
+  checkbox.checked = selector.value === "max" && settings.reviewMode !== "off";
+  checkbox.disabled = selector.disabled || selector.value !== "max";
   status.textContent = message || campaignStoryMemoryDescription(settings);
   status.className = "field-note";
 }
@@ -218,10 +222,11 @@ async function saveCampaignStoryMemory() {
   const level = elements.campaignStoryMemoryLevel.value;
   const selectionRequest = campaignSelectionRequest;
   if (!campaignId || !campaignStoryMemorySettings || !STORY_MEMORY_LEVELS.includes(level)) return;
-  renderCampaignStoryMemorySettings(campaignStoryMemorySettings, { draftLevel: level, disabled: true, message: "Saving Story Memory level…" });
+  const continuityReviewEnabled = level === "max" && elements.campaignContinuityReviewEnabled.checked;
+  renderCampaignStoryMemorySettings({ ...campaignStoryMemorySettings, reviewMode: continuityReviewEnabled ? "enforce" : "off" }, { draftLevel: level, disabled: true, message: "Saving Story Memory level…" });
   try {
     const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`, {
-      method: "PUT", body: JSON.stringify({ level })
+      method: "PUT", body: JSON.stringify({ level, continuityReviewEnabled })
     }));
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     campaignStoryMemorySettings = settings;
@@ -6657,6 +6662,7 @@ elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns("", { focusNoSelection: true }).catch((error) => setStatus(error.message, "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
+elements.campaignContinuityReviewEnabled.addEventListener("change", () => { void saveCampaignStoryMemory(); });
 elements.campaignStoryMemoryLevel.addEventListener("change", () => { void saveCampaignStoryMemory(); });
 const campaignSettingsRailMediaQuery = window.matchMedia("(max-width: 820px)");
 syncCampaignSettingsRailOrientation(campaignSettingsRailMediaQuery);

@@ -638,3 +638,6 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
   .data-transfer-purpose-grid article + article, .system-archive-columns > section + section { border-top: 1px solid var(--line); border-left: 0; }
   .system-preview-summary > div, .system-preview-details section, .system-report-evidence section, .system-recovery-checklist section { border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+.campaign-review-settings > label { display:flex; align-items:center; gap:8px; }
+.campaign-review-settings input[type="checkbox"] { width:18px; height:18px; margin:0; }

@@ -111,9 +111,9 @@ const STORY_MEMORY_LEVEL_LABELS: Record<(typeof STORY_MEMORY_LEVELS)[number], st
 };
 
 function storyMemoryGuidance(settings: StoryMemorySettings | null): string {
-  if (settings?.reviewMode === "enforce") return "Max reviews continuity, attempts a repair, and blocks unresolved conflicts. Your Story context limit still applies.";
-  if (settings) return `This campaign's current review mode is ${settings.reviewMode}. Max behavior follows the server's current review mode. Your Story context limit still applies.`;
-  return "Max behavior follows the server's current review mode. Your Story context limit still applies.";
+  return settings?.reviewMode !== "off" && settings
+    ? "Continuity review checks each new draft before acceptance. It adds a model request and may pause a turn for your decision."
+    : "Continuity review is disabled. Story structure and safety validation still apply.";
 }
 
 function storyMemorySettingsMarkup(settings: StoryMemorySettings | null, unavailable: boolean): string {
@@ -124,7 +124,7 @@ function storyMemorySettingsMarkup(settings: StoryMemorySettings | null, unavail
   const status = unavailable
     ? '<p class="campaign-error" role="status">Campaign memory settings could not be loaded. Reload the page before changing them.</p>'
     : `<p data-story-memory-guidance class="campaign-field-hint">${storyMemoryGuidance(settings)}</p>`;
-  return `<form id="memory-settings-form" class="campaign-form" aria-busy="false"><section><h3>Campaign memory</h3>${field("Memory level", `<select name="storyMemoryLevel" aria-describedby="story-memory-help"${disabled}>${options}</select>`)}<p id="story-memory-help" class="campaign-field-hint">This applies to newly queued turns. Existing jobs keep their saved memory policy. Accepted turns and the current draft are unchanged.</p>${status}</section><div class="campaign-action-ledger"><span>Selection is restricted by this server's available memory levels.</span><button class="primary-action" type="submit"${disabled}>Save memory level</button></div></form>`;
+  return `<form id="memory-settings-form" class="campaign-form" aria-busy="false"><section><h3>Campaign memory</h3>${field("Memory level", `<select name="storyMemoryLevel" aria-describedby="story-memory-help"${disabled}>${options}</select>`)}<label class="campaign-checkbox"><input type="checkbox" name="continuityReviewEnabled"${settings && settings.reviewMode !== "off" ? " checked" : ""}${unavailable || selected !== "max" ? " disabled" : ""}><span>Enable continuity review</span></label><p class="campaign-field-hint">Optional with Max memory. Disabled by default.</p><p id="story-memory-help" class="campaign-field-hint">This applies to newly queued turns. Existing jobs keep their saved memory policy. Accepted turns and the current draft are unchanged.</p>${status}</section><div class="campaign-action-ledger"><span>Selection is restricted by this server's available memory levels.</span><button class="primary-action" type="submit"${disabled}>Save memory level</button></div></form>`;
 }
 
 function campaignListMarkup(): string {
@@ -433,10 +433,44 @@ export function mountCampaignEditorPage(root: HTMLElement, route: CampaignRoute)
     else target.innerHTML=dataMarkup(campaign); target.setAttribute("aria-busy","false"); bindActions(target);
   }
   function bindActions(target: HTMLElement): void {
+    target.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']")?.addEventListener("change", (event) => {
+      const select = event.target as HTMLSelectElement;
+      const checkbox = target.querySelector<HTMLInputElement>("input[name='continuityReviewEnabled']");
+      if (checkbox) { checkbox.disabled = select.value !== "max"; if (checkbox.disabled) checkbox.checked = false; }
+    });
     target.addEventListener("submit",async(event)=>{event.preventDefault();if(!campaign)return;const form=event.target as HTMLFormElement;try{
       if(form.id==="narration-correction-form"){const dialog=form.closest<HTMLDialogElement>("dialog")!;const error=dialog.querySelector<HTMLElement>(".narration-correction-error")!;const narration=(form.elements.namedItem("narration") as HTMLTextAreaElement).value.trim();if(!narration){error.textContent="Enter the corrected narration before saving.";error.hidden=false;(form.elements.namedItem("narration") as HTMLTextAreaElement).focus();return;}const submit=form.querySelector<HTMLButtonElement>('button[type="submit"]')!;await withCampaignActionState(submit,"Saving correction…",async()=>campaignApi.patch(campaign!.id,`/turns/${encodeURIComponent(form.dataset.turnId??"")}/correction`,{narration,expectedCorrectionRevision:Number(form.dataset.correctionRevision??0),expectedActiveTurnNumber:campaign!.activeTurnNumber,source:"user_edit"}));const article=Array.from(target.querySelectorAll<HTMLElement>("article[data-turn-id]")).find((candidate)=>candidate.dataset.turnId===form.dataset.turnId);const feedback=article?.querySelector<HTMLElement>(".turn-feedback");dialog.close();message("Accepted narration corrected; dependent Chronicle context was rebuilt.");if(feedback){feedback.textContent="Narration saved. Chronicle context was rebuilt.";delete feedback.dataset.state;}return;}
       if(form.id==="overview-form"){const v=formObject(form);const originalTurnControlStyle=form.dataset.originalTurnControlStyle;const expectedStateRevision=Number(form.dataset.stateRevision);if(!Number.isSafeInteger(expectedStateRevision)||expectedStateRevision<0)throw new Error("Campaign settings need to be reloaded before saving.");const turnControlStyle=v.turnControlStyle==="flexible_action"&&originalTurnControlStyle==="action_only"?"action_only":v.turnControlStyle;await campaignApi.patch(campaign.id,"",{...v,turnControlStyle,expectedTurnControlStyle:originalTurnControlStyle,expectedActiveTurnNumber:campaign.activeTurnNumber,expectedStateRevision,textProviderProfileId:v.textProviderProfileId||null,storyContextBudgetTokens:Number(v.storyContextBudgetTokens)});message("Campaign settings saved.");}
-      if(form.id==="memory-settings-form"){const select=form.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']");if(!select)throw new Error("Campaign memory settings need to be reloaded before saving.");const submit=form.querySelector<HTMLButtonElement>("button[type='submit']");select.disabled=true;if(submit)submit.disabled=true;form.setAttribute("aria-busy","true");try{const saved=await storyMemoryApi.update(campaign.id,{level:select.value as StoryMemorySettings["level"]},controller.signal);if(disposed||campaign.id!==route.campaignId)return;storyMemorySettings=saved;storyMemoryUnavailable=false;const guidance=form.querySelector<HTMLElement>("[data-story-memory-guidance]");if(guidance)guidance.textContent=storyMemoryGuidance(saved);for(const candidate of select.options){candidate.disabled=!saved.availableLevels.includes(candidate.value as StoryMemorySettings["level"]);candidate.selected=candidate.value===saved.level;}message("Campaign memory level saved.");}finally{if(!disposed){select.disabled=storyMemoryUnavailable;if(submit)submit.disabled=storyMemoryUnavailable;form.setAttribute("aria-busy","false");}}}
+      if (form.id === "memory-settings-form") {
+        const select = form.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']");
+        const checkbox = form.querySelector<HTMLInputElement>("input[name='continuityReviewEnabled']");
+        if (!select || !checkbox) throw new Error("Campaign memory settings need to be reloaded before saving.");
+        const submit = form.querySelector<HTMLButtonElement>("button[type='submit']");
+        const enabled = select.value === "max" && checkbox.checked;
+        select.disabled = checkbox.disabled = true;
+        if (submit) submit.disabled = true;
+        form.setAttribute("aria-busy", "true");
+        try {
+          const saved = await storyMemoryApi.update(campaign.id, { level: select.value as StoryMemorySettings["level"], continuityReviewEnabled: enabled }, controller.signal);
+          if (disposed || campaign.id !== route.campaignId) return;
+          storyMemorySettings = saved; storyMemoryUnavailable = false;
+          checkbox.checked = saved.reviewMode !== "off";
+          const guidance = form.querySelector<HTMLElement>("[data-story-memory-guidance]");
+          if (guidance) guidance.textContent = storyMemoryGuidance(saved);
+          for (const candidate of select.options) {
+            candidate.disabled = !saved.availableLevels.includes(candidate.value as StoryMemorySettings["level"]);
+            candidate.selected = candidate.value === saved.level;
+          }
+          message("Campaign memory level saved.");
+        } finally {
+          if (!disposed) {
+            select.disabled = storyMemoryUnavailable;
+            checkbox.disabled = storyMemoryUnavailable || select.value !== "max";
+            if (submit) submit.disabled = storyMemoryUnavailable;
+            form.setAttribute("aria-busy", "false");
+          }
+        }
+      }
       if(form.id==="character-form"){const v=formObject(form);await campaignApi.put(campaign.id,"/character-profile",{expectedRevision:Number(v.revision),name:v.name,profile:parseJsonField(form,"profile","Profile"),editSource:"manual"});message("Campaign character profile saved.");}
       if(form.id==="state-form"){if(stateSaveInFlight||stateReloadInFlight)return;if(stateGenerationLocked)throw new Error("Current-state editing is unavailable while a story generation needs attention.");if(stateConflictLocked)throw new Error("Current state changed while you were editing. Reload before saving; your draft is still available.");const base=stateBase;const editor=continuityEditor;if(!base||!editor)throw new Error("Current campaign state is unavailable. Reload before saving.");const sessionId=stateSessionId;const trackers=parseJsonField(form,"trackers","Trackers") as CampaignRuntimeStateUpdate["trackers"];const request=buildCurrentStateUpdate(base,editor.readDraft(),{trackers});stateSaveInFlight=true;setStateFormBusy(form,true);editor.setDisabled(true);try{const saved=await campaignApi.patch<CampaignRuntimeStateResponse>(campaign.id,"/state",request);if(disposed||sessionId!==stateSessionId||stateBase!==base||continuityEditor!==editor)return;stateBase=saved;editor.dispose();continuityEditor=createCampaignContinuityEditor(root.ownerDocument,createCampaignContinuityDraft(saved),{idPrefix:"campaign-current-state",onChange:()=>undefined});target.querySelector("[data-campaign-continuity-editor]")?.replaceChildren(continuityEditor.element);message("Current campaign state saved.");}catch(error){if(error instanceof CampaignEditorApiError&&error.status===409)stateConflictLocked=true;throw error;}finally{if(!disposed&&sessionId===stateSessionId){stateSaveInFlight=false;setStateFormBusy(form,false);if(continuityEditor===editor)editor.setDisabled(stateGenerationLocked||stateConflictLocked);}}}
       if(form.id==="chronicle-form"){await runChronicleOperation(target,async()=>{const v=formObject(form);const payload=chronicleEmbeddingConfigPayload(v);if(payload.enabled===true&&!payload.providerProfileId)throw new Error("Choose an eligible embedding provider before enabling Semantic Retrieval.");const saved=record(await campaignApi.put(campaign!.id,"/memory/embedding-config",payload));chronicleConfig=saved;if(saved.enabled===true&&!saved.jobId)throw new Error("Semantic Retrieval was enabled, but indexing did not return a job identifier.");if(saved.jobId)await monitorAndRefreshChronicle(saved.jobId, "Semantic Retrieval indexing");else{await refreshChronicleMetrics(target);message("Semantic Retrieval disabled. Chronicle local lexical retrieval and retained rollback embeddings remain available.");}});}

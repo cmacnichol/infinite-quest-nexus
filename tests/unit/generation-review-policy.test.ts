@@ -15,6 +15,8 @@ const base = {
 describe("generation review keep policy", () => {
   it.each([
     ["eligible soft review finding", base, true],
+    ["validated interrupted final candidate", { ...base, reasons: ["provider_interrupted"] }, true],
+    ["interrupted main cannot bypass remaining validation", { ...base, stage: "scene_coverage", candidateScope: "main", reasons: ["provider_interrupted"] }, false],
     ["missing completed output", { ...base, complete: false }, false],
     ["malformed output", { ...base, structurallyValid: false }, false],
     ["mechanics contamination", { ...base, mechanicsClean: false }, false],

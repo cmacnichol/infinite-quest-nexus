@@ -32,10 +32,10 @@ export type CanonicalProviderRequest = Readonly<
   }
 >;
 
-/** Review-output-v1: findings have their own ceiling; story/repair reserves stay unchanged.
+/** Review, story, and repair share the configured output allowance.
  * The effective limit is serialized into the hash-bound request, including preset routes. */
-export function effectiveRequestOutputTokens(configured: number, request: Pick<ProviderRequest, "budgetOutput">): number {
-  return request.budgetOutput?.kind === "continuity_review" ? Math.min(configured, 16_384) : configured;
+export function effectiveRequestOutputTokens(configured: number, _request: Pick<ProviderRequest, "budgetOutput">): number {
+  return configured;
 }
 
 /** Task 5 supplies this text-free audit after measuring the serialized request. */

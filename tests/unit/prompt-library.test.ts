@@ -166,14 +166,37 @@ describe("Prompt Library catalog", () => {
     const preview = buildPromptPreview(key, snapshot[key].content);
     const text = preview.sections.map((section) => section.content).join("\n");
 
-    expect(text).toContain('Split sequences of three or more independent clauses joined by "and" into separate sentences.');
-    expect(text).toContain("Allow ordinary conjunctions in lists and natural dialogue.");
+    expect(text).toContain("Write natural, character-led fiction");
+    expect(text).toContain("When characters speak, write their words as direct dialogue enclosed in double quotation marks");
+    expect(text).toContain("Start a new paragraph whenever the speaker changes.");
+    expect(text).toContain("Escape quotation marks correctly inside the JSON narration string");
+    expect(text).toContain("Do not force dialogue into solitary or nonverbal scenes.");
+    expect(text).toContain("Preserve established character voice and cadence");
+    expect(text).toContain("Keep purposeful repetition, hesitation, callbacks, and subtext");
+    expect(text).toContain("Keep world atmosphere distinct from narrative delivery and individual character speech.");
+    expect(text).toContain("Plausible present-scene speech, reactions, and connective action may develop the requested events");
     expect(text).toContain("Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning.");
-    expect(text).toContain("Use previous narration and retrieved story history for facts and continuity, not as prose patterns to imitate.");
-    expect(text).toContain("Do not carry forward their chained clauses, circular restatements, or repeated rhetorical endings into new narration.");
-    expect(text).toContain("Express each idea once; remove sentences that merely rename or restate it without adding a concrete development.");
-    expect(text).toContain("Preserve established facts, requested events, viewpoint, and tone.");
+    expect(text).not.toContain("not as prose patterns to imitate");
+    expect(text).not.toContain("Prefer one main action or observation per sentence.");
+    expect(text).toContain("Preserve established facts, requested events, viewpoint, and the selected prose style.");
+    expect(text).toContain("When repairing a turn, preserve unaffected narration and dialogue");
     expect(preview.unresolvedVariables).toEqual([]);
+  });
+
+  it("protects unaffected narration and voice during continuity repair", () => {
+    const text = CONTINUITY_REVIEW_PROMPT_CATALOG.repair.defaultContent;
+    expect(text).toContain("Preserve unaffected narration, character voice, and dialogue rhythm");
+    expect(text).toContain("Change only what the verified findings require");
+    expect(text).toContain("Write natural, character-led fiction");
+    expect(text).toContain("Do not add facts, mechanics, private reasoning, or supersession authority.");
+  });
+
+  it("keeps revised writing templates within their override limits and changes chain identity", () => {
+    for (const definition of [...Object.values(PROMPT_TEMPLATE_CATALOG), CONTINUITY_REVIEW_PROMPT_CATALOG.repair]) {
+      expect(definition.defaultContent.length).toBeLessThanOrEqual(definition.maxLength);
+    }
+    expect(createHash("sha256").update(STORY_SYSTEM_PROMPT).digest("hex"))
+      .not.toBe("10d3f89bb64a084a2f50a158069ddd350daa84756cc36fcb1eedb17ee9c6b18d");
   });
 
   it("limits event-extension prose revision to newly appended narration", () => {

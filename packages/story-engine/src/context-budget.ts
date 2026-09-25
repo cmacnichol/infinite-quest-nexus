@@ -53,6 +53,8 @@ export type ContextPlanOptions<TContext = readonly ContextBudgetBlock[]> = Reado
   count: (serialized: string) => number;
   serializeContext: (blocks: readonly ContextBudgetBlock[]) => string;
   serializeRequest: (context: TContext) => string;
+  /** Input tokens for a later request that must fit the same output reserve. */
+  additionalRequestTokens?: (context: TContext) => number;
   safetyAllowanceTokens?: number | ((tokens: number) => number);
   contextSafetyAllowanceTokens?: number | ((tokens: number) => number);
   contextValue?: (blocks: readonly ContextBudgetBlock[]) => TContext;
@@ -67,6 +69,7 @@ export type ContextPlan = Readonly<{
   contextTokens: number;
   requestTokens: number;
   safetyAllowanceTokens: number;
+  additionalRequestTokens: number;
 }>;
 
 function assertLimit(value: number, name: string): void {
@@ -121,17 +124,19 @@ function uniqueBlocks(blocks: readonly ContextBudgetBlock[]): ContextBudgetBlock
 function measured<TContext>(
   selected: readonly ContextBudgetBlock[],
   options: ContextPlanOptions<TContext>
-): Readonly<{ serializedContext: string; serializedRequest: string; contextTokens: number; requestTokens: number }> {
+): Readonly<{ serializedContext: string; serializedRequest: string; contextTokens: number; requestTokens: number; additionalRequestTokens: number }> {
   const ordered = [...selected].sort(contextOrder);
   const serializedContext = options.serializeContext(ordered);
   const contextValue = options.contextValue ? options.contextValue(ordered) : ordered as TContext;
   const serializedRequest = options.serializeRequest(contextValue);
   const contextTokens = options.count(serializedContext);
   const requestTokens = options.count(serializedRequest);
+  const additionalRequestTokens = options.additionalRequestTokens?.(contextValue) ?? 0;
+  assertLimit(additionalRequestTokens, "additionalRequestTokens");
   if (!Number.isFinite(contextTokens) || !Number.isFinite(requestTokens) || contextTokens < 0 || requestTokens < 0) {
     throw new ContextBudgetError("context_budget_invalid", 0, 0);
   }
-  return { serializedContext, serializedRequest, contextTokens, requestTokens };
+  return { serializedContext, serializedRequest, contextTokens, requestTokens, additionalRequestTokens };
 }
 
 /** Plans whole context records without truncating protected state or padding sparse input. */
@@ -150,6 +155,10 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
   let current = measured(selected, options);
   const protectedContextSafetyAllowanceTokens = contextSafetyAllowanceFor(current.contextTokens);
   const protectedRequestSafetyAllowanceTokens = safetyAllowanceFor(current.requestTokens);
+  const requiredInputTokens = (measurement: typeof current) => Math.max(
+    measurement.requestTokens + safetyAllowanceFor(measurement.requestTokens),
+    measurement.additionalRequestTokens ? measurement.additionalRequestTokens + safetyAllowanceFor(measurement.additionalRequestTokens) : 0
+  );
   assertLimit(protectedContextSafetyAllowanceTokens, "contextSafetyAllowanceTokens");
   assertLimit(protectedRequestSafetyAllowanceTokens, "safetyAllowanceTokens");
   if (current.contextTokens + protectedContextSafetyAllowanceTokens > options.contextLimit) {
@@ -158,8 +167,8 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
       protectedBlockIds: protectedBlocks.map((block) => block.id)
     });
   }
-  if (current.requestTokens + protectedRequestSafetyAllowanceTokens > options.inputLimit) {
-    throw new ContextBudgetError("context_budget_exceeded", current.requestTokens + protectedRequestSafetyAllowanceTokens, options.inputLimit, undefined, {
+  if (requiredInputTokens(current) > options.inputLimit) {
+    throw new ContextBudgetError("context_budget_exceeded", requiredInputTokens(current), options.inputLimit, undefined, {
       scope: "provider_request",
       protectedBlockIds: protectedBlocks.map((block) => block.id)
     });
@@ -176,7 +185,7 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
       omitted.push({ id: candidate.id, revision: candidate.revision, reason: "context_limit" });
       continue;
     }
-    if (trial.requestTokens + safetyAllowanceTokens > options.inputLimit) {
+    if (requiredInputTokens(trial) > options.inputLimit) {
       omitted.push({ id: candidate.id, revision: candidate.revision, reason: "request_limit" });
       continue;
     }

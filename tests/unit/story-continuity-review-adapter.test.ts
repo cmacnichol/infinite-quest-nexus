@@ -1,6 +1,6 @@
 import { PROMPT_TEMPLATE_CATALOG, CONTINUITY_REVIEW_PROMPT_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { describe, expect, it, vi } from "vitest";
-import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview } from "../../services/runtime/src/story-continuity-review-adapter.js";
+import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview, estimateContinuityReviewPlanningTokens } from "../../services/runtime/src/story-continuity-review-adapter.js";
 import { createStoryEvidence, generationEvidenceManifestHash } from "../../packages/application/src/memory/generation-context.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { sha256 } from "../../packages/domain/src/text.js";
@@ -15,6 +15,14 @@ const provider = { id: "p", name: "Fake", providerRole: "text", providerType: "o
 const promptSnapshot = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])), continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
 const prepare = (overrides = {}) => prepareContinuityReview({ provider, manifest, producingRequestHash: requestHash, promptSnapshot, reviewMode: "observe", direction: "Wait", draft, ...overrides });
 describe("exact continuity review provider request", () => {
+  it("reserves candidate output in the exact prospective review input before context selection", () => {
+    const args = { provider, manifest, producingRequestHash: requestHash, promptSnapshot, reviewMode: "enforce" as const, direction: "Wait" };
+    const base = estimateContinuityReviewPlanningTokens({ ...args, candidateOutputTokens: 0 });
+    expect(estimateContinuityReviewPlanningTokens({ ...args, candidateOutputTokens: 48_000 })).toBe(base + 48_000);
+    expect(estimateContinuityReviewPlanningTokens({ ...args, candidateOutputTokens: 48_000,
+      prepareSystemPrompt: (systemPrompt) => ({ systemPrompt: systemPrompt + "frozen preset instructions".repeat(100) }) })).toBeGreaterThan(base + 48_000);
+    expect(provider.execute).not.toHaveBeenCalled();
+  });
   it.each(["protected", "historical_fact"] as const)("keeps a current cast correction and conflicting %s canonical fact distinct through a scoped review pass", async (selectionGroup) => {
     const correction = createStoryEvidence({ source: { kind: "cast", id: "mara:eyes", revision: "2", turnNumber: 8 },
       semanticRole: "corrected_state", rank: 0, selectionGroup: "cast", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1",
@@ -56,18 +64,21 @@ describe("exact continuity review provider request", () => {
     expect(repair.request.systemPrompt).toContain(CAST_STORY_AUTHORITY_CONTRACT);
     expect(repair.requiredEvidenceIds).toContain(castEntry.id);
   });
-  it("fits a complete large review using a review-only output reserve", () => {
+  it("uses the story output reserve and rejects a complete review when that reserve cannot fit", () => {
     const largeEntry = createStoryEvidence({ source: { kind: "state_edit", id: "state", revision: "1", turnNumber: 1 }, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null }, { text: "The archive remains intact. ".repeat(11_000) });
     const largeBody = { ...body, entries: [largeEntry], requiredReviewEvidenceIds: [largeEntry.id] };
     const largeManifest = { ...largeBody, manifestHash: generationEvidenceManifestHash(largeBody) };
     const largeProvider = { ...provider, contextWindowTokens: 163_840, maxOutputTokens: 48_000 };
-    const prepared = prepare({ provider: largeProvider, manifest: largeManifest });
+    expect(() => prepare({ provider: largeProvider, manifest: largeManifest })).toThrow(expect.objectContaining({
+      code: "context_budget_exceeded", scope: "provider_request", availableTokens: 163_840
+    }));
+    const prepared = prepare({ provider: { ...largeProvider, contextWindowTokens: 200_000 }, manifest: largeManifest });
     expect(prepared.input.evidence).toHaveLength(1);
     expect(prepared.input.evidence[0]!.content).toBe(largeEntry.content);
     expect(prepared.input.draft.narration).toBe(draft.narration);
-    expect(JSON.parse(prepared.body).max_tokens).toBe(16_384);
+    expect(JSON.parse(prepared.body).max_tokens).toBe(48_000);
     expect(prepared.requestTokens + prepared.safetyAllowanceTokens + 48_000).toBeGreaterThan(163_840);
-    expect(prepared.requestTokens + prepared.safetyAllowanceTokens + 16_384).toBeLessThanOrEqual(163_840);
+    expect(prepared.requestTokens + prepared.safetyAllowanceTokens + 48_000).toBeLessThanOrEqual(200_000);
     expect(JSON.parse(prepareContinuityRepair({ provider: largeProvider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft, findings: [] }).body).max_tokens).toBe(48_000);
   });
 

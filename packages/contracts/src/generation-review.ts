@@ -2,7 +2,7 @@ import { z } from "zod";
 import { continuityReviewSchema } from "./story-continuity-review.js";
 
 export const generationReviewStageSchema = z.enum(["structure", "choices", "scene_coverage", "event_coverage", "continuity"]);
-export const generationReviewReasonCodeSchema = z.enum(["scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable", "invalid_choices", "invalid_structure", "output_incomplete", "mechanics_contamination", "event_coverage_failed", "candidate_stale", "candidate_invalid"]);
+export const generationReviewReasonCodeSchema = z.enum(["scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable", "invalid_choices", "invalid_structure", "output_incomplete", "mechanics_contamination", "event_coverage_failed", "candidate_stale", "candidate_invalid", "provider_interrupted"]);
 
 const reviewIdRevisionSchema = {
   reviewId: z.uuid(),
@@ -152,6 +152,7 @@ const reviewReasonMessages: Record<GenerationReviewReasonCode, string> = {
   invalid_choices: "The candidate choices do not meet the required structure.",
   invalid_structure: "The candidate does not meet the required story structure.",
   output_incomplete: "The candidate output is incomplete.",
+  provider_interrupted: "The provider stream was interrupted. A complete candidate passed validation and was preserved for your decision.",
   mechanics_contamination: "The candidate contains game mechanics language.",
   event_coverage_failed: "The candidate does not cover required story events.",
   candidate_stale: "The candidate no longer matches the current campaign authority.",

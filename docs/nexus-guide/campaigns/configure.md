@@ -39,15 +39,23 @@ button. Both interfaces read the same saved value.
 - **Off** uses the legacy context path without continuity review.
 - **Standard** improves authoritative character/world context and history retrieval.
 - **Enhanced** also reserves space for a recent window of up to three accepted turns.
-- **Max** adds evidence-based continuity review. It can repair a conflict once;
-  unresolved conflicts or unavailable required review leave the turn in recovery
-  instead of accepting it.
+- **Max** also supports verified excerpts and optional evidence-based continuity review.
 
-Upgrading assigns Max to existing campaigns. New campaigns, branches and imports
-also start at Max. Later selections, including Off, remain saved across restarts.
-Changes apply to newly queued turns; accepted history and jobs already queued are
-unchanged. Story context size is a separate setting and still respects provider
-limits. Max adds review calls and may add a repair call.
+Check **Enable continuity review** with Max memory to review each new draft before
+acceptance. Review adds a model request and can pause a turn for a Keep or Retry
+decision. Uncheck it to skip that extra review; structure and mechanics validation
+still apply. The checkbox is disabled by default for new campaigns, branches and
+imports. Existing saved review choices remain unchanged by the update.
+
+Memory level and the checkbox apply to newly queued turns. Pending jobs retain
+their frozen policy, including saved drafts awaiting review. Legacy checkbox changes
+save immediately; campaign overview uses **Save memory level**.
+
+Story context remains a separate limit. When review is enabled, context selection
+reserves room for review instructions, selected evidence, the future draft and the
+same configured output allowance used for story generation. Optional history may
+be omitted to fit. Required authority is never truncated, and the final review
+request is checked again because token counts are estimates.
 
 Existing custom prompt overrides may require the current protocol acknowledgement
 in the Prompt Library before new generation can start. Disabled options indicate

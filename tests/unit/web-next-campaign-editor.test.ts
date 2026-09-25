@@ -72,12 +72,13 @@ describe("web-next campaign editor routing", () => {
     const select = root.querySelector<HTMLSelectElement>("select[name='storyMemoryLevel']")!;
     expect(select.value).toBe("standard");
     expect(select.querySelector<HTMLOptionElement>("option[value='max']")?.hasAttribute("disabled")).toBe(true);
-    expect(root.textContent).toContain("This campaign's current review mode is off.");
+    expect(root.querySelector<HTMLInputElement>("input[name=continuityReviewEnabled]")?.hasAttribute("checked")).toBe(false);
+    expect(root.querySelector<HTMLInputElement>("input[name=continuityReviewEnabled]")?.hasAttribute("disabled")).toBe(true);
 
     root.querySelector<HTMLFormElement>("#memory-settings-form")!.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === "/api/v1/campaigns/campaign-1/story-memory" && (init as RequestInit).method === "PUT")).toBe(true));
     const save = fetchMock.mock.calls.find(([url, init]) => url === "/api/v1/campaigns/campaign-1/story-memory" && (init as RequestInit).method === "PUT");
-    expect(JSON.parse(String((save?.[1] as RequestInit).body))).toEqual({ level: "standard" });
+    expect(JSON.parse(String((save?.[1] as RequestInit).body))).toEqual({ level: "standard", continuityReviewEnabled: false });
     expect(root.textContent).toContain("Campaign memory level saved.");
     mounted.dispose();
   });

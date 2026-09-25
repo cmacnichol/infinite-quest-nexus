@@ -105,7 +105,7 @@ export function prepareContinuityRepair(input: Readonly<{
 
 /** Uses the very serializer selected by the provider transport. No continuation,
  * streaming, automatic response-format retry, hidden source, or optional pruning. */
-export function prepareContinuityReview(input: Readonly<{
+type ContinuityReviewPreparation = Readonly<{
   provider: RuntimeTextExecution; manifest: GenerationEvidenceManifest; producingRequestHash: string;
   promptSnapshot: unknown; reviewMode: "observe" | "enforce"; direction: string; draft: StoryTurnOutput; effectiveContextWindowTokens?: number;
   responseContract?: PreparedResponseContract;
@@ -114,7 +114,9 @@ export function prepareContinuityReview(input: Readonly<{
   bindRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => ProviderRequest;
   /** Serializes the same bound request at the earliest continuity budget boundary. */
   serializeRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => Readonly<{ body: string; payloadHash: string }>;
-}>): PreparedContinuityReview {
+}>;
+
+function serializeContinuityReview(input: ContinuityReviewPreparation): PreparedContinuityReview {
   const parsed = generationEvidenceManifestSchema.safeParse(input.manifest);
   if (!parsed.success || parsed.data.producingRequestHash !== input.producingRequestHash) throw new ContinuityReviewUnavailableError();
   const manifest = parsed.data;
@@ -141,12 +143,28 @@ ${CONTINUITY_REVIEW_CONTRACT}${castContract}`, input.prepareSystemPrompt);
     ?? serializeProviderRequest({ ...input.provider, baseUrl: "" }, request);
   const requestTokens = estimateStoryTokens(prepared.body);
   const safetyAllowanceTokens = estimatedInputSafetyAllowanceTokens(requestTokens);
-  const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
-  if (!Number.isSafeInteger(limit)) throw new ContinuityReviewUnavailableError();
-  const requiredTokens = requestTokens + safetyAllowanceTokens + effectiveRequestOutputTokens(input.provider.maxOutputTokens, request);
-  if (requiredTokens > limit) throw new ContextBudgetError("context_budget_exceeded", requiredTokens, limit, undefined, { scope: "provider_request" });
   return { request, body: prepared.body, requestHash: prepared.payloadHash, input: projection, manifestHash: manifest.manifestHash, requestTokens, safetyAllowanceTokens,
     ...(systemPrompt.textExecutionPlan ? { textExecutionPlan: systemPrompt.textExecutionPlan } : {}) };
+}
+
+/** Keep the exact final guard: planning is an estimate, not permission to overflow. */
+export function prepareContinuityReview(input: ContinuityReviewPreparation): PreparedContinuityReview {
+  const prepared = serializeContinuityReview(input);
+  const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
+  if (!Number.isSafeInteger(limit)) throw new ContinuityReviewUnavailableError();
+  const requiredTokens = prepared.requestTokens + prepared.safetyAllowanceTokens + effectiveRequestOutputTokens(input.provider.maxOutputTokens, prepared.request);
+  if (requiredTokens > limit) throw new ContextBudgetError("context_budget_exceeded", requiredTokens, limit, undefined, { scope: "provider_request" });
+  return prepared;
+}
+
+/** Measure identical evidence, framing and frozen provider settings before a draft exists.
+ * Reserve a full generation output allowance for the future candidate projection.
+ * The planner adds input safety and the review's separate output reserve. */
+export function estimateContinuityReviewPlanningTokens(input: Omit<ContinuityReviewPreparation, "draft"> & { candidateOutputTokens: number }): number {
+  if (!Number.isSafeInteger(input.candidateOutputTokens) || input.candidateOutputTokens < 0) throw new ContinuityReviewUnavailableError();
+  const draft: StoryTurnOutput = { narration: "", choices: [], custom_action_suggestion: "", scratchpad: "",
+    tracker_updates: [], image_prompt: "", continuity_summary: "", open_threads: [], canonical_facts: [], canonical_fact_updates: [], superseded_facts: [] };
+  return serializeContinuityReview({ ...input, draft }).requestTokens + input.candidateOutputTokens;
 }
 
 export async function executePreparedContinuityReview(provider: RuntimeTextExecution, prepared: PreparedContinuityReview) {

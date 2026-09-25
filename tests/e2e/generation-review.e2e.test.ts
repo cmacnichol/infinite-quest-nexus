@@ -20,6 +20,7 @@ test.afterEach(() => {
 });
 
 interface ReviewFixtureOptions {
+  readonly interrupted?: boolean;
   readonly liveStream?: boolean;
   readonly failReviewDetail?: boolean;
   readonly delayReviewDetailMs?: number;
@@ -57,10 +58,12 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
           } : null
         }
       : { version: 1 as const, reviewId, revision: 1, state: "pending" as const, stage: options.structureReview ? "structure" as const : "continuity" as const, candidateScope: "final" as const, reasons: [options.structureReview ? "invalid_structure" as const : canKeep ? "narrative_conflict" as const : "invalid_choices" as const], canKeep: options.structureReview ? false : canKeep, canRetry: true };
+  if (options.interrupted) { review.reasons = ["provider_interrupted"]; review.canRetry = false; }
   const candidateNarration = options.structureReview && !options.formatRepair ? null : "The lighthouse bell answered across the harbor.";
   const candidateChoices = options.structureReview && !options.formatRepair ? [] : ["Follow the bell", "Wait at the quay"];
   const detail: Record<string, any> | null = options.futureReview ? null : { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: options.structureReview || options.formatRepair ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0, ...(options.revokeKeepInCurrentDetail ? { canKeep: false } : {}), ...(options.validationIssues ? { validationIssues: options.validationIssues } : {}) };
   const decisions: Record<string, unknown>[] = [];
+  if (options.interrupted && detail) detail.findings = [{ code: "provider_interrupted", message: "The provider stream was interrupted. A complete candidate passed validation and was preserved for your decision." }];
   const writePaths: string[] = [];
   const sharedState = options.sharedState ?? { accepted: false };
   let terminalAction: "cancelled" | "discarded" | null = null;
@@ -384,6 +387,21 @@ for (const surface of ["legacy", "web-next"] as const) {
     await expect(recovery).toContainText("The candidate does not meet the required story structure.");
     await expect(recovery).not.toContainText(privateCanary);
     await expect(recovery.getByRole("button", { name: "Continue with retry", exact: true })).toBeVisible();
+  });
+
+  test(`${surface} preserves interrupted candidate until explicit Keep`, async ({ page }) => {
+    const api = await installReviewApi(page, true, false, true, { interrupted: true, replaceLatest: true });
+    await openReview(page, surface, api.fixture.campaignId);
+    const recovery = recoveryFor(page, surface);
+    await expect(recovery).toContainText("The provider stream was interrupted.");
+    await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
+    await page.reload();
+    await expect(recovery.getByRole("button", { name: "Keep this turn", exact: true })).toBeVisible();
+    expect(api.decisions).toEqual([]);
+    await page.screenshot({ path: `local-data/interrupted-qa/${surface}-recovery.png`, fullPage: true });
+    await recovery.getByRole("button", { name: "Keep this turn", exact: true }).click();
+    await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "keep" }]);
+    expect(api.consoleErrors).toEqual([]);
   });
 
   test(`${surface} renders a saved review and posts only an explicit Keep decision`, async ({ page }) => {

@@ -12,7 +12,7 @@ describe("campaign memory browser API", () => {
     expect(await api.get("campaign/a", signal)).toEqual(settings);
     expect(fetchImpl.mock.calls[0]![0]).toBe("/api/v1/campaigns/campaign%2Fa/story-memory");
     expect(await api.update("campaign/a", { level: "max" }, signal)).toEqual(settings);
-    expect(fetchImpl.mock.calls[1]![1]).toMatchObject({ method: "PUT", body: '{"level":"max"}', signal });
+    expect(fetchImpl.mock.calls[1]![1]).toMatchObject({ method: "PUT", body: '{"level":"max","continuityReviewEnabled":false}', signal });
   });
 
   it("rejects invalid levels before sending and malformed server settings before display", async () => {

@@ -1,4 +1,6 @@
 import { vi } from "vitest";
+import { PreparedResponseContractError } from "../../packages/story-engine/src/provider-response-format.js";
+import { PreparedRouteTerminalError } from "../../packages/story-engine/src/preset-route-execution.js";
 import { createPostgresGenerationExecutionRepository, reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
 import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
 import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
@@ -86,6 +88,7 @@ integration("T17 durable continuity review", () => {
   let rejectSceneRewriteResponseFormat = false;
   let repairSupersedesFactId: string | null = null;
   let primaryNarration = "Mira waits at the observatory.";
+  let interruptedPrimary: string | null = null;
 
   function reviewResponse(body: string): string {
     const userInput = (() => { try { return JSON.parse(JSON.parse(body).messages[1].content) as Record<string, unknown>; } catch { return null; } })();
@@ -142,7 +145,7 @@ integration("T17 durable continuity review", () => {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ data: [
           { id: "t17-capturing-fake", context_length: 65_536 },
-          { id: "t17-native-frozen", context_length: 65_536 }
+          { id: "t17-native-frozen", context_length: 163_840 }
         ] }));
         return;
       }
@@ -169,6 +172,13 @@ integration("T17 durable continuity review", () => {
         const providerRequest = JSON.parse(body) as { stream?: boolean };
         if (providerRequest.stream === true) {
           response.writeHead(200, { "content-type": "text/event-stream" });
+          if (interruptedPrimary !== null) {
+            const interrupted = interruptedPrimary;
+            interruptedPrimary = null;
+            response.write(`data: ${JSON.stringify({ id: "interrupted-fixture", choices: [{ delta: { content: interrupted }, finish_reason: null }] })}\n\n`);
+            setTimeout(() => response.destroy(), 30);
+            return;
+          }
           const midpoint = Math.max(1, Math.floor(content.length / 2));
           for (const chunk of [content.slice(0, midpoint), content.slice(midpoint)]) {
             response.write(`data: ${JSON.stringify({ id: randomUUID(), model: "t17-capturing-fake", choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`);
@@ -191,6 +201,7 @@ integration("T17 durable continuity review", () => {
   afterAll(async () => { await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done())); await (server as Server & { transport?: { close(): Promise<void> } }).transport?.close(); await pool.end(); });
 
   afterEach(() => {
+    interruptedPrimary = null;
     reviewVerdict = "pass";
     reviewUnavailable = false;
     reviewSequence = [];
@@ -245,6 +256,49 @@ integration("T17 durable continuity review", () => {
     }));
     return { job, application, campaignId: imported.campaignId };
   }
+
+  it.each([false, true])("retains an interrupted corrected candidate for explicit Keep (replacement=%s)", async (replacement) => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyStreamingContinuityResponseFormatConfiguration)]);
+    try {
+      const { job, application, campaignId } = replacement ? await enqueueReplacement("off", true) : await enqueue("off");
+      const before = await acceptedAuthoritySnapshot(campaignId);
+      const correct = reply("Mira waits at the observatory.");
+      const malformed = JSON.parse(correct);
+      delete malformed.custom_action_suggestion;
+      interruptedPrimary = JSON.stringify(malformed) + "\n```json\n" + correct + "\n```\n" + correct.slice(0, 70);
+      await runGenerationJob(pool, `interrupted-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
+      const offered = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(offered).toMatchObject({ canKeep: true, narration: "Mira waits at the observatory.", reasons: ["provider_interrupted"] });
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(before);
+      const count = requests.length;
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: offered.reviewId, revision: offered.revision, decision: "keep" });
+      await runGenerationJob(pool, `interrupted-keep-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      expect(requests).toHaveLength(count);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
+    }
+  });
+
+  it.each(["incomplete", "ambiguous"])("preserves %s interrupted output without permitting Keep", async (kind) => {
+    await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyStreamingContinuityResponseFormatConfiguration)]);
+    try {
+      const { job, application, campaignId } = await enqueue("off");
+      const before = await acceptedAuthoritySnapshot(campaignId);
+      const raw = kind === "incomplete" ? reply("Mira waits.").slice(0, -5)
+        : reply("Mira waits.") + reply("Mira leaves.");
+      interruptedPrimary = raw;
+      await runGenerationJob(pool, `interrupted-invalid-${randomUUID()}`, 30, credentialSecret);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable",
+        failureDiagnostic: { code: "provider_transport_error" } });
+      expect(await application.getReview({ ownerUserId, jobId: job.id })).toMatchObject({ canKeep: false, canRetry: true });
+      expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(before);
+      expect((await pool.query("SELECT raw_output FROM generation_attempts WHERE generation_job_id=$1", [job.id])).rows[0].raw_output).toBe(raw);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify(legacyContinuityResponseFormatConfiguration)]);
+    }
+  });
 
   function loadDefaultRuntimeStoryMemoryConfig() {
     const previousDatabaseUrl = process.env.DATABASE_URL;
@@ -1667,7 +1721,8 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it("keeps a queue-produced native preset candidate without a second prepared execution", async () => {
+  it.each(["complete", "deadline", "unbound"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+    const deadline = outcome !== "complete";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
     const nativeProvider = await createProvider(pool, {
@@ -1676,7 +1731,7 @@ integration("T17 durable continuity review", () => {
       providerRole: "text",
       baseUrl: `http://127.0.0.1:${address.port}`,
       defaultModel: "@preset/keep",
-      contextWindowTokens: 65_536,
+      contextWindowTokens: 163_840,
       maxOutputTokens: 48_000,
       temperature: 0,
       enabled: true,
@@ -1700,17 +1755,28 @@ integration("T17 durable continuity review", () => {
     }));
     await expect(pool.query<{ basis: { preset: { slug: string }; parameters: { temperature: number }; candidates: Array<{ modelId: string }> } }>(
       "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [job.id]
-    )).resolves.toMatchObject({ rows: [{ basis: { preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "t17-native-frozen" }] } }] });
+    )).resolves.toMatchObject({ rows: [{ basis: { preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
 
-    reviewVerdict = "conflict";
+    reviewVerdict = deadline ? "pass" : "conflict";
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
-    const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest }: { plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string; request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string } }) => ({
+    const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest }: { plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string; request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string } }) => {
+      if (deadline && operation === "story_generation") {
+        if (outcome === "unbound") throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Missing wire evidence.");
+        const content = reply("Mira waits at the observatory.");
+        const invalid = JSON.parse(content);
+        delete invalid.custom_action_suggestion;
+        throw new PreparedResponseContractError(new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Fixture deadline."), preparedRequest!, {
+          partialContent: JSON.stringify(invalid) + "\n" + content + "\n" + content.slice(0, 50),
+          responseId: "interrupted-native", returnedModel: plan.candidates[0]!.modelId
+        });
+      }
+      return {
       content: reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] })),
       responseId: randomUUID(), finishReason: "stop", outputLimited: false, modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
       ...(preparedRequest ? { preparedRequest } : {})
-    }));
+    }; });
     const composedCollaborators = createGenerationExecutionCollaborators(
       pool,
       createApiIllustrationApplication(pool, providers.illustration),
@@ -1730,6 +1796,16 @@ integration("T17 durable continuity review", () => {
     const initialClaim = await repository.claimNext({ workerId: initialWorker, leaseSeconds: 30 });
     expect(initialClaim?.jobId).toBe(job.id);
     await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: initialClaim!, workerId: initialWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    if (deadline) {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+        failureDiagnostic: { code: "provider_request_timeout", message: "The provider request timed out." }
+      });
+    }
+    if (outcome === "unbound") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "failed", resultTurnId: null });
+      expect(preparedTextExecutor).toHaveBeenCalledTimes(1);
+      return;
+    }
     const review = await application.getReview({ ownerUserId, jobId: job.id });
     expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
     expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
@@ -1742,7 +1818,7 @@ integration("T17 durable continuity review", () => {
       orchestrationPrivate: { primaryReservation: { requestBody: string }; primaryResult: { contextDiagnostics: { requestTokens: number } }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
     }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestrationPrivate;
     const preparedBodies = preparedTextExecutor.mock.calls.map(([input]) => input.preparedRequest!.body);
-    expect(preparedBodies.map((body) => JSON.parse(body).max_tokens)).toEqual([48_000, 16_384]);
+    expect(preparedBodies.map((body) => JSON.parse(body).max_tokens)).toEqual([48_000, 48_000]);
     expect(preparedBodies[0]).toBe(durableNativeRequests.primaryReservation.requestBody);
     expect(durableNativeRequests.primaryResult.contextDiagnostics.requestTokens).toBe(estimateStoryTokens(preparedBodies[0]!));
     expect(preparedBodies.map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
@@ -2257,7 +2333,7 @@ integration("T17 durable continuity review", () => {
     await expect(application.retry({ ownerUserId, jobId: job.id })).rejects.toThrow();
   });
 
-  it.each([{ verdict: "pass", expected: "completed" }, { verdict: "uncertain", expected: "recoverable" }] as const)("uses the imported campaign's default Max policy when runtime review is $verdict", async ({ verdict, expected }) => {
+  it.each([{ verdict: "pass", expected: "completed" }, { verdict: "uncertain", expected: "completed" }] as const)("skips review for a new campaign by default even when the reviewer would return $verdict", async ({ verdict, expected }) => {
     const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Default Max review ${randomUUID()}`;
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "default-max-review.story", story }));
@@ -2271,13 +2347,14 @@ integration("T17 durable continuity review", () => {
     try {
       const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
       const queued = (await pool.query<{ context_options: { storyMemoryPolicy?: unknown } }>("SELECT context_options FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
-      expect(queued.context_options.storyMemoryPolicy).toMatchObject({ policy: { capability: "r3", continuityReview: "enforce" } });
+      expect(queued.context_options.storyMemoryPolicy).toMatchObject({ policy: { capability: "r3", continuityReview: "off" } });
 
       await runGenerationJob(pool, `default-max-review-${randomUUID()}`, 30, credentialSecret);
 
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: expected });
       const saved = (await pool.query<{ orchestration_private: { continuityReview?: unknown } }>("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
-      expect(saved.orchestration_private.continuityReview).toMatchObject({ mode: "enforce", status: "completed", verdict });
+      expect(saved.orchestration_private.continuityReview).toBeUndefined();
+      expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(0);
     } finally {
       reviewVerdict = "pass";
       requests.length = 0;

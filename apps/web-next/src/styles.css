@@ -3185,7 +3185,7 @@ footer p:first-child {
 .campaign-metrics span { color:var(--text-secondary); font-family:"Chakra Petch",sans-serif; font-size:.78rem; letter-spacing:.06em; text-transform:uppercase; }
 .campaign-action-ledger { position:sticky; bottom:0; z-index:2; display:flex; justify-content:flex-end; align-items:center; gap:12px; min-height:64px; margin:8px calc(-1 * clamp(24px,3vw,48px)) calc(-1 * clamp(24px,3vw,48px)); padding:10px clamp(24px,3vw,48px); border-top:1px solid var(--rule-strong); background:var(--surface-paper); }
 .campaign-action-ledger span { margin-right:auto; color:var(--text-secondary); }
-#overview-form .campaign-action-ledger { position:static; margin-bottom:0; }
+#overview-form .campaign-action-ledger, #memory-settings-form .campaign-action-ledger { position:static; margin-bottom:0; }
 #memory-settings-form { margin-top:32px; }
 .campaign-action-ledger button,.turn-actions button,.turn-actions a,.campaign-data-actions a,.campaign-data-actions button,.campaign-danger button,.secondary-action { min-height:44px; padding:10px 16px; border:1px solid var(--rule-strong); border-radius:0; color:var(--text-primary); background:transparent; font-family:"Chakra Petch",sans-serif; font-weight:600; letter-spacing:.05em; text-decoration:none; text-transform:uppercase; }
 .campaign-action-ledger .primary-action,.primary-action,.campaign-enter-story { border-color:var(--accent); background:var(--accent); color:var(--text-on-accent); }
@@ -3877,3 +3877,6 @@ footer p:first-child {
 }
 .authoring-comparison-fields dt { font-weight: 600; margin-block-start: 0.75rem; }
 .authoring-comparison-fields dd { margin: 0.25rem 0 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.campaign-checkbox { display:flex; align-items:center; gap:10px; margin-top:18px; cursor:pointer; }
+.campaign-checkbox input[type="checkbox"] { width:18px; height:18px; margin:0; accent-color:var(--accent); }

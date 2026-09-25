@@ -425,8 +425,17 @@ integration("world campaign Fastify production application cutover", () => {
     const initial = await app.inject({ method: "GET", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory` });
     expect(initial.statusCode).toBe(200);
     expect(initial.json()).toEqual({
-      level: "max", reviewMode: "enforce", availableLevels: ["off", "standard", "enhanced", "max"]
+      level: "max", reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"]
     });
+
+    const enabled = await app.inject({ method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "max", continuityReviewEnabled: true } });
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.json()).toMatchObject({ level: "max", reviewMode: "enforce" });
+    const persisted = await app.inject({ method: "GET", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory` });
+    expect(persisted.json().reviewMode).toBe("enforce");
+    const disabled = await app.inject({ method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "max", continuityReviewEnabled: false } });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json()).toMatchObject({ level: "max", reviewMode: "off" });
 
     const enhanced = await app.inject({
       method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "enhanced" }
@@ -442,7 +451,7 @@ integration("world campaign Fastify production application cutover", () => {
 
     config.storyMemoryEnforceEnabled = false;
     const enforceDisabled = await app.inject({
-      method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "max" }
+      method: "PUT", url: `/api/v1/campaigns/${owned.campaign.id}/story-memory`, payload: { level: "max", continuityReviewEnabled: true }
     });
     expect(enforceDisabled.statusCode).toBe(409);
     config.storyMemoryCapability = "r1";
@@ -855,7 +864,7 @@ integration("world campaign Fastify production application cutover", () => {
       method: "GET", url: `/api/v1/campaigns/${branch.json().id}/story-memory`
     });
     expect(branchSettings.statusCode).toBe(200);
-    expect(branchSettings.json()).toMatchObject({ level: "max", reviewMode: "enforce" });
+    expect(branchSettings.json()).toMatchObject({ level: "max", reviewMode: "off" });
     trackCampaign(branch.json().id, branchTitle);
   });
 

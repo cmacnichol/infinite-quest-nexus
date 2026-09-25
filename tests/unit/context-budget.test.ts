@@ -9,6 +9,25 @@ const stringify = (value: unknown) => JSON.stringify(value);
 const count = (value: string) => value.length;
 
 describe("context budget planning", () => {
+  it("packs optional records against the review input and preserves primary request measurements", () => {
+    const options = {
+      blocks: [
+        { id: "authority", revision: "1", content: "canon", protected: true, priority: 0, ordinal: 0 },
+        { id: "history", revision: "1", content: "history", protected: false, priority: 1, ordinal: 1 }
+      ],
+      contextLimit: 1000, inputLimit: 100, count,
+      serializeContext: () => "context", serializeRequest: () => "story",
+      safetyAllowanceTokens: (tokens: number) => Math.ceil(tokens * 0.2),
+      additionalRequestTokens: (blocks: readonly unknown[]) => 60 + blocks.length * 10
+    };
+    expect(planContext(options).selected).toHaveLength(2);
+    const tight = { ...options, additionalRequestTokens: (blocks: readonly unknown[]) => 65 + blocks.length * 10 };
+    const plan = planContext(tight);
+    expect(plan.selected.map((block) => block.id)).toEqual(["authority"]);
+    expect(plan.requestTokens).toBe(5);
+    expect(plan.omitted[0]?.reason).toBe("request_limit");
+    expect(() => planContext({ ...tight, inputLimit: 80 })).toThrow(/context_budget_exceeded/);
+  });
   it("fails before serialization when protected context alone exceeds its ceiling", () => {
     expect(() => planContext({
       blocks: [{ id: "latest", revision: "1", content: "x".repeat(100), protected: true, priority: 0, ordinal: 1 }],

@@ -62,10 +62,10 @@ integration("Story Memory enrollment", () => {
     expect(await capture(false)).toEqual(old);
   });
 
-  it("defaults imported campaigns to enforced Max and preserves an explicit Off", async () => {
-    await expect(resolveSnapshot()).resolves.toMatchObject({ policy: { capability: "r3", continuityReview: "enforce" } });
+  it("defaults imported campaigns to Max with review off and preserves an explicit Off", async () => {
+    await expect(resolveSnapshot()).resolves.toMatchObject({ policy: { capability: "r3", continuityReview: "off" } });
     await expect(readStoryMemorySettings(pool, scope(), { installedCapability: "r3", enforceEnabled: true })).resolves.toEqual({
-      level: "max", reviewMode: "enforce", availableLevels: ["off", "standard", "enhanced", "max"]
+      level: "max", reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"]
     });
     await clearStoryMemoryEnrollment(pool, scope());
     await expect(resolveSnapshot()).resolves.toBeNull();

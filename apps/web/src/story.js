@@ -2816,9 +2816,11 @@ function storyMemoryDescription(settings) {
 function renderStoryMemorySettings(settings, message = null, draftLevel = null, disabled = false) {
   const selector = $("storyMemoryLevel");
   const status = $("storyMemoryStatus");
+  const checkbox = $("storyContinuityReviewEnabled");
   if (!selector || !status) return;
   if (!settings) {
     selector.disabled = true;
+    if (checkbox) checkbox.disabled = true;
     status.textContent = message || "Story Memory controls are unavailable for this campaign.";
     return;
   }
@@ -2829,6 +2831,7 @@ function renderStoryMemorySettings(settings, message = null, draftLevel = null, 
   }
   selector.value = draftLevel || settings.level;
   selector.disabled = disabled || !state.campaignId;
+  if (checkbox) { checkbox.checked = selector.value === "max" && settings.reviewMode !== "off"; checkbox.disabled = selector.disabled || selector.value !== "max"; }
   status.textContent = message || storyMemoryDescription(settings);
 }
 
@@ -2853,9 +2856,10 @@ async function saveStoryMemorySettings() {
   const level = selector?.value;
   const requestId = state.storyMemoryRequestId;
   if (!campaignId || !selector || !settings || !level || !STORY_MEMORY_LEVELS.has(level) || !composition.storyMemory) return;
-  renderStoryMemorySettings(settings, "Saving Story Memory level…", level, true);
+  const continuityReviewEnabled = level === "max" && $("storyContinuityReviewEnabled")?.checked === true;
+  renderStoryMemorySettings({ ...settings, reviewMode: continuityReviewEnabled ? "enforce" : "off" }, "Saving Story Memory level…", level, true);
   try {
-    const saved = await composition.storyMemory.update(campaignId, { level });
+    const saved = await composition.storyMemory.update(campaignId, { level, continuityReviewEnabled });
     if (state.campaignId !== campaignId || requestId !== state.storyMemoryRequestId) return;
     state.storyMemorySettings = saved;
     renderStoryMemorySettings(saved);
@@ -3510,6 +3514,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnSaveUserProfile = $("btnSaveUserProfile");
   if (btnSaveUserProfile) btnSaveUserProfile.addEventListener("click", saveUserProfile);
   const storyMemoryLevel = $("storyMemoryLevel");
+  $("storyContinuityReviewEnabled")?.addEventListener("change", () => { void saveStoryMemorySettings(); });
   if (storyMemoryLevel) storyMemoryLevel.addEventListener("change", () => { void saveStoryMemorySettings(); });
 
   // Edit State dialog

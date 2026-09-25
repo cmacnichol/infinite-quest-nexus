@@ -15,7 +15,7 @@ function availableLevels(config: StoryMemoryOperatorConfig): StoryMemoryLevel[] 
   const levels: StoryMemoryLevel[] = ["off"];
   if (config.installedCapability && supports(config.installedCapability, "r1")) levels.push("standard");
   if (config.installedCapability && supports(config.installedCapability, "r2")) levels.push("enhanced");
-  if (config.installedCapability === "r3" && config.enforceEnabled) levels.push("max");
+  if (config.installedCapability === "r3") levels.push("max");
   return levels;
 }
 
@@ -26,11 +26,12 @@ function levelForEnrollment(row: { capability: StoryMemoryCapability; reviewMode
   return "max";
 }
 
-function enrollmentForLevel(level: StoryMemoryLevel): StoryMemoryEnrollmentInput | null {
+function enrollmentForLevel(level: StoryMemoryLevel, continuityReviewEnabled: boolean): StoryMemoryEnrollmentInput | null {
+  if (continuityReviewEnabled && level !== "max") throw enrollmentError("Continuity review requires Max memory.", "story_memory_enrollment_invalid", 400);
   if (level === "off") return null;
   if (level === "standard") return { capability: "r1", reviewMode: "off" };
   if (level === "enhanced") return { capability: "r2", reviewMode: "off" };
-  return { capability: "r3", reviewMode: "enforce" };
+  return { capability: "r3", reviewMode: continuityReviewEnabled ? "enforce" : "off" };
 }
 
 function supports(installed: StoryMemoryCapability, requested: StoryMemoryCapability): boolean {
@@ -81,8 +82,8 @@ export async function readStoryMemorySettings(pool: DatabasePool, scope: Readonl
   return { level: levelForEnrollment(enrollment), reviewMode: enrollment?.reviewMode ?? "off", availableLevels: availableLevels(config) };
 }
 
-export async function saveStoryMemorySettings(pool: DatabasePool, scope: Readonly<{ ownerUserId: string; campaignId: string }>, level: StoryMemoryLevel, config: StoryMemoryOperatorConfig): Promise<StoryMemorySettings> {
-  const enrollment = enrollmentForLevel(level);
+export async function saveStoryMemorySettings(pool: DatabasePool, scope: Readonly<{ ownerUserId: string; campaignId: string }>, level: StoryMemoryLevel, config: StoryMemoryOperatorConfig, continuityReviewEnabled = false): Promise<StoryMemorySettings> {
+  const enrollment = enrollmentForLevel(level, continuityReviewEnabled);
   if (enrollment) await saveStoryMemoryEnrollment(pool, scope, enrollment, config);
   else await clearStoryMemoryEnrollment(pool, scope);
   return readStoryMemorySettings(pool, scope, config);

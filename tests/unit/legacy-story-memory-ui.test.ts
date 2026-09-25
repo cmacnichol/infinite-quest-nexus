@@ -14,6 +14,8 @@ describe("legacy campaign story-memory controls", () => {
 
     expect(document.querySelector("#campaignPanelStory")?.contains(selector)).toBe(true);
     expect(selector?.disabled).toBe(true);
+    expect(document.querySelector("#campaignContinuityReviewEnabled")?.getAttribute("type")).toBe("checkbox");
+    expect(document.querySelector("#campaignContinuityReviewEnabled")?.hasAttribute("checked")).toBe(false);
     expect([...selector!.options].map((option) => option.value)).toEqual(["off", "standard", "enhanced", "max"]);
     expect(nexusScript).toContain("/story-memory");
     expect(nexusScript).toContain("availableLevels");
@@ -26,6 +28,8 @@ describe("legacy campaign story-memory controls", () => {
     const selector = document.querySelector<HTMLSelectElement>("#storyMemoryLevel");
 
     expect(selector?.disabled).toBe(true);
+    expect(document.querySelector("#storyContinuityReviewEnabled")?.getAttribute("type")).toBe("checkbox");
+    expect(document.querySelector("#storyContinuityReviewEnabled")?.hasAttribute("checked")).toBe(false);
     expect([...selector!.options].map((option) => option.value)).toEqual(["off", "standard", "enhanced", "max"]);
     expect(storyScript).toContain("storyMemory");
     expect(storyScript).toContain("availableLevels");
