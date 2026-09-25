@@ -9,6 +9,30 @@ export const STORY_PROMPT_PROTOCOL_VERSION = "story-v16-fact-wire-distinction";
 export const STORY_PROMPT_SCHEMA_VERSION = "story-output-v2";
 /** Wire-only Story schema: narration arrives as paragraphs and is joined at the provider boundary. */
 export const STORY_PARAGRAPH_WIRE_SCHEMA_VERSION = "story-native-v3";
+
+/**
+ * Application-owned output-encoding rule for story-native-v3 jobs. This is composed onto
+ * the system prompt at the executor boundary so it reaches every Story system prompt
+ * without editing campaign overrides, and takes precedence over any override example.
+ */
+export const STORY_OUTPUT_ENCODING_CONTRACT_V3 = [
+  "Output encoding contract (story-native-v3). This contract takes precedence over any earlier instruction or example that shows a narration string, escaped quotation marks, or \\n paragraph separators.",
+  "Return the narration as narration_paragraphs: an ordered JSON array of strings with one paragraph per item. Do not return a narration field.",
+  "Start a new item for every change of speaker, scene transition, or meaningful shift in focus. One-line dialogue items are valid.",
+  "Write every directly spoken utterance inside typographic quotation marks “ and ”. Never use straight double quotation marks or backslash escapes inside any string value. Use the typographic apostrophe ’ where one is needed.",
+  "Thoughts, reported speech, and ordinary narration do not take dialogue quotation marks. Do not add dialogue to a solitary or nonverbal scene merely to use quotation marks.",
+  "When supplied narration must be preserved, return its paragraphs as separate items in the same order, with the same words."
+].join("\n");
+
+/** Returns the v3 encoding contract only when the job's frozen story schema is story-native-v3; otherwise "" so v2 prompts stay byte-identical. */
+export function storyOutputEncodingContract(storySchemaVersion: string | null | undefined): string {
+  return storySchemaVersion === STORY_PARAGRAPH_WIRE_SCHEMA_VERSION ? STORY_OUTPUT_ENCODING_CONTRACT_V3 : "";
+}
+
+/** Appends the encoding contract last, after every other composed instruction; a no-op when contract is "". */
+export function appendStoryOutputEncodingContract(systemPrompt: string, contract: string): string {
+  return contract ? `${systemPrompt}\n\n${contract}` : systemPrompt;
+}
 export const STORY_CONTEXT_POLICY_VERSION = "current-continuity-v2";
 /**
  * The Story Memory route is explicitly opted into by a frozen job policy.

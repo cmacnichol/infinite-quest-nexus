@@ -49,9 +49,11 @@ import {
   type StoryLengthWordRange
 } from "../../../packages/contracts/src/story-settings.js";
 import {
+  appendStoryOutputEncodingContract,
   composeStoryPromptSystemPrompt,
   projectSafeGenerationContextDiagnostic,
-  projectSafeGenerationDiagnostic
+  projectSafeGenerationDiagnostic,
+  storyOutputEncodingContract
 } from "../../../packages/contracts/src/story-prompt.js";
 import type { GenerationFailureDiagnostic } from "../../../packages/contracts/src/generation-review.js";
 import type {
@@ -151,6 +153,14 @@ export function deriveCampaignTextExecutionPlan(
 ): TextExecutionPlan | undefined {
   const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
   return routeBasis ? deriveTextExecutionPlan(routeBasis, operationPrompt) : undefined;
+}
+
+/** The frozen closure fixes one story wire version for every story:* key of the job. */
+function frozenStorySchemaVersion(job: GenerationExecutionPayload): string | null {
+  const frozen = job.orchestration_private?.frozenResponseContracts;
+  if (!frozen || frozen.version !== 2) return null;
+  const contract = frozen.contracts["story:stream"] ?? frozen.contracts["story:nonstream"];
+  return contract?.schemaVersion ?? null;
 }
 
 function prepareCampaignSystemPrompt(job: GenerationExecutionPayload, operationPrompt: string) {
@@ -2275,7 +2285,7 @@ async function executeLoadedGeneration(
       const inputTokenLimit = effectiveContextWindow - effectiveMaxOutputTokens(provider, job);
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
-      const storyBaseSystemPrompt = generationPolicy?.playMode === "story_only"
+      const composedWriterSystemPrompt = generationPolicy?.playMode === "story_only"
         ? composeStoryOnlySystemPrompt(
           baseStorySystemPrompt,
           generationPolicy,
@@ -2288,6 +2298,10 @@ async function executeLoadedGeneration(
           : storySystemContractProtocol
             ? composeStoryPromptSystemPrompt(baseStorySystemPrompt, storySystemContractProtocol)
             : baseStorySystemPrompt;
+      const storyBaseSystemPrompt = appendStoryOutputEncodingContract(
+        composedWriterSystemPrompt,
+        storyOutputEncodingContract(frozenStorySchemaVersion(job))
+      );
       // Bind the preset before fixed-envelope accounting so it reduces the
       // Chronicle/context budget rather than causing a late transport overflow.
       const storyTextExecutionPlan = deriveCampaignTextExecutionPlan(job, storyBaseSystemPrompt);
@@ -3965,7 +3979,10 @@ async function executeLoadedGeneration(
             authoritative_context: promptContext
           }));
           const extensionRequest = bindCampaignResponseContract(job, "event_extension", {
-            systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
+            systemPrompt: appendStoryOutputEncodingContract(
+              collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
+              storyOutputEncodingContract(frozenStorySchemaVersion(job))
+            ),
             input: extensionInput,
             budgetOutput: {
               kind: "event_extension",
@@ -4411,6 +4428,7 @@ async function executeLoadedGeneration(
               preparedRepair = prepareContinuityRepair({ provider, manifest: finalManifest, promptSnapshot: frozenPromptEnvelope,
                 direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
                 effectiveContextWindowTokens: effectiveContextWindow,
+                encodingContract: storyOutputEncodingContract(frozenStorySchemaVersion(job)),
                 prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
                 ...(job.orchestration_private?.frozenResponseContracts ? {
                   serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_repair", request, plan)

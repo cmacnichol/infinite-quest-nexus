@@ -30,6 +30,10 @@ import {
   type GenerationExecutionCollaborators
 } from "../../services/runtime/src/generation-executor-adapter.js";
 import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
+import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
+import { getProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { STORY_OUTPUT_ENCODING_CONTRACT_V3 } from "../../packages/contracts/src/story-prompt.js";
+import type { ResponseFormatEligibilityV2 } from "../../packages/contracts/src/text-response-format.js";
 import { prepareGenerationReview } from "../../services/runtime/src/generation-review-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
@@ -213,6 +217,92 @@ describe("frozen Story route basis", () => {
       systemPrompt: "Actual coverage prompt.", input: "{}"
     })).rejects.toMatchObject({ code: "prepared_text_execution_unavailable" });
     expect(provider.execute).not.toHaveBeenCalled();
+  });
+
+  it("appends the v3 output-encoding contract to the primary story system prompt for a v3-frozen job, and leaves a v2-frozen job unchanged", async () => {
+    const evidenceHash = "b".repeat(64);
+    const verifiedEligibility = (
+      operation: Parameters<typeof getProviderOutputSchemaV2>[0],
+      streaming: boolean,
+      schema: ProviderOutputSchemaV2
+    ): ResponseFormatEligibilityV2 => ({
+      status: "verified", reason: "verified",
+      verification: {
+        version: 2, providerType: "openai_compatible", endpointIdentity: "endpoint", model: "test-model",
+        routeConfigHash: evidenceHash, adapterProtocol: "text-schema-adapter-v2", operation, schemaHash: schema.schemaHash,
+        streaming, verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+        providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects
+      }
+    });
+    const modelPolicy = {
+      version: 2 as const, policy: "required" as const, providerProfileId: claim.providerProfileId,
+      admission: { mode: "json_schema" as const, basis: "model_verified" as const, verification: {
+        version: 2 as const, providerType: "openai_compatible" as const, endpointIdentity: "endpoint", model: "test-model",
+        routeConfigHash: evidenceHash, adapterProtocol: "text-schema-adapter-v2" as const, operation: "story" as const,
+        schemaHash: getProviderOutputSchemaV2("story").schemaHash, streaming: false,
+        verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+        providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: getProviderOutputSchemaV2("story").requiresOpenTrackerObjects
+      } },
+      authority: {
+        kind: "model_verified" as const, providerProfileId: claim.providerProfileId,
+        providerType: "openai_compatible" as const, endpointIdentity: "endpoint", model: "test-model",
+        providerConfigurationHash: evidenceHash, routeConfigHash: evidenceHash, verificationRegistryHash: evidenceHash,
+        authorityRevision: "authority-v1"
+      },
+      operationClosureVersion: 2 as const,
+      invocationKeys: ["story:nonstream"] as ("story:nonstream")[]
+    };
+    // The v2 fixture deliberately disqualifies the story-native-v3 schema so selection falls back to the catalog's v2 schema.
+    const frozenContractsFor = (schemaVersion: "story-native-v3" | "story-native-v2") => resolveGenerationResponseContractsV2({
+      queuedPolicy: modelPolicy, capabilityEvidenceHash: evidenceHash,
+      eligible: (operation, streaming, schema) => schemaVersion === "story-native-v2" && operation === "story" && schema.version === "story-native-v3"
+        ? { status: "unsupported", reason: "schema_incompatible", verification: null }
+        : verifiedEligibility(operation, streaming, schema)
+    });
+
+    const run = async (schemaVersion: "story-native-v3" | "story-native-v2") => {
+      const job = completeGenerationExecutionPayload();
+      job.orchestration_private = { frozenResponseContracts: frozenContractsFor(schemaVersion) } as never;
+      const output = JSON.stringify({ narration: "Fine.", choices: ["A", "B", "C", "D"],
+        custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
+        canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+      const provider = { id: claim.providerProfileId, name: "Encoding fixture", providerRole: "text" as const,
+        providerType: "openai_compatible" as const, model: "test-model", endpointIdentity: "endpoint",
+        contextWindowTokens: 20_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+        execute: vi.fn(async (dispatchedRequest: any) => {
+          const preparedRequest = serializeProviderRequest({ ...provider, baseUrl: "" }, dispatchedRequest);
+          return { content: output, responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "instance",
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {}, preparedRequest };
+        }) };
+      const repository = {
+        loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+        saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+        recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+        markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true),
+        pauseForReview: vi.fn(async () => true),
+        reserveResponseContractInvocation: vi.fn(async (_scope: unknown, input: any) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+        markResponseContractInvocationDispatched: vi.fn(async (_scope: unknown, id: string) => ({ id, status: "dispatched" })),
+        completeResponseContractInvocation: vi.fn(async (_scope: unknown, id: string, response: unknown) => ({ id, status: "completed", response }))
+      } as unknown as GenerationExecutionRepository;
+      const collaborators = {
+        memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+        illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
+        promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."), recordProfileCost: vi.fn(async () => undefined),
+        attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+      } as unknown as GenerationExecutionCollaborators;
+      await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+        .execute({ workerId: `encoding-${schemaVersion}`, leaseSeconds: 30, claim })).resolves.toBe(true);
+      expect(repository.markRecoverable).not.toHaveBeenCalled();
+      expect(repository.markFailed).not.toHaveBeenCalled();
+      return (provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { systemPrompt: string };
+    };
+
+    const v3 = await run("story-native-v3");
+    expect(v3.systemPrompt).toBe(`Write a concise fictional scene.\n\n${STORY_OUTPUT_ENCODING_CONTRACT_V3}`);
+
+    const v2 = await run("story-native-v2");
+    expect(v2.systemPrompt).toBe("Write a concise fictional scene.");
+    expect(v2.systemPrompt).not.toContain(STORY_OUTPUT_ENCODING_CONTRACT_V3);
   });
 });
 

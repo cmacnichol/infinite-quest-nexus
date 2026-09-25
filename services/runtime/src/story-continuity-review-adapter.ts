@@ -51,6 +51,8 @@ export function prepareContinuityRepair(input: Readonly<{
   provider: RuntimeTextExecution; manifest: GenerationEvidenceManifest; promptSnapshot: unknown;
   direction: string; rejectedDraft: StoryTurnOutput; originalMain?: StoryTurnOutput; scope?: "main" | "extension_only";
   findings: unknown; effectiveContextWindowTokens?: number; responseContract?: PreparedResponseContract;
+  /** The frozen v3 output-encoding contract for this job, or "" for v2/absent. Appended after the repair boundary contract. */
+  encodingContract?: string;
   prepareSystemPrompt?: (operationPrompt: string) => PreparedContinuitySystemPrompt;
   /** Applies a frozen operation contract before this helper measures its body. */
   bindRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => ProviderRequest;
@@ -72,7 +74,7 @@ export function prepareContinuityRepair(input: Readonly<{
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
   const prepare = (entries: GenerationEvidenceManifest["entries"]): PreparedContinuityRepair | null => {
     const systemPrompt = prepareSystemPrompt(
-      `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.${castContract}`,
+      `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.${castContract}${input.encodingContract ? `\n\n${input.encodingContract}` : ""}`,
       input.prepareSystemPrompt
     );
     const unboundRequest: ProviderRequest = {

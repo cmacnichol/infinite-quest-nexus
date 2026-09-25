@@ -14,6 +14,14 @@ const draft = storyTurnOutputSchema.parse({ narration: "Mira waits.", choices: [
 const provider = { id: "p", name: "Fake", providerRole: "text", providerType: "openai_compatible", model: "test", contextWindowTokens: 32000, maxOutputTokens: 1000, temperature: 0, requestTimeoutMs: 1000, configuration: {}, execute: vi.fn() } as const;
 const promptSnapshot = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])), continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
 const prepare = (overrides = {}) => prepareContinuityReview({ provider, manifest, producingRequestHash: requestHash, promptSnapshot, reviewMode: "observe", direction: "Wait", draft, ...overrides });
+function repairFixtureInput(overrides: Readonly<{ repairProtocolIdentity?: string }> = {}) {
+  const input = { provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
+    findings: [{ code: "conflict", evidence_ids: [entry.id] }] };
+  // Pin the historical identity explicitly so this test is unaffected when Task 12 makes v2 the catalog default.
+  const identity = overrides.repairProtocolIdentity ?? "story-continuity-repair-v1";
+  return { ...input, promptSnapshot: { ...input.promptSnapshot, continuityReview: { ...input.promptSnapshot.continuityReview,
+    repair: { ...input.promptSnapshot.continuityReview.repair, protocolIdentity: identity } } } };
+}
 describe("exact continuity review provider request", () => {
   it("reserves candidate output in the exact prospective review input before context selection", () => {
     const args = { provider, manifest, producingRequestHash: requestHash, promptSnapshot, reviewMode: "enforce" as const, direction: "Wait" };
@@ -176,6 +184,13 @@ describe("exact continuity review provider request", () => {
     expect(prepared.body).toContain("original_main"); expect(prepared.body).toContain(originalMain.narration);
     expect(prepared.omittedEvidenceIds).toEqual([optional.id]);
     expect(() => prepareContinuityRepair({ ...args, findings: [{ kind: "contradiction", basis: { kind: "source", evidenceId: optional.id } }] })).toThrow(/continuity_review_unavailable/);
+  });
+
+  it("appends the frozen encoding contract after the repair boundary contract", () => {
+    const prepared = prepareContinuityRepair({ ...repairFixtureInput(), encodingContract: "ENCODING-SENTINEL" });
+    expect(prepared.request.systemPrompt.endsWith("ENCODING-SENTINEL")).toBe(true);
+    const plain = prepareContinuityRepair(repairFixtureInput());
+    expect(plain.request.systemPrompt).not.toContain("ENCODING-SENTINEL");
   });
 
 });
