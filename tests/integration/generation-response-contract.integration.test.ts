@@ -443,7 +443,7 @@ integration("PostgreSQL response-contract persistence", () => {
     })).toBe(true);
 
     const reloaded = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
-    expect(reloaded?.orchestration_private.frozenResponseContracts.contracts["story:nonstream"].schemaVersion).toBe("story-native-v3");
+    expect(reloaded?.orchestration_private.frozenResponseContracts).toEqual(frozen);
     const savedBody = reloaded?.orchestration_private.primaryReservation?.requestBody as string;
     expect(savedBody).toBe(requestBody);
     const savedSystemMessage = (JSON.parse(savedBody) as { messages: Array<{ content: string }> }).messages[0]!.content;

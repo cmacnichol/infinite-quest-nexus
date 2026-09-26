@@ -50,6 +50,32 @@ const claim: ClaimedGeneration = {
   replacementTurnId: null
 };
 
+/**
+ * Task 8 Step 3 golden fixture: the exact byte-for-byte provider request the
+ * PRE-BRANCH code produced for a job frozen on story-native-v2, computed once
+ * against commit f69785f4 (the commit immediately before this remediation
+ * branch started) and pinned here so the "byte-identical after deployment"
+ * unit test below compares current-code output against a real historical
+ * artifact instead of comparing current code against itself.
+ *
+ * Produced by: `git worktree add <scratch>/wt-f69785f4 f69785f4`, junctioning
+ * node_modules (root + every workspace package/app that has its own) into that
+ * worktree, adding a temporary `tests/unit/__task8_golden_v2.test.ts` there
+ * that constructs the IDENTICAL fixture below (same `claim`, same
+ * `completeGenerationExecutionPayload()`, same `modelPolicy`/`verifiedEligibility`
+ * shape, adapted only for the pre-branch `eligible(operation, streaming)`
+ * signature, which pre-branch has no third `schema` parameter because only
+ * one story schema version, story-native-v2, existed yet) and printing the
+ * `serializeProviderRequest(...).payloadHash`/`.body` its executor dispatched.
+ * `git diff f69785f4 HEAD -- tests/unit/generation-executor-adapter.test.ts`
+ * confirms `claim`, `validPromptSnapshot`, and `completeGenerationExecutionPayload`
+ * are byte-for-byte unchanged since f69785f4, so this is the same fixture.
+ * The worktree and its node_modules junctions were removed afterward.
+ */
+const TASK8_GOLDEN_V2_PAYLOAD_HASH = "c3920cfa0fab804179db268f26ad6f5b92977b16ea76ae823149e1895c72e6ee";
+const TASK8_GOLDEN_V2_BODY_LENGTH = 4314;
+const TASK8_GOLDEN_V2_BODY = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"system\",\"content\":\"Write a concise fictional scene.\"},{\"role\":\"user\",\"content\":\"{\\\"authoritative_context\\\":{\\\"authoritativeRules\\\":[],\\\"worldCanon\\\":{},\\\"selectedCharacterId\\\":null,\\\"currentContinuity\\\":{},\\\"currentScene\\\":null,\\\"chronicle\\\":[]},\\\"narration_length\\\":{\\\"profile\\\":\\\"standard\\\",\\\"preferred_min_words\\\":450,\\\"preferred_max_words\\\":900,\\\"policy\\\":\\\"soft_pacing_goal\\\",\\\"early_stop_allowed\\\":true},\\\"instructions\\\":[\\\"Obey every applicable constraint in authoritative_context.authoritativeRules. These rules are mandatory and take priority over conflicting story history or player requests.\\\",\\\"Treat the database snapshot as authoritative even if provider conversation memory disagrees.\\\",\\\"Use corrected current continuity as authoritative for the next turn when it conflicts with historical narration or provider conversation memory. Empty corrected fields are intentional. Mandatory world rules still apply.\\\",\\\"Continue established chronology and character continuity.\\\",\\\"Treat narration_length as a soft pacing goal, not as a minimum requirement or permission to pad. Fidelity to authoritative context and the current turn input outranks length.\\\",\\\"Do not expose or invent non-diegetic resolution metadata.\\\",\\\"In canonical_fact_updates, supersedes_fact_ids may contain only exact IDs copied from canonical facts visible in the authoritative context; never invent a fact ID.\\\",\\\"The current turn input is a player action or attempt. Preserve its stated manner, dialogue, and intent while resolving uncertain outcomes from authoritative context and fiction-only outcome guidance.\\\",\\\"Once the attempted action and its directly supported consequence are complete, end the turn rather than opening unsupported developments to reach the preferred range.\\\",\\\"Return one complete JSON object, not a fragment or continuation.\\\"],\\\"current_turn_input\\\":{\\\"mode\\\":\\\"action\\\",\\\"text\\\":\\\"Open the observatory door.\\\"},\\\"task\\\":\\\"Generate the next complete story turn from this authoritative database snapshot. Prefer 450-900 narration words only while the current input and supported consequences naturally sustain that length. End early when the turn is complete; do not pad, repeat, or invent material story facts to meet the range.\\\"}\"}],\"temperature\":0,\"max_tokens\":2000,\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"infinite_quest_story_native_v2\",\"strict\":true,\"schema\":{\"additionalProperties\":false,\"properties\":{\"canonical_fact_updates\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"content\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"supersedes_fact_ids\":{\"items\":{\"maxLength\":36,\"minLength\":36,\"pattern\":\"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$\",\"type\":\"string\"},\"maxItems\":100,\"type\":\"array\"}},\"required\":[\"content\",\"supersedes_fact_ids\"],\"type\":\"object\"},\"maxItems\":100,\"type\":\"array\"},\"canonical_facts\":{\"items\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":100,\"type\":\"array\"},\"choices\":{\"items\":{\"maxLength\":2000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":4,\"minItems\":4,\"type\":\"array\"},\"continuity_summary\":{\"maxLength\":20000,\"type\":\"string\"},\"custom_action_suggestion\":{\"maxLength\":2000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"image_prompt\":{\"maxLength\":20000,\"type\":\"string\"},\"narration\":{\"maxLength\":200000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"open_threads\":{\"items\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":500,\"type\":\"array\"},\"scratchpad\":{\"maxLength\":100000,\"type\":\"string\"},\"superseded_facts\":{\"items\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":0,\"type\":\"array\"},\"tracker_updates\":{\"items\":{\"additionalProperties\":true,\"type\":\"object\"},\"maxItems\":200,\"type\":\"array\"}},\"required\":[\"narration\",\"choices\",\"custom_action_suggestion\",\"scratchpad\",\"tracker_updates\",\"image_prompt\",\"continuity_summary\",\"canonical_facts\",\"superseded_facts\",\"canonical_fact_updates\",\"open_threads\"],\"type\":\"object\"}}}}";
+
 describe("frozen Story route basis", () => {
   it("composes the saved preset exactly once and rejects a plan from another basis", () => {
     const basis = {
@@ -312,20 +338,23 @@ describe("frozen Story route basis", () => {
     expect(v2.systemPrompt).not.toContain(STORY_OUTPUT_ENCODING_CONTRACT_V3);
 
     // Task 8 Step 3: a job already frozen on story-native-v2 must keep dispatching
-    // byte-identical requests after this deployment. The only request-composition
-    // change this branch made is the conditional v3 encoding-contract append above;
-    // confirm the v2 job's bound schema is still the exact pre-existing catalog
-    // entry (same hash/version, untouched by the new v3 registry addition) and that
-    // re-deriving the request for the identical frozen job is fully deterministic,
-    // so its serialized payloadHash cannot silently drift across a redeploy.
+    // byte-identical requests after this deployment. Confirm the v2 job's bound
+    // schema is still the exact pre-existing catalog entry (same hash/version,
+    // untouched by the new v3 registry addition)...
     expect(v2.responseContract).toMatchObject({
       mode: "json_schema",
       schemaVersion: "story-native-v2",
       schemaHash: getProviderOutputSchemaV2("story", "story-native-v2").schemaHash
     });
-    const v2Again = await run("story-native-v2");
-    expect(v2Again.preparedRequest.payloadHash).toBe(v2.preparedRequest.payloadHash);
-    expect(v2Again.preparedRequest.body).toBe(v2.preparedRequest.body);
+    // ...and, decisively, that the current code's serialized request for this
+    // exact fixture is byte-identical to the request the PRE-BRANCH code
+    // (commit f69785f4) actually produced for the same fixture. This compares
+    // against a real historical artifact, not against another run of today's
+    // code, so it would catch a deterministic-but-different regression that a
+    // same-code double-run could never detect.
+    expect(v2.preparedRequest.body.length).toBe(TASK8_GOLDEN_V2_BODY_LENGTH);
+    expect(v2.preparedRequest.body).toBe(TASK8_GOLDEN_V2_BODY);
+    expect(v2.preparedRequest.payloadHash).toBe(TASK8_GOLDEN_V2_PAYLOAD_HASH);
   });
 });
 
