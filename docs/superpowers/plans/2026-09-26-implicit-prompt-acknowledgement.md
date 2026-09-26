@@ -62,7 +62,7 @@ Frozen job snapshots and their hash proofs are unchanged.
 - Produces: `overrideIsCompatible(row, mode)` returns true for keys without a requirement. Otherwise it returns true iff `row.compatibility_required_shape_version === STORY_PROMPT_SCHEMA_VERSION && row.compatibility_content_hash === hash(row.content)`. `mode` no longer affects the result; keep the parameter only if removing it churns callers.
 - `savePromptOverride` always stores `{ requiredShapeVersion: STORY_PROMPT_SCHEMA_VERSION, protocolIdentity: storyMemoryPromptCompatibilityRequirement(key).protocolIdentity, contentHash: hash(content) }` for keys with a requirement, and nulls for other keys. It never throws `prompt_override_incompatible`.
 
-- [ ] **Step 1: Write the failing unit tests.** Add to `tests/unit/prompt-library.test.ts`, reusing the file's fake-query style (see the tests near "shows the v14 acknowledgement requirement"):
+- [x] **Step 1: Write the failing unit tests.** Add to `tests/unit/prompt-library.test.ts`, reusing the file's fake-query style (see the tests near "shows the v14 acknowledgement requirement"):
 
 ```ts
 describe("implicit prompt override acknowledgement", () => {
@@ -132,9 +132,9 @@ describe("implicit prompt override acknowledgement", () => {
 
 Import `STORY_PROMPT_SCHEMA_VERSION` from `../../packages/contracts/src/story-prompt.js` if it is not already imported.
 
-- [ ] **Step 2: Run to confirm failure.** Run `node node_modules/vitest/vitest.mjs run tests/unit/prompt-library.test.ts --exclude '**/.worktrees/**' --exclude '**/.codex/**'`. Expected: the new legacy-identity, save and message tests FAIL.
+- [x] **Step 2: Run to confirm failure.** Run `node node_modules/vitest/vitest.mjs run tests/unit/prompt-library.test.ts --exclude '**/.worktrees/**' --exclude '**/.codex/**'`. Expected: the new legacy-identity, save and message tests FAIL.
 
-- [ ] **Step 3: Implement the rule.** In `prompt-repository.ts`, import `STORY_PROMPT_SCHEMA_VERSION`. Replace `acknowledgementMatches` and `overrideIsCompatible` with:
+- [x] **Step 3: Implement the rule.** In `prompt-repository.ts`, import `STORY_PROMPT_SCHEMA_VERSION`. Replace `acknowledgementMatches` and `overrideIsCompatible` with:
 
 ```ts
 /** Compatibility follows the local output shape the override was saved
@@ -157,23 +157,23 @@ Update both call sites in `resolveSnapshot`, dropping the `mode` argument. Chang
 
 Keep `statusCode: 409` and `code: "prompt_override_incompatible"`.
 
-- [ ] **Step 4: Derive the acknowledgement on save.** In `savePromptOverride`:
+- [x] **Step 4: Derive the acknowledgement on save.** In `savePromptOverride`:
   - Remove the `acknowledgementValid` block and its throw.
   - Compute `const requirement = storyMemoryPromptCompatibilityRequirement(value.key as PromptTemplateKey);`.
   - Pass `requirement ? STORY_PROMPT_SCHEMA_VERSION : null`, `requirement?.protocolIdentity ?? null`, and `requirement ? hash(value.content) : null` as the three compatibility parameters.
   - Keep parsing `compatibilityAcknowledgement` through `promptTemplateOverrideSchema` so malformed input still fails validation, but do not use its values.
 
-- [ ] **Step 5: Library flag.** In `listPromptLibrary`, compute `acknowledged` as `frozen.source === "shipped" || (override !== undefined && overrideIsCompatible(override))`, where `override` is the row that supplied the effective content.
+- [x] **Step 5: Library flag.** In `listPromptLibrary`, compute `acknowledged` as `frozen.source === "shipped" || (override !== undefined && overrideIsCompatible(override))`, where `override` is the row that supplied the effective content.
 
-- [ ] **Step 6: Update existing tests that encode the old rule.** Find them with `grep -n "prompt_override_incompatible\|acknowledg" tests/unit/prompt-library.test.ts tests/integration/story-memory-enrollment.integration.test.ts tests/integration/prompt-library.integration.test.ts tests/helpers/provider-application-fixtures.ts`. For each one:
+- [x] **Step 6: Update existing tests that encode the old rule.** Find them with `grep -n "prompt_override_incompatible\|acknowledg" tests/unit/prompt-library.test.ts tests/integration/story-memory-enrollment.integration.test.ts tests/integration/prompt-library.integration.test.ts tests/helpers/provider-application-fixtures.ts`. For each one:
   - A test that expects a 409 for a protocol-identity mismatch now expects success.
   - A test that expects a 409 on save for a missing or stale client acknowledgement now expects success, and the stored values to be server-derived.
   - Keep, or add, one test for each remaining block: a shape-version mismatch, a content-hash mismatch, and missing metadata.
   - List every changed test and the reason in the report.
 
-- [ ] **Step 7: Run the unit and integration suites.** Run `node node_modules/vitest/vitest.mjs run tests/unit/prompt-library.test.ts tests/unit/story-memory-settings.test.ts --exclude '**/.worktrees/**' --exclude '**/.codex/**'`. Expected: PASS. Then run the two integration files against a disposable container. Expected: PASS.
+- [x] **Step 7: Run the unit and integration suites.** Run `node node_modules/vitest/vitest.mjs run tests/unit/prompt-library.test.ts tests/unit/story-memory-settings.test.ts --exclude '**/.worktrees/**' --exclude '**/.codex/**'`. Expected: PASS. Then run the two integration files against a disposable container. Expected: PASS.
 
-- [ ] **Step 8: Commit.** Commit with subject `Prompt library: acknowledge overrides implicitly by output shape`.
+- [x] **Step 8: Commit.** Commit with subject `Prompt library: acknowledge overrides implicitly by output shape`.
 
 ---
 
@@ -186,7 +186,7 @@ Keep `statusCode: 409` and `code: "prompt_override_incompatible"`.
 
 **Interfaces:** The UI stops sending `compatibilityAcknowledgement`. The server ignores it (Task 1).
 
-- [ ] **Step 1: Write the failing UI test.** In `tests/unit/management-ui.test.ts`, following the file's existing pattern of reading `index.html` and `nexus.js` as strings, add:
+- [x] **Step 1: Write the failing UI test.** In `tests/unit/management-ui.test.ts`, following the file's existing pattern of reading `index.html` and `nexus.js` as strings, add:
 
 ```ts
 it("saves prompt overrides without a compatibility checkbox", () => {
@@ -200,9 +200,9 @@ it("saves prompt overrides without a compatibility checkbox", () => {
 
 Use the variable names the file already uses for the HTML and script sources.
 
-- [ ] **Step 2: Run to confirm failure.**
+- [x] **Step 2: Run to confirm failure.**
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
   - In `index.html`, keep the `promptLibraryCompatibility` element and its `promptLibraryCompatibilityCopy` span, but remove the checkbox `<span>`/`<input>` and its sentence.
   - In `nexus.js`, delete `syncPromptLibraryAcknowledgement` and its call, and remove the element from the elements list.
   - Replace the save path's `compatibilityAcknowledgement` construction and its spread in the PUT body with nothing.
@@ -210,9 +210,9 @@ Use the variable names the file already uses for the HTML and script sources.
   - Keep the required-shape preview.
   - Minimal edits in the file's existing style. Do not rewrite line endings.
 
-- [ ] **Step 4: Run the tests and checks.** Run `tests/unit/management-ui.test.ts` and `node --check apps/web/public/nexus.js`. Expected: PASS.
+- [x] **Step 4: Run the tests and checks.** Run `tests/unit/management-ui.test.ts` and `node --check apps/web/public/nexus.js`. Expected: PASS.
 
-- [ ] **Step 5: Commit.** Commit with subject `Legacy admin UI: save prompt overrides without an acknowledgement checkbox`.
+- [x] **Step 5: Commit.** Commit with subject `Legacy admin UI: save prompt overrides without an acknowledgement checkbox`.
 
 ---
 
@@ -271,3 +271,5 @@ An override saved against an earlier output schema, edited outside the Prompt Li
 ## Progress log
 
 (The controller appends one line per completed task: date, commits, review outcome.)
+- 2026-09-26 — Task 1 complete (commits bf305d79, 3934a601); review found a stale migrations integration expectation, fixed in round 1; unit 4546 pass / 3 known baseline; integration 19/19 + migration test pass.
+- 2026-09-26 — Task 2 complete (commits e7bc51c3, 9d6c8552); review found a stale Playwright scenario and lost editor-reset coverage, fixed in round 1; management-ui 82/82, e2e generation-integrity-diagnostics ran (screenshots it regenerates were restored).
