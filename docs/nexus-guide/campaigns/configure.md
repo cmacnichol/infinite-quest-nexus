@@ -57,13 +57,9 @@ same configured output allowance used for story generation. Optional history may
 be omitted to fit. Required authority is never truncated, and the final review
 request is checked again because token counts are estimates.
 
-Existing custom prompt overrides may require the current protocol acknowledgement
-in the Prompt Library before new generation can start. Disabled options indicate
-that an operator has restricted the available levels.
-
-After this release, an existing application writer or event-extension override
-shows *Needs acknowledgement* once. Acknowledge it to make it effective for
-every campaign without a campaign copy.
+Saving a writer or event-extension prompt records it against the current output
+shape automatically. You only need to re-save a prompt if the Prompt Library
+marks it as written for an earlier output shape.
 
 ## Correct current continuity
 

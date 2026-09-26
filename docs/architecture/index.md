@@ -41,6 +41,7 @@ See also [Repository Overview](./repository-overview.md) for project-goal/naming
 - [Story-only campaign policy](./story-only-campaign-policy.md)
 - [ADR 0021: Typed turn input and optional intent classification](./0021-turn-input-intent-classification.md)
 - [ADR 0024: Central Prompt Library](./0024-central-prompt-library.md)
+- [ADR 0039: Implicit Prompt Override Acknowledgement](./0039-implicit-prompt-override-acknowledgement.md)
 - [Task 10 B1 generation boundary completion audit](../review/2026-08-03-task-10-b1-completion.md)
 
 ## World Library and characters
