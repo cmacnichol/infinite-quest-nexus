@@ -1536,6 +1536,8 @@ git commit -m "Prompt library: acknowledge application overrides for Story Memor
 
 ### Task 11: Consolidate stored overrides (operational; requires per-campaign user approval)
 
+**Status note, 2026-09-26:** R4 is implemented (ADR 0039, implicit acknowledgement); the application override now works for every campaign after one re-save, so this consolidation is optional rather than required.
+
 **Why:** Eight per-campaign `story_system` copies freeze three texts. `10d3f89b` is the old default without the quotation rule. Campaign `3bb3c3e5` has a mixed set. The recovery siblings for `story_recovery_*` are unreachable (F7). This is data work through the supported API. No schema change.
 
 **Prerequisites:** Task 10 deployed. Tasks 1–8 deployed if the v3 contract should apply immediately.

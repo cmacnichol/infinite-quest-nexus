@@ -432,6 +432,8 @@ FROM prompt_template_overrides ORDER BY prompt_key, created_at;
 
 Recommendations are listed in priority order. Each can be implemented independently.
 
+**Status update, 2026-09-26:** R4 is implemented on branch `fix/prompt-system-remediation` and superseded by [ADR 0039](../architecture/0039-implicit-prompt-override-acknowledgement.md) (implicit acknowledgement). R5 (override consolidation) is now optional: the application override works for every campaign after one re-save; per-campaign copies can stay or be removed.
+
 ### R1. Controlled structured-output escape probe (experiment; blocks R2's design choice)
 
 - **Scope:** a small authorized probe with a synthetic story of about 2,000 tokens that includes dialogue. Hold the model (`z-ai/glm-5.2`), provider route (pin DeepInfra and Phala separately), and sampling fixed. Vary the response format:

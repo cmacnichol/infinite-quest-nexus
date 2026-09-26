@@ -14,4 +14,4 @@ Saving an override records its acknowledgement automatically against the current
 
 ## Consequences
 
-An override saved against an earlier output schema, edited outside the Prompt Library, or saved before acknowledgements existed still returns 409 until re-saved. Routes without strict provider schemas (for example LM Studio or JSON-object mode) rely on the appended contracts and local validation; a creative override that describes an obsolete shape there yields rejected turns rather than a pre-dispatch block.
+An override saved against an earlier output schema, edited outside the Prompt Library, or saved before acknowledgements existed still returns 409 until re-saved. Routes without strict provider schemas (for example LM Studio or JSON-object mode) rely on the appended contracts and local validation; a creative override that describes an obsolete shape there yields rejected turns rather than a pre-dispatch block. System-archive imports restore overrides without acknowledgement metadata; re-save imported writer and event-extension overrides after import.

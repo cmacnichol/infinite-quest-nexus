@@ -87,8 +87,8 @@ diagnostics coverage. It renders recoverable prompt-compatibility guidance and
 available recovery actions in both Story surfaces, checks that a private
 diagnostic canary is absent, and records desktop and 390x844 captures under
 `docs/review/assets/generation-integrity-diagnostics/`. The same test verifies
-the Prompt Library's required-shape acknowledgement before it submits a
-protected override.
+that the Prompt Library submits a protected override with an implicit save
+(no acknowledgement payload).
 The production rollout still requires copied-campaign canaries with the actual
 provider, payload/commit/next-turn checks, and observed usage/latency. A skipped
 database, browser, or provider check is not a passed gate.
