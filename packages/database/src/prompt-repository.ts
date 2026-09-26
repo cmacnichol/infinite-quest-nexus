@@ -19,6 +19,7 @@ import {
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_OUTPUT_ENCODING_CONTRACT_V3,
   castStoryMemoryPromptCompatibilityIdentity,
+  storyMemoryMandatoryContract,
   storyPromptCompatibilityIdentity,
   storyPromptProtocolIdentity
 } from "../../contracts/src/story-prompt.js";
@@ -256,17 +257,47 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
 }
 
 /**
+ * Resolves the Story Memory prompt protocol an enrolled campaign should show in
+ * preview. Cast authority (CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) is chosen
+ * at enqueue by an operator-wide runtime toggle
+ * (StoryMemoryOperatorConfig.castContextEnabled), not a per-campaign database
+ * value, so this repository cannot read that toggle directly. Instead it reuses
+ * whatever protocol the campaign's own most recent generation job already froze
+ * into generation_jobs.context_options->'storyMemoryPolicy'->>'promptProtocol'
+ * (the same field the executor reads at generation-executor-adapter.ts). That
+ * protocol is accepted only when storyMemoryMandatoryContract still recognizes
+ * it; otherwise (or when the campaign has never queued a turn) preview falls
+ * back to the current default protocol and says so explicitly.
+ */
+async function resolveStoryMemoryPreviewProtocol(
+  database: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string
+): Promise<Readonly<{ promptProtocol: string; source: "latest_job" | "default" }>> {
+  const latestJobResult = await database.query<{ contextOptions: Record<string, unknown> | null }>(
+    `SELECT context_options AS "contextOptions" FROM generation_jobs
+      WHERE owner_user_id=$1 AND campaign_id=$2
+      ORDER BY created_at DESC LIMIT 1`,
+    [ownerUserId, campaignId]
+  );
+  const candidate = (latestJobResult.rows[0]?.contextOptions as { storyMemoryPolicy?: { promptProtocol?: unknown } } | null)
+    ?.storyMemoryPolicy?.promptProtocol;
+  if (typeof candidate === "string") {
+    try {
+      storyMemoryMandatoryContract(candidate);
+      return { promptProtocol: candidate, source: "latest_job" };
+    } catch { /* unsupported or malformed; fall back to the current default below */ }
+  }
+  return { promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION, source: "default" };
+}
+
+/**
  * Adds the effective (post-composition) writer system prompt to a story_system
- * preview for a specific campaign, plus a note when the campaign's text profile
+ * preview for a specific campaign, a note naming the Story Memory protocol
+ * source for an enrolled campaign, and a note when the campaign's text profile
  * is a provider preset (its own system text is applied at dispatch, never shown
  * here). This never calls a provider and never exposes credentials or preset
  * text.
- *
- * Approximation: Story Memory's cast-authority contract is an operator-wide
- * runtime toggle (CAST_CONTEXT_ENABLED), not a per-campaign database value, so
- * it cannot be read from this repository without threading operator
- * configuration through the prompt-library composition. This preview always
- * shows the current (non-cast) Story Memory protocol for an enrolled campaign.
  */
 async function withEffectiveStorySystemPreview(
   database: DatabaseClient,
@@ -287,6 +318,7 @@ async function withEffectiveStorySystemPreview(
     [campaignId, ownerUserId]
   );
   const enrolled = enrollmentResult.rows.length > 0;
+  const storyMemory = enrolled ? await resolveStoryMemoryPreviewProtocol(database, ownerUserId, campaignId) : null;
 
   const providerResult = campaign.text_provider_profile_id
     ? await database.query<{ text_selection: unknown }>(
@@ -310,7 +342,7 @@ async function withEffectiveStorySystemPreview(
   const effectiveContent = composeEffectiveStorySystemPrompt({
     writerPrompt: content,
     storyOnlyPolicy,
-    storyMemoryPromptProtocol: enrolled ? STORY_MEMORY_PROMPT_PROTOCOL_VERSION : null,
+    storyMemoryPromptProtocol: storyMemory?.promptProtocol ?? null,
     ...(storyPromptContractProtocol ? { storyPromptContractProtocol } : {}),
     encodingContract: STORY_OUTPUT_ENCODING_CONTRACT_V3
   });
@@ -318,6 +350,13 @@ async function withEffectiveStorySystemPreview(
   const sections = [
     ...base.sections,
     { label: "Effective system prompt", role: "system" as const, content: effectiveContent },
+    ...(storyMemory ? [{
+      label: "Story Memory contract source",
+      role: "system" as const,
+      content: storyMemory.source === "latest_job"
+        ? `Protocol ${storyMemory.promptProtocol} from the campaign's latest queued turn.`
+        : `Protocol ${storyMemory.promptProtocol} is the current default protocol; the campaign-cast contract is added at dispatch when cast context is enabled.`
+    }] : []),
     ...(usesPreset ? [{
       label: "Preset system prompt (added at dispatch)",
       role: "system" as const,

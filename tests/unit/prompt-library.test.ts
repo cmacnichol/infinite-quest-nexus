@@ -14,7 +14,15 @@ import {
   renderPromptTemplate,
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
-import { STORY_SYSTEM_PROMPT, storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import {
+  STORY_SYSTEM_PROMPT,
+  storyPromptCompatibilityIdentity,
+  STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  CAST_STORY_AUTHORITY_CONTRACT,
+  STORY_OUTPUT_ENCODING_CONTRACT_V3,
+  storyMemoryMandatoryContract
+} from "../../packages/contracts/src/story-prompt.js";
 import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../packages/contracts/src/generation.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
@@ -513,12 +521,13 @@ describe("Prompt Library catalog", () => {
     expect(compatibility?.protocolIdentity).not.toBe(promptCompatibilityRequirement("story_system")?.protocolIdentity);
   });
 
-  it("previews the effective writer composition for an enrolled campaign", async () => {
+  it("previews the effective writer composition for an enrolled campaign, falling back to the current default protocol when it has never queued a turn", async () => {
     const ownerUserId = crypto.randomUUID();
     const campaignId = crypto.randomUUID();
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
       if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM generation_jobs")) return { rows: [] };
       if (sql.includes("FROM provider_profiles")) return { rows: [] };
       return { rows: [] };
     });
@@ -528,7 +537,56 @@ describe("Prompt Library catalog", () => {
     const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
     expect(effective.content).toContain("Story Memory authority contract");
     expect(effective.content).toContain("narration_paragraphs");
+    expect(effective.content).not.toContain(CAST_STORY_AUTHORITY_CONTRACT);
     expect(preview.sections.find((section) => section.label === "Preset system prompt (added at dispatch)")).toBeUndefined();
+
+    const source = preview.sections.find((section) => section.label === "Story Memory contract source");
+    expect(source).toMatchObject({
+      role: "system",
+      content: `Protocol ${STORY_MEMORY_PROMPT_PROTOCOL_VERSION} is the current default protocol; the campaign-cast contract is added at dispatch when cast context is enabled.`
+    });
+  });
+
+  it("uses the cast protocol frozen by the campaign's latest queued turn, ordered writer / Story Memory contract / encoding contract", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM generation_jobs")) return { rows: [{ contextOptions: { storyMemoryPolicy: { promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION } } }] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
+    expect(effective.content.startsWith("WRITER")).toBe(true);
+    expect(effective.content.indexOf(storyMemoryMandatoryContract(CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION))).toBeGreaterThan(0);
+    expect(effective.content).toContain(CAST_STORY_AUTHORITY_CONTRACT);
+    expect(effective.content.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
+
+    const source = preview.sections.find((section) => section.label === "Story Memory contract source");
+    expect(source).toMatchObject({
+      role: "system",
+      content: `Protocol ${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the campaign's latest queued turn.`
+    });
+  });
+
+  it("includes the story-only supplement for a flexible_scene campaign", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_scene", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
+    expect(effective.content).toContain("Story Direction mode is a fiction-only scene direction.");
   });
 
   it("notes a provider preset instead of exposing its system text", async () => {

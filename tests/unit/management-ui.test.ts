@@ -502,6 +502,33 @@ describe("Nexus management UI contracts", () => {
     expect(managementCss).toContain(".prompt-library-toolbar label.hidden { display: none; }");
   });
 
+  it("sends the selected campaign to the effective-prompt preview only in campaign scope", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+    const template = { key: "story_system" };
+    const calls: Array<Record<string, unknown>> = [];
+    const api = vi.fn(async (_path: string, options: { body: string }) => {
+      calls.push(JSON.parse(options.body));
+      return { sections: [], unresolvedVariables: [], estimatedTokens: 0 };
+    });
+    const run = async (campaignId: string) => {
+      const functions = managementFunctions<{ renderPromptLibraryPreview: () => Promise<void> }>(
+        ["renderPromptLibraryPreview"], {
+          elements, api, promptLibrarySelectedTemplate: () => template,
+          promptLibraryPreviewVisible: true, promptLibraryPreviewSequence: 0,
+          promptLibraryCampaignId: () => campaignId
+        });
+      await functions.renderPromptLibraryPreview();
+    };
+
+    await run("campaign-a");
+    expect(calls[0]).toMatchObject({ key: "story_system", campaignId: "campaign-a" });
+
+    await run("");
+    expect(calls[1]).toMatchObject({ key: "story_system" });
+    expect(calls[1]).not.toHaveProperty("campaignId");
+  });
+
   it("explains every structured character field and the AI organizer on hover", () => {
     expect(managementHtml).toContain('id="organizeCharacterProfile"');
     expect(managementHtml).toContain("Uses the current profile, legacy guidance, and world lore, background, and canon");

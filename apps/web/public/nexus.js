@@ -1383,9 +1383,10 @@ async function renderPromptLibraryPreview() {
   const sequence = ++promptLibraryPreviewSequence;
   elements.promptLibraryPreviewContent.textContent = "Building sample request…";
   try {
+    const previewCampaignId = promptLibraryCampaignId();
     const preview = await api("/api/v1/prompt-library/preview", {
       method: "POST",
-      body: JSON.stringify({ key: template.key, content: elements.promptLibraryContent.value })
+      body: JSON.stringify({ key: template.key, content: elements.promptLibraryContent.value, ...(previewCampaignId ? { campaignId: previewCampaignId } : {}) })
     });
     if (sequence !== promptLibraryPreviewSequence) return;
     const sections = preview.sections.map((section) => `── ${section.label} [${section.role}] ──\n${section.content}`).join("\n\n");
