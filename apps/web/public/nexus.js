@@ -1349,13 +1349,6 @@ async function promptContentHash(content) {
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-function syncPromptLibraryAcknowledgement() {
-  const template = promptLibrarySelectedTemplate();
-  elements.promptLibraryCompatibilityAcknowledgement.checked = Boolean(
-    template?.compatibility
-  );
-}
-
 function renderPromptLibraryDirtyState() {
   const dirty = promptLibraryIsDirty();
   elements.promptLibraryUnsaved?.classList.toggle("hidden", !dirty);
@@ -1457,14 +1450,13 @@ function renderPromptLibrary(loadEditor = false) {
     promptLibraryEditorContext = context;
     promptLibraryEditorBaseline = template.effectiveContent;
     elements.promptLibraryContent.value = template.effectiveContent;
-    syncPromptLibraryAcknowledgement();
   }
   elements.promptLibraryWarning?.classList.toggle("hidden", template.category !== "Story Engine");
   const compatibility = template.compatibility;
   elements.promptLibraryCompatibility?.classList.toggle("hidden", !compatibility);
   elements.promptLibraryRequiredShape?.classList.toggle("hidden", !compatibility);
   if (compatibility) {
-    elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Review the shipped required shape before saving.`;
+    elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Saving records this prompt against the current shape; the application adds the required output rules automatically.`;
     elements.promptLibraryRequiredShape.textContent = compatibility.requiredShapePreview;
   }
   const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";
@@ -1502,17 +1494,7 @@ async function savePromptLibraryTemplate(event) {
   const scope = elements.promptLibraryScope.value;
   try {
     const content = elements.promptLibraryContent.value;
-    const compatibilityAcknowledgement = template.compatibility
-      ? (() => {
-        if (!elements.promptLibraryCompatibilityAcknowledgement.checked) throw new Error("Acknowledge the required output shape before saving this prompt.");
-        return promptContentHash(content).then((contentHash) => ({
-          requiredShapeVersion: template.compatibility.requiredShapeVersion,
-          protocolIdentity: template.compatibility.protocolIdentity,
-          contentHash
-        }));
-      })()
-      : null;
-    const response = await api("/api/v1/prompt-library/overrides", { method: "PUT", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content, ...(compatibilityAcknowledgement ? { compatibilityAcknowledgement: await compatibilityAcknowledgement } : {}) }) });
+    const response = await api("/api/v1/prompt-library/overrides", { method: "PUT", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content }) });
     promptLibrary = response.library; elements.promptLibraryStatus.textContent = "Prompt saved. New jobs will use this version."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
   } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
 }
@@ -6770,7 +6752,6 @@ elements.promptLibraryPreview?.addEventListener("click", () => { promptLibraryPr
 elements.promptLibraryContent?.addEventListener("input", () => { renderPromptLibraryDirtyState(); schedulePromptLibraryPreview(); });
 elements.promptLibraryDiscard?.addEventListener("click", () => {
   elements.promptLibraryContent.value = promptLibraryEditorBaseline;
-  syncPromptLibraryAcknowledgement();
   renderPromptLibraryDirtyState();
   schedulePromptLibraryPreview();
 });
