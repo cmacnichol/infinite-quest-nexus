@@ -194,8 +194,10 @@ export function bindCampaignTextExecutionPlan(
   }
   if (preboundPlan) {
     if (request.systemPrompt === plan.prompt) return request;
-    const expected = presetPromptInjectedRemotely(routeBasis) ? request.systemPrompt
-      : composePresetPrompt({ presetPrompt: routeBasis.presetSystemPrompt, operationPrompt: request.systemPrompt });
+    const expected = composePresetPrompt({
+      presetPrompt: presetPromptInjectedRemotely(routeBasis) ? "" : routeBasis.presetSystemPrompt,
+      operationPrompt: request.systemPrompt
+    });
     if (expected !== plan.prompt) {
       throw new Error("Frozen Story text execution plan conflicts with the request prompt.");
     }

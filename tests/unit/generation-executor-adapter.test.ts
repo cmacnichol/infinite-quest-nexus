@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, presetPromptInjectedRemotely, STORY_PRESET_ROUTE_PROTOCOL_V2, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import type {
   ClaimedGeneration,
   IllustrationGenerationTransactionPort
@@ -109,6 +109,40 @@ describe("frozen Story route basis", () => {
       systemPrompt: plan.prompt,
       input: "{}"
     }, plan)).toThrow("different route basis");
+  });
+
+  it("binds a v2 remote-injected preset route without local preset text, tolerating a whitespace-padded operation prompt, with the v3 encoding contract last", () => {
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "remote-route" },
+      preset: { slug: "remote-route", versionId: "v1", configHash: "9".repeat(64) },
+      candidates: [{ modelId: "@preset/remote-route", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "PRESET SYSTEM TEXT", parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000,
+      protocolVersion: STORY_PRESET_ROUTE_PROTOCOL_V2
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    expect(presetPromptInjectedRemotely(routeBasis)).toBe(true);
+    const job = { ...completeGenerationExecutionPayload(), orchestration_private: { textExecutionRouteBasis: routeBasis } };
+
+    const writerPrompt = "Write a concise fictional scene.";
+    const composedWriterSystemPrompt = composeEffectiveStorySystemPrompt({
+      writerPrompt, storyOnlyPolicy: null, storyMemoryPromptProtocol: null, encodingContract: ""
+    });
+    const v3OperationPrompt = appendStoryOutputEncodingContract(composedWriterSystemPrompt, STORY_OUTPUT_ENCODING_CONTRACT_V3);
+
+    const plan = deriveCampaignTextExecutionPlan(job, v3OperationPrompt)!;
+    expect(plan.prompt).toBe(v3OperationPrompt);
+    expect(plan.prompt).not.toContain("PRESET SYSTEM TEXT");
+
+    // A prompt-library override is not trimmed (prompt-library.ts) and the plain
+    // writer path returns writerPrompt unchanged, so a real caller can bind a
+    // request whose systemPrompt carries trailing whitespace the plan does not.
+    expect(() => bindCampaignTextExecutionPlan(job, { systemPrompt: `${v3OperationPrompt}\n`, input: "{}" }, plan)).not.toThrow();
+    const request = bindCampaignTextExecutionPlan(job, { systemPrompt: `${v3OperationPrompt}\n`, input: "{}" }, plan);
+
+    expect(request.systemPrompt).toBe(plan.prompt);
+    expect(request.systemPrompt).not.toContain("PRESET SYSTEM TEXT");
+    expect(request.systemPrompt.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
   });
 
   it("uses the prebound main plan once and reduces retrieval budget before context planning", async () => {
