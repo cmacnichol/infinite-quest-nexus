@@ -340,12 +340,16 @@ async function withEffectiveStorySystemPreview(
     ? storyPromptCompatibilityIdentity()
     : undefined;
 
+  // Only a preset route freezes story-native-v3 (packages/contracts/src/story-prompt.ts
+  // ties the v3 wire to a preset-eligible response contract); a direct-model
+  // campaign freezes story-native-v2 and must not preview a contract it will
+  // never actually dispatch.
   const effectiveContent = composeEffectiveStorySystemPrompt({
     writerPrompt: content,
     storyOnlyPolicy,
     storyMemoryPromptProtocol: storyMemory?.promptProtocol ?? null,
     ...(storyPromptContractProtocol ? { storyPromptContractProtocol } : {}),
-    encodingContract: STORY_OUTPUT_ENCODING_CONTRACT_V3
+    encodingContract: usesPreset ? STORY_OUTPUT_ENCODING_CONTRACT_V3 : ""
   });
 
   const sections = [
@@ -362,7 +366,11 @@ async function withEffectiveStorySystemPreview(
       label: "Preset system prompt (added at dispatch)",
       role: "system" as const,
       content: "Applied by the selected provider preset; not shown here."
-    }] : [])
+    }] : [{
+      label: "Paragraph-wire output contract",
+      role: "system" as const,
+      content: "The paragraph-wire output contract is added for preset routes; this campaign's direct model uses the story-native-v2 wire."
+    }])
   ];
   return {
     ...base,

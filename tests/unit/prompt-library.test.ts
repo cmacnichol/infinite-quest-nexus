@@ -552,9 +552,15 @@ describe("Prompt Library catalog", () => {
     const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
     const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
     expect(effective.content).toContain("Story Memory authority contract");
-    expect(effective.content).toContain("narration_paragraphs");
+    // No preset is configured, so this campaign will freeze story-native-v2;
+    // the v3 paragraph-wire contract must not appear in its preview.
+    expect(effective.content).not.toContain("narration_paragraphs");
     expect(effective.content).not.toContain(CAST_STORY_AUTHORITY_CONTRACT);
     expect(preview.sections.find((section) => section.label === "Preset system prompt (added at dispatch)")).toBeUndefined();
+    expect(preview.sections.find((section) => section.label === "Paragraph-wire output contract")).toMatchObject({
+      role: "system",
+      content: "The paragraph-wire output contract is added for preset routes; this campaign's direct model uses the story-native-v2 wire."
+    });
 
     const source = preview.sections.find((section) => section.label === "Story Memory contract source");
     expect(source).toMatchObject({
@@ -570,7 +576,9 @@ describe("Prompt Library catalog", () => {
       if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
       if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
       if (sql.includes("FROM generation_jobs")) return { rows: [{ contextOptions: { storyMemoryPolicy: { promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION } } }] };
-      if (sql.includes("FROM provider_profiles")) return { rows: [] };
+      // The v3 encoding contract this test asserts is ordered last is only
+      // ever added for a preset route, so this fixture selects one.
+      if (sql.includes("FROM provider_profiles")) return { rows: [{ text_selection: { kind: "openrouter_preset", slug: "writer-preset" } }] };
       return { rows: [] };
     });
     const prompts = createPromptRepository({ query } as never);

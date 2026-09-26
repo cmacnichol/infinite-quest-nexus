@@ -181,7 +181,9 @@ describe("versioned v2 schema catalog", () => {
   it("keeps story-native-v2 addressable with its original hash", () => {
     const legacy = findProviderOutputSchemaV2("story", "story-native-v2");
     expect(legacy?.name).toBe("infinite_quest_story_native_v2");
-    expect(legacy?.schemaHash).toMatch(/^[a-f0-9]{64}$/);
+    // Pinned to the literal hash (verified unchanged pre/post branch), not just
+    // a hex-shaped regex, so a schema-changing regression fails this test.
+    expect(legacy?.schemaHash).toBe("10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7");
   });
 
   it("rejects an unknown version", () => {
