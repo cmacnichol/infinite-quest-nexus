@@ -46,4 +46,9 @@ describe("scene coverage", () => {
     expect(() => parseEventCoverageOutput('{"event_results":[]}', ["bell"]))
       .toThrow(/every expected event ID/);
   });
+
+  it("frames required events as scene beats for the shared coverage validator", () => {
+    const input = JSON.parse(buildEventCoveragePrompt([{ id: "gate", fiction: "The gate opens." }], "The gate opens."));
+    expect(input.task).toContain("Treat each required event as a required scene beat");
+  });
 });

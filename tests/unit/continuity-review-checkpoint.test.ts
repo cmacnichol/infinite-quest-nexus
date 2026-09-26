@@ -18,6 +18,19 @@ describe("durable continuity review checkpoint", () => {
     expect(continuityReviewCheckpointSchema.safeParse({ ...checkpoint, bindingHash: "2".repeat(64) }).success).toBe(false);
     expect(() => assertContinuityReviewCommit("off", undefined, binding)).not.toThrow();
   });
+  it("persists an optional diagnosable reason on an unavailable review, and still parses older rows without one", () => {
+    const unavailable = { ...checkpoint, verdict: "unavailable" as const, result: null, reviewRequestHash: null };
+    for (const unavailableReason of ["context_budget_exceeded", "provider_failed", "invalid_output", "evidence_unavailable"] as const) {
+      const withReason = continuityReviewCheckpointSchema.safeParse({ ...unavailable, unavailableReason });
+      expect(withReason.success).toBe(true);
+      expect(withReason.success && withReason.data.unavailableReason).toBe(unavailableReason);
+    }
+    // Older persisted rows carry no unavailableReason field at all.
+    expect(continuityReviewCheckpointSchema.safeParse(unavailable).success).toBe(true);
+    expect(continuityReviewCheckpointSchema.safeParse({ ...unavailable, unavailableReason: "not_a_real_reason" }).success).toBe(false);
+    // A reason only makes sense next to an unavailable verdict.
+    expect(continuityReviewCheckpointSchema.safeParse({ ...checkpoint, unavailableReason: "provider_failed" }).success).toBe(false);
+  });
   it("accepts an enforced final conflict only for its exact persisted Keep receipt", () => {
     const story = storyTurnOutputSchema.parse({ narration: "The archive door opens.", choices: ["Enter the archive.", "Circle the tower.", "Call to the keeper.", "Study the door."], custom_action_suggestion: "Examine the door.", scratchpad: "", tracker_updates: [], image_prompt: "An archive door.", continuity_summary: "The door opened.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
     const candidate = {

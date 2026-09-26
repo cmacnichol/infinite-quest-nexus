@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { assertContinuityReviewPromptSnapshot, CONTINUITY_REPAIR_PROTOCOL_V2 } from "../../../packages/contracts/src/prompt-library.js";
 import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../../packages/contracts/src/story-prompt.js";
 import { generationEvidenceManifestHash, generationEvidenceManifestSchema, type GenerationEvidenceManifest } from "../../../packages/application/src/memory/generation-context.js";
@@ -15,6 +16,32 @@ import type { RuntimeTextExecution } from "./provider-credential-transport-adapt
 export class ContinuityReviewUnavailableError extends Error {
   readonly code = "continuity_review_unavailable";
   constructor() { super("continuity_review_unavailable: the complete bound review could not be prepared or verified."); }
+}
+
+/** Why a continuity review checkpoint could not reach a verdict. Recorded
+ * alongside `verdict: "unavailable"` so a durable row is diagnosable without
+ * live logs. Production evidence: unavailable rows previously carried no
+ * reason at all, so the cause could not be told apart after the fact. */
+export type ContinuityReviewUnavailableReason =
+  | "context_budget_exceeded"
+  | "provider_failed"
+  | "invalid_output"
+  | "evidence_unavailable";
+
+/** Classifies a caught continuity-review error into its durable reason.
+ * `code === "continuity_review_unavailable"` is treated the same as the
+ * `ContinuityReviewUnavailableError` class: both mark evidence that could not
+ * be bound or verified, whether raised by this adapter's own class or by an
+ * ad-hoc `Object.assign(new Error(...), { code })` at a call site. */
+export function continuityReviewUnavailableReason(error: unknown): ContinuityReviewUnavailableReason {
+  if (error instanceof ContextBudgetError) return "context_budget_exceeded";
+  const code = typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : null;
+  if (error instanceof ContinuityReviewUnavailableError || code === "continuity_review_unavailable") return "evidence_unavailable";
+  if (error instanceof z.ZodError || error instanceof SyntaxError) return "invalid_output";
+  return "provider_failed";
 }
 function castAuthorityContract(protocolIdentity: string | undefined, manifest: GenerationEvidenceManifest): string {
   const enabled = protocolIdentity === castStoryMemoryPromptCompatibilityIdentity();

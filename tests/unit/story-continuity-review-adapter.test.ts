@@ -1,6 +1,8 @@
 import { PROMPT_TEMPLATE_CATALOG, CONTINUITY_REVIEW_PROMPT_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { describe, expect, it, vi } from "vitest";
-import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview, estimateContinuityReviewPlanningTokens, ContinuityReviewUnavailableError } from "../../services/runtime/src/story-continuity-review-adapter.js";
+import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview, estimateContinuityReviewPlanningTokens, ContinuityReviewUnavailableError, continuityReviewUnavailableReason } from "../../services/runtime/src/story-continuity-review-adapter.js";
+import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
+import { z } from "zod";
 import { createStoryEvidence, generationEvidenceManifestHash } from "../../packages/application/src/memory/generation-context.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { sha256 } from "../../packages/domain/src/text.js";
@@ -220,4 +222,18 @@ describe("exact continuity review provider request", () => {
       .toThrow(ContinuityReviewUnavailableError);
   });
 
+});
+
+describe("continuity review unavailable reason", () => {
+  it("classifies a caught error into a diagnosable unavailable reason", () => {
+    expect(continuityReviewUnavailableReason(new ContextBudgetError("context_budget_exceeded", 100, 50, undefined, { scope: "provider_request" })))
+      .toBe("context_budget_exceeded");
+    expect(continuityReviewUnavailableReason(new ContinuityReviewUnavailableError())).toBe("evidence_unavailable");
+    expect(continuityReviewUnavailableReason(Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" })))
+      .toBe("evidence_unavailable");
+    expect(continuityReviewUnavailableReason(new z.ZodError([]))).toBe("invalid_output");
+    expect(continuityReviewUnavailableReason(new SyntaxError("Unexpected token"))).toBe("invalid_output");
+    expect(continuityReviewUnavailableReason(new Error("network timeout"))).toBe("provider_failed");
+    expect(continuityReviewUnavailableReason("not an error")).toBe("provider_failed");
+  });
 });

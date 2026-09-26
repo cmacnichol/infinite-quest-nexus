@@ -1,5 +1,5 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
-import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
+import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult, continuityReviewUnavailableReason } from "./story-continuity-review-adapter.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
 import { recoverInterruptedStory } from "../../../packages/story-engine/src/interrupted-story.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
@@ -4286,7 +4286,7 @@ async function executeLoadedGeneration(
       else if (existing.success) {
         // A prior lease may have dispatched the call. Do not silently duplicate
         // its cost or assume the missing response was a semantic pass.
-        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null };
+        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null, unavailableReason: "provider_failed" };
       } else {
         checkpoint = { version: 1, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null };
         try {
@@ -4318,7 +4318,7 @@ async function executeLoadedGeneration(
               countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
             });
           }
-          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null };
+          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null, unavailableReason: continuityReviewUnavailableReason(error) };
         }
       }
       const reviewDiagnostic = projectSafeGenerationDiagnostic({

@@ -11,7 +11,10 @@ export function reviewBindingHash(binding: ReviewBinding): string { return sha25
 export const continuityReviewCheckpointSchema = z.object({
   version: z.literal(1), mode: z.enum(["observe", "enforce"]), binding: reviewBindingSchema, bindingHash: hash,
   status: z.enum(["dispatched", "completed"]), verdict: z.enum(["pass", "conflict", "uncertain", "unavailable"]),
-  reviewRequestHash: hash.nullable(), result: continuityReviewSchema.nullable()
+  reviewRequestHash: hash.nullable(), result: continuityReviewSchema.nullable(),
+  /** Diagnostic-only: why an "unavailable" verdict could not reach a result.
+   * Optional so rows persisted before this field existed still parse. */
+  unavailableReason: z.enum(["context_budget_exceeded", "provider_failed", "invalid_output", "evidence_unavailable"]).optional()
 }).strict().superRefine((value, context) => {
   if ((value.status === "dispatched" || value.verdict !== "unavailable") && !value.reviewRequestHash) context.addIssue({ code: "custom", message: "Dispatched and completed reviews require their exact request identity." });
   if (value.verdict !== "unavailable" && (!value.binding.manifestHash || !value.binding.producingRequestHash)) context.addIssue({ code: "custom", message: "A review result requires complete input identity." });
@@ -19,6 +22,7 @@ export const continuityReviewCheckpointSchema = z.object({
   if (value.status === "dispatched" && (value.verdict !== "unavailable" || value.result !== null)) context.addIssue({ code: "custom", message: "Unfinished review cannot contain a result." });
   if (value.verdict !== "unavailable" && (!value.result || value.result.verdict !== value.verdict)) context.addIssue({ code: "custom", message: "Review verdict must match its result." });
   if (value.verdict === "unavailable" && value.result !== null) context.addIssue({ code: "custom", message: "Unavailable review cannot claim a result." });
+  if (value.verdict !== "unavailable" && value.unavailableReason !== undefined) context.addIssue({ code: "custom", message: "An unavailable reason only applies to an unavailable verdict." });
 });
 export type ContinuityReviewCheckpoint = z.infer<typeof continuityReviewCheckpointSchema>;
 

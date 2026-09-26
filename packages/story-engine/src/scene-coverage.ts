@@ -38,7 +38,7 @@ export function parseSceneCoverageOutput(content: string) {
 
 export function buildEventCoveragePrompt(requirements: readonly EventCoverageRequirement[], narration: string): string {
   return stableStringify({
-    task: "Evaluate every required event independently against the narration. Each event ID must appear exactly once.",
+    task: "Treat each required event as a required scene beat. Evaluate every required event independently against the narration. Each event ID must appear exactly once.",
     required_events: requirements.map((event) => ({ event_id: event.id, fiction_requirement: event.fiction })),
     generated_narration: narration,
     output_shape: { event_results: [{ event_id: "exact required event id", covered: "boolean", missing_required_beats: ["string"], contradictions: ["string"] }] }
