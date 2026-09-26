@@ -61,6 +61,7 @@ type ProviderCompositionOptions = Readonly<{
   /** One admission switch is supplied unchanged to API enqueue and every worker graph. */
   nativeTextExecutionPlanAdmission?: boolean;
   castDiscoveryEnabled?: boolean;
+  castContextEnabled?: boolean;
   textProviderConcurrency?: number;
 }>;
 
@@ -212,7 +213,7 @@ function createInternals(
   ): ProviderApplicationTransaction {
     const client = database as DatabaseClient;
     const providerRepositories = createPostgresProviderRepositories(client);
-    const prompts = createPromptRepository(client);
+    const prompts = createPromptRepository(client, { castContextEnabled: options.castContextEnabled === true });
     const costs = createProviderCostRepository(database);
     const runtime = createRuntimeProviderAdapter({
       database: client,

@@ -18,10 +18,10 @@ import {
 import {
   STORY_PROMPT_PROTOCOL_VERSION,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_OUTPUT_ENCODING_CONTRACT_V3,
   STORY_PROMPT_SCHEMA_VERSION,
   castStoryMemoryPromptCompatibilityIdentity,
-  storyMemoryMandatoryContract,
   storyPromptCompatibilityIdentity,
   storyPromptProtocolIdentity
 } from "../../contracts/src/story-prompt.js";
@@ -252,40 +252,7 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
   return preview;
 }
 
-/**
- * Resolves the Story Memory prompt protocol an enrolled campaign should show in
- * preview. Cast authority (CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION) is chosen
- * at enqueue by an operator-wide runtime toggle
- * (StoryMemoryOperatorConfig.castContextEnabled), not a per-campaign database
- * value, so this repository cannot read that toggle directly. Instead it reuses
- * whatever protocol the campaign's own most recent generation job already froze
- * into generation_jobs.context_options->'storyMemoryPolicy'->>'promptProtocol'
- * (the same field the executor reads at generation-executor-adapter.ts). That
- * protocol is accepted only when storyMemoryMandatoryContract still recognizes
- * it; otherwise (or when the campaign has never queued a turn) preview falls
- * back to the current default protocol and says so explicitly.
- */
-async function resolveStoryMemoryPreviewProtocol(
-  database: DatabaseClient,
-  ownerUserId: string,
-  campaignId: string
-): Promise<Readonly<{ promptProtocol: string; source: "latest_job" | "default" }>> {
-  const latestJobResult = await database.query<{ contextOptions: Record<string, unknown> | null }>(
-    `SELECT context_options AS "contextOptions" FROM generation_jobs
-      WHERE owner_user_id=$1 AND campaign_id=$2
-      ORDER BY created_at DESC LIMIT 1`,
-    [ownerUserId, campaignId]
-  );
-  const candidate = (latestJobResult.rows[0]?.contextOptions as { storyMemoryPolicy?: { promptProtocol?: unknown } } | null)
-    ?.storyMemoryPolicy?.promptProtocol;
-  if (typeof candidate === "string") {
-    try {
-      storyMemoryMandatoryContract(candidate);
-      return { promptProtocol: candidate, source: "latest_job" };
-    } catch { /* unsupported or malformed; fall back to the current default below */ }
-  }
-  return { promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION, source: "default" };
-}
+type PromptPreviewOptions = Readonly<{ castContextEnabled?: boolean }>;
 
 /**
  * Adds the effective (post-composition) writer system prompt to a story_system
@@ -300,7 +267,8 @@ async function withEffectiveStorySystemPreview(
   ownerUserId: string,
   campaignId: string,
   content: string,
-  base: PromptPreviewView
+  base: PromptPreviewView,
+  options: PromptPreviewOptions
 ): Promise<PromptPreviewView> {
   const campaignResult = await database.query<{ turn_control_style: string; text_provider_profile_id: string | null }>(
     "SELECT turn_control_style,text_provider_profile_id FROM campaigns WHERE id=$1 AND owner_user_id=$2",
@@ -314,7 +282,9 @@ async function withEffectiveStorySystemPreview(
     [campaignId, ownerUserId]
   );
   const enrolled = enrollmentResult.rows.length > 0;
-  const storyMemory = enrolled ? await resolveStoryMemoryPreviewProtocol(database, ownerUserId, campaignId) : null;
+  const storyMemoryPromptProtocol = enrolled
+    ? options.castContextEnabled === true ? CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION : STORY_MEMORY_PROMPT_PROTOCOL_VERSION
+    : null;
 
   const providerResult = campaign.text_provider_profile_id
     ? await database.query<{ text_selection: unknown }>(
@@ -335,27 +305,24 @@ async function withEffectiveStorySystemPreview(
     ? storyPromptCompatibilityIdentity()
     : undefined;
 
-  // Only a preset route freezes story-native-v3 (packages/contracts/src/story-prompt.ts
-  // ties the v3 wire to a preset-eligible response contract); a direct-model
-  // campaign freezes story-native-v2 and must not preview a contract it will
-  // never actually dispatch.
+  // Presets use the preferred wire. Direct models select a verified wire at
+  // enqueue; this read-only repository has no capability evidence, so their
+  // preview explicitly leaves output encoding unresolved.
   const effectiveContent = composeEffectiveStorySystemPrompt({
     writerPrompt: content,
     storyOnlyPolicy,
-    storyMemoryPromptProtocol: storyMemory?.promptProtocol ?? null,
+    storyMemoryPromptProtocol,
     ...(storyPromptContractProtocol ? { storyPromptContractProtocol } : {}),
     encodingContract: usesPreset ? STORY_OUTPUT_ENCODING_CONTRACT_V3 : ""
   });
 
   const sections = [
     ...base.sections,
-    { label: "Effective system prompt", role: "system" as const, content: effectiveContent },
-    ...(storyMemory ? [{
+    { label: usesPreset ? "Effective system prompt" : "System prompt preview (output encoding pending)", role: "system" as const, content: effectiveContent },
+    ...(storyMemoryPromptProtocol ? [{
       label: "Story Memory contract source",
       role: "system" as const,
-      content: storyMemory.source === "latest_job"
-        ? `Protocol ${storyMemory.promptProtocol} from the campaign's latest queued turn.`
-        : `Protocol ${storyMemory.promptProtocol} is the current default protocol; the campaign-cast contract is added at dispatch when cast context is enabled.`
+      content: `Protocol ${storyMemoryPromptProtocol} from the current runtime settings.`
     }] : []),
     ...(usesPreset ? [{
       label: "Preset system prompt (added at dispatch)",
@@ -364,7 +331,7 @@ async function withEffectiveStorySystemPreview(
     }] : [{
       label: "Paragraph-wire output contract",
       role: "system" as const,
-      content: "The paragraph-wire output contract is added for preset routes; this campaign's direct model uses the story-native-v2 wire."
+      content: "Output encoding is selected when the turn is queued using the direct model's verified capabilities. This preview omits that contract; story-native-v3 adds paragraph-array and typographic-quotation rules."
     }])
   ];
   return {
@@ -374,7 +341,7 @@ async function withEffectiveStorySystemPreview(
   };
 }
 
-export function createPromptRepository(database: DatabaseClient): PromptLibraryPort {
+export function createPromptRepository(database: DatabaseClient, previewOptions: PromptPreviewOptions = {}): PromptLibraryPort {
   const activeDefinition = (key: PromptCatalogKey) => {
     if (RETIRED_PROMPT_TEMPLATE_KEYS.has(key as PromptTemplateKey)) throw Object.assign(new Error("This historical prompt is unavailable."), { statusCode: 410, code: key === "turn_intent" ? "turn_input_classification_removed" : "prompt_template_retired" });
     return PROMPT_CATALOG[key];
@@ -444,7 +411,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         ? buildPromptPreview("story_system", value.content)
         : establishedPromptPreview(value.key as PromptTemplateKey, value.content);
       if (value.key !== "story_system" || !request.campaignId) return base;
-      return withEffectiveStorySystemPreview(database, request.ownerUserId, request.campaignId, value.content, base);
+      return withEffectiveStorySystemPreview(database, request.ownerUserId, request.campaignId, value.content, base, previewOptions);
     },
     async savePromptOverride(command) {
       const campaignId = command.scope === "campaign" ? command.campaignId : null;

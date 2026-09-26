@@ -77,6 +77,25 @@ function listModels(composition: ReturnType<typeof createApiProviderApplicationC
 }
 
 describe("provider application composition capability cache transactions", () => {
+  it.each([true, false])("uses current cast context setting %s in prompt previews despite older jobs", async (castContextEnabled) => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM generation_jobs")) return { rows: [{ contextOptions: { storyMemoryPolicy: {
+        promptProtocol: castContextEnabled ? "story-v16-fact-wire-distinction" : "story-v17-campaign-cast"
+      } } }] };
+      return { rows: [] };
+    });
+    const composition = createApiProviderApplicationComposition({ query } as never, {
+      credentialSecret: "test-secret", transport: {} as never, castContextEnabled
+    });
+    const preview = await composition.application.previewPrompt({
+      ownerUserId, campaignId: "00000000-0000-4000-8000-000000000003", key: "story_system", content: "WRITER"
+    });
+    const system = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
+    expect(system.content.includes("Campaign cast authority:")).toBe(castContextEnabled);
+  });
+
   it("allows image and embedding execution while text capacity is exhausted", async () => {
     const leases = { tryAcquire: vi.fn(async () => null), release: vi.fn(async () => {}) };
     const capacity = createSharedTextProviderCapacity(leases, 1);

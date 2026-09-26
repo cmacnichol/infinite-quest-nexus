@@ -545,7 +545,7 @@ describe("Prompt Library catalog", () => {
     expect(compatibility?.protocolIdentity).not.toBe(promptCompatibilityRequirement("story_system")?.protocolIdentity);
   });
 
-  it("previews the effective writer composition for an enrolled campaign, falling back to the current default protocol when it has never queued a turn", async () => {
+  it("labels direct-model previews as partial until output encoding is selected at enqueue", async () => {
     const ownerUserId = crypto.randomUUID();
     const campaignId = crypto.randomUUID();
     const query = vi.fn(async (sql: string) => {
@@ -558,38 +558,38 @@ describe("Prompt Library catalog", () => {
     const prompts = createPromptRepository({ query } as never);
 
     const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
-    const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
+    const effective = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
+    expect(effective).toBeDefined();
     expect(effective.content).toContain("Story Memory authority contract");
-    // No preset is configured, so this campaign will freeze story-native-v2;
-    // the v3 paragraph-wire contract must not appear in its preview.
+    // Direct-model eligibility is resolved at enqueue, so the preview must
+    // neither invent an encoding contract nor claim v2 is guaranteed.
     expect(effective.content).not.toContain("narration_paragraphs");
     expect(effective.content).not.toContain(CAST_STORY_AUTHORITY_CONTRACT);
     expect(preview.sections.find((section) => section.label === "Preset system prompt (added at dispatch)")).toBeUndefined();
     expect(preview.sections.find((section) => section.label === "Paragraph-wire output contract")).toMatchObject({
       role: "system",
-      content: "The paragraph-wire output contract is added for preset routes; this campaign's direct model uses the story-native-v2 wire."
+      content: "Output encoding is selected when the turn is queued using the direct model's verified capabilities. This preview omits that contract; story-native-v3 adds paragraph-array and typographic-quotation rules."
     });
 
     const source = preview.sections.find((section) => section.label === "Story Memory contract source");
     expect(source).toMatchObject({
       role: "system",
-      content: `Protocol ${STORY_MEMORY_PROMPT_PROTOCOL_VERSION} is the current default protocol; the campaign-cast contract is added at dispatch when cast context is enabled.`
+      content: `Protocol ${STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the current runtime settings.`
     });
   });
 
-  it("uses the cast protocol frozen by the campaign's latest queued turn, ordered writer / Story Memory contract / encoding contract", async () => {
+  it("uses current cast context settings even when the latest queued turn predates enabling cast", async () => {
     const ownerUserId = crypto.randomUUID();
     const campaignId = crypto.randomUUID();
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
       if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
-      if (sql.includes("FROM generation_jobs")) return { rows: [{ contextOptions: { storyMemoryPolicy: { promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION } } }] };
-      // The v3 encoding contract this test asserts is ordered last is only
-      // ever added for a preset route, so this fixture selects one.
+      if (sql.includes("FROM generation_jobs")) return { rows: [{ contextOptions: { storyMemoryPolicy: { promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION } } }] };
+      // A preset route selects v3 without direct-model capability evidence.
       if (sql.includes("FROM provider_profiles")) return { rows: [{ text_selection: { kind: "openrouter_preset", slug: "writer-preset" } }] };
       return { rows: [] };
     });
-    const prompts = createPromptRepository({ query } as never);
+    const prompts = createPromptRepository({ query } as never, { castContextEnabled: true });
 
     const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
     const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
@@ -601,7 +601,7 @@ describe("Prompt Library catalog", () => {
     const source = preview.sections.find((section) => section.label === "Story Memory contract source");
     expect(source).toMatchObject({
       role: "system",
-      content: `Protocol ${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the campaign's latest queued turn.`
+      content: `Protocol ${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the current runtime settings.`
     });
   });
 
@@ -617,7 +617,7 @@ describe("Prompt Library catalog", () => {
     const prompts = createPromptRepository({ query } as never);
 
     const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
-    const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
+    const effective = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
     expect(effective.content).toContain("Story Direction mode is a fiction-only scene direction.");
   });
 
