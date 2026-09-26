@@ -52,4 +52,19 @@ describe("partial paragraph streams", () => {
   it("feeds the public partial preview", () => {
     expect(extractPartialNarration('{"narration_paragraphs":["One.","Two')).toBe("One.\n\nTwo");
   });
+  it("decodes \\uXXXX escapes instead of leaking the hex digits", () => {
+    expect(extractPartialNarrationParagraphs('{"narration_paragraphs":["\\u201cStay,\\u201d Mara says.'))
+      .toBe("“Stay,” Mara says.");
+  });
+  it("drops a truncated trailing \\u escape instead of emitting garbage digits", () => {
+    const result = extractPartialNarrationParagraphs('{"narration_paragraphs":["Stay,\\u20');
+    expect(result).toBe("Stay,");
+    expect(result).not.toMatch(/20$/);
+    expect(() => extractPartialNarrationParagraphs('{"narration_paragraphs":["Stay,\\u20')).not.toThrow();
+  });
+  it("decodes a surrogate pair (emoji) without throwing", () => {
+    const result = extractPartialNarrationParagraphs('{"narration_paragraphs":["\\ud83d\\ude00"]');
+    expect(() => result).not.toThrow();
+    expect(result).toBe("😀");
+  });
 });

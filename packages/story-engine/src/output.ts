@@ -7,6 +7,7 @@ import { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domai
 import { formatNarrationParagraphs } from "./narration-formatting.js";
 import { extractPartialNarrationParagraphs, isNarrationParagraphsComplete, joinProviderNarration } from "./narration-paragraphs.js";
 import { narrationFormatSignals, type NarrationFormatSignals } from "./narration-format-signals.js";
+import { unescapeJsonString } from "./json-unescape.js";
 
 export { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 
@@ -44,21 +45,6 @@ export function extractJsonObject(content: string): unknown {
     }
   }
   throw new SyntaxError("The JSON object ended before its closing brace.");
-}
-
-function unescapeJsonString(str: string): string {
-  let cleaned = str.replace(/\\(?:u[0-9a-fA-F]{0,3}|[0-9a-fA-F]{0,3})?$/u, "");
-  if (cleaned.endsWith("\\")) cleaned = cleaned.slice(0, -1);
-  return cleaned
-    .replace(/\\u([0-9a-fA-F]{4})/gu, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\\n/gu, "\n")
-    .replace(/\\r/gu, "\r")
-    .replace(/\\t/gu, "\t")
-    .replace(/\\"/gu, '"')
-    .replace(/\\\\/gu, "\\")
-    .replace(/\\\//gu, "/")
-    .replace(/\\b/gu, "\b")
-    .replace(/\\f/gu, "\f");
 }
 
 export function extractPartialNarration(content: string): string {
