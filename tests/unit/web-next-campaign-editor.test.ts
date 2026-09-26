@@ -188,6 +188,42 @@ describe("web-next campaign editor routing", () => {
     mounted.dispose();
   });
 
+  it("carries the loaded refinement prompt unchanged when other illustration settings are saved", async () => {
+    const { document } = parseHTML("<body><div id=app></div></body>");
+    const root = document.querySelector<HTMLElement>("#app")!;
+    const storedRefinementPrompt = "Favor painterly fantasy lighting; never render text overlays.";
+    const illustrationConfig = {
+      enabled: true, sourcePolicy: "generate_only", matchingScope: "campaign", confidenceProfile: "balanced",
+      repetitionWindow: 5, providerProfileId: "provider-1", model: "illustrator", size: "1024x1024", aspectRatio: "1:1",
+      quality: "auto", outputFormat: "png", maxAttempts: 3, segmentWordCount: 500, imagesPerSegment: 1,
+      segmentPromptMode: "ai_refined", refinementPrompt: storedRefinementPrompt,
+      defaultRefinementPrompt: "Shipped default text.", updatedAt: null
+    };
+    let putBody: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/v1/campaigns") return new Response(JSON.stringify({ campaigns: [overviewCampaign] }), { status: 200 });
+      if (url === "/api/v1/providers") return new Response(JSON.stringify({ providers: [{ id: "provider-1", name: "Illustrator", providerRole: "image", providerType: "openai" }] }), { status: 200 });
+      if (url === "/api/v1/campaigns/campaign-1/illustration-config" && init.method === "PUT") {
+        putBody = JSON.parse(String(init.body));
+        return new Response(JSON.stringify(illustrationConfig), { status: 200 });
+      }
+      if (url === "/api/v1/campaigns/campaign-1/illustration-config") return new Response(JSON.stringify(illustrationConfig), { status: 200 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    installOverviewFormData();
+    const mounted = mountCampaignEditorPage(root, { campaignId: overviewCampaign.id, section: "illustrations" });
+    await vi.waitFor(() => expect(root.querySelector("#illustrations-form")).toBeTruthy());
+    const form = root.querySelector<HTMLFormElement>("#illustrations-form")!;
+    expect(form.textContent).not.toContain(storedRefinementPrompt);
+    const repetitionWindow = form.querySelector<HTMLInputElement>("input[name='repetitionWindow']")!;
+    repetitionWindow.value = "9";
+    form.dispatchEvent(new document.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(putBody).not.toBeNull());
+    expect(putBody).toMatchObject({ repetitionWindow: 9, refinementPrompt: storedRefinementPrompt });
+    mounted.dispose();
+  });
+
   it("gives every confirmed editor section its own canonical subpage", () => {
     expect(CAMPAIGN_SECTIONS).toEqual(["overview", "character", "state", "history", "chronicle", "illustrations", "world-transfer", "data"]);
     for (const section of CAMPAIGN_SECTIONS) {
