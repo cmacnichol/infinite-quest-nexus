@@ -141,6 +141,8 @@ const state = {
   cancellationConfirmed: false,
   illustrationConfig: null,
   illustrationSegments: [],
+  illustrationError: null,
+  imagePollEpoch: 0,
   illustrationVariantIndexes: new Map(),
   illustrationSegmentActivity: new Map(),
   imagePollTimer: null,
@@ -452,7 +454,12 @@ async function checkOnboarding() {
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
   const loadEpoch = ++storyTurnWindowEpoch;
-  if (state.campaignId !== campaignId) state.retainedAppendDraft = null;
+  if (state.campaignId !== campaignId) {
+    state.retainedAppendDraft = null;
+    state.illustrationConfig = null;
+    state.illustrationSegments = [];
+    state.illustrationError = null;
+  }
   clearResponseEditSession();
   resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
@@ -484,9 +491,9 @@ async function loadCampaign(campaignId, options = {}) {
       state.illustrationConfig = await illustrationApi.config(campaignId);
       const segmentData = await illustrationApi.segments(campaignId);
       state.illustrationSegments = segmentData.segments || [];
-    } catch (_) {
-      state.illustrationConfig = { enabled: false, sourcePolicy: "off" };
-      state.illustrationSegments = [];
+      state.illustrationError = null;
+    } catch (error) {
+      state.illustrationError = illustrationLoadError(error);
     }
 
     // Set title
@@ -951,7 +958,7 @@ function renderStoryIllustration() {
   const turnLabel = $("storyIllustrationTurn");
   const turnIndex = viewedTurnIndex();
   const turn = state.turns[turnIndex];
-  const visible = illustrationsEnabled() && !state.generationDisplayActive && Boolean(turn);
+  const visible = (illustrationsEnabled() || state.illustrationError) && !state.generationDisplayActive && Boolean(turn);
   if (!layout || !panel || !content) return;
 
   const inlineContents = [...document.querySelectorAll(".segment-illustration-content[data-segment-id]")];
@@ -969,7 +976,7 @@ function renderStoryIllustration() {
     );
   });
 
-  const inlineVisible = visible && inlineContents.length > 0;
+  const inlineVisible = visible && inlineContents.length > 0 && !state.illustrationError;
   const panelVisible = visible && !inlineVisible;
   layout.classList.toggle("has-illustration", panelVisible);
   layout.classList.toggle("has-segmented-illustrations", inlineVisible);
@@ -986,14 +993,16 @@ function renderStoryIllustration() {
   if (turnLabel) turnLabel.textContent = `Turn ${turn.turnNumber}`;
   const turnId = turn.id || turn.turnId || "";
   const segments = illustrationSegmentsForTurn(turnId);
+  const statusMarkup = `${state.illustrationError ? `<p role="status">${escapeHtml(state.illustrationError)}</p>` : ""}
+    <button class="small ghost" type="button" data-action="refresh-illustrations">Refresh illustrations</button>`;
   if (segments.length) {
     const narrationIsStale = !segmentProseMatchesNarration(segments, turn.narration);
-    content.innerHTML = `${narrationIsStale
+    content.innerHTML = `${statusMarkup}${narrationIsStale
       ? `<p class="mini dim">The narration was corrected; existing illustrations may no longer match.</p>`
       : ""}${segments.map((segment) => segmentIllustrationMarkup(turn, turnIndex, segment, segments.length)).join("")}`;
     return;
   }
-  content.innerHTML = `<div class="image-wrap image-job-placeholder">
+  content.innerHTML = `${statusMarkup}<div class="image-wrap image-job-placeholder">
     <div class="image-placeholder">This accepted turn has no illustration segments yet.</div>
     <button class="small primary" type="button" data-turn-id="${escapeHtml(turnId)}" data-action="generate-turn-segments">Generate illustrations for this turn</button>
   </div>`;
@@ -1934,9 +1943,9 @@ async function reconcileCompletedGeneration(result) {
       state.illustrationConfig = await illustrationApi.config(state.campaignId);
       const segmentData = await illustrationApi.segments(state.campaignId);
       state.illustrationSegments = segmentData.segments || [];
-    } catch (_) {
-      state.illustrationConfig = { enabled: false, sourcePolicy: "off" };
-      state.illustrationSegments = [];
+      state.illustrationError = null;
+    } catch (error) {
+      state.illustrationError = illustrationLoadError(error);
     }
 
     const titleEl = $("storyTitle");
@@ -2274,15 +2283,48 @@ function promptBranchOrReset(turnNumber) {
 }
 
 // ── Illustration Management ───────────────────────────────────
+function illustrationLoadError(error) {
+  return error?.name === "ApiContractError"
+    ? "The server returned invalid illustration data. Refresh to try again."
+    : "Illustration status could not be loaded. Refresh to try again.";
+}
+
+async function refreshIllustrations() {
+  const campaignId = state.campaignId;
+  try {
+    const config = await illustrationApi.config(campaignId);
+    if (state.campaignId !== campaignId) return;
+    state.illustrationConfig = config;
+    await pollImageJobs();
+  } catch (error) {
+    if (state.campaignId !== campaignId) return;
+    state.illustrationError = illustrationLoadError(error);
+    renderStoryIllustration();
+  }
+}
+
 function pollImageJobs() {
   if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
   if (!state.campaignId) return;
+  const campaignId = state.campaignId;
+  const epoch = ++state.imagePollEpoch;
+  let failures = 0;
+  const current = () => state.campaignId === campaignId && state.imagePollEpoch === epoch;
 
   const poll = async () => {
+    if (!current()) return;
     try {
-      const data = await illustrationApi.imageJobs(state.campaignId);
+      if (!state.illustrationConfig) {
+        const config = await illustrationApi.config(campaignId);
+        if (!current()) return;
+        state.illustrationConfig = config;
+      }
+      const data = await illustrationApi.imageJobs(campaignId);
       const jobs = data.jobs || data || [];
-      const segmentData = await illustrationApi.segments(state.campaignId);
+      const segmentData = await illustrationApi.segments(campaignId);
+      if (!current()) return;
+      failures = 0;
+      state.illustrationError = null;
       const segments = segmentData.segments || [];
       let anyPending = false;
       state.illustrationSegments = segments;
@@ -2301,7 +2343,14 @@ function pollImageJobs() {
       if (anyPending) {
         state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS);
       }
-    } catch (_) { /* ignore polling errors */ }
+    } catch (error) {
+      if (!current()) return;
+      state.illustrationError = illustrationLoadError(error);
+      renderStoryIllustration();
+      if (error?.name !== "ApiContractError" && ++failures < 3) {
+        state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS * failures);
+      }
+    }
   };
   return poll();
 }
@@ -3676,6 +3725,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Story and illustration rail delegated click handler.
   const handleStoryAction = (e) => {
+    if (e.target.closest('[data-action="refresh-illustrations"]')) {
+      void refreshIllustrations();
+      return;
+    }
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     if (btn.dataset.action === "follow-stream") {

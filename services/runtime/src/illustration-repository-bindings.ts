@@ -56,7 +56,7 @@ async function assertInitialOwner(pool: DatabasePool, ownerUserId: string): Prom
 
 function timestamp(value: Date | string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
-  return value instanceof Date ? value.toISOString() : value;
+  return (value instanceof Date ? value : new Date(value)).toISOString();
 }
 
 function imageJob(job: Awaited<ReturnType<typeof getImageJob>>): IllustrationImageJob {

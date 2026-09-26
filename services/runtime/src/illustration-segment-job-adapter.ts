@@ -666,10 +666,11 @@ export async function promoteProvisionalSet(
   // Update the set
   const setResult = await client.query<{ id: string, character_visual_reference: string }>(
     `UPDATE turn_illustration_sets
-        SET turn_id = $3, status = $4, source_text_hash = $5
-      WHERE generation_job_id = $1 AND owner_user_id = $2 AND status = 'provisional'
+        SET turn_id = $3, status = CASE WHEN status = 'provisional' THEN $4 ELSE status END, source_text_hash = $5
+      WHERE generation_job_id = $1 AND owner_user_id = $2 AND campaign_id = $6
+        AND turn_id IS NULL AND is_active AND status NOT IN ('orphaned', 'superseded')
       RETURNING id, character_visual_reference`,
-    [generationJobId, ownerUserId, turnId, config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", sha256(finalNarration)]
+    [generationJobId, ownerUserId, turnId, config.segment_prompt_mode === "ai_refined" ? "refining" : "queued", sha256(finalNarration), campaignId]
   );
   if (!setResult.rows[0]) return;
   const setId = setResult.rows[0].id;
@@ -1087,6 +1088,8 @@ export async function listCampaignIllustrationSegments(pool: DatabasePool, campa
        LEFT JOIN illustration_prompt_jobs prompts
          ON prompts.segment_id = segments.id AND prompts.owner_user_id = segments.owner_user_id
       WHERE sets.campaign_id = $1 AND sets.owner_user_id = $2 AND sets.is_active
+        AND sets.turn_id IS NOT NULL AND segments.turn_id = sets.turn_id
+        AND sets.status NOT IN ('orphaned', 'superseded')
       ORDER BY sets.turn_id, segments.ordinal`,
     [campaignId, ownerUserId]
   );

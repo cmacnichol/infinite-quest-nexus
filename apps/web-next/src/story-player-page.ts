@@ -1264,6 +1264,10 @@ export function mountStoryPlayerPage(
       control.addEventListener("click", () => illustrations.selectNext());
     }
     for (const [action, operation] of [
+      ["refresh-images", () => {
+        const { campaignId, turnId } = illustrations.get();
+        return campaignId && turnId ? illustrations.load(campaignId, turnId) : Promise.resolve();
+      }],
       ["regenerate-image", () => illustrations.regenerate()],
       ["retry-image-job", () => illustrations.retryJob()],
       ["generate-missing-images", () => illustrations.generateMissing()],

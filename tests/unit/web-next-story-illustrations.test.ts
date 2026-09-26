@@ -1,3 +1,4 @@
+import { ApiContractError } from "../../packages/client-core/src/errors.js";
 import { describe, expect, it, vi } from "vitest";
 import { parseHTML } from "linkedom";
 import type { IllustrationApi } from "../../packages/client-web/src/illustration-api.js";
@@ -133,6 +134,22 @@ function controller(api: IllustrationApi) {
 }
 
 describe("StoryIllustrationController", () => {
+  it("reports invalid image data and offers a read-only refresh", async () => {
+    const api = illustrationApi({ segments: vi.fn().mockRejectedValueOnce(new ApiContractError('bad data', {
+      phase: 'response',kind:'response_schema_mismatch',method:'GET',path:'/segments'
+    })).mockResolvedValue(segments()) });
+    const subject = controller(api);
+    await subject.load(campaignId,turnId);
+    expect(subject.get().message).toMatch(/invalid.*data/i);
+    const document = parseHTML('<html><body></body></html>').document;
+    const wing = renderIllustrationWing(document,subject.get());
+    expect(wing.querySelector('[data-action="refresh-images"]')).not.toBeNull();
+    await subject.load(campaignId,turnId);
+    expect(subject.get().selectedVariant?.assetId).toBe('77777777-7777-4777-8777-777777777777');
+    expect(api.regenerateSegmentImage).not.toHaveBeenCalled();
+    expect(api.generateTurnSegments).not.toHaveBeenCalled();
+  });
+
   it("does not request segments when illustrations are disabled", async () => {
     const api = illustrationApi({ config: vi.fn().mockResolvedValue(config({ enabled: false })) });
     const subject = controller(api);
