@@ -61,6 +61,10 @@ Existing custom prompt overrides may require the current protocol acknowledgemen
 in the Prompt Library before new generation can start. Disabled options indicate
 that an operator has restricted the available levels.
 
+After this release, an existing application writer or event-extension override
+shows *Needs acknowledgement* once. Acknowledge it to make it effective for
+every campaign without a campaign copy.
+
 ## Correct current continuity
 
 Use **Edit State** in the legacy Story Player, **Campaign Tools → Edit Campaign State** in the new Story Player, or **Current state** in the new campaign editor. The editor always loads the latest campaign state, even while you are reading an earlier turn. Historical inspection remains read-only.

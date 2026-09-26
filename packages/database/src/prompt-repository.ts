@@ -64,9 +64,13 @@ async function assertCampaignOwner(database: DatabaseClient, ownerUserId: string
 
 /** The library must describe the acknowledgement that its selected campaign
  * will actually need at enqueue time.  This is an eligibility check only; it
- * never reads a mutable policy from a queued generation. */
+ * never reads a mutable policy from a queued generation.
+ *
+ * Every campaign is enrolled on creation (migration 0112), and legacy mode
+ * accepts the stricter Story Memory acknowledgement, so application defaults
+ * must be acknowledged for Story Memory to be usable anywhere. */
 async function promptCompatibilityMode(database: DatabaseClient, scope: PromptScope): Promise<PromptCompatibilityMode> {
-  if (scope.scope !== "campaign") return "legacy";
+  if (scope.scope !== "campaign") return "story_memory";
   const enrollment = await database.query(
     `SELECT 1 FROM campaign_story_memory_enrollments
       WHERE campaign_id=$1 AND owner_user_id=$2`,

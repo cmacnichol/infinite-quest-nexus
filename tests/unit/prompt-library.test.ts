@@ -424,7 +424,10 @@ describe("Prompt Library catalog", () => {
 
   it("persists an exact protected-prompt acknowledgement and accepts it when loading the saved override", async () => {
     const content = "Keep the established output shape and voice.";
-    const requirement = promptCompatibilityRequirement("story_system")!;
+    // Application scope now advertises the Story Memory requirement (every
+    // campaign is enrolled), so this is the acknowledgement the library
+    // shows and the one that must round-trip as acknowledged.
+    const requirement = storyMemoryPromptCompatibilityRequirement("story_system")!;
     let saved: Record<string, unknown> | null = null;
     const query = vi.fn(async (sql: string, values?: readonly unknown[]) => {
       if (sql.includes("INSERT INTO prompt_template_overrides")) {
@@ -597,5 +600,32 @@ describe("Prompt Library catalog", () => {
     expect(writer).not.toContain("separated by two newline characters");
     expect(writer).toContain("follow the output encoding contract");
     expect(writer).toContain("double quotation marks");
+  });
+
+  it("advertises the Story Memory acknowledgement at application scope", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const prompts = createPromptRepository({ query } as never);
+    const library = await prompts.listPromptLibrary({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    expect(library.templates.find((template) => template.key === "story_system")?.compatibility)
+      .toMatchObject(storyMemoryPromptCompatibilityRequirement("story_system")!);
+  });
+
+  it("lets an application override acknowledged through the library run for enrolled campaigns", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const content = "Application writer prompt.";
+    const requirement = storyMemoryPromptCompatibilityRequirement("story_system")!;
+    const row = { prompt_key: "story_system", content, campaign_id: null, compatibility_required_shape_version: requirement.requiredShapeVersion,
+      compatibility_protocol_identity: requirement.protocolIdentity, compatibility_content_hash: createHash("sha256").update(content).digest("hex") };
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("prompt_template_overrides")) return { rows: [row] };
+      return { rows: [] };
+    });
+    const snapshot = await resolveStoryMemoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId });
+    expect(snapshot.templates.story_system).toMatchObject({ content, source: "application" });
+    const legacy = await resolveStoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId });
+    expect(legacy.templates.story_system.source).toBe("application");
   });
 });
