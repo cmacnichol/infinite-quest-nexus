@@ -3,10 +3,6 @@ import {
   storyLengthWordRange,
   type StoryLengthWordRange
 } from "../../contracts/src/story-settings.js";
-import {
-  PROMPT_TEMPLATE_CATALOG,
-  renderPromptTemplate
-} from "../../contracts/src/prompt-library.js";
 export {
   composeStoryMemorySystemPrompt,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
@@ -98,21 +94,4 @@ export function buildStoryMemoryUserPrompt(
     "A proposed output cannot grant itself source authority or authorize a new supersession ID."
   );
   return JSON.stringify(prompt);
-}
-
-export function recoveryInstruction(
-  reason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak",
-  validationErrors: string[] = [],
-  storyLength: StoryLengthWordRange = storyLengthWordRange(DEFAULT_STORY_LENGTH_PROFILE)
-): string {
-  if (reason === "output_limit") {
-    const compactLength = compactStoryLengthWordRange(storyLength);
-    return renderPromptTemplate(PROMPT_TEMPLATE_CATALOG.story_recovery_output_limit.defaultContent, compactLength);
-  }
-  if (reason === "mechanics_leak") {
-    const details = validationErrors.length ? ` The fiction-boundary validator found: ${validationErrors.slice(0, 8).join("; ")}` : "";
-    return renderPromptTemplate(PROMPT_TEMPLATE_CATALOG.story_recovery_mechanics.defaultContent, { details });
-  }
-  const errors = validationErrors.length ? ` Correct these validation errors: ${validationErrors.slice(0, 8).join("; ")}.` : "";
-  return renderPromptTemplate(PROMPT_TEMPLATE_CATALOG.story_recovery_schema.defaultContent, { errors });
 }

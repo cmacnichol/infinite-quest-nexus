@@ -75,7 +75,6 @@ import {
   buildSceneCoveragePrompt,
   buildStoryMemoryUserPrompt,
   buildStoryUserPrompt,
-  compactStoryLengthWordRange,
   containsMechanicsLanguage,
   extractPartialNarration,
   ContextBudgetError,
@@ -795,38 +794,6 @@ function safeTurnInput(value: string): string {
     });
   }
   return trimmed;
-}
-
-function recoveryPromptFromSnapshot(
-  collaborators: GenerationExecutionCollaborators,
-  job: GenerationExecutionPayload,
-  reason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak",
-  errors: string[],
-  storyLength: StoryLengthWordRange
-) {
-  if (reason === "output_limit") {
-    const compact = compactStoryLengthWordRange(storyLength);
-      return renderPromptTemplate(
-        collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_output_limit"),
-        compact
-      );
-  }
-  if (reason === "mechanics_leak") {
-    const details = errors.length
-      ? ` The fiction-boundary validator found: ${errors.slice(0, 8).join("; ")}`
-      : "";
-    return renderPromptTemplate(
-      collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_mechanics"),
-      { details }
-    );
-  }
-  const detail = errors.length
-    ? ` Correct these validation errors: ${errors.slice(0, 8).join("; ")}.`
-    : "";
-  return renderPromptTemplate(
-    collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_schema"),
-    { errors: detail }
-  );
 }
 
 function storyMemoryDefaultsFromContext(context: unknown) {

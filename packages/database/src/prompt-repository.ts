@@ -9,6 +9,7 @@ import {
   promptTemplateOverrideSchema,
   sampleValuesForPrompt,
   legacyPromptTemplateKeys,
+  RETIRED_PROMPT_TEMPLATE_KEYS,
   type PromptSnapshotV2,
   type PromptSnapshot,
   type PromptTemplateKey,
@@ -372,7 +373,7 @@ async function withEffectiveStorySystemPreview(
 
 export function createPromptRepository(database: DatabaseClient): PromptLibraryPort {
   const activeDefinition = (key: PromptCatalogKey) => {
-    if (key === "turn_intent") throw Object.assign(new Error("This historical prompt is unavailable."), { statusCode: 410, code: "turn_input_classification_removed" });
+    if (RETIRED_PROMPT_TEMPLATE_KEYS.has(key as PromptTemplateKey)) throw Object.assign(new Error("This historical prompt is unavailable."), { statusCode: 410, code: key === "turn_intent" ? "turn_input_classification_removed" : "prompt_template_retired" });
     return PROMPT_CATALOG[key];
   };
   async function loadPromptSnapshot(scope: PromptScope): Promise<PromptSnapshotVersion> {
@@ -397,7 +398,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
     return {
       catalogVersion: CATALOG_VERSION,
       campaignId: scope.scope === "campaign" ? scope.campaignId : null,
-      templates: Object.values(PROMPT_CATALOG).filter((definition) => definition.key !== "turn_intent").map((definition) => {
+      templates: Object.values(PROMPT_CATALOG).filter((definition) => !RETIRED_PROMPT_TEMPLATE_KEYS.has(definition.key as PromptTemplateKey)).map((definition) => {
         const frozen = displaySnapshot[definition.key];
         return ({
         key: definition.key,
@@ -494,7 +495,10 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         scope: command.scope,
         ...(campaignId ? { campaignId } : {})
       });
-      activeDefinition(value.key);
+      // Resets remain allowed for retired keys so operators can delete stale
+      // rows (for example, campaign-scoped story_recovery_* overrides) even
+      // though preview and save reject them.
+      if (!RETIRED_PROMPT_TEMPLATE_KEYS.has(value.key as PromptTemplateKey)) activeDefinition(value.key);
       if (campaignId) await assertCampaignOwner(database, command.ownerUserId, campaignId);
       await database.query(
         `DELETE FROM prompt_template_overrides

@@ -86,6 +86,12 @@ export const legacyPromptTemplateKeys = [
 ] as const;
 export type LegacyPromptTemplateKey = typeof legacyPromptTemplateKeys[number];
 
+/** Still captured in snapshots for historical identity; no runtime path dispatches them. */
+export const RETIRED_PROMPT_TEMPLATE_KEYS: ReadonlySet<PromptTemplateKey> = new Set([
+  "turn_intent", "story_recovery_output_limit", "story_recovery_mechanics", "story_recovery_schema",
+  "world_roster_supplement", "infinite_worlds_conversion", "infinite_worlds_recovery", "infinite_worlds_batch"
+]);
+
 export type PromptSnapshotEntry = Readonly<{
   content: string;
   hash: string;

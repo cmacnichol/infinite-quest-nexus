@@ -10,8 +10,7 @@ import {
   buildStoryUserPrompt,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_PROMPT_PROTOCOL_VERSION,
-  STORY_SYSTEM_PROMPT,
-  recoveryInstruction
+  STORY_SYSTEM_PROMPT
 } from "../../packages/story-engine/src/prompt.js";
 
 function story(overrides: Record<string, unknown> = {}) {
@@ -239,17 +238,9 @@ describe("story output integrity", () => {
 
   it("does not prime the narrative prompt with roll or dice vocabulary", () => {
     expect(STORY_SYSTEM_PROMPT).not.toMatch(/\broll(?:s|ed|ing)?\b|\bdice?\b/i);
-    expect(recoveryInstruction("mechanics_leak")).not.toMatch(/\broll(?:s|ed|ing)?\b|\bdice?\b/i);
-  });
-
-  it("includes fiction-boundary findings in mechanics cleanup instructions", () => {
-    const instruction = recoveryInstruction("mechanics_leak", ['Mechanics language detected in narration: "rolls a 17".']);
-    expect(instruction).toContain('"rolls a 17"');
-    expect(instruction).toContain("Rewrite the rejected response");
   });
 
   it("gives schema repair enough typed detail to correct tracker arrays", () => {
-    const repair = recoveryInstruction("invalid_schema", ["tracker_updates.0: expected record, received string"]);
     expect(STORY_SYSTEM_PROMPT).toContain("tracker_updates must be an array of JSON objects");
     expect(STORY_SYSTEM_PROMPT).toContain("continuity_summary");
     expect(STORY_SYSTEM_PROMPT).toContain("canonical_facts");
@@ -258,17 +249,6 @@ describe("story output integrity", () => {
     expect(STORY_SYSTEM_PROMPT).toContain("copy only exact IDs shown on visible canonical facts");
     expect(STORY_SYSTEM_PROMPT).toContain("Never invent, infer, alter, or reuse an ID");
     expect(STORY_SYSTEM_PROMPT).toContain("open_threads");
-    expect(repair).toContain("tracker_updates.0: expected record, received string");
-    expect(repair).toContain('[{"name":"fictional tracker name","value":"new fictional value"}]');
-  });
-
-  it("handles invalid json by asking for schema-complete json", () => {
-    const repair = recoveryInstruction("invalid_json");
-    expect(repair).toContain("Return one syntactically valid, schema-complete replacement JSON object for the same supported turn.");
-    expect(repair).toContain('tracker_updates must be an array of JSON objects such as [{"name":"fictional tracker name","value":"new fictional value"}], or [] when unchanged');
-
-    const repairWithErrors = recoveryInstruction("invalid_json", ["Unexpected end of JSON input"]);
-    expect(repairWithErrors).toContain("Correct these validation errors: Unexpected end of JSON input.");
   });
 
   it("keeps typed fictional guidance separate from authoritative context", () => {
@@ -306,7 +286,6 @@ describe("story output integrity", () => {
     });
     expect(payload.task).toContain("End early when the turn is complete");
     expect(payload.instructions.join(" ")).toContain("Fidelity to authoritative context and the current turn input outranks length.");
-    expect(recoveryInstruction("output_limit", [], extended)).toContain("soft pacing goal");
   });
 
   it("privately requests readable narration paragraphs with a versioned protocol", () => {

@@ -433,9 +433,8 @@ describe("Prompt Library catalog", () => {
       .resolves.toMatchObject({ snapshot: { turn_intent: { content: frozenContent, hash: frozenHash, source: "shipped" } } });
   });
 
-  it("rejects retired turn-intent preview and reset before database work", async () => {
+  it("rejects retired turn-intent preview before database work, but still allows reset to delete a stale override", async () => {
     const previewQuery = vi.fn();
-    const resetQuery = vi.fn();
     const ownerUserId = crypto.randomUUID();
 
     await expect(createPromptRepository({ query: previewQuery } as never).previewPrompt({
@@ -443,14 +442,31 @@ describe("Prompt Library catalog", () => {
       key: "turn_intent",
       content: "Classify this new submission."
     })).rejects.toMatchObject({ code: "turn_input_classification_removed", statusCode: 410 });
+    expect(previewQuery).not.toHaveBeenCalled();
+
+    const resetQuery = vi.fn(async () => ({ rows: [] }));
     await expect(createPromptRepository({ query: resetQuery } as never).resetPromptOverride({
       ownerUserId,
       scope: "application",
       key: "turn_intent"
-    })).rejects.toMatchObject({ code: "turn_input_classification_removed", statusCode: 410 });
+    })).resolves.toMatchObject({
+      templates: expect.not.arrayContaining([expect.objectContaining({ key: "turn_intent" })])
+    });
+    expect(resetQuery).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM prompt_template_overrides"),
+      expect.arrayContaining([ownerUserId, null, "turn_intent"])
+    );
+  });
 
-    expect(previewQuery).not.toHaveBeenCalled();
-    expect(resetQuery).not.toHaveBeenCalled();
+  it("hides retired templates and rejects edits to them", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const prompts = createPromptRepository({ query } as never);
+    const library = await prompts.listPromptLibrary({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    const keys = library.templates.map((template) => template.key);
+    for (const retired of ["story_recovery_output_limit", "story_recovery_mechanics", "story_recovery_schema", "world_roster_supplement",
+      "infinite_worlds_conversion", "infinite_worlds_recovery", "infinite_worlds_batch", "turn_intent"]) expect(keys).not.toContain(retired);
+    await expect(prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_recovery_schema", content: "x {{errors}}" }))
+      .rejects.toMatchObject({ statusCode: 410 });
   });
 
   it("persists an exact protected-prompt acknowledgement and accepts it when loading the saved override", async () => {
