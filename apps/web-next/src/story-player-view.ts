@@ -674,6 +674,13 @@ export function renderIllustrationWing(document: Document, illustration: Readonl
   statusLine.setAttribute("role", "status");
   statusLine.setAttribute("aria-live", "polite");
   wing.append(statusLine);
+  if (illustration.status === "unavailable" || illustration.status === "ready") {
+    const refresh = element(document, "button", undefined, "Refresh illustrations");
+    refresh.type = "button";
+    refresh.dataset.action = "refresh-images";
+    refresh.disabled = capabilities.busy;
+    wing.append(refresh);
+  }
   const segment = illustration.selectedSegment;
   const variant = illustration.selectedVariant;
   if (!segment || !variant) {

@@ -35,6 +35,8 @@ async function bootLegacyStory({
   correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
   illustrationConfig = { enabled: false, sourcePolicy: "off" },
   illustrationSegments = [],
+  loadIllustrationSegments,
+  loadIllustrationConfig,
   classifyTurnInput,
   workflow = { resume: async () => null },
   failedTurnPrompts,
@@ -52,6 +54,8 @@ async function bootLegacyStory({
   correctTurnNarration?: ReturnType<typeof vi.fn>;
   illustrationConfig?: Record<string, unknown>;
   illustrationSegments?: Array<Record<string, unknown>>;
+  loadIllustrationSegments?: () => Promise<unknown>;
+  loadIllustrationConfig?: () => Promise<unknown>;
   classifyTurnInput?: ReturnType<typeof vi.fn>;
   workflow?: Record<string, unknown>;
   failedTurnPrompts?: Record<string, unknown>;
@@ -108,8 +112,8 @@ async function bootLegacyStory({
       meta: { get: async () => ({}) }
     },
     illustrations: {
-      config: async () => illustrationConfig,
-      segments: async () => ({ segments: illustrationSegments }),
+      config: loadIllustrationConfig ?? (async () => illustrationConfig),
+      segments: loadIllustrationSegments ?? (async () => ({ segments: illustrationSegments })),
       imageJobs: async () => ({ jobs: [] })
     },
     workflow,
@@ -177,6 +181,31 @@ function deferred<T>() {
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("retains the refresh control when configuration fails but segment polling succeeds", async () => {
+    try {
+      const { document } = await bootLegacyStory({turns:makeTurns(1,1),loadIllustrationConfig:async()=>{throw new Error('offline');}});
+      await new Promise(resolve=>setTimeout(resolve,0));
+      expect(document.getElementById('storyIllustrationPanel')?.classList.contains('hidden')).toBe(false);
+      expect(document.querySelector('[data-action="refresh-illustrations"]')).not.toBeNull();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("keeps illustration failures visible and refreshes without generating", async () => {
+    let unavailable = true;
+    try {
+      const { document,window } = await bootLegacyStory({ turns: makeTurns(1,1),
+        illustrationConfig: { enabled:true,sourcePolicy:'generate_only' },
+        loadIllustrationSegments: async () => { if(unavailable) throw new Error('offline'); return {segments:[]}; }
+      });
+      expect(document.getElementById('storyIllustrationPanel')?.classList.contains('hidden')).toBe(false);
+      expect(document.getElementById('storyIllustrationContent')?.textContent).toMatch(/could not.*loaded/i);
+      unavailable = false;
+      document.querySelector('[data-action="refresh-illustrations"]')!.dispatchEvent(new window.Event('click',{bubbles:true}));
+      await new Promise(resolve=>setTimeout(resolve,0));
+      expect(document.getElementById('storyIllustrationContent')?.textContent).not.toMatch(/could not.*loaded/i);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("clears recovery controls and stale recovery actions when a clean campaign replaces a recovered one", async () => {
     const recoveredCampaign = {
       campaign: { id: "campaign-1", title: "Recovered campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
@@ -1203,7 +1232,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('recordActivity("image", "Illustration generation progress"');
     expect(storyScript).toContain('["queued", "generating", "provider_pending", "downloading"]');
     expect(storyScript).toContain('aria-label", `Illustration generation progress');
-    expect(storyScript).toContain('illustrationApi.imageJobs(state.campaignId)');
+    expect(storyScript).toContain('illustrationApi.imageJobs(campaignId)');
     expect(storyScript).toContain('illustrationApi.config(campaignId)');
     expect(storyScript).toContain('state.illustrationConfig?.sourcePolicy !== "off"');
     expect(storyScript).toContain('function openImagePromptEditor(turnId)');

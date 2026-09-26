@@ -4,6 +4,7 @@ import type {
   IllustrationResolutionResponse,
   IllustrationSegment
 } from "@infinite-quest/contracts";
+import { ApiContractError } from "@infinite-quest/client-core";
 import type { Clock, DelayScheduler, IdFactory } from "@infinite-quest/client-core";
 
 export type StoryIllustrationStatus = "idle" | "loading" | "disabled" | "ready" | "unavailable";
@@ -196,9 +197,11 @@ export function createStoryIllustrationController(options: StoryIllustrationCont
       const next = { ...state, config, status: "ready" as const, segments, selectedSegmentIndex, selectedVariantIndex };
       publish({ ...next, ...selected(next) });
       startPolling(campaignId, turnId, requestEpoch);
-    } catch {
+    } catch (error) {
       if (controller.signal.aborted || !isCurrent(requestEpoch, campaignId, turnId)) return;
-      publish({ ...state, ...unavailable("The image service could not be reached.") });
+      publish({ ...state, ...unavailable(error instanceof ApiContractError
+        ? "The server returned invalid illustration data. Refresh to try again."
+        : "Image status could not be loaded. Refresh to try again.") });
     }
   };
 
