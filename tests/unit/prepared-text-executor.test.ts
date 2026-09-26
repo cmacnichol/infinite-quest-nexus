@@ -106,6 +106,62 @@ function authority(execute: (request: ProviderRequest) => Promise<ProviderResult
   };
 }
 
+/** Reusable preset-route fixture: dispatches a frozen review request and captures the prepared body the fake transport received. */
+async function runPresetFixture(options: Readonly<{
+  responseCache?: TextExecutionPlan["responseCache"];
+  bypassResponseCache?: boolean;
+}>) {
+  const maxOutputTokens = 8_000;
+  const routeDraft = {
+    version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "review" },
+    preset: { slug: "review", versionId: "v1", configHash: hash("preset") },
+    candidates: [{ modelId: "model-a", providerPolicy: { only: ["route-a"] }, contextWindowTokens: 65_536, maxOutputTokens }],
+    presetSystemPrompt: "Review instructions.", parameters: { temperature: 0.2 }, endpointReference: "endpoint-a",
+    ...(options.responseCache === undefined ? {} : { responseCache: options.responseCache }),
+    credentialReference: "profile-a", profileRevision: "profile-v1", authorityRevision: "authority-v1",
+    requestTimeoutMs: 2_000, protocolVersion: "text-schema-adapter-v2"
+  };
+  const routeBasis = { ...routeDraft, routeBasisHash: textExecutionRouteBasisHash({ ...routeDraft, routeBasisHash: hash("basis") }) };
+  const invocationKey = "continuity_review:nonstream" as const;
+  const operation = "story_continuity_review" as const;
+  const policy = {
+    version: 2 as const, policy: "required" as const, providerProfileId: "11111111-1111-4111-8111-111111111111",
+    admission: { mode: "json_schema" as const, basis: "preset_trusted" as const },
+    authority: { kind: "preset_trusted" as const, routeBasisHash: routeBasis.routeBasisHash, selection: routeBasis.selection,
+      endpointReference: "endpoint-a", credentialReference: "profile-a", authorityRevision: "authority-v1", profileRevision: "profile-v1" },
+    operationClosureVersion: 2 as const, invocationKeys: [invocationKey]
+  };
+  const schema = getProviderOutputSchemaV2("continuity_review");
+  const selected = {
+    version: 2 as const, queuedPolicy: policy, selectedAt: "2026-09-22T00:00:00.000Z", capabilityEvidenceHash: hash("capability"),
+    contracts: { [invocationKey]: { version: 2 as const, mode: "json_schema" as const, admission: policy.admission,
+      operation: "continuity_review" as const, streaming: false, forbidFormatFallback: true as const,
+      schemaVersion: schema.version, schemaHash: schema.schemaHash, schemaName: schema.name, schema: schema.schema,
+      authority: { kind: "preset_trusted" as const, routeBasisHash: routeBasis.routeBasisHash } } }
+  };
+  const frozen = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
+  const trustedOperationPrompt = "Check the final story.";
+  const reviewPlan = deriveTextExecutionPlan(routeBasis, trustedOperationPrompt);
+  const request = { systemPrompt: reviewPlan.prompt, input: "Complete evidence. ".repeat(2_500), budgetOutput: { kind: "continuity_review" as const } };
+  const expectedOutputTokens = Math.min(maxOutputTokens, 16_384);
+  const preparedRequest = serializeCheckedBoundFrozenPresetProviderRequest({
+    providerType: "openrouter", baseUrl: "", model: "model-a", contextWindowTokens: 65_536, maxOutputTokens, temperature: 0.2
+  }, request, { frozen, routeBasis, plan: reviewPlan, invocationKey, operation, trustedOperationPrompt }, {
+    inputLimit: 65_536 - expectedOutputTokens, count: (value) => Math.ceil(value.length / 3), output: request.budgetOutput
+  });
+  let prepared!: NonNullable<ProviderRequest["preparedRequest"]>;
+  const execute = vi.fn(async (sent: ProviderRequest) => {
+    prepared = sent.preparedRequest!;
+    return result();
+  });
+  const executor = createPreparedTextExecutor({ attempts: repository(vi.fn()), loadAuthority: async () => authority(execute) });
+  await executor.execute({ ...executionInput(vi.fn()), plan: reviewPlan, operation, request, preparedRequest,
+    routeBasis, frozenResponseContracts: frozen, invocationKey, trustedOperationPrompt,
+    ...(options.bypassResponseCache ? { bypassResponseCache: true } : {})
+  });
+  return { prepared };
+}
+
 describe("prepared text executor stream durability", () => {
   it("waits for capacity before reserving or charging a physical attempt", async () => {
     const attempts = repository(vi.fn());
@@ -239,6 +295,15 @@ describe("prepared text executor stream durability", () => {
       returnedModel: "fallback-model", returnedProviderRoute: "remote-route", outcome: "succeeded"
     }));
     expect(routeBasis.candidates[0]!.maxOutputTokens).toBe(maxOutputTokens);
+  });
+
+  it("disables the provider response cache for a bypassed dispatch without changing the body", async () => {
+    const cached = await runPresetFixture({ responseCache: { enabled: true } });
+    const bypassed = await runPresetFixture({ responseCache: { enabled: true }, bypassResponseCache: true });
+    expect(cached.prepared.responseCache).toEqual({ enabled: true });
+    expect(bypassed.prepared.responseCache).toEqual({ enabled: false });
+    expect(bypassed.prepared.body).toBe(cached.prepared.body);
+    expect(bypassed.prepared.payloadHash).toBe(cached.prepared.payloadHash);
   });
 
   it("waits for durable output evidence before exposing a provider chunk", async () => {

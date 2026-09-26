@@ -1524,7 +1524,8 @@ export async function callCampaignTextProvider(
   job: GenerationExecutionPayload,
   operation: StoryCostOperation,
   request: ProviderRequest,
-  preboundPlan?: TextExecutionPlan
+  preboundPlan?: TextExecutionPlan,
+  options?: Readonly<{ bypassResponseCache?: boolean }>
 ) {
   const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
   const preparedRequest = bindCampaignTextExecutionPlan(job,
@@ -1655,6 +1656,7 @@ export async function callCampaignTextProvider(
             kind: "story", ownerUserId: job.owner_user_id, generationJobId: job.id,
             invocationId: reserved.id, workerId: scope.workerId
           },
+          ...(options?.bypassResponseCache ? { bypassResponseCache: true } : {}),
           ...(presetBinding ? {
             frozenResponseContracts: presetBinding.frozen,
             invocationKey: presetBinding.invocationKey,
@@ -3088,7 +3090,8 @@ async function executeLoadedGeneration(
     let interruptedOutput = capturedPrimary?.interruptedOutput;
     let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", async () => {
       try {
-        return await callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest, storyTextExecutionPlan);
+        return await callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest, storyTextExecutionPlan,
+          { bypassResponseCache: Boolean(primaryRetryReceipt) });
       } catch (error) {
         const route = preparedRouteTerminalError(error);
         if (route?.reason === "cancelled" || (!providerTransportErrorDetails(error) && route?.reason !== "deadline")) throw error;

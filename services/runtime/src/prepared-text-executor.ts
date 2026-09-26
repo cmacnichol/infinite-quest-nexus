@@ -97,7 +97,9 @@ export function createPreparedTextExecutor(input: Readonly<{
             if (candidateOrdinal !== 0 || !execution.preparedRequest) {
               throw Object.assign(new Error("The checked direct-model request is unavailable."), { code: "prepared_route_request_unavailable" });
             }
-            return execution.preparedRequest;
+            return execution.bypassResponseCache && execution.preparedRequest.responseCache
+              ? Object.freeze({ ...execution.preparedRequest, responseCache: { ...execution.preparedRequest.responseCache, enabled: false } })
+              : execution.preparedRequest;
           }
           const prepared = serializeCheckedBoundFrozenPresetProviderRequest(
             serializationProfile(candidate), canonical, binding(execution, routeBasis!, candidateOrdinal), {
@@ -115,7 +117,9 @@ export function createPreparedTextExecutor(input: Readonly<{
               code: "prepared_route_request_mismatch"
             });
           }
-          return prepared;
+          return execution.bypassResponseCache && prepared.responseCache
+            ? Object.freeze({ ...prepared, responseCache: { ...prepared.responseCache, enabled: false } })
+            : prepared;
         },
         async beforeDispatch(candidate, candidateOrdinal) {
           let current: RuntimeTextExecution;
