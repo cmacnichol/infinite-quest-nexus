@@ -2280,6 +2280,7 @@ integration("T17 durable continuity review", () => {
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
       expect(saved.contextDiagnostic).toMatchObject({ code: "context_budget_exceeded", operation: "story_continuity_review", scope: "provider_request", requiredTokens: expect.any(Number), availableTokens: 20_000 });
       expect(saved.contextDiagnostic.requiredTokens).toBeGreaterThan(20_000);
+      expect(saved.continuityReview).toMatchObject({ verdict: "unavailable", unavailableReason: "context_budget_exceeded" });
       expect(saved.generationReview.gateCandidate.story).toEqual(saved.validatedMainDraft.story);
       expect(saved.generationReview.gateCandidate.story.narration.replace(/\s+/g, " ")).toBe(primaryNarration);
       expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [campaignId])).rows[0].count).toBe(before);
@@ -2305,7 +2306,7 @@ integration("T17 durable continuity review", () => {
     await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: mode === "observe" ? "completed" : "recoverable" });
     const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
-    expect(saved.continuityReview).toMatchObject({ verdict: "unavailable", binding: { manifestHash: null } });
+    expect(saved.continuityReview).toMatchObject({ verdict: "unavailable", binding: { manifestHash: null }, unavailableReason: "evidence_unavailable" });
     expect(requests).toHaveLength(1);
     expect(acceptedImages).toHaveBeenCalledTimes(mode === "observe" ? 1 : 0);
   });
