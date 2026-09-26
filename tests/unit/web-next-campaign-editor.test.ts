@@ -733,6 +733,20 @@ describe("web-next campaign parity inventory", () => {
     expect((healthView as (health: Record<string, unknown>) => Record<string, string>)({ status: "fallback_active", coveragePercent: 50, fallbackCode: "<raw-error>" })).toMatchObject({ fallbackLabel: "Unavailable" });
   });
 
+  it("points illustration refinement editing to the Prompt Library", () => {
+    const markup = campaignEditorPage.illustrationsMarkup;
+    expect(typeof markup).toBe("function");
+    if (typeof markup !== "function") return;
+    const html = (markup as (config: Record<string, unknown>, providers: unknown[]) => string)({
+      enabled: true, sourcePolicy: "generate_only", matchingScope: "campaign", confidenceProfile: "balanced",
+      repetitionWindow: 5, providerProfileId: null, model: "illustrator", size: "1024x1024", aspectRatio: "1:1",
+      quality: "auto", outputFormat: "png", maxAttempts: 3, segmentWordCount: 500, imagesPerSegment: 1,
+      segmentPromptMode: "ai_refined", refinementPrompt: "Existing campaign-authored refinement prompt."
+    }, []);
+    expect(html).not.toContain('name="refinementPrompt"');
+    expect(html).toContain("Prompt Library");
+  });
+
   it("sends the shared retrieval fields without adding UI defaults", () => {
     const payload = campaignEditorPage.chronicleEmbeddingConfigPayload;
     expect(typeof payload).toBe("function");

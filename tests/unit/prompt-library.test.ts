@@ -15,6 +15,7 @@ import {
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
 import { STORY_SYSTEM_PROMPT, storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../packages/contracts/src/generation.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { appendAuthoringContract } from "../../packages/domain/src/authoring-prompts.js";
@@ -158,6 +159,10 @@ describe("Prompt Library catalog", () => {
     const migration = readFileSync("database/migrations/0038_prompt_library_hardening.sql", "utf8");
     expect(migration).toContain("FOREIGN KEY (campaign_id, owner_user_id)");
     expect(migration).toContain("REFERENCES campaigns(id, owner_user_id)");
+  });
+
+  it("uses one shipped illustration refinement default", () => {
+    expect(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT).toBe(PROMPT_TEMPLATE_CATALOG.illustration_refinement.defaultContent);
   });
 
   it("defines every core generation and illustration instruction with an owned default", () => {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { sha256Hex } from "./hash.js";
+import { ILLUSTRATION_REFINEMENT_DEFAULT } from "./illustration-refinement-default.js";
 import {
   LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
@@ -326,17 +327,7 @@ ${generatedWorldCharacterRequirements}` },
   infinite_worlds_recovery: { key: "infinite_worlds_recovery", title: "Infinite Worlds recovery", category: "Imports", description: "Recovers a truncated converted export.", campaignOverrideAllowed: false, maxLength: 4000, variables: [], defaultContent: "The previous JSON was truncated. Return a complete, more compact replacement object. Start again at { and close every field and the final }." },
   infinite_worlds_batch: { key: "infinite_worlds_batch", title: "Infinite Worlds batch continuation", category: "Imports", description: "Continues a chunked import.", campaignOverrideAllowed: false, maxLength: 4000, variables: ["base", "batch", "total"], defaultContent: "{{base}}\nThis is batch {{batch}} of {{total}}. Return the full accumulated world object, preserving the supplied partial draft unless this batch corrects it." },
   infinite_worlds_final_turn: { key: "infinite_worlds_final_turn", title: "Final-turn enrichment", category: "Imports", description: "Adds choices and an image prompt to imported fiction.", campaignOverrideAllowed: false, maxLength: 4000, variables: [], defaultContent: "Return JSON only with choices (exactly four diegetic next actions), custom_action_suggestion, and image_prompt. Continue from the accepted fictional outcome. Never mention rolls, dice, checks, stats, modifiers, targets, difficulties, parser errors, or private reasoning." },
-  illustration_refinement: { key: "illustration_refinement", title: "Illustration refinement", category: "Illustrations", description: "Converts accepted fiction into an image-provider prompt.", campaignOverrideAllowed: true, maxLength: 4000, variables: [], defaultContent: `You are an expert visual translator and prompt engineer for AI image generators. Your task is to analyze a provided excerpt of fiction and generate a highly effective, concise prompt to illustrate that exact scene.
-
-Follow these strict rules:
-
-1. ISOLATE THE MOMENT: An image is a single static frame. Analyze the chronology of the passage and select the single most visually compelling or climactic moment to illustrate. Do not attempt to show a sequence of events.
-2. STRICT FIDELITY: Base the visual details ONLY on the provided text. Preserve the exact characters, setting, action, and mood described. Do not invent events, objects, or characters. Exclude all non-diegetic material (e.g., no text overlays, no UI elements, no author notes).
-3. EXTERNALIZE THE INTERNAL: Translate abstract concepts (internal thoughts, smells, unseen threats) into purely visual elements (e.g., facial expressions, body language, atmospheric lighting, color palettes, weather).
-4. KEYWORD EFFICIENCY: AI image generators respond best to concrete nouns, vivid adjectives, and clear stylistic descriptors. Avoid full narrative sentences.
-
-Output ONLY a valid JSON object containing a single "image_prompt" field. The image prompt string should be structured in the following order, separated by commas:
-[Main Subject(s) & Physical Description] + [Specific Action/Pose] + [Setting/Background] + [Lighting & Atmosphere based on mood] + [Medium/Art Style: e.g., cinematic concept art, high fantasy illustration]` },
+  illustration_refinement: { key: "illustration_refinement", title: "Illustration refinement", category: "Illustrations", description: "Converts accepted fiction into an image-provider prompt.", campaignOverrideAllowed: true, maxLength: 4000, variables: [], defaultContent: ILLUSTRATION_REFINEMENT_DEFAULT },
   illustration_direct: { key: "illustration_direct", title: "Direct illustration prompt", category: "Illustrations", description: "Wraps accepted fiction for direct image generation.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["segment"], defaultContent: "Create one polished story illustration depicting only the concrete scene described in this passage.\nPreserve the visible characters, setting, mood, actions, and chronology. Do not add typography, captions, logos, interface elements, or non-diegetic overlays.\n\n{{segment}}" },
   illustration_character_reference: { key: "illustration_character_reference", title: "Character visual reference", category: "Illustrations", description: "Appends canonical visual character detail to an image prompt.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["scene", "character"], defaultContent: "{{scene}}\n\nCANONICAL CHARACTER REFERENCE:\nUse these appearance details only if this character is depicted in the requested scene. Do not add the character merely because this reference is present.\n{{character}}" }
 };
