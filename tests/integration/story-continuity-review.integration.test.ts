@@ -1755,7 +1755,7 @@ integration("T17 durable continuity review", () => {
     }));
     await expect(pool.query<{ basis: { preset: { slug: string }; parameters: { temperature: number }; candidates: Array<{ modelId: string }> } }>(
       "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [job.id]
-    )).resolves.toMatchObject({ rows: [{ basis: { preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
+    )).resolves.toMatchObject({ rows: [{ basis: { protocolVersion: "story-openrouter-preset-v2", preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
 
     reviewVerdict = deadline ? "pass" : "conflict";
     const repository = createPostgresGenerationExecutionRepository(pool);
@@ -1811,8 +1811,10 @@ integration("T17 durable continuity review", () => {
     expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
     for (const [input] of preparedTextExecutor.mock.calls) {
       expect(input.request.systemPrompt).toBe(input.plan.prompt);
-      expect(input.plan.prompt).toContain("Native frozen preset instruction.");
+      expect(input.plan.prompt).not.toContain("Native frozen preset instruction.");
+      expect(input.plan.candidates[0]!.modelId).toBe("@preset/keep");
       expect(input.preparedRequest?.body).toBeDefined();
+      expect(JSON.parse(input.preparedRequest!.body).model).toBe("@preset/keep");
     }
     const durableNativeRequests = (await pool.query<{
       orchestrationPrivate: { primaryReservation: { requestBody: string }; primaryResult: { contextDiagnostics: { requestTokens: number } }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
