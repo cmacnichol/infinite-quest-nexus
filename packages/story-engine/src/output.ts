@@ -6,11 +6,12 @@ import {
 import { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
 import { extractPartialNarrationParagraphs, isNarrationParagraphsComplete, joinProviderNarration } from "./narration-paragraphs.js";
+import { narrationFormatSignals, type NarrationFormatSignals } from "./narration-format-signals.js";
 
 export { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 
 export type StoryParseResult =
-  | { ok: true; story: StoryTurnOutput }
+  | { ok: true; story: StoryTurnOutput; formatSignals?: NarrationFormatSignals }
   | { ok: false; code: "invalid_json" | "invalid_schema" | "mechanics_leak"; errors: string[] };
 
 export type StoryMemoryDefaults = {
@@ -205,7 +206,7 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
   };
   const leakErrors = mechanicsLeakErrors(story);
   if (leakErrors.length) return { ok: false, code: "mechanics_leak", errors: leakErrors };
-  return { ok: true, story };
+  return { ok: true, story, formatSignals: narrationFormatSignals(validated.data.narration, story.narration) };
 }
 
 /**

@@ -3146,6 +3146,14 @@ async function executeLoadedGeneration(
         }
       : await phase("story_validation", async () => {
       const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
+      if (parsed.ok && parsed.formatSignals && (parsed.formatSignals.suspectedUnquotedSpeech || parsed.formatSignals.paragraphsSynthesized)) {
+        logger.warn({
+          event: "story_narration_format_signal",
+          ...generationLogContext(job, workerId),
+          storySchemaVersion: frozenStorySchemaVersion(job),
+          ...parsed.formatSignals
+        });
+      }
       const firstReason: "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
         !parsed.ok ? parsed.code : null;
       const validationCode = !parsed.ok && result.outputLimited
