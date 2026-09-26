@@ -38,6 +38,16 @@ it("counts unavailable attempts and charges their full reservation instead of si
   expect(JSON.stringify(result)).not.toContain("private provider failure");
 });
 
+it("counts a replayed v3 paragraph-wire capture as valid instead of failing schema on the unmerged array", async () => {
+  const input = fixture();
+  const original = await input.execute();
+  input.execute.mockClear();
+  input.execute.mockResolvedValue({ ...original, content: JSON.stringify({ narration_paragraphs: ["The lantern glows.", "It flickers once."], choices: ["Wait.", "Look.", "Listen.", "Leave."], custom_action_suggestion: "Observe.", scratchpad: "", continuity_summary: "The lantern glows.", canonical_facts: [], canonical_fact_updates: [], superseded_facts: [], open_threads: [] }) });
+  const result = await evaluateLiveCopiedRequest(input.configuration, input.source, input.provider, { inputUsdPerMillion: 0, outputUsdPerMillion: 0 });
+  expect(input.execute).toHaveBeenCalledTimes(2);
+  expect(result.report).toMatchObject({ attempts: 2, valid: 2 });
+});
+
 it("stops after a wire mismatch or usage exceeding the reservation", async () => {
   for (const reason of ["wire", "usage"] as const) {
     const input = fixture();

@@ -1,8 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
+import { createPromptRepository } from "../../packages/database/src/prompt-repository.js";
 
 const PRIVATE_CANARY = "PRIVATE_PROMPT_AND_PROVIDER_ERROR_CANARY";
 const generationId = "55555555-5555-4555-8555-555555555555";
@@ -218,7 +219,7 @@ test("legacy Story renders safe recovery guidance without private diagnostic dat
   expect(errors).toEqual([]);
 });
 
-for (const scope of ["application", "campaign"] as const) test(`Prompt Library defaults ${scope} acknowledgement on and honors a manual uncheck`, async ({ page }) => {
+for (const scope of ["application", "campaign"] as const) test(`Prompt Library saves ${scope} prompt overrides implicitly`, async ({ page }) => {
   const campaign = quietLeafApiPayloads();
   const enrolledProtocol = "story-v14-continuity-context|story-output-v2|current-continuity-v3";
   let savedOverride: Record<string, unknown> | null = null;
@@ -258,36 +259,66 @@ for (const scope of ["application", "campaign"] as const) test(`Prompt Library d
   await expect(page.getByText("Required output shape version story-output-v2.")).toBeVisible();
   await expect(page.locator("#promptLibraryRequiredShape")).toHaveText("{ narration, choices, currentContinuity }");
   if (scope === "campaign") {
-    await page.locator("#promptLibraryCompatibilityAcknowledgement").check();
     await page.locator("#promptLibraryScope").selectOption("campaign");
     await page.locator("#promptLibraryCampaign").selectOption(campaign.campaignId);
-    await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
   }
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
-  await page.locator("#promptLibraryContent").fill("Edited with acknowledgement enabled.");
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
-  await page.locator("#promptLibraryCompatibilityAcknowledgement").uncheck();
   await page.locator("#promptLibraryContent").fill("Keep the established creative voice. Edited.");
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).not.toBeChecked();
-  await page.getByRole("button", { name: "Save prompt", exact: true }).click();
-  await expect(page.locator("#promptLibraryStatus")).toContainText("Acknowledge the required output shape");
-  expect(savedOverride).toBeNull();
-
-  await page.locator("#promptLibraryCompatibilityAcknowledgement").check();
   await page.getByRole("button", { name: "Save prompt", exact: true }).click();
   await expect.poll(() => savedOverride).not.toBeNull();
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
   await page.screenshot({ path: join(tmpdir(), `prompt-library-default-${scope}.png`), fullPage: true });
   expect(savedOverride).toMatchObject({
     key: "story_system",
     scope,
-    ...(scope === "campaign" ? { campaignId: campaign.campaignId } : {}),
-    content: "Keep the established creative voice. Edited.",
-    compatibilityAcknowledgement: {
-      requiredShapeVersion: "story-output-v2",
-      protocolIdentity: scope === "campaign" ? enrolledProtocol : "story-protocol-fixture"
-    }
+    ...(scope === "campaign" ? { campaignId: campaign.campaignId } : {})
   });
+  expect(savedOverride).toHaveProperty("content", "Keep the established creative voice. Edited.");
+  expect(savedOverride).not.toHaveProperty("compatibilityAcknowledgement");
+});
+
+test("Prompt Library previews current cast settings and unresolved direct-model encoding", async ({ page }) => {
+  const campaign = quietLeafApiPayloads();
+  const ownerUserId = "66666666-6666-4666-8666-666666666666";
+  const prompts = createPromptRepository({
+    query: async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM generation_jobs")) return { rows: [{ contextOptions: { storyMemoryPolicy: { promptProtocol: "story-v16-fact-wire-distinction" } } }] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [{ text_selection: { kind: "model", modelId: "fixture-model" } }] };
+      return { rows: [] };
+    }
+  } as never, { castContextEnabled: true });
+  await page.route("**/api/v1/**", async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const respond = (body: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    if (url.pathname === "/api/v1/session") return respond({ user: { id: ownerUserId, displayName: "Fixture", settings: {} }, authentication: "deferred" });
+    if (url.pathname === "/api/v1/providers") return respond({ providers: [] });
+    if (url.pathname === "/api/v1/worlds") return respond({ worlds: [] });
+    if (url.pathname === "/api/v1/campaigns") return respond(campaign.campaigns);
+    if (url.pathname === "/api/v1/prompt-library") return respond(await prompts.listPromptLibrary(url.searchParams.has("campaignId")
+      ? { ownerUserId, scope: "campaign", campaignId: campaign.campaignId }
+      : { ownerUserId, scope: "application" }));
+    if (url.pathname === "/api/v1/prompt-library/preview") {
+      const body = request.postDataJSON();
+      return respond(await prompts.previewPrompt({ ...body, ownerUserId }));
+    }
+    return respond({});
+  });
+
+  await page.goto(`${legacyOrigin}/nexus/index.html#prompt-library`);
+  await page.locator("#promptLibraryScope").selectOption("campaign");
+  await page.locator("#promptLibraryCampaign").selectOption(campaign.campaignId);
+  await page.getByRole("button", { name: "Preview full request", exact: true }).click();
+  const preview = page.locator("#promptLibraryPreviewContent");
+  await expect(preview).toContainText("System prompt preview (output encoding pending)");
+  await expect(preview).toContainText("Campaign cast authority:");
+  await expect(preview).toContainText("Protocol story-v17-campaign-cast from the current runtime settings.");
+  await expect(preview).toContainText("This preview omits that contract");
+  await expect(preview).not.toContainText("this campaign's direct model uses the story-native-v2 wire");
+  await preview.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await preview.scrollIntoViewIfNeeded();
+  await mkdir("docs/review/assets/prompt-system-review", { recursive: true });
+  await page.screenshot({ path: "docs/review/assets/prompt-system-review/preview.png", fullPage: true });
 });
 
 for (const surface of ["legacy", "web-next"] as const) {

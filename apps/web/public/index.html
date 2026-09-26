@@ -301,7 +301,7 @@
                 <label>Segment prompt mode<select id="illustrationSegmentPromptMode"><option value="direct">Use accepted segment text</option><option value="ai_refined">AI-refined visual prompt</option></select></label>
               </div>
               <div id="illustrationRefinementPromptField" class="illustration-refinement-prompt hidden">
-                <div><strong>AI prompt editor</strong><span id="illustrationRefinementPromptSummary" class="field-note">Using the default refinement prompt.</span></div>
+                <div><strong>AI prompt editor</strong><span id="illustrationRefinementPromptSummary" class="field-note">The AI refinement prompt is edited in the Prompt Library (Illustration refinement), where campaign overrides apply to every segment job.</span></div>
                 <button id="openIllustrationPromptEditor" class="button secondary" type="button">Read or edit prompt…</button>
               </div>
               <div id="illustrationMatchingSettings" class="illustration-settings-group illustration-matching-group hidden">
@@ -510,7 +510,7 @@
         <p id="promptLibraryEditorDescription" class="muted"></p>
         <p id="promptLibraryEditorMeta" class="field-note"></p>
         <p id="promptLibraryWarning" class="status warning hidden">Engine-critical prompt: invalid instructions can prevent generation or validation from completing.</p>
-        <label id="promptLibraryCompatibility" class="hidden"><span id="promptLibraryCompatibilityCopy" class="field-note"></span><span><input id="promptLibraryCompatibilityAcknowledgement" type="checkbox"> I acknowledge this exact prompt must produce the required shape.</span></label>
+        <label id="promptLibraryCompatibility" class="hidden"><span id="promptLibraryCompatibilityCopy" class="field-note"></span></label>
         <pre id="promptLibraryRequiredShape" class="prompt-library-preview hidden"></pre>
         <label>Instructions<textarea id="promptLibraryContent" rows="14" required></textarea></label>
         <div class="button-row"><button id="promptLibraryPreview" class="button secondary" type="button" aria-expanded="false">Preview full request</button><button id="promptLibraryReset" class="button secondary" type="button">Reset this scope</button><span id="promptLibraryUnsaved" class="status warning hidden">Unsaved changes</span><button id="promptLibraryDiscard" class="button secondary hidden" type="button">Discard edits</button><span class="character-action-spacer"></span><button class="button primary" type="submit">Save prompt</button></div>
@@ -786,28 +786,6 @@
         <button id="applyCustomProviderModel" class="button secondary" type="button">Use custom ID</button>
       </div>
     </div>
-  </dialog>
-
-  <dialog id="illustrationPromptDialog" class="confirm-dialog illustration-prompt-dialog" aria-labelledby="illustrationPromptDialogTitle">
-    <form id="illustrationPromptForm">
-      <div class="dialog-heading-row">
-        <div>
-          <p class="eyebrow">Campaign illustrations</p>
-          <h2 id="illustrationPromptDialogTitle">AI image-prompt instructions</h2>
-        </div>
-      </div>
-      <p class="muted">This prompt tells the text model how to translate each accepted fiction excerpt into an image prompt. Nexus adds a brief fiction-only story context and the excerpt separately. Apply your edit here, then save the campaign’s illustration settings to persist it.</p>
-      <label>Prompt
-        <textarea id="illustrationRefinementPrompt" maxlength="4000" required></textarea>
-        <span class="field-note">Keep this focused on visual translation. The generated prompt is still checked for mechanics leakage before it can reach the image provider.</span>
-      </label>
-      <div class="button-row confirm-actions illustration-prompt-actions">
-        <button id="restoreDefaultIllustrationPrompt" class="button secondary" type="button">Restore default</button>
-        <span class="character-action-spacer"></span>
-        <button id="cancelIllustrationPrompt" class="button secondary" type="button">Cancel</button>
-        <button class="button primary" type="submit">Apply to settings</button>
-      </div>
-    </form>
   </dialog>
 
   <dialog id="deleteDialog" class="confirm-dialog" data-dismiss-mode="cancel" aria-labelledby="deleteDialogTitle">

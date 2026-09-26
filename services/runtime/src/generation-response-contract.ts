@@ -15,10 +15,11 @@ import type {
   TextResponseFormatPolicy
 } from "../../../packages/contracts/src/text-response-format.js";
 import { getProviderOutputSchema } from "../../../packages/story-engine/src/provider-output-schema.js";
-import { getProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2, selectProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";
 import type { ResponseInvocationKeyV2, ResponseFormatEligibilityV2 } from "../../../packages/contracts/src/text-response-format.js";
 import type { TextModelSelection } from "../../../packages/contracts/src/provider-selection.js";
 import { resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
+import { STORY_PRESET_ROUTE_PROTOCOL_V2 } from "../../../packages/contracts/src/text-execution-plan.js";
 
 export type ResponseContractRuntimeProfile = Readonly<{
   id: string;
@@ -84,20 +85,41 @@ function v2OperationForKey(key: ResponseInvocationKeyV2): Readonly<{ operation: 
  * consult discovery or the verification registry. */
 export function resolveGenerationResponseContractsV2(input: Readonly<{
   queuedPolicy: QueuedResponsePolicyV2;
-  eligible?(operation: Parameters<typeof getProviderOutputSchemaV2>[0], streaming: boolean): ResponseFormatEligibilityV2;
+  /** Frozen enqueue route identity; absent and historical routes retain the original Story wire. */
+  routeProtocolVersion?: string;
+  eligible?(operation: Parameters<typeof getProviderOutputSchemaV2>[0], streaming: boolean, schema: ProviderOutputSchemaV2): ResponseFormatEligibilityV2;
   selectedAt?: string;
   capabilityEvidenceHash: string | (() => string);
 }>): FrozenResponseContractsV2 {
   const contracts: Record<string, unknown> = {};
+  const presetTrusted = input.queuedPolicy.authority.kind === "preset_trusted";
+  const streamingByOperation = new Map<Parameters<typeof getProviderOutputSchemaV2>[0], boolean[]>();
   for (const key of input.queuedPolicy.invocationKeys) {
     const { operation, streaming } = v2OperationForKey(key);
-    const schema = getProviderOutputSchemaV2(operation);
+    streamingByOperation.set(operation, [...(streamingByOperation.get(operation) ?? []), streaming]);
+  }
+  // One version per operation, so every key of that operation (stream and
+  // nonstream) shares one wire shape and one encoding contract.
+  const chosen = new Map<Parameters<typeof getProviderOutputSchemaV2>[0], ProviderOutputSchemaV2>();
+  for (const [operation, streamings] of streamingByOperation) {
+    // A queued preset job may predate paragraph wire without having selected
+    // its closure yet. Only the new frozen route identity opts it into v3.
+    const schema = presetTrusted && operation === "story" && input.routeProtocolVersion !== STORY_PRESET_ROUTE_PROTOCOL_V2
+      ? getProviderOutputSchemaV2(operation, "story-native-v2")
+      : selectProviderOutputSchemaV2(operation, (candidate) => presetTrusted
+      || streamings.every((streaming) => input.eligible?.(operation, streaming, candidate)?.status === "verified"))
+      ?? getProviderOutputSchemaV2(operation);
+    chosen.set(operation, schema);
+  }
+  for (const key of input.queuedPolicy.invocationKeys) {
+    const { operation, streaming } = v2OperationForKey(key);
+    const schema = chosen.get(operation)!;
     const admission = input.queuedPolicy.authority.kind === "preset_trusted"
       ? input.queuedPolicy.admission
       : resolveResponseContractAdmission({
         selection: { kind: "model", modelId: input.queuedPolicy.authority.model } satisfies TextModelSelection,
         directEligibility: () => {
-          const eligibility = input.eligible?.(operation, streaming);
+          const eligibility = input.eligible?.(operation, streaming, schema);
           if (!eligibility) throw new ResponseContractPreflightError("response_contract_unavailable", `The required response contract is unavailable for ${key}.`);
           return eligibility;
         }

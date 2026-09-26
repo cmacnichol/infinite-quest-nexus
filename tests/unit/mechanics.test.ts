@@ -110,3 +110,20 @@ describe("typed private story orchestration", () => {
     });
   });
 });
+
+describe("parseEventExtension with paragraph wire output", () => {
+  const base = { choices: ["a", "b", "c", "d"], custom_action_suggestion: "e", scratchpad: "", tracker_updates: [], image_prompt: "",
+    continuity_summary: "", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] };
+  const main = "\"Stay,\" Mara says.\n\nYou wait.";
+
+  it("keeps the original prefix bytes when only quote style differs", () => {
+    const extension = parseEventExtension(JSON.stringify({ ...base,
+      narration_paragraphs: ["“Stay,” Mara says.", "You wait.", "Thunder rolls over the harbor."] }), main);
+    expect(extension.narration).toBe(`${main}\n\nThunder rolls over the harbor.`);
+  });
+
+  it("still rejects a rewritten prefix", () => {
+    expect(() => parseEventExtension(JSON.stringify({ ...base,
+      narration_paragraphs: ["“Go,” Mara says.", "You wait.", "Thunder."] }), main)).toThrow(/rewrote the validated main narration/);
+  });
+});

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
+import { joinProviderNarration } from "../../packages/story-engine/src/narration-paragraphs.js";
 import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 import type { ProviderRequest } from "../../packages/story-engine/src/providers.js";
 import { executeCappedLiveEvaluation, type LiveConfiguration } from "./story-continuity-evaluator.js";
@@ -54,7 +55,13 @@ export async function evaluateLiveCopiedRequest(
       || !Number.isFinite(reportedUsd) || reportedUsd < 0 || reportedUsd > reserve.costUsd)
       throw new Error("Live transport exceeded its pre-dispatch reservation; evaluation stopped.");
     let valid = false;
-    try { valid = !result.outputLimited && storyTurnOutputSchema.safeParse(JSON.parse(result.content)).success; } catch { /* Invalid output remains an attempted sample. */ }
+    try {
+      // A replayed story-native-v3 capture arrives as an unmerged
+      // narration_paragraphs array; join it before schema validation so a
+      // valid v3 sample is not misreported as a schema failure.
+      const joined = joinProviderNarration(JSON.parse(result.content));
+      valid = !result.outputLimited && joined.ok && storyTurnOutputSchema.safeParse(joined.value).success;
+    } catch { /* Invalid output remains an attempted sample. */ }
     outputs.push({ content: result.content, status: valid ? "valid" : "invalid", latencyMs: performance.now() - started });
     return reserve;
   }, () => reserve);

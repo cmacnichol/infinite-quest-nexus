@@ -1,5 +1,5 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
-import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult } from "./story-continuity-review-adapter.js";
+import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult, continuityReviewUnavailableReason } from "./story-continuity-review-adapter.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
 import { recoverInterruptedStory } from "../../../packages/story-engine/src/interrupted-story.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
@@ -49,9 +49,11 @@ import {
   type StoryLengthWordRange
 } from "../../../packages/contracts/src/story-settings.js";
 import {
-  composeStoryPromptSystemPrompt,
+  appendStoryOutputEncodingContract,
   projectSafeGenerationContextDiagnostic,
-  projectSafeGenerationDiagnostic
+  projectSafeGenerationDiagnostic,
+  storyOutputEncodingContract,
+  STORY_PARAGRAPH_WIRE_SCHEMA_VERSION
 } from "../../../packages/contracts/src/story-prompt.js";
 import type { GenerationFailureDiagnostic } from "../../../packages/contracts/src/generation-review.js";
 import type {
@@ -74,16 +76,14 @@ import {
   buildSceneCoveragePrompt,
   buildStoryMemoryUserPrompt,
   buildStoryUserPrompt,
-  compactStoryLengthWordRange,
   containsMechanicsLanguage,
   extractPartialNarration,
   ContextBudgetError,
   resolveEffectiveContextWindowTokens,
   estimatedInputSafetyAllowanceTokens,
   estimateStoryTokens,
-  composeStoryMemorySystemPrompt,
   composeStoryOnlyChoiceRepairSystemPrompt,
-  composeStoryOnlySystemPrompt,
+  composeEffectiveStorySystemPrompt,
   buildStoryOnlyChoiceRepairInput,
   generationExecutionProtocolIdentity,
   serializeBoundFrozenPresetProviderRequest,
@@ -132,7 +132,7 @@ import { providerPromptProtocolVersion } from "./provider-application-compositio
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
 import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, responseContractInvocationLedgerLimitV2, responseContractOperationV2Schema, sceneCoverageReplayResultHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type FrozenResponseContractsVersioned, type QueuedResponsePolicy, type QueuedResponsePolicyVersioned, type ResponseContractOperation, type ResponseContractOperationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
-import type { TextExecutionPlan, TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
+import { presetPromptInjectedRemotely, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
@@ -151,6 +151,24 @@ export function deriveCampaignTextExecutionPlan(
 ): TextExecutionPlan | undefined {
   const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
   return routeBasis ? deriveTextExecutionPlan(routeBasis, operationPrompt) : undefined;
+}
+
+/** The frozen closure fixes one story wire version for every story:* key of the job. */
+function frozenStorySchemaVersion(job: GenerationExecutionPayload): string | null {
+  const frozen = job.orchestration_private?.frozenResponseContracts;
+  if (!frozen || frozen.version !== 2) return null;
+  const contract = frozen.contracts["story:stream"] ?? frozen.contracts["story:nonstream"];
+  return contract?.schemaVersion ?? null;
+}
+
+/**
+ * The event-coverage "scene beat" framing sentence is new post-branch text.
+ * A job frozen before this identity existed must re-derive the exact
+ * pre-branch task string, so the framing only attaches once the job's frozen
+ * story wire is already the new story-native-v3 identity.
+ */
+function eventCoveragePromptOptions(job: GenerationExecutionPayload): { framing: "story-native-v3" | null } {
+  return { framing: frozenStorySchemaVersion(job) === STORY_PARAGRAPH_WIRE_SCHEMA_VERSION ? "story-native-v3" : null };
 }
 
 function prepareCampaignSystemPrompt(job: GenerationExecutionPayload, operationPrompt: string) {
@@ -176,7 +194,11 @@ export function bindCampaignTextExecutionPlan(
   }
   if (preboundPlan) {
     if (request.systemPrompt === plan.prompt) return request;
-    if (composePresetPrompt({ presetPrompt: routeBasis.presetSystemPrompt, operationPrompt: request.systemPrompt }) !== plan.prompt) {
+    const expected = composePresetPrompt({
+      presetPrompt: presetPromptInjectedRemotely(routeBasis) ? "" : routeBasis.presetSystemPrompt,
+      operationPrompt: request.systemPrompt
+    });
+    if (expected !== plan.prompt) {
       throw new Error("Frozen Story text execution plan conflicts with the request prompt.");
     }
     return { ...request, systemPrompt: plan.prompt };
@@ -255,7 +277,8 @@ export type GenerationExecutionCollaborators = Readonly<{
     ownerUserId: string,
     profile: GenerationTextProvider,
     queuedPolicy: QueuedResponsePolicyVersioned,
-    runtimeProfile: ResponseContractRuntimeProfile
+    runtimeProfile: ResponseContractRuntimeProfile,
+    routeProtocolVersion?: string
   ): Promise<FrozenResponseContractsVersioned>;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
@@ -787,38 +810,6 @@ function safeTurnInput(value: string): string {
     });
   }
   return trimmed;
-}
-
-function recoveryPromptFromSnapshot(
-  collaborators: GenerationExecutionCollaborators,
-  job: GenerationExecutionPayload,
-  reason: "output_limit" | "invalid_json" | "invalid_schema" | "mechanics_leak",
-  errors: string[],
-  storyLength: StoryLengthWordRange
-) {
-  if (reason === "output_limit") {
-    const compact = compactStoryLengthWordRange(storyLength);
-      return renderPromptTemplate(
-        collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_output_limit"),
-        compact
-      );
-  }
-  if (reason === "mechanics_leak") {
-    const details = errors.length
-      ? ` The fiction-boundary validator found: ${errors.slice(0, 8).join("; ")}`
-      : "";
-    return renderPromptTemplate(
-      collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_mechanics"),
-      { details }
-    );
-  }
-  const detail = errors.length
-    ? ` Correct these validation errors: ${errors.slice(0, 8).join("; ")}.`
-    : "";
-  return renderPromptTemplate(
-    collaborators.promptFromSnapshot(job.prompt_snapshot, "story_recovery_schema"),
-    { errors: detail }
-  );
 }
 
 function storyMemoryDefaultsFromContext(context: unknown) {
@@ -1514,7 +1505,8 @@ export async function callCampaignTextProvider(
   job: GenerationExecutionPayload,
   operation: StoryCostOperation,
   request: ProviderRequest,
-  preboundPlan?: TextExecutionPlan
+  preboundPlan?: TextExecutionPlan,
+  options?: Readonly<{ bypassResponseCache?: boolean }>
 ) {
   const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
   const preparedRequest = bindCampaignTextExecutionPlan(job,
@@ -1645,6 +1637,7 @@ export async function callCampaignTextProvider(
             kind: "story", ownerUserId: job.owner_user_id, generationJobId: job.id,
             invocationId: reserved.id, workerId: scope.workerId
           },
+          ...(options?.bypassResponseCache ? { bypassResponseCache: true } : {}),
           ...(presetBinding ? {
             frozenResponseContracts: presetBinding.frozen,
             invocationKey: presetBinding.invocationKey,
@@ -2232,7 +2225,7 @@ async function executeLoadedGeneration(
         if (!collaborators.resolveResponseContracts || !repository.saveFrozenResponseContracts) {
           throw Object.assign(new Error("This worker cannot preflight the queued response contract."), { code: "response_contract_unavailable" });
         }
-        const selected = await collaborators.resolveResponseContracts(job.owner_user_id, provider, queuedResponsePolicy, responseContractProfile(provider, job));
+        const selected = await collaborators.resolveResponseContracts(job.owner_user_id, provider, queuedResponsePolicy, responseContractProfile(provider, job), routeBasis?.protocolVersion);
         const saved = await repository.saveFrozenResponseContracts(scope, queuedResponsePolicyVersionedHash(queuedResponsePolicy), selected);
         if (!saved) throw Object.assign(new Error("The response-contract preflight lost its lease."), { code: "lease_lost" });
         if (saved.version !== 2) throw Object.assign(new Error("The worker received an incompatible response-contract version."), { code: "response_contract_identity_mismatch" });
@@ -2275,19 +2268,14 @@ async function executeLoadedGeneration(
       const inputTokenLimit = effectiveContextWindow - effectiveMaxOutputTokens(provider, job);
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
-      const storyBaseSystemPrompt = generationPolicy?.playMode === "story_only"
-        ? composeStoryOnlySystemPrompt(
-          baseStorySystemPrompt,
-          generationPolicy,
-          hasFrozenStoryMemoryPolicy,
-          frozenStoryMemoryPolicySnapshot?.promptProtocol,
-          storySystemContractProtocol
-        )
-        : hasFrozenStoryMemoryPolicy
-          ? composeStoryMemorySystemPrompt(baseStorySystemPrompt, "", frozenStoryMemoryPolicySnapshot.promptProtocol)
-          : storySystemContractProtocol
-            ? composeStoryPromptSystemPrompt(baseStorySystemPrompt, storySystemContractProtocol)
-            : baseStorySystemPrompt;
+      const composedWriterSystemPrompt = composeEffectiveStorySystemPrompt({
+        writerPrompt: baseStorySystemPrompt,
+        storyOnlyPolicy: generationPolicy?.playMode === "story_only" ? generationPolicy : null,
+        storyMemoryPromptProtocol: hasFrozenStoryMemoryPolicy ? frozenStoryMemoryPolicySnapshot.promptProtocol : null,
+        ...(storySystemContractProtocol ? { storyPromptContractProtocol: storySystemContractProtocol } : {}),
+        encodingContract: ""
+      });
+      const storyBaseSystemPrompt = appendStoryOutputEncodingContract(composedWriterSystemPrompt, storyOutputEncodingContract(frozenStorySchemaVersion(job)));
       // Bind the preset before fixed-envelope accounting so it reduces the
       // Chronicle/context budget rather than causing a late transport overflow.
       const storyTextExecutionPlan = deriveCampaignTextExecutionPlan(job, storyBaseSystemPrompt);
@@ -2303,7 +2291,13 @@ async function executeLoadedGeneration(
           job.resolved_input_mode
         ))
         + 1024;
-      if (inputTokenLimit - fixedPromptEnvelope < 512) {
+      // A v2 remote-injected preset route omits the preset text from the plan
+      // prompt (OpenRouter adds it server-side), so it must be added back here
+      // to keep the Chronicle/context budget honest about the real transport size.
+      const remotePresetTokens = job.orchestration_private?.textExecutionRouteBasis
+        && presetPromptInjectedRemotely(job.orchestration_private.textExecutionRouteBasis)
+        ? estimateStoryTokens(job.orchestration_private.textExecutionRouteBasis.presetSystemPrompt) : 0;
+      if (inputTokenLimit - (fixedPromptEnvelope + remotePresetTokens) < 512) {
         throw Object.assign(new Error(
           `The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${effectiveMaxOutputTokens(provider, job)}) and story prompt envelope.`
         ), { code: "context_budget_invalid" });
@@ -2311,7 +2305,7 @@ async function executeLoadedGeneration(
       const configuredCampaignContextBudget = Number(job.context_options.budgetTokens || 32000);
       const safeContextBudget = Math.max(512, Math.min(
         configuredCampaignContextBudget,
-        inputTokenLimit - fixedPromptEnvelope
+        inputTokenLimit - (fixedPromptEnvelope + remotePresetTokens)
       ));
       return {
         safeAction,
@@ -2319,6 +2313,7 @@ async function executeLoadedGeneration(
         effectiveContextWindow,
         inputTokenLimit,
         storySystemPrompt,
+        composedWriterSystemPrompt,
         storyTextExecutionPlan,
         configuredCampaignContextBudget,
         safeContextBudget
@@ -2330,6 +2325,7 @@ async function executeLoadedGeneration(
       effectiveContextWindow,
       inputTokenLimit,
       storySystemPrompt,
+      composedWriterSystemPrompt,
       storyTextExecutionPlan,
       configuredCampaignContextBudget,
       safeContextBudget
@@ -3074,7 +3070,8 @@ async function executeLoadedGeneration(
     let interruptedOutput = capturedPrimary?.interruptedOutput;
     let result = validatedDraft?.response || savedChoiceRepair?.originalResponse || capturedPrimary?.response || await phase("story_generation", async () => {
       try {
-        return await callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest, storyTextExecutionPlan);
+        return await callCampaignTextProvider(ledgerDependencies, provider, job, "story_generation", primaryRequest, storyTextExecutionPlan,
+          { bypassResponseCache: Boolean(primaryRetryReceipt) });
       } catch (error) {
         const route = preparedRouteTerminalError(error);
         if (route?.reason === "cancelled" || (!providerTransportErrorDetails(error) && route?.reason !== "deadline")) throw error;
@@ -3132,6 +3129,14 @@ async function executeLoadedGeneration(
         }
       : await phase("story_validation", async () => {
       const parsed = parseStoryOutput(result.content, storyMemoryDefaults);
+      if (parsed.ok && parsed.formatSignals && (parsed.formatSignals.suspectedUnquotedSpeech || parsed.formatSignals.paragraphsSynthesized)) {
+        logger.warn({
+          event: "story_narration_format_signal",
+          ...generationLogContext(job, workerId),
+          storySchemaVersion: frozenStorySchemaVersion(job),
+          ...parsed.formatSignals
+        });
+      }
       const firstReason: "invalid_json" | "invalid_schema" | "mechanics_leak" | null =
         !parsed.ok ? parsed.code : null;
       const validationCode = !parsed.ok && result.outputLimited
@@ -3739,7 +3744,7 @@ async function executeLoadedGeneration(
         const coverageResponse = await phase("scene_coverage_validation", () =>
           callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-            input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), currentMainStory.narration)
+            input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), currentMainStory.narration, eventCoveragePromptOptions(job))
           })
         );
         mainEventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, dueBeforeOrPendingEvents);
@@ -3873,7 +3878,7 @@ async function executeLoadedGeneration(
           const coverageResponse = await phase("scene_coverage_validation", () =>
             callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-              input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), repairedStory.narration)
+              input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), repairedStory.narration, eventCoveragePromptOptions(job))
             })
           );
           repairedCoverage = coverageResponse.outputLimited
@@ -3965,7 +3970,10 @@ async function executeLoadedGeneration(
             authoritative_context: promptContext
           }));
           const extensionRequest = bindCampaignResponseContract(job, "event_extension", {
-            systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
+            systemPrompt: appendStoryOutputEncodingContract(
+              collaborators.promptFromSnapshot(job.prompt_snapshot, "event_extension"),
+              storyOutputEncodingContract(frozenStorySchemaVersion(job))
+            ),
             input: extensionInput,
             budgetOutput: {
               kind: "event_extension",
@@ -4038,7 +4046,7 @@ async function executeLoadedGeneration(
         const coverageResponse = await phase("scene_coverage_validation", () =>
           callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-            input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), committedStory.narration)
+            input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), committedStory.narration, eventCoveragePromptOptions(job))
           })
         );
         eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
@@ -4052,7 +4060,7 @@ async function executeLoadedGeneration(
           const coverageResponse = await phase("scene_coverage_validation", () =>
             callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-              input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
+              input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration, eventCoveragePromptOptions(job))
             })
           );
           eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
@@ -4224,7 +4232,7 @@ async function executeLoadedGeneration(
             const coverageResponse = await phase("scene_coverage_validation", () =>
               callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
                 systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-                input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), repairedStory.narration)
+                input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), repairedStory.narration, eventCoveragePromptOptions(job))
               })
             );
             eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
@@ -4234,7 +4242,7 @@ async function executeLoadedGeneration(
               const appendedCoverageResponse = await phase("scene_coverage_validation", () =>
                 callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
                   systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-                  input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
+                  input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration, eventCoveragePromptOptions(job))
                 })
               );
               eventCoverage = appendedCoverageResponse.outputLimited
@@ -4300,7 +4308,7 @@ async function executeLoadedGeneration(
       else if (existing.success) {
         // A prior lease may have dispatched the call. Do not silently duplicate
         // its cost or assume the missing response was a semantic pass.
-        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null };
+        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null, unavailableReason: "provider_failed" };
       } else {
         checkpoint = { version: 1, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null };
         try {
@@ -4332,7 +4340,7 @@ async function executeLoadedGeneration(
               countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
             });
           }
-          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null };
+          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null, unavailableReason: continuityReviewUnavailableReason(error) };
         }
       }
       const reviewDiagnostic = projectSafeGenerationDiagnostic({
@@ -4411,6 +4419,8 @@ async function executeLoadedGeneration(
               preparedRepair = prepareContinuityRepair({ provider, manifest: finalManifest, promptSnapshot: frozenPromptEnvelope,
                 direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
                 effectiveContextWindowTokens: effectiveContextWindow,
+                encodingContract: storyOutputEncodingContract(frozenStorySchemaVersion(job)),
+                writerSystemPrompt: composedWriterSystemPrompt,
                 prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
                 ...(job.orchestration_private?.frozenResponseContracts ? {
                   serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_repair", request, plan)

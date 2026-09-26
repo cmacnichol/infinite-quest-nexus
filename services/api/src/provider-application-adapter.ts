@@ -410,7 +410,7 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       return composition.application.listPromptLibrary(scope);
     },
 
-    previewPrompt(ownerUserId: string, input: Readonly<{ key: PromptCatalogKey; content: string }>) {
+    previewPrompt(ownerUserId: string, input: Readonly<{ key: PromptCatalogKey; content: string; campaignId?: string }>) {
       return composition.application.previewPrompt({ ownerUserId, ...input });
     },
 

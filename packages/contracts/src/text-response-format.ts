@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { getProviderOutputSchemaV2, providerOutputSchemaOperationV2Schema, stableJsonHash } from "./provider-output-schema.js";
+import { findProviderOutputSchemaV2, getProviderOutputSchemaV2, providerOutputSchemaOperationV2Schema, stableJsonHash } from "./provider-output-schema.js";
 
 export type TextResponseFormatPolicy = "legacy" | "auto" | "required";
 export type ResponseSchemaOperation = "story" | "choices" | "continuity_review";
@@ -54,9 +54,10 @@ export function assertModelVerifiedResponseContractEvidence(input: Readonly<{
   authority: ModelVerifiedResponseContractAuthority;
   operation: ResponseSchemaOperationV2;
   streaming: boolean;
+  schemaVersion: string;
 }>): void {
   const { verification, authority, operation, streaming } = input;
-  const catalog = getProviderOutputSchemaV2(operation);
+  const catalog = getProviderOutputSchemaV2(operation, input.schemaVersion);
   if (verification.providerType !== authority.providerType || verification.endpointIdentity !== authority.endpointIdentity
     || verification.model !== authority.model || verification.routeConfigHash !== authority.routeConfigHash
     || verification.operation !== operation || verification.schemaHash !== catalog.schemaHash || verification.streaming !== streaming
@@ -104,8 +105,8 @@ const preparedResponseContractV2SchemaShape = z.object({
 }).strict();
 export const preparedResponseContractV2Schema = preparedResponseContractV2SchemaShape.superRefine((value, context) => {
   if (value.admission.basis !== value.authority.kind) context.addIssue({ code: "custom", path: ["authority"], message: "Response-contract admission and authority must agree." });
-  const catalog = getProviderOutputSchemaV2(value.operation);
-  if (value.schemaVersion !== catalog.version || value.schemaName !== catalog.name || value.schemaHash !== catalog.schemaHash
+  const catalog = findProviderOutputSchemaV2(value.operation, value.schemaVersion);
+  if (!catalog || value.schemaName !== catalog.name || value.schemaHash !== catalog.schemaHash
     || value.schemaHash !== stableJsonHash(value.schema)) {
     context.addIssue({ code: "custom", path: ["schema"], message: "Prepared v2 contract must use the exact catalog schema." });
   }
@@ -115,7 +116,8 @@ export const preparedResponseContractV2Schema = preparedResponseContractV2Schema
         verification: value.admission.verification,
         authority: value.authority,
         operation: value.operation,
-        streaming: value.streaming
+        streaming: value.streaming,
+        schemaVersion: value.schemaVersion
       });
     } catch {
       context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Model verification must bind the exact v2 contract authority and schema." });

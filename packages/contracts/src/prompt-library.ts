@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { sha256Hex } from "./hash.js";
+import { ILLUSTRATION_REFINEMENT_DEFAULT } from "./illustration-refinement-default.js";
 import {
   LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   PREVIOUS_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
@@ -43,9 +44,11 @@ export type PromptCompatibilityRequirement = Readonly<{
 }>;
 
 /**
- * Compatibility is an explicit operator acknowledgement, never a heuristic
- * search through creative override text. These templates must keep the
- * currently shipped StoryTurnOutput shape to remain safe to execute.
+ * Compatibility is keyed on the shape version plus a content hash, never a
+ * heuristic search through creative override text. Saving an override
+ * derives and stores this acknowledgement automatically (ADR 0039); these
+ * templates must keep the currently shipped StoryTurnOutput shape to remain
+ * safe to execute.
  */
 export function promptCompatibilityRequirement(key: PromptTemplateKey): PromptCompatibilityRequirement | null {
   if (key !== "story_system" && key !== "event_extension") return null;
@@ -59,7 +62,9 @@ export function promptCompatibilityRequirement(key: PromptTemplateKey): PromptCo
 /**
  * New Story Memory jobs bind this requirement to their frozen v14 policy.
  * The legacy requirement above remains the compatibility contract for v13
- * snapshots and existing creative overrides.
+ * snapshots and existing creative overrides. Both share the same shape
+ * version plus content-hash compatibility rule (ADR 0039); the protocol
+ * identity below no longer gates compatibility on its own.
  */
 export function storyMemoryPromptCompatibilityRequirement(key: PromptTemplateKey): PromptCompatibilityRequirement | null {
   if (key !== "story_system" && key !== "event_extension") return null;
@@ -84,6 +89,12 @@ export const legacyPromptTemplateKeys = [
   "infinite_worlds_batch", "infinite_worlds_final_turn", "illustration_refinement", "illustration_direct", "illustration_character_reference"
 ] as const;
 export type LegacyPromptTemplateKey = typeof legacyPromptTemplateKeys[number];
+
+/** Still captured in snapshots for historical identity; no runtime path dispatches them. */
+export const RETIRED_PROMPT_TEMPLATE_KEYS: ReadonlySet<PromptTemplateKey> = new Set([
+  "turn_intent", "story_recovery_output_limit", "story_recovery_mechanics", "story_recovery_schema",
+  "world_roster_supplement", "infinite_worlds_conversion", "infinite_worlds_recovery", "infinite_worlds_batch"
+]);
 
 export type PromptSnapshotEntry = Readonly<{
   content: string;
@@ -190,6 +201,13 @@ export function readPromptSnapshot(input: unknown): ReadPromptSnapshot {
   };
 }
 
+export const CONTINUITY_REPAIR_PROTOCOL_V1 = "story-continuity-repair-v1";
+export const CONTINUITY_REPAIR_PROTOCOL_V2 = "story-continuity-repair-v2";
+const acceptedContinuityProtocols = {
+  review: new Set(["story-continuity-review-v1"]),
+  repair: new Set([CONTINUITY_REPAIR_PROTOCOL_V1, CONTINUITY_REPAIR_PROTOCOL_V2])
+} as const;
+
 /** The generic reader accepts valid off snapshots.  An enabled review stage
  * must additionally prove that both immutable prompts were captured. */
 export function assertContinuityReviewPromptSnapshot(input: unknown, mode: "off" | "observe" | "enforce"): ReadPromptSnapshot {
@@ -201,7 +219,7 @@ export function assertContinuityReviewPromptSnapshot(input: unknown, mode: "off"
   if (snapshot.continuityReview) {
     for (const key of ["review", "repair"] as const) {
       validateSnapshotEntry(snapshot.continuityReview[key]);
-      if (snapshot.continuityReview[key].protocolIdentity !== CONTINUITY_REVIEW_PROMPT_CATALOG[key].protocolIdentity) throw new Error("Frozen continuity prompt protocol is incompatible.");
+      if (!acceptedContinuityProtocols[key].has(snapshot.continuityReview[key].protocolIdentity)) throw new Error("Frozen continuity prompt protocol is incompatible.");
     }
   }
   if (mode === "off") {
@@ -319,17 +337,7 @@ ${generatedWorldCharacterRequirements}` },
   infinite_worlds_recovery: { key: "infinite_worlds_recovery", title: "Infinite Worlds recovery", category: "Imports", description: "Recovers a truncated converted export.", campaignOverrideAllowed: false, maxLength: 4000, variables: [], defaultContent: "The previous JSON was truncated. Return a complete, more compact replacement object. Start again at { and close every field and the final }." },
   infinite_worlds_batch: { key: "infinite_worlds_batch", title: "Infinite Worlds batch continuation", category: "Imports", description: "Continues a chunked import.", campaignOverrideAllowed: false, maxLength: 4000, variables: ["base", "batch", "total"], defaultContent: "{{base}}\nThis is batch {{batch}} of {{total}}. Return the full accumulated world object, preserving the supplied partial draft unless this batch corrects it." },
   infinite_worlds_final_turn: { key: "infinite_worlds_final_turn", title: "Final-turn enrichment", category: "Imports", description: "Adds choices and an image prompt to imported fiction.", campaignOverrideAllowed: false, maxLength: 4000, variables: [], defaultContent: "Return JSON only with choices (exactly four diegetic next actions), custom_action_suggestion, and image_prompt. Continue from the accepted fictional outcome. Never mention rolls, dice, checks, stats, modifiers, targets, difficulties, parser errors, or private reasoning." },
-  illustration_refinement: { key: "illustration_refinement", title: "Illustration refinement", category: "Illustrations", description: "Converts accepted fiction into an image-provider prompt.", campaignOverrideAllowed: true, maxLength: 4000, variables: [], defaultContent: `You are an expert visual translator and prompt engineer for AI image generators. Your task is to analyze a provided excerpt of fiction and generate a highly effective, concise prompt to illustrate that exact scene.
-
-Follow these strict rules:
-
-1. ISOLATE THE MOMENT: An image is a single static frame. Analyze the chronology of the passage and select the single most visually compelling or climactic moment to illustrate. Do not attempt to show a sequence of events.
-2. STRICT FIDELITY: Base the visual details ONLY on the provided text. Preserve the exact characters, setting, action, and mood described. Do not invent events, objects, or characters. Exclude all non-diegetic material (e.g., no text overlays, no UI elements, no author notes).
-3. EXTERNALIZE THE INTERNAL: Translate abstract concepts (internal thoughts, smells, unseen threats) into purely visual elements (e.g., facial expressions, body language, atmospheric lighting, color palettes, weather).
-4. KEYWORD EFFICIENCY: AI image generators respond best to concrete nouns, vivid adjectives, and clear stylistic descriptors. Avoid full narrative sentences.
-
-Output ONLY a valid JSON object containing a single "image_prompt" field. The image prompt string should be structured in the following order, separated by commas:
-[Main Subject(s) & Physical Description] + [Specific Action/Pose] + [Setting/Background] + [Lighting & Atmosphere based on mood] + [Medium/Art Style: e.g., cinematic concept art, high fantasy illustration]` },
+  illustration_refinement: { key: "illustration_refinement", title: "Illustration refinement", category: "Illustrations", description: "Converts accepted fiction into an image-provider prompt.", campaignOverrideAllowed: true, maxLength: 4000, variables: [], defaultContent: ILLUSTRATION_REFINEMENT_DEFAULT },
   illustration_direct: { key: "illustration_direct", title: "Direct illustration prompt", category: "Illustrations", description: "Wraps accepted fiction for direct image generation.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["segment"], defaultContent: "Create one polished story illustration depicting only the concrete scene described in this passage.\nPreserve the visible characters, setting, mood, actions, and chronology. Do not add typography, captions, logos, interface elements, or non-diegetic overlays.\n\n{{segment}}" },
   illustration_character_reference: { key: "illustration_character_reference", title: "Character visual reference", category: "Illustrations", description: "Appends canonical visual character detail to an image prompt.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["scene", "character"], defaultContent: "{{scene}}\n\nCANONICAL CHARACTER REFERENCE:\nUse these appearance details only if this character is depicted in the requested scene. Do not add the character merely because this reference is present.\n{{character}}" }
 };
@@ -338,7 +346,7 @@ Output ONLY a valid JSON object containing a single "image_prompt" field. The im
  * set. They can only enter a generation through the v2 frozen pair. */
 export const CONTINUITY_REVIEW_PROMPT_CATALOG: Record<"review" | "repair", PromptTemplateDefinition & { protocolIdentity: string }> = {
   review: { key: "story_continuity_review", title: "Story continuity review", category: "Story Engine", description: "Finds observable, evidence-quoted continuity conflicts.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Review only the supplied fiction-safe evidence and candidate projection. Return the story-continuity-review-v1 JSON object. Cite exact supplied source and candidate quotations. Report ambiguity or a missing unresolved thread as a warning; never invent an absent quotation. Give short observable explanations only; do not reveal reasoning.", protocolIdentity: "story-continuity-review-v1" },
-  repair: { key: "story_continuity_repair", title: "Story continuity repair", category: "Story Engine", description: "Repairs a bounded rejected story output from verified findings.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Return one complete replacement story output using only the supplied authority, direction, rejected fiction-safe projection, and verified continuity findings. Do not add facts, mechanics, private reasoning, or supersession authority. Preserve intentional empty correction fields. Preserve unaffected narration, character voice, and dialogue rhythm verbatim wherever possible. Change only what the verified findings require and the directly dependent continuity fields." + "\n\n" + STORY_PROSE_GUIDANCE + "\nApply the prose guidance only to passages that require correction; do not restyle unaffected narration.", protocolIdentity: "story-continuity-repair-v1" }
+  repair: { key: "story_continuity_repair", title: "Story continuity repair", category: "Story Engine", description: "Repairs a bounded rejected story output from verified findings.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Return one complete replacement story output using only the supplied authority, direction, rejected fiction-safe projection, and verified continuity findings. Do not add facts, mechanics, private reasoning, or supersession authority. Preserve intentional empty correction fields. Preserve unaffected narration, character voice, and dialogue rhythm verbatim wherever possible. Change only what the verified findings require and the directly dependent continuity fields." + "\n\n" + STORY_PROSE_GUIDANCE + "\nApply the prose guidance only to passages that require correction; do not restyle unaffected narration.", protocolIdentity: CONTINUITY_REPAIR_PROTOCOL_V2 }
 } as const;
 
 export const PROMPT_CATALOG = {

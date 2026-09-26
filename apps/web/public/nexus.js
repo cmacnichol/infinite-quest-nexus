@@ -1343,19 +1343,6 @@ function promptLibraryIsDirty() {
   return Boolean(promptLibraryEditorContext && elements.promptLibraryContent.value !== promptLibraryEditorBaseline);
 }
 
-async function promptContentHash(content) {
-  const bytes = new TextEncoder().encode(content);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
-}
-
-function syncPromptLibraryAcknowledgement() {
-  const template = promptLibrarySelectedTemplate();
-  elements.promptLibraryCompatibilityAcknowledgement.checked = Boolean(
-    template?.compatibility
-  );
-}
-
 function renderPromptLibraryDirtyState() {
   const dirty = promptLibraryIsDirty();
   elements.promptLibraryUnsaved?.classList.toggle("hidden", !dirty);
@@ -1383,9 +1370,10 @@ async function renderPromptLibraryPreview() {
   const sequence = ++promptLibraryPreviewSequence;
   elements.promptLibraryPreviewContent.textContent = "Building sample request…";
   try {
+    const previewCampaignId = promptLibraryCampaignId();
     const preview = await api("/api/v1/prompt-library/preview", {
       method: "POST",
-      body: JSON.stringify({ key: template.key, content: elements.promptLibraryContent.value })
+      body: JSON.stringify({ key: template.key, content: elements.promptLibraryContent.value, ...(previewCampaignId ? { campaignId: previewCampaignId } : {}) })
     });
     if (sequence !== promptLibraryPreviewSequence) return;
     const sections = preview.sections.map((section) => `── ${section.label} [${section.role}] ──\n${section.content}`).join("\n\n");
@@ -1456,14 +1444,13 @@ function renderPromptLibrary(loadEditor = false) {
     promptLibraryEditorContext = context;
     promptLibraryEditorBaseline = template.effectiveContent;
     elements.promptLibraryContent.value = template.effectiveContent;
-    syncPromptLibraryAcknowledgement();
   }
   elements.promptLibraryWarning?.classList.toggle("hidden", template.category !== "Story Engine");
   const compatibility = template.compatibility;
   elements.promptLibraryCompatibility?.classList.toggle("hidden", !compatibility);
   elements.promptLibraryRequiredShape?.classList.toggle("hidden", !compatibility);
   if (compatibility) {
-    elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Review the shipped required shape before saving.`;
+    elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Saving records this prompt against the current shape; the application adds the required output rules automatically.${compatibility.acknowledged ? "" : " Saved for an earlier output shape or outside the Prompt Library. Save it again before generation can use it."}`;
     elements.promptLibraryRequiredShape.textContent = compatibility.requiredShapePreview;
   }
   const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";
@@ -1501,17 +1488,7 @@ async function savePromptLibraryTemplate(event) {
   const scope = elements.promptLibraryScope.value;
   try {
     const content = elements.promptLibraryContent.value;
-    const compatibilityAcknowledgement = template.compatibility
-      ? (() => {
-        if (!elements.promptLibraryCompatibilityAcknowledgement.checked) throw new Error("Acknowledge the required output shape before saving this prompt.");
-        return promptContentHash(content).then((contentHash) => ({
-          requiredShapeVersion: template.compatibility.requiredShapeVersion,
-          protocolIdentity: template.compatibility.protocolIdentity,
-          contentHash
-        }));
-      })()
-      : null;
-    const response = await api("/api/v1/prompt-library/overrides", { method: "PUT", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content, ...(compatibilityAcknowledgement ? { compatibilityAcknowledgement: await compatibilityAcknowledgement } : {}) }) });
+    const response = await api("/api/v1/prompt-library/overrides", { method: "PUT", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}), content }) });
     promptLibrary = response.library; elements.promptLibraryStatus.textContent = "Prompt saved. New jobs will use this version."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
   } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
 }
@@ -3906,8 +3883,6 @@ async function loadIllustrationConfig() {
   elements.illustrationSegmentPromptMode.value = illustrationConfig.segmentPromptMode || "direct";
   defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || illustrationConfig.refinementPrompt || "";
   illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
-  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue;
-  renderIllustrationPromptSummary();
   syncIllustrationProviderAvailability(true);
   const provider = effectiveCampaignProvider("image");
   elements.campaignImageProviderSummary.textContent = provider
@@ -3933,39 +3908,12 @@ function illustrationPolicyUsesProvider(policy = elements.illustrationSourcePoli
   return policy === "library_then_generate" || policy === "generate_only";
 }
 
-function renderIllustrationPromptSummary() {
-  const usesDefault = illustrationRefinementPromptValue.trim() === defaultIllustrationRefinementPrompt.trim();
-  elements.illustrationRefinementPromptSummary.textContent = usesDefault
-    ? "Using the default refinement prompt."
-    : "Using a custom campaign prompt.";
-}
-
 function openIllustrationPromptEditor() {
   elements.promptLibraryScope.value = "campaign";
   syncPromptLibraryCampaigns();
   elements.promptLibraryCampaign.value = selectedCampaign?.id || "";
   selectedPromptTemplateKey = "illustration_refinement";
   window.location.hash = "#prompt-library";
-}
-
-function applyIllustrationPrompt(event) {
-  event.preventDefault();
-  const prompt = elements.illustrationRefinementPrompt.value.trim();
-  if (!prompt) {
-    elements.illustrationRefinementPrompt.setCustomValidity("Enter an image-prompt refinement prompt.");
-    elements.illustrationRefinementPrompt.reportValidity();
-    return;
-  }
-  elements.illustrationRefinementPrompt.setCustomValidity("");
-  illustrationRefinementPromptValue = prompt;
-  renderIllustrationPromptSummary();
-  elements.illustrationPromptDialog.close("apply");
-}
-
-function restoreDefaultIllustrationPrompt() {
-  elements.illustrationRefinementPrompt.value = defaultIllustrationRefinementPrompt;
-  elements.illustrationRefinementPrompt.setCustomValidity("");
-  elements.illustrationRefinementPrompt.focus();
 }
 
 function renderIllustrationSettingsVisibility() {
@@ -5599,12 +5547,12 @@ async function saveIllustrationConfig(event) {
         maxAttempts: elements.illustrationMaxAttempts.value,
         segmentWordCount: elements.illustrationSegmentWordCount.value,
         imagesPerSegment: elements.illustrationImagesPerSegment.value,
-        segmentPromptMode: elements.illustrationSegmentPromptMode.value
+        segmentPromptMode: elements.illustrationSegmentPromptMode.value,
+        refinementPrompt: illustrationRefinementPromptValue
       })
     });
     defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || defaultIllustrationRefinementPrompt;
     illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
-    renderIllustrationPromptSummary();
     elements.illustrationStatus.className = "status success";
     elements.illustrationStatus.textContent = sourcePolicy === "off"
       ? "Illustrations disabled. No image endpoint will be called for new turns."
@@ -6755,13 +6703,6 @@ elements.embeddingModel.addEventListener("keydown", (event) => {
 elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
 elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
 elements.openIllustrationPromptEditor.addEventListener("click", openIllustrationPromptEditor);
-elements.illustrationPromptForm.addEventListener("submit", applyIllustrationPrompt);
-elements.restoreDefaultIllustrationPrompt.addEventListener("click", restoreDefaultIllustrationPrompt);
-elements.cancelIllustrationPrompt.addEventListener("click", () => requestModalDismissal(elements.illustrationPromptDialog));
-elements.illustrationPromptDialog.addEventListener("close", () => {
-  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue;
-  elements.illustrationRefinementPrompt.setCustomValidity("");
-});
 elements.illustrationSourcePolicy.addEventListener("change", () => {
   if (illustrationPolicyUsesProvider() && !enabledProviders("image").length) {
     elements.illustrationSourcePolicy.value = "library_only";
@@ -6805,7 +6746,6 @@ elements.promptLibraryPreview?.addEventListener("click", () => { promptLibraryPr
 elements.promptLibraryContent?.addEventListener("input", () => { renderPromptLibraryDirtyState(); schedulePromptLibraryPreview(); });
 elements.promptLibraryDiscard?.addEventListener("click", () => {
   elements.promptLibraryContent.value = promptLibraryEditorBaseline;
-  syncPromptLibraryAcknowledgement();
   renderPromptLibraryDirtyState();
   schedulePromptLibraryPreview();
 });

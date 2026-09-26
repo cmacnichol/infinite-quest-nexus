@@ -14,7 +14,17 @@ import {
   renderPromptTemplate,
   sampleValuesForPrompt
 } from "../../packages/contracts/src/prompt-library.js";
-import { STORY_SYSTEM_PROMPT, storyPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import {
+  STORY_SYSTEM_PROMPT,
+  storyPromptCompatibilityIdentity,
+  STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  CAST_STORY_AUTHORITY_CONTRACT,
+  STORY_OUTPUT_ENCODING_CONTRACT_V3,
+  STORY_PROMPT_SCHEMA_VERSION,
+  storyMemoryMandatoryContract
+} from "../../packages/contracts/src/story-prompt.js";
+import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../packages/contracts/src/generation.js";
 import { composeIllustrationProviderPrompt, directIllustrationPrompt } from "../../packages/domain/src/illustrations.js";
 import { buildTemplateWorldPrompt } from "../../packages/domain/src/world-template.js";
 import { appendAuthoringContract } from "../../packages/domain/src/authoring-prompts.js";
@@ -26,6 +36,17 @@ import { providerPromptProtocolVersion } from "../helpers/provider-application-f
 import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
 import { createPromptRepository, resolveStoryMemoryPromptSnapshot, resolveStoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
+
+function snapshotWithRepairIdentity(protocolIdentity: string) {
+  const templates = Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG)
+    .map(([key, definition]) => [key, { content: definition.defaultContent, hash: createHash("sha256").update(definition.defaultContent).digest("hex"), source: "shipped" }]));
+  const review = CONTINUITY_REVIEW_PROMPT_CATALOG.review.defaultContent;
+  const repair = CONTINUITY_REVIEW_PROMPT_CATALOG.repair.defaultContent;
+  return { version: 2, templates, continuityReview: {
+    review: { content: review, hash: createHash("sha256").update(review).digest("hex"), source: "shipped", protocolIdentity: "story-continuity-review-v1" },
+    repair: { content: repair, hash: createHash("sha256").update(repair).digest("hex"), source: "shipped", protocolIdentity }
+  } };
+}
 
 describe("Prompt Library catalog", () => {
   it.each(["source_extraction", "source_extraction_recovery"] as const)("uses evidence IDs in the %s prompt", (key) => {
@@ -42,6 +63,13 @@ describe("Prompt Library catalog", () => {
     expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, continuityReview: null }, "enforce")).toThrow("requires a frozen");
     expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, continuityReview: { ...snapshot.continuityReview!, review: { ...snapshot.continuityReview!.review, hash: "0".repeat(64) } } }, "observe")).toThrow("hash");
     expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, templates: { ...templates, story_continuity_review: snapshot.continuityReview!.review } }, "observe")).toThrow("Unsupported");
+  });
+  it("accepts frozen v1 and v2 repair identities and freezes v2 for new work", () => {
+    expect(CONTINUITY_REVIEW_PROMPT_CATALOG.repair.protocolIdentity).toBe("story-continuity-repair-v2");
+    for (const identity of ["story-continuity-repair-v1", "story-continuity-repair-v2"]) {
+      expect(() => assertContinuityReviewPromptSnapshot(snapshotWithRepairIdentity(identity), "enforce")).not.toThrow();
+    }
+    expect(() => assertContinuityReviewPromptSnapshot(snapshotWithRepairIdentity("story-continuity-repair-v9"), "enforce")).toThrow();
   });
   it("freezes the effective review pair at enqueue rather than consulting later overrides", async () => {
     const ownerUserId = crypto.randomUUID();
@@ -142,6 +170,10 @@ describe("Prompt Library catalog", () => {
     expect(migration).toContain("REFERENCES campaigns(id, owner_user_id)");
   });
 
+  it("uses one shipped illustration refinement default", () => {
+    expect(DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT).toBe(PROMPT_TEMPLATE_CATALOG.illustration_refinement.defaultContent);
+  });
+
   it("defines every core generation and illustration instruction with an owned default", () => {
     for (const key of ["story_system", "rpg_assessment", "event_trigger", "event_extension", "turn_intent", "scene_coverage", "world_generation", "character_generation", "infinite_worlds_conversion", "illustration_refinement", "illustration_direct"] as const) {
       expect(PROMPT_TEMPLATE_CATALOG[key].defaultContent.trim()).not.toBe("");
@@ -169,7 +201,7 @@ describe("Prompt Library catalog", () => {
     expect(text).toContain("Write natural, character-led fiction");
     expect(text).toContain("When characters speak, write their words as direct dialogue enclosed in double quotation marks");
     expect(text).toContain("Start a new paragraph whenever the speaker changes.");
-    expect(text).toContain("Escape quotation marks correctly inside the JSON narration string");
+    expect(text).toContain("Keep dialogue quotation marks visible in the returned narration");
     expect(text).toContain("Do not force dialogue into solitary or nonverbal scenes.");
     expect(text).toContain("Preserve established character voice and cadence");
     expect(text).toContain("Keep purposeful repetition, hesitation, callbacks, and subtext");
@@ -287,14 +319,18 @@ describe("Prompt Library catalog", () => {
       }
     });
     expect(assertStoryMemoryPromptCompatibility(snapshot).template("story_system").content).toBe(content);
-    await expect(resolveStoryMemoryPromptSnapshot({
+    // A stored acknowledgement under an earlier prompt protocol identity is
+    // now accepted: compatibility follows the output shape (version + content
+    // hash), not the protocol identity, so this no longer blocks generation.
+    const legacyIdentitySnapshot = await resolveStoryMemoryPromptSnapshot({
       query: vi.fn().mockResolvedValueOnce({ rows: [{}] }).mockResolvedValueOnce({ rows: [{
         prompt_key: "story_system", content, campaign_id: null,
         compatibility_required_shape_version: "story-output-v2",
         compatibility_protocol_identity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
         compatibility_content_hash: hash
       }] })
-    } as never, { ownerUserId, scope: "campaign", campaignId })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+    } as never, { ownerUserId, scope: "campaign", campaignId });
+    expect(legacyIdentitySnapshot.templates.story_system.content).toBe(content);
   });
 
   it("freezes acknowledged non-enrolled v16 story bytes with their fact-wire identity", async () => {
@@ -363,16 +399,19 @@ describe("Prompt Library catalog", () => {
     })).toThrow("does not match captured content");
   });
 
-  it("rejects an unacknowledged continuity override before persistence can lead to provider execution", async () => {
-    const query = vi.fn();
+  it("stores a server-derived acknowledgement for a shape-bearing override without requiring one from the client", async () => {
+    const content = "Keep the existing creative event voice.";
+    const requirement = storyMemoryPromptCompatibilityRequirement("event_extension")!;
+    const query = vi.fn(async (_sql: string, _values?: readonly unknown[]) => ({ rows: [] }));
     const prompts = createPromptRepository({ query } as never);
     await expect(prompts.savePromptOverride({
       ownerUserId: crypto.randomUUID(),
       scope: "application",
       key: "event_extension",
-      content: "Keep the existing creative event voice."
-    })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
-    expect(query).not.toHaveBeenCalled();
+      content
+    })).resolves.toBeDefined();
+    const insert = query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([STORY_PROMPT_SCHEMA_VERSION, requirement.protocolIdentity, createHash("sha256").update(content).digest("hex")]);
   });
 
   it("rejects a retired turn-intent override before it can be persisted", async () => {
@@ -402,9 +441,8 @@ describe("Prompt Library catalog", () => {
       .resolves.toMatchObject({ snapshot: { turn_intent: { content: frozenContent, hash: frozenHash, source: "shipped" } } });
   });
 
-  it("rejects retired turn-intent preview and reset before database work", async () => {
+  it("rejects retired turn-intent preview before database work, but still allows reset to delete a stale override", async () => {
     const previewQuery = vi.fn();
-    const resetQuery = vi.fn();
     const ownerUserId = crypto.randomUUID();
 
     await expect(createPromptRepository({ query: previewQuery } as never).previewPrompt({
@@ -412,19 +450,39 @@ describe("Prompt Library catalog", () => {
       key: "turn_intent",
       content: "Classify this new submission."
     })).rejects.toMatchObject({ code: "turn_input_classification_removed", statusCode: 410 });
+    expect(previewQuery).not.toHaveBeenCalled();
+
+    const resetQuery = vi.fn(async () => ({ rows: [] }));
     await expect(createPromptRepository({ query: resetQuery } as never).resetPromptOverride({
       ownerUserId,
       scope: "application",
       key: "turn_intent"
-    })).rejects.toMatchObject({ code: "turn_input_classification_removed", statusCode: 410 });
+    })).resolves.toMatchObject({
+      templates: expect.not.arrayContaining([expect.objectContaining({ key: "turn_intent" })])
+    });
+    expect(resetQuery).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM prompt_template_overrides"),
+      expect.arrayContaining([ownerUserId, null, "turn_intent"])
+    );
+  });
 
-    expect(previewQuery).not.toHaveBeenCalled();
-    expect(resetQuery).not.toHaveBeenCalled();
+  it("hides retired templates and rejects edits to them", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const prompts = createPromptRepository({ query } as never);
+    const library = await prompts.listPromptLibrary({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    const keys = library.templates.map((template) => template.key);
+    for (const retired of ["story_recovery_output_limit", "story_recovery_mechanics", "story_recovery_schema", "world_roster_supplement",
+      "infinite_worlds_conversion", "infinite_worlds_recovery", "infinite_worlds_batch", "turn_intent"]) expect(keys).not.toContain(retired);
+    await expect(prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_recovery_schema", content: "x {{errors}}" }))
+      .rejects.toMatchObject({ statusCode: 410 });
   });
 
   it("persists an exact protected-prompt acknowledgement and accepts it when loading the saved override", async () => {
     const content = "Keep the established output shape and voice.";
-    const requirement = promptCompatibilityRequirement("story_system")!;
+    // Application scope now advertises the Story Memory requirement (every
+    // campaign is enrolled), so this is the acknowledgement the library
+    // shows and the one that must round-trip as acknowledged.
+    const requirement = storyMemoryPromptCompatibilityRequirement("story_system")!;
     let saved: Record<string, unknown> | null = null;
     const query = vi.fn(async (sql: string, values?: readonly unknown[]) => {
       if (sql.includes("INSERT INTO prompt_template_overrides")) {
@@ -487,7 +545,110 @@ describe("Prompt Library catalog", () => {
     expect(compatibility?.protocolIdentity).not.toBe(promptCompatibilityRequirement("story_system")?.protocolIdentity);
   });
 
-  it("blocks a saved protected override acknowledged under an earlier prompt protocol identity", async () => {
+  it("labels direct-model previews as partial until output encoding is selected at enqueue", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM generation_jobs")) return { rows: [] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const effective = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
+    expect(effective).toBeDefined();
+    expect(effective.content).toContain("Story Memory authority contract");
+    // Direct-model eligibility is resolved at enqueue, so the preview must
+    // neither invent an encoding contract nor claim v2 is guaranteed.
+    expect(effective.content).not.toContain("narration_paragraphs");
+    expect(effective.content).not.toContain(CAST_STORY_AUTHORITY_CONTRACT);
+    expect(preview.sections.find((section) => section.label === "Preset system prompt (added at dispatch)")).toBeUndefined();
+    expect(preview.sections.find((section) => section.label === "Paragraph-wire output contract")).toMatchObject({
+      role: "system",
+      content: "Output encoding is selected when the turn is queued using the direct model's verified capabilities. This preview omits that contract; story-native-v3 adds paragraph-array and typographic-quotation rules."
+    });
+
+    const source = preview.sections.find((section) => section.label === "Story Memory contract source");
+    expect(source).toMatchObject({
+      role: "system",
+      content: `Protocol ${STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the current runtime settings.`
+    });
+  });
+
+  it("uses current cast context settings even when the latest queued turn predates enabling cast", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM generation_jobs")) return { rows: [{ contextOptions: { storyMemoryPolicy: { promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION } } }] };
+      // A preset route selects v3 without direct-model capability evidence.
+      if (sql.includes("FROM provider_profiles")) return { rows: [{ text_selection: { kind: "openrouter_preset", slug: "writer-preset" } }] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never, { castContextEnabled: true });
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
+    expect(effective.content.startsWith("WRITER")).toBe(true);
+    expect(effective.content.indexOf(storyMemoryMandatoryContract(CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION))).toBeGreaterThan(0);
+    expect(effective.content).toContain(CAST_STORY_AUTHORITY_CONTRACT);
+    expect(effective.content.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
+
+    const source = preview.sections.find((section) => section.label === "Story Memory contract source");
+    expect(source).toMatchObject({
+      role: "system",
+      content: `Protocol ${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION} from the current runtime settings.`
+    });
+  });
+
+  it("includes the story-only supplement for a flexible_scene campaign", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_scene", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const effective = preview.sections.find((section) => section.label === "System prompt preview (output encoding pending)")!;
+    expect(effective.content).toContain("Story Direction mode is a fiction-only scene direction.");
+  });
+
+  it("notes a provider preset instead of exposing its system text", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [{ text_selection: { kind: "openrouter_preset", slug: "writer-preset" } }] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const preset = preview.sections.find((section) => section.label === "Preset system prompt (added at dispatch)");
+    expect(preset).toMatchObject({ role: "system", content: "Applied by the selected provider preset; not shown here." });
+    expect(JSON.stringify(preview)).not.toContain("writer-preset");
+  });
+
+  it("rejects a preview for a campaign the owner cannot see", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async () => ({ rows: [] }));
+    const prompts = createPromptRepository({ query } as never);
+
+    await expect(prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId }))
+      .rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("accepts a saved protected override acknowledged under an earlier prompt protocol identity", async () => {
     const content = "Keep the established output shape and voice.";
     const query = vi.fn().mockResolvedValue({
       rows: [{
@@ -502,7 +663,7 @@ describe("Prompt Library catalog", () => {
     const prompts = createPromptRepository({ query } as never);
 
     await expect(prompts.loadPromptSnapshot({ ownerUserId: crypto.randomUUID(), scope: "application" }))
-      .rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+      .resolves.toMatchObject({ snapshot: { story_system: { content, source: "application" } } });
   });
 
   it("renders only engine-supplied placeholder values", () => {
@@ -589,5 +750,106 @@ describe("Prompt Library catalog", () => {
       batch: "CONVERT / BATCH 2 OF 4",
       finalTurn: "FINAL"
     });
+  });
+
+  it("keeps shipped Story prose guidance independent of the wire encoding", () => {
+    const writer = PROMPT_TEMPLATE_CATALOG.story_system.defaultContent;
+    expect(writer).not.toContain("Escape quotation marks");
+    expect(writer).not.toContain("separated by two newline characters");
+    expect(writer).toContain("follow the output encoding contract");
+    expect(writer).toContain("double quotation marks");
+  });
+
+  it("advertises the Story Memory acknowledgement at application scope", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const prompts = createPromptRepository({ query } as never);
+    const library = await prompts.listPromptLibrary({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    expect(library.templates.find((template) => template.key === "story_system")?.compatibility)
+      .toMatchObject(storyMemoryPromptCompatibilityRequirement("story_system")!);
+  });
+
+  it("lets an application override acknowledged through the library run for enrolled campaigns", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const content = "Application writer prompt.";
+    const requirement = storyMemoryPromptCompatibilityRequirement("story_system")!;
+    const row = { prompt_key: "story_system", content, campaign_id: null, compatibility_required_shape_version: requirement.requiredShapeVersion,
+      compatibility_protocol_identity: requirement.protocolIdentity, compatibility_content_hash: createHash("sha256").update(content).digest("hex") };
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("prompt_template_overrides")) return { rows: [row] };
+      return { rows: [] };
+    });
+    const snapshot = await resolveStoryMemoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId });
+    expect(snapshot.templates.story_system).toMatchObject({ content, source: "application" });
+    const legacy = await resolveStoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId });
+    expect(legacy.templates.story_system.source).toBe("application");
+  });
+});
+
+describe("implicit prompt override acknowledgement", () => {
+  const content = "Custom writer prompt.";
+  const contentHash = createHash("sha256").update(content).digest("hex");
+  const row = (overrides: Record<string, unknown> = {}) => ({ prompt_key: "story_system", content, campaign_id: null,
+    compatibility_required_shape_version: "story-output-v2", compatibility_protocol_identity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
+    compatibility_content_hash: contentHash, ...overrides });
+  const db = (rows: unknown[], enrolled = true) => ({ query: vi.fn(async (sql: string, _values?: readonly unknown[]) => {
+    if (sql.includes("FROM campaigns")) return { rows: [{ exists: 1 }] };
+    if (sql.includes("campaign_story_memory_enrollments")) return { rows: enrolled ? [{ exists: 1 }] : [] };
+    if (sql.includes("prompt_template_overrides")) return { rows };
+    return { rows: [] };
+  }) });
+  const scope = () => ({ ownerUserId: crypto.randomUUID(), scope: "campaign" as const, campaignId: crypto.randomUUID() });
+
+  it("accepts an override acknowledged under an older prompt protocol when the output shape is unchanged", async () => {
+    const snapshot = await resolveStoryMemoryPromptSnapshot(db([row()]) as never, scope());
+    expect(snapshot.templates.story_system).toMatchObject({ content, source: "application" });
+  });
+
+  it("still blocks an override whose stored shape version is not current", async () => {
+    await expect(resolveStoryMemoryPromptSnapshot(db([row({ compatibility_required_shape_version: "story-output-v1" })]) as never, scope()))
+      .rejects.toMatchObject({ statusCode: 409, code: "prompt_override_incompatible", message: expect.stringMatching(/re-save/i) });
+  });
+
+  it("still blocks an override whose content changed after it was acknowledged", async () => {
+    await expect(resolveStoryMemoryPromptSnapshot(db([row({ compatibility_content_hash: "0".repeat(64) })]) as never, scope()))
+      .rejects.toMatchObject({ statusCode: 409, code: "prompt_override_incompatible" });
+  });
+
+  it("blocks an override with no acknowledgement metadata and asks for a re-save", async () => {
+    await expect(resolveStoryPromptSnapshot(db([row({ compatibility_required_shape_version: null, compatibility_protocol_identity: null, compatibility_content_hash: null })], false) as never, scope()))
+      .rejects.toMatchObject({ statusCode: 409, code: "prompt_override_incompatible", message: expect.stringMatching(/re-save/i) });
+  });
+
+  it("stores a server-derived acknowledgement on save without requiring one from the client", async () => {
+    const database = db([]);
+    const prompts = createPromptRepository(database as never);
+    await prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_system", content });
+    const insert = database.query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([STORY_PROMPT_SCHEMA_VERSION, storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity, contentHash]);
+  });
+
+  it("ignores a stale client-supplied acknowledgement instead of rejecting the save", async () => {
+    const database = db([]);
+    const prompts = createPromptRepository(database as never);
+    await prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_system", content,
+      compatibilityAcknowledgement: { requiredShapeVersion: "story-output-v2", protocolIdentity: "stale|identity", contentHash: "0".repeat(64) } });
+    const insert = database.query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([STORY_PROMPT_SCHEMA_VERSION, storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity, contentHash]);
+  });
+
+  it("stores no acknowledgement for keys without a shape requirement", async () => {
+    const database = db([]);
+    const prompts = createPromptRepository(database as never);
+    await prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "rpg_assessment", content });
+    const insert = database.query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([null, null, null]);
+  });
+
+  it("reports a legacy-identity override as compatible in the library", async () => {
+    const prompts = createPromptRepository(db([row()]) as never);
+    const library = await prompts.listPromptLibrary({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    expect(library.templates.find((template) => template.key === "story_system")?.compatibility?.acknowledged).toBe(true);
   });
 });

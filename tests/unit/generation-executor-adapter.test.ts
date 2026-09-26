@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, presetPromptInjectedRemotely, STORY_PRESET_ROUTE_PROTOCOL_V2, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
 import type {
   ClaimedGeneration,
   IllustrationGenerationTransactionPort
@@ -30,6 +30,11 @@ import {
   type GenerationExecutionCollaborators
 } from "../../services/runtime/src/generation-executor-adapter.js";
 import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
+import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
+import { getProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { appendStoryOutputEncodingContract, STORY_OUTPUT_ENCODING_CONTRACT_V3 } from "../../packages/contracts/src/story-prompt.js";
+import { composeEffectiveStorySystemPrompt } from "../../packages/story-engine/src/effective-story-system-prompt.js";
+import type { ResponseFormatEligibilityV2 } from "../../packages/contracts/src/text-response-format.js";
 import { prepareGenerationReview } from "../../services/runtime/src/generation-review-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { DEDICATED_CHUNKED_AUDIT } from "../fixtures/chronicle-retrieval-audits.js";
@@ -45,6 +50,32 @@ const claim: ClaimedGeneration = {
   operationKind: "append",
   replacementTurnId: null
 };
+
+/**
+ * Task 8 Step 3 golden fixture: the exact byte-for-byte provider request the
+ * PRE-BRANCH code produced for a job frozen on story-native-v2, computed once
+ * against commit f69785f4 (the commit immediately before this remediation
+ * branch started) and pinned here so the "byte-identical after deployment"
+ * unit test below compares current-code output against a real historical
+ * artifact instead of comparing current code against itself.
+ *
+ * Produced by: `git worktree add <scratch>/wt-f69785f4 f69785f4`, junctioning
+ * node_modules (root + every workspace package/app that has its own) into that
+ * worktree, adding a temporary `tests/unit/__task8_golden_v2.test.ts` there
+ * that constructs the IDENTICAL fixture below (same `claim`, same
+ * `completeGenerationExecutionPayload()`, same `modelPolicy`/`verifiedEligibility`
+ * shape, adapted only for the pre-branch `eligible(operation, streaming)`
+ * signature, which pre-branch has no third `schema` parameter because only
+ * one story schema version, story-native-v2, existed yet) and printing the
+ * `serializeProviderRequest(...).payloadHash`/`.body` its executor dispatched.
+ * `git diff f69785f4 HEAD -- tests/unit/generation-executor-adapter.test.ts`
+ * confirms `claim`, `validPromptSnapshot`, and `completeGenerationExecutionPayload`
+ * are byte-for-byte unchanged since f69785f4, so this is the same fixture.
+ * The worktree and its node_modules junctions were removed afterward.
+ */
+const TASK8_GOLDEN_V2_PAYLOAD_HASH = "c3920cfa0fab804179db268f26ad6f5b92977b16ea76ae823149e1895c72e6ee";
+const TASK8_GOLDEN_V2_BODY_LENGTH = 4314;
+const TASK8_GOLDEN_V2_BODY = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"system\",\"content\":\"Write a concise fictional scene.\"},{\"role\":\"user\",\"content\":\"{\\\"authoritative_context\\\":{\\\"authoritativeRules\\\":[],\\\"worldCanon\\\":{},\\\"selectedCharacterId\\\":null,\\\"currentContinuity\\\":{},\\\"currentScene\\\":null,\\\"chronicle\\\":[]},\\\"narration_length\\\":{\\\"profile\\\":\\\"standard\\\",\\\"preferred_min_words\\\":450,\\\"preferred_max_words\\\":900,\\\"policy\\\":\\\"soft_pacing_goal\\\",\\\"early_stop_allowed\\\":true},\\\"instructions\\\":[\\\"Obey every applicable constraint in authoritative_context.authoritativeRules. These rules are mandatory and take priority over conflicting story history or player requests.\\\",\\\"Treat the database snapshot as authoritative even if provider conversation memory disagrees.\\\",\\\"Use corrected current continuity as authoritative for the next turn when it conflicts with historical narration or provider conversation memory. Empty corrected fields are intentional. Mandatory world rules still apply.\\\",\\\"Continue established chronology and character continuity.\\\",\\\"Treat narration_length as a soft pacing goal, not as a minimum requirement or permission to pad. Fidelity to authoritative context and the current turn input outranks length.\\\",\\\"Do not expose or invent non-diegetic resolution metadata.\\\",\\\"In canonical_fact_updates, supersedes_fact_ids may contain only exact IDs copied from canonical facts visible in the authoritative context; never invent a fact ID.\\\",\\\"The current turn input is a player action or attempt. Preserve its stated manner, dialogue, and intent while resolving uncertain outcomes from authoritative context and fiction-only outcome guidance.\\\",\\\"Once the attempted action and its directly supported consequence are complete, end the turn rather than opening unsupported developments to reach the preferred range.\\\",\\\"Return one complete JSON object, not a fragment or continuation.\\\"],\\\"current_turn_input\\\":{\\\"mode\\\":\\\"action\\\",\\\"text\\\":\\\"Open the observatory door.\\\"},\\\"task\\\":\\\"Generate the next complete story turn from this authoritative database snapshot. Prefer 450-900 narration words only while the current input and supported consequences naturally sustain that length. End early when the turn is complete; do not pad, repeat, or invent material story facts to meet the range.\\\"}\"}],\"temperature\":0,\"max_tokens\":2000,\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"infinite_quest_story_native_v2\",\"strict\":true,\"schema\":{\"additionalProperties\":false,\"properties\":{\"canonical_fact_updates\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"content\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"supersedes_fact_ids\":{\"items\":{\"maxLength\":36,\"minLength\":36,\"pattern\":\"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$\",\"type\":\"string\"},\"maxItems\":100,\"type\":\"array\"}},\"required\":[\"content\",\"supersedes_fact_ids\"],\"type\":\"object\"},\"maxItems\":100,\"type\":\"array\"},\"canonical_facts\":{\"items\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":100,\"type\":\"array\"},\"choices\":{\"items\":{\"maxLength\":2000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":4,\"minItems\":4,\"type\":\"array\"},\"continuity_summary\":{\"maxLength\":20000,\"type\":\"string\"},\"custom_action_suggestion\":{\"maxLength\":2000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"image_prompt\":{\"maxLength\":20000,\"type\":\"string\"},\"narration\":{\"maxLength\":200000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"open_threads\":{\"items\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":500,\"type\":\"array\"},\"scratchpad\":{\"maxLength\":100000,\"type\":\"string\"},\"superseded_facts\":{\"items\":{\"maxLength\":4000,\"minLength\":1,\"pattern\":\"^\\\\S(?:[\\\\s\\\\S]*\\\\S)?$\",\"type\":\"string\"},\"maxItems\":0,\"type\":\"array\"},\"tracker_updates\":{\"items\":{\"additionalProperties\":true,\"type\":\"object\"},\"maxItems\":200,\"type\":\"array\"}},\"required\":[\"narration\",\"choices\",\"custom_action_suggestion\",\"scratchpad\",\"tracker_updates\",\"image_prompt\",\"continuity_summary\",\"canonical_facts\",\"superseded_facts\",\"canonical_fact_updates\",\"open_threads\"],\"type\":\"object\"}}}}";
 
 describe("frozen Story route basis", () => {
   it("composes the saved preset exactly once and rejects a plan from another basis", () => {
@@ -78,6 +109,40 @@ describe("frozen Story route basis", () => {
       systemPrompt: plan.prompt,
       input: "{}"
     }, plan)).toThrow("different route basis");
+  });
+
+  it("binds a v2 remote-injected preset route without local preset text, tolerating a whitespace-padded operation prompt, with the v3 encoding contract last", () => {
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "remote-route" },
+      preset: { slug: "remote-route", versionId: "v1", configHash: "9".repeat(64) },
+      candidates: [{ modelId: "@preset/remote-route", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "PRESET SYSTEM TEXT", parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000,
+      protocolVersion: STORY_PRESET_ROUTE_PROTOCOL_V2
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    expect(presetPromptInjectedRemotely(routeBasis)).toBe(true);
+    const job = { ...completeGenerationExecutionPayload(), orchestration_private: { textExecutionRouteBasis: routeBasis } };
+
+    const writerPrompt = "Write a concise fictional scene.";
+    const composedWriterSystemPrompt = composeEffectiveStorySystemPrompt({
+      writerPrompt, storyOnlyPolicy: null, storyMemoryPromptProtocol: null, encodingContract: ""
+    });
+    const v3OperationPrompt = appendStoryOutputEncodingContract(composedWriterSystemPrompt, STORY_OUTPUT_ENCODING_CONTRACT_V3);
+
+    const plan = deriveCampaignTextExecutionPlan(job, v3OperationPrompt)!;
+    expect(plan.prompt).toBe(v3OperationPrompt);
+    expect(plan.prompt).not.toContain("PRESET SYSTEM TEXT");
+
+    // A prompt-library override is not trimmed (prompt-library.ts) and the plain
+    // writer path returns writerPrompt unchanged, so a real caller can bind a
+    // request whose systemPrompt carries trailing whitespace the plan does not.
+    expect(() => bindCampaignTextExecutionPlan(job, { systemPrompt: `${v3OperationPrompt}\n`, input: "{}" }, plan)).not.toThrow();
+    const request = bindCampaignTextExecutionPlan(job, { systemPrompt: `${v3OperationPrompt}\n`, input: "{}" }, plan);
+
+    expect(request.systemPrompt).toBe(plan.prompt);
+    expect(request.systemPrompt).not.toContain("PRESET SYSTEM TEXT");
+    expect(request.systemPrompt.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
   });
 
   it("uses the prebound main plan once and reduces retrieval budget before context planning", async () => {
@@ -213,6 +278,147 @@ describe("frozen Story route basis", () => {
       systemPrompt: "Actual coverage prompt.", input: "{}"
     })).rejects.toMatchObject({ code: "prepared_text_execution_unavailable" });
     expect(provider.execute).not.toHaveBeenCalled();
+  });
+
+  it("appends the v3 output-encoding contract to the primary story system prompt for a v3-frozen job, and leaves a v2-frozen job unchanged", async () => {
+    const evidenceHash = "b".repeat(64);
+    const verifiedEligibility = (
+      operation: Parameters<typeof getProviderOutputSchemaV2>[0],
+      streaming: boolean,
+      schema: ProviderOutputSchemaV2
+    ): ResponseFormatEligibilityV2 => ({
+      status: "verified", reason: "verified",
+      verification: {
+        version: 2, providerType: "openai_compatible", endpointIdentity: "endpoint", model: "test-model",
+        routeConfigHash: evidenceHash, adapterProtocol: "text-schema-adapter-v2", operation, schemaHash: schema.schemaHash,
+        streaming, verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+        providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects
+      }
+    });
+    const modelPolicy = {
+      version: 2 as const, policy: "required" as const, providerProfileId: claim.providerProfileId,
+      admission: { mode: "json_schema" as const, basis: "model_verified" as const, verification: {
+        version: 2 as const, providerType: "openai_compatible" as const, endpointIdentity: "endpoint", model: "test-model",
+        routeConfigHash: evidenceHash, adapterProtocol: "text-schema-adapter-v2" as const, operation: "story" as const,
+        schemaHash: getProviderOutputSchemaV2("story").schemaHash, streaming: false,
+        verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+        providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: getProviderOutputSchemaV2("story").requiresOpenTrackerObjects
+      } },
+      authority: {
+        kind: "model_verified" as const, providerProfileId: claim.providerProfileId,
+        providerType: "openai_compatible" as const, endpointIdentity: "endpoint", model: "test-model",
+        providerConfigurationHash: evidenceHash, routeConfigHash: evidenceHash, verificationRegistryHash: evidenceHash,
+        authorityRevision: "authority-v1"
+      },
+      operationClosureVersion: 2 as const,
+      invocationKeys: ["story:nonstream"] as ("story:nonstream")[]
+    };
+    // The v2 fixture deliberately disqualifies the story-native-v3 schema so selection falls back to the catalog's v2 schema.
+    const frozenContractsFor = (schemaVersion: "story-native-v3" | "story-native-v2") => resolveGenerationResponseContractsV2({
+      queuedPolicy: modelPolicy, capabilityEvidenceHash: evidenceHash,
+      eligible: (operation, streaming, schema) => schemaVersion === "story-native-v2" && operation === "story" && schema.version === "story-native-v3"
+        ? { status: "unsupported", reason: "schema_incompatible", verification: null }
+        : verifiedEligibility(operation, streaming, schema)
+    });
+
+    const run = async (schemaVersion: "story-native-v3" | "story-native-v2") => {
+      const job = completeGenerationExecutionPayload();
+      job.orchestration_private = { frozenResponseContracts: frozenContractsFor(schemaVersion) } as never;
+      const output = JSON.stringify({ narration: "Fine.", choices: ["A", "B", "C", "D"],
+        custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
+        canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
+      const provider = { id: claim.providerProfileId, name: "Encoding fixture", providerRole: "text" as const,
+        providerType: "openai_compatible" as const, model: "test-model", endpointIdentity: "endpoint",
+        contextWindowTokens: 20_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+        execute: vi.fn(async (dispatchedRequest: any) => {
+          const preparedRequest = serializeProviderRequest({ ...provider, baseUrl: "" }, dispatchedRequest);
+          return { content: output, responseId: "main", finishReason: "stop", outputLimited: false, modelInstanceId: "instance",
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null, rawMetadata: {}, preparedRequest };
+        }) };
+      const repository = {
+        loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+        saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true), saveStreamingSegments: vi.fn(async () => true),
+        recordAttempt: vi.fn(async () => undefined), markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true),
+        markCommitting: vi.fn(async () => true), commitAcceptedTurn: vi.fn(async () => ({ turnId: "turn" })), markFailed: vi.fn(async () => true),
+        pauseForReview: vi.fn(async () => true),
+        reserveResponseContractInvocation: vi.fn(async (_scope: unknown, input: any) => ({ id: "b".repeat(64), status: "reserved", ...input })),
+        markResponseContractInvocationDispatched: vi.fn(async (_scope: unknown, id: string) => ({ id, status: "dispatched" })),
+        completeResponseContractInvocation: vi.fn(async (_scope: unknown, id: string, response: unknown) => ({ id, status: "completed", response }))
+      } as unknown as GenerationExecutionRepository;
+      const collaborators = {
+        memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
+        illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
+        promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."), recordProfileCost: vi.fn(async () => undefined),
+        attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+      } as unknown as GenerationExecutionCollaborators;
+      await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+        .execute({ workerId: `encoding-${schemaVersion}`, leaseSeconds: 30, claim })).resolves.toBe(true);
+      expect(repository.markRecoverable).not.toHaveBeenCalled();
+      expect(repository.markFailed).not.toHaveBeenCalled();
+      const dispatched = (provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+        systemPrompt: string;
+        responseContract?: { mode: string; schemaVersion?: string | null; schemaHash?: string | null };
+      };
+      const resolvedResponse = await (provider.execute as ReturnType<typeof vi.fn>).mock.results[0]!.value as {
+        preparedRequest: { body: string; payloadHash: string };
+      };
+      return { systemPrompt: dispatched.systemPrompt, responseContract: dispatched.responseContract, preparedRequest: resolvedResponse.preparedRequest };
+    };
+
+    const v3 = await run("story-native-v3");
+    expect(v3.systemPrompt).toBe(`Write a concise fictional scene.\n\n${STORY_OUTPUT_ENCODING_CONTRACT_V3}`);
+
+    const v2 = await run("story-native-v2");
+    expect(v2.systemPrompt).toBe("Write a concise fictional scene.");
+    expect(v2.systemPrompt).not.toContain(STORY_OUTPUT_ENCODING_CONTRACT_V3);
+
+    // Task 8 Step 3: a job already frozen on story-native-v2 must keep dispatching
+    // byte-identical requests after this deployment. Confirm the v2 job's bound
+    // schema is still the exact pre-existing catalog entry (same hash/version,
+    // untouched by the new v3 registry addition)...
+    expect(v2.responseContract).toMatchObject({
+      mode: "json_schema",
+      schemaVersion: "story-native-v2",
+      schemaHash: getProviderOutputSchemaV2("story", "story-native-v2").schemaHash
+    });
+    // ...and, decisively, that the current code's serialized request for this
+    // exact fixture is byte-identical to the request the PRE-BRANCH code
+    // (commit f69785f4) actually produced for the same fixture. This compares
+    // against a real historical artifact, not against another run of today's
+    // code, so it would catch a deterministic-but-different regression that a
+    // same-code double-run could never detect.
+    expect(v2.preparedRequest.body.length).toBe(TASK8_GOLDEN_V2_BODY_LENGTH);
+    expect(v2.preparedRequest.body).toBe(TASK8_GOLDEN_V2_BODY);
+    expect(v2.preparedRequest.payloadHash).toBe(TASK8_GOLDEN_V2_PAYLOAD_HASH);
+  });
+
+  it("composes a preset route's v3 primary system prompt as preset, then writer, then the encoding contract last", () => {
+    // Reproduces the executor's exact primary-prompt composition (lines around
+    // generation-executor-adapter.ts's input_preparation phase): first
+    // composeEffectiveStorySystemPrompt (writer prompt, no contract yet), then
+    // appendStoryOutputEncodingContract (contract last), then
+    // deriveTextExecutionPlan (preset prepended). Appending the v3 contract
+    // directly to routeBasis.presetSystemPrompt instead would skip the writer
+    // prompt entirely and prove freeze/persistence but not this order.
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "v1", configHash: "f".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "Use spare prose.", parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000,
+      protocolVersion: "route-basis-v2"
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    const writerPrompt = "Write a concise fictional scene.";
+    const composedWriterSystemPrompt = composeEffectiveStorySystemPrompt({
+      writerPrompt, storyOnlyPolicy: null, storyMemoryPromptProtocol: null, encodingContract: ""
+    });
+    const storyBaseSystemPrompt = appendStoryOutputEncodingContract(composedWriterSystemPrompt, STORY_OUTPUT_ENCODING_CONTRACT_V3);
+    const composedSystemPrompt = deriveTextExecutionPlan(routeBasis, storyBaseSystemPrompt).prompt;
+
+    expect(composedSystemPrompt).toBe(`Use spare prose.\n\n${writerPrompt}\n\n${STORY_OUTPUT_ENCODING_CONTRACT_V3}`);
+    expect(composedSystemPrompt.indexOf("Use spare prose.")).toBe(0);
+    expect(composedSystemPrompt.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
   });
 });
 

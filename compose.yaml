@@ -22,6 +22,10 @@ services:
   infinitequest-app:
     build:
       context: .
+      args:
+        NEXUS_BUILD_COMMIT: ${NEXUS_BUILD_COMMIT:-}
+        NEXUS_BUILD_DIRTY: ${NEXUS_BUILD_DIRTY:-unknown}
+        NEXUS_BUILD_DATE: ${NEXUS_BUILD_DATE:-}
     image: infinitequest-nexus:local
     environment:
       APP_ROLE: all

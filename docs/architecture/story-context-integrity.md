@@ -71,9 +71,12 @@ Recovery requests are self-contained. They may include a complete, explicitly
 untrusted rejected draft, but never a prefix presented as an outcome. They do
 not send `previous_response_id`; response IDs remain diagnostics only. Prompt
 overrides preserve editable creative text while the protocol's required wire
-shape and authority requirements remain non-overridable. An incompatible
-override must be acknowledged against the current protocol and otherwise gives
-an actionable compatibility notice; the service never rewrites the override.
+shape and authority requirements remain non-overridable. Compatibility is
+keyed to the local output shape version and a content hash, derived and
+stored automatically when the override is saved
+([ADR 0039](0039-implicit-prompt-override-acknowledgement.md)); an
+incompatible override gives an actionable compatibility notice and the
+service never rewrites the override.
 
 ## Durable execution
 

@@ -1755,7 +1755,7 @@ integration("T17 durable continuity review", () => {
     }));
     await expect(pool.query<{ basis: { preset: { slug: string }; parameters: { temperature: number }; candidates: Array<{ modelId: string }> } }>(
       "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [job.id]
-    )).resolves.toMatchObject({ rows: [{ basis: { preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
+    )).resolves.toMatchObject({ rows: [{ basis: { protocolVersion: "story-openrouter-preset-v2", preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
 
     reviewVerdict = deadline ? "pass" : "conflict";
     const repository = createPostgresGenerationExecutionRepository(pool);
@@ -1811,8 +1811,10 @@ integration("T17 durable continuity review", () => {
     expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
     for (const [input] of preparedTextExecutor.mock.calls) {
       expect(input.request.systemPrompt).toBe(input.plan.prompt);
-      expect(input.plan.prompt).toContain("Native frozen preset instruction.");
+      expect(input.plan.prompt).not.toContain("Native frozen preset instruction.");
+      expect(input.plan.candidates[0]!.modelId).toBe("@preset/keep");
       expect(input.preparedRequest?.body).toBeDefined();
+      expect(JSON.parse(input.preparedRequest!.body).model).toBe("@preset/keep");
     }
     const durableNativeRequests = (await pool.query<{
       orchestrationPrivate: { primaryReservation: { requestBody: string }; primaryResult: { contextDiagnostics: { requestTokens: number } }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
@@ -2280,6 +2282,7 @@ integration("T17 durable continuity review", () => {
       const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
       expect(saved.contextDiagnostic).toMatchObject({ code: "context_budget_exceeded", operation: "story_continuity_review", scope: "provider_request", requiredTokens: expect.any(Number), availableTokens: 20_000 });
       expect(saved.contextDiagnostic.requiredTokens).toBeGreaterThan(20_000);
+      expect(saved.continuityReview).toMatchObject({ verdict: "unavailable", unavailableReason: "context_budget_exceeded" });
       expect(saved.generationReview.gateCandidate.story).toEqual(saved.validatedMainDraft.story);
       expect(saved.generationReview.gateCandidate.story.narration.replace(/\s+/g, " ")).toBe(primaryNarration);
       expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [campaignId])).rows[0].count).toBe(before);
@@ -2305,7 +2308,7 @@ integration("T17 durable continuity review", () => {
     await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: mode === "observe" ? "completed" : "recoverable" });
     const saved = (await pool.query("SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id])).rows[0].orchestration_private;
-    expect(saved.continuityReview).toMatchObject({ verdict: "unavailable", binding: { manifestHash: null } });
+    expect(saved.continuityReview).toMatchObject({ verdict: "unavailable", binding: { manifestHash: null }, unavailableReason: "evidence_unavailable" });
     expect(requests).toHaveLength(1);
     expect(acceptedImages).toHaveBeenCalledTimes(mode === "observe" ? 1 : 0);
   });

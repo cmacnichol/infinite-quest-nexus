@@ -7,6 +7,32 @@ export const PREVIOUS_STORY_PROMPT_PROTOCOL_VERSION = "story-v15-canonical-fact-
 /** The immutable story wire contract shared by newly queued prompts and the engine. */
 export const STORY_PROMPT_PROTOCOL_VERSION = "story-v16-fact-wire-distinction";
 export const STORY_PROMPT_SCHEMA_VERSION = "story-output-v2";
+/** Wire-only Story schema: narration arrives as paragraphs and is joined at the provider boundary. */
+export const STORY_PARAGRAPH_WIRE_SCHEMA_VERSION = "story-native-v3";
+
+/**
+ * Application-owned output-encoding rule for story-native-v3 jobs. This is composed onto
+ * the system prompt at the executor boundary so it reaches every Story system prompt
+ * without editing campaign overrides, and takes precedence over any override example.
+ */
+export const STORY_OUTPUT_ENCODING_CONTRACT_V3 = [
+  "Output encoding contract (story-native-v3). This contract takes precedence over any earlier instruction or example that shows a narration string, escaped quotation marks, or \\n paragraph separators.",
+  "Return the narration as narration_paragraphs: an ordered JSON array of strings with one paragraph per item. Do not return a narration field.",
+  "Start a new item for every change of speaker, scene transition, or meaningful shift in focus. One-line dialogue items are valid.",
+  "Write every directly spoken utterance inside typographic quotation marks “ and ”. Never use straight double quotation marks or backslash escapes inside any string value. Use the typographic apostrophe ’ where one is needed.",
+  "Thoughts, reported speech, and ordinary narration do not take dialogue quotation marks. Do not add dialogue to a solitary or nonverbal scene merely to use quotation marks.",
+  "When supplied narration must be preserved, return its paragraphs as separate items in the same order, with the same words."
+].join("\n");
+
+/** Returns the v3 encoding contract only when the job's frozen story schema is story-native-v3; otherwise "" so v2 prompts stay byte-identical. */
+export function storyOutputEncodingContract(storySchemaVersion: string | null | undefined): string {
+  return storySchemaVersion === STORY_PARAGRAPH_WIRE_SCHEMA_VERSION ? STORY_OUTPUT_ENCODING_CONTRACT_V3 : "";
+}
+
+/** Appends the encoding contract last, after every other composed instruction; a no-op when contract is "". */
+export function appendStoryOutputEncodingContract(systemPrompt: string, contract: string): string {
+  return contract ? `${systemPrompt}\n\n${contract}` : systemPrompt;
+}
 export const STORY_CONTEXT_POLICY_VERSION = "current-continuity-v2";
 /**
  * The Story Memory route is explicitly opted into by a frozen job policy.
@@ -56,7 +82,7 @@ export const STORY_MEMORY_MANDATORY_CONTRACT = [
 ].join("\n");
 
 export const STORY_PROSE_GUIDANCE = `Narration prose: Write natural, character-led fiction with clear, concrete language and varied sentence lengths. When characters can and would speak, let the scene unfold through believable conversation mixed with action and brief observation. Give each speaker vocabulary and rhythm consistent with their personality, relationship, and immediate situation. Use contractions, short replies, pauses, and occasional interruptions where they fit. Do not force dialogue into solitary or nonverbal scenes.
-When characters speak, write their words as direct dialogue enclosed in double quotation marks, rather than replacing the exchange with a summary or leaving spoken words unquoted. Start a new paragraph whenever the speaker changes. Keep speaker attribution clear through brief dialogue tags or accompanying action. Escape quotation marks correctly inside the JSON narration string so they remain visible in the decoded narration.
+When characters speak, write their words as direct dialogue enclosed in double quotation marks, rather than replacing the exchange with a summary or leaving spoken words unquoted. Start a new paragraph whenever the speaker changes. Keep speaker attribution clear through brief dialogue tags or accompanying action. Keep dialogue quotation marks visible in the returned narration; when an output encoding contract is supplied, follow the output encoding contract for which quotation marks and paragraph boundaries to use.
 Keep world atmosphere distinct from narrative delivery and individual character speech. A bleak or unsettling setting need not make every speaker detached or formal. Show emotion through speech, behavior, and specific perceptions without explaining every gesture. Keep introspection connected to the character's immediate situation.
 Use previous narration and retrieved history for facts and continuity. Preserve established character voice and cadence without copying repetitive sentence patterns. Keep purposeful repetition, hesitation, callbacks, and subtext when they reveal character or change an exchange. Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning. Break up excessive chains of independent clauses when they obscure meaning; allow ordinary conjunctions and flowing sentences.
 Plausible present-scene speech, reactions, and connective action may develop the requested events without inventing contradictory history, unsupported knowledge, motives, or durable canon commitments. Respect authoritative rules, continuity, and the requested scope; do not reduce a scene to a factual recap or invent developments merely to reach a word target.
@@ -80,7 +106,7 @@ Required shape:
   "open_threads": ["complete current unresolved goals, mysteries, promises, dangers, and planned payoffs"]
 }
 
-Format narration as readable prose paragraphs separated by two newline characters (\\n\\n). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
+Format narration as readable prose paragraphs; unless an output encoding contract says otherwise, separate them with a blank line (\\n\\n in the JSON string). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
 
 ${STORY_PROSE_GUIDANCE}
 

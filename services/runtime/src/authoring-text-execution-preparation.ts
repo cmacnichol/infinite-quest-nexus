@@ -69,6 +69,8 @@ export type PreparedAuthoringTextExecutor = Readonly<{
     trustedOperationPrompt?: string;
     /** Required by the production prepared executor; Task 5C binds non-Story callers. */
     logicalReservation?: LogicalReservation;
+    /** Header-only: sends X-OpenRouter-Cache: false; never alters the hashed body. */
+    bypassResponseCache?: boolean;
   }>): Promise<ProviderResult>;
 }>;
 

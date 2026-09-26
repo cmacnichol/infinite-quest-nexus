@@ -214,7 +214,8 @@ integration("standard database migration runner", () => {
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity",
+          "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -225,8 +226,11 @@ integration("standard database migration runner", () => {
       ]);
       const client = await isolatedPool.connect();
       try {
+        // The 0086 sentinel no longer blocks generation: compatibility is
+        // keyed to the output shape version and content hash, not the
+        // protocol identity it overwrites (ADR 0039, implicit acknowledgement).
         await expect(createPromptRepository(client).loadPromptSnapshot({ ownerUserId, scope: "application" }))
-          .rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+          .resolves.toMatchObject({ snapshot: { story_system: { content, source: "application" } } });
       } finally {
         client.release();
       }

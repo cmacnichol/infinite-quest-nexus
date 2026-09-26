@@ -3,6 +3,7 @@ export type ApplicationMetadata = {
   version: string;
   commit: string | null;
   builtAt: string | null;
+  dirty: boolean | null;
 };
 
 function optionalBuildValue(value: string | undefined): string | null {
@@ -17,6 +18,7 @@ export function applicationMetadata(environment: NodeJS.ProcessEnv = process.env
       || optionalBuildValue(environment.npm_package_version)
       || "0.1.0",
     commit: optionalBuildValue(environment.NEXUS_BUILD_COMMIT),
-    builtAt: optionalBuildValue(environment.NEXUS_BUILD_DATE)
+    builtAt: optionalBuildValue(environment.NEXUS_BUILD_DATE),
+    dirty: environment.NEXUS_BUILD_DIRTY === "true" ? true : environment.NEXUS_BUILD_DIRTY === "false" ? false : null
   };
 }

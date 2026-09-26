@@ -12,6 +12,7 @@ import type { StoryTurnOutput } from "../../contracts/src/story-prompt.js";
 import { stableStringify, stripMechanicsLeakage } from "../../domain/src/text.js";
 import { containsMechanicsLanguage, extractJsonObject } from "./output.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
+import { joinProviderNarration } from "./narration-paragraphs.js";
 
 export const RPG_ASSESSMENT_SYSTEM_PROMPT = `You are the private referee for a percentile adventure system.
 Return only one valid JSON object and no commentary.
@@ -216,16 +217,24 @@ export function buildEventExtensionPrompt(
   });
 }
 
+function quoteStyleInsensitive(value: string): string {
+  return value.replace(/[“”]/gu, "\"").replace(/[‘’]/gu, "'");
+}
+
 export function parseEventExtension(content: string, mainNarration: string) {
-  const extension = eventExtensionOutputSchema.parse(extractJsonObject(content));
+  const joined = joinProviderNarration(extractJsonObject(content));
+  if (!joined.ok) throw new Error(joined.error);
+  const extension = eventExtensionOutputSchema.parse(joined.value);
   const normalizedMainNarration = formatNarrationParagraphs(mainNarration);
   const normalizedNarration = formatNarrationParagraphs(extension.narration);
-  if (!normalizedNarration.startsWith(normalizedMainNarration)) {
+  if (!quoteStyleInsensitive(normalizedNarration).startsWith(quoteStyleInsensitive(normalizedMainNarration))) {
     throw new Error("Event extension rewrote the validated main narration.");
   }
-  const appendedNarration = normalizedNarration.slice(normalizedMainNarration.length).trim();
-  if (!appendedNarration) throw new Error("Event extension did not append fiction.");
-  const fields = [normalizedNarration, extension.scratchpad, extension.continuity_summary, extension.image_prompt, ...extension.open_threads, ...extension.canonical_facts, JSON.stringify(extension.tracker_updates)];
+  const suffix = normalizedNarration.slice(normalizedMainNarration.length);
+  if (!suffix.trim()) throw new Error("Event extension did not append fiction.");
+  // Accepted text keeps the validated prefix bytes followed by the model's own suffix exactly as emitted.
+  const narration = `${normalizedMainNarration}${suffix}`;
+  const fields = [narration, extension.scratchpad, extension.continuity_summary, extension.image_prompt, ...extension.open_threads, ...extension.canonical_facts, JSON.stringify(extension.tracker_updates)];
   if (fields.some(containsMechanicsLanguage)) throw new Error("Mechanics language detected in event extension.");
-  return { ...extension, narration: normalizedNarration };
+  return { ...extension, narration };
 }

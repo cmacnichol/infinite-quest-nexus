@@ -3,7 +3,8 @@ import type { GenerationExecutionPayload } from "../../packages/database/src/gen
 import { sha256 } from "../../packages/domain/src/index.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
-import { getProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import { getProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
+import type { ResponseFormatEligibilityV2 } from "../../packages/contracts/src/text-response-format.js";
 import {
   bindCampaignResponseContract,
   callCampaignTextProvider,
@@ -93,6 +94,57 @@ function v2FrozenContracts(key: `${Parameters<typeof getProviderOutputSchemaV2>[
     eligible: () => ({ status: "verified", reason: "verified", verification }),
     selectedAt: "2026-09-19T00:00:00.000Z", capabilityEvidenceHash: hash
   });
+}
+
+/** Minimal preset-trusted queued policy fixture: story only, both delivery modes. */
+const presetPolicy = {
+  version: 2 as const, policy: "required" as const, providerProfileId: "00000000-0000-4000-8000-000000000004",
+  admission: { mode: "json_schema" as const, basis: "preset_trusted" as const },
+  authority: {
+    kind: "preset_trusted" as const, routeBasisHash: hash,
+    selection: { kind: "openrouter_preset" as const, slug: "story-preset" },
+    endpointReference: "endpoint-ref", credentialReference: "credential-ref",
+    authorityRevision: "authority-v1", profileRevision: "profile-v1"
+  },
+  operationClosureVersion: 2 as const,
+  invocationKeys: ["story:nonstream", "story:stream"] as ("story:nonstream" | "story:stream")[]
+};
+
+/** Minimal model-verified queued policy fixture: story only, both delivery modes. */
+const modelPolicy = {
+  version: 2 as const, policy: "required" as const, providerProfileId: "00000000-0000-4000-8000-000000000004",
+  admission: { mode: "json_schema" as const, basis: "model_verified" as const, verification: {
+    version: 2 as const, providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a",
+    routeConfigHash: hash, adapterProtocol: "text-schema-adapter-v2" as const, operation: "story" as const,
+    schemaHash: getProviderOutputSchemaV2("story").schemaHash, streaming: false,
+    verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+    providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: true
+  } },
+  authority: {
+    kind: "model_verified" as const, providerProfileId: "00000000-0000-4000-8000-000000000004",
+    providerType: "openrouter" as const, endpointIdentity: "endpoint", model: "model-a",
+    providerConfigurationHash: hash, routeConfigHash: hash, verificationRegistryHash: hash,
+    authorityRevision: "authority-v1"
+  },
+  operationClosureVersion: 2 as const,
+  invocationKeys: ["story:nonstream", "story:stream"] as ("story:nonstream" | "story:stream")[]
+};
+
+/** Matches the `{ status: "verified", verification }` shape the model-verified fixtures above build. */
+function verifiedEligibility(
+  operation: Parameters<typeof getProviderOutputSchemaV2>[0],
+  streaming: boolean,
+  schema: ProviderOutputSchemaV2
+): ResponseFormatEligibilityV2 {
+  return {
+    status: "verified", reason: "verified",
+    verification: {
+      version: 2, providerType: "openrouter", endpointIdentity: "endpoint", model: "model-a",
+      routeConfigHash: hash, adapterProtocol: "text-schema-adapter-v2", operation, schemaHash: schema.schemaHash,
+      streaming, verifiedAt: "2026-09-18T00:00:00.000Z", expiresAt: "2026-09-20T00:00:00.000Z",
+      providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: schema.requiresOpenTrackerObjects
+    }
+  };
 }
 
 function auditLedger() {
@@ -202,5 +254,36 @@ describe("generation response-contract executor operation matrix", () => {
     await expect(callCampaignTextProvider(dependencies(ledger), textProvider, job(), "story_generation", request()))
       .rejects.toMatchObject({ code: "response_contract_unavailable" });
     expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, "story-openrouter-preset-v1"])("preserves v2 when first selecting a historical queued preset closure (%s)", (routeProtocolVersion) => {
+    const frozen = resolveGenerationResponseContractsV2({
+      queuedPolicy: presetPolicy, ...(routeProtocolVersion !== undefined ? { routeProtocolVersion } : {}), capabilityEvidenceHash: "0".repeat(64)
+    });
+    expect(frozen.contracts["story:stream"]?.schemaVersion).toBe("story-native-v2");
+    expect(frozen.contracts["story:nonstream"]?.schemaVersion).toBe("story-native-v2");
+  });
+
+  it("freezes story-native-v3 for new preset routes and keeps v2 for direct models verified only for v2", () => {
+    const preset = resolveGenerationResponseContractsV2({ queuedPolicy: presetPolicy, routeProtocolVersion: "story-openrouter-preset-v2", capabilityEvidenceHash: "0".repeat(64) });
+    expect(preset.contracts["story:stream"]?.schemaVersion).toBe("story-native-v3");
+    expect(preset.contracts["story:nonstream"]?.schemaVersion).toBe("story-native-v3");
+    const direct = resolveGenerationResponseContractsV2({
+      queuedPolicy: modelPolicy, capabilityEvidenceHash: "0".repeat(64),
+      eligible: (operation, streaming, schema) => operation === "story" && schema.version === "story-native-v3"
+        ? { status: "unsupported", reason: "schema_incompatible", verification: null }
+        : verifiedEligibility(operation, streaming, schema)
+    });
+    expect(direct.contracts["story:stream"]?.schemaVersion).toBe("story-native-v2");
+    expect(direct.contracts["story:nonstream"]?.schemaVersion).toBe("story-native-v2");
+  });
+
+  it("throws when no registered story version verifies for a direct model", () => {
+    expect(() => resolveGenerationResponseContractsV2({
+      queuedPolicy: modelPolicy, capabilityEvidenceHash: "0".repeat(64),
+      eligible: (operation, streaming, schema) => operation === "story"
+        ? { status: "unsupported", reason: "schema_incompatible", verification: null }
+        : verifiedEligibility(operation, streaming, schema)
+    })).toThrow(/does not have a verified response contract/i);
   });
 });

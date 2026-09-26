@@ -1,4 +1,5 @@
-import { assertContinuityReviewPromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
+import { z } from "zod";
+import { assertContinuityReviewPromptSnapshot, CONTINUITY_REPAIR_PROTOCOL_V2 } from "../../../packages/contracts/src/prompt-library.js";
 import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../../packages/contracts/src/story-prompt.js";
 import { generationEvidenceManifestHash, generationEvidenceManifestSchema, type GenerationEvidenceManifest } from "../../../packages/application/src/memory/generation-context.js";
 import type { StoryTurnOutput } from "../../../packages/contracts/src/story-prompt.js";
@@ -15,6 +16,32 @@ import type { RuntimeTextExecution } from "./provider-credential-transport-adapt
 export class ContinuityReviewUnavailableError extends Error {
   readonly code = "continuity_review_unavailable";
   constructor() { super("continuity_review_unavailable: the complete bound review could not be prepared or verified."); }
+}
+
+/** Why a continuity review checkpoint could not reach a verdict. Recorded
+ * alongside `verdict: "unavailable"` so a durable row is diagnosable without
+ * live logs. Production evidence: unavailable rows previously carried no
+ * reason at all, so the cause could not be told apart after the fact. */
+export type ContinuityReviewUnavailableReason =
+  | "context_budget_exceeded"
+  | "provider_failed"
+  | "invalid_output"
+  | "evidence_unavailable";
+
+/** Classifies a caught continuity-review error into its durable reason.
+ * `code === "continuity_review_unavailable"` is treated the same as the
+ * `ContinuityReviewUnavailableError` class: both mark evidence that could not
+ * be bound or verified, whether raised by this adapter's own class or by an
+ * ad-hoc `Object.assign(new Error(...), { code })` at a call site. */
+export function continuityReviewUnavailableReason(error: unknown): ContinuityReviewUnavailableReason {
+  if (error instanceof ContextBudgetError) return "context_budget_exceeded";
+  const code = typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : null;
+  if (error instanceof ContinuityReviewUnavailableError || code === "continuity_review_unavailable") return "evidence_unavailable";
+  if (error instanceof z.ZodError || error instanceof SyntaxError) return "invalid_output";
+  return "provider_failed";
 }
 function castAuthorityContract(protocolIdentity: string | undefined, manifest: GenerationEvidenceManifest): string {
   const enabled = protocolIdentity === castStoryMemoryPromptCompatibilityIdentity();
@@ -51,6 +78,10 @@ export function prepareContinuityRepair(input: Readonly<{
   provider: RuntimeTextExecution; manifest: GenerationEvidenceManifest; promptSnapshot: unknown;
   direction: string; rejectedDraft: StoryTurnOutput; originalMain?: StoryTurnOutput; scope?: "main" | "extension_only";
   findings: unknown; effectiveContextWindowTokens?: number; responseContract?: PreparedResponseContract;
+  /** The frozen v3 output-encoding contract for this job, or "" for v2/absent. Appended after the repair boundary contract. */
+  encodingContract?: string;
+  /** The composed writer system prompt (without the encoding contract). Required when the frozen repair identity is v2. */
+  writerSystemPrompt?: string;
   prepareSystemPrompt?: (operationPrompt: string) => PreparedContinuitySystemPrompt;
   /** Applies a frozen operation contract before this helper measures its body. */
   bindRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => ProviderRequest;
@@ -72,7 +103,12 @@ export function prepareContinuityRepair(input: Readonly<{
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
   const prepare = (entries: GenerationEvidenceManifest["entries"]): PreparedContinuityRepair | null => {
     const systemPrompt = prepareSystemPrompt(
-      `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.${castContract}`,
+      (() => {
+        const repairOperation = `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.${castContract}${input.encodingContract ? `\n\n${input.encodingContract}` : ""}`;
+        if (repairPrompt.protocolIdentity !== CONTINUITY_REPAIR_PROTOCOL_V2) return repairOperation;
+        if (!input.writerSystemPrompt?.trim()) throw new ContinuityReviewUnavailableError();
+        return `${input.writerSystemPrompt}\n\nContinuity repair task:\n${repairOperation}`;
+      })(),
       input.prepareSystemPrompt
     );
     const unboundRequest: ProviderRequest = {

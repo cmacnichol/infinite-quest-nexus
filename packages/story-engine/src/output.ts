@@ -5,11 +5,14 @@ import {
 } from "../../contracts/src/generation.js";
 import { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "./narration-formatting.js";
+import { extractPartialNarrationParagraphs, isNarrationParagraphsComplete, joinProviderNarration } from "./narration-paragraphs.js";
+import { narrationFormatSignals, type NarrationFormatSignals } from "./narration-format-signals.js";
+import { unescapeJsonString } from "./json-unescape.js";
 
 export { containsMechanicsLanguage, mechanicsLanguageMatches } from "../../domain/src/text.js";
 
 export type StoryParseResult =
-  | { ok: true; story: StoryTurnOutput }
+  | { ok: true; story: StoryTurnOutput; formatSignals?: NarrationFormatSignals }
   | { ok: false; code: "invalid_json" | "invalid_schema" | "mechanics_leak"; errors: string[] };
 
 export type StoryMemoryDefaults = {
@@ -44,25 +47,12 @@ export function extractJsonObject(content: string): unknown {
   throw new SyntaxError("The JSON object ended before its closing brace.");
 }
 
-function unescapeJsonString(str: string): string {
-  let cleaned = str.replace(/\\(?:u[0-9a-fA-F]{0,3}|[0-9a-fA-F]{0,3})?$/u, "");
-  if (cleaned.endsWith("\\")) cleaned = cleaned.slice(0, -1);
-  return cleaned
-    .replace(/\\u([0-9a-fA-F]{4})/gu, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\\n/gu, "\n")
-    .replace(/\\r/gu, "\r")
-    .replace(/\\t/gu, "\t")
-    .replace(/\\"/gu, '"')
-    .replace(/\\\\/gu, "\\")
-    .replace(/\\\//gu, "/")
-    .replace(/\\b/gu, "\b")
-    .replace(/\\f/gu, "\f");
-}
-
 export function extractPartialNarration(content: string): string {
   const raw = String(content ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
   if (!raw) return "";
   if (raw.startsWith("{")) {
+    const paragraphs = extractPartialNarrationParagraphs(raw);
+    if (paragraphs !== null) return containsMechanicsLanguage(paragraphs) ? "" : paragraphs;
     const match = /["']narration["']\s*:\s*"/i.exec(raw);
     if (!match) return "";
     const start = match.index + match[0].length;
@@ -91,6 +81,7 @@ export function extractPartialNarration(content: string): string {
 
 export function isNarrationFieldComplete(raw: string): boolean {
   if (!raw || !raw.startsWith("{")) return false;
+  if (/["']narration_paragraphs["']\s*:\s*\[/.test(raw)) return isNarrationParagraphsComplete(raw);
   const match = /["']narration["']\s*:\s*"/i.exec(raw);
   if (!match) return false;
   const start = match.index + match[0].length;
@@ -189,7 +180,9 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
   } catch (error) {
     return { ok: false, code: "invalid_json", errors: [error instanceof Error ? error.message : String(error)] };
   }
-  const validated = storyTurnOutputSchema.safeParse(normalizeProviderStoryOutput(parsed));
+  const joined = joinProviderNarration(parsed);
+  if (!joined.ok) return { ok: false, code: "invalid_schema", errors: [joined.error] };
+  const validated = storyTurnOutputSchema.safeParse(normalizeProviderStoryOutput(joined.value));
   if (!validated.success) {
     return { ok: false, code: "invalid_schema", errors: validated.error.issues.map((issue) => `${issue.path.join(".") || "response"}: ${issue.message}`) };
   }
@@ -199,7 +192,7 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
   };
   const leakErrors = mechanicsLeakErrors(story);
   if (leakErrors.length) return { ok: false, code: "mechanics_leak", errors: leakErrors };
-  return { ok: true, story };
+  return { ok: true, story, formatSignals: narrationFormatSignals(validated.data.narration, story.narration) };
 }
 
 /**
@@ -209,11 +202,13 @@ export function parseStoryOutput(content: string, memoryDefaults: StoryMemoryDef
 export function parseHistoricalStoryOutput(content: string, memoryDefaults: StoryMemoryDefaults = {}): StoryParseResult {
   let parsed: unknown;
   try {
-    parsed = normalizeHistoricalStoryOutput(extractJsonObject(content), memoryDefaults);
+    parsed = extractJsonObject(content);
   } catch (error) {
     return { ok: false, code: "invalid_json", errors: [error instanceof Error ? error.message : String(error)] };
   }
-  const validated = storyTurnOutputHistoricalSchema.safeParse(parsed);
+  const joined = joinProviderNarration(parsed);
+  if (!joined.ok) return { ok: false, code: "invalid_schema", errors: [joined.error] };
+  const validated = storyTurnOutputHistoricalSchema.safeParse(normalizeHistoricalStoryOutput(joined.value, memoryDefaults));
   if (!validated.success) {
     return { ok: false, code: "invalid_schema", errors: validated.error.issues.map((issue) => `${issue.path.join(".") || "response"}: ${issue.message}`) };
   }

@@ -9,6 +9,7 @@ import {
   promptTemplateOverrideSchema,
   sampleValuesForPrompt,
   legacyPromptTemplateKeys,
+  RETIRED_PROMPT_TEMPLATE_KEYS,
   type PromptSnapshotV2,
   type PromptSnapshot,
   type PromptTemplateKey,
@@ -16,11 +17,18 @@ import {
 } from "../../contracts/src/prompt-library.js";
 import {
   STORY_PROMPT_PROTOCOL_VERSION,
+  STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  STORY_OUTPUT_ENCODING_CONTRACT_V3,
+  STORY_PROMPT_SCHEMA_VERSION,
   castStoryMemoryPromptCompatibilityIdentity,
+  storyPromptCompatibilityIdentity,
   storyPromptProtocolIdentity
 } from "../../contracts/src/story-prompt.js";
+import { textModelSelectionSchema } from "../../contracts/src/provider-selection.js";
 import type {
   PromptLibraryPort,
+  PromptPreviewView,
   PromptScope,
   PromptSnapshotVersion
 } from "../../application/src/providers/index.js";
@@ -29,7 +37,9 @@ import {
   buildEventTriggerPrompt,
   buildRpgAssessmentPrompt,
   buildSceneCoveragePrompt,
-  buildStoryUserPrompt
+  buildStoryUserPrompt,
+  composeEffectiveStorySystemPrompt,
+  storyOnlyPromptSnapshot
 } from "../../story-engine/src/index.js";
 import type { DatabaseClient } from "./pool.js";
 
@@ -64,9 +74,15 @@ async function assertCampaignOwner(database: DatabaseClient, ownerUserId: string
 
 /** The library must describe the acknowledgement that its selected campaign
  * will actually need at enqueue time.  This is an eligibility check only; it
- * never reads a mutable policy from a queued generation. */
+ * never reads a mutable policy from a queued generation.
+ *
+ * Compatibility is keyed on the local output shape version and a content
+ * hash, not the prompt-protocol identity (ADR 0039): saving an override
+ * derives and stores that acknowledgement automatically. This mode only
+ * selects which enqueue path (Story Memory or legacy) a campaign will
+ * exercise; every campaign is enrolled on creation (migration 0112). */
 async function promptCompatibilityMode(database: DatabaseClient, scope: PromptScope): Promise<PromptCompatibilityMode> {
-  if (scope.scope !== "campaign") return "legacy";
+  if (scope.scope !== "campaign") return "story_memory";
   const enrollment = await database.query(
     `SELECT 1 FROM campaign_story_memory_enrollments
       WHERE campaign_id=$1 AND owner_user_id=$2`,
@@ -86,28 +102,25 @@ async function invalidateModelChains(database: DatabaseClient, scope: PromptScop
   );
 }
 
-function acknowledgementMatches(
-  row: OverrideRow,
-  requirement: NonNullable<ReturnType<typeof promptCompatibilityRequirement>>
-): boolean {
-  return row.compatibility_required_shape_version === requirement.requiredShapeVersion
-    && row.compatibility_protocol_identity === requirement.protocolIdentity
+/** Compatibility follows the local output shape the override was saved
+ * against, not the prompt protocol: strict provider schemas, appended
+ * application contracts and local validation own the wire shape, so a
+ * protocol bump alone never invalidates a saved creative prompt. */
+function overrideIsCompatible(row: OverrideRow): boolean {
+  if (!(legacyPromptTemplateKeys as readonly string[]).includes(row.prompt_key)) return true;
+  if (!promptCompatibilityRequirement(row.prompt_key as PromptTemplateKey)) return true;
+  return row.compatibility_required_shape_version === STORY_PROMPT_SCHEMA_VERSION
     && row.compatibility_content_hash === hash(row.content);
 }
 
-function overrideIsCompatible(row: OverrideRow, mode: PromptCompatibilityMode): boolean {
-  if (!(legacyPromptTemplateKeys as readonly string[]).includes(row.prompt_key)) return true;
-  const legacyRequirement = promptCompatibilityRequirement(row.prompt_key as PromptTemplateKey);
-  if (!legacyRequirement) return true;
-  if (mode === "story_memory") {
-    const storyMemoryRequirement = storyMemoryPromptCompatibilityRequirement(row.prompt_key as PromptTemplateKey);
-    return storyMemoryRequirement !== null && acknowledgementMatches(row, storyMemoryRequirement);
-  }
-  // A v14 acknowledgement is stricter for the same output schema and leaves
-  // the editable creative text intact, so existing v13 generation may use it.
-  return acknowledgementMatches(row, legacyRequirement)
-    || (storyMemoryPromptCompatibilityRequirement(row.prompt_key as PromptTemplateKey) !== null
-      && acknowledgementMatches(row, storyMemoryPromptCompatibilityRequirement(row.prompt_key as PromptTemplateKey)!));
+function incompatibleOverrideError(row: OverrideRow) {
+  const scopeLabel = row.campaign_id ? "campaign scope" : "application scope";
+  return Object.assign(new Error(
+    `The saved ${row.prompt_key} prompt override (${scopeLabel}) was written for an earlier output shape or was edited outside the Prompt Library. Re-save it in the Prompt Library before generation can run.`
+  ), {
+    statusCode: 409,
+    code: "prompt_override_incompatible"
+  });
 }
 
 async function resolveSnapshot(
@@ -128,21 +141,16 @@ async function resolveSnapshot(
   const campaign = new Map<PromptCatalogKey, OverrideRow>();
   for (const row of result.rows) {
     if (!(legacyPromptTemplateKeys as readonly string[]).includes(row.prompt_key)) continue;
-    if (mode === "legacy" && enforceCompatibility && !overrideIsCompatible(row, mode)) {
-      throw Object.assign(new Error("A saved prompt override must be acknowledged for the current required output shape before generation can run."), {
-        statusCode: 409,
-        code: "prompt_override_incompatible"
-      });
+    if (mode === "legacy" && enforceCompatibility && !overrideIsCompatible(row)) {
+      throw incompatibleOverrideError(row);
     }
     (row.campaign_id ? campaign : application).set(row.prompt_key, row);
   }
   return Object.fromEntries(legacyPromptTemplateKeys.map((key) => {
     const definition = PROMPT_TEMPLATE_CATALOG[key];
     const effective = campaign.get(definition.key) ?? application.get(definition.key);
-    if (mode === "story_memory" && enforceCompatibility && effective && !overrideIsCompatible(effective, mode)) {
-      throw Object.assign(new Error("The effective prompt override requires compatibility acknowledgement."), {
-        statusCode: 409, code: "prompt_override_incompatible"
-      });
+    if (mode === "story_memory" && enforceCompatibility && effective && !overrideIsCompatible(effective)) {
+      throw incompatibleOverrideError(effective);
     }
     const content = effective?.content ?? definition.defaultContent;
     const source = campaign.has(definition.key) ? "campaign" : application.has(definition.key) ? "application" : "shipped";
@@ -244,9 +252,98 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
   return preview;
 }
 
-export function createPromptRepository(database: DatabaseClient): PromptLibraryPort {
+type PromptPreviewOptions = Readonly<{ castContextEnabled?: boolean }>;
+
+/**
+ * Adds the effective (post-composition) writer system prompt to a story_system
+ * preview for a specific campaign, a note naming the Story Memory protocol
+ * source for an enrolled campaign, and a note when the campaign's text profile
+ * is a provider preset (its own system text is applied at dispatch, never shown
+ * here). This never calls a provider and never exposes credentials or preset
+ * text.
+ */
+async function withEffectiveStorySystemPreview(
+  database: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  content: string,
+  base: PromptPreviewView,
+  options: PromptPreviewOptions
+): Promise<PromptPreviewView> {
+  const campaignResult = await database.query<{ turn_control_style: string; text_provider_profile_id: string | null }>(
+    "SELECT turn_control_style,text_provider_profile_id FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+    [campaignId, ownerUserId]
+  );
+  const campaign = campaignResult.rows[0];
+  if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+
+  const enrollmentResult = await database.query(
+    "SELECT 1 FROM campaign_story_memory_enrollments WHERE campaign_id=$1 AND owner_user_id=$2",
+    [campaignId, ownerUserId]
+  );
+  const enrolled = enrollmentResult.rows.length > 0;
+  const storyMemoryPromptProtocol = enrolled
+    ? options.castContextEnabled === true ? CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION : STORY_MEMORY_PROMPT_PROTOCOL_VERSION
+    : null;
+
+  const providerResult = campaign.text_provider_profile_id
+    ? await database.query<{ text_selection: unknown }>(
+      "SELECT text_selection FROM provider_profiles WHERE id=$1 AND owner_user_id=$2 AND provider_role='text' AND enabled=true",
+      [campaign.text_provider_profile_id, ownerUserId]
+    )
+    : await database.query<{ text_selection: unknown }>(
+      "SELECT text_selection FROM provider_profiles WHERE owner_user_id=$1 AND provider_role='text' AND enabled=true ORDER BY is_default DESC,name,id LIMIT 1",
+      [ownerUserId]
+    );
+  const selection = textModelSelectionSchema.safeParse(providerResult.rows[0]?.text_selection);
+  const usesPreset = selection.success && selection.data.kind === "openrouter_preset";
+
+  const storyOnlyPolicy = campaign.turn_control_style === "flexible_scene"
+    ? { version: 1 as const, playMode: "story_only" as const, turnControlStyle: "flexible_scene" as const, protocolVersion: "story-only-v1" as const, prompts: storyOnlyPromptSnapshot() }
+    : null;
+  const storyPromptContractProtocol = !enrolled && content !== PROMPT_TEMPLATE_CATALOG.story_system.defaultContent
+    ? storyPromptCompatibilityIdentity()
+    : undefined;
+
+  // Presets use the preferred wire. Direct models select a verified wire at
+  // enqueue; this read-only repository has no capability evidence, so their
+  // preview explicitly leaves output encoding unresolved.
+  const effectiveContent = composeEffectiveStorySystemPrompt({
+    writerPrompt: content,
+    storyOnlyPolicy,
+    storyMemoryPromptProtocol,
+    ...(storyPromptContractProtocol ? { storyPromptContractProtocol } : {}),
+    encodingContract: usesPreset ? STORY_OUTPUT_ENCODING_CONTRACT_V3 : ""
+  });
+
+  const sections = [
+    ...base.sections,
+    { label: usesPreset ? "Effective system prompt" : "System prompt preview (output encoding pending)", role: "system" as const, content: effectiveContent },
+    ...(storyMemoryPromptProtocol ? [{
+      label: "Story Memory contract source",
+      role: "system" as const,
+      content: `Protocol ${storyMemoryPromptProtocol} from the current runtime settings.`
+    }] : []),
+    ...(usesPreset ? [{
+      label: "Preset system prompt (added at dispatch)",
+      role: "system" as const,
+      content: "Applied by the selected provider preset; not shown here."
+    }] : [{
+      label: "Paragraph-wire output contract",
+      role: "system" as const,
+      content: "Output encoding is selected when the turn is queued using the direct model's verified capabilities. This preview omits that contract; story-native-v3 adds paragraph-array and typographic-quotation rules."
+    }])
+  ];
+  return {
+    ...base,
+    sections,
+    estimatedTokens: Math.max(1, Math.ceil(sections.reduce((total, section) => total + section.content.length, 0) / 4))
+  };
+}
+
+export function createPromptRepository(database: DatabaseClient, previewOptions: PromptPreviewOptions = {}): PromptLibraryPort {
   const activeDefinition = (key: PromptCatalogKey) => {
-    if (key === "turn_intent") throw Object.assign(new Error("This historical prompt is unavailable."), { statusCode: 410, code: "turn_input_classification_removed" });
+    if (RETIRED_PROMPT_TEMPLATE_KEYS.has(key as PromptTemplateKey)) throw Object.assign(new Error("This historical prompt is unavailable."), { statusCode: 410, code: key === "turn_intent" ? "turn_input_classification_removed" : "prompt_template_retired" });
     return PROMPT_CATALOG[key];
   };
   async function loadPromptSnapshot(scope: PromptScope): Promise<PromptSnapshotVersion> {
@@ -271,7 +368,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
     return {
       catalogVersion: CATALOG_VERSION,
       campaignId: scope.scope === "campaign" ? scope.campaignId : null,
-      templates: Object.values(PROMPT_CATALOG).filter((definition) => definition.key !== "turn_intent").map((definition) => {
+      templates: Object.values(PROMPT_CATALOG).filter((definition) => !RETIRED_PROMPT_TEMPLATE_KEYS.has(definition.key as PromptTemplateKey)).map((definition) => {
         const frozen = displaySnapshot[definition.key];
         return ({
         key: definition.key,
@@ -291,14 +388,10 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
             ? storyMemoryPromptCompatibilityRequirement(definition.key as PromptTemplateKey)
             : promptCompatibilityRequirement(definition.key as PromptTemplateKey);
           if (!requirement) return null;
+          const override = acknowledgement.get(definition.key);
           return {
             ...requirement,
-            acknowledged: frozen.source === "shipped" || (() => {
-              const override = acknowledgement.get(definition.key);
-              return override?.compatibility_required_shape_version === requirement.requiredShapeVersion
-                && override.compatibility_protocol_identity === requirement.protocolIdentity
-                && override.compatibility_content_hash === frozen.hash;
-            })()
+            acknowledged: frozen.source === "shipped" || (override !== undefined && overrideIsCompatible(override))
           };
         })()
       }); })
@@ -314,8 +407,11 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         scope: "application"
       });
       activeDefinition(value.key);
-      if (!(legacyPromptTemplateKeys as readonly string[]).includes(value.key)) return buildPromptPreview("story_system", value.content);
-      return establishedPromptPreview(value.key as PromptTemplateKey, value.content);
+      const base = !(legacyPromptTemplateKeys as readonly string[]).includes(value.key)
+        ? buildPromptPreview("story_system", value.content)
+        : establishedPromptPreview(value.key as PromptTemplateKey, value.content);
+      if (value.key !== "story_system" || !request.campaignId) return base;
+      return withEffectiveStorySystemPreview(database, request.ownerUserId, request.campaignId, value.content, base, previewOptions);
     },
     async savePromptOverride(command) {
       const campaignId = command.scope === "campaign" ? command.campaignId : null;
@@ -327,24 +423,10 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         ...(command.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: command.compatibilityAcknowledgement })
       });
       activeDefinition(value.key);
-      const requirement = promptCompatibilityRequirement(value.key as PromptTemplateKey);
-      const storyMemoryRequirement = storyMemoryPromptCompatibilityRequirement(value.key as PromptTemplateKey);
-      const acknowledgement = value.compatibilityAcknowledgement;
-      const acknowledgementValid = !requirement || (!!acknowledgement && (
-        (acknowledgement.requiredShapeVersion === requirement.requiredShapeVersion
-          && acknowledgement.protocolIdentity === requirement.protocolIdentity
-          && acknowledgement.contentHash === hash(value.content))
-        || (storyMemoryRequirement !== null
-          && acknowledgement.requiredShapeVersion === storyMemoryRequirement.requiredShapeVersion
-          && acknowledgement.protocolIdentity === storyMemoryRequirement.protocolIdentity
-          && acknowledgement.contentHash === hash(value.content))
-      ));
-      if (!acknowledgementValid) {
-        throw Object.assign(new Error("Acknowledge the current required output shape for this exact prompt text before saving."), {
-          statusCode: 409,
-          code: "prompt_override_incompatible"
-        });
-      }
+      // The client's compatibilityAcknowledgement field (if sent) is parsed
+      // above for shape validation only; the stored acknowledgement is always
+      // derived here from the current requirement, never from client input.
+      const requirement = storyMemoryPromptCompatibilityRequirement(value.key as PromptTemplateKey);
       if (campaignId) await assertCampaignOwner(database, command.ownerUserId, campaignId);
       await database.query(
         `INSERT INTO prompt_template_overrides(owner_user_id,campaign_id,prompt_key,content,compatibility_required_shape_version,compatibility_protocol_identity,compatibility_content_hash,compatibility_acknowledged_at,updated_at)
@@ -352,7 +434,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
          ON CONFLICT(owner_user_id,campaign_id,prompt_key)
          DO UPDATE SET content=excluded.content,compatibility_required_shape_version=excluded.compatibility_required_shape_version,compatibility_protocol_identity=excluded.compatibility_protocol_identity,compatibility_content_hash=excluded.compatibility_content_hash,compatibility_acknowledged_at=excluded.compatibility_acknowledged_at,updated_at=now()`,
         [command.ownerUserId, campaignId, value.key, value.content,
-          acknowledgement?.requiredShapeVersion ?? null, acknowledgement?.protocolIdentity ?? null, acknowledgement?.contentHash ?? null]
+          requirement ? STORY_PROMPT_SCHEMA_VERSION : null, requirement?.protocolIdentity ?? null, requirement ? hash(value.content) : null]
       );
       await invalidateModelChains(database, command, value.key);
       return listPromptLibrary(command);
@@ -365,7 +447,10 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         scope: command.scope,
         ...(campaignId ? { campaignId } : {})
       });
-      activeDefinition(value.key);
+      // Resets remain allowed for retired keys so operators can delete stale
+      // rows (for example, campaign-scoped story_recovery_* overrides) even
+      // though preview and save reject them.
+      if (!RETIRED_PROMPT_TEMPLATE_KEYS.has(value.key as PromptTemplateKey)) activeDefinition(value.key);
       if (campaignId) await assertCampaignOwner(database, command.ownerUserId, campaignId);
       await database.query(
         `DELETE FROM prompt_template_overrides

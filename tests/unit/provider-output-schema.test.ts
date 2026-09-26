@@ -1,6 +1,13 @@
 import { Ajv } from "ajv";
 import { describe, expect, it } from "vitest";
-import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
+import {
+  findProviderOutputSchemaV2,
+  findProviderOutputSchemaV2ByHash,
+  getProviderOutputSchemaV2,
+  providerOutputSchemaVersionsV2,
+  selectProviderOutputSchemaV2
+} from "../../packages/contracts/src/provider-output-schema.js";
+import { storyTurnOutputSchema, STORY_PARAGRAPH_WIRE_SCHEMA_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { continuityReviewSchema } from "../../packages/contracts/src/story-continuity-review.js";
 import { sha256, stableStringify } from "../../packages/domain/src/text.js";
 import { buildContinuityReviewInput, validateContinuityReview } from "../../packages/story-engine/src/continuity-review.js";
@@ -160,5 +167,59 @@ describe("provider output schema registry", () => {
     expect(getProviderOutputSchema("choices").version).toBe("choices-v1");
     expect(getProviderOutputSchema("continuity_review").version).toBe("continuity-review-v1");
     expect(structuredOutputFactId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe("versioned v2 schema catalog", () => {
+  it("returns the preferred version by default and every registered version by name", () => {
+    const versions = providerOutputSchemaVersionsV2("story");
+    expect(versions.length).toBeGreaterThanOrEqual(1);
+    expect(getProviderOutputSchemaV2("story")).toBe(versions[0]);
+    for (const entry of versions) expect(getProviderOutputSchemaV2("story", entry.version)).toBe(entry);
+  });
+
+  it("keeps story-native-v2 addressable with its original hash", () => {
+    const legacy = findProviderOutputSchemaV2("story", "story-native-v2");
+    expect(legacy?.name).toBe("infinite_quest_story_native_v2");
+    // Pinned to the literal hash (verified unchanged pre/post branch), not just
+    // a hex-shaped regex, so a schema-changing regression fails this test.
+    expect(legacy?.schemaHash).toBe("10765575fa1c47721ba4f72f81d918edc2dbf6df288e952f84ae4f485bcc55d7");
+  });
+
+  it("rejects an unknown version", () => {
+    expect(findProviderOutputSchemaV2("story", "story-native-v999")).toBeUndefined();
+    expect(() => getProviderOutputSchemaV2("story", "story-native-v999")).toThrow(/Unknown story schema version/);
+  });
+
+  it("resolves a registered version from its schema hash for persisted evidence that only carries a hash", () => {
+    const preferred = getProviderOutputSchemaV2("story");
+    expect(findProviderOutputSchemaV2ByHash("story", preferred.schemaHash)).toBe(preferred);
+    expect(findProviderOutputSchemaV2ByHash("story", "f".repeat(64))).toBeUndefined();
+  });
+});
+
+describe("story-native-v3 paragraph wire schema", () => {
+  const v3 = getProviderOutputSchemaV2("story", STORY_PARAGRAPH_WIRE_SCHEMA_VERSION);
+  const validate = new Ajv({ strict: false, allErrors: true }).compile(v3.schema);
+  const base = makeStructuredOutputStory();
+  const { narration: _narration, ...withoutNarration } = base;
+
+  it("is preferred and requires narration_paragraphs instead of narration", () => {
+    expect(getProviderOutputSchemaV2("story").version).toBe(STORY_PARAGRAPH_WIRE_SCHEMA_VERSION);
+    expect(validate({ ...withoutNarration, narration_paragraphs: ["“Stay,” Mara says.", "You nod."] })).toBe(true);
+    expect(validate(base)).toBe(false);
+    expect(validate({ ...withoutNarration, narration_paragraphs: [] })).toBe(false);
+  });
+
+  it("carries no prose pattern on paragraph items", () => {
+    const items = (v3.schema as any).properties.narration_paragraphs.items;
+    expect(items.pattern).toBeUndefined();
+    expect(items.minLength).toBe(1);
+  });
+
+  it("selects the first acceptable version", () => {
+    expect(selectProviderOutputSchemaV2("story", () => true)?.version).toBe("story-native-v3");
+    expect(selectProviderOutputSchemaV2("story", (schema) => schema.version === "story-native-v2")?.version).toBe("story-native-v2");
+    expect(selectProviderOutputSchemaV2("story", () => false)).toBeNull();
   });
 });

@@ -154,9 +154,13 @@ this is used as a release procedure.
    runtime, worker, and both Story-interface builds.
 5. Check automatic Max enrollment and resolved operator settings while intake
    remains stopped. Existing custom creative prompt overrides retain their
-   bytes and still require v14 compatibility acknowledgement in the Prompt
-   Library; never automatically acknowledge or rewrite them. Use campaign
-   settings or the operator API for any deliberately reduced level.
+   bytes. They remain usable across prompt-protocol changes while the output
+   shape version is unchanged (ADR 0039); never rewrite them automatically. Use
+   campaign settings or the operator API for any deliberately reduced level.
+   After deploy, re-save the application story_system and event_extension
+   overrides once (this stamps the current Story Memory identity) before
+   removing any campaign copies, so a rollback to the previous image does not
+   block generation.
 6. Run copied-campaign canaries at 32k and at one larger window actually
    supported by the selected provider. A configured 2m or 4m campaign budget
    is not proof that a provider supports that request size. Inspect exact

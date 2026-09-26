@@ -37,33 +37,6 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="providerSelectionPreset"');
     expect(managementHtml).toContain('id="providerDefaultModel"');
   });
-  it.each(["application", "campaign"])("defaults prompt acknowledgement on in %s scope and preserves a manual uncheck", (scope) => {
-    const { document } = parseHTML(managementHtml);
-    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
-    Object.defineProperty(elements.promptLibraryScope, "value", { value: scope, configurable: true });
-    const template = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
-      effectiveSource: scope, effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
-    const functions = managementFunctions<{ renderPromptLibrary: (load?: boolean) => void; syncPromptLibraryAcknowledgement: () => void }>(
-      ["renderPromptLibrary", "syncPromptLibraryAcknowledgement"], {
-        document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
-        promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => scope === "campaign" ? "campaign-a" : "",
-        promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
-        requestAnimationFrame: () => {}
-      });
-    functions.renderPromptLibrary(true);
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-    elements.promptLibraryContent.value = "Changed instructions";
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-    elements.promptLibraryCompatibilityAcknowledgement.checked = false;
-    functions.renderPromptLibrary();
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(false);
-    functions.renderPromptLibrary(true);
-    expect(elements.promptLibraryContent.value).toBe("Saved instructions");
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-    template.compatibility.acknowledged = false;
-    functions.renderPromptLibrary(true);
-    expect(elements.promptLibraryCompatibilityAcknowledgement.checked).toBe(true);
-  });
   it("ignores an old campaign world response after another campaign is selected", async () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
@@ -502,6 +475,33 @@ describe("Nexus management UI contracts", () => {
     expect(managementCss).toContain(".prompt-library-toolbar label.hidden { display: none; }");
   });
 
+  it("sends the selected campaign to the effective-prompt preview only in campaign scope", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+    const template = { key: "story_system" };
+    const calls: Array<Record<string, unknown>> = [];
+    const api = vi.fn(async (_path: string, options: { body: string }) => {
+      calls.push(JSON.parse(options.body));
+      return { sections: [], unresolvedVariables: [], estimatedTokens: 0 };
+    });
+    const run = async (campaignId: string) => {
+      const functions = managementFunctions<{ renderPromptLibraryPreview: () => Promise<void> }>(
+        ["renderPromptLibraryPreview"], {
+          elements, api, promptLibrarySelectedTemplate: () => template,
+          promptLibraryPreviewVisible: true, promptLibraryPreviewSequence: 0,
+          promptLibraryCampaignId: () => campaignId
+        });
+      await functions.renderPromptLibraryPreview();
+    };
+
+    await run("campaign-a");
+    expect(calls[0]).toMatchObject({ key: "story_system", campaignId: "campaign-a" });
+
+    await run("");
+    expect(calls[1]).toMatchObject({ key: "story_system" });
+    expect(calls[1]).not.toHaveProperty("campaignId");
+  });
+
   it("explains every structured character field and the AI organizer on hover", () => {
     expect(managementHtml).toContain('id="organizeCharacterProfile"');
     expect(managementHtml).toContain("Uses the current profile, legacy guidance, and world lore, background, and canon");
@@ -707,7 +707,15 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="navPromptLibrary"');
     expect(managementHtml).toContain('id="promptLibraryScope"');
     expect(managementHtml).toContain('id="promptLibraryContent"');
-    expect(managementScript).not.toContain("refinementPrompt: illustrationRefinementPromptValue");
+    expect(managementHtml).toContain("The AI refinement prompt is edited in the Prompt Library (Illustration refinement), where campaign overrides apply to every segment job.");
+    expect(managementHtml).not.toContain('<textarea id="illustrationRefinementPrompt"');
+    expect(managementHtml).not.toContain('id="illustrationPromptDialog"');
+    expect(managementScript).not.toContain("function renderIllustrationPromptSummary()");
+    expect(managementScript).not.toContain("Using the default refinement prompt.");
+    expect(managementScript).not.toContain("Using a custom campaign prompt.");
+    // The illustration-config save must still carry the campaign's stored refinementPrompt
+    // unchanged, so saving other illustration settings never resets it to the shipped default.
+    expect(managementScript).toContain("refinementPrompt: illustrationRefinementPromptValue");
     expect(managementScript).toContain("function openIllustrationPromptEditor()");
     expect(managementScript).toContain('selectedPromptTemplateKey = "illustration_refinement"');
     expect(managementScript).toContain('elements.illustrationSegmentPromptMode.value === "ai_refined"');
@@ -1517,5 +1525,53 @@ describe("Nexus management UI contracts", () => {
     expect(campaignArchiveCommit).toContain("selectedImport = null;");
     expect(campaignArchiveCommit).toContain('elements.previewCampaignArchiveAgain.classList.add("hidden")');
     expect(campaignArchiveCommit).toContain("elements.importStory.disabled = true;");
+  });
+
+  it("saves prompt overrides without a compatibility checkbox", () => {
+    expect(managementHtml).not.toContain("promptLibraryCompatibilityAcknowledgement");
+    expect(managementHtml).not.toContain("I acknowledge this exact prompt must produce the required shape.");
+    expect(managementScript).not.toContain("Acknowledge the required output shape before saving this prompt.");
+    expect(managementScript).not.toContain("compatibilityAcknowledgement");
+    expect(managementHtml).toContain("promptLibraryRequiredShape");
+  });
+
+  it("flags an unacknowledged prompt override and stays quiet for an acknowledged one", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+    const baseTemplate = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
+      effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
+    const harness = (template: typeof baseTemplate) => managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
+      ["renderPromptLibrary"], {
+        document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
+        promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
+        promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
+        requestAnimationFrame: () => {}
+      });
+
+    harness(baseTemplate).renderPromptLibrary(true);
+    expect(elements.promptLibraryCompatibilityCopy.textContent).not.toContain("Save it again before generation can use it.");
+
+    const unacknowledged = { ...baseTemplate, compatibility: { ...baseTemplate.compatibility, acknowledged: false } };
+    harness(unacknowledged).renderPromptLibrary(true);
+    expect(elements.promptLibraryCompatibilityCopy.textContent).toContain("Save it again before generation can use it.");
+  });
+
+  it("resets unsaved prompt edits when renderPromptLibrary loads with fresh data", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+    const template = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
+      effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
+    const functions = managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
+      ["renderPromptLibrary"], {
+        document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
+        promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
+        promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
+        requestAnimationFrame: () => {}
+      });
+    functions.renderPromptLibrary(true);
+    expect(elements.promptLibraryContent.value).toBe("Saved instructions");
+    elements.promptLibraryContent.value = "Changed instructions";
+    functions.renderPromptLibrary(true);
+    expect(elements.promptLibraryContent.value).toBe("Saved instructions");
   });
 });

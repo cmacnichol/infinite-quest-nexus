@@ -10,6 +10,8 @@ import {
   responseInvocationKeyV2Schema
 } from "./text-response-format.js";
 import {
+  findProviderOutputSchemaV2,
+  findProviderOutputSchemaV2ByHash,
   getProviderOutputSchemaV2,
   providerOutputSchemaOperationV2Schema,
   responseContractOperationV2Schema,
@@ -206,15 +208,21 @@ export const queuedResponsePolicyV2Schema = z.object({
     });
     if (!key) context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must cover a permitted invocation." });
     else {
-      try {
-        assertModelVerifiedResponseContractEvidence({
-          verification: admission.verification,
-          authority,
-          operation: admission.verification.operation,
-          streaming: admission.verification.streaming
-        });
-      } catch {
+      const matchedSchema = findProviderOutputSchemaV2ByHash(admission.verification.operation, admission.verification.schemaHash);
+      if (!matchedSchema) {
         context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must bind exact authority and catalog evidence." });
+      } else {
+        try {
+          assertModelVerifiedResponseContractEvidence({
+            verification: admission.verification,
+            authority,
+            operation: admission.verification.operation,
+            streaming: admission.verification.streaming,
+            schemaVersion: matchedSchema.version
+          });
+        } catch {
+          context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Queued model verification must bind exact authority and catalog evidence." });
+        }
       }
     }
   }
@@ -267,14 +275,14 @@ export const frozenResponseContractV2Schema = z.object({
   authority: frozenResponseContractAuthorityV2Schema
 }).strict().superRefine((value, context) => {
   if (value.admission.basis !== value.authority.kind) context.addIssue({ code: "custom", path: ["authority"], message: "Response-contract admission and authority must agree." });
-  const catalog = getProviderOutputSchemaV2(value.operation);
-  if (value.schemaVersion !== catalog.version || value.schemaName !== catalog.name || value.schemaHash !== catalog.schemaHash
+  const catalog = findProviderOutputSchemaV2(value.operation, value.schemaVersion);
+  if (!catalog || value.schemaName !== catalog.name || value.schemaHash !== catalog.schemaHash
     || value.schemaHash !== stableJsonHash(value.schema)) {
     context.addIssue({ code: "custom", path: ["schema"], message: "Frozen v2 contract must use the exact catalog schema." });
   }
   if (value.admission.basis === "model_verified" && value.authority.kind === "model_verified") {
     try {
-      assertModelVerifiedResponseContractEvidence({ verification: value.admission.verification, authority: value.authority, operation: value.operation, streaming: value.streaming });
+      assertModelVerifiedResponseContractEvidence({ verification: value.admission.verification, authority: value.authority, operation: value.operation, streaming: value.streaming, schemaVersion: value.schemaVersion });
     } catch {
       context.addIssue({ code: "custom", path: ["admission", "verification"], message: "Model verification must bind the exact v2 contract authority and schema." });
     }
@@ -302,8 +310,8 @@ export const frozenResponseContractsV2Schema = z.object({
     const catalogOperation = responseInvocationKeyV2Schema.options.find((candidate) => candidate.split(":")[0] === contract.operation)?.split(":")[0];
     if (!catalogOperation) context.addIssue({ code: "custom", path: ["contracts", key, "operation"], message: "Frozen v2 contract operation is unknown." });
     else {
-      const catalog = getProviderOutputSchemaV2(catalogOperation as Parameters<typeof getProviderOutputSchemaV2>[0]);
-      if (contract.schemaVersion !== catalog.version || contract.schemaName !== catalog.name || contract.schemaHash !== catalog.schemaHash
+      const catalog = findProviderOutputSchemaV2(catalogOperation as Parameters<typeof getProviderOutputSchemaV2>[0], contract.schemaVersion);
+      if (!catalog || contract.schemaName !== catalog.name || contract.schemaHash !== catalog.schemaHash
         || canonicalJson(contract.schema) !== canonicalJson(catalog.schema)) {
         context.addIssue({ code: "custom", path: ["contracts", key], message: "Frozen v2 contract must use the exact catalog schema." });
       }

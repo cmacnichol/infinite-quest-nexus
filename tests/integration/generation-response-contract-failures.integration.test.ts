@@ -375,6 +375,11 @@ integration("response-contract provider failures", () => {
     const request = generationRequestSchema.parse({ action: "Open the observatory archive.", providerProfileId: provider.id, ...(options.storyOnly || options.scene ? { requestedInputMode: "scene" as const, resolvedInputMode: "scene" as const, inputModeSource: "explicit" as const } : {}), ...(selection === "preset" || selection === "fallback" || selection === "mutable" ? { textSelection: { kind: "openrouter_preset", slug: selection === "fallback" ? "native-fallback" : selection === "mutable" ? "native-mutable" : "native-success" } } : {}), ...(options.contextWindowTokens === undefined ? {} : { textExecutionOverrides: { conservativeContextWindowTokens: options.contextWindowTokens } }), idempotencyKey: randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, request);
     ownedJobIds.push(job.id);
+    if (native && selection !== "model") {
+      await expect(pool.query(
+        "SELECT orchestration_private->'textExecutionRouteBasis'->>'protocolVersion' AS protocol FROM generation_jobs WHERE id=$1", [job.id]
+      )).resolves.toMatchObject({ rows: [{ protocol: "story-openrouter-preset-v2" }] });
+    }
     const workerGraph = createWorkerProviderApplicationComposition(pool, { credentialSecret, transport: currentIntegrationProviderTransport(), schemaVerifications: verification.records, schemaVerificationDigest: verification.digest, clock: () => verificationNow });
     const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, workerGraph.illustration), apiMemoryApplication(pool, credentialSecret), workerGraph.generation);
     return { application, campaignId: imported.campaignId, providerId: provider.id, request, job, collaborators };
@@ -681,7 +686,8 @@ integration("response-contract provider failures", () => {
       expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
         name: getProviderOutputSchemaV2(operation).name, strict: true, schema: getProviderOutputSchemaV2(operation).schema
       } });
-      expect(body.messages[0].content.split("Native preset success instruction.").length - 1).toBe(1);
+      expect(body.model).toBe("@preset/native-success");
+      expect(body.messages[0].content).not.toContain("Native preset success instruction.");
     }
     expect(saved.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual(expect.arrayContaining(
       requestBodies.map((body) => expect.objectContaining({ version: 2, requestPayloadHash: createHash("sha256").update(body).digest("hex"), status: "completed" }))
@@ -727,7 +733,8 @@ integration("response-contract provider failures", () => {
     expect(extension.response_format).toEqual({ type: "json_schema", json_schema: {
       name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
     } });
-    expect(extension.messages[0].content.split("Native preset success instruction.").length - 1).toBe(1);
+    expect(extension.model).toBe("@preset/native-success");
+    expect(extension.messages[0].content).not.toContain("Native preset success instruction.");
     expect(row.rows[0]!.orchestrationPrivate.extension).toMatchObject({
       producingOperation: "event_extension", producingRequestBody: extensionBody,
       producingRequestPayloadHash: createHash("sha256").update(extensionBody!).digest("hex")
@@ -842,7 +849,8 @@ integration("response-contract provider failures", () => {
     expect(requestBodies.filter((body) => body === replay.requestBody)).toHaveLength(1);
     for (const bodyText of requestBodies) {
       const body = JSON.parse(bodyText);
-      expect(body.messages[0].content.split("Native preset success instruction.").length - 1).toBe(1);
+      expect(body.model).toBe("@preset/native-success");
+      expect(body.messages[0].content).not.toContain("Native preset success instruction.");
       expect(body.response_format.type).toBe("json_schema");
     }
     await expect(pool.query<{ narration: string }>(
@@ -943,7 +951,7 @@ integration("response-contract provider failures", () => {
     expect(attempts.rows).toEqual([expect.objectContaining({ status: "completed", outcome: "succeeded", failureReason: null })]);
     expect(row.rows[0]).toMatchObject({ status: "completed", errorCode: null, errorMessage: null });
     expect(privateState.queuedResponsePolicy).toMatchObject({ version: 2, admission: { basis: "preset_trusted" }, authority: { kind: "preset_trusted" } });
-    expect(privateState.textExecutionRouteBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "native-success" }, presetSystemPrompt: "Native preset success instruction.", parameters: { temperature: 0.25 } });
+    expect(privateState.textExecutionRouteBasis).toMatchObject({ protocolVersion: "story-openrouter-preset-v2", selection: { kind: "openrouter_preset", slug: "native-success" }, presetSystemPrompt: "Native preset success instruction.", parameters: { temperature: 0.25 } });
     expect(requestBodies).toHaveLength(1);
     const body = JSON.parse(requestBodies[0]!);
     expect(body).toMatchObject({ model: "@preset/native-success", temperature: 0.25 });
@@ -953,7 +961,7 @@ integration("response-contract provider failures", () => {
     expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
       name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
     } });
-    expect(body.messages[0].content).toContain("Native preset success instruction.");
+    expect(body.messages[0].content).not.toContain("Native preset success instruction.");
     expect(privateState.primaryReservation.requestBody).toBe(requestBodies[0]);
     expect(privateState.responseContractInvocations[0].requestPayloadHash).toBe(createHash("sha256").update(requestBodies[0]!).digest("hex"));
   }, 60_000);
@@ -994,7 +1002,7 @@ integration("response-contract provider failures", () => {
         model: "@preset/native-fallback", temperature: 0.25
       });
       expect(body).not.toHaveProperty("provider");
-      expect(body.messages[0].content.split("Native preset fallback instruction.").length - 1).toBe(1);
+      expect(body.messages[0].content).not.toContain("Native preset fallback instruction.");
       expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
         name: getProviderOutputSchemaV2("story").name, strict: true, schema: getProviderOutputSchemaV2("story").schema
       } });
@@ -1178,7 +1186,8 @@ integration("response-contract provider failures", () => {
       expect.objectContaining({ version: 2, operation: "story_generation", status: "completed", requestPayloadHash: createHash("sha256").update(requestBodies[1]!).digest("hex") })
     ]);
     if (selection === "preset") {
-      expect(JSON.parse(requestBodies[1]!).messages[0].content).toContain("Native preset success instruction.");
+      expect(JSON.parse(requestBodies[1]!).model).toBe("@preset/native-success");
+      expect(JSON.parse(requestBodies[1]!).messages[0].content).not.toContain("Native preset success instruction.");
     }
   }, 60_000);
 
@@ -1213,7 +1222,8 @@ integration("response-contract provider failures", () => {
     expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual([
       expect.objectContaining({ version: 2, operation: "story_generation", requestPayloadHash: createHash("sha256").update(requestBodies[0]!).digest("hex") })
     ]);
-    expect(JSON.parse(requestBodies[0]!).messages[0].content).toContain("Native preset success instruction.");
+    expect(JSON.parse(requestBodies[0]!).model).toBe("@preset/native-success");
+    expect(JSON.parse(requestBodies[0]!).messages[0].content).not.toContain("Native preset success instruction.");
   }, 60_000);
 
   it("repairs native v2 preset Story Direction choices through the frozen choices schema after an explicit review", async () => {
@@ -1237,8 +1247,8 @@ integration("response-contract provider failures", () => {
       expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
         name: getProviderOutputSchemaV2(operation).name, strict: true, schema: getProviderOutputSchemaV2(operation).schema
       } });
-      expect(body.messages[0].content.startsWith("Native preset success instruction.\n\n")).toBe(true);
-      expect(body.messages[0].content.split("Native preset success instruction.").length - 1).toBe(1);
+      expect(body.model).toBe("@preset/native-success");
+      expect(body.messages[0].content).not.toContain("Native preset success instruction.");
     }
     expect(row.rows[0]!.orchestrationPrivate.choiceRepair).toMatchObject({
       status: "validated", originalRequestBody: requestBodies[0], repairRequestBody: requestBodies[1]
@@ -1320,7 +1330,8 @@ integration("response-contract provider failures", () => {
       expect(body.response_format).toEqual({ type: "json_schema", json_schema: {
         name: getProviderOutputSchemaV2(operation).name, strict: true, schema: getProviderOutputSchemaV2(operation).schema
       } });
-      expect(body.messages[0].content).toContain("Native preset success instruction.");
+      expect(body.model).toBe("@preset/native-success");
+      expect(body.messages[0].content).not.toContain("Native preset success instruction.");
     }
     expect(row.rows[0]!.orchestrationPrivate.responseContractInvocations).toEqual(expected.map((operation, index) => expect.objectContaining({
       version: 2,

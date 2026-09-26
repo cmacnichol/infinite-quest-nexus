@@ -41,6 +41,16 @@ Swarm services must define health checks, resource expectations, restart behavio
 
 Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.
 
+### Build provenance
+
+Every image build must record the source commit and working-tree cleanliness so a running container can be traced back to what actually produced it. `scripts/build-metadata.mjs` reads `git rev-parse HEAD` and `git status --porcelain` and prints `NEXUS_BUILD_COMMIT`, `NEXUS_BUILD_DIRTY`, and `NEXUS_BUILD_DATE` as shell assignments; the runtime image exposes them as `NEXUS_BUILD_COMMIT`, `NEXUS_BUILD_DIRTY`, and `NEXUS_BUILD_DATE` build args/env vars, and `applicationMetadata()` (`services/api/src/app-metadata.ts`) surfaces them as `commit`, `dirty`, and `builtAt`. Build with:
+
+```bash
+env $(node scripts/build-metadata.mjs | xargs) docker compose build infinitequest-app
+```
+
+Do not deploy an image with `dirty: true` to production; treat it as a local/diagnostic build only.
+
 ### Durable AI authoring rollout and rollback
 
 `AI_AUTHORING_JOBS_ENABLED` is a compatible API-and-worker capability gate and defaults to `false`. Deploy the API and worker binaries that understand the durable authoring tables before setting it to `true`, and pass the same value to both Swarm roles. The client must use the capability returned by the API and retain its synchronous compatibility flow when durable authoring is unavailable; do not infer availability from a browser build or environment value.
