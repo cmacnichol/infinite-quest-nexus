@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 export function buildMetadataFromGit(io = {
   revParse: () => execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
-  statusPorcelain: () => execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" }),
+  statusPorcelain: () => execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" }),
   now: () => new Date()
 }) {
   return { commit: io.revParse(), dirty: io.statusPorcelain().trim().length > 0, date: io.now().toISOString() };
