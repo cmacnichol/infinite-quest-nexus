@@ -169,7 +169,7 @@ describe("Prompt Library catalog", () => {
     expect(text).toContain("Write natural, character-led fiction");
     expect(text).toContain("When characters speak, write their words as direct dialogue enclosed in double quotation marks");
     expect(text).toContain("Start a new paragraph whenever the speaker changes.");
-    expect(text).toContain("Escape quotation marks correctly inside the JSON narration string");
+    expect(text).toContain("Keep dialogue quotation marks visible in the returned narration");
     expect(text).toContain("Do not force dialogue into solitary or nonverbal scenes.");
     expect(text).toContain("Preserve established character voice and cadence");
     expect(text).toContain("Keep purposeful repetition, hesitation, callbacks, and subtext");
@@ -589,5 +589,13 @@ describe("Prompt Library catalog", () => {
       batch: "CONVERT / BATCH 2 OF 4",
       finalTurn: "FINAL"
     });
+  });
+
+  it("keeps shipped Story prose guidance independent of the wire encoding", () => {
+    const writer = PROMPT_TEMPLATE_CATALOG.story_system.defaultContent;
+    expect(writer).not.toContain("Escape quotation marks");
+    expect(writer).not.toContain("separated by two newline characters");
+    expect(writer).toContain("follow the output encoding contract");
+    expect(writer).toContain("double quotation marks");
   });
 });

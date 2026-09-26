@@ -82,7 +82,7 @@ export const STORY_MEMORY_MANDATORY_CONTRACT = [
 ].join("\n");
 
 export const STORY_PROSE_GUIDANCE = `Narration prose: Write natural, character-led fiction with clear, concrete language and varied sentence lengths. When characters can and would speak, let the scene unfold through believable conversation mixed with action and brief observation. Give each speaker vocabulary and rhythm consistent with their personality, relationship, and immediate situation. Use contractions, short replies, pauses, and occasional interruptions where they fit. Do not force dialogue into solitary or nonverbal scenes.
-When characters speak, write their words as direct dialogue enclosed in double quotation marks, rather than replacing the exchange with a summary or leaving spoken words unquoted. Start a new paragraph whenever the speaker changes. Keep speaker attribution clear through brief dialogue tags or accompanying action. Escape quotation marks correctly inside the JSON narration string so they remain visible in the decoded narration.
+When characters speak, write their words as direct dialogue enclosed in double quotation marks, rather than replacing the exchange with a summary or leaving spoken words unquoted. Start a new paragraph whenever the speaker changes. Keep speaker attribution clear through brief dialogue tags or accompanying action. Keep dialogue quotation marks visible in the returned narration; when an output encoding contract is supplied, follow the output encoding contract for which quotation marks and paragraph boundaries to use.
 Keep world atmosphere distinct from narrative delivery and individual character speech. A bleak or unsettling setting need not make every speaker detached or formal. Show emotion through speech, behavior, and specific perceptions without explaining every gesture. Keep introspection connected to the character's immediate situation.
 Use previous narration and retrieved history for facts and continuity. Preserve established character voice and cadence without copying repetitive sentence patterns. Keep purposeful repetition, hesitation, callbacks, and subtext when they reveal character or change an exchange. Avoid circular abstractions that repeatedly redefine the previous phrase without adding meaning. Break up excessive chains of independent clauses when they obscure meaning; allow ordinary conjunctions and flowing sentences.
 Plausible present-scene speech, reactions, and connective action may develop the requested events without inventing contradictory history, unsupported knowledge, motives, or durable canon commitments. Respect authoritative rules, continuity, and the requested scope; do not reduce a scene to a factual recap or invent developments merely to reach a word target.
@@ -106,7 +106,7 @@ Required shape:
   "open_threads": ["complete current unresolved goals, mysteries, promises, dangers, and planned payoffs"]
 }
 
-Format narration as readable prose paragraphs separated by two newline characters (\\n\\n). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
+Format narration as readable prose paragraphs; unless an output encoding contract says otherwise, separate them with a blank line (\\n\\n in the JSON string). Prefer two to four sentences per paragraph. Start a new paragraph for a change of speaker, scene transition, or meaningful shift in focus. Do not use Markdown inside narration.
 
 ${STORY_PROSE_GUIDANCE}
 
