@@ -16,6 +16,7 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createProvider, loadPromptSnapshotForTest, providerPromptProtocolVersion, readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { importLegacyStory } from "../helpers/memory-aware-services.js";
 import { sha256, stableStringify } from "../../packages/domain/src/index.js";
+import { STORY_OUTPUT_ENCODING_CONTRACT_V3, STORY_PARAGRAPH_WIRE_SCHEMA_VERSION, appendStoryOutputEncodingContract, storyOutputEncodingContract } from "../../packages/contracts/src/story-prompt.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
@@ -404,6 +405,49 @@ integration("PostgreSQL response-contract persistence", () => {
     const stored = await pool.query<{ orchestrationPrivate: Record<string, unknown> }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [queued.id]);
     expect(stored.rows[0]!.orchestrationPrivate.frozenResponseContracts).toEqual(frozen);
     expect(stored.rows[0]!.orchestrationPrivate.responseContractInvocations).toHaveLength(24);
+    await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
+  });
+
+  it("freezes story-native-v3 for a newly queued preset job and carries the v3 output-encoding contract into the reserved primary request", async () => {
+    const { queued, fixture, frozen, routeBasis, logicalAttemptId } = await v2PresetFixture("Queue a preset job onto the paragraph wire schema.");
+    const contract = frozen.contracts["story:nonstream"];
+    expect(contract.schemaVersion).toBe(STORY_PARAGRAPH_WIRE_SCHEMA_VERSION);
+    expect(contract.schemaVersion).toBe("story-native-v3");
+
+    // The executor composes the primary Story system prompt this way (append the
+    // v3 contract, last, only when the frozen schema is story-native-v3) before
+    // binding it into the reserved request; reproduce that composition here with
+    // the same production functions rather than a hand-authored literal.
+    const composedSystemPrompt = appendStoryOutputEncodingContract(
+      routeBasis.presetSystemPrompt,
+      storyOutputEncodingContract(contract.schemaVersion)
+    );
+    expect(composedSystemPrompt.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
+
+    const prompt = "Write the next turn.";
+    const plan = deriveTextExecutionPlan(routeBasis, prompt);
+    const requestBody = JSON.stringify({
+      model: routeBasis.candidates[0]!.modelId,
+      messages: [{ role: "system", content: composedSystemPrompt }, { role: "user", content: prompt }]
+    });
+    const requestPayloadHash = sha256Hex(requestBody);
+    const reserved = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, {
+      version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "story_generation" as const,
+      requestPayloadHash, request: v2Audit(frozen, prompt, plan, requestPayloadHash), routeBasis, plan, trustedOperationPrompt: prompt
+    });
+    expect(reserved).toMatchObject({ version: 2, status: "reserved" });
+    expect(await fixture.repository.saveOrchestration(fixture.scope, {
+      ...fixture.payload.orchestration_private, textExecutionRouteBasis: routeBasis,
+      primaryReservation: { version: 1 as const, requestBody, requestPayloadHash, providerConfigurationHash: hash, attempt: 1, status: "reserved" as const },
+      logicalAttempt: { version: 1 as const, id: logicalAttemptId, semanticRepairsConsumed: 0, reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 }
+    })).toBe(true);
+
+    const reloaded = await fixture.repository.loadExecutionPayload({ workerId: fixture.scope.workerId, leaseSeconds: 30, claim: fixture.claim });
+    expect(reloaded?.orchestration_private.frozenResponseContracts.contracts["story:nonstream"].schemaVersion).toBe("story-native-v3");
+    const savedBody = reloaded?.orchestration_private.primaryReservation?.requestBody as string;
+    expect(savedBody).toBe(requestBody);
+    const savedSystemMessage = (JSON.parse(savedBody) as { messages: Array<{ content: string }> }).messages[0]!.content;
+    expect(savedSystemMessage.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
     await pool.query("UPDATE generation_jobs SET status='cancelled',lease_owner=NULL,lease_expires_at=NULL WHERE id=$1", [queued.id]);
   });
 

@@ -294,7 +294,14 @@ describe("frozen Story route basis", () => {
         .execute({ workerId: `encoding-${schemaVersion}`, leaseSeconds: 30, claim })).resolves.toBe(true);
       expect(repository.markRecoverable).not.toHaveBeenCalled();
       expect(repository.markFailed).not.toHaveBeenCalled();
-      return (provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { systemPrompt: string };
+      const dispatched = (provider.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+        systemPrompt: string;
+        responseContract?: { mode: string; schemaVersion?: string | null; schemaHash?: string | null };
+      };
+      const resolvedResponse = await (provider.execute as ReturnType<typeof vi.fn>).mock.results[0]!.value as {
+        preparedRequest: { body: string; payloadHash: string };
+      };
+      return { systemPrompt: dispatched.systemPrompt, responseContract: dispatched.responseContract, preparedRequest: resolvedResponse.preparedRequest };
     };
 
     const v3 = await run("story-native-v3");
@@ -303,6 +310,22 @@ describe("frozen Story route basis", () => {
     const v2 = await run("story-native-v2");
     expect(v2.systemPrompt).toBe("Write a concise fictional scene.");
     expect(v2.systemPrompt).not.toContain(STORY_OUTPUT_ENCODING_CONTRACT_V3);
+
+    // Task 8 Step 3: a job already frozen on story-native-v2 must keep dispatching
+    // byte-identical requests after this deployment. The only request-composition
+    // change this branch made is the conditional v3 encoding-contract append above;
+    // confirm the v2 job's bound schema is still the exact pre-existing catalog
+    // entry (same hash/version, untouched by the new v3 registry addition) and that
+    // re-deriving the request for the identical frozen job is fully deterministic,
+    // so its serialized payloadHash cannot silently drift across a redeploy.
+    expect(v2.responseContract).toMatchObject({
+      mode: "json_schema",
+      schemaVersion: "story-native-v2",
+      schemaHash: getProviderOutputSchemaV2("story", "story-native-v2").schemaHash
+    });
+    const v2Again = await run("story-native-v2");
+    expect(v2Again.preparedRequest.payloadHash).toBe(v2.preparedRequest.payloadHash);
+    expect(v2Again.preparedRequest.body).toBe(v2.preparedRequest.body);
   });
 });
 
