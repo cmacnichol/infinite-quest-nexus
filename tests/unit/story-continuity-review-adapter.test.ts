@@ -14,6 +14,10 @@ const draft = storyTurnOutputSchema.parse({ narration: "Mira waits.", choices: [
 const provider = { id: "p", name: "Fake", providerRole: "text", providerType: "openai_compatible", model: "test", contextWindowTokens: 32000, maxOutputTokens: 1000, temperature: 0, requestTimeoutMs: 1000, configuration: {}, execute: vi.fn() } as const;
 const promptSnapshot = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])), continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
 const prepare = (overrides = {}) => prepareContinuityReview({ provider, manifest, producingRequestHash: requestHash, promptSnapshot, reviewMode: "observe", direction: "Wait", draft, ...overrides });
+// Pins the frozen repair identity to v1 for tests that exercise repair mechanics
+// unrelated to the v2 writer-prompt composition (Task 12).
+const v1PromptSnapshot = { ...promptSnapshot, continuityReview: { ...promptSnapshot.continuityReview,
+  repair: { ...promptSnapshot.continuityReview.repair, protocolIdentity: "story-continuity-repair-v1" } } };
 function repairFixtureInput(overrides: Readonly<{ repairProtocolIdentity?: string }> = {}) {
   const input = { provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
     findings: [{ code: "conflict", evidence_ids: [entry.id] }] };
@@ -67,7 +71,7 @@ describe("exact continuity review provider request", () => {
     const review = prepare({ manifest: castManifest, promptSnapshot: castPrompts });
     expect(review.request.systemPrompt).toContain(CAST_STORY_AUTHORITY_CONTRACT);
     expect(review.input.evidence[0]).toMatchObject({ role: "corrected_state", sourceKind: "cast", required: true });
-    const repair = prepareContinuityRepair({ provider, manifest: castManifest, promptSnapshot: castPrompts,
+    const repair = prepareContinuityRepair({ provider, manifest: castManifest, promptSnapshot: { ...castPrompts, continuityReview: v1PromptSnapshot.continuityReview },
       direction: "Visit Mara", rejectedDraft: draft, findings: [] });
     expect(repair.request.systemPrompt).toContain(CAST_STORY_AUTHORITY_CONTRACT);
     expect(repair.requiredEvidenceIds).toContain(castEntry.id);
@@ -87,7 +91,7 @@ describe("exact continuity review provider request", () => {
     expect(JSON.parse(prepared.body).max_tokens).toBe(48_000);
     expect(prepared.requestTokens + prepared.safetyAllowanceTokens + 48_000).toBeGreaterThan(163_840);
     expect(prepared.requestTokens + prepared.safetyAllowanceTokens + 48_000).toBeLessThanOrEqual(200_000);
-    expect(JSON.parse(prepareContinuityRepair({ provider: largeProvider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft, findings: [] }).body).max_tokens).toBe(48_000);
+    expect(JSON.parse(prepareContinuityRepair({ provider: largeProvider, manifest, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft, findings: [] }).body).max_tokens).toBe(48_000);
   });
 
   it("reports token counts when even the bounded review cannot fit", () => {
@@ -110,7 +114,7 @@ describe("exact continuity review provider request", () => {
     }));
     const review = prepare({ prepareSystemPrompt: compose });
     const repair = prepareContinuityRepair({
-      provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
+      provider, manifest, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft,
       findings: [{ code: "conflict", evidence_ids: [entry.id] }],
       prepareSystemPrompt: compose
     });
@@ -131,7 +135,7 @@ describe("exact continuity review provider request", () => {
     }));
     const review = prepare({ bindRequest: bind });
     const repair = prepareContinuityRepair({
-      provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
+      provider, manifest, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft,
       findings: [{ code: "conflict", evidence_ids: [entry.id] }], bindRequest: bind
     });
 
@@ -164,7 +168,7 @@ describe("exact continuity review provider request", () => {
     await expect(executePreparedContinuityReview({ ...provider, execute }, prepared)).rejects.toThrow(/continuity_review_unavailable/);
   });
   it("prepares a complete self-contained repair without private scratchpad or a continuation", () => {
-    const prepared = prepareContinuityRepair({ provider, manifest, promptSnapshot, direction: "Wait", rejectedDraft: draft,
+    const prepared = prepareContinuityRepair({ provider, manifest, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft,
       findings: [{ code: "conflict", evidence_ids: [entry.id] }] });
     expect(prepared.body).toContain(entry.content);
     expect(prepared.body).toContain("conflict");
@@ -177,7 +181,7 @@ describe("exact continuity review provider request", () => {
     const optional = createStoryEvidence({ source: { kind: "turn", id: "old-turn", revision: "1", turnNumber: 1 }, sourcePath: "/text", semanticRole: "accepted_narration", normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], selectionGroup: "retrieved", rank: 1, canonicalFactId: null }, { text: "An old unrelated passage. ".repeat(5000) });
     const full = { ...body, entries: [entry, optional] }; const expanded = { ...full, manifestHash: generationEvidenceManifestHash(full) };
     const originalMain = { ...draft, narration: "The original main waits." };
-    const args = { provider, manifest: expanded, promptSnapshot, direction: "Wait", rejectedDraft: draft, originalMain, scope: "main" as const, effectiveContextWindowTokens: 5000,
+    const args = { provider, manifest: expanded, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft, originalMain, scope: "main" as const, effectiveContextWindowTokens: 5000,
       findings: [{ kind: "contradiction", basis: { kind: "source", evidenceId: entry.id } }] };
     const prepared = prepareContinuityRepair(args);
     expect(prepared.body).not.toContain(optional.content); expect(prepared.body).toContain(entry.content);
@@ -191,6 +195,23 @@ describe("exact continuity review provider request", () => {
     expect(prepared.request.systemPrompt.endsWith("ENCODING-SENTINEL")).toBe(true);
     const plain = prepareContinuityRepair(repairFixtureInput());
     expect(plain.request.systemPrompt).not.toContain("ENCODING-SENTINEL");
+  });
+
+  it("v2 repair composes the writer prompt before the repair template", () => {
+    const input = repairFixtureInput({ repairProtocolIdentity: "story-continuity-repair-v2" });
+    const prepared = prepareContinuityRepair({ ...input, writerSystemPrompt: "WRITER-SENTINEL" });
+    const system = prepared.request.systemPrompt;
+    expect(system.indexOf("WRITER-SENTINEL")).toBe(0);
+    expect(system.indexOf("Repair boundary contract v1")).toBeGreaterThan(system.indexOf("WRITER-SENTINEL"));
+  });
+
+  it("v1 repair snapshots keep their original composition", () => {
+    const prepared = prepareContinuityRepair({ ...repairFixtureInput({ repairProtocolIdentity: "story-continuity-repair-v1" }), writerSystemPrompt: "WRITER-SENTINEL" });
+    expect(prepared.request.systemPrompt).not.toContain("WRITER-SENTINEL");
+  });
+
+  it("v2 repair without a writer prompt is unavailable", () => {
+    expect(() => prepareContinuityRepair(repairFixtureInput({ repairProtocolIdentity: "story-continuity-repair-v2" }))).toThrow();
   });
 
 });

@@ -27,6 +27,17 @@ import type { PromptSnapshot } from "../../packages/contracts/src/index.js";
 import { infiniteWorldsPromptSet } from "../legacy-api/src/infinite-worlds-import-service.js";
 import { createPromptRepository, resolveStoryMemoryPromptSnapshot, resolveStoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
 
+function snapshotWithRepairIdentity(protocolIdentity: string) {
+  const templates = Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG)
+    .map(([key, definition]) => [key, { content: definition.defaultContent, hash: createHash("sha256").update(definition.defaultContent).digest("hex"), source: "shipped" }]));
+  const review = CONTINUITY_REVIEW_PROMPT_CATALOG.review.defaultContent;
+  const repair = CONTINUITY_REVIEW_PROMPT_CATALOG.repair.defaultContent;
+  return { version: 2, templates, continuityReview: {
+    review: { content: review, hash: createHash("sha256").update(review).digest("hex"), source: "shipped", protocolIdentity: "story-continuity-review-v1" },
+    repair: { content: repair, hash: createHash("sha256").update(repair).digest("hex"), source: "shipped", protocolIdentity }
+  } };
+}
+
 describe("Prompt Library catalog", () => {
   it.each(["source_extraction", "source_extraction_recovery"] as const)("uses evidence IDs in the %s prompt", (key) => {
     expect(PROMPT_TEMPLATE_CATALOG[key].defaultContent).toContain("evidenceId");
@@ -42,6 +53,13 @@ describe("Prompt Library catalog", () => {
     expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, continuityReview: null }, "enforce")).toThrow("requires a frozen");
     expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, continuityReview: { ...snapshot.continuityReview!, review: { ...snapshot.continuityReview!.review, hash: "0".repeat(64) } } }, "observe")).toThrow("hash");
     expect(() => assertContinuityReviewPromptSnapshot({ ...snapshot, templates: { ...templates, story_continuity_review: snapshot.continuityReview!.review } }, "observe")).toThrow("Unsupported");
+  });
+  it("accepts frozen v1 and v2 repair identities and freezes v2 for new work", () => {
+    expect(CONTINUITY_REVIEW_PROMPT_CATALOG.repair.protocolIdentity).toBe("story-continuity-repair-v2");
+    for (const identity of ["story-continuity-repair-v1", "story-continuity-repair-v2"]) {
+      expect(() => assertContinuityReviewPromptSnapshot(snapshotWithRepairIdentity(identity), "enforce")).not.toThrow();
+    }
+    expect(() => assertContinuityReviewPromptSnapshot(snapshotWithRepairIdentity("story-continuity-repair-v9"), "enforce")).toThrow();
   });
   it("freezes the effective review pair at enqueue rather than consulting later overrides", async () => {
     const ownerUserId = crypto.randomUUID();

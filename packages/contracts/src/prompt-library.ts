@@ -190,6 +190,13 @@ export function readPromptSnapshot(input: unknown): ReadPromptSnapshot {
   };
 }
 
+export const CONTINUITY_REPAIR_PROTOCOL_V1 = "story-continuity-repair-v1";
+export const CONTINUITY_REPAIR_PROTOCOL_V2 = "story-continuity-repair-v2";
+const acceptedContinuityProtocols = {
+  review: new Set(["story-continuity-review-v1"]),
+  repair: new Set([CONTINUITY_REPAIR_PROTOCOL_V1, CONTINUITY_REPAIR_PROTOCOL_V2])
+} as const;
+
 /** The generic reader accepts valid off snapshots.  An enabled review stage
  * must additionally prove that both immutable prompts were captured. */
 export function assertContinuityReviewPromptSnapshot(input: unknown, mode: "off" | "observe" | "enforce"): ReadPromptSnapshot {
@@ -201,7 +208,7 @@ export function assertContinuityReviewPromptSnapshot(input: unknown, mode: "off"
   if (snapshot.continuityReview) {
     for (const key of ["review", "repair"] as const) {
       validateSnapshotEntry(snapshot.continuityReview[key]);
-      if (snapshot.continuityReview[key].protocolIdentity !== CONTINUITY_REVIEW_PROMPT_CATALOG[key].protocolIdentity) throw new Error("Frozen continuity prompt protocol is incompatible.");
+      if (!acceptedContinuityProtocols[key].has(snapshot.continuityReview[key].protocolIdentity)) throw new Error("Frozen continuity prompt protocol is incompatible.");
     }
   }
   if (mode === "off") {
@@ -338,7 +345,7 @@ Output ONLY a valid JSON object containing a single "image_prompt" field. The im
  * set. They can only enter a generation through the v2 frozen pair. */
 export const CONTINUITY_REVIEW_PROMPT_CATALOG: Record<"review" | "repair", PromptTemplateDefinition & { protocolIdentity: string }> = {
   review: { key: "story_continuity_review", title: "Story continuity review", category: "Story Engine", description: "Finds observable, evidence-quoted continuity conflicts.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Review only the supplied fiction-safe evidence and candidate projection. Return the story-continuity-review-v1 JSON object. Cite exact supplied source and candidate quotations. Report ambiguity or a missing unresolved thread as a warning; never invent an absent quotation. Give short observable explanations only; do not reveal reasoning.", protocolIdentity: "story-continuity-review-v1" },
-  repair: { key: "story_continuity_repair", title: "Story continuity repair", category: "Story Engine", description: "Repairs a bounded rejected story output from verified findings.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Return one complete replacement story output using only the supplied authority, direction, rejected fiction-safe projection, and verified continuity findings. Do not add facts, mechanics, private reasoning, or supersession authority. Preserve intentional empty correction fields. Preserve unaffected narration, character voice, and dialogue rhythm verbatim wherever possible. Change only what the verified findings require and the directly dependent continuity fields." + "\n\n" + STORY_PROSE_GUIDANCE + "\nApply the prose guidance only to passages that require correction; do not restyle unaffected narration.", protocolIdentity: "story-continuity-repair-v1" }
+  repair: { key: "story_continuity_repair", title: "Story continuity repair", category: "Story Engine", description: "Repairs a bounded rejected story output from verified findings.", campaignOverrideAllowed: true, maxLength: 8_000, variables: [], defaultContent: "Return one complete replacement story output using only the supplied authority, direction, rejected fiction-safe projection, and verified continuity findings. Do not add facts, mechanics, private reasoning, or supersession authority. Preserve intentional empty correction fields. Preserve unaffected narration, character voice, and dialogue rhythm verbatim wherever possible. Change only what the verified findings require and the directly dependent continuity fields." + "\n\n" + STORY_PROSE_GUIDANCE + "\nApply the prose guidance only to passages that require correction; do not restyle unaffected narration.", protocolIdentity: CONTINUITY_REPAIR_PROTOCOL_V2 }
 } as const;
 
 export const PROMPT_CATALOG = {

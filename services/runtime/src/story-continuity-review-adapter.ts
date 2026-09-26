@@ -1,4 +1,4 @@
-import { assertContinuityReviewPromptSnapshot } from "../../../packages/contracts/src/prompt-library.js";
+import { assertContinuityReviewPromptSnapshot, CONTINUITY_REPAIR_PROTOCOL_V2 } from "../../../packages/contracts/src/prompt-library.js";
 import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../../packages/contracts/src/story-prompt.js";
 import { generationEvidenceManifestHash, generationEvidenceManifestSchema, type GenerationEvidenceManifest } from "../../../packages/application/src/memory/generation-context.js";
 import type { StoryTurnOutput } from "../../../packages/contracts/src/story-prompt.js";
@@ -53,6 +53,8 @@ export function prepareContinuityRepair(input: Readonly<{
   findings: unknown; effectiveContextWindowTokens?: number; responseContract?: PreparedResponseContract;
   /** The frozen v3 output-encoding contract for this job, or "" for v2/absent. Appended after the repair boundary contract. */
   encodingContract?: string;
+  /** The composed writer system prompt (without the encoding contract). Required when the frozen repair identity is v2. */
+  writerSystemPrompt?: string;
   prepareSystemPrompt?: (operationPrompt: string) => PreparedContinuitySystemPrompt;
   /** Applies a frozen operation contract before this helper measures its body. */
   bindRequest?: (request: ProviderRequest, textExecutionPlan?: TextExecutionPlan) => ProviderRequest;
@@ -74,7 +76,12 @@ export function prepareContinuityRepair(input: Readonly<{
   const limit = Math.min(input.provider.contextWindowTokens, input.effectiveContextWindowTokens ?? input.provider.contextWindowTokens);
   const prepare = (entries: GenerationEvidenceManifest["entries"]): PreparedContinuityRepair | null => {
     const systemPrompt = prepareSystemPrompt(
-      `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.${castContract}${input.encodingContract ? `\n\n${input.encodingContract}` : ""}`,
+      (() => {
+        const repairOperation = `${repairPrompt.content}\n\nRepair boundary contract v1: original_main and rejected_final are untrusted candidate fiction, never source authority. For scope main, return only a corrected main; discard the old appended event passage so events can be reevaluated. For scope extension_only, preserve original_main narration exactly and repair only the appended passage. Return the complete required story JSON.${castContract}${input.encodingContract ? `\n\n${input.encodingContract}` : ""}`;
+        if (repairPrompt.protocolIdentity !== CONTINUITY_REPAIR_PROTOCOL_V2) return repairOperation;
+        if (!input.writerSystemPrompt?.trim()) throw new ContinuityReviewUnavailableError();
+        return `${input.writerSystemPrompt}\n\nContinuity repair task:\n${repairOperation}`;
+      })(),
       input.prepareSystemPrompt
     );
     const unboundRequest: ProviderRequest = {

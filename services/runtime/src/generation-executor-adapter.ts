@@ -2335,6 +2335,7 @@ async function executeLoadedGeneration(
         effectiveContextWindow,
         inputTokenLimit,
         storySystemPrompt,
+        composedWriterSystemPrompt,
         storyTextExecutionPlan,
         configuredCampaignContextBudget,
         safeContextBudget
@@ -2346,6 +2347,7 @@ async function executeLoadedGeneration(
       effectiveContextWindow,
       inputTokenLimit,
       storySystemPrompt,
+      composedWriterSystemPrompt,
       storyTextExecutionPlan,
       configuredCampaignContextBudget,
       safeContextBudget
@@ -4440,6 +4442,7 @@ async function executeLoadedGeneration(
                 direction: safeAction, rejectedDraft: committedStory, originalMain: orchestration.validatedMainDraft?.story ?? parsed.story, scope: repairScope, findings: checkpoint.result.findings,
                 effectiveContextWindowTokens: effectiveContextWindow,
                 encodingContract: storyOutputEncodingContract(frozenStorySchemaVersion(job)),
+                writerSystemPrompt: composedWriterSystemPrompt,
                 prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
                 ...(job.orchestration_private?.frozenResponseContracts ? {
                   serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_repair", request, plan)
