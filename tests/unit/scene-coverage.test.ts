@@ -47,8 +47,13 @@ describe("scene coverage", () => {
       .toThrow(/every expected event ID/);
   });
 
-  it("frames required events as scene beats for the shared coverage validator", () => {
+  it("produces the exact pre-branch task string by default, so frozen jobs re-derive it byte-identically", () => {
     const input = JSON.parse(buildEventCoveragePrompt([{ id: "gate", fiction: "The gate opens." }], "The gate opens."));
-    expect(input.task).toContain("Treat each required event as a required scene beat");
+    expect(input.task).toBe("Evaluate every required event independently against the narration. Each event ID must appear exactly once.");
+  });
+
+  it("frames required events as scene beats only when the caller opts into the v3 identity", () => {
+    const input = JSON.parse(buildEventCoveragePrompt([{ id: "gate", fiction: "The gate opens." }], "The gate opens.", { framing: "story-native-v3" }));
+    expect(input.task).toBe("Treat each required event as a required scene beat. Evaluate every required event independently against the narration. Each event ID must appear exactly once.");
   });
 });

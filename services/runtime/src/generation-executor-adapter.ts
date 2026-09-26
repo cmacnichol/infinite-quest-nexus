@@ -52,7 +52,8 @@ import {
   appendStoryOutputEncodingContract,
   projectSafeGenerationContextDiagnostic,
   projectSafeGenerationDiagnostic,
-  storyOutputEncodingContract
+  storyOutputEncodingContract,
+  STORY_PARAGRAPH_WIRE_SCHEMA_VERSION
 } from "../../../packages/contracts/src/story-prompt.js";
 import type { GenerationFailureDiagnostic } from "../../../packages/contracts/src/generation-review.js";
 import type {
@@ -158,6 +159,16 @@ function frozenStorySchemaVersion(job: GenerationExecutionPayload): string | nul
   if (!frozen || frozen.version !== 2) return null;
   const contract = frozen.contracts["story:stream"] ?? frozen.contracts["story:nonstream"];
   return contract?.schemaVersion ?? null;
+}
+
+/**
+ * The event-coverage "scene beat" framing sentence is new post-branch text.
+ * A job frozen before this identity existed must re-derive the exact
+ * pre-branch task string, so the framing only attaches once the job's frozen
+ * story wire is already the new story-native-v3 identity.
+ */
+function eventCoveragePromptOptions(job: GenerationExecutionPayload): { framing: "story-native-v3" | null } {
+  return { framing: frozenStorySchemaVersion(job) === STORY_PARAGRAPH_WIRE_SCHEMA_VERSION ? "story-native-v3" : null };
 }
 
 function prepareCampaignSystemPrompt(job: GenerationExecutionPayload, operationPrompt: string) {
@@ -3722,7 +3733,7 @@ async function executeLoadedGeneration(
         const coverageResponse = await phase("scene_coverage_validation", () =>
           callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-            input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), currentMainStory.narration)
+            input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), currentMainStory.narration, eventCoveragePromptOptions(job))
           })
         );
         mainEventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, dueBeforeOrPendingEvents);
@@ -3856,7 +3867,7 @@ async function executeLoadedGeneration(
           const coverageResponse = await phase("scene_coverage_validation", () =>
             callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-              input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), repairedStory.narration)
+              input: buildEventCoveragePrompt(eventCoverageRequirement(dueBeforeOrPendingEvents), repairedStory.narration, eventCoveragePromptOptions(job))
             })
           );
           repairedCoverage = coverageResponse.outputLimited
@@ -4024,7 +4035,7 @@ async function executeLoadedGeneration(
         const coverageResponse = await phase("scene_coverage_validation", () =>
           callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
             systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-            input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), committedStory.narration)
+            input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), committedStory.narration, eventCoveragePromptOptions(job))
           })
         );
         eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
@@ -4038,7 +4049,7 @@ async function executeLoadedGeneration(
           const coverageResponse = await phase("scene_coverage_validation", () =>
             callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
               systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-              input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
+              input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration, eventCoveragePromptOptions(job))
             })
           );
           eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
@@ -4210,7 +4221,7 @@ async function executeLoadedGeneration(
             const coverageResponse = await phase("scene_coverage_validation", () =>
               callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
                 systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-                input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), repairedStory.narration)
+                input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), repairedStory.narration, eventCoveragePromptOptions(job))
               })
             );
             eventCoverage = coverageResponse.outputLimited ? null : parseRequiredEventCoverage(coverageResponse.content, immediateEvents);
@@ -4220,7 +4231,7 @@ async function executeLoadedGeneration(
               const appendedCoverageResponse = await phase("scene_coverage_validation", () =>
                 callCampaignTextProvider(ledgerDependencies, provider, job, "event_coverage_validation", {
                   systemPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "scene_coverage"),
-                  input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration)
+                  input: buildEventCoveragePrompt(eventCoverageRequirement(immediateEvents), appendedNarration, eventCoveragePromptOptions(job))
                 })
               );
               eventCoverage = appendedCoverageResponse.outputLimited

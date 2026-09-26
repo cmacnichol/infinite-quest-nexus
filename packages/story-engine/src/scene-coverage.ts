@@ -36,9 +36,26 @@ export function parseSceneCoverageOutput(content: string) {
   return coverageSchema.parse(JSON.parse(trimmed));
 }
 
-export function buildEventCoveragePrompt(requirements: readonly EventCoverageRequirement[], narration: string): string {
+export type EventCoveragePromptOptions = Readonly<{ framing?: "story-native-v3" | null }>;
+
+const EVENT_COVERAGE_BASE_TASK = "Evaluate every required event independently against the narration. Each event ID must appear exactly once.";
+
+/**
+ * `options.framing` must only be set to "story-native-v3" for jobs whose
+ * frozen response contract already commits to that identity. A job frozen
+ * before this framing sentence existed must re-derive the exact pre-branch
+ * task string (the default, no-argument path) byte-for-byte.
+ */
+export function buildEventCoveragePrompt(
+  requirements: readonly EventCoverageRequirement[],
+  narration: string,
+  options?: EventCoveragePromptOptions
+): string {
+  const task = options?.framing === "story-native-v3"
+    ? `Treat each required event as a required scene beat. ${EVENT_COVERAGE_BASE_TASK}`
+    : EVENT_COVERAGE_BASE_TASK;
   return stableStringify({
-    task: "Treat each required event as a required scene beat. Evaluate every required event independently against the narration. Each event ID must appear exactly once.",
+    task,
     required_events: requirements.map((event) => ({ event_id: event.id, fiction_requirement: event.fiction })),
     generated_narration: narration,
     output_shape: { event_results: [{ event_id: "exact required event id", covered: "boolean", missing_required_beats: ["string"], contradictions: ["string"] }] }

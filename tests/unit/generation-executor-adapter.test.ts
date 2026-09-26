@@ -32,7 +32,8 @@ import {
 import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
 import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
 import { getProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
-import { STORY_OUTPUT_ENCODING_CONTRACT_V3 } from "../../packages/contracts/src/story-prompt.js";
+import { appendStoryOutputEncodingContract, STORY_OUTPUT_ENCODING_CONTRACT_V3 } from "../../packages/contracts/src/story-prompt.js";
+import { composeEffectiveStorySystemPrompt } from "../../packages/story-engine/src/effective-story-system-prompt.js";
 import type { ResponseFormatEligibilityV2 } from "../../packages/contracts/src/text-response-format.js";
 import { prepareGenerationReview } from "../../services/runtime/src/generation-review-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
@@ -355,6 +356,35 @@ describe("frozen Story route basis", () => {
     expect(v2.preparedRequest.body.length).toBe(TASK8_GOLDEN_V2_BODY_LENGTH);
     expect(v2.preparedRequest.body).toBe(TASK8_GOLDEN_V2_BODY);
     expect(v2.preparedRequest.payloadHash).toBe(TASK8_GOLDEN_V2_PAYLOAD_HASH);
+  });
+
+  it("composes a preset route's v3 primary system prompt as preset, then writer, then the encoding contract last", () => {
+    // Reproduces the executor's exact primary-prompt composition (lines around
+    // generation-executor-adapter.ts's input_preparation phase): first
+    // composeEffectiveStorySystemPrompt (writer prompt, no contract yet), then
+    // appendStoryOutputEncodingContract (contract last), then
+    // deriveTextExecutionPlan (preset prepended). Appending the v3 contract
+    // directly to routeBasis.presetSystemPrompt instead would skip the writer
+    // prompt entirely and prove freeze/persistence but not this order.
+    const basis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "v1", configHash: "f".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "Use spare prose.", parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile", authorityRevision: "authority", requestTimeoutMs: 30_000,
+      protocolVersion: "route-basis-v2"
+    };
+    const routeBasis = { ...basis, routeBasisHash: sha256(stableStringify(basis)) };
+    const writerPrompt = "Write a concise fictional scene.";
+    const composedWriterSystemPrompt = composeEffectiveStorySystemPrompt({
+      writerPrompt, storyOnlyPolicy: null, storyMemoryPromptProtocol: null, encodingContract: ""
+    });
+    const storyBaseSystemPrompt = appendStoryOutputEncodingContract(composedWriterSystemPrompt, STORY_OUTPUT_ENCODING_CONTRACT_V3);
+    const composedSystemPrompt = deriveTextExecutionPlan(routeBasis, storyBaseSystemPrompt).prompt;
+
+    expect(composedSystemPrompt).toBe(`Use spare prose.\n\n${writerPrompt}\n\n${STORY_OUTPUT_ENCODING_CONTRACT_V3}`);
+    expect(composedSystemPrompt.indexOf("Use spare prose.")).toBe(0);
+    expect(composedSystemPrompt.endsWith(STORY_OUTPUT_ENCODING_CONTRACT_V3)).toBe(true);
   });
 });
 
