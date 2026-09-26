@@ -10,6 +10,7 @@ export * from "./provider-response.js";
 export * from "./provider-request.js";
 export * from "./prompt.js";
 export * from "./story-only-prompt.js";
+export * from "./effective-story-system-prompt.js";
 export * from "./story-only-output.js";
 export * from "./scene-coverage.js";
 export * from "./continuity-review.js";

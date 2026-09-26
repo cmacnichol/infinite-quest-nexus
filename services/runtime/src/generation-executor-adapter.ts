@@ -50,7 +50,6 @@ import {
 } from "../../../packages/contracts/src/story-settings.js";
 import {
   appendStoryOutputEncodingContract,
-  composeStoryPromptSystemPrompt,
   projectSafeGenerationContextDiagnostic,
   projectSafeGenerationDiagnostic,
   storyOutputEncodingContract
@@ -83,9 +82,8 @@ import {
   resolveEffectiveContextWindowTokens,
   estimatedInputSafetyAllowanceTokens,
   estimateStoryTokens,
-  composeStoryMemorySystemPrompt,
   composeStoryOnlyChoiceRepairSystemPrompt,
-  composeStoryOnlySystemPrompt,
+  composeEffectiveStorySystemPrompt,
   buildStoryOnlyChoiceRepairInput,
   generationExecutionProtocolIdentity,
   serializeBoundFrozenPresetProviderRequest,
@@ -2287,23 +2285,14 @@ async function executeLoadedGeneration(
       const inputTokenLimit = effectiveContextWindow - effectiveMaxOutputTokens(provider, job);
       const emptyPromptContext = { worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null };
       const baseStorySystemPrompt = collaborators.promptFromSnapshot(job.prompt_snapshot, "story_system");
-      const composedWriterSystemPrompt = generationPolicy?.playMode === "story_only"
-        ? composeStoryOnlySystemPrompt(
-          baseStorySystemPrompt,
-          generationPolicy,
-          hasFrozenStoryMemoryPolicy,
-          frozenStoryMemoryPolicySnapshot?.promptProtocol,
-          storySystemContractProtocol
-        )
-        : hasFrozenStoryMemoryPolicy
-          ? composeStoryMemorySystemPrompt(baseStorySystemPrompt, "", frozenStoryMemoryPolicySnapshot.promptProtocol)
-          : storySystemContractProtocol
-            ? composeStoryPromptSystemPrompt(baseStorySystemPrompt, storySystemContractProtocol)
-            : baseStorySystemPrompt;
-      const storyBaseSystemPrompt = appendStoryOutputEncodingContract(
-        composedWriterSystemPrompt,
-        storyOutputEncodingContract(frozenStorySchemaVersion(job))
-      );
+      const composedWriterSystemPrompt = composeEffectiveStorySystemPrompt({
+        writerPrompt: baseStorySystemPrompt,
+        storyOnlyPolicy: generationPolicy?.playMode === "story_only" ? generationPolicy : null,
+        storyMemoryPromptProtocol: hasFrozenStoryMemoryPolicy ? frozenStoryMemoryPolicySnapshot.promptProtocol : null,
+        ...(storySystemContractProtocol ? { storyPromptContractProtocol: storySystemContractProtocol } : {}),
+        encodingContract: ""
+      });
+      const storyBaseSystemPrompt = appendStoryOutputEncodingContract(composedWriterSystemPrompt, storyOutputEncodingContract(frozenStorySchemaVersion(job)));
       // Bind the preset before fixed-envelope accounting so it reduces the
       // Chronicle/context budget rather than causing a late transport overflow.
       const storyTextExecutionPlan = deriveCampaignTextExecutionPlan(job, storyBaseSystemPrompt);

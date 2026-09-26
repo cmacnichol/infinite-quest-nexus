@@ -16,11 +16,16 @@ import {
 } from "../../contracts/src/prompt-library.js";
 import {
   STORY_PROMPT_PROTOCOL_VERSION,
+  STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  STORY_OUTPUT_ENCODING_CONTRACT_V3,
   castStoryMemoryPromptCompatibilityIdentity,
+  storyPromptCompatibilityIdentity,
   storyPromptProtocolIdentity
 } from "../../contracts/src/story-prompt.js";
+import { textModelSelectionSchema } from "../../contracts/src/provider-selection.js";
 import type {
   PromptLibraryPort,
+  PromptPreviewView,
   PromptScope,
   PromptSnapshotVersion
 } from "../../application/src/providers/index.js";
@@ -29,7 +34,9 @@ import {
   buildEventTriggerPrompt,
   buildRpgAssessmentPrompt,
   buildSceneCoveragePrompt,
-  buildStoryUserPrompt
+  buildStoryUserPrompt,
+  composeEffectiveStorySystemPrompt,
+  storyOnlyPromptSnapshot
 } from "../../story-engine/src/index.js";
 import type { DatabaseClient } from "./pool.js";
 
@@ -248,6 +255,82 @@ function establishedPromptPreview(key: PromptTemplateKey, content: string) {
   return preview;
 }
 
+/**
+ * Adds the effective (post-composition) writer system prompt to a story_system
+ * preview for a specific campaign, plus a note when the campaign's text profile
+ * is a provider preset (its own system text is applied at dispatch, never shown
+ * here). This never calls a provider and never exposes credentials or preset
+ * text.
+ *
+ * Approximation: Story Memory's cast-authority contract is an operator-wide
+ * runtime toggle (CAST_CONTEXT_ENABLED), not a per-campaign database value, so
+ * it cannot be read from this repository without threading operator
+ * configuration through the prompt-library composition. This preview always
+ * shows the current (non-cast) Story Memory protocol for an enrolled campaign.
+ */
+async function withEffectiveStorySystemPreview(
+  database: DatabaseClient,
+  ownerUserId: string,
+  campaignId: string,
+  content: string,
+  base: PromptPreviewView
+): Promise<PromptPreviewView> {
+  const campaignResult = await database.query<{ turn_control_style: string; text_provider_profile_id: string | null }>(
+    "SELECT turn_control_style,text_provider_profile_id FROM campaigns WHERE id=$1 AND owner_user_id=$2",
+    [campaignId, ownerUserId]
+  );
+  const campaign = campaignResult.rows[0];
+  if (!campaign) throw Object.assign(new Error("Campaign not found."), { statusCode: 404 });
+
+  const enrollmentResult = await database.query(
+    "SELECT 1 FROM campaign_story_memory_enrollments WHERE campaign_id=$1 AND owner_user_id=$2",
+    [campaignId, ownerUserId]
+  );
+  const enrolled = enrollmentResult.rows.length > 0;
+
+  const providerResult = campaign.text_provider_profile_id
+    ? await database.query<{ text_selection: unknown }>(
+      "SELECT text_selection FROM provider_profiles WHERE id=$1 AND owner_user_id=$2 AND provider_role='text' AND enabled=true",
+      [campaign.text_provider_profile_id, ownerUserId]
+    )
+    : await database.query<{ text_selection: unknown }>(
+      "SELECT text_selection FROM provider_profiles WHERE owner_user_id=$1 AND provider_role='text' AND enabled=true ORDER BY is_default DESC,name,id LIMIT 1",
+      [ownerUserId]
+    );
+  const selection = textModelSelectionSchema.safeParse(providerResult.rows[0]?.text_selection);
+  const usesPreset = selection.success && selection.data.kind === "openrouter_preset";
+
+  const storyOnlyPolicy = campaign.turn_control_style === "flexible_scene"
+    ? { version: 1 as const, playMode: "story_only" as const, turnControlStyle: "flexible_scene" as const, protocolVersion: "story-only-v1" as const, prompts: storyOnlyPromptSnapshot() }
+    : null;
+  const storyPromptContractProtocol = !enrolled && content !== PROMPT_TEMPLATE_CATALOG.story_system.defaultContent
+    ? storyPromptCompatibilityIdentity()
+    : undefined;
+
+  const effectiveContent = composeEffectiveStorySystemPrompt({
+    writerPrompt: content,
+    storyOnlyPolicy,
+    storyMemoryPromptProtocol: enrolled ? STORY_MEMORY_PROMPT_PROTOCOL_VERSION : null,
+    ...(storyPromptContractProtocol ? { storyPromptContractProtocol } : {}),
+    encodingContract: STORY_OUTPUT_ENCODING_CONTRACT_V3
+  });
+
+  const sections = [
+    ...base.sections,
+    { label: "Effective system prompt", role: "system" as const, content: effectiveContent },
+    ...(usesPreset ? [{
+      label: "Preset system prompt (added at dispatch)",
+      role: "system" as const,
+      content: "Applied by the selected provider preset; not shown here."
+    }] : [])
+  ];
+  return {
+    ...base,
+    sections,
+    estimatedTokens: Math.max(1, Math.ceil(sections.reduce((total, section) => total + section.content.length, 0) / 4))
+  };
+}
+
 export function createPromptRepository(database: DatabaseClient): PromptLibraryPort {
   const activeDefinition = (key: PromptCatalogKey) => {
     if (key === "turn_intent") throw Object.assign(new Error("This historical prompt is unavailable."), { statusCode: 410, code: "turn_input_classification_removed" });
@@ -318,8 +401,11 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         scope: "application"
       });
       activeDefinition(value.key);
-      if (!(legacyPromptTemplateKeys as readonly string[]).includes(value.key)) return buildPromptPreview("story_system", value.content);
-      return establishedPromptPreview(value.key as PromptTemplateKey, value.content);
+      const base = !(legacyPromptTemplateKeys as readonly string[]).includes(value.key)
+        ? buildPromptPreview("story_system", value.content)
+        : establishedPromptPreview(value.key as PromptTemplateKey, value.content);
+      if (value.key !== "story_system" || !request.campaignId) return base;
+      return withEffectiveStorySystemPreview(database, request.ownerUserId, request.campaignId, value.content, base);
     },
     async savePromptOverride(command) {
       const campaignId = command.scope === "campaign" ? command.campaignId : null;

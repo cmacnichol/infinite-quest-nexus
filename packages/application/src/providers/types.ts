@@ -352,6 +352,7 @@ export type PromptLibraryView = Readonly<{
 export type PromptPreviewRequest = OwnerScope & Readonly<{
   key: PromptCatalogKey;
   content: string;
+  campaignId?: string;
 }>;
 
 export type PromptPreviewView = Readonly<{

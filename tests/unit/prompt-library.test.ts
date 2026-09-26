@@ -513,6 +513,51 @@ describe("Prompt Library catalog", () => {
     expect(compatibility?.protocolIdentity).not.toBe(promptCompatibilityRequirement("story_system")?.protocolIdentity);
   });
 
+  it("previews the effective writer composition for an enrolled campaign", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [{ exists: 1 }] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const effective = preview.sections.find((section) => section.label === "Effective system prompt")!;
+    expect(effective.content).toContain("Story Memory authority contract");
+    expect(effective.content).toContain("narration_paragraphs");
+    expect(preview.sections.find((section) => section.label === "Preset system prompt (added at dispatch)")).toBeUndefined();
+  });
+
+  it("notes a provider preset instead of exposing its system text", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM campaigns")) return { rows: [{ turn_control_style: "flexible_action", text_provider_profile_id: null }] };
+      if (sql.includes("FROM campaign_story_memory_enrollments")) return { rows: [] };
+      if (sql.includes("FROM provider_profiles")) return { rows: [{ text_selection: { kind: "openrouter_preset", slug: "writer-preset" } }] };
+      return { rows: [] };
+    });
+    const prompts = createPromptRepository({ query } as never);
+
+    const preview = await prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId });
+    const preset = preview.sections.find((section) => section.label === "Preset system prompt (added at dispatch)");
+    expect(preset).toMatchObject({ role: "system", content: "Applied by the selected provider preset; not shown here." });
+    expect(JSON.stringify(preview)).not.toContain("writer-preset");
+  });
+
+  it("rejects a preview for a campaign the owner cannot see", async () => {
+    const ownerUserId = crypto.randomUUID();
+    const campaignId = crypto.randomUUID();
+    const query = vi.fn(async () => ({ rows: [] }));
+    const prompts = createPromptRepository({ query } as never);
+
+    await expect(prompts.previewPrompt({ key: "story_system", content: "WRITER", campaignId, ownerUserId }))
+      .rejects.toMatchObject({ statusCode: 404 });
+  });
+
   it("blocks a saved protected override acknowledged under an earlier prompt protocol identity", async () => {
     const content = "Keep the established output shape and voice.";
     const query = vi.fn().mockResolvedValue({

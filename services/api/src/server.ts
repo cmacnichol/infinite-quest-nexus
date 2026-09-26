@@ -107,7 +107,8 @@ import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.j
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../../packages/contracts/src/assets.js";
 import {
   promptTemplateKeySchema,
-  promptTemplateOverrideSchema
+  promptTemplateOverrideSchema,
+  continuityPromptTemplateKeySchema
 } from "../../../packages/contracts/src/prompt-library.js";
 import {
   campaignTransferCommitRequestSchema,
@@ -805,9 +806,16 @@ export async function buildServer({
     };
   });
   app.post("/api/v1/prompt-library/preview", async (request) => {
-    const body = z.object({ key: promptTemplateKeySchema, content: z.string().trim().min(1).max(16_000) })
-      .parse(request.body);
-    return providers.previewPrompt(await initialOwnerId(pool), body);
+    const body = z.object({
+      key: z.union([promptTemplateKeySchema, continuityPromptTemplateKeySchema]),
+      content: z.string().trim().min(1).max(16_000),
+      campaignId: z.uuid().optional()
+    }).parse(request.body);
+    return providers.previewPrompt(await initialOwnerId(pool), {
+      key: body.key,
+      content: body.content,
+      ...(body.campaignId === undefined ? {} : { campaignId: body.campaignId })
+    });
   });
 
   app.get("/api/v1/providers", async () => parseResponseProjection(providerListResponseSchema, {
