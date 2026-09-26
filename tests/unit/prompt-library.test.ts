@@ -21,6 +21,7 @@ import {
   CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   CAST_STORY_AUTHORITY_CONTRACT,
   STORY_OUTPUT_ENCODING_CONTRACT_V3,
+  STORY_PROMPT_SCHEMA_VERSION,
   storyMemoryMandatoryContract
 } from "../../packages/contracts/src/story-prompt.js";
 import { DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT } from "../../packages/contracts/src/generation.js";
@@ -318,14 +319,18 @@ describe("Prompt Library catalog", () => {
       }
     });
     expect(assertStoryMemoryPromptCompatibility(snapshot).template("story_system").content).toBe(content);
-    await expect(resolveStoryMemoryPromptSnapshot({
+    // A stored acknowledgement under an earlier prompt protocol identity is
+    // now accepted: compatibility follows the output shape (version + content
+    // hash), not the protocol identity, so this no longer blocks generation.
+    const legacyIdentitySnapshot = await resolveStoryMemoryPromptSnapshot({
       query: vi.fn().mockResolvedValueOnce({ rows: [{}] }).mockResolvedValueOnce({ rows: [{
         prompt_key: "story_system", content, campaign_id: null,
         compatibility_required_shape_version: "story-output-v2",
         compatibility_protocol_identity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
         compatibility_content_hash: hash
       }] })
-    } as never, { ownerUserId, scope: "campaign", campaignId })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+    } as never, { ownerUserId, scope: "campaign", campaignId });
+    expect(legacyIdentitySnapshot.templates.story_system.content).toBe(content);
   });
 
   it("freezes acknowledged non-enrolled v16 story bytes with their fact-wire identity", async () => {
@@ -394,16 +399,19 @@ describe("Prompt Library catalog", () => {
     })).toThrow("does not match captured content");
   });
 
-  it("rejects an unacknowledged continuity override before persistence can lead to provider execution", async () => {
-    const query = vi.fn();
+  it("stores a server-derived acknowledgement for a shape-bearing override without requiring one from the client", async () => {
+    const content = "Keep the existing creative event voice.";
+    const requirement = storyMemoryPromptCompatibilityRequirement("event_extension")!;
+    const query = vi.fn(async (_sql: string, _values?: readonly unknown[]) => ({ rows: [] }));
     const prompts = createPromptRepository({ query } as never);
     await expect(prompts.savePromptOverride({
       ownerUserId: crypto.randomUUID(),
       scope: "application",
       key: "event_extension",
-      content: "Keep the existing creative event voice."
-    })).rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
-    expect(query).not.toHaveBeenCalled();
+      content
+    })).resolves.toBeDefined();
+    const insert = query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([STORY_PROMPT_SCHEMA_VERSION, requirement.protocolIdentity, createHash("sha256").update(content).digest("hex")]);
   });
 
   it("rejects a retired turn-intent override before it can be persisted", async () => {
@@ -640,7 +648,7 @@ describe("Prompt Library catalog", () => {
       .rejects.toMatchObject({ statusCode: 404 });
   });
 
-  it("blocks a saved protected override acknowledged under an earlier prompt protocol identity", async () => {
+  it("accepts a saved protected override acknowledged under an earlier prompt protocol identity", async () => {
     const content = "Keep the established output shape and voice.";
     const query = vi.fn().mockResolvedValue({
       rows: [{
@@ -655,7 +663,7 @@ describe("Prompt Library catalog", () => {
     const prompts = createPromptRepository({ query } as never);
 
     await expect(prompts.loadPromptSnapshot({ ownerUserId: crypto.randomUUID(), scope: "application" }))
-      .rejects.toMatchObject({ code: "prompt_override_incompatible", statusCode: 409 });
+      .resolves.toMatchObject({ snapshot: { story_system: { content, source: "application" } } });
   });
 
   it("renders only engine-supplied placeholder values", () => {
@@ -777,5 +785,69 @@ describe("Prompt Library catalog", () => {
     expect(snapshot.templates.story_system).toMatchObject({ content, source: "application" });
     const legacy = await resolveStoryPromptSnapshot({ query } as never, { ownerUserId, scope: "campaign", campaignId });
     expect(legacy.templates.story_system.source).toBe("application");
+  });
+});
+
+describe("implicit prompt override acknowledgement", () => {
+  const content = "Custom writer prompt.";
+  const contentHash = createHash("sha256").update(content).digest("hex");
+  const row = (overrides: Record<string, unknown> = {}) => ({ prompt_key: "story_system", content, campaign_id: null,
+    compatibility_required_shape_version: "story-output-v2", compatibility_protocol_identity: "story-v13-current-state-corrections|story-output-v2|current-continuity-v2",
+    compatibility_content_hash: contentHash, ...overrides });
+  const db = (rows: unknown[], enrolled = true) => ({ query: vi.fn(async (sql: string, _values?: readonly unknown[]) => {
+    if (sql.includes("FROM campaigns")) return { rows: [{ exists: 1 }] };
+    if (sql.includes("campaign_story_memory_enrollments")) return { rows: enrolled ? [{ exists: 1 }] : [] };
+    if (sql.includes("prompt_template_overrides")) return { rows };
+    return { rows: [] };
+  }) });
+  const scope = () => ({ ownerUserId: crypto.randomUUID(), scope: "campaign" as const, campaignId: crypto.randomUUID() });
+
+  it("accepts an override acknowledged under an older prompt protocol when the output shape is unchanged", async () => {
+    const snapshot = await resolveStoryMemoryPromptSnapshot(db([row()]) as never, scope());
+    expect(snapshot.templates.story_system).toMatchObject({ content, source: "application" });
+  });
+
+  it("still blocks an override whose stored shape version is not current", async () => {
+    await expect(resolveStoryMemoryPromptSnapshot(db([row({ compatibility_required_shape_version: "story-output-v1" })]) as never, scope()))
+      .rejects.toMatchObject({ statusCode: 409, code: "prompt_override_incompatible", message: expect.stringMatching(/re-save/i) });
+  });
+
+  it("still blocks an override whose content changed after it was acknowledged", async () => {
+    await expect(resolveStoryMemoryPromptSnapshot(db([row({ compatibility_content_hash: "0".repeat(64) })]) as never, scope()))
+      .rejects.toMatchObject({ statusCode: 409, code: "prompt_override_incompatible" });
+  });
+
+  it("blocks an override with no acknowledgement metadata and asks for a re-save", async () => {
+    await expect(resolveStoryPromptSnapshot(db([row({ compatibility_required_shape_version: null, compatibility_protocol_identity: null, compatibility_content_hash: null })], false) as never, scope()))
+      .rejects.toMatchObject({ statusCode: 409, code: "prompt_override_incompatible", message: expect.stringMatching(/re-save/i) });
+  });
+
+  it("stores a server-derived acknowledgement on save without requiring one from the client", async () => {
+    const database = db([]);
+    const prompts = createPromptRepository(database as never);
+    await prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_system", content });
+    const insert = database.query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([STORY_PROMPT_SCHEMA_VERSION, storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity, contentHash]);
+  });
+
+  it("ignores a stale client-supplied acknowledgement instead of rejecting the save", async () => {
+    const database = db([]);
+    const prompts = createPromptRepository(database as never);
+    await expect(prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_system", content,
+      compatibilityAcknowledgement: { requiredShapeVersion: "story-output-v2", protocolIdentity: "stale|identity", contentHash: "0".repeat(64) } })).resolves.toBeDefined();
+  });
+
+  it("stores no acknowledgement for keys without a shape requirement", async () => {
+    const database = db([]);
+    const prompts = createPromptRepository(database as never);
+    await prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "rpg_assessment", content });
+    const insert = database.query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([null, null, null]);
+  });
+
+  it("reports a legacy-identity override as compatible in the library", async () => {
+    const prompts = createPromptRepository(db([row()]) as never);
+    const library = await prompts.listPromptLibrary({ ownerUserId: crypto.randomUUID(), scope: "application" });
+    expect(library.templates.find((template) => template.key === "story_system")?.compatibility?.acknowledged).toBe(true);
   });
 });

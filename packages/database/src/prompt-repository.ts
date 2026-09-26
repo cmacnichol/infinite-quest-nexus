@@ -19,6 +19,7 @@ import {
   STORY_PROMPT_PROTOCOL_VERSION,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
   STORY_OUTPUT_ENCODING_CONTRACT_V3,
+  STORY_PROMPT_SCHEMA_VERSION,
   castStoryMemoryPromptCompatibilityIdentity,
   storyMemoryMandatoryContract,
   storyPromptCompatibilityIdentity,
@@ -99,28 +100,15 @@ async function invalidateModelChains(database: DatabaseClient, scope: PromptScop
   );
 }
 
-function acknowledgementMatches(
-  row: OverrideRow,
-  requirement: NonNullable<ReturnType<typeof promptCompatibilityRequirement>>
-): boolean {
-  return row.compatibility_required_shape_version === requirement.requiredShapeVersion
-    && row.compatibility_protocol_identity === requirement.protocolIdentity
-    && row.compatibility_content_hash === hash(row.content);
-}
-
-function overrideIsCompatible(row: OverrideRow, mode: PromptCompatibilityMode): boolean {
+/** Compatibility follows the local output shape the override was saved
+ * against, not the prompt protocol: strict provider schemas, appended
+ * application contracts and local validation own the wire shape, so a
+ * protocol bump alone never invalidates a saved creative prompt. */
+function overrideIsCompatible(row: OverrideRow): boolean {
   if (!(legacyPromptTemplateKeys as readonly string[]).includes(row.prompt_key)) return true;
-  const legacyRequirement = promptCompatibilityRequirement(row.prompt_key as PromptTemplateKey);
-  if (!legacyRequirement) return true;
-  if (mode === "story_memory") {
-    const storyMemoryRequirement = storyMemoryPromptCompatibilityRequirement(row.prompt_key as PromptTemplateKey);
-    return storyMemoryRequirement !== null && acknowledgementMatches(row, storyMemoryRequirement);
-  }
-  // A v14 acknowledgement is stricter for the same output schema and leaves
-  // the editable creative text intact, so existing v13 generation may use it.
-  return acknowledgementMatches(row, legacyRequirement)
-    || (storyMemoryPromptCompatibilityRequirement(row.prompt_key as PromptTemplateKey) !== null
-      && acknowledgementMatches(row, storyMemoryPromptCompatibilityRequirement(row.prompt_key as PromptTemplateKey)!));
+  if (!promptCompatibilityRequirement(row.prompt_key as PromptTemplateKey)) return true;
+  return row.compatibility_required_shape_version === STORY_PROMPT_SCHEMA_VERSION
+    && row.compatibility_content_hash === hash(row.content);
 }
 
 async function resolveSnapshot(
@@ -141,8 +129,8 @@ async function resolveSnapshot(
   const campaign = new Map<PromptCatalogKey, OverrideRow>();
   for (const row of result.rows) {
     if (!(legacyPromptTemplateKeys as readonly string[]).includes(row.prompt_key)) continue;
-    if (mode === "legacy" && enforceCompatibility && !overrideIsCompatible(row, mode)) {
-      throw Object.assign(new Error("A saved prompt override must be acknowledged for the current required output shape before generation can run."), {
+    if (mode === "legacy" && enforceCompatibility && !overrideIsCompatible(row)) {
+      throw Object.assign(new Error("This saved prompt override was written for an earlier output shape or was edited outside the Prompt Library. Re-save it in the Prompt Library before generation can run."), {
         statusCode: 409,
         code: "prompt_override_incompatible"
       });
@@ -152,8 +140,8 @@ async function resolveSnapshot(
   return Object.fromEntries(legacyPromptTemplateKeys.map((key) => {
     const definition = PROMPT_TEMPLATE_CATALOG[key];
     const effective = campaign.get(definition.key) ?? application.get(definition.key);
-    if (mode === "story_memory" && enforceCompatibility && effective && !overrideIsCompatible(effective, mode)) {
-      throw Object.assign(new Error("The effective prompt override requires compatibility acknowledgement."), {
+    if (mode === "story_memory" && enforceCompatibility && effective && !overrideIsCompatible(effective)) {
+      throw Object.assign(new Error("This saved prompt override was written for an earlier output shape or was edited outside the Prompt Library. Re-save it in the Prompt Library before generation can run."), {
         statusCode: 409, code: "prompt_override_incompatible"
       });
     }
@@ -426,14 +414,10 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
             ? storyMemoryPromptCompatibilityRequirement(definition.key as PromptTemplateKey)
             : promptCompatibilityRequirement(definition.key as PromptTemplateKey);
           if (!requirement) return null;
+          const override = acknowledgement.get(definition.key);
           return {
             ...requirement,
-            acknowledged: frozen.source === "shipped" || (() => {
-              const override = acknowledgement.get(definition.key);
-              return override?.compatibility_required_shape_version === requirement.requiredShapeVersion
-                && override.compatibility_protocol_identity === requirement.protocolIdentity
-                && override.compatibility_content_hash === frozen.hash;
-            })()
+            acknowledged: frozen.source === "shipped" || (override !== undefined && overrideIsCompatible(override))
           };
         })()
       }); })
@@ -465,24 +449,10 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
         ...(command.compatibilityAcknowledgement === undefined ? {} : { compatibilityAcknowledgement: command.compatibilityAcknowledgement })
       });
       activeDefinition(value.key);
-      const requirement = promptCompatibilityRequirement(value.key as PromptTemplateKey);
-      const storyMemoryRequirement = storyMemoryPromptCompatibilityRequirement(value.key as PromptTemplateKey);
-      const acknowledgement = value.compatibilityAcknowledgement;
-      const acknowledgementValid = !requirement || (!!acknowledgement && (
-        (acknowledgement.requiredShapeVersion === requirement.requiredShapeVersion
-          && acknowledgement.protocolIdentity === requirement.protocolIdentity
-          && acknowledgement.contentHash === hash(value.content))
-        || (storyMemoryRequirement !== null
-          && acknowledgement.requiredShapeVersion === storyMemoryRequirement.requiredShapeVersion
-          && acknowledgement.protocolIdentity === storyMemoryRequirement.protocolIdentity
-          && acknowledgement.contentHash === hash(value.content))
-      ));
-      if (!acknowledgementValid) {
-        throw Object.assign(new Error("Acknowledge the current required output shape for this exact prompt text before saving."), {
-          statusCode: 409,
-          code: "prompt_override_incompatible"
-        });
-      }
+      // The client's compatibilityAcknowledgement field (if sent) is parsed
+      // above for shape validation only; the stored acknowledgement is always
+      // derived here from the current requirement, never from client input.
+      const requirement = storyMemoryPromptCompatibilityRequirement(value.key as PromptTemplateKey);
       if (campaignId) await assertCampaignOwner(database, command.ownerUserId, campaignId);
       await database.query(
         `INSERT INTO prompt_template_overrides(owner_user_id,campaign_id,prompt_key,content,compatibility_required_shape_version,compatibility_protocol_identity,compatibility_content_hash,compatibility_acknowledged_at,updated_at)
@@ -490,7 +460,7 @@ export function createPromptRepository(database: DatabaseClient): PromptLibraryP
          ON CONFLICT(owner_user_id,campaign_id,prompt_key)
          DO UPDATE SET content=excluded.content,compatibility_required_shape_version=excluded.compatibility_required_shape_version,compatibility_protocol_identity=excluded.compatibility_protocol_identity,compatibility_content_hash=excluded.compatibility_content_hash,compatibility_acknowledged_at=excluded.compatibility_acknowledged_at,updated_at=now()`,
         [command.ownerUserId, campaignId, value.key, value.content,
-          acknowledgement?.requiredShapeVersion ?? null, acknowledgement?.protocolIdentity ?? null, acknowledgement?.contentHash ?? null]
+          requirement ? STORY_PROMPT_SCHEMA_VERSION : null, requirement?.protocolIdentity ?? null, requirement ? hash(value.content) : null]
       );
       await invalidateModelChains(database, command, value.key);
       return listPromptLibrary(command);
