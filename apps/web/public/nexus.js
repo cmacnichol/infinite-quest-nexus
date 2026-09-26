@@ -3906,8 +3906,6 @@ async function loadIllustrationConfig() {
   elements.illustrationSegmentPromptMode.value = illustrationConfig.segmentPromptMode || "direct";
   defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || illustrationConfig.refinementPrompt || "";
   illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
-  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue;
-  renderIllustrationPromptSummary();
   syncIllustrationProviderAvailability(true);
   const provider = effectiveCampaignProvider("image");
   elements.campaignImageProviderSummary.textContent = provider
@@ -3933,39 +3931,12 @@ function illustrationPolicyUsesProvider(policy = elements.illustrationSourcePoli
   return policy === "library_then_generate" || policy === "generate_only";
 }
 
-function renderIllustrationPromptSummary() {
-  const usesDefault = illustrationRefinementPromptValue.trim() === defaultIllustrationRefinementPrompt.trim();
-  elements.illustrationRefinementPromptSummary.textContent = usesDefault
-    ? "Using the default refinement prompt."
-    : "Using a custom campaign prompt.";
-}
-
 function openIllustrationPromptEditor() {
   elements.promptLibraryScope.value = "campaign";
   syncPromptLibraryCampaigns();
   elements.promptLibraryCampaign.value = selectedCampaign?.id || "";
   selectedPromptTemplateKey = "illustration_refinement";
   window.location.hash = "#prompt-library";
-}
-
-function applyIllustrationPrompt(event) {
-  event.preventDefault();
-  const prompt = elements.illustrationRefinementPrompt.value.trim();
-  if (!prompt) {
-    elements.illustrationRefinementPrompt.setCustomValidity("Enter an image-prompt refinement prompt.");
-    elements.illustrationRefinementPrompt.reportValidity();
-    return;
-  }
-  elements.illustrationRefinementPrompt.setCustomValidity("");
-  illustrationRefinementPromptValue = prompt;
-  renderIllustrationPromptSummary();
-  elements.illustrationPromptDialog.close("apply");
-}
-
-function restoreDefaultIllustrationPrompt() {
-  elements.illustrationRefinementPrompt.value = defaultIllustrationRefinementPrompt;
-  elements.illustrationRefinementPrompt.setCustomValidity("");
-  elements.illustrationRefinementPrompt.focus();
 }
 
 function renderIllustrationSettingsVisibility() {
@@ -5599,12 +5570,12 @@ async function saveIllustrationConfig(event) {
         maxAttempts: elements.illustrationMaxAttempts.value,
         segmentWordCount: elements.illustrationSegmentWordCount.value,
         imagesPerSegment: elements.illustrationImagesPerSegment.value,
-        segmentPromptMode: elements.illustrationSegmentPromptMode.value
+        segmentPromptMode: elements.illustrationSegmentPromptMode.value,
+        refinementPrompt: illustrationRefinementPromptValue
       })
     });
     defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || defaultIllustrationRefinementPrompt;
     illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
-    renderIllustrationPromptSummary();
     elements.illustrationStatus.className = "status success";
     elements.illustrationStatus.textContent = sourcePolicy === "off"
       ? "Illustrations disabled. No image endpoint will be called for new turns."
@@ -6755,13 +6726,6 @@ elements.embeddingModel.addEventListener("keydown", (event) => {
 elements.embeddingForm.addEventListener("submit", saveEmbeddingConfig);
 elements.illustrationForm.addEventListener("submit", saveIllustrationConfig);
 elements.openIllustrationPromptEditor.addEventListener("click", openIllustrationPromptEditor);
-elements.illustrationPromptForm.addEventListener("submit", applyIllustrationPrompt);
-elements.restoreDefaultIllustrationPrompt.addEventListener("click", restoreDefaultIllustrationPrompt);
-elements.cancelIllustrationPrompt.addEventListener("click", () => requestModalDismissal(elements.illustrationPromptDialog));
-elements.illustrationPromptDialog.addEventListener("close", () => {
-  elements.illustrationRefinementPrompt.value = illustrationRefinementPromptValue;
-  elements.illustrationRefinementPrompt.setCustomValidity("");
-});
 elements.illustrationSourcePolicy.addEventListener("change", () => {
   if (illustrationPolicyUsesProvider() && !enabledProviders("image").length) {
     elements.illustrationSourcePolicy.value = "library_only";

@@ -707,7 +707,15 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="navPromptLibrary"');
     expect(managementHtml).toContain('id="promptLibraryScope"');
     expect(managementHtml).toContain('id="promptLibraryContent"');
-    expect(managementScript).not.toContain("refinementPrompt: illustrationRefinementPromptValue");
+    expect(managementHtml).toContain("The AI refinement prompt is edited in the Prompt Library (Illustration refinement), where campaign overrides apply to every segment job.");
+    expect(managementHtml).not.toContain('<textarea id="illustrationRefinementPrompt"');
+    expect(managementHtml).not.toContain('id="illustrationPromptDialog"');
+    expect(managementScript).not.toContain("function renderIllustrationPromptSummary()");
+    expect(managementScript).not.toContain("Using the default refinement prompt.");
+    expect(managementScript).not.toContain("Using a custom campaign prompt.");
+    // The illustration-config save must still carry the campaign's stored refinementPrompt
+    // unchanged, so saving other illustration settings never resets it to the shipped default.
+    expect(managementScript).toContain("refinementPrompt: illustrationRefinementPromptValue");
     expect(managementScript).toContain("function openIllustrationPromptEditor()");
     expect(managementScript).toContain('selectedPromptTemplateKey = "illustration_refinement"');
     expect(managementScript).toContain('elements.illustrationSegmentPromptMode.value === "ai_refined"');
