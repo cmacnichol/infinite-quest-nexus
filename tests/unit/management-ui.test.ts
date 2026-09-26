@@ -1534,4 +1534,24 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).not.toContain("compatibilityAcknowledgement");
     expect(managementHtml).toContain("promptLibraryRequiredShape");
   });
+
+  it("resets unsaved prompt edits when renderPromptLibrary loads with fresh data", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+    const template = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
+      effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
+    const functions = managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
+      ["renderPromptLibrary"], {
+        document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
+        promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
+        promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
+        requestAnimationFrame: () => {}
+      });
+    functions.renderPromptLibrary(true);
+    expect(elements.promptLibraryContent.value).toBe("Saved instructions");
+    elements.promptLibraryContent.value = "Changed instructions";
+    expect(elements.promptLibraryContent.value).toBe("Changed instructions");
+    functions.renderPromptLibrary(true);
+    expect(elements.promptLibraryContent.value).toBe("Saved instructions");
+  });
 });

@@ -218,7 +218,7 @@ test("legacy Story renders safe recovery guidance without private diagnostic dat
   expect(errors).toEqual([]);
 });
 
-for (const scope of ["application", "campaign"] as const) test(`Prompt Library defaults ${scope} acknowledgement on and honors a manual uncheck`, async ({ page }) => {
+for (const scope of ["application", "campaign"] as const) test(`Prompt Library saves ${scope} prompt overrides implicitly`, async ({ page }) => {
   const campaign = quietLeafApiPayloads();
   const enrolledProtocol = "story-v14-continuity-context|story-output-v2|current-continuity-v3";
   let savedOverride: Record<string, unknown> | null = null;
@@ -258,36 +258,20 @@ for (const scope of ["application", "campaign"] as const) test(`Prompt Library d
   await expect(page.getByText("Required output shape version story-output-v2.")).toBeVisible();
   await expect(page.locator("#promptLibraryRequiredShape")).toHaveText("{ narration, choices, currentContinuity }");
   if (scope === "campaign") {
-    await page.locator("#promptLibraryCompatibilityAcknowledgement").check();
     await page.locator("#promptLibraryScope").selectOption("campaign");
     await page.locator("#promptLibraryCampaign").selectOption(campaign.campaignId);
-    await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
   }
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
-  await page.locator("#promptLibraryContent").fill("Edited with acknowledgement enabled.");
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
-  await page.locator("#promptLibraryCompatibilityAcknowledgement").uncheck();
   await page.locator("#promptLibraryContent").fill("Keep the established creative voice. Edited.");
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).not.toBeChecked();
-  await page.getByRole("button", { name: "Save prompt", exact: true }).click();
-  await expect(page.locator("#promptLibraryStatus")).toContainText("Acknowledge the required output shape");
-  expect(savedOverride).toBeNull();
-
-  await page.locator("#promptLibraryCompatibilityAcknowledgement").check();
   await page.getByRole("button", { name: "Save prompt", exact: true }).click();
   await expect.poll(() => savedOverride).not.toBeNull();
-  await expect(page.locator("#promptLibraryCompatibilityAcknowledgement")).toBeChecked();
   await page.screenshot({ path: join(tmpdir(), `prompt-library-default-${scope}.png`), fullPage: true });
   expect(savedOverride).toMatchObject({
     key: "story_system",
     scope,
-    ...(scope === "campaign" ? { campaignId: campaign.campaignId } : {}),
-    content: "Keep the established creative voice. Edited.",
-    compatibilityAcknowledgement: {
-      requiredShapeVersion: "story-output-v2",
-      protocolIdentity: scope === "campaign" ? enrolledProtocol : "story-protocol-fixture"
-    }
+    ...(scope === "campaign" ? { campaignId: campaign.campaignId } : {})
   });
+  expect(savedOverride).toHaveProperty("content", "Keep the established creative voice. Edited.");
+  expect(savedOverride).not.toHaveProperty("compatibilityAcknowledgement");
 });
 
 for (const surface of ["legacy", "web-next"] as const) {
