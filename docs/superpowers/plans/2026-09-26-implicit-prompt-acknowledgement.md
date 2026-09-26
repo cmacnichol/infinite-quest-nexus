@@ -258,9 +258,9 @@ An override saved against an earlier output schema, edited outside the Prompt Li
 
 ### Task 4: Verify and record progress
 
-- [ ] **Step 1: Full checks.** Run `pnpm check` and the full `tests/unit`. The only failures may be the known baseline.
-- [ ] **Step 2: Whole-change review.** Run a whole-change review (controller-dispatched), and fix any findings.
-- [ ] **Step 3: Update the remediation records.** Update `docs/review/prompt-system-audit-2026-09-25.md` recommendation R4/R5 status and the remediation plan's Task 11 note. The app-wide override no longer needs re-acknowledgement, so override consolidation is optional. Commit with subject `Docs: note implicit acknowledgement in the prompt audit follow-ups`.
+- [x] **Step 1: Full checks.** Run `pnpm check` and the full `tests/unit`. The only failures may be the known baseline.
+- [x] **Step 2: Whole-change review.** Run a whole-change review (controller-dispatched), and fix any findings.
+- [x] **Step 3: Update the remediation records.** Update `docs/review/prompt-system-audit-2026-09-25.md` recommendation R4/R5 status and the remediation plan's Task 11 note. The app-wide override no longer needs re-acknowledgement, so override consolidation is optional. Commit with subject `Docs: note implicit acknowledgement in the prompt audit follow-ups`.
 
 ## Rollout notes
 
@@ -274,3 +274,4 @@ An override saved against an earlier output schema, edited outside the Prompt Li
 - 2026-09-26 — Task 1 complete (commits bf305d79, 3934a601); review found a stale migrations integration expectation, fixed in round 1; unit 4546 pass / 3 known baseline; integration 19/19 + migration test pass.
 - 2026-09-26 — Task 2 complete (commits e7bc51c3, 9d6c8552); review found a stale Playwright scenario and lost editor-reset coverage, fixed in round 1; management-ui 82/82, e2e generation-integrity-diagnostics ran (screenshots it regenerates were restored).
 - 2026-09-26 — Task 3 complete (ADR 0039, index, runbook, user guide); review clean; commit subject reworded to move the trailer out of the subject.
+- 2026-09-26 — Task 4 complete: pnpm check clean; unit 4547 pass / 3 known baseline; whole-change review (With fixes) addressed in 4f90dfe0 and 9bb2867e (UI re-save marker, key/scope in 409s, stale comments/docs, runbook rollback line, audit/plan notes); re-review clean. Plan complete.
