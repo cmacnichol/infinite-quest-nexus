@@ -106,10 +106,27 @@ export function composeTextExecutionPrompt(input: Readonly<{ presetPrompt: strin
   return presetPrompt ? `${presetPrompt}\n\n${operationPrompt}` : operationPrompt;
 }
 
+/** New Story preset jobs: OpenRouter applies the preset system prompt itself. */
+export const STORY_PRESET_ROUTE_PROTOCOL_V2 = "story-openrouter-preset-v2";
+
+/**
+ * True only for a new-protocol route basis whose sole dispatch target is the
+ * selected OpenRouter preset itself, so OpenRouter (not this app) injects the
+ * preset system prompt server-side. Every other route -- a v1 route basis, or
+ * any basis resolved to concrete model candidates (authoring, cast discovery,
+ * illustration) -- keeps composing the preset prompt locally.
+ */
+export function presetPromptInjectedRemotely(basis: TextExecutionRouteBasis): boolean {
+  return basis.protocolVersion === STORY_PRESET_ROUTE_PROTOCOL_V2
+    && basis.candidates.length === 1 && basis.candidates[0]!.modelId.startsWith("@preset/");
+}
+
 /** Derives every inherited plan field from a verified saved route basis and trusted operation prompt. */
 export function deriveTextExecutionPlan(routeBasisValue: unknown, operationPrompt: string): TextExecutionPlan {
   const basis = readTextExecutionRouteBasis(routeBasisValue);
-  const prompt = composeTextExecutionPrompt({ presetPrompt: basis.presetSystemPrompt, operationPrompt });
+  const prompt = presetPromptInjectedRemotely(basis)
+    ? composeTextExecutionPrompt({ presetPrompt: "", operationPrompt })
+    : composeTextExecutionPrompt({ presetPrompt: basis.presetSystemPrompt, operationPrompt });
   const planWithoutHash = {
     version: basis.version,
     selection: basis.selection,

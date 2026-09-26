@@ -132,7 +132,7 @@ import { providerPromptProtocolVersion } from "./provider-application-compositio
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
 import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, responseContractInvocationLedgerLimitV2, responseContractOperationV2Schema, sceneCoverageReplayResultHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type FrozenResponseContractsVersioned, type QueuedResponsePolicy, type QueuedResponsePolicyVersioned, type ResponseContractOperation, type ResponseContractOperationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
-import type { TextExecutionPlan, TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
+import { presetPromptInjectedRemotely, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
@@ -194,7 +194,9 @@ export function bindCampaignTextExecutionPlan(
   }
   if (preboundPlan) {
     if (request.systemPrompt === plan.prompt) return request;
-    if (composePresetPrompt({ presetPrompt: routeBasis.presetSystemPrompt, operationPrompt: request.systemPrompt }) !== plan.prompt) {
+    const expected = presetPromptInjectedRemotely(routeBasis) ? request.systemPrompt
+      : composePresetPrompt({ presetPrompt: routeBasis.presetSystemPrompt, operationPrompt: request.systemPrompt });
+    if (expected !== plan.prompt) {
       throw new Error("Frozen Story text execution plan conflicts with the request prompt.");
     }
     return { ...request, systemPrompt: plan.prompt };
@@ -2286,7 +2288,13 @@ async function executeLoadedGeneration(
           job.resolved_input_mode
         ))
         + 1024;
-      if (inputTokenLimit - fixedPromptEnvelope < 512) {
+      // A v2 remote-injected preset route omits the preset text from the plan
+      // prompt (OpenRouter adds it server-side), so it must be added back here
+      // to keep the Chronicle/context budget honest about the real transport size.
+      const remotePresetTokens = job.orchestration_private?.textExecutionRouteBasis
+        && presetPromptInjectedRemotely(job.orchestration_private.textExecutionRouteBasis)
+        ? estimateStoryTokens(job.orchestration_private.textExecutionRouteBasis.presetSystemPrompt) : 0;
+      if (inputTokenLimit - (fixedPromptEnvelope + remotePresetTokens) < 512) {
         throw Object.assign(new Error(
           `The provider context window (${effectiveContextWindow}) cannot fit the configured output reserve (${effectiveMaxOutputTokens(provider, job)}) and story prompt envelope.`
         ), { code: "context_budget_invalid" });
@@ -2294,7 +2302,7 @@ async function executeLoadedGeneration(
       const configuredCampaignContextBudget = Number(job.context_options.budgetTokens || 32000);
       const safeContextBudget = Math.max(512, Math.min(
         configuredCampaignContextBudget,
-        inputTokenLimit - fixedPromptEnvelope
+        inputTokenLimit - (fixedPromptEnvelope + remotePresetTokens)
       ));
       return {
         safeAction,
