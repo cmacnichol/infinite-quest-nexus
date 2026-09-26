@@ -222,7 +222,7 @@ Use the variable names the file already uses for the HTML and script sources.
 - Create: `docs/architecture/0039-implicit-prompt-override-acknowledgement.md`
 - Modify: `docs/architecture/index.md` (list entry), `docs/runbooks/story-memory-rollout.md:157-158`, `docs/nexus-guide/campaigns/configure.md:60-66`
 
-- [ ] **Step 1: Write the ADR,** in the same style as `0024-central-prompt-library.md`:
+- [x] **Step 1: Write the ADR,** in the same style as `0024-central-prompt-library.md`:
 
 ```markdown
 # ADR 0039: Implicit Prompt Override Acknowledgement
@@ -244,15 +244,15 @@ Saving an override records its acknowledgement automatically against the current
 An override saved against an earlier output schema, edited outside the Prompt Library, or saved before acknowledgements existed still returns 409 until re-saved. Routes without strict provider schemas (for example LM Studio or JSON-object mode) rely on the appended contracts and local validation; a creative override that describes an obsolete shape there yields rejected turns rather than a pre-dispatch block.
 ```
 
-- [ ] **Step 2: Update the runbook.** In `story-memory-rollout.md`, replace the sentence "Existing custom creative prompt overrides retain their bytes and still require v14 compatibility acknowledgement in the Prompt Library; never automatically acknowledge or rewrite them." with "Existing custom creative prompt overrides retain their bytes. They remain usable across prompt-protocol changes while the output shape version is unchanged (ADR 0039); never rewrite them automatically."
+- [x] **Step 2: Update the runbook.** In `story-memory-rollout.md`, replace the sentence "Existing custom creative prompt overrides retain their bytes and still require v14 compatibility acknowledgement in the Prompt Library; never automatically acknowledge or rewrite them." with "Existing custom creative prompt overrides retain their bytes. They remain usable across prompt-protocol changes while the output shape version is unchanged (ADR 0039); never rewrite them automatically."
 
-- [ ] **Step 3: Update the user guide.** In `configure.md`, replace the acknowledgement notes at lines ~60-66 with: "Saving a writer or event-extension prompt records it against the current output shape automatically. You only need to re-save a prompt if the Prompt Library marks it as written for an earlier output shape."
+- [x] **Step 3: Update the user guide.** In `configure.md`, replace the acknowledgement notes at lines ~60-66 with: "Saving a writer or event-extension prompt records it against the current output shape automatically. You only need to re-save a prompt if the Prompt Library marks it as written for an earlier output shape."
 
-- [ ] **Step 4: Index entry.** Add ADR 0039 to `docs/architecture/index.md`, following its existing format.
+- [x] **Step 4: Index entry.** Add ADR 0039 to `docs/architecture/index.md`, following its existing format.
 
-- [ ] **Step 5: Check links and diff.** Run `git diff --check`, and verify that every relative link in the changed docs resolves.
+- [x] **Step 5: Check links and diff.** Run `git diff --check`, and verify that every relative link in the changed docs resolves.
 
-- [ ] **Step 6: Commit.** Commit with subject `Docs: record implicit prompt override acknowledgement`.
+- [x] **Step 6: Commit.** Commit with subject `Docs: record implicit prompt override acknowledgement`.
 
 ---
 
@@ -273,3 +273,4 @@ An override saved against an earlier output schema, edited outside the Prompt Li
 (The controller appends one line per completed task: date, commits, review outcome.)
 - 2026-09-26 — Task 1 complete (commits bf305d79, 3934a601); review found a stale migrations integration expectation, fixed in round 1; unit 4546 pass / 3 known baseline; integration 19/19 + migration test pass.
 - 2026-09-26 — Task 2 complete (commits e7bc51c3, 9d6c8552); review found a stale Playwright scenario and lost editor-reset coverage, fixed in round 1; management-ui 82/82, e2e generation-integrity-diagnostics ran (screenshots it regenerates were restored).
+- 2026-09-26 — Task 3 complete (ADR 0039, index, runbook, user guide); review clean; commit subject reworded to move the trailer out of the subject.
