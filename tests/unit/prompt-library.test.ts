@@ -833,8 +833,10 @@ describe("implicit prompt override acknowledgement", () => {
   it("ignores a stale client-supplied acknowledgement instead of rejecting the save", async () => {
     const database = db([]);
     const prompts = createPromptRepository(database as never);
-    await expect(prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_system", content,
-      compatibilityAcknowledgement: { requiredShapeVersion: "story-output-v2", protocolIdentity: "stale|identity", contentHash: "0".repeat(64) } })).resolves.toBeDefined();
+    await prompts.savePromptOverride({ ownerUserId: crypto.randomUUID(), scope: "application", key: "story_system", content,
+      compatibilityAcknowledgement: { requiredShapeVersion: "story-output-v2", protocolIdentity: "stale|identity", contentHash: "0".repeat(64) } });
+    const insert = database.query.mock.calls.find(([sql]) => String(sql).startsWith("INSERT INTO prompt_template_overrides"))!;
+    expect(insert[1]!.slice(4, 7)).toEqual([STORY_PROMPT_SCHEMA_VERSION, storyMemoryPromptCompatibilityRequirement("story_system")!.protocolIdentity, contentHash]);
   });
 
   it("stores no acknowledgement for keys without a shape requirement", async () => {

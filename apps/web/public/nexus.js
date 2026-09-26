@@ -1343,12 +1343,6 @@ function promptLibraryIsDirty() {
   return Boolean(promptLibraryEditorContext && elements.promptLibraryContent.value !== promptLibraryEditorBaseline);
 }
 
-async function promptContentHash(content) {
-  const bytes = new TextEncoder().encode(content);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
-}
-
 function renderPromptLibraryDirtyState() {
   const dirty = promptLibraryIsDirty();
   elements.promptLibraryUnsaved?.classList.toggle("hidden", !dirty);
@@ -1456,7 +1450,7 @@ function renderPromptLibrary(loadEditor = false) {
   elements.promptLibraryCompatibility?.classList.toggle("hidden", !compatibility);
   elements.promptLibraryRequiredShape?.classList.toggle("hidden", !compatibility);
   if (compatibility) {
-    elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Saving records this prompt against the current shape; the application adds the required output rules automatically.`;
+    elements.promptLibraryCompatibilityCopy.textContent = `Required output shape version ${compatibility.requiredShapeVersion}. Saving records this prompt against the current shape; the application adds the required output rules automatically.${compatibility.acknowledged ? "" : " Saved for an earlier output shape or outside the Prompt Library. Save it again before generation can use it."}`;
     elements.promptLibraryRequiredShape.textContent = compatibility.requiredShapePreview;
   }
   const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";

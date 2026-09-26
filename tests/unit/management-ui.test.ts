@@ -1535,6 +1535,27 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain("promptLibraryRequiredShape");
   });
 
+  it("flags an unacknowledged prompt override and stays quiet for an acknowledged one", () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
+    const baseTemplate = { key: "story_system", title: "Story writer", category: "Story Engine", description: "", variables: [], maxLength: 10000, campaignOverrideAllowed: true,
+      effectiveSource: "application", effectiveContent: "Saved instructions", compatibility: { acknowledged: true, requiredShapeVersion: "v2", requiredShapePreview: "{}" } };
+    const harness = (template: typeof baseTemplate) => managementFunctions<{ renderPromptLibrary: (load?: boolean) => void }>(
+      ["renderPromptLibrary"], {
+        document, elements, promptLibrary: { templates: [template] }, promptLibraryCategory: "All", selectedPromptTemplateKey: template.key,
+        promptLibrarySelectedTemplate: () => template, syncPromptLibraryCampaigns: () => {}, promptLibraryCampaignId: () => "",
+        promptLibraryEditorContext: "", promptLibraryEditorBaseline: "", renderPromptLibraryDirtyState: () => {}, promptLibraryPreviewVisible: false,
+        requestAnimationFrame: () => {}
+      });
+
+    harness(baseTemplate).renderPromptLibrary(true);
+    expect(elements.promptLibraryCompatibilityCopy.textContent).not.toContain("Save it again before generation can use it.");
+
+    const unacknowledged = { ...baseTemplate, compatibility: { ...baseTemplate.compatibility, acknowledged: false } };
+    harness(unacknowledged).renderPromptLibrary(true);
+    expect(elements.promptLibraryCompatibilityCopy.textContent).toContain("Save it again before generation can use it.");
+  });
+
   it("resets unsaved prompt edits when renderPromptLibrary loads with fresh data", () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, any>;
@@ -1550,7 +1571,6 @@ describe("Nexus management UI contracts", () => {
     functions.renderPromptLibrary(true);
     expect(elements.promptLibraryContent.value).toBe("Saved instructions");
     elements.promptLibraryContent.value = "Changed instructions";
-    expect(elements.promptLibraryContent.value).toBe("Changed instructions");
     functions.renderPromptLibrary(true);
     expect(elements.promptLibraryContent.value).toBe("Saved instructions");
   });

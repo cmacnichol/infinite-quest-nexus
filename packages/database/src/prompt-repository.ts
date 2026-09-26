@@ -76,9 +76,11 @@ async function assertCampaignOwner(database: DatabaseClient, ownerUserId: string
  * will actually need at enqueue time.  This is an eligibility check only; it
  * never reads a mutable policy from a queued generation.
  *
- * Every campaign is enrolled on creation (migration 0112), and legacy mode
- * accepts the stricter Story Memory acknowledgement, so application defaults
- * must be acknowledged for Story Memory to be usable anywhere. */
+ * Compatibility is keyed on the local output shape version and a content
+ * hash, not the prompt-protocol identity (ADR 0039): saving an override
+ * derives and stores that acknowledgement automatically. This mode only
+ * selects which enqueue path (Story Memory or legacy) a campaign will
+ * exercise; every campaign is enrolled on creation (migration 0112). */
 async function promptCompatibilityMode(database: DatabaseClient, scope: PromptScope): Promise<PromptCompatibilityMode> {
   if (scope.scope !== "campaign") return "story_memory";
   const enrollment = await database.query(
@@ -111,6 +113,16 @@ function overrideIsCompatible(row: OverrideRow): boolean {
     && row.compatibility_content_hash === hash(row.content);
 }
 
+function incompatibleOverrideError(row: OverrideRow) {
+  const scopeLabel = row.campaign_id ? "campaign scope" : "application scope";
+  return Object.assign(new Error(
+    `The saved ${row.prompt_key} prompt override (${scopeLabel}) was written for an earlier output shape or was edited outside the Prompt Library. Re-save it in the Prompt Library before generation can run.`
+  ), {
+    statusCode: 409,
+    code: "prompt_override_incompatible"
+  });
+}
+
 async function resolveSnapshot(
   database: DatabaseClient,
   scope: PromptScope,
@@ -130,10 +142,7 @@ async function resolveSnapshot(
   for (const row of result.rows) {
     if (!(legacyPromptTemplateKeys as readonly string[]).includes(row.prompt_key)) continue;
     if (mode === "legacy" && enforceCompatibility && !overrideIsCompatible(row)) {
-      throw Object.assign(new Error("This saved prompt override was written for an earlier output shape or was edited outside the Prompt Library. Re-save it in the Prompt Library before generation can run."), {
-        statusCode: 409,
-        code: "prompt_override_incompatible"
-      });
+      throw incompatibleOverrideError(row);
     }
     (row.campaign_id ? campaign : application).set(row.prompt_key, row);
   }
@@ -141,9 +150,7 @@ async function resolveSnapshot(
     const definition = PROMPT_TEMPLATE_CATALOG[key];
     const effective = campaign.get(definition.key) ?? application.get(definition.key);
     if (mode === "story_memory" && enforceCompatibility && effective && !overrideIsCompatible(effective)) {
-      throw Object.assign(new Error("This saved prompt override was written for an earlier output shape or was edited outside the Prompt Library. Re-save it in the Prompt Library before generation can run."), {
-        statusCode: 409, code: "prompt_override_incompatible"
-      });
+      throw incompatibleOverrideError(effective);
     }
     const content = effective?.content ?? definition.defaultContent;
     const source = campaign.has(definition.key) ? "campaign" : application.has(definition.key) ? "application" : "shipped";

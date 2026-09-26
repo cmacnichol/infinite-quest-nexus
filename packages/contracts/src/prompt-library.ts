@@ -44,9 +44,11 @@ export type PromptCompatibilityRequirement = Readonly<{
 }>;
 
 /**
- * Compatibility is an explicit operator acknowledgement, never a heuristic
- * search through creative override text. These templates must keep the
- * currently shipped StoryTurnOutput shape to remain safe to execute.
+ * Compatibility is keyed on the shape version plus a content hash, never a
+ * heuristic search through creative override text. Saving an override
+ * derives and stores this acknowledgement automatically (ADR 0039); these
+ * templates must keep the currently shipped StoryTurnOutput shape to remain
+ * safe to execute.
  */
 export function promptCompatibilityRequirement(key: PromptTemplateKey): PromptCompatibilityRequirement | null {
   if (key !== "story_system" && key !== "event_extension") return null;
@@ -60,7 +62,9 @@ export function promptCompatibilityRequirement(key: PromptTemplateKey): PromptCo
 /**
  * New Story Memory jobs bind this requirement to their frozen v14 policy.
  * The legacy requirement above remains the compatibility contract for v13
- * snapshots and existing creative overrides.
+ * snapshots and existing creative overrides. Both share the same shape
+ * version plus content-hash compatibility rule (ADR 0039); the protocol
+ * identity below no longer gates compatibility on its own.
  */
 export function storyMemoryPromptCompatibilityRequirement(key: PromptTemplateKey): PromptCompatibilityRequirement | null {
   if (key !== "story_system" && key !== "event_extension") return null;
