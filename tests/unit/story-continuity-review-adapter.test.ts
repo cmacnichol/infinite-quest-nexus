@@ -1,6 +1,6 @@
 import { PROMPT_TEMPLATE_CATALOG, CONTINUITY_REVIEW_PROMPT_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { describe, expect, it, vi } from "vitest";
-import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview, estimateContinuityReviewPlanningTokens } from "../../services/runtime/src/story-continuity-review-adapter.js";
+import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview, estimateContinuityReviewPlanningTokens, ContinuityReviewUnavailableError } from "../../services/runtime/src/story-continuity-review-adapter.js";
 import { createStoryEvidence, generationEvidenceManifestHash } from "../../packages/application/src/memory/generation-context.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { sha256 } from "../../packages/domain/src/text.js";
@@ -211,7 +211,13 @@ describe("exact continuity review provider request", () => {
   });
 
   it("v2 repair without a writer prompt is unavailable", () => {
-    expect(() => prepareContinuityRepair(repairFixtureInput({ repairProtocolIdentity: "story-continuity-repair-v2" }))).toThrow();
+    expect(() => prepareContinuityRepair(repairFixtureInput({ repairProtocolIdentity: "story-continuity-repair-v2" })))
+      .toThrow(ContinuityReviewUnavailableError);
+  });
+
+  it("v2 repair with a blank writer prompt is unavailable", () => {
+    expect(() => prepareContinuityRepair({ ...repairFixtureInput({ repairProtocolIdentity: "story-continuity-repair-v2" }), writerSystemPrompt: "   " }))
+      .toThrow(ContinuityReviewUnavailableError);
   });
 
 });
