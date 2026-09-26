@@ -19,6 +19,7 @@ import { getProviderOutputSchemaV2, selectProviderOutputSchemaV2, type ProviderO
 import type { ResponseInvocationKeyV2, ResponseFormatEligibilityV2 } from "../../../packages/contracts/src/text-response-format.js";
 import type { TextModelSelection } from "../../../packages/contracts/src/provider-selection.js";
 import { resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
+import { STORY_PRESET_ROUTE_PROTOCOL_V2 } from "../../../packages/contracts/src/text-execution-plan.js";
 
 export type ResponseContractRuntimeProfile = Readonly<{
   id: string;
@@ -84,6 +85,8 @@ function v2OperationForKey(key: ResponseInvocationKeyV2): Readonly<{ operation: 
  * consult discovery or the verification registry. */
 export function resolveGenerationResponseContractsV2(input: Readonly<{
   queuedPolicy: QueuedResponsePolicyV2;
+  /** Frozen enqueue route identity; absent and historical routes retain the original Story wire. */
+  routeProtocolVersion?: string;
   eligible?(operation: Parameters<typeof getProviderOutputSchemaV2>[0], streaming: boolean, schema: ProviderOutputSchemaV2): ResponseFormatEligibilityV2;
   selectedAt?: string;
   capabilityEvidenceHash: string | (() => string);
@@ -99,7 +102,11 @@ export function resolveGenerationResponseContractsV2(input: Readonly<{
   // nonstream) shares one wire shape and one encoding contract.
   const chosen = new Map<Parameters<typeof getProviderOutputSchemaV2>[0], ProviderOutputSchemaV2>();
   for (const [operation, streamings] of streamingByOperation) {
-    const schema = selectProviderOutputSchemaV2(operation, (candidate) => presetTrusted
+    // A queued preset job may predate paragraph wire without having selected
+    // its closure yet. Only the new frozen route identity opts it into v3.
+    const schema = presetTrusted && operation === "story" && input.routeProtocolVersion !== STORY_PRESET_ROUTE_PROTOCOL_V2
+      ? getProviderOutputSchemaV2(operation, "story-native-v2")
+      : selectProviderOutputSchemaV2(operation, (candidate) => presetTrusted
       || streamings.every((streaming) => input.eligible?.(operation, streaming, candidate)?.status === "verified"))
       ?? getProviderOutputSchemaV2(operation);
     chosen.set(operation, schema);

@@ -256,8 +256,16 @@ describe("generation response-contract executor operation matrix", () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
-  it("freezes story-native-v3 for preset routes and keeps v2 for direct models verified only for v2", () => {
-    const preset = resolveGenerationResponseContractsV2({ queuedPolicy: presetPolicy, capabilityEvidenceHash: "0".repeat(64) });
+  it.each([undefined, "story-openrouter-preset-v1"])("preserves v2 when first selecting a historical queued preset closure (%s)", (routeProtocolVersion) => {
+    const frozen = resolveGenerationResponseContractsV2({
+      queuedPolicy: presetPolicy, ...(routeProtocolVersion !== undefined ? { routeProtocolVersion } : {}), capabilityEvidenceHash: "0".repeat(64)
+    });
+    expect(frozen.contracts["story:stream"]?.schemaVersion).toBe("story-native-v2");
+    expect(frozen.contracts["story:nonstream"]?.schemaVersion).toBe("story-native-v2");
+  });
+
+  it("freezes story-native-v3 for new preset routes and keeps v2 for direct models verified only for v2", () => {
+    const preset = resolveGenerationResponseContractsV2({ queuedPolicy: presetPolicy, routeProtocolVersion: "story-openrouter-preset-v2", capabilityEvidenceHash: "0".repeat(64) });
     expect(preset.contracts["story:stream"]?.schemaVersion).toBe("story-native-v3");
     expect(preset.contracts["story:nonstream"]?.schemaVersion).toBe("story-native-v3");
     const direct = resolveGenerationResponseContractsV2({

@@ -277,7 +277,8 @@ export type GenerationExecutionCollaborators = Readonly<{
     ownerUserId: string,
     profile: GenerationTextProvider,
     queuedPolicy: QueuedResponsePolicyVersioned,
-    runtimeProfile: ResponseContractRuntimeProfile
+    runtimeProfile: ResponseContractRuntimeProfile,
+    routeProtocolVersion?: string
   ): Promise<FrozenResponseContractsVersioned>;
   attributeGenerationCostsToTurn(
     client: DatabaseClient,
@@ -2224,7 +2225,7 @@ async function executeLoadedGeneration(
         if (!collaborators.resolveResponseContracts || !repository.saveFrozenResponseContracts) {
           throw Object.assign(new Error("This worker cannot preflight the queued response contract."), { code: "response_contract_unavailable" });
         }
-        const selected = await collaborators.resolveResponseContracts(job.owner_user_id, provider, queuedResponsePolicy, responseContractProfile(provider, job));
+        const selected = await collaborators.resolveResponseContracts(job.owner_user_id, provider, queuedResponsePolicy, responseContractProfile(provider, job), routeBasis?.protocolVersion);
         const saved = await repository.saveFrozenResponseContracts(scope, queuedResponsePolicyVersionedHash(queuedResponsePolicy), selected);
         if (!saved) throw Object.assign(new Error("The response-contract preflight lost its lease."), { code: "lease_lost" });
         if (saved.version !== 2) throw Object.assign(new Error("The worker received an incompatible response-contract version."), { code: "response_contract_identity_mismatch" });

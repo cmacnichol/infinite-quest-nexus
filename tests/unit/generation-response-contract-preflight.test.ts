@@ -286,6 +286,18 @@ describe("generation response-contract production preflight collaborators", () =
       admission: { basis: "preset_trusted" },
       authority: { kind: "preset_trusted", selection: presetProfile.textSelection }
     });
+    const policy = await createQueuedResponsePolicyResolver(apiProviders, true)({} as never, scope);
+    const worker = collaborators().result;
+    for (const [routeProtocolVersion, schemaVersion] of [
+      ["story-openrouter-preset-v1", "story-native-v2"],
+      ["story-openrouter-preset-v2", "story-native-v3"]
+    ] as const) {
+      const frozen = await worker.resolveResponseContracts!("owner", presetProfile as never, policy!, {
+        id: profile.id, providerType: profile.providerType, model: "@preset/keep",
+        endpointIdentity: profile.endpointIdentity, configurationHash: "a".repeat(64)
+      }, routeProtocolVersion);
+      expect(frozen.contracts["story:nonstream"]).toMatchObject({ schemaVersion });
+    }
   });
 
   it("captures a required policy when the queued profile carries the new-work default", async () => {

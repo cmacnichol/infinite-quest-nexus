@@ -103,11 +103,12 @@ export function createGenerationExecutionCollaborators(
         && current.authorityRevision === routeBasis.authorityRevision
         && (current.endpointIdentity ?? current.id) === routeBasis.endpointReference;
     },
-    resolveResponseContracts: async (ownerUserId, profile, queuedPolicy, runtimeProfile): Promise<FrozenResponseContractsVersioned> => {
+    resolveResponseContracts: async (ownerUserId, profile, queuedPolicy, runtimeProfile, routeProtocolVersion): Promise<FrozenResponseContractsVersioned> => {
       if (queuedPolicy.version === 2) {
         if (queuedPolicy.authority.kind === "preset_trusted") {
           return resolveGenerationResponseContractsV2({
             queuedPolicy,
+            ...(routeProtocolVersion !== undefined ? { routeProtocolVersion } : {}),
             capabilityEvidenceHash: sha256(stableStringify({ routeBasisHash: queuedPolicy.authority.routeBasisHash }))
           });
         }
