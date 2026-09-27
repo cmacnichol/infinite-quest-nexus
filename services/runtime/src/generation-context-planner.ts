@@ -172,7 +172,8 @@ export function planGenerationPromptContext(
   promptRoute: "legacy" | "story_memory" = "legacy",
   policy?: StoryMemoryPolicy,
   serializeStoryRequest?: (input: string) => string,
-  reviewInputTokens?: (manifest: GenerationEvidenceManifest) => number
+  reviewInputTokens?: (manifest: GenerationEvidenceManifest) => number,
+  reviewInputLimit?: number
 ) {
   const authority = context.authority;
   const castSnapshot = isGenerationBaseIdentityV4(context.baseIdentity) ? authority.castSnapshot : undefined;
@@ -290,6 +291,7 @@ export function planGenerationPromptContext(
     blocks: planBlocks,
     contextLimit,
     inputLimit,
+    ...(reviewInputTokens ? { additionalRequestInputLimit: reviewInputLimit ?? inputLimit } : {}),
     count: estimateStoryTokens,
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
     contextSafetyAllowanceTokens: 0,
@@ -324,9 +326,16 @@ export function planGenerationPromptContext(
       throw error;
     }
   };
-  const requestCost = (plan: ReturnType<typeof measure>) => Math.max(
-    plan.requestTokens + plan.safetyAllowanceTokens,
-    plan.additionalRequestTokens ? plan.additionalRequestTokens + estimatedInputSafetyAllowanceTokens(plan.additionalRequestTokens) : 0
+  const writerRequestCost = (plan: ReturnType<typeof measure>) => plan.requestTokens + plan.safetyAllowanceTokens;
+  const reviewRequestCost = (plan: ReturnType<typeof measure>) => plan.additionalRequestTokens
+    + estimatedInputSafetyAllowanceTokens(plan.additionalRequestTokens);
+  const requestCostDelta = (trial: ReturnType<typeof measure>, base: ReturnType<typeof measure>) => Math.max(
+    writerRequestCost(trial) - writerRequestCost(base),
+    reviewRequestCost(trial) - reviewRequestCost(base)
+  );
+  const requestHeadroom = (plan: ReturnType<typeof measure>) => Math.min(
+    inputLimit - writerRequestCost(plan),
+    (reviewInputLimit ?? inputLimit) - reviewRequestCost(plan)
   );
   const useWorldQuota = hasGenerationCharacterAuthority(context.baseIdentity) && Boolean(authority.worldReferenceSource);
   let plan;
@@ -336,7 +345,7 @@ export function planGenerationPromptContext(
     const castBlocks: typeof blocks = [];
     if (castSnapshot) {
       castAllocatedTokens = Math.min(3000, Math.floor(0.10 * Math.max(0, Math.min(
-        contextLimit - protectedPlan.contextTokens, inputLimit - requestCost(protectedPlan)))));
+        contextLimit - protectedPlan.contextTokens, requestHeadroom(protectedPlan)))));
       let budgetTokens = castAllocatedTokens;
       for (;;) {
         castSelection = selectCastContext({ snapshot: castSnapshot, direction: action,
@@ -346,7 +355,7 @@ export function planGenerationPromptContext(
           protected: false, priority: 0, ordinal: 0, scope: "cast" };
         const trial = measure([authorityBlock, block]);
         const added = Math.max(trial.contextTokens - protectedPlan.contextTokens,
-          requestCost(trial) - requestCost(protectedPlan));
+          requestCostDelta(trial, protectedPlan));
         if (trial.selected.some((entry) => entry.id === block.id) && added <= castAllocatedTokens) {
           castBlocks.push({ ...block, protected: true }); protectedPlan = trial; break;
         }
@@ -357,7 +366,7 @@ export function planGenerationPromptContext(
     const reservedAuthority = [authorityBlock, ...castBlocks];
     const residual = Math.max(0, Math.min(
       contextLimit - protectedPlan.contextTokens,
-      inputLimit - requestCost(protectedPlan)
+      requestHeadroom(protectedPlan)
     ));
     const worldCeiling = Math.floor(residual * (policy?.worldResidualShare ?? 0.15));
     const recentCeiling = Math.floor(residual * (policy?.recentResidualShare ?? 0));
@@ -371,7 +380,7 @@ export function planGenerationPromptContext(
           recentDiagnostics.firstGapReason = trial.omitted[0]?.reason ?? "context_limit"; break;
         }
         const added = Math.max(trial.contextTokens - protectedPlan.contextTokens,
-          requestCost(trial) - requestCost(protectedPlan));
+          requestCostDelta(trial, protectedPlan));
         if (added > recentCeiling) { recentDiagnostics.firstGapReason = "context_limit"; break; }
         selectedRecentBlocks.push({ ...block, protected: true });
         recentDiagnostics.included++;
@@ -384,7 +393,7 @@ export function planGenerationPromptContext(
       if (!trial.selected.some((block) => block.id === worldBlock.id)) continue;
       const added = Math.max(
         trial.contextTokens - worldBasePlan.contextTokens,
-        requestCost(trial) - requestCost(worldBasePlan)
+        requestCostDelta(trial, worldBasePlan)
       );
       if (added <= worldCeiling) selectedWorldBlocks.push({ ...worldBlock, protected: true });
     }

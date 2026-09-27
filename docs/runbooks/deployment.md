@@ -308,3 +308,9 @@ compatible worker claims new-policy work.
 5. Roll back concurrency independently from application code by returning the value to `1` if provider throttling, database pressure, or latency worsens.
 
 Image retries remain independent of story generation in every deployment mode. Exhausting image attempts leaves the accepted narration and campaign state intact; retry or disable the image provider without rerunning the narration job.
+
+## Continuity-review reliability rollout and rollback
+
+Do not enable a continuity-review execution policy or its automatic fallback until deterministic workflow, real-PostgreSQL, browser, and authorized live-review canary evidence are separately recorded. Start with copied-campaign canaries and verify the frozen preset/model identity, response contract, budget, evidence identity, verdict, candidate preservation, accepted-state commit, next-turn replay, cost, and latency.
+
+An executable, read-only schema probe imported the exact baseline `900df97` reader and the current reader. It confirmed that both accept an equivalent historical v1 checkpoint without changing its serialized value, while the baseline rejects a valid v2 technical-failure checkpoint that the current reader accepts. Do not roll back workers while any active job can read a version 2 continuity checkpoint. First pause intake, let compatible workers drain or explicitly pause affected jobs, verify no compatible-worker leases remain, and retain the candidate plus review-attempt ledger. Then deploy the rollback binary. Roll back the policy for new jobs only; never rewrite frozen routes, checkpoints, candidates, or accepted turns.

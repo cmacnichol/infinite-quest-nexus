@@ -100,7 +100,9 @@ import {
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { withTransaction } from "./pool.js";
-import { textExecutionPlanSchema, textExecutionRouteBasisSchema, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, textExecutionPlanSchema, textExecutionRouteBasisSchema, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
+import { continuityReviewExecutionSnapshotSchema, type ContinuityReviewExecutionSnapshot } from "../../contracts/src/continuity-review-execution.js";
+import { stableJsonHash } from "../../contracts/src/provider-output-schema.js";
 
 async function enqueueChunkIndexBestEffort(
   client: DatabaseClient,
@@ -170,11 +172,92 @@ function responseContractInvocations(value: unknown): readonly ResponseContractI
   });
 }
 
-function responseContractState(jobId: string, value: GenerationOrchestrationState): void {
+async function completedReviewerPhysicalAttempt(
+  client: DatabaseClient,
+  scope: Readonly<{ jobId: string; ownerUserId: string }>,
+  value: GenerationOrchestrationState
+): Promise<boolean> {
+  const review = continuityReviewCheckpointSchema.safeParse(value.continuityReview);
+  const reviewer = continuityReviewExecutionSnapshotSchema.safeParse(value.continuityReviewExecution);
+  if (!review.success || review.data.version !== 2 || !reviewer.success || !reviewer.data.enabled || !reviewer.data.primary
+    || review.data.status !== "completed" || !review.data.reviewRequestHash
+    || review.data.binding.reviewerExecutionSnapshotHash !== reviewer.data.snapshotHash) return false;
+  const durableAttempt = review.data.attempts?.at(-1);
+  if (durableAttempt?.reservationStatus === "dispatched" && durableAttempt.outcome === null
+    && review.data.outcome?.kind === "technical_failure") return true;
+  if (durableAttempt && (durableAttempt.reservationStatus !== "completed" || durableAttempt.requestHash !== review.data.reviewRequestHash
+    || durableAttempt.outcome?.kind !== review.data.outcome?.kind)) return false;
+  // Task 3 checkpoints have no durable attempt list; retain their frozen
+  // primary attestation semantics. Task 4 checkpoints bind the active route.
+  const routeName = durableAttempt?.route ?? "primary";
+  const route = routeName === "fallback" ? reviewer.data.fallback : reviewer.data.primary;
+  if (!route) return false;
+  const contract = route.responseContracts.contracts["continuity_review:nonstream"];
+  if (!contract || contract.operation !== "continuity_review" || contract.streaming) return false;
+  const result = await client.query<{
+    planHash: string; requestedModel: string; requestedPresetSlug: string | null; requestedPresetVersionId: string | null;
+    requestedPresetConfigHash: string | null; requestPayloadHash: string; requestBody: string; status: string;
+    outcome: string | null; failureReason: string | null; emittedOutput: boolean;
+  }>(`SELECT plan_hash AS "planHash",requested_model AS "requestedModel",
+              requested_preset_slug AS "requestedPresetSlug",requested_preset_version_id AS "requestedPresetVersionId",
+              requested_preset_config_hash AS "requestedPresetConfigHash",request_payload_hash AS "requestPayloadHash",
+              request_body AS "requestBody",status,outcome,failure_reason AS "failureReason",emitted_output AS "emittedOutput"
+       FROM prepared_text_physical_attempts
+      WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+        AND logical_reservation->>'invocationId'=$3`, [
+    scope.ownerUserId, scope.jobId, `continuity-review:${routeName}:${review.data.bindingHash}${review.data.cycleId ? `:${review.data.cycleId}` : ""}`
+  ]);
+  const attempt = result.rows[0];
+  const semanticOutcome = review.data.verdict !== "unavailable";
+  const technicalFailure = review.data.outcome?.kind === "technical_failure" ? review.data.outcome : null;
+  const physicalOutcomeMatches = semanticOutcome
+    ? attempt?.outcome === "succeeded" && attempt.emittedOutput
+    : technicalFailure !== null && (
+      ((technicalFailure.failure === "output_limit" || technicalFailure.failure === "invalid_output")
+        && attempt?.outcome === "succeeded")
+      || (technicalFailure.failure === "evidence_unavailable"
+        && attempt?.outcome === "succeeded" && attempt.emittedOutput)
+      || (technicalFailure.failure === "provider_timeout"
+        && attempt?.outcome === "failed" && attempt.failureReason === "deadline")
+      || (technicalFailure.failure === "provider_failed"
+        && attempt?.outcome === "failed" && attempt.failureReason !== "deadline")
+    );
+  if (!attempt || result.rows.length !== 1 || attempt.status !== "completed" || !physicalOutcomeMatches
+    || attempt.requestPayloadHash !== review.data.reviewRequestHash
+    || attempt.requestPayloadHash !== sha256Hex(attempt.requestBody)
+    || attempt.requestedModel !== route.routeBasis.candidates[0]?.modelId
+    || (durableAttempt !== undefined && attempt.planHash !== durableAttempt.routePlanHash)) return false;
+  const preset = route.routeBasis.preset;
+  if (preset
+    ? attempt.requestedPresetSlug !== preset.slug || attempt.requestedPresetVersionId !== preset.versionId || attempt.requestedPresetConfigHash !== preset.configHash
+    : attempt.requestedPresetSlug !== null || attempt.requestedPresetVersionId !== null || attempt.requestedPresetConfigHash !== null) return false;
+  try {
+    const wire = JSON.parse(attempt.requestBody) as { messages?: Array<{ role?: unknown; content?: unknown }>; response_format?: { type?: unknown; json_schema?: { name?: unknown; strict?: unknown; schema?: unknown } } };
+    const systemPrompt = wire.messages?.find((message) => message?.role === "system")?.content;
+    if (typeof systemPrompt !== "string") return false;
+    const prefix = route.routeBasis.presetSystemPrompt ? `${route.routeBasis.presetSystemPrompt}\n\n` : "";
+    const operationPrompt = prefix && systemPrompt.startsWith(prefix) ? systemPrompt.slice(prefix.length) : systemPrompt;
+    if (attempt.planHash !== deriveTextExecutionPlan(route.routeBasis, operationPrompt).planHash) return false;
+    if (contract.mode === "json_schema") {
+      const format = wire.response_format;
+      if (format?.type !== "json_schema" || format.json_schema?.name !== contract.schemaName || format.json_schema?.strict !== true
+        || stableJsonHash(format.json_schema?.schema) !== contract.schemaHash) return false;
+    } else if (wire.response_format?.type !== "json_object") return false;
+  } catch { return false; }
+  return true;
+}
+
+async function responseContractState(
+  client: DatabaseClient,
+  scope: Readonly<{ jobId: string; ownerUserId: string }>,
+  value: GenerationOrchestrationState
+): Promise<void> {
+  const { jobId } = scope;
   try {
   if (value.textExecutionRouteBasis !== undefined && !readTextExecutionRouteBasis(value.textExecutionRouteBasis)) {
     throw new Error(`Generation ${jobId} has an invalid frozen text execution route basis.`);
   }
+  if (value.continuityReviewExecution !== undefined) continuityReviewExecutionSnapshotSchema.parse(value.continuityReviewExecution);
   if (value.textExecutionPlan !== undefined && !readTextExecutionPlan(value.textExecutionPlan)) {
     throw new Error(`Generation ${jobId} has an invalid frozen text execution plan.`);
   }
@@ -237,7 +320,14 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
         throw new Error("Scene coverage replay checkpoint does not match its completed v2 invocation.");
       }
     }
-    if (value.continuityReview?.reviewRequestHash && value.continuityReview.status === "completed" && !completedFor(value.continuityReview.reviewRequestHash, ["story_continuity_review"])) throw new Error("Continuity review checkpoint has no completed v2 invocation.");
+    if (value.continuityReview?.reviewRequestHash && value.continuityReview.status === "completed") {
+      const reviewerBound = value.continuityReview.binding.reviewerExecutionSnapshotHash !== undefined;
+      if (reviewerBound
+        ? !await completedReviewerPhysicalAttempt(client, scope, value)
+        : !completedFor(value.continuityReview.reviewRequestHash, ["story_continuity_review"])) {
+        throw new Error("Continuity review checkpoint has no completed replay evidence.");
+      }
+    }
     return;
   }
   const frozenV1 = frozen?.version === 1 ? frozen : undefined;
@@ -304,9 +394,13 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
       throw new Error("Scene rewrite checkpoint does not match its response-contract invocation.");
     }
     const review = value.continuityReview;
-    if (review?.reviewRequestHash && review.status === "completed"
-      && !completedFor(review.reviewRequestHash, ["story_continuity_review"])) {
-      throw new Error("Continuity review checkpoint does not match its response-contract invocation.");
+    if (review?.reviewRequestHash && review.status === "completed") {
+      const reviewerBound = review.binding.reviewerExecutionSnapshotHash !== undefined;
+      if (reviewerBound
+        ? !await completedReviewerPhysicalAttempt(client, scope, value)
+        : !completedFor(review.reviewRequestHash, ["story_continuity_review"])) {
+        throw new Error("Continuity review checkpoint does not match its response-contract invocation.");
+      }
     }
   }
   } catch {
@@ -382,7 +476,7 @@ async function updateResponseContractInvocation(
       [scope.jobId, scope.ownerUserId, scope.workerId]
     );
     const row = result.rows[0]; if (!row) return null;
-    responseContractState(scope.jobId, row.orchestrationPrivate);
+    await responseContractState(client, scope, row.orchestrationPrivate);
     const ledger = [...(responseContractInvocations(row.orchestrationPrivate.responseContractInvocations) ?? [])];
     const index = ledger.findIndex((item) => item.id === invocationId);
     if (index < 0) return null;
@@ -475,6 +569,8 @@ export type GenerationOrchestrationState = {
   castDiscoveryAdmission?: { status: "ready"; execution: CastDiscoveryExecution } | { status: "unavailable" };
   /** Prompt-independent v2 route evidence captured before queueing. */
   textExecutionRouteBasis?: TextExecutionRouteBasis;
+  /** Reviewer route and limits resolved at enqueue; absence means a historical job. */
+  continuityReviewExecution?: ContinuityReviewExecutionSnapshot;
   /** Version 2 plans are immutable private snapshots; absence is historical v1 behavior. */
   textExecutionPlan?: TextExecutionPlan;
   /** Absent is the exact historical job shape; present values are server-owned and versioned. */
@@ -1324,7 +1420,7 @@ async function commitAcceptedTurn(
   }
   const storedJob = lease.rows[0]!;
   try {
-    responseContractState(storedJob.id, storedJob.orchestration_private);
+    await responseContractState(client, scope, storedJob.orchestration_private);
   } catch {
     throw Object.assign(new Error("The persisted response-contract replay evidence is invalid."), {
       code: "generation_checkpoint_incompatible"
@@ -1354,7 +1450,10 @@ async function commitAcceptedTurn(
       const normalBinding = {
         draftHash: sha256Hex(stableStringify(story)), producingRequestHash: requestBody ? sha256Hex(requestBody) : null, manifestHash: manifest?.manifestHash ?? null, auxiliaryRequestHashes,
         providerConfigurationHash: policy.providerConfigurationFingerprint, promptHash: prompts.continuityReview!.review.hash,
-        promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash
+        promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash,
+        ...(storedJob.orchestration_private.continuityReviewExecution?.enabled
+          ? { reviewerExecutionSnapshotHash: storedJob.orchestration_private.continuityReviewExecution.snapshotHash }
+          : {})
       } as const;
       const review = generationReviewCheckpointSchema.safeParse(saved.generationReview);
       const isFinalContinuityCheckpoint = review.success && review.data.state === "decided"
@@ -1840,7 +1939,7 @@ export function createPostgresGenerationExecutionRepository(
       const row = result.rows[0];
       if (!row) return null;
       let responseContractValid = true;
-      try { responseContractState(row.id, row.orchestration_private); } catch { responseContractValid = false; }
+      try { await responseContractState(client, request.claim, row.orchestration_private); } catch { responseContractValid = false; }
       const storedReview = row.orchestration_private?.generationReview === undefined
         ? undefined : generationReviewCheckpointSchema.safeParse(row.orchestration_private.generationReview);
       if (!responseContractValid || (row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
@@ -1996,12 +2095,14 @@ export function createPostgresGenerationExecutionRepository(
         const prior = locked.rows[0]?.orchestrationPrivate;
         if (!prior) return false;
         const { queuedResponsePolicy: _queued, frozenResponseContracts: _frozen, textExecutionRouteBasis: _basis, textExecutionPlan: _plan,
+          continuityReviewExecution: _reviewExecution,
           responseContractInvocations: _ledger, preparedResponseFailures: suppliedFailures, ...mutable } = value;
         const priorFailures = prior.preparedResponseFailures;
         const appendOnly = priorFailures === undefined || (suppliedFailures !== undefined
           && priorFailures.every((entry) => suppliedFailures.some((candidate) => stableStringify(candidate) === stableStringify(entry))));
         const merged: GenerationOrchestrationState = {
           ...mutable,
+          ...(prior.continuityReviewExecution === undefined ? {} : { continuityReviewExecution: prior.continuityReviewExecution }),
           ...(prior.textExecutionRouteBasis === undefined ? {} : { textExecutionRouteBasis: prior.textExecutionRouteBasis }),
           ...(prior.textExecutionPlan === undefined ? {} : { textExecutionPlan: prior.textExecutionPlan }),
           ...(prior.queuedResponsePolicy === undefined ? {} : { queuedResponsePolicy: prior.queuedResponsePolicy }),
@@ -2010,13 +2111,14 @@ export function createPostgresGenerationExecutionRepository(
           ...(priorFailures === undefined ? (suppliedFailures === undefined ? {} : { preparedResponseFailures: suppliedFailures })
             : appendOnly ? { preparedResponseFailures: suppliedFailures } : { preparedResponseFailures: priorFailures })
         };
-        responseContractState(scope.jobId, merged);
+        await responseContractState(client, scope, merged);
         return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =
-              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis')
-                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
-                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis')
+              CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis' - 'continuityReviewExecution')
+                   WHEN orchestration_private ? 'generationReview' THEN (($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis' - 'continuityReviewExecution') || jsonb_build_object('generationReview', orchestration_private->'generationReview'))
+                   ELSE ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis' - 'continuityReviewExecution')
                END
+               || CASE WHEN orchestration_private ? 'continuityReviewExecution' THEN jsonb_build_object('continuityReviewExecution', orchestration_private->'continuityReviewExecution') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'textExecutionRouteBasis' THEN jsonb_build_object('textExecutionRouteBasis', orchestration_private->'textExecutionRouteBasis') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'textExecutionPlan' THEN jsonb_build_object('textExecutionPlan', orchestration_private->'textExecutionPlan') ELSE '{}'::jsonb END
                || CASE WHEN orchestration_private ? 'queuedResponsePolicy' THEN jsonb_build_object('queuedResponsePolicy', orchestration_private->'queuedResponsePolicy') ELSE '{}'::jsonb END
@@ -2082,7 +2184,7 @@ export function createPostgresGenerationExecutionRepository(
           [scope.jobId, scope.ownerUserId, scope.workerId]
         );
         const row = result.rows[0]; if (!row) return null;
-        responseContractState(scope.jobId, row.orchestrationPrivate);
+        await responseContractState(client, scope, row.orchestrationPrivate);
         const frozen = readFrozenResponseContractsVersioned(row.orchestrationPrivate.frozenResponseContracts);
         const logicalAttempt = row.orchestrationPrivate.logicalAttempt;
         if (!logicalAttempt || !hasValidLogicalAttempt(logicalAttempt) || input.logicalAttemptId !== logicalAttempt.id

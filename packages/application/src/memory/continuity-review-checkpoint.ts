@@ -1,21 +1,30 @@
-import { z, continuityReviewSchema, sha256Hex } from "@infinite-quest/contracts";
+import { z, continuityReviewSchema, continuityReviewAttemptOutcomeSchema, sha256Hex } from "@infinite-quest/contracts";
 import { generationEvidenceManifestSchema, generationEvidenceManifestHash, type GenerationEvidenceManifest, canonicalEvidenceJson } from "./generation-context.js";
 import { generationReviewCheckpointSchema } from "../generation/review-checkpoint.js";
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
 export const reviewBindingSchema = z.object({
   draftHash: hash, producingRequestHash: hash.nullable(), manifestHash: hash.nullable(), auxiliaryRequestHashes: z.array(hash).max(4).optional(), providerConfigurationHash: hash,
-  promptHash: hash, promptProtocol: z.literal("story-continuity-review-v1"), policyHash: hash
+  promptHash: hash, promptProtocol: z.literal("story-continuity-review-v1"), policyHash: hash,
+  /** Absent for historical writer-routed reviews; present when a frozen reviewer route was selected. */
+  reviewerExecutionSnapshotHash: hash.optional()
 }).strict();
 export type ReviewBinding = Readonly<z.infer<typeof reviewBindingSchema>>;
 export function reviewBindingHash(binding: ReviewBinding): string { return sha256Hex(canonicalEvidenceJson(reviewBindingSchema.parse(binding))); }
-export const continuityReviewCheckpointSchema = z.object({
-  version: z.literal(1), mode: z.enum(["observe", "enforce"]), binding: reviewBindingSchema, bindingHash: hash,
+const continuityReviewCheckpointBase = {
+  mode: z.enum(["observe", "enforce"]), binding: reviewBindingSchema, bindingHash: hash,
   status: z.enum(["dispatched", "completed"]), verdict: z.enum(["pass", "conflict", "uncertain", "unavailable"]),
   reviewRequestHash: hash.nullable(), result: continuityReviewSchema.nullable(),
   /** Diagnostic-only: why an "unavailable" verdict could not reach a result.
    * Optional so rows persisted before this field existed still parse. */
-  unavailableReason: z.enum(["context_budget_exceeded", "provider_failed", "invalid_output", "evidence_unavailable"]).optional()
-}).strict().superRefine((value, context) => {
+  unavailableReason: z.enum(["output_limit", "invalid_output", "provider_timeout", "provider_failed", "context_budget_exceeded", "evidence_unavailable"]).optional()
+};
+type ContinuityReviewCheckpointFields = {
+  status: "dispatched" | "completed"; verdict: "pass" | "conflict" | "uncertain" | "unavailable";
+  binding: z.infer<typeof reviewBindingSchema>; bindingHash: string;
+  reviewRequestHash: string | null; result: z.infer<typeof continuityReviewSchema> | null;
+  unavailableReason?: "output_limit" | "provider_timeout" | "context_budget_exceeded" | "provider_failed" | "invalid_output" | "evidence_unavailable" | undefined
+};
+function validateContinuityReviewCheckpoint(value: ContinuityReviewCheckpointFields, context: z.RefinementCtx) {
   if ((value.status === "dispatched" || value.verdict !== "unavailable") && !value.reviewRequestHash) context.addIssue({ code: "custom", message: "Dispatched and completed reviews require their exact request identity." });
   if (value.verdict !== "unavailable" && (!value.binding.manifestHash || !value.binding.producingRequestHash)) context.addIssue({ code: "custom", message: "A review result requires complete input identity." });
   if (value.bindingHash !== reviewBindingHash(value.binding)) context.addIssue({ code: "custom", message: "Review binding hash differs." });
@@ -23,7 +32,83 @@ export const continuityReviewCheckpointSchema = z.object({
   if (value.verdict !== "unavailable" && (!value.result || value.result.verdict !== value.verdict)) context.addIssue({ code: "custom", message: "Review verdict must match its result." });
   if (value.verdict === "unavailable" && value.result !== null) context.addIssue({ code: "custom", message: "Unavailable review cannot claim a result." });
   if (value.verdict !== "unavailable" && value.unavailableReason !== undefined) context.addIssue({ code: "custom", message: "An unavailable reason only applies to an unavailable verdict." });
+}
+const continuityReviewCheckpointV1Schema = z.object({ version: z.literal(1), ...continuityReviewCheckpointBase }).strict().superRefine(validateContinuityReviewCheckpoint);
+const continuityReviewAttemptSchema = z.object({
+  ordinal: z.union([z.literal(1), z.literal(2)]),
+  route: z.enum(["primary", "fallback"]),
+  cycleId: hash.optional(),
+  routePlanHash: hash,
+  requestHash: hash,
+  responseReference: z.string().min(1).max(256).nullable(),
+  reservationStatus: z.enum(["reserved", "dispatched", "completed"]),
+  outcome: continuityReviewAttemptOutcomeSchema.nullable()
+}).strict().superRefine((value, context) => {
+  if ((value.reservationStatus === "reserved" || value.reservationStatus === "dispatched") && value.outcome !== null) {
+    context.addIssue({ code: "custom", message: "A reserved reviewer attempt cannot have an outcome." });
+  }
+  if (value.reservationStatus === "completed" && value.outcome === null) {
+    context.addIssue({ code: "custom", message: "A completed reviewer attempt requires an outcome." });
+  }
+  if (value.route === "primary" !== (value.ordinal === 1)) {
+    context.addIssue({ code: "custom", message: "Reviewer attempt ordinal must match its route." });
+  }
 });
+const fallbackPreparationFailureSchema = z.object({
+  version: z.literal(1),
+  route: z.literal("fallback"),
+  failure: z.enum(["output_limit", "invalid_output", "provider_timeout", "provider_failed", "context_budget_exceeded", "evidence_unavailable"])
+}).strict();
+const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...continuityReviewCheckpointBase,
+  outcome: continuityReviewAttemptOutcomeSchema.nullable(),
+  /** Present for frozen reviewer routes; old v2 checkpoints remain readable. */
+  attempts: z.array(continuityReviewAttemptSchema).min(1).max(2).optional(),
+  /** A fallback request that could not be safely prepared has no provider dispatch. */
+  fallbackPreparationFailure: fallbackPreparationFailureSchema.optional(),
+  /** A user-authorized technical retry creates a new bounded reviewer cycle. */
+  cycleId: hash.optional()
+}).strict().superRefine((value, context) => {
+  validateContinuityReviewCheckpoint(value, context);
+  if (value.status === "dispatched") {
+    if (value.outcome !== null) context.addIssue({ code: "custom", message: "Dispatched review cannot have an outcome." });
+    return;
+  }
+  if (!value.outcome) { context.addIssue({ code: "custom", message: "Completed v2 review requires its attempt outcome." }); return; }
+  if (value.outcome.kind === "semantic_verdict" && (value.result?.verdict !== value.outcome.review.verdict || value.verdict !== value.outcome.review.verdict)) {
+    context.addIssue({ code: "custom", message: "Semantic outcome must match the persisted review verdict." });
+  }
+  if (value.outcome.kind === "technical_failure" && (value.verdict !== "unavailable" || value.result !== null)) {
+    context.addIssue({ code: "custom", message: "Technical failure cannot claim a semantic verdict." });
+  }
+  if (value.outcome.kind === "technical_failure" && value.unavailableReason !== value.outcome.failure) {
+    context.addIssue({ code: "custom", message: "Technical checkpoint reason must match its attempt outcome." });
+  }
+  if (value.attempts) {
+    const latest = value.attempts.at(-1)!;
+    // A lease can end after a request was durably dispatched but before its
+    // response was saved. Preserve that indeterminate reservation for an
+    // explicit decision; it is neither completed provider evidence nor safe
+    // to redispatch automatically.
+    const unreconciledDispatch = value.status === "completed" && value.outcome.kind === "technical_failure"
+      && latest.reservationStatus === "dispatched" && latest.outcome === null;
+    if (latest.requestHash !== value.reviewRequestHash || (!unreconciledDispatch
+      && (latest.reservationStatus !== value.status || latest.outcome?.kind !== value.outcome.kind))) {
+      context.addIssue({ code: "custom", message: "The active reviewer attempt must match the review checkpoint." });
+    }
+    if (value.attempts.some((attempt, index) => attempt.ordinal !== index + 1)) {
+      context.addIssue({ code: "custom", message: "Reviewer attempts must be ordered and append-only." });
+    }
+    if (value.attempts.some((attempt) => attempt.cycleId !== value.cycleId)) {
+      context.addIssue({ code: "custom", message: "Reviewer attempts must retain their cycle identity." });
+    }
+  }
+  if (value.fallbackPreparationFailure && (value.status !== "completed" || value.outcome.kind !== "technical_failure"
+    || value.attempts?.at(-1)?.route !== "primary" || value.attempts.at(-1)?.reservationStatus !== "completed")) {
+    context.addIssue({ code: "custom", message: "Fallback preparation failure requires a completed technical primary attempt." });
+  }
+});
+/** Explicitly reads frozen v1 checkpoints and newly versioned v2 outcomes. */
+export const continuityReviewCheckpointSchema = z.union([continuityReviewCheckpointV1Schema, continuityReviewCheckpointV2Schema]);
 export type ContinuityReviewCheckpoint = z.infer<typeof continuityReviewCheckpointSchema>;
 
 /** Server-known identity required to honor a single final-candidate Keep receipt.

@@ -6,6 +6,7 @@ import type {
   GenerationRetryLatestRequest
 } from "../../contracts/src/index.js";
 import { readQueuedResponsePolicyVersioned, type QueuedResponsePolicyVersioned } from "../../contracts/src/generation-response-contract.js";
+import { continuityReviewExecutionSnapshotHash, continuityReviewExecutionSnapshotSchema, type ContinuityReviewExecutionSnapshot } from "../../contracts/src/continuity-review-execution.js";
 import {
   GenerationApplicationError,
   type GenerationCommandRepository,
@@ -34,7 +35,8 @@ import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
-import { generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
+import { continuityReviewTechnicalDiagnosticProjection, generationReviewSummaryProjection, projectBoundedGenerationReviewSummary } from "./generation-review-summary-projection.js";
+import { generationReviewTechnicalDiagnosticSchema } from "../../contracts/src/generation-review.js";
 import { generationResponseFormatProjection } from "./generation-response-format-projection.js";
 import { projectGenerationResponseFormat } from "../../contracts/src/generation-response-format-projection.js";
 import { textExecutionRouteBasisSchema, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
@@ -84,6 +86,7 @@ type JobRow = {
   recoveryMetadata: Record<string, unknown>;
   failureDiagnostic: unknown;
   reviewSummary: unknown;
+  continuityReviewDiagnostic: unknown;
   responseFormat: unknown;
   createdAt: string;
   updatedAt: string;
@@ -189,6 +192,7 @@ export type PreparedQueuedTextExecution = Readonly<{
   endpointIdentity: string;
   advertisement: ModelParameterAdvertisement | null;
   routeBasis?: TextExecutionRouteBasis;
+  continuityReviewExecution?: ContinuityReviewExecutionSnapshot;
 }>;
 
 function json(value: unknown): string {
@@ -335,6 +339,7 @@ function jobResult(row: JobRow): GenerationJob {
     errorMessage: row.errorMessage,
     recoveryMetadata: row.recoveryMetadata,
     failureDiagnostic: projectGenerationFailureDiagnostic(row.failureDiagnostic),
+    continuityReviewDiagnostic: generationReviewTechnicalDiagnosticSchema.nullable().catch(null).parse(row.continuityReviewDiagnostic),
     responseFormat: projectGenerationResponseFormat({ ...(typeof row.responseFormat === "object" && row.responseFormat !== null ? row.responseFormat as Record<string, unknown> : {}), errorCode: row.errorCode }),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -475,6 +480,9 @@ export function createPostgresGenerationCommandRepository(
       const preparedBasis = preparedTextExecution?.routeBasis
         ? readTextExecutionRouteBasis(preparedTextExecution.routeBasis)
         : legacyPreparedBasis;
+      const disabledReviewExecution = { version: 1 as const, enabled: false, maximumAutomaticFallbacks: 0 as const, primary: null, fallback: null };
+      const continuityReviewExecution = continuityReviewExecutionSnapshotSchema.parse(preparedTextExecution?.continuityReviewExecution
+        ?? { ...disabledReviewExecution, snapshotHash: continuityReviewExecutionSnapshotHash(disabledReviewExecution) });
       if (preparedTextExecution?.routeBasis && !preparedBasis) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
       }
@@ -570,6 +578,7 @@ export function createPostgresGenerationCommandRepository(
               requestedModel, json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy), json({
                 ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
+                continuityReviewExecution,
                 ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );
@@ -610,6 +619,9 @@ export function createPostgresGenerationCommandRepository(
       const preparedBasis = preparedTextExecution?.routeBasis
         ? readTextExecutionRouteBasis(preparedTextExecution.routeBasis)
         : legacyPreparedBasis;
+      const disabledReviewExecution = { version: 1 as const, enabled: false, maximumAutomaticFallbacks: 0 as const, primary: null, fallback: null };
+      const continuityReviewExecution = continuityReviewExecutionSnapshotSchema.parse(preparedTextExecution?.continuityReviewExecution
+        ?? { ...disabledReviewExecution, snapshotHash: continuityReviewExecutionSnapshotHash(disabledReviewExecution) });
       if (preparedTextExecution?.routeBasis && !preparedBasis) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
       }
@@ -765,6 +777,7 @@ export function createPostgresGenerationCommandRepository(
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy), json({
                 ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
+                continuityReviewExecution,
                 ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );
@@ -812,6 +825,7 @@ export function createPostgresGenerationCommandRepository(
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
                 orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
+                ${continuityReviewTechnicalDiagnosticProjection("orchestration_private")} AS "continuityReviewDiagnostic",
                 ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
                 ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
@@ -926,6 +940,13 @@ export function createPostgresGenerationCommandRepository(
             state.continuityReview ?? row.orchestrationPrivate?.continuityReview
           );
           return continuity.success ? continuity.data.result : null;
+        })(),
+        continuityReviewCheckpoint: (() => {
+          const state = checkpoint.data.gateCandidate.resumeDependencies.stageState as Record<string, unknown>;
+          const continuity = continuityReviewCheckpointSchema.safeParse(
+            state.continuityReview ?? row.orchestrationPrivate?.continuityReview
+          );
+          return continuity.success ? continuity.data : undefined;
         })(),
         ...(validationIssues.length ? { validationIssues } : {})
       });

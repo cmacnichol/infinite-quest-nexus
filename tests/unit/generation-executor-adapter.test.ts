@@ -13,9 +13,11 @@ import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/
 import { characterFictionAuthority, sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson, readStoryEvidenceFromSource } from "../../packages/application/src/memory/generation-context.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
+import { continuityReviewCheckpointSchema, reviewBindingHash } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { generationExecutionProtocolIdentity, PreparedResponseContractError, serializeProviderRequest, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
+  completeContinuityReviewTechnicalFailure,
   callCampaignTextProvider,
   appendFactFormatRepairApplication,
   bindCampaignTextExecutionPlan,
@@ -29,6 +31,7 @@ import {
   sentCanonicalFactIds,
   type GenerationExecutionCollaborators
 } from "../../services/runtime/src/generation-executor-adapter.js";
+import { validatePreparedContinuityReviewResult } from "../../services/runtime/src/story-continuity-review-adapter.js";
 import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
 import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
 import { getProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
@@ -562,6 +565,35 @@ function authorizeReviewRetry(job: GenerationExecutionPayload, checkpoint: Gener
 }
 
 describe("generation executor adapter", () => {
+  function dispatchedContinuityCheckpoint() {
+    const binding = { draftHash: "a".repeat(64), producingRequestHash: "b".repeat(64), manifestHash: "c".repeat(64),
+      providerConfigurationHash: "d".repeat(64), promptHash: "e".repeat(64), promptProtocol: "story-continuity-review-v1" as const, policyHash: "f".repeat(64) };
+    return { version: 2 as const, mode: "enforce" as const, binding, bindingHash: reviewBindingHash(binding),
+      status: "dispatched" as const, verdict: "unavailable" as const, reviewRequestHash: "0".repeat(64), result: null, outcome: null };
+  }
+  it("persists an outputLimited provider result as a v2 technical outcome with a matching reason", () => {
+    const body = "exact prepared review request";
+    const requestHash = sha256(body);
+    const prepared = { requestHash, request: {}, input: {} } as any;
+    let failure: unknown;
+    try {
+      validatePreparedContinuityReviewResult(prepared, { content: "{\"verdict\":\"pass\"}", outputLimited: true, finishReason: "length",
+        usage: { outputTokens: 48_000 }, preparedRequest: { body, payloadHash: requestHash } } as any);
+    } catch (error) { failure = error; }
+    expect(failure).toMatchObject({ outcome: { kind: "technical_failure", failure: "output_limit" } });
+    const saved = completeContinuityReviewTechnicalFailure(dispatchedContinuityCheckpoint(), failure);
+    expect(continuityReviewCheckpointSchema.parse(saved)).toMatchObject({ version: 2, unavailableReason: "output_limit",
+      outcome: { kind: "technical_failure", failure: "output_limit", providerMetadata: { finishReason: "length", outputTokens: 48_000 } } });
+  });
+  it("persists a thrown provider timeout as a v2 technical outcome with a matching reason", () => {
+    let failure: unknown;
+    try { throw Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" }); }
+    catch (error) { failure = error; }
+    expect(failure).toMatchObject({ code: "ETIMEDOUT" });
+    const saved = completeContinuityReviewTechnicalFailure(dispatchedContinuityCheckpoint(), failure);
+    expect(continuityReviewCheckpointSchema.parse(saved)).toMatchObject({ version: 2, unavailableReason: "provider_timeout",
+      outcome: { kind: "technical_failure", failure: "provider_timeout" } });
+  });
   function contractDispatchFixture() {
     const job = completeGenerationExecutionPayload();
     job.orchestration_private = {

@@ -9,7 +9,7 @@ import type {
   SafeProviderConfiguration,
   SafeProviderConfigurationFields
 } from "./types.js";
-import { textExecutionOverridesSchema } from "@infinite-quest/contracts";
+import { continuityReviewExecutionPolicySchema, textExecutionOverridesSchema } from "@infinite-quest/contracts";
 
 function freezeConfiguration(configuration: SafeProviderConfiguration): SafeProviderConfiguration {
   return Object.freeze({ ...configuration }) as SafeProviderConfiguration;
@@ -66,6 +66,7 @@ function isSafeConfigurationEntry(key: string, value: unknown): boolean {
   if (key === "contentFilter") return value === "enabled" || value === "disabled";
   if (key === "textResponseFormatPolicy") return value === "legacy" || value === "auto" || value === "required";
   if (key === "textExecutionOverrides") return textExecutionOverridesSchema.safeParse(value).success;
+  if (key === "continuityReviewExecutionPolicy") return value === null || continuityReviewExecutionPolicySchema.safeParse(value).success;
   if (key === "defaultOutputFormat") return value === "png" || value === "jpeg" || value === "webp";
   if (key === "defaultQuality") {
     return value === "auto" || value === "low" || value === "medium" || value === "high";
@@ -107,9 +108,22 @@ export function assertTextExecutionOverrides(configuration: unknown, providerRol
   }
 }
 
+export function assertContinuityReviewExecutionPolicy(configuration: unknown, providerRole?: string): void {
+  if (!configuration || typeof configuration !== "object" || Array.isArray(configuration)) return;
+  const source = configuration as Record<string, unknown>;
+  if (!("continuityReviewExecutionPolicy" in source) || source.continuityReviewExecutionPolicy === undefined || source.continuityReviewExecutionPolicy === null) return;
+  if (providerRole !== undefined && providerRole !== "text") {
+    throw Object.assign(new Error("Continuity reviewer execution policy is available only for text provider profiles."), { statusCode: 400 });
+  }
+  if (!continuityReviewExecutionPolicySchema.safeParse(source.continuityReviewExecutionPolicy).success) {
+    throw Object.assign(new Error("continuityReviewExecutionPolicy must match the strict reviewer execution contract."), { statusCode: 400 });
+  }
+}
+
 export function assertProviderConfiguration(configuration: unknown, providerRole?: string): void {
   assertResponseFormatPolicy(configuration);
   assertTextExecutionOverrides(configuration, providerRole);
+  assertContinuityReviewExecutionPolicy(configuration, providerRole);
 }
 
 function immutablePromptSnapshot(version: PromptSnapshotVersion): PromptSnapshotVersion {

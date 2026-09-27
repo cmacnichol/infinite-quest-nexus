@@ -1,4 +1,4 @@
-import { generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation, type CampaignProjection } from "@infinite-quest/client-core";
+import { generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation, generationReviewTechnicalDiagnosticMessage, type CampaignProjection } from "@infinite-quest/client-core";
 import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile, StoryMemorySettings } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
@@ -176,7 +176,7 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
       decisions.append(keep, element(document, "p", undefined, reviewView.keepDescription));
     }
     if (reviewView.canRetry) {
-      const retry = element(document, "button", undefined, "Continue with retry");
+      const retry = element(document, "button", undefined, review?.summary.technicalDiagnostic ? "Retry continuity review" : "Continue with retry");
       retry.type = "button"; retry.dataset.action = "retry-generation-review"; retry.disabled = state.reviewDecisionInFlight;
       decisions.append(retry, element(document, "p", undefined, reviewView.retryDescription));
     }
@@ -251,6 +251,9 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
 
 function generationLabel(projection: Readonly<CampaignProjection>): string {
   if (projection.generation === null) return "Story Engine ready";
+  if (generationReviewTechnicalDiagnosticMessage(projection.generation.snapshot?.continuityReviewDiagnostic) === "Retrying continuity review") {
+    return "Retrying continuity review";
+  }
   return projection.generation.origin === "hydrated_recovery" || projection.generation.result.state === "failed"
     ? "Story generation needs attention" : "Story Engine generating";
 }

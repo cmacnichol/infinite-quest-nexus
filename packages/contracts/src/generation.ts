@@ -17,7 +17,7 @@ import { ILLUSTRATION_REFINEMENT_DEFAULT as DEFAULT_ILLUSTRATION_REFINEMENT_PROM
 import { apiTimestampSchema } from "./http.js";
 import { storyLengthProfileSchema } from "./story-settings.js";
 import { generationPolicySnapshotSchema } from "./campaign-generation-policy.js";
-import { generationFailureDiagnosticProjectionSchema, generationReviewTransportSchema } from "./generation-review.js";
+import { generationFailureDiagnosticProjectionSchema, generationReviewTechnicalDiagnosticSchema, generationReviewTransportSchema } from "./generation-review.js";
 import { textExecutionOverridesSchema } from "./text-execution-plan.js";
 
 export const providerTypeSchema = z.enum(["lmstudio", "openrouter", "manifest", "openai_compatible", "sogni", "sogni_sdk"]);
@@ -437,6 +437,7 @@ export const generationJobStatusSchema = z.object({
   recoveryMetadata: z.record(z.string(), z.unknown()).optional(),
   /** Private at rest; repository supplies only the fixed public projection. */
   failureDiagnostic: generationFailureDiagnosticProjectionSchema.nullable().optional(),
+  continuityReviewDiagnostic: generationReviewTechnicalDiagnosticSchema.nullable().optional(),
   responseFormat: generationResponseFormatProjectionSchema.optional(),
   createdAt: apiTimestampSchema,
   updatedAt: apiTimestampSchema,
@@ -485,7 +486,7 @@ const generationStreamSnapshotBaseSchema = generationJobStatusSchema.pick({
   attempts: true,
   partialNarration: true,
   resultTurnId: true
-}).extend({ ...publicGenerationFailureFields, review: generationReviewTransportSchema.optional(), responseFormat: generationResponseFormatProjectionSchema.optional() });
+}).extend({ ...publicGenerationFailureFields, review: generationReviewTransportSchema.optional(), continuityReviewDiagnostic: generationReviewTechnicalDiagnosticSchema.nullable().optional(), responseFormat: generationResponseFormatProjectionSchema.optional() });
 
 export const generationStreamSnapshotSchema = z.discriminatedUnion("operationKind", [
   generationStreamSnapshotBaseSchema.extend({

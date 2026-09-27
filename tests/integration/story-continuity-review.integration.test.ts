@@ -135,6 +135,16 @@ integration("T17 durable continuity review", () => {
     return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "PRIVATE_REVIEW_CANARY: fixture reviewer reports a grounded conflict." }] : [] });
   }
 
+  function preparedContinuityReviewResponse(input: string): string {
+    const reviewInput = JSON.parse(input) as { draft: { narration: string }; evidence: Array<{ id: string; content: string }> };
+    const basis = reviewInput.evidence.find((entry) => entry.content.length > 0);
+    if (!basis) throw new Error("Prepared review fixture requires selected evidence.");
+    const verdict = reviewSequence.shift() ?? reviewVerdict;
+    const start = extensionConflict ? reviewInput.draft.narration.indexOf("The bell rings") : 0;
+    const quote = reviewInput.draft.narration.slice(start, start + 4);
+    return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "PRIVATE_REVIEW_CANARY: prepared fixture reviewer reports a grounded conflict." }] : [] });
+  }
+
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 6);
     await migrateDatabase(pool, resolve(repositoryRoot, "database/migrations"));
@@ -154,6 +164,22 @@ integration("T17 durable continuity review", () => {
         response.end(JSON.stringify({ data: {
           slug: "keep", name: "Frozen Keep", status: "active",
           designated_version: { id: "keep-v1", version: 1, system_prompt: "Native frozen preset instruction.", config: { model: "t17-native-frozen", temperature: 0.2 } }
+        } }));
+        return;
+      }
+      if (request.url === "/presets/reviewer") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "reviewer", name: "Frozen Reviewer", status: "active",
+          designated_version: { id: "reviewer-v1", version: 1, system_prompt: "Native frozen reviewer instruction.", config: { model: "t17-native-frozen", temperature: 0 } }
+        } }));
+        return;
+      }
+      if (request.url === "/presets/fallback") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "fallback", name: "Frozen Reviewer Fallback", status: "active",
+          designated_version: { id: "fallback-v1", version: 1, system_prompt: "Native fallback reviewer instruction.", config: { model: "t17-native-frozen", temperature: 0 } }
         } }));
         return;
       }
@@ -1640,6 +1666,72 @@ integration("T17 durable continuity review", () => {
     } finally { reviewSequence = []; }
   });
 
+  it.each(["dispatched", "completed"] as const)("reclaims a continuity Retry checkpoint at %s without a second reviewer call", async (crashAt) => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["uncertain", "pass"]; requests.length = 0;
+    await runGenerationJob(pool, `continuity-cycle-initial-${randomUUID()}`, 30, credentialSecret);
+    const offered = await application.getReview({ ownerUserId, jobId: job.id });
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: offered.reviewId, revision: offered.revision, decision: "retry" });
+    const before = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } }; sourceEvidenceManifest: { manifestHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const updated = await repository.saveOrchestration(scope, value);
+      if (!interrupted && value.continuityReview?.version === 2 && value.continuityReview.cycleId && value.continuityReview.status === crashAt) {
+        interrupted = true;
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+        throw Object.assign(new Error("Injected termination during a user-authorized continuity Retry"), { code: "generation_cancelled" });
+      }
+      return updated;
+    } };
+    const workerId = `continuity-cycle-crash-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+    const callsBeforeReclaim = requests.filter((body) => body.includes("story-continuity-review-v1")).length;
+    await runGenerationJob(pool, `continuity-cycle-reclaim-${randomUUID()}`, 30, credentialSecret);
+    const after = (await pool.query<{ orchestration_private: { continuityReview: { cycleId?: string }; generationReview: { gateCandidate: { storyHash: string } }; sourceEvidenceManifest: { manifestHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(callsBeforeReclaim);
+    expect(after.continuityReview.cycleId).toBeTruthy();
+    expect(after.generationReview.gateCandidate.storyHash).toBe(before.generationReview.gateCandidate.storyHash);
+    expect(after.sourceEvidenceManifest.manifestHash).toBe(before.sourceEvidenceManifest.manifestHash);
+  });
+
+  it("recovers a physically attested historical v1 dispatched review as unavailable without another call", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    reviewVerdict = "pass"; requests.length = 0;
+    const before = await acceptedAuthoritySnapshot(campaignId);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const current = value.continuityReview as any;
+      if (!interrupted && current?.version === 2 && current.status === "completed" && current.verdict === "pass") {
+        interrupted = true;
+        const { outcome: _outcome, attempts: _attempts, fallbackPreparationFailure: _fallbackPreparationFailure, cycleId: _cycleId, ...legacy } = current;
+        await repository.saveOrchestration(scope, { ...value, continuityReview: { ...legacy, version: 1, status: "dispatched", verdict: "unavailable", result: null } });
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+        throw Object.assign(new Error("Injected restart with a historically shaped v1 checkpoint"), { code: "generation_cancelled" });
+      }
+      return repository.saveOrchestration(scope, value);
+    } };
+    const workerId = `historical-v1-reclaim-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+    const callsBeforeReclaim = requests.filter((body) => body.includes("story-continuity-review-v1")).length;
+    await runGenerationJob(pool, `historical-v1-reclaim-resume-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+    expect(await application.getReview({ ownerUserId, jobId: job.id })).toMatchObject({ state: "pending", stage: "continuity", reasons: ["review_unavailable"] });
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(callsBeforeReclaim);
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(before);
+  });
+
   it("re-offers the original final candidate after a failed authorized continuity retry and keeps it offline", async () => {
     await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
     const { job, application, campaignId } = await enqueue("enforce");
@@ -1721,8 +1813,8 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
-    const deadline = outcome !== "complete";
+  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "prepared_identity_mismatch", "prepared_identity_missing_physical", "prepared_identity_tampered_physical", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+    const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
     const nativeProvider = await createProvider(pool, {
@@ -1735,7 +1827,15 @@ integration("T17 durable continuity review", () => {
       maxOutputTokens: 48_000,
       temperature: 0,
       enabled: true,
-      configuration: { textResponseFormatPolicy: "auto" },
+      configuration: {
+        textResponseFormatPolicy: "auto",
+        continuityReviewExecutionPolicy: {
+          version: 1,
+          primary: { selection: { kind: "openrouter_preset", slug: "reviewer" }, overrides: { parameters: { temperature: 0 } } },
+          ...(["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"].includes(outcome) ? { fallback: { selection: { kind: "openrouter_preset", slug: "fallback" }, overrides: { parameters: { temperature: 0 }, ...(outcome === "fallback_preparation_overflow" ? { conservativeContextWindowTokens: 1 } : {}) } } } : {}),
+          maximumAutomaticFallbacks: ["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"].includes(outcome) ? 1 : 0
+        }
+      },
       apiKey: "native-keep-fixture"
     }, credentialSecret);
     const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
@@ -1743,7 +1843,7 @@ integration("T17 durable continuity review", () => {
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "native-keep.story", story }));
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
-    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+    const appendRequest = generationRequestSchema.parse({
       action: "Wait for the observatory keeper.",
       requestedInputMode: "action",
       resolvedInputMode: "action",
@@ -1752,15 +1852,33 @@ integration("T17 durable continuity review", () => {
       textSelection: { kind: "openrouter_preset", slug: "keep" },
       idempotencyKey: randomUUID(),
       context: { budgetTokens: 32000, compression: "full", recentTurns: 8 }
-    }));
+    });
+    const job = outcome === "fallback_replacement_pass"
+      ? await application.enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, generationRetryLatestRequestSchema.parse({
+        action: appendRequest.action, expectedCurrentTurnNumber: (await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id=$1", [imported.campaignId])).rows[0]!.active_turn_number,
+        requestedInputMode: appendRequest.requestedInputMode, resolvedInputMode: appendRequest.resolvedInputMode, inputModeSource: appendRequest.inputModeSource,
+        providerProfileId: nativeProvider.id, idempotencyKey: appendRequest.idempotencyKey, context: appendRequest.context
+      }))
+      : await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest);
     await expect(pool.query<{ basis: { preset: { slug: string }; parameters: { temperature: number }; candidates: Array<{ modelId: string }> } }>(
       "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [job.id]
     )).resolves.toMatchObject({ rows: [{ basis: { protocolVersion: "story-openrouter-preset-v2", preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
+    if (outcome === "fallback_policy_frozen") {
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [nativeProvider.id, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
+    }
 
     reviewVerdict = deadline ? "pass" : "conflict";
+    if (outcome === "fallback_after_output_limit") reviewSequence = ["conflict", "pass"];
+    if (outcome === "fallback_policy_frozen") reviewSequence = ["conflict", "pass"];
+    if (outcome === "fallback_replacement_pass") reviewSequence = ["conflict", "pass"];
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
-    const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest }: { plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string; request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string } }) => {
+    let reviewerDispatches = 0;
+    const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest, invocationKey, routeBasis, frozenResponseContracts, logicalReservation }: {
+      plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string;
+      request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string };
+      invocationKey?: string; routeBasis?: unknown; frozenResponseContracts?: unknown; logicalReservation?: unknown;
+    }) => {
       if (deadline && operation === "story_generation") {
         if (outcome === "unbound") throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Missing wire evidence.");
         const content = reply("Mira waits at the observatory.");
@@ -1771,11 +1889,68 @@ integration("T17 durable continuity review", () => {
           responseId: "interrupted-native", returnedModel: plan.candidates[0]!.modelId
         });
       }
+      const content = operation === "story_continuity_review"
+        ? outcome === "invalid_output" ? "malformed reviewer response" : preparedContinuityReviewResponse(request.input)
+        : reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] }));
+      const responseId = randomUUID();
+      if (operation === "story_continuity_review") {
+        reviewerDispatches += 1;
+        if (!preparedRequest || !logicalReservation) throw new Error("Prepared reviewer fixture requires durable request evidence.");
+        const actualPlan = plan as typeof plan & { planHash: string; preset: { slug: string; versionId: string; configHash: string } | null; candidates: Array<{ modelId: string; providerPolicy: Record<string, unknown>; contextWindowTokens: number; maxOutputTokens: number }> };
+        const actualReservation = logicalReservation as { kind: "story"; ownerUserId: string; generationJobId: string; invocationId: string; workerId: string };
+        if (outcome === "fallback_reclaim_reserved" && reviewerDispatches === 1) {
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [actualReservation.generationJobId]);
+          throw Object.assign(new Error("Injected worker loss after reviewer reservation."), { code: "lease_lost" });
+        }
+        await pool.query(`INSERT INTO prepared_text_physical_attempts (
+          owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,
+          requested_preset_slug,requested_preset_version_id,requested_preset_config_hash,candidate_ordinal,
+          requested_model,provider_policy,request_payload_hash,request_body,status,outcome,
+          provider_response_id,returned_model,emitted_output,dispatched_at,completed_at
+        ) VALUES ($1,'story',$2,$3::jsonb,$4,$5,$6,$7,0,$8,$9::jsonb,$10,$11,'completed','succeeded',$12,$8,$13,clock_timestamp(),clock_timestamp())`, [
+          actualReservation.ownerUserId, `${actualReservation.generationJobId}:${actualReservation.invocationId}`,
+          JSON.stringify(actualReservation), actualPlan.planHash, actualPlan.preset?.slug ?? null,
+          actualPlan.preset?.versionId ?? null, actualPlan.preset?.configHash ?? null, actualPlan.candidates[0]!.modelId,
+          JSON.stringify(actualPlan.candidates[0]!.providerPolicy), preparedRequest.payloadHash, preparedRequest.body, responseId,
+          outcome !== "invalid_output"
+        ]);
+        if (outcome === "transport_failed") {
+          await pool.query(`UPDATE prepared_text_physical_attempts
+            SET outcome='failed',failure_reason='provider_unavailable',emitted_output=false
+            WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+              AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId]);
+          throw new PreparedRouteTerminalError("prepared_route_terminal", "provider_unavailable", "Fixture reviewer transport failure.");
+        }
+        if (outcome === "review_deadline") {
+          await pool.query(`UPDATE prepared_text_physical_attempts
+            SET outcome='failed',failure_reason='deadline',emitted_output=false
+            WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+              AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId]);
+          throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Fixture reviewer deadline.");
+        }
+        if (outcome === "prepared_identity_missing_physical") {
+          await pool.query(`DELETE FROM prepared_text_physical_attempts
+            WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+              AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId]);
+        }
+        if (outcome === "prepared_identity_tampered_physical") {
+          await pool.query(`UPDATE prepared_text_physical_attempts SET request_payload_hash=$4
+            WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+              AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId, "0".repeat(64)]);
+        }
+      }
       return {
-      content: reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] })),
-      responseId: randomUUID(), finishReason: "stop", outputLimited: false, modelInstanceId: plan.candidates[0]!.modelId,
+      content,
+      responseId, finishReason: "stop", outputLimited: (outcome === "output_limited"
+        || (outcome === "fallback_after_output_limit" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_policy_frozen" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_replacement_pass" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_preparation_overflow" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_retry_after_technical" && reviewerDispatches < 4)
+        || outcome === "fallback_both_output_limited") && operation === "story_continuity_review", modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
-      ...(preparedRequest ? { preparedRequest } : {})
+      ...(preparedRequest ? { preparedRequest: outcome.startsWith("prepared_identity_") && operation === "story_continuity_review"
+        ? { body: preparedRequest.body, payloadHash: "0".repeat(64) } : preparedRequest } : {})
     }; });
     const composedCollaborators = createGenerationExecutionCollaborators(
       pool,
@@ -1806,16 +1981,178 @@ integration("T17 durable continuity review", () => {
       expect(preparedTextExecutor).toHaveBeenCalledTimes(1);
       return;
     }
+    if (outcome === "fallback_after_output_limit") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      expect(preparedTextExecutor.mock.calls.slice(1).map(([input]) => (input.logicalReservation as { invocationId?: string } | undefined)?.invocationId)).toEqual([
+        expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}$/u),
+        expect.stringMatching(/^continuity-review:fallback:[a-f0-9]{64}$/u)
+      ]);
+      return;
+    }
+    if (outcome === "fallback_policy_frozen") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      return;
+    }
+    if (outcome === "fallback_replacement_pass") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String), operationKind: "replace_latest" });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      return;
+    }
+    if (outcome === "fallback_retry_after_technical") {
+      const initial = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(initial).toMatchObject({ state: "pending", stage: "continuity", reasons: ["review_unavailable"] });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: initial.reviewId, revision: initial.revision, decision: "retry" });
+      reviewSequence = ["conflict", "pass"];
+      const retryWorker = `native-keep-retry-${randomUUID()}`;
+      const retryClaim = await repository.claimNext({ workerId: retryWorker, leaseSeconds: 30 });
+      expect(retryClaim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: retryClaim!, workerId: retryWorker, leaseSeconds: 30 })).resolves.toBe(true);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual([
+        "@preset/keep", "@preset/reviewer", "@preset/fallback", "@preset/reviewer", "@preset/fallback"
+      ]);
+      expect(preparedTextExecutor.mock.calls.filter(([input]) => input.plan.candidates[0]!.modelId === "@preset/keep")).toHaveLength(1);
+      expect(preparedTextExecutor.mock.calls.slice(3).map(([input]) => (input.logicalReservation as { invocationId?: string } | undefined)?.invocationId)).toEqual([
+        expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}:[a-f0-9]{64}$/u),
+        expect.stringMatching(/^continuity-review:fallback:[a-f0-9]{64}:[a-f0-9]{64}$/u)
+      ]);
+      return;
+    }
+    if (outcome === "fallback_reclaim_reserved") {
+      const reclaimWorker = `native-keep-reclaim-${randomUUID()}`;
+      const reclaimClaim = await repository.claimNext({ workerId: reclaimWorker, leaseSeconds: 30 });
+      expect(reclaimClaim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: reclaimClaim!, workerId: reclaimWorker, leaseSeconds: 30 })).resolves.toBe(true);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
+      return;
+    }
+    if (outcome === "fallback_preparation_overflow") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
+      expect(await repository.claimNext({ workerId: `fallback-overflow-resume-${randomUUID()}`, leaseSeconds: 30 })).toBeNull();
+      expect(preparedTextExecutor.mock.calls).toHaveLength(2);
+      await expect(pool.query<{ failure: { route: string; failure: string } }>(
+        "SELECT orchestration_private->'continuityReview'->'fallbackPreparationFailure' AS failure FROM generation_jobs WHERE id=$1", [job.id]
+      )).resolves.toMatchObject({ rows: [{ failure: { route: "fallback", failure: "context_budget_exceeded" } }] });
+      return;
+    }
+    if (outcome === "fallback_both_output_limited") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      return;
+    }
+    if (outcome === "fallback_semantic_conflict") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["narrative_conflict"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
+      return;
+    }
+    if (outcome === "prepared_identity_mismatch") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      await expect(application.getReview({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
+      await expect(pool.query<{ unavailableReason: string; outcome: { kind: string; failure: string }; resultTurnId: string | null; candidateHash: string | null; acceptedTurnCount: string }>(
+        `SELECT orchestration_private->'continuityReview'->>'unavailableReason' AS "unavailableReason",
+                orchestration_private->'continuityReview'->'outcome' AS "outcome",result_turn_id AS "resultTurnId",
+                orchestration_private #>> '{generationReview,gateCandidate,storyHash}' AS "candidateHash",
+                (SELECT count(*) FROM turns WHERE campaign_id=$2 AND turn_number=$3) AS "acceptedTurnCount"
+           FROM generation_jobs WHERE id=$1`, [job.id, imported.campaignId, job.expectedTurnNumber]
+      )).resolves.toMatchObject({ rows: [{ unavailableReason: "evidence_unavailable",
+        outcome: { kind: "technical_failure", failure: "evidence_unavailable" }, resultTurnId: null,
+        candidateHash: expect.stringMatching(/^[a-f0-9]{64}$/u), acceptedTurnCount: "0" }] });
+      return;
+    }
+    if (outcome === "prepared_identity_missing_physical" || outcome === "prepared_identity_tampered_physical") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_checkpoint_incompatible", resultTurnId: null
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
+      return;
+    }
     const review = await application.getReview({ ownerUserId, jobId: job.id });
     expect(review).toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+    if (outcome === "transport_failed") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required"
+      });
+      await expect(pool.query<{ verdict: string; unavailableReason: string; outcome: { kind: string; failure: string } }>(
+        `SELECT orchestration_private->'continuityReview'->>'verdict' AS "verdict",
+                orchestration_private->'continuityReview'->>'unavailableReason' AS "unavailableReason",
+                orchestration_private->'continuityReview'->'outcome' AS "outcome"
+           FROM generation_jobs WHERE id=$1`, [job.id]
+      )).resolves.toMatchObject({ rows: [{ verdict: "unavailable", unavailableReason: "provider_failed",
+        outcome: { kind: "technical_failure", failure: "provider_failed" } }] });
+      return;
+    }
+    if (outcome === "review_deadline") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required"
+      });
+      await expect(pool.query<{ unavailableReason: string; outcome: { kind: string; failure: string } }>(
+        `SELECT orchestration_private->'continuityReview'->>'unavailableReason' AS "unavailableReason",
+                orchestration_private->'continuityReview'->'outcome' AS "outcome"
+           FROM generation_jobs WHERE id=$1`, [job.id]
+      )).resolves.toMatchObject({ rows: [{ unavailableReason: "provider_timeout",
+        outcome: { kind: "technical_failure", failure: "provider_timeout" } }] });
+      return;
+    }
+    if (outcome === "output_limited" || outcome === "invalid_output") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required"
+      });
+      await expect(pool.query<{ unavailableReason: string; outcome: { kind: string; failure: string }; status: string; physicalOutcome: string; emittedOutput: boolean }>(
+        `SELECT orchestration_private->'continuityReview'->>'unavailableReason' AS "unavailableReason",
+                orchestration_private->'continuityReview'->'outcome' AS "outcome",
+                orchestration_private->'continuityReview'->>'status' AS "status",
+                attempt.outcome AS "physicalOutcome",attempt.emitted_output AS "emittedOutput"
+           FROM generation_jobs job
+           JOIN prepared_text_physical_attempts attempt
+             ON attempt.owner_user_id=job.owner_user_id
+            AND attempt.logical_kind='story'
+            AND attempt.logical_reservation->>'generationJobId'=job.id::text
+            AND attempt.logical_reservation->>'invocationId'=('continuity-review:primary:' || (job.orchestration_private #>> '{continuityReview,bindingHash}'))
+          WHERE job.id=$1`, [job.id]
+      )).resolves.toMatchObject({ rows: [{ unavailableReason: outcome === "output_limited" ? "output_limit" : "invalid_output",
+        outcome: { kind: "technical_failure", failure: outcome === "output_limited" ? "output_limit" : "invalid_output" },
+        status: "completed", physicalOutcome: "succeeded", emittedOutput: outcome === "output_limited" }] });
+      return;
+    }
     expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
     for (const [input] of preparedTextExecutor.mock.calls) {
       expect(input.request.systemPrompt).toBe(input.plan.prompt);
       expect(input.plan.prompt).not.toContain("Native frozen preset instruction.");
-      expect(input.plan.candidates[0]!.modelId).toBe("@preset/keep");
+      expect(input.plan.candidates[0]!.modelId).toBe(input.operation === "story_continuity_review" ? "@preset/reviewer" : "@preset/keep");
       expect(input.preparedRequest?.body).toBeDefined();
-      expect(JSON.parse(input.preparedRequest!.body).model).toBe("@preset/keep");
+      expect(JSON.parse(input.preparedRequest!.body).model).toBe(
+        input.operation === "story_continuity_review" ? "@preset/reviewer" : "@preset/keep"
+      );
     }
+    const reviewerDispatch = preparedTextExecutor.mock.calls[1]![0] as {
+      invocationKey?: string; routeBasis?: unknown; frozenResponseContracts?: unknown; logicalReservation?: unknown;
+      preparedRequest?: { body: string; payloadHash: string };
+    };
+    expect(reviewerDispatch.invocationKey).toBe("continuity_review:nonstream");
+    expect(reviewerDispatch.routeBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "reviewer" } });
+    expect(reviewerDispatch.frozenResponseContracts).toMatchObject({ version: 2, contracts: {
+      "continuity_review:nonstream": expect.any(Object)
+    } });
+    expect(reviewerDispatch.logicalReservation).toMatchObject({ kind: "story", generationJobId: job.id,
+      invocationId: expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}$/u) });
+    expect(reviewerDispatch.preparedRequest?.payloadHash).toBe(sha256Hex(reviewerDispatch.preparedRequest!.body));
+    expect(JSON.parse(preparedTextExecutor.mock.calls[0]![0].preparedRequest!.body).model).toBe("@preset/keep");
+    expect(JSON.parse(reviewerDispatch.preparedRequest!.body).model).toBe("@preset/reviewer");
     const durableNativeRequests = (await pool.query<{
       orchestrationPrivate: { primaryReservation: { requestBody: string }; primaryResult: { contextDiagnostics: { requestTokens: number } }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
     }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestrationPrivate;
@@ -1823,13 +2160,44 @@ integration("T17 durable continuity review", () => {
     expect(preparedBodies.map((body) => JSON.parse(body).max_tokens)).toEqual([48_000, 48_000]);
     expect(preparedBodies[0]).toBe(durableNativeRequests.primaryReservation.requestBody);
     expect(durableNativeRequests.primaryResult.contextDiagnostics.requestTokens).toBe(estimateStoryTokens(preparedBodies[0]!));
-    expect(preparedBodies.map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
+    expect(preparedBodies.slice(0, 1).map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
     expect(verifyTextExecutionRouteAuthority).toHaveBeenCalled();
+    const reviewCheckpoint = (await pool.query<{
+      review: { bindingHash: string; binding: { reviewerExecutionSnapshotHash?: string; producingRequestHash: string } };
+      reviewer: { snapshotHash: string };
+    }>("SELECT orchestration_private->'continuityReview' AS review, orchestration_private->'continuityReviewExecution' AS reviewer FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
+    expect(reviewCheckpoint.review.binding.reviewerExecutionSnapshotHash).toBe(reviewCheckpoint.reviewer.snapshotHash);
+    expect(reviewCheckpoint.review.binding.producingRequestHash).toBe(sha256Hex(preparedBodies[0]!));
+    await expect(pool.query<{
+      status: string; outcome: string | null; emittedOutput: boolean; requestPayloadHash: string;
+      requestedModel: string; invocationId: string;
+    }>(`SELECT status,outcome,emitted_output AS "emittedOutput",request_payload_hash AS "requestPayloadHash",
+                 requested_model AS "requestedModel",logical_reservation->>'invocationId' AS "invocationId"
+          FROM prepared_text_physical_attempts
+         WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+           AND logical_reservation->>'invocationId'=$3`, [
+      ownerUserId, job.id, `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`
+    ])).resolves.toMatchObject({ rows: [{
+      status: "completed", outcome: "succeeded", emittedOutput: true,
+      requestPayloadHash: reviewerDispatch.preparedRequest!.payloadHash,
+      requestedModel: "@preset/reviewer",
+      invocationId: `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`
+    }] });
     const candidate = (await pool.query<{ candidate: { storyHash: string; story: { narration: string } } }>(
       "SELECT orchestration_private->'generationReview'->'gateCandidate' AS candidate FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.candidate;
     expect(sha256Hex(canonicalEvidenceJson(candidate.story))).toBe(candidate.storyHash);
 
+    if (outcome === "tampered") {
+      await pool.query(`UPDATE prepared_text_physical_attempts SET emitted_output=false
+        WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+          AND logical_reservation->>'invocationId'=$3`, [ownerUserId, job.id, `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`]);
+    }
+    if (outcome === "failed") {
+      await pool.query(`UPDATE prepared_text_physical_attempts SET outcome='failed',failure_reason='unknown'
+        WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+          AND logical_reservation->>'invocationId'=$3`, [ownerUserId, job.id, `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`]);
+    }
     await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
     const offlinePreparedExecutor = vi.fn(async () => { throw new Error("Keep must not execute a prepared native route"); });
     const offlineAuthority = vi.fn(async () => { throw new Error("Keep must not read native route authority"); });
@@ -1842,15 +2210,109 @@ integration("T17 durable continuity review", () => {
     const keepWorker = `native-keep-final-${randomUUID()}`;
     const keepClaim = await repository.claimNext({ workerId: keepWorker, leaseSeconds: 30 });
     expect(keepClaim?.jobId).toBe(job.id);
-    await expect(createGenerationExecutor({ pool, repository, collaborators: offlineCollaborators }).execute({ claim: keepClaim!, workerId: keepWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    await expect(createGenerationExecutor({ pool, repository, collaborators: offlineCollaborators }).execute({ claim: keepClaim!, workerId: keepWorker, leaseSeconds: 30 })).resolves.toBe(!(outcome === "tampered" || outcome === "failed"));
     expect(offlinePreparedExecutor).not.toHaveBeenCalled();
     expect(offlineAuthority).not.toHaveBeenCalled();
     expect(offlineLoadTextExecution).not.toHaveBeenCalled();
+    if (outcome === "tampered" || outcome === "failed") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_checkpoint_incompatible"
+      });
+      return;
+    }
     await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: "completed" });
     await expect(pool.query<{ narration: string; candidateHash: string }>(
       "SELECT narration,model_metadata->'reviewAcceptance'->>'candidateHash' AS \"candidateHash\" FROM turns WHERE campaign_id=$1 AND turn_number=$2",
       [imported.campaignId, job.expectedTurnNumber]
     )).resolves.toMatchObject({ rows: [{ narration: candidate.story.narration, candidateHash: candidate.storyHash }] });
+  });
+
+  it("does not resolve a deleted reviewer selection when review is off, while observe and enforce still reject it", async () => {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
+    const reviewerUnavailableProvider = await createProvider(pool, {
+      name: `T17 missing reviewer ${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "@preset/keep", contextWindowTokens: 163_840,
+      maxOutputTokens: 48_000, temperature: 0, enabled: true,
+      configuration: { textResponseFormatPolicy: "auto", continuityReviewExecutionPolicy: {
+        version: 1, primary: { selection: { kind: "model", modelId: "deleted-reviewer" } }, maximumAutomaticFallbacks: 0
+      } }, apiKey: "native-missing-reviewer-fixture"
+    }, credentialSecret);
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Missing reviewer ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "missing-reviewer.story", story }));
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+      providerProfileId: reviewerUnavailableProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
+      idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(job.status).toBe("queued");
+    expect((await pool.query<{ reviewer: { enabled: boolean } }>("SELECT orchestration_private->'continuityReviewExecution' AS reviewer FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.reviewer).toMatchObject({ enabled: false });
+    await runGenerationJob(pool, `off-missing-reviewer-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+
+    for (const mode of ["observe", "enforce"] as const) {
+      const campaignStory = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+      campaignStory.world.title = `Missing reviewer ${mode} ${randomUUID()}`;
+      const campaign = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: `missing-reviewer-${mode}.story`, story: campaignStory }));
+      await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: campaign.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
+      await expect(application.enqueueAppend({ ownerUserId, campaignId: campaign.campaignId }, generationRequestSchema.parse({
+        action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+        providerProfileId: reviewerUnavailableProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
+        idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+      }))).rejects.toThrow();
+    }
+  });
+
+  it("rejects a known enforced reviewer overflow before the writer provider dispatches", async () => {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
+    const narrowReviewerProvider = await createProvider(pool, {
+      name: `T17 narrow reviewer ${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "@preset/keep", contextWindowTokens: 163_840,
+      maxOutputTokens: 48_000, temperature: 0, enabled: true,
+      configuration: { textResponseFormatPolicy: "auto", continuityReviewExecutionPolicy: {
+        version: 1, primary: { selection: { kind: "openrouter_preset", slug: "reviewer" },
+          overrides: { parameters: { temperature: 0, max_tokens: 4_096 }, conservativeContextWindowTokens: 5_000 } },
+        maximumAutomaticFallbacks: 0
+      } }, apiKey: "native-narrow-reviewer-fixture"
+    }, credentialSecret);
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Narrow reviewer ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "narrow-reviewer.story", story }));
+    await pool.query(
+      `UPDATE campaigns SET selected_character_id='mira', character_profile=$2::jsonb, character_profile_revision=1
+        WHERE id=$1 AND owner_user_id=$3`,
+      [imported.campaignId, JSON.stringify({
+        name: "Campaign Mira",
+        profile: {
+          identity: { aliases: ["Fox"] },
+          story: { keyRelationships: "Mira keeps the observatory's full history." },
+          appearance: { clothing: "blue cloak" },
+          unclassifiedNotes: "Complete fiction note."
+        }
+      }), ownerUserId]
+    );
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+      providerProfileId: narrowReviewerProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
+      idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+    }));
+    expect((await pool.query<{ reviewer: { enabled: boolean; primary: { effectiveContextWindowTokens: number; effectiveOutputTokens: number } } }>(
+      "SELECT orchestration_private->'continuityReviewExecution' AS reviewer FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.reviewer).toMatchObject({ enabled: true, primary: { effectiveContextWindowTokens: 5_000, effectiveOutputTokens: 4_096 } });
+    expect((await pool.query<{ version: string }>(
+      "SELECT generation_base_identity->>'version' AS version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.version).toMatch(/^generation-base-v[34]$/);
+    requests.length = 0;
+    await runGenerationJob(pool, `narrow-reviewer-budget-${randomUUID()}`, 30, credentialSecret);
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(0);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(0);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
   });
 
   it("keeps an uncovered scene main exactly, then pauses again for a later final continuity conflict", async () => {

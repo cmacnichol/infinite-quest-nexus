@@ -21,6 +21,10 @@ import { getProviderOutputSchemaV2, selectProviderOutputSchemaV2, type ProviderO
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { responseContractInvocationClosureV2 } from "./generation-response-contract.js";
 import { resolveEffectiveTextExecutionOverrides } from "./text-execution-overrides.js";
+import { disabledContinuityReviewExecution, resolveContinuityReviewExecution } from "./continuity-review-execution.js";
+import { resolveGenerationResponseContractsV2 } from "./generation-response-contract.js";
+import { queuedResponsePolicyV2Schema } from "../../../packages/contracts/src/generation-response-contract.js";
+import { continuityReviewExecutionPolicySchema } from "../../../packages/contracts/src/continuity-review-execution.js";
 
 export type ApiGenerationCompositionFactories = Readonly<{
   createCommandRepository(pool: DatabasePool): GenerationCommandRepository;
@@ -199,8 +203,12 @@ function createQueuedTextExecutionPreparation(
 ): Pick<PostgresGenerationCommandRepositoryDependencies, "prepareQueuedTextExecution" | "verifyQueuedTextExecution"> {
   return {
     prepareQueuedTextExecution: async (scope): Promise<PreparedQueuedTextExecution | undefined> => {
-      const campaign = await pool.query<{ textProviderProfileId: string | null }>(
-        `SELECT text_provider_profile_id AS "textProviderProfileId" FROM campaigns WHERE id=$1 AND owner_user_id=$2`,
+      const campaign = await pool.query<{ textProviderProfileId: string | null; continuityReviewMode: "off" | "observe" | "enforce" | null }>(
+        `SELECT campaign.text_provider_profile_id AS "textProviderProfileId", enrollment.review_mode AS "continuityReviewMode"
+           FROM campaigns campaign
+           LEFT JOIN campaign_story_memory_enrollments enrollment
+             ON enrollment.campaign_id=campaign.id AND enrollment.owner_user_id=campaign.owner_user_id
+          WHERE campaign.id=$1 AND campaign.owner_user_id=$2`,
         [scope.campaignId, scope.ownerUserId]
       );
       if (!campaign.rows[0]) throw new GenerationApplicationError("not_found", { campaignId: scope.campaignId });
@@ -233,6 +241,105 @@ function createQueuedTextExecutionPreparation(
           ? {}
           : { requestOverrides: scope.requestedTextExecutionOverrides })
       });
+      const reviewerAdvertisements = new Map<string, NonNullable<Awaited<ReturnType<typeof providers.responseFormatInventory.listModels>>["models"][number]["responseFormatAdvertisement"]>>();
+      const reviewMode = campaign.rows[0].continuityReviewMode ?? "off";
+      const rawReviewerPolicy = reviewMode === "off" ? undefined : defaultProfile.configuration.continuityReviewExecutionPolicy;
+      const reviewerPolicy = rawReviewerPolicy == null ? undefined : continuityReviewExecutionPolicySchema.parse(rawReviewerPolicy);
+      if (reviewerPolicy && (!defaultProfile.executionRevision || !defaultProfile.authorityRevision)) {
+        throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+      }
+      const continuityReviewExecution = reviewMode === "off"
+        ? disabledContinuityReviewExecution()
+        : reviewerPolicy
+        ? await resolveContinuityReviewExecution({
+          profile: {
+            ownerUserId: scope.ownerUserId, providerProfileId, profileRevision: defaultProfile.executionRevision!,
+            authorityRevision: defaultProfile.authorityRevision!, providerType: defaultProfile.providerType,
+            selection: defaultProfile.textSelection ?? normalizeTextSelection({ providerType: defaultProfile.providerType, providerRole: "text", defaultModel: defaultProfile.model }),
+            contextWindowTokens: defaultProfile.contextWindowTokens, maxOutputTokens: defaultProfile.maxOutputTokens,
+            endpointReference: defaultProfile.endpointIdentity ?? defaultProfile.id, credentialReference: defaultProfile.id,
+            requestTimeoutMs: defaultProfile.requestTimeoutMs, parameters: { temperature: defaultProfile.temperature },
+            protocolVersion: "continuity-review-route-basis-v1"
+          },
+          policy: reviewerPolicy,
+          ports: {
+            resolvePreset: async ({ ownerUserId, providerProfileId: id, slug }) =>
+              (await providers.responseFormatInventory.getPreset({ ownerUserId, providerProfileId: id, slug })).preset,
+            discoverModels: async ({ ownerUserId, providerProfileId: id, modelIds }) => {
+              const inventory = await providers.responseFormatInventory.listModels({ ownerUserId, providerProfileId: id, providerRole: "text" });
+              for (const model of inventory.models) if (model.responseFormatAdvertisement) reviewerAdvertisements.set(model.id, model.responseFormatAdvertisement);
+              return inventory.models.filter((model) => modelIds.includes(model.id)).map((model) => ({ id: model.id,
+                ...(model.contextWindowTokens === undefined ? {} : { contextWindowTokens: model.contextWindowTokens }) }));
+            }
+          },
+          prepareResponseContracts: async (routeBasis, reviewerSelection) => {
+            if (!profile.executionRevision || !profile.authorityRevision) {
+              throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+            }
+            const selectedCandidate = routeBasis.candidates[0]!;
+            const invocationKeys = ["continuity_review:nonstream"] as const;
+            const admission = reviewerSelection.kind === "openrouter_preset"
+              ? { mode: "json_schema" as const, basis: "preset_trusted" as const }
+              : (() => {
+                const routeConfigHash = capabilityRouteConfigHash(defaultProfile.configuration);
+                const advertisement = reviewerAdvertisements.get(reviewerSelection.modelId) ?? null;
+                const eligible = (schema: ProviderOutputSchemaV2) => providers.responseFormatCapabilities.eligibilityV2({
+                  advertisement,
+                  providerType: defaultProfile.providerType as "openrouter" | "openai_compatible",
+                  endpointIdentity: defaultProfile.endpointIdentity ?? "",
+                  model: reviewerSelection.modelId,
+                  routeConfigHash,
+                  adapterProtocol: "text-schema-adapter-v2",
+                  operation: "continuity_review", schemaHash: schema.schemaHash, streaming: false,
+                  now: providers.responseFormatCapabilities.now()
+                });
+                const schema = selectProviderOutputSchemaV2("continuity_review", (candidate) => {
+                  const result = eligible(candidate);
+                  return result.status === "verified" && Boolean(result.verification);
+                });
+                if (!schema) throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
+                return resolveResponseContractAdmission({ selection: reviewerSelection, directEligibility: () => eligible(schema) });
+              })();
+            const routeConfigHash = capabilityRouteConfigHash(defaultProfile.configuration);
+            const queuedPolicy = queuedResponsePolicyV2Schema.parse({
+              version: 2, policy: "required", providerProfileId: defaultProfile.id, admission,
+              authority: reviewerSelection.kind === "openrouter_preset" ? {
+                kind: "preset_trusted", routeBasisHash: routeBasis.routeBasisHash, selection: reviewerSelection,
+                endpointReference: routeBasis.endpointReference, credentialReference: routeBasis.credentialReference,
+                authorityRevision: routeBasis.authorityRevision, profileRevision: routeBasis.profileRevision
+              } : {
+                kind: "model_verified", providerProfileId: defaultProfile.id, providerType: defaultProfile.providerType,
+                endpointIdentity: defaultProfile.endpointIdentity ?? "", model: reviewerSelection.modelId,
+                providerConfigurationHash: effectiveProviderConfigurationFingerprint({
+                  providerId: defaultProfile.id, providerType: defaultProfile.providerType,
+                  endpointIdentity: defaultProfile.endpointIdentity ?? "", model: reviewerSelection.modelId,
+                  contextWindowTokens: defaultProfile.contextWindowTokens, maxOutputTokens: selectedCandidate.maxOutputTokens,
+                  temperature: routeBasis.parameters.temperature ?? defaultProfile.temperature,
+                  requestTimeoutMs: routeBasis.requestTimeoutMs, configuration: defaultProfile.configuration,
+                  effectiveContextWindowTokens: selectedCandidate.contextWindowTokens,
+                  inputSafetyPolicy: "estimated_20_percent_plus_1024"
+                }),
+                routeConfigHash, verificationRegistryHash: providers.responseFormatCapabilities.registryDigest,
+                authorityRevision: routeBasis.authorityRevision!, routeBasisHash: routeBasis.routeBasisHash
+              },
+              operationClosureVersion: 2, invocationKeys
+            });
+            return resolveGenerationResponseContractsV2({
+              queuedPolicy, routeProtocolVersion: routeBasis.protocolVersion,
+              eligible: (_operation, _streaming, schema) => {
+                const advertisement = reviewerAdvertisements.get(reviewerSelection.kind === "model" ? reviewerSelection.modelId : "") ?? null;
+                return providers.responseFormatCapabilities.eligibilityV2({ advertisement,
+                  providerType: defaultProfile.providerType as "openrouter" | "openai_compatible",
+                  endpointIdentity: defaultProfile.endpointIdentity ?? "",
+                  model: reviewerSelection.kind === "model" ? reviewerSelection.modelId : `@preset/${reviewerSelection.slug}`,
+                  routeConfigHash, adapterProtocol: "text-schema-adapter-v2", operation: "continuity_review",
+                  schemaHash: schema.schemaHash, streaming: false, now: providers.responseFormatCapabilities.now() });
+              },
+              capabilityEvidenceHash: providers.responseFormatCapabilities.registryDigest
+            });
+          }
+        })
+        : undefined;
       if (selection.kind === "model") {
         const inventory = await providers.responseFormatInventory.listModels({
           ownerUserId: scope.ownerUserId, providerProfileId, providerRole: "text"
@@ -275,6 +382,7 @@ function createQueuedTextExecutionPreparation(
           endpointIdentity: profile.endpointIdentity ?? profile.id,
           advertisement: selected?.responseFormatAdvertisement ?? null,
           routeBasis
+          , ...(continuityReviewExecution ? { continuityReviewExecution } : {})
         };
       }
       const routeBasis = await resolveTextExecutionRouteBasis({
@@ -306,6 +414,7 @@ function createQueuedTextExecutionPreparation(
         endpointIdentity: profile.endpointIdentity ?? profile.id,
         advertisement: null,
         routeBasis
+        , ...(continuityReviewExecution ? { continuityReviewExecution } : {})
       };
     },
     verifyQueuedTextExecution: async (client, scope) => {

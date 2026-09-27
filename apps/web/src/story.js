@@ -45,7 +45,8 @@ import {
   generationDiagnosticPresentation,
   generationRecoveryGuidance,
   generationResponseFormatPresentation,
-  generationReviewPresentation
+  generationReviewPresentation,
+  generationReviewTechnicalDiagnosticMessage
 } from "@infinite-quest/client-core";
 
 "use strict";
@@ -1650,7 +1651,7 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
         if (issue.code === "missing_array") return `The response omitted ${issue.field}; an array is required.`;
         return issue.code === "expected_string_item" ? `${issue.field} must contain text entries.` : `The response has an invalid ${issue.field} shape.`;
       }) || [];
-      $("generationReviewReason").textContent = [...validationMessages, ...(review?.detail?.findings?.map(finding => finding.message) || [])].join(" ") || reviewView.message;
+      $("generationReviewReason").textContent = [reviewView.message, ...validationMessages, ...(review?.detail?.findings?.map(finding => finding.message) || [])].join(" ");
       const preview = $("generationReviewPreview");
       preview.replaceChildren();
       if (review?.detail?.narration) preview.append(...review.detail.narration.split(/\r?\n/).filter(Boolean).map(text => { const p = document.createElement("p"); p.textContent = text; return p; }));
@@ -1658,6 +1659,7 @@ function showGenerationRecovery(jobId, message, kind = "generation", guidance = 
       choices.replaceChildren();
       for (const choice of review?.detail?.choices || []) { const button = document.createElement("button"); button.type = "button"; button.disabled = true; button.textContent = choice; choices.append(button); }
       const keep = $("btnKeepGenerationReview"); const retry = $("btnRetryGenerationReview"); const repair = $("btnRepairFormatGenerationReview");
+      if (retry) retry.textContent = review?.summary.technicalDiagnostic ? "Retry continuity review" : "Continue with retry";
       if (keep) { keep.classList.toggle("hidden", !reviewView.canKeep); keep.disabled = state.generationReviewSubmitting; }
       if (retry) { retry.classList.toggle("hidden", !reviewView.canRetry); retry.disabled = state.generationReviewSubmitting; }
       if (repair) { repair.classList.toggle("hidden", !reviewView.canRepairFormat); repair.disabled = state.generationReviewSubmitting; repair.title = reviewView.repairDescription || ""; }
@@ -2044,8 +2046,12 @@ async function observeGenerationRun(run, action, retryFirst = false) {
 }
 
 function updateGenerationProgress(job) {
+  const continuityReviewMessage = generationReviewTechnicalDiagnosticMessage(job.continuityReviewDiagnostic);
+  if (continuityReviewMessage === "Retrying continuity review") {
+    showBusy("Retrying continuity review…");
+  }
   const stage = job.stage || job.status || "generating";
-  showBusy(`Story Engine: ${stage}…`);
+  if (continuityReviewMessage !== "Retrying continuity review") showBusy(`Story Engine: ${stage}…`);
   const progressEl = $("generationProgress");
   if (progressEl) {
     progressEl.classList.add("turn-progress");
@@ -2067,7 +2073,7 @@ function updateGenerationProgress(job) {
 
     const currentStep = steps[currentIndex];
     const percent = Math.round(((currentIndex + 1) / steps.length) * 100);
-    const detailText = `Story Engine: ${stage}`;
+    const detailText = continuityReviewMessage || `Story Engine: ${stage}`;
 
     progressEl.innerHTML = `
       <div class="turn-progress-head">

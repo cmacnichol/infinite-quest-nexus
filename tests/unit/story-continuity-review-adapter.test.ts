@@ -2,12 +2,14 @@ import { PROMPT_TEMPLATE_CATALOG, CONTINUITY_REVIEW_PROMPT_CATALOG } from "../..
 import { describe, expect, it, vi } from "vitest";
 import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview, estimateContinuityReviewPlanningTokens, ContinuityReviewUnavailableError, continuityReviewUnavailableReason } from "../../services/runtime/src/story-continuity-review-adapter.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
+import { PreparedRouteTerminalError } from "../../packages/story-engine/src/preset-route-execution.js";
 import { z } from "zod";
 import { createStoryEvidence, generationEvidenceManifestHash } from "../../packages/application/src/memory/generation-context.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { continuityReviewOutputLimitFixture, continuityReviewOutputLimitResponse } from "../fixtures/continuity-review-output-limit.js";
 const requestHash = sha256("producing-request");
 const entry = createStoryEvidence({ source: { kind: "state_edit", id: "state", revision: "1", turnNumber: 1 }, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null }, { text: "Mira waits at the lighthouse." });
 const body = { version: "generation-evidence-v1" as const, attemptId: "00000000-0000-4000-8000-000000000001", producingRequestHash: requestHash, entries: [entry], requiredReviewEvidenceIds: [entry.id] };
@@ -169,6 +171,44 @@ describe("exact continuity review provider request", () => {
     result.preparedRequest.payloadHash = "f".repeat(64);
     await expect(executePreparedContinuityReview({ ...provider, execute }, prepared)).rejects.toThrow(/continuity_review_unavailable/);
   });
+  it("rejects a provider output limit as a typed failure instead of semantic uncertainty", async () => {
+    const evidence = createStoryEvidence({ source: { kind: "state_edit", id: "synthetic-state", revision: "1", turnNumber: 1 },
+      semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text",
+      normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null },
+    { text: continuityReviewOutputLimitFixture.evidence });
+    const fixtureBody = { ...body, entries: [evidence], requiredReviewEvidenceIds: [evidence.id] };
+    const fixtureManifest = { ...fixtureBody, manifestHash: generationEvidenceManifestHash(fixtureBody) };
+    const prepared = prepare({ manifest: fixtureManifest, direction: continuityReviewOutputLimitFixture.direction,
+      draft: storyTurnOutputSchema.parse(continuityReviewOutputLimitFixture.story) });
+    const execute = async () => ({ ...continuityReviewOutputLimitResponse,
+      preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) } });
+
+    await expect(executePreparedContinuityReview({ ...provider, execute } as typeof provider, prepared))
+      .rejects.toMatchObject({ code: "continuity_review_output_limited", outcome: { kind: "technical_failure", failure: "output_limit" } });
+  });
+  it.each([
+    ["malformed JSON", "{"],
+    ["schema-invalid JSON", JSON.stringify({ version: "story-continuity-review-v1", verdict: "maybe", findings: [] })]
+  ])("classifies %s as technical invalid output", async (_label, content) => {
+    const prepared = prepare();
+    await expect(executePreparedContinuityReview({ ...provider, execute: async () => ({ content, outputLimited: false,
+      preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) } }) } as typeof provider, prepared))
+      .rejects.toMatchObject({ outcome: { kind: "technical_failure", failure: "invalid_output" } });
+  });
+  it("retains a validated semantic uncertain verdict as uncertainty", async () => {
+    const prepared = prepare();
+    const result = await executePreparedContinuityReview({ ...provider, execute: async () => ({
+      content: JSON.stringify({ version: "story-continuity-review-v1", verdict: "uncertain", findings: [] }), outputLimited: false,
+      preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) }
+    }) } as typeof provider, prepared);
+    expect(result.review.verdict).toBe("uncertain");
+    expect(result.outcome.kind).toBe("semantic_verdict");
+  });
+  it("classifies a transport timeout as a technical failure", async () => {
+    const prepared = prepare();
+    await expect(executePreparedContinuityReview({ ...provider, execute: async () => { throw Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" }); } } as typeof provider, prepared))
+      .rejects.toMatchObject({ outcome: { kind: "technical_failure", failure: "provider_timeout" } });
+  });
   it("prepares a complete self-contained repair without private scratchpad or a continuation", () => {
     const prepared = prepareContinuityRepair({ provider, manifest, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft,
       findings: [{ code: "conflict", evidence_ids: [entry.id] }] });
@@ -233,7 +273,8 @@ describe("continuity review unavailable reason", () => {
       .toBe("evidence_unavailable");
     expect(continuityReviewUnavailableReason(new z.ZodError([]))).toBe("invalid_output");
     expect(continuityReviewUnavailableReason(new SyntaxError("Unexpected token"))).toBe("invalid_output");
-    expect(continuityReviewUnavailableReason(new Error("network timeout"))).toBe("provider_failed");
+    expect(continuityReviewUnavailableReason(new Error("network timeout"))).toBe("provider_timeout");
+    expect(continuityReviewUnavailableReason(new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Route deadline."))).toBe("provider_timeout");
     expect(continuityReviewUnavailableReason("not an error")).toBe("provider_failed");
   });
 });

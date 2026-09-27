@@ -7,7 +7,8 @@ import {
   projectGenerationReviewDetail,
   projectGenerationReviewSummary,
   factFormatRepairHash,
-  sha256Hex
+  sha256Hex,
+  continuityReviewAttemptOutcomeSchema
 } from "../../packages/contracts/src/index.js";
 import { generationReviewCandidateSchema, generationReviewCheckpointSchema, generationReviewFindingsHash } from "../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
@@ -44,6 +45,14 @@ const snapshot = {
 };
 
 describe("generation review contracts", () => {
+  it("keeps semantic uncertainty distinct from versioned technical failures", () => {
+    const semantic = { version: 2, kind: "semantic_verdict", review: { version: "story-continuity-review-v1", verdict: "uncertain", findings: [] }, providerMetadata: { finishReason: "stop", outputTokens: 4 } };
+    const technical = { version: 2, kind: "technical_failure", failure: "output_limit", providerMetadata: { finishReason: "length", outputTokens: 1000 } };
+    expect(continuityReviewAttemptOutcomeSchema.parse(semantic)).toEqual(semantic);
+    expect(continuityReviewAttemptOutcomeSchema.parse(technical)).toEqual(technical);
+    expect(continuityReviewAttemptOutcomeSchema.safeParse({ ...technical, verdict: "uncertain" }).success).toBe(false);
+    expect(continuityReviewAttemptOutcomeSchema.safeParse({ ...technical, providerMetadata: { finishReason: "PRIVATE RAW RESPONSE" } }).success).toBe(false);
+  });
   it("projects only known structural validation errors into finite safe issues", () => {
     expect(projectGenerationValidationIssues([
       "superseded_facts: Invalid input: expected array, received undefined",

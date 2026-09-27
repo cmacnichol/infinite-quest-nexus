@@ -1,5 +1,7 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
-import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult, continuityReviewUnavailableReason } from "./story-continuity-review-adapter.js";
+import { nextContinuityReviewAction } from "../../../packages/application/src/memory/continuity-review-attempt-policy.js";
+import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult, continuityReviewUnavailableReason, ContinuityReviewAttemptError } from "./story-continuity-review-adapter.js";
+import { continuityReviewAttemptOutcomeSchema } from "../../../packages/contracts/src/generation-review.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
 import { recoverInterruptedStory } from "../../../packages/story-engine/src/interrupted-story.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
@@ -134,6 +136,7 @@ import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseCont
 import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
 import { presetPromptInjectedRemotely, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
+import { prepareFrozenContinuityReviewRequest } from "./continuity-review-execution.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
@@ -1863,6 +1866,25 @@ async function evaluateTriggers(
   return activatedEventsFromResponse(response.content, triggers, job.expected_turn_number);
 }
 
+export function completeContinuityReviewTechnicalFailure(checkpoint: ContinuityReviewCheckpoint, error: unknown): ContinuityReviewCheckpoint {
+  const unavailableReason = continuityReviewUnavailableReason(error);
+  const outcome = error instanceof ContinuityReviewAttemptError
+    ? error.outcome
+    : continuityReviewAttemptOutcomeSchema.parse({ version: 2, kind: "technical_failure", failure: unavailableReason, providerMetadata: null });
+  return continuityReviewCheckpointSchema.parse({ ...checkpoint, version: 2, status: "completed", verdict: "unavailable", result: null,
+    unavailableReason, outcome,
+    ...(checkpoint.version === 2 && checkpoint.attempts ? { attempts: checkpoint.attempts.map((attempt) => attempt.reservationStatus === "completed" ? attempt : ({
+      ...attempt, reservationStatus: "completed" as const, outcome
+    })) } : {}) });
+}
+
+/** Initial frozen reviewer reservations retain Task 3's identity. A validated
+ * technical Retry is a separately bounded cycle and therefore cannot collide
+ * with its already-completed physical attempt. */
+function continuityReviewReservationId(route: "primary" | "fallback", bindingHash: string, cycleId?: string): string {
+  return `continuity-review:${route}:${bindingHash}${cycleId ? `:${cycleId}` : ""}`;
+}
+
 export function createGenerationExecutor(
   dependencies: GenerationExecutorDependencies
 ): GenerationExecutor {
@@ -2532,6 +2554,15 @@ async function executeLoadedGeneration(
 
     const frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
     const frozenContracts = frozenResponseContracts?.contracts;
+    const planningReviewerRoute = job.orchestration_private?.continuityReviewExecution?.enabled
+      ? job.orchestration_private.continuityReviewExecution.primary
+      : null;
+    // Measure exact reviewer wire requests even when a tentative optional
+    // context record exceeds the reviewer cap; planContext then omits that
+    // record instead of the serializer aborting the whole planning pass.
+    const reviewerSerializationRoute = planningReviewerRoute
+      ? { ...planningReviewerRoute, effectiveContextWindowTokens: Number.MAX_SAFE_INTEGER }
+      : null;
     const initialLogicalAttempt = (orchestration.logicalAttempt?.id ?? job.id) === job.id;
     // Use the captured delivery choice for both context packing and dispatch.
     const usesV2FrozenDelivery = frozenResponseContracts?.version === 2 && frozenContracts !== undefined;
@@ -2559,12 +2590,27 @@ async function executeLoadedGeneration(
         }, storyTextExecutionPlan).body : undefined,
         frozenStoryMemoryPolicySnapshot && frozenStoryMemoryPolicySnapshot.policy.continuityReview !== "off"
           ? (manifest) => estimateContinuityReviewPlanningTokens({
-            provider, manifest, producingRequestHash: manifest.producingRequestHash,
+            provider: planningReviewerRoute ? {
+              ...provider, model: planningReviewerRoute.routeBasis.candidates[0]!.modelId,
+              contextWindowTokens: planningReviewerRoute.effectiveContextWindowTokens,
+              maxOutputTokens: planningReviewerRoute.effectiveOutputTokens,
+              temperature: planningReviewerRoute.routeBasis.parameters.temperature ?? 0,
+              requestTimeoutMs: planningReviewerRoute.routeBasis.requestTimeoutMs
+            } : provider,
+            manifest, producingRequestHash: manifest.producingRequestHash,
             promptSnapshot: frozenPromptEnvelope, reviewMode: frozenStoryMemoryPolicySnapshot.policy.continuityReview as "observe" | "enforce",
             direction: safeAction, candidateOutputTokens: effectiveMaxOutputTokens(provider, job),
             prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
-            ...(frozenContracts ? { serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan) } : {})
-          }) : undefined
+            ...(reviewerSerializationRoute ? {
+              bindRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerSerializationRoute, request).request,
+              serializeRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerSerializationRoute, request).preparedRequest
+            } : frozenContracts ? {
+              serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan)
+            } : {})
+          }) : undefined,
+        planningReviewerRoute
+          ? planningReviewerRoute.effectiveContextWindowTokens - planningReviewerRoute.effectiveOutputTokens
+          : undefined
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
@@ -4277,10 +4323,15 @@ async function executeLoadedGeneration(
         if (producingBody && orchestration.sourceEvidenceManifest) finalManifest = bindManifestToProducingRequest(orchestration.sourceEvidenceManifest, producingBody);
       } catch { /* Observe records unavailable source scope; enforce cannot pass it. */ }
       const auxiliaryRequestHashes = validatedChoiceRequestHashes(orchestration.choiceRepair, orchestration.validatedMainDraft?.story, effectiveProviderConfigurationHash(provider, job));
+      const reviewerExecution = job.orchestration_private?.continuityReviewExecution;
+      const reviewerRoute = reviewerExecution?.enabled
+        ? reviewerExecution.primary
+        : null;
       const binding = {
         draftHash: sha256(stableStringify(committedStory)), producingRequestHash: producingBody ? sha256(producingBody) : null, manifestHash: finalManifest?.manifestHash ?? null, auxiliaryRequestHashes,
         providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), promptHash: promptSnapshot.continuityReview!.review.hash,
-        promptProtocol: "story-continuity-review-v1" as const, policyHash: frozenStoryMemoryPolicySnapshot.policyHash
+        promptProtocol: "story-continuity-review-v1" as const, policyHash: frozenStoryMemoryPolicySnapshot.policyHash,
+        ...(reviewerExecution?.enabled ? { reviewerExecutionSnapshotHash: reviewerExecution.snapshotHash } : {})
       };
       const bindingHash = reviewBindingHash(binding);
       const continuityRetryReceipt = savedReview.success && savedReview.data.state === "decided"
@@ -4290,11 +4341,20 @@ async function executeLoadedGeneration(
             && entry.nextStage === "continuity"
             && entry.candidateHash === sha256(canonicalEvidenceJson(committedStory)))
         : undefined;
+      const reviewCycleId = continuityRetryReceipt
+        ? sha256(canonicalEvidenceJson({ reviewId: continuityRetryReceipt.reviewId, revision: continuityRetryReceipt.revision,
+          candidateHash: continuityRetryReceipt.candidateHash, decision: continuityRetryReceipt.decision }))
+        : undefined;
       // An unavailable or uncertain review retry authorizes one new reviewer
       // call only.  It never carries forward a prior non-pass as a repair
       // authorization, and a newly discovered conflict receives its own gate.
+      const savedCheckpointForCycle = continuityReviewCheckpointSchema.safeParse(orchestration.continuityReview);
+      const checkpointBelongsToRetryCycle = savedCheckpointForCycle.success
+        && savedCheckpointForCycle.data.version === 2
+        && savedCheckpointForCycle.data.cycleId === reviewCycleId;
       if (continuityRetryReceipt && savedReview.success
-          && !savedReview.data.reasons.includes("narrative_conflict")) {
+          && !savedReview.data.reasons.includes("narrative_conflict")
+          && !checkpointBelongsToRetryCycle) {
         orchestration = await persistOrchestration(repository, scope, job, { continuityReview: undefined });
       }
       const existing = continuityReviewCheckpointSchema.safeParse(orchestration.continuityReview);
@@ -4308,29 +4368,67 @@ async function executeLoadedGeneration(
       else if (existing.success) {
         // A prior lease may have dispatched the call. Do not silently duplicate
         // its cost or assume the missing response was a semantic pass.
-        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null, unavailableReason: "provider_failed" };
+        checkpoint = existing.data.version === 1
+          ? continuityReviewCheckpointSchema.parse({ ...existing.data, status: "completed", verdict: "unavailable", result: null })
+          : continuityReviewCheckpointSchema.parse({ ...existing.data, status: "completed", verdict: "unavailable", result: null,
+            unavailableReason: "provider_failed", outcome: { version: 2, kind: "technical_failure", failure: "provider_failed", providerMetadata: null } });
       } else {
-        checkpoint = { version: 1, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null };
+        checkpoint = { version: 2, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null, outcome: null,
+          ...(reviewCycleId ? { cycleId: reviewCycleId } : {}) };
         try {
           if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
-          const prepared = prepareContinuityReview({ provider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
-            promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory, effectiveContextWindowTokens: effectiveContextWindow,
+          const reviewerProvider = reviewerRoute ? {
+            id: job.provider_profile_id, name: "Frozen continuity reviewer", providerRole: "text" as const,
+            providerType: reviewerRoute.providerType, model: reviewerRoute.routeBasis.candidates[0]!.modelId,
+            contextWindowTokens: reviewerRoute.effectiveContextWindowTokens, maxOutputTokens: reviewerRoute.effectiveOutputTokens,
+            temperature: reviewerRoute.routeBasis.parameters.temperature ?? 0,
+            requestTimeoutMs: reviewerRoute.routeBasis.requestTimeoutMs, configuration: {}
+          } as GenerationTextProvider : provider;
+          const prepared = prepareContinuityReview({ provider: reviewerProvider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
+            promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory,
+            effectiveContextWindowTokens: reviewerRoute?.effectiveContextWindowTokens ?? effectiveContextWindow,
             prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
-            ...(job.orchestration_private?.frozenResponseContracts ? {
+            ...(reviewerRoute ? {
+              bindRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerRoute, request).request,
+              serializeRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerRoute, request).preparedRequest
+            } : job.orchestration_private?.frozenResponseContracts ? {
               serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan)
             } : {}) });
           const priorLedger = orchestration.logicalAttempt ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0,
             reviewsConsumed: 0, automaticRepairsConsumed: orchestration.automaticRepair ? 1 : 0,
             choiceRepairsConsumed: orchestration.choiceRepair ? 1 : 0, eventCoverageRepairsConsumed: orchestration.eventCoverageRepair ? 1 : 0 };
-          if (priorLedger.reviewsConsumed >= 2) throw Object.assign(new Error("Continuity review allowance consumed."), { code: "continuity_review_unavailable" });
-          checkpoint = { ...checkpoint, status: "dispatched", reviewRequestHash: prepared.requestHash };
+          if (!reviewCycleId && priorLedger.reviewsConsumed >= 2) throw Object.assign(new Error("Continuity review allowance consumed."), { code: "continuity_review_unavailable" });
+          const primaryFrozen = reviewerRoute ? prepareFrozenContinuityReviewRequest(reviewerRoute, prepared.request) : null;
+          checkpoint = { ...checkpoint, status: "dispatched", reviewRequestHash: prepared.requestHash,
+            ...(primaryFrozen ? { attempts: [{ ordinal: 1 as const, route: "primary" as const, routePlanHash: primaryFrozen.plan.planHash,
+              ...(reviewCycleId ? { cycleId: reviewCycleId } : {}),
+              requestHash: prepared.requestHash, responseReference: null, reservationStatus: "dispatched" as const, outcome: null }] } : {}) };
           orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint,
             logicalAttempt: { ...priorLedger, reviewsConsumed: priorLedger.reviewsConsumed + 1 }, sourceEvidenceManifest: finalManifest });
-          const reviewed = await phase("story_continuity_review", () => callCampaignTextProvider(
-            ledgerDependencies, provider, job, "story_continuity_review", prepared.request, prepared.textExecutionPlan
-          ));
+          const reviewed = reviewerRoute
+            ? await phase("story_continuity_review", async () => {
+              const frozen = prepareFrozenContinuityReviewRequest(reviewerRoute, prepared.request);
+              if (frozen.preparedRequest.payloadHash !== prepared.requestHash) {
+                throw Object.assign(new Error("Frozen reviewer request differs from its checked review body."), {
+                  code: "response_contract_identity_mismatch"
+                });
+              }
+              return requirePreparedTextExecutor(collaborators).execute({
+                plan: frozen.plan, operation: "story_continuity_review", ownerUserId: job.owner_user_id,
+                providerProfileId: job.provider_profile_id, request: frozen.request, preparedRequest: frozen.preparedRequest,
+                invocationKey: "continuity_review:nonstream", frozenResponseContracts: reviewerRoute.responseContracts,
+                routeBasis: reviewerRoute.routeBasis, trustedOperationPrompt: frozen.trustedOperationPrompt,
+                logicalReservation: { kind: "story", ownerUserId: job.owner_user_id, generationJobId: job.id,
+                  invocationId: continuityReviewReservationId("primary", bindingHash, reviewCycleId), workerId }
+              });
+            })
+            : await phase("story_continuity_review", () => callCampaignTextProvider(
+              ledgerDependencies, provider, job, "story_continuity_review", prepared.request, prepared.textExecutionPlan
+            ));
           const validated = validatePreparedContinuityReviewResult(prepared, reviewed);
-          checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"] };
+          checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"], outcome: validated.outcome,
+            ...(checkpoint.version === 2 && checkpoint.attempts ? { attempts: checkpoint.attempts.map((attempt) => ({ ...attempt, reservationStatus: "completed" as const,
+              responseReference: reviewed.responseId || null, outcome: validated.outcome })) } : {}) };
         } catch (error) {
           if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "") || isV2PreparedContractFailure(error, job)) throw error;
           if (error instanceof ContextBudgetError) {
@@ -4340,7 +4438,80 @@ async function executeLoadedGeneration(
               countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
             });
           }
-          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null, unavailableReason: continuityReviewUnavailableReason(error) };
+          checkpoint = completeContinuityReviewTechnicalFailure(checkpoint, error);
+        }
+        const fallbackAction = checkpoint.version === 2 && checkpoint.attempts
+          ? nextContinuityReviewAction({ maximumAutomaticFallbacks: reviewerExecution?.maximumAutomaticFallbacks ?? 0,
+            hasFallback: reviewerExecution?.fallback !== null && reviewerExecution?.fallback !== undefined,
+            fallbackPreparationFailed: checkpoint.fallbackPreparationFailure !== undefined,
+            attempts: checkpoint.attempts.map((attempt) => ({ route: attempt.route, status: attempt.reservationStatus, outcome: attempt.outcome })) })
+          : { kind: "pause-for-decision" as const };
+        if (fallbackAction.kind === "dispatch-fallback" && reviewerExecution?.fallback && finalManifest && binding.producingRequestHash) {
+          const fallbackCheckpoint = checkpoint as Extract<ContinuityReviewCheckpoint, { version: 2 }> & { attempts: NonNullable<Extract<ContinuityReviewCheckpoint, { version: 2 }> ["attempts"]> };
+          const fallbackRoute = reviewerExecution.fallback;
+          let fallbackDispatched = false;
+          try {
+            const fallbackProvider = {
+              id: job.provider_profile_id, name: "Frozen continuity reviewer fallback", providerRole: "text" as const,
+              providerType: fallbackRoute.providerType, model: fallbackRoute.routeBasis.candidates[0]!.modelId,
+              contextWindowTokens: fallbackRoute.effectiveContextWindowTokens, maxOutputTokens: fallbackRoute.effectiveOutputTokens,
+              temperature: fallbackRoute.routeBasis.parameters.temperature ?? 0,
+              requestTimeoutMs: fallbackRoute.routeBasis.requestTimeoutMs, configuration: {}
+            } as GenerationTextProvider;
+            const fallbackPrepared = prepareContinuityReview({ provider: fallbackProvider, manifest: finalManifest,
+              producingRequestHash: binding.producingRequestHash, promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction,
+              draft: committedStory, effectiveContextWindowTokens: fallbackRoute.effectiveContextWindowTokens,
+              prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
+              bindRequest: (request) => prepareFrozenContinuityReviewRequest(fallbackRoute, request).request,
+              serializeRequest: (request) => prepareFrozenContinuityReviewRequest(fallbackRoute, request).preparedRequest });
+            const fallbackFrozen = prepareFrozenContinuityReviewRequest(fallbackRoute, fallbackPrepared.request);
+            if (fallbackFrozen.preparedRequest.payloadHash !== fallbackPrepared.requestHash) {
+              throw Object.assign(new Error("Frozen fallback reviewer request differs from its checked review body."), {
+                code: "response_contract_identity_mismatch"
+              });
+            }
+            checkpoint = { ...fallbackCheckpoint, status: "dispatched", reviewRequestHash: fallbackPrepared.requestHash, outcome: null,
+              attempts: [...fallbackCheckpoint.attempts, { ordinal: 2 as const, route: "fallback" as const, routePlanHash: fallbackFrozen.plan.planHash,
+                ...(reviewCycleId ? { cycleId: reviewCycleId } : {}),
+                requestHash: fallbackPrepared.requestHash, responseReference: null, reservationStatus: "dispatched" as const, outcome: null }] };
+            const fallbackLedger = orchestration.logicalAttempt ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0,
+              reviewsConsumed: 0, automaticRepairsConsumed: 0, choiceRepairsConsumed: 0, eventCoverageRepairsConsumed: 0 };
+            if (!reviewCycleId && fallbackLedger.reviewsConsumed >= 2) throw Object.assign(new Error("Continuity review allowance consumed."), { code: "continuity_review_unavailable" });
+            orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint,
+              logicalAttempt: { ...fallbackLedger, reviewsConsumed: fallbackLedger.reviewsConsumed + 1 } });
+            fallbackDispatched = true;
+            const fallbackReviewed = await phase("story_continuity_review", () => requirePreparedTextExecutor(collaborators).execute({
+              plan: fallbackFrozen.plan, operation: "story_continuity_review", ownerUserId: job.owner_user_id,
+              providerProfileId: job.provider_profile_id, request: fallbackFrozen.request, preparedRequest: fallbackFrozen.preparedRequest,
+              invocationKey: "continuity_review:nonstream", frozenResponseContracts: fallbackRoute.responseContracts,
+              routeBasis: fallbackRoute.routeBasis, trustedOperationPrompt: fallbackFrozen.trustedOperationPrompt,
+              logicalReservation: { kind: "story", ownerUserId: job.owner_user_id, generationJobId: job.id,
+                invocationId: continuityReviewReservationId("fallback", bindingHash, reviewCycleId), workerId }
+            }));
+            const fallbackValidated = validatePreparedContinuityReviewResult(fallbackPrepared, fallbackReviewed);
+            const dispatchedFallbackCheckpoint = checkpoint as Extract<ContinuityReviewCheckpoint, { version: 2 }> & { attempts: NonNullable<Extract<ContinuityReviewCheckpoint, { version: 2 }> ["attempts"]> };
+            const { unavailableReason: _primaryUnavailableReason, ...fallbackCompletionBase } = dispatchedFallbackCheckpoint;
+            checkpoint = { ...fallbackCompletionBase, status: "completed", verdict: fallbackValidated.review.verdict,
+              result: structuredClone(fallbackValidated.review) as ContinuityReviewCheckpoint["result"], outcome: fallbackValidated.outcome,
+              attempts: dispatchedFallbackCheckpoint.attempts.map((attempt) => attempt.route === "fallback" ? { ...attempt,
+                reservationStatus: "completed" as const, responseReference: fallbackReviewed.responseId || null, outcome: fallbackValidated.outcome } : attempt) };
+          } catch (error) {
+            if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "") || isV2PreparedContractFailure(error, job)) throw error;
+            if (fallbackDispatched) {
+              checkpoint = completeContinuityReviewTechnicalFailure(checkpoint, error);
+            } else {
+              if (error instanceof ContextBudgetError) {
+                reviewBudgetDiagnostic = projectSafeGenerationDiagnostic({
+                  code: error.code, operation: "story_continuity_review", action: "adjust_context", scope: error.scope,
+                  requiredTokens: error.requiredTokens, availableTokens: error.availableTokens,
+                  countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
+                });
+              }
+              checkpoint = { ...fallbackCheckpoint, fallbackPreparationFailure: {
+                version: 1, route: "fallback", failure: continuityReviewUnavailableReason(error)
+              } };
+            }
+          }
         }
       }
       const reviewDiagnostic = projectSafeGenerationDiagnostic({

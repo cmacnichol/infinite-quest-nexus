@@ -55,6 +55,8 @@ export type ContextPlanOptions<TContext = readonly ContextBudgetBlock[]> = Reado
   serializeRequest: (context: TContext) => string;
   /** Input tokens for a later request that must fit the same output reserve. */
   additionalRequestTokens?: (context: TContext) => number;
+  /** Independent input cap for the later request, including its output reserve. */
+  additionalRequestInputLimit?: number;
   safetyAllowanceTokens?: number | ((tokens: number) => number);
   contextSafetyAllowanceTokens?: number | ((tokens: number) => number);
   contextValue?: (blocks: readonly ContextBudgetBlock[]) => TContext;
@@ -155,10 +157,8 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
   let current = measured(selected, options);
   const protectedContextSafetyAllowanceTokens = contextSafetyAllowanceFor(current.contextTokens);
   const protectedRequestSafetyAllowanceTokens = safetyAllowanceFor(current.requestTokens);
-  const requiredInputTokens = (measurement: typeof current) => Math.max(
-    measurement.requestTokens + safetyAllowanceFor(measurement.requestTokens),
-    measurement.additionalRequestTokens ? measurement.additionalRequestTokens + safetyAllowanceFor(measurement.additionalRequestTokens) : 0
-  );
+  const additionalRequestInputLimit = options.additionalRequestInputLimit ?? options.inputLimit;
+  assertLimit(additionalRequestInputLimit, "additionalRequestInputLimit");
   assertLimit(protectedContextSafetyAllowanceTokens, "contextSafetyAllowanceTokens");
   assertLimit(protectedRequestSafetyAllowanceTokens, "safetyAllowanceTokens");
   if (current.contextTokens + protectedContextSafetyAllowanceTokens > options.contextLimit) {
@@ -167,8 +167,16 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
       protectedBlockIds: protectedBlocks.map((block) => block.id)
     });
   }
-  if (requiredInputTokens(current) > options.inputLimit) {
-    throw new ContextBudgetError("context_budget_exceeded", requiredInputTokens(current), options.inputLimit, undefined, {
+  const requiredRequestInputTokens = current.requestTokens + safetyAllowanceFor(current.requestTokens);
+  if (requiredRequestInputTokens > options.inputLimit) {
+    throw new ContextBudgetError("context_budget_exceeded", requiredRequestInputTokens, options.inputLimit, undefined, {
+      scope: "provider_request",
+      protectedBlockIds: protectedBlocks.map((block) => block.id)
+    });
+  }
+  const requiredAdditionalInputTokens = current.additionalRequestTokens + safetyAllowanceFor(current.additionalRequestTokens);
+  if (requiredAdditionalInputTokens > additionalRequestInputLimit) {
+    throw new ContextBudgetError("context_budget_exceeded", requiredAdditionalInputTokens, additionalRequestInputLimit, undefined, {
       scope: "provider_request",
       protectedBlockIds: protectedBlocks.map((block) => block.id)
     });
@@ -185,7 +193,8 @@ export function planContext<TContext = readonly ContextBudgetBlock[]>(options: C
       omitted.push({ id: candidate.id, revision: candidate.revision, reason: "context_limit" });
       continue;
     }
-    if (requiredInputTokens(trial) > options.inputLimit) {
+    if (trial.requestTokens + safetyAllowanceFor(trial.requestTokens) > options.inputLimit
+      || trial.additionalRequestTokens + safetyAllowanceFor(trial.additionalRequestTokens) > additionalRequestInputLimit) {
       omitted.push({ id: candidate.id, revision: candidate.revision, reason: "request_limit" });
       continue;
     }

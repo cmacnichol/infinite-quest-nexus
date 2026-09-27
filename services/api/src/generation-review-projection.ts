@@ -1,11 +1,14 @@
 import {
   generationReviewDetailSchema,
+  projectGenerationReviewTechnicalDiagnosticProjection,
+  projectContinuityReviewTechnicalDiagnostic,
   projectGenerationReviewSummary,
   generationReviewTransportSchema,
   type GenerationReviewDetail,
   type GenerationReviewReasonCode,
   type GenerationReviewTransport
 } from "../../../packages/contracts/src/generation-review.js";
+export { projectContinuityReviewTechnicalDiagnostic };
 
 const reasonMessages: Record<GenerationReviewReasonCode, string> = {
   scene_beats_missing: "The candidate does not cover all requested scene beats.",
@@ -35,15 +38,16 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 /** Returns the only review checkpoint fields permitted in polling, SSE, and sync. */
-export function projectGenerationReviewSnapshot(value: unknown): Readonly<{ review?: GenerationReviewTransport }> {
+export function projectGenerationReviewSnapshot(value: unknown): Readonly<{ review?: GenerationReviewTransport; continuityReviewDiagnostic?: unknown }> {
   const source = record(value);
   const metadata = record(source?.recoveryMetadata);
   const candidate = source?.review ?? metadata?.generationReview;
   try {
-    if (candidate === undefined) return {};
+    const continuityReviewDiagnostic = projectGenerationReviewTechnicalDiagnosticProjection(source?.continuityReviewDiagnostic) ?? undefined;
+    if (candidate === undefined) return continuityReviewDiagnostic ? { continuityReviewDiagnostic } : {};
     const transport = generationReviewTransportSchema.safeParse(candidate);
-    if (transport.success && transport.data.version > 2) return { review: transport.data };
-    return { review: projectGenerationReviewSummary(candidate) };
+    const review = transport.success && transport.data.version > 2 ? transport.data : projectGenerationReviewSummary(candidate);
+    return continuityReviewDiagnostic ? { review, continuityReviewDiagnostic } : { review };
   } catch {
     return {};
   }
@@ -51,9 +55,13 @@ export function projectGenerationReviewSnapshot(value: unknown): Readonly<{ revi
 
 /** Revalidates an application detail response and replaces every untrusted message with an allowlisted one. */
 export function projectGenerationReviewDetailResponse(value: unknown): GenerationReviewDetail {
-  const detail = generationReviewDetailSchema.parse(value);
+  const source = record(value) ?? {};
+  const technicalDiagnostic = projectGenerationReviewTechnicalDiagnosticProjection(source.technicalDiagnostic);
+  const { technicalDiagnostic: _untrustedDiagnostic, ...detailSource } = source;
+  const detail = generationReviewDetailSchema.parse(detailSource);
   return generationReviewDetailSchema.parse({
     ...detail,
+    ...(technicalDiagnostic ? { technicalDiagnostic } : {}),
     findings: detail.findings.map(({ code, message }) => ({ code, message: safeFindingMessage(code, message, detail.narration) })),
     retryFailure: detail.retryFailure === null ? null : "The authorized retry did not produce an acceptable replacement."
   });

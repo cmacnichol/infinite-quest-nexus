@@ -1,6 +1,70 @@
 import { z } from "zod";
 import { continuityReviewSchema } from "./story-continuity-review.js";
 
+/** Safe provider metadata only; raw output and provider-private references never enter this record. */
+export const continuityReviewProviderMetadataSchema = z.strictObject({
+  finishReason: z.enum(["stop", "length", "max_tokens", "content_filter", "tool_calls", "unknown"]),
+  outputTokens: z.number().int().nonnegative().safe().nullable()
+});
+
+/** Durable attempt result: technical failures cannot carry a semantic verdict. */
+export const continuityReviewAttemptOutcomeSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ version: z.literal(2), kind: z.literal("semantic_verdict"), review: continuityReviewSchema,
+    providerMetadata: continuityReviewProviderMetadataSchema.nullable() }),
+  z.strictObject({ version: z.literal(2), kind: z.literal("technical_failure"),
+    failure: z.enum(["output_limit", "invalid_output", "provider_timeout", "provider_failed", "context_budget_exceeded", "evidence_unavailable"]),
+    providerMetadata: continuityReviewProviderMetadataSchema.nullable() })
+]);
+export type ContinuityReviewAttemptOutcome = z.infer<typeof continuityReviewAttemptOutcomeSchema>;
+
+/** Browser-safe continuity-review execution status, separate from semantic findings. */
+export const generationReviewTechnicalDiagnosticSchema = z.strictObject({
+  version: z.literal(1),
+  category: z.enum(["output_limit", "invalid_output", "provider_timeout", "provider_failed", "context_budget_exceeded", "evidence_unavailable"]),
+  phase: z.enum(["continuity_review_primary", "continuity_review_fallback", "continuity_review_fallback_preparation"]),
+  attemptCount: z.number().int().min(1).max(2),
+  maxAttempts: z.number().int().min(1).max(2),
+  state: z.enum(["retrying", "incomplete"])
+});
+export type GenerationReviewTechnicalDiagnostic = z.infer<typeof generationReviewTechnicalDiagnosticSchema>;
+
+/** Selects only named fields before validating an untrusted public diagnostic. */
+export function projectGenerationReviewTechnicalDiagnosticProjection(value: unknown): GenerationReviewTechnicalDiagnostic | null {
+  const source = typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const parsed = generationReviewTechnicalDiagnosticSchema.safeParse({
+    version: source.version, category: source.category, phase: source.phase,
+    attemptCount: source.attemptCount, maxAttempts: source.maxAttempts, state: source.state
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+/** Projects private v2 checkpoint evidence to a bounded, provider-safe status. */
+export function projectContinuityReviewTechnicalDiagnostic(value: unknown): GenerationReviewTechnicalDiagnostic | null {
+  const source = typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (source?.version !== 2 || (source.status !== "dispatched" && source.status !== "completed")) return null;
+  const asRecord = (item: unknown): Record<string, unknown> | null => typeof item === "object" && item !== null && !Array.isArray(item) ? item as Record<string, unknown> : null;
+  const attempts = Array.isArray(source.attempts) ? source.attempts.map(asRecord) : [];
+  const latest = attempts.at(-1) ?? null;
+  const prep = asRecord(source.fallbackPreparationFailure);
+  const latestOutcome = asRecord(latest?.outcome);
+  const primary = attempts.find((attempt) => attempt?.route === "primary");
+  const primaryOutcome = asRecord(primary?.outcome);
+  const outcome = asRecord(source.outcome);
+  const failure = typeof prep?.failure === "string" ? prep.failure
+    : source.status === "dispatched" && latest?.route === "fallback" ? primaryOutcome?.failure
+    : latestOutcome?.kind === "technical_failure" ? latestOutcome.failure
+    : outcome?.kind === "technical_failure" ? outcome.failure
+    : source.unavailableReason;
+  const phase = prep ? "continuity_review_fallback_preparation"
+    : latest?.route === "fallback" ? "continuity_review_fallback" : "continuity_review_primary";
+  const attemptCount = Math.min(2, Math.max(1, attempts.length));
+  const maxAttempts = prep || attempts.some((attempt) => attempt?.route === "fallback") ? 2 : 1;
+  const state = source.status === "dispatched" && latest?.route === "fallback" && latest.reservationStatus !== "completed"
+    ? "retrying" : "incomplete";
+  const parsed = generationReviewTechnicalDiagnosticSchema.safeParse({ version: 1, category: failure, phase, attemptCount, maxAttempts, state });
+  return parsed.success ? parsed.data : null;
+}
+
 export const generationReviewStageSchema = z.enum(["structure", "choices", "scene_coverage", "event_coverage", "continuity"]);
 export const generationReviewReasonCodeSchema = z.enum(["scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable", "invalid_choices", "invalid_structure", "output_incomplete", "mechanics_contamination", "event_coverage_failed", "candidate_stale", "candidate_invalid", "provider_interrupted"]);
 
@@ -68,7 +132,8 @@ export const generationReviewV1SummarySchema = z.strictObject({
   version: z.literal(1), reviewId: z.uuid(), revision: z.number().int().safe().positive(),
   state: z.enum(["pending", "decided"]), stage: generationReviewStageSchema,
   candidateScope: z.enum(["main", "final"]), reasons: z.array(generationReviewReasonCodeSchema).min(1).max(20),
-  canKeep: z.boolean(), canRetry: z.boolean()
+  canKeep: z.boolean(), canRetry: z.boolean(),
+  technicalDiagnostic: generationReviewTechnicalDiagnosticSchema.optional()
 });
 
 const formatRepairOfferSchema = z.strictObject({
@@ -169,6 +234,7 @@ const generationReviewDetailProjectionInputSchema = z.object({
   candidate: fictionPreviewSchema.nullable().optional(),
   continuityReview: continuityReviewSchema.nullable().optional(),
   omittedFindingCount: z.number().int().min(0).optional(),
+  continuityReviewCheckpoint: z.unknown().optional(),
   validationIssues: z.array(generationValidationIssueSchema).max(8).optional()
 }).passthrough();
 
@@ -212,16 +278,22 @@ export function projectGenerationReviewDetail(value: unknown): GenerationReviewD
     // surface records only that the one authorized replacement was unavailable.
     retryFailure: input.review.retryFailure ? "The authorized retry did not produce an acceptable replacement." : null,
     omittedFindingCount: input.omittedFindingCount ?? 0,
+    ...(projectContinuityReviewTechnicalDiagnostic(input.continuityReviewCheckpoint)
+      ? { technicalDiagnostic: projectContinuityReviewTechnicalDiagnostic(input.continuityReviewCheckpoint)! } : {}),
     ...(input.validationIssues ? { validationIssues: input.validationIssues } : {})
   });
 }
 
 /** Selects the sole browser-safe review fields from private orchestration data. */
 export function projectGenerationReviewSummary(value: unknown): GenerationReviewSummary {
-  const parsed = z.union([generationReviewV1SummarySchema.passthrough(), generationReviewV2SummarySchema.passthrough()]).parse(value);
+  const source = typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const technicalDiagnostic = projectGenerationReviewTechnicalDiagnosticProjection(source.technicalDiagnostic);
+  const { technicalDiagnostic: _untrustedDiagnostic, ...summarySource } = source;
+  const parsed = z.union([generationReviewV1SummarySchema.passthrough(), generationReviewV2SummarySchema.passthrough()]).parse(summarySource);
   const base = { version: parsed.version, reviewId: parsed.reviewId, revision: parsed.revision, state: parsed.state,
     stage: parsed.stage, candidateScope: parsed.candidateScope, reasons: parsed.reasons,
-    canKeep: parsed.canKeep, canRetry: parsed.canRetry };
+    canKeep: parsed.canKeep, canRetry: parsed.canRetry,
+    ...(technicalDiagnostic ? { technicalDiagnostic } : {}) };
   return parsed.version === 2
     ? { ...base, version: 2, canRepairFormat: parsed.canRepairFormat, formatRepair: parsed.formatRepair }
     : { ...base, version: 1 };

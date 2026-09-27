@@ -10,6 +10,7 @@ import {
 } from "./archives.js";
 import { providerRoleSchema, providerTypeSchema } from "./generation.js";
 import { textExecutionOverridesSchema } from "./text-execution-plan.js";
+import { continuityReviewExecutionPolicySchema } from "./continuity-review-execution.js";
 import { portableAcceptedGenerationPolicyProvenanceSchema } from "./campaign-generation-policy.js";
 import { worldSourceMaterialSchema } from "./world-library.js";
 
@@ -236,7 +237,8 @@ const safeProviderConfigurationSchema = z.object({
   embeddingDimensions: z.number().int().optional(),
   embeddingMaxRetries: z.number().int().optional(),
   textResponseFormatPolicy: z.enum(["legacy", "auto", "required"]).optional(),
-  textExecutionOverrides: textExecutionOverridesSchema.optional()
+  textExecutionOverrides: textExecutionOverridesSchema.optional(),
+  continuityReviewExecutionPolicy: continuityReviewExecutionPolicySchema.nullable().optional()
 }).strict();
 
 const systemChronicleRecordBase = {
@@ -878,6 +880,9 @@ const systemPortableProviderV2Schema = systemPortableProviderSchema.safeExtend({
     createdAt: archiveTimestampSchema,
     updatedAt: archiveTimestampSchema
   }).strict().superRefine((authority, context) => {
+    if (authority.configuration.continuityReviewExecutionPolicy != null && authority.providerRole !== "text") {
+      context.addIssue({ code: "custom", path: ["configuration", "continuityReviewExecutionPolicy"], message: "Continuity reviewer execution policy requires a text provider profile." });
+    }
     if (authority.configuration.textExecutionOverrides !== undefined
       && authority.providerRole !== "text" && authority.providerRole !== "intent") {
       context.addIssue({ code: "custom", path: ["configuration", "textExecutionOverrides"], message: "Text execution overrides require a text or intent provider role." });

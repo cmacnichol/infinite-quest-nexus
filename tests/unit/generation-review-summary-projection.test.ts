@@ -9,7 +9,9 @@ describe("generation review hot-path SQL projection", () => {
     expect(sql).toContain("generationReview,gateCandidate,story");
     expect(sql).toContain("generationReview,reasons");
     expect(sql).toContain("jsonb_typeof");
-    expect(sql).not.toMatch(/originalCandidate|workingCandidate|narration|choices|prompt|provider|journal|retryFailure|raw/i);
+    expect(sql).toContain("continuityReview,fallbackPreparationFailure");
+    expect(sql).toContain("continuityReview,attempts");
+    expect(sql).not.toMatch(/originalCandidate|workingCandidate|narration|choices|promptBody|providerBody|journal|retryFailure|rawOutput/i);
   });
 
   test("uses the shared Keep policy after extracting only bounded evidence", () => {
@@ -70,5 +72,25 @@ describe("generation review hot-path SQL projection", () => {
       eligibility: { complete: false, structurallyValid: false, mechanicsClean: true, authorityValid: true, stageComplete: false, retryAvailable: true },
       candidatePresent: false, repairPlanHash: "a".repeat(64), repairChangedFactCount: 2, repairStatus: "applied"
     }, "recoverable")).toMatchObject({ version: 2, canRepairFormat: false, formatRepair: null });
+  });
+
+  test("attaches only validated technical continuity status to a bounded review summary", () => {
+    const review = projectBoundedGenerationReviewSummary({
+      version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "continuity", candidateScope: "final", reasons: ["review_unavailable"],
+      eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+      candidatePresent: true,
+      technicalDiagnostic: { version: 1, category: "output_limit", phase: "continuity_review_fallback", attemptCount: 2, maxAttempts: 2, state: "retrying" }
+    }, "recoverable");
+    expect(review).toMatchObject({ technicalDiagnostic: {
+      version: 1, category: "output_limit", phase: "continuity_review_fallback", attemptCount: 2, maxAttempts: 2, state: "retrying"
+    } });
+    expect(projectBoundedGenerationReviewSummary({
+      version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",
+      stage: "continuity", candidateScope: "final", reasons: ["review_unavailable"],
+      eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+      candidatePresent: true,
+      technicalDiagnostic: { version: 7, prompt: "private" }
+    }, "recoverable")).toMatchObject({ canKeep: true, canRetry: true });
   });
 });
