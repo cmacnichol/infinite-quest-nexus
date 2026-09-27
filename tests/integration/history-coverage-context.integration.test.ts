@@ -12,6 +12,7 @@ import { defaultStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySchem
 import { CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { CONTINUITY_REVIEW_PROMPT_CATALOG, PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { sha256 } from "../../packages/domain/src/index.js";
+import { estimatedInputSafetyAllowanceTokens, estimateStoryTokens } from "../../packages/story-engine/src/index.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 
@@ -135,6 +136,16 @@ integration("history coverage intent authority", () => {
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "observe" });
     const snapshot = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
       castContext: true, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const legacySnapshot = { policy, policyHash: storyMemoryPolicyHash(policy), castContext: true,
+      promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const capturedV4 = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
+      ownerUserId, campaignId: campaign.rows[0]!.id, operationKind: "append", expectedTurnNumber: 15,
+      baseIdentityVersion: "generation-base-v4"
+    }));
+    const legacyContext = await withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client, {
+      ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id, operationKind: "append", expectedTurnNumber: 15,
+      query: "keeper gate", expectedBaseIdentity: capturedV4.baseIdentity as never, storyMemoryPolicy: legacySnapshot
+    }));
     const captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
       ownerUserId, campaignId: campaign.rows[0]!.id, operationKind: "append", expectedTurnNumber: 15,
       baseIdentityVersion: "generation-base-v4", captureStoryLedger: true, captureRecentWindow: true, recentWindowTurns: 11
@@ -168,6 +179,7 @@ integration("history coverage intent authority", () => {
     const acceptedFirst = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id=$1 AND turn_number=1", [campaign.rows[0]!.id]);
 
     expect(context.authority.storyLedger?.entries[0]?.direction).toBe("Ask the keeper to open the gate.");
+    expect(legacyContext.recentTurns?.length ?? 0).toBeLessThanOrEqual(2);
     expect(acceptedFirst.rows[0]!.narration).toContain("keeper refuses and the gate remains sealed");
     expect(JSON.stringify(context.authority.storyLedger)).not.toContain("keeper refuses and the gate remains sealed");
     expect(planned.storyInput).toContain("storyLedger records earlier player intent, not proof of events.");
@@ -180,6 +192,106 @@ integration("history coverage intent authority", () => {
     expect(() => bindManifestToProducingRequest(manifest, planned.contextPlan.serializedRequest)).not.toThrow();
     expect(review.body).toContain(manifest.manifestHash);
     expect(review.requestHash).toBe(sha256(review.body));
+
+    // This deliberately holds the captured authority and source inputs fixed.
+    // The v4 comparison may therefore prove byte identity; it must never be
+    // compared with the unrelated literal Task 0 compatibility fixture.
+    const matrixContext = {
+      ...context,
+      authority: {
+        ...context.authority,
+        protectedFacts: [{
+          id: "33333333-3333-4333-8333-333333333333",
+          turnNumber: 2,
+          content: "The complete protected fact says the silver seal cannot open a broken gate."
+        }]
+      },
+      candidates: [{
+        id: "44444444-4444-4444-8444-444444444444",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        ordinal: 2,
+        kind: "turn_fiction",
+        content: "Retrieved accepted narration: the keeper hid the silver seal beneath the quay.",
+        tokenEstimate: 20,
+        rank: 1
+      }]
+    };
+    const legacyMatrixContext = { ...legacyContext, candidates: matrixContext.candidates };
+    const legacyMatrixContextWithIgnoredV5Fields = {
+      ...legacyMatrixContext,
+      authority: { ...legacyMatrixContext.authority, protectedFacts: matrixContext.authority.protectedFacts }
+    };
+    const budgets = [32_000, 64_000, 128_000, 256_000, 1_000_000, 4_000_000] as const;
+    const matrixMetrics: unknown[] = [];
+    for (const configuredBudget of budgets) {
+      const writer = {
+        ...provider,
+        id: `matrix-writer-${configuredBudget}`,
+        contextWindowTokens: Math.min(configuredBudget, 256_000)
+      };
+      // Every row deliberately has an enabled, smaller reviewer. The 32k row
+      // also establishes that a configured budget cannot override that cap.
+      const reviewer = {
+        ...provider,
+        id: `matrix-reviewer-${configuredBudget}`,
+        contextWindowTokens: Math.min(Math.max(16_000, Math.floor(configuredBudget / 2)), 64_000)
+      };
+      const writerInputLimit = writer.contextWindowTokens - writer.maxOutputTokens;
+      const reviewerInputLimit = reviewer.contextWindowTokens;
+      const reviewerEstimator = (sourceManifest: NonNullable<ReturnType<typeof planGenerationPromptContext>["sourceManifest"]>) =>
+        estimateContinuityReviewPlanningTokens({
+          provider: reviewer,
+          manifest: sourceManifest,
+          producingRequestHash: sourceManifest.producingRequestHash,
+          promptSnapshot,
+          reviewMode: "observe",
+          direction: "Ask the keeper to open the gate.",
+          candidateOutputTokens: reviewer.maxOutputTokens
+        });
+      const v4Legacy = planGenerationPromptContext(legacyMatrixContext, writer, "Write a scene.", "Ask the keeper to open the gate.", [],
+        { profile: "brief", minWords: 100, maxWords: 120 }, "action", writer.contextWindowTokens, writerInputLimit,
+        "55555555-5555-4555-8555-555555555555", "story_memory", policy, undefined, reviewerEstimator, reviewerInputLimit);
+      const v4WithIgnoredV5Fields = planGenerationPromptContext(legacyMatrixContextWithIgnoredV5Fields, writer, "Write a scene.", "Ask the keeper to open the gate.", [],
+        { profile: "brief", minWords: 100, maxWords: 120 }, "action", writer.contextWindowTokens, writerInputLimit,
+        "55555555-5555-4555-8555-555555555555", "story_memory", policy, undefined, reviewerEstimator, reviewerInputLimit);
+      expect(v4WithIgnoredV5Fields.contextPlan.serializedRequest).toBe(v4Legacy.contextPlan.serializedRequest);
+
+      const v5 = planGenerationPromptContext(matrixContext, writer, "Write a scene.", "Ask the keeper to open the gate.", [],
+        { profile: "brief", minWords: 100, maxWords: 120 }, "action", writer.contextWindowTokens, writerInputLimit,
+        "55555555-5555-4555-8555-555555555555", "story_memory", policy, undefined, reviewerEstimator, reviewerInputLimit,
+        HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+      const v5Manifest = generationEvidenceManifestSchema.parse(v5.sourceManifest);
+      const v5Review = prepareContinuityReview({ provider: reviewer, manifest: v5Manifest,
+        producingRequestHash: v5Manifest.producingRequestHash, promptSnapshot, reviewMode: "observe",
+        direction: "Ask the keeper to open the gate.",
+        draft: { narration: "The keeper refuses again.", choices: ["Wait", "Search", "Leave", "Listen"], custom_action_suggestion: "Inspect the quay.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", open_threads: [], canonical_facts: [], superseded_facts: [], canonical_fact_updates: [] } });
+      const writerTokens = estimateStoryTokens(v5.contextPlan.serializedRequest);
+      const writerRequired = writerTokens + estimatedInputSafetyAllowanceTokens(writerTokens) + writer.maxOutputTokens;
+      const reviewerRequired = v5Review.requestTokens + v5Review.safetyAllowanceTokens + reviewer.maxOutputTokens;
+      expect(writerRequired).toBeLessThanOrEqual(writer.contextWindowTokens);
+      expect(reviewerRequired).toBeLessThanOrEqual(reviewer.contextWindowTokens);
+      expect(reviewer.contextWindowTokens).toBeLessThan(writer.contextWindowTokens);
+      expect(() => bindManifestToProducingRequest(v5Manifest, v5.contextPlan.serializedRequest)).not.toThrow();
+      expect(v5Review.body).toContain(v5Manifest.manifestHash);
+      expect(v5Manifest.entries.some((entry) => entry.selectionGroup === "ledger")).toBe(true);
+      expect(v5Manifest.entries.some((entry) => entry.selectionGroup === "recent")).toBe(true);
+      expect(v5Manifest.entries.some((entry) => entry.selectionGroup === "retrieved")).toBe(true);
+      expect(v5Manifest.entries.some((entry) => entry.canonicalFactId === "33333333-3333-4333-8333-333333333333")).toBe(true);
+      expect((v5.layerDiagnostics as any).history?.version).toBe("history-coverage-diagnostics-v1");
+      expect(JSON.stringify((v5.layerDiagnostics as any).history)).not.toContain("keeper hid the silver seal");
+      matrixMetrics.push({ configuredBudget, writerContextWindowTokens: writer.contextWindowTokens,
+        reviewerContextWindowTokens: reviewer.contextWindowTokens, writerBytes: new TextEncoder().encode(v5.contextPlan.serializedRequest).byteLength,
+        reviewerBytes: new TextEncoder().encode(v5Review.body).byteLength, writerTokens, reviewerTokens: v5Review.requestTokens,
+        writerHeadroom: writer.contextWindowTokens - writerRequired, reviewerHeadroom: reviewer.contextWindowTokens - reviewerRequired,
+        selectedLedger: v5Manifest.entries.filter((entry) => entry.selectionGroup === "ledger").length,
+        selectedRecent: v5Manifest.entries.filter((entry) => entry.selectionGroup === "recent").length,
+        selectedRetrieved: v5Manifest.entries.filter((entry) => entry.selectionGroup === "retrieved").length,
+        selectedFacts: v5Manifest.entries.filter((entry) => entry.canonicalFactId === "33333333-3333-4333-8333-333333333333").length,
+        measurementTrials: (v5.layerDiagnostics as any).ledgerReservation.measurementTrialCount,
+        writerSerializations: (v5.layerDiagnostics as any).ledgerReservation.writerSerializationCount,
+        reviewerSerializations: (v5.layerDiagnostics as any).ledgerReservation.reviewerSerializationCount });
+    }
+    process.stderr.write(`${JSON.stringify({ historyCoveragePreenableMatrix: matrixMetrics })}\n`);
     process.stderr.write(`${JSON.stringify({ historyCoverageCompositionMetrics: { writerBytes: new TextEncoder().encode(planned.contextPlan.serializedRequest).byteLength, reviewerBytes: new TextEncoder().encode(review.body).byteLength, ledgerEntries: ledgerEvidence.length, measurementTrials: (planned.layerDiagnostics as any).ledgerReservation.measurementTrialCount, writerSerializations: (planned.layerDiagnostics as any).ledgerReservation.writerSerializationCount, reviewerSerializations: (planned.layerDiagnostics as any).ledgerReservation.reviewerSerializationCount } })}\n`);
   });
 });
