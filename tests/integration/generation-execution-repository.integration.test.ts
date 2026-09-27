@@ -186,6 +186,38 @@ integration("PostgreSQL generation execution repository", () => {
     }
   });
 
+  it.each(["window", "policy"] as const)("rejects a tampered frozen v5 checkpoint $mutation before provider execution", async (mutation) => {
+    const imported = await campaign();
+    await extendAcceptedHistory(imported.campaignId);
+    const queued = await historyCoveragePolicyCommands("r3").enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Protect the frozen checkpoint.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } })
+    );
+    if (mutation === "window") {
+      await pool.query("UPDATE generation_jobs SET generation_base_identity=jsonb_set(generation_base_identity,'{recentWindowTurns}','10'::jsonb) WHERE id=$1", [queued.id]);
+    } else {
+      const stored = (await pool.query<{ context_options: Record<string, unknown> }>("SELECT context_options FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]!.context_options;
+      const policy = stored.storyMemoryPolicy as Record<string, unknown>;
+      await pool.query("UPDATE generation_jobs SET context_options=$2::jsonb WHERE id=$1", [queued.id, JSON.stringify({ ...stored, storyMemoryPolicy: { ...policy, policy: { ...(policy.policy as Record<string, unknown>), capability: "r1" } } })]);
+    }
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: `v5-tamper-${mutation}`, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    await expect(repository.loadExecutionPayload({ workerId: `v5-tamper-${mutation}`, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+    expect((await pool.query("SELECT status,error_code FROM generation_jobs WHERE id=$1", [queued.id])).rows[0])
+      .toMatchObject({ status: "recoverable", error_code: "generation_checkpoint_incompatible" });
+  });
+
+  it("loads a historical v3 checkpoint whose recent-window field remains absent", async () => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Resume historical checkpoint.", "r2");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "historical-window-absent", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const payload = await repository.loadExecutionPayload({ workerId: "historical-window-absent", leaseSeconds: 30, claim: claim! });
+    expect(payload).not.toBeNull();
+    expect(payload?.generation_base_identity).not.toHaveProperty("recentWindowTurns");
+  });
+
   function supersedingStory(supersedesFactIds: readonly string[]) {
     return storyTurnOutputSchema.parse({
       narration: "The observatory's true purpose becomes clear beneath the moon.",

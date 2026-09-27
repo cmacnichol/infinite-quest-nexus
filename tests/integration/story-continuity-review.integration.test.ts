@@ -2,6 +2,7 @@ import { vi } from "vitest";
 import { PreparedResponseContractError } from "../../packages/story-engine/src/provider-response-format.js";
 import { PreparedRouteTerminalError } from "../../packages/story-engine/src/preset-route-execution.js";
 import { createPostgresGenerationExecutionRepository, reconcileNextAcceptedStreamingIllustration } from "../../packages/database/src/generation-execution-repository.js";
+import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createGenerationExecutionCollaborators } from "../../services/runtime/src/generation-worker-composition.js";
 import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
 import { estimateStoryTokens } from "../../packages/story-engine/src/token-estimate.js";
@@ -15,20 +16,22 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema, generationRetryLatestRequestSchema, illustrationConfigSchema } from "../../packages/contracts/src/generation.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySchema } from "../../packages/contracts/src/story-memory-policy.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
 import { loadRuntimeConfig } from "../../packages/database/src/config.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
+import { resolveStoryMemoryPromptSnapshot } from "../../packages/database/src/prompt-repository.js";
 import type { GenerationEvidenceManifest } from "../../packages/application/src/memory/generation-context.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { sha256Hex } from "../../packages/contracts/src/hash.js";
 import { sha256, stableStringify } from "../../packages/domain/src/text.js";
-import { createProvider } from "../helpers/provider-application-fixtures.js";
+import { createProvider, loadPromptSnapshotForTest, providerPromptProtocolVersion, readTurnReportedCostsForTest } from "../helpers/provider-application-fixtures.js";
 import { createApiGenerationApplication as composeGeneration } from "../../services/runtime/src/generation-api-composition.js";
 import { apiProviderGraph } from "../helpers/provider-application-fixtures.js";
-import { saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
+import { resolveStoryMemoryPolicySnapshot, saveStoryMemoryEnrollment } from "../../packages/database/src/story-memory-policy-repository.js";
 import { getCampaignRuntimeState, importLegacyStory, updateCampaignRuntimeState } from "../helpers/memory-aware-services.js";
 import { snapshotCorrectionEvidence } from "../helpers/campaign-state-correction-fixtures.js";
 import { runGenerationJob } from "../helpers/generation-worker-harness.js";
@@ -294,6 +297,32 @@ integration("T17 durable continuity review", () => {
       requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit",
       providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 }
     }));
+    return { job, application, campaignId: imported.campaignId };
+  }
+
+  async function enqueueRealV5ReviewCheckpoint() {
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Real v5 checkpoint ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "real-v5-review.story", story }));
+    await pool.query(`INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,input_mode,state_snapshot_private)
+      SELECT $1,$2,turn_number,concat('Watch ',turn_number),concat('Tide ',turn_number),'action','{}'::jsonb FROM generate_series(3,14) AS turn_number`, [ownerUserId, imported.campaignId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=14 WHERE id=$1", [imported.campaignId]);
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const commands = createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId, snapshot) => snapshot
+        ? resolveStoryMemoryPromptSnapshot(client, { ownerUserId: scopeOwnerUserId, scope: "campaign", campaignId }, snapshot.policy.continuityReview, snapshot.castContext === true)
+        : loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) => readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
+      resolveStoryMemoryPolicySnapshot: async (client, scope) => {
+        const resolved = await resolveStoryMemoryPolicySnapshot(client, scope, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true });
+        if (!resolved) throw new Error("Expected real provider policy fingerprint.");
+        return { ...resolved, policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v5" as const,
+          castContext: true, promptProtocol: "story-v17-campaign-cast" as const };
+      }
+    });
+    const job = await commands.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", providerProfileId: providerId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true });
     return { job, application, campaignId: imported.campaignId };
   }
 
@@ -2813,17 +2842,13 @@ integration("T17 durable continuity review", () => {
   });
 
   it("reclaims a persisted v5 review checkpoint with its frozen request hash and no new primary call", async () => {
-    const { job, application } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, true);
-    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
-      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
+    const { job, application } = await enqueueRealV5ReviewCheckpoint();
+    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string; generation_base_identity: Record<string, unknown> }>(
+      "SELECT context_options,prompt_protocol_version,generation_base_identity FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!;
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
-    expect(frozenPolicy).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v4", promptProtocol: "story-v17-campaign-cast" });
-    await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
-      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
-        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
-    );
+    expect(frozenPolicy).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v5", promptProtocol: "story-v17-campaign-cast" });
+    expect(captured.generation_base_identity).toMatchObject({ recentWindowTurns: 11, recentWindowFingerprint: expect.any(String) });
     reviewVerdict = "pass";
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
