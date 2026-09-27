@@ -76,7 +76,8 @@ describe("canonical private generation context", () => {
       version: "history-coverage-diagnostics-v1",
       limits: { contextTokens: 32_000, writerInputTokens: 31_000, reviewerInputTokens: 30_000,
         recentWindowTurns: 11, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
-      candidates: { selectedCount: 3, selectedEstimateTokens: 1_240, candidatePoolCandidatesRemoved: 1,
+      candidates: { sourceCount: 6, selectedCount: 3, omittedCount: 3, selectedEstimateTokens: 1_240,
+        serializerGuardExcludedCount: 1, batchedTrialCount: 2, candidatePoolCandidatesRemoved: 1,
         stopReason: "candidate_pool_limit", fallbackReason: "none", duplicateExcluded: 2,
         sourceValidationFailureCount: 1, sourceValidationExcluded: 1 },
       ledger: { capturedCount: 5, sentCount: 2, omittedCount: 3, coveredByRecentCount: 1,
@@ -92,6 +93,7 @@ describe("canonical private generation context", () => {
     for (const hostile of [
       { ...diagnostic, arbitrary: "no" },
       { ...diagnostic, candidates: { ...diagnostic.candidates, candidateId: uuid } },
+      { ...diagnostic, candidates: { ...diagnostic.candidates, omittedCount: undefined } },
       { ...diagnostic, ledger: { ...diagnostic.ledger, direction: "PRIVATE_DIRECTION_CANARY" } },
       { ...diagnostic, facts: { ...diagnostic.facts, error: "PRIVATE_ERROR_CANARY" } },
       { ...diagnostic, candidates: { ...diagnostic.candidates, stopReason: "unbounded" } }
