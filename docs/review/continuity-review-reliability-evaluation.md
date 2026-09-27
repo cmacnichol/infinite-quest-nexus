@@ -13,3 +13,9 @@ The matching persisted physical-attempt usage row recorded 36,432 input tokens, 
 ## Candidate settings and evaluation status
 
 No dedicated review preset was compared with the shared configuration. No isolated live-provider evaluation was run, and no paid provider calls were made. Consequently, completion rate, pass/conflict/uncertainty accuracy, conflict detection, truncation rate, comparative usage and latency, and provider-specific reasoning-control support are unavailable. The incident alone does not support a numeric output-budget recommendation. Keep automatic fallback disabled by default until an authorized, isolated evaluation compares the same evidence across known pass, real conflict, uncertainty, malformed response, and large-evidence cases. Record output-limit and schema outcomes separately from semantic quality in that evaluation.
+
+## Task 6 release evidence (2026-09-26)
+
+The deterministic continuity workflow has focused unit, dedicated-PostgreSQL, and browser evidence from Tasks 2–5. Task 6 ran all 118 integration files in separate Vitest processes against the dedicated isolated PostgreSQL database; 10 files failed and the sweep therefore is not a release pass. The required unit command also failed: 4,592 passed, 49 skipped, and 2 failed. One failure is a pre-existing 48,000-token context-budget expectation, reproduced at baseline `900df97`; the other is a bare-`pnpm` child-process version mismatch. With the pinned fallback launcher first on `PATH`, its focused web-build contract passed 5/5. `corepack pnpm check`, `corepack pnpm build`, and `git diff --check` passed using that launcher path.
+
+No copied-campaign canary, paid live-review request, provider-quality comparison, production policy enablement, or deployment was authorized or performed. Automatic fallback remains disabled by default. Unit, PostgreSQL, and browser evidence does not establish live reviewer quality, completion rate, cost, or latency.

@@ -93,6 +93,10 @@ The production rollout still requires copied-campaign canaries with the actual
 provider, payload/commit/next-turn checks, and observed usage/latency. A skipped
 database, browser, or provider check is not a passed gate.
 
+### Continuity-review reliability release gate
+
+Record deterministic workflow, real-PostgreSQL, browser, and live-review evidence separately. A full suite that contains unrelated or pre-existing failures is still a failed release gate; record its complete passed, failed, and skipped counts and baseline comparisons before triage. The v2 continuity checkpoint reader is incompatible with the baseline v1-only reader: before rolling back workers, pause intake and drain or explicitly pause every job that may read a v2 checkpoint. Never rewrite a frozen candidate or checkpoint to make rollback appear safe.
+
 ## Story-only campaign-policy verification
 
 Generation-policy changes need focused unit coverage for policy creation,
