@@ -9,10 +9,13 @@ import type { GenerationExecutionPayload } from "../../packages/database/src/gen
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/generation.js";
-import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
+import { defaultStoryMemoryPolicy, effectiveProviderConfigurationFingerprint, storyMemoryPolicyHash, storyMemoryPolicySchema } from "../../packages/contracts/src/story-memory-policy.js";
+import { HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, castStoryMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { queuedResponsePolicyV2Schema } from "../../packages/contracts/src/generation-response-contract.js";
 import { characterFictionAuthority, sha256, stableStringify } from "../../packages/domain/src/index.js";
 import { canonicalEvidenceJson, readStoryEvidenceFromSource } from "../../packages/application/src/memory/generation-context.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
+import { estimatedInputSafetyAllowanceTokens } from "../../packages/story-engine/src/provider-request.js";
 import { continuityReviewCheckpointSchema, reviewBindingHash } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { generationExecutionProtocolIdentity, PreparedResponseContractError, serializeProviderRequest, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
@@ -33,9 +36,10 @@ import {
   sentCanonicalFactIds,
   type GenerationExecutionCollaborators
 } from "../../services/runtime/src/generation-executor-adapter.js";
+import { resolveContinuityReviewExecution } from "../../services/runtime/src/continuity-review-execution.js";
+import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
 import { validatePreparedContinuityReviewResult } from "../../services/runtime/src/story-continuity-review-adapter.js";
 import { providerPromptProtocolVersion } from "../../services/runtime/src/provider-application-composition.js";
-import { resolveGenerationResponseContractsV2 } from "../../services/runtime/src/generation-response-contract.js";
 import { getProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../packages/contracts/src/provider-output-schema.js";
 import { appendStoryOutputEncodingContract, STORY_OUTPUT_ENCODING_CONTRACT_V3 } from "../../packages/contracts/src/story-prompt.js";
 import { composeEffectiveStorySystemPrompt } from "../../packages/story-engine/src/effective-story-system-prompt.js";
@@ -2973,5 +2977,168 @@ describe("generation executor adapter", () => {
     expect(input.authoritative_context.chronicle).toEqual([expect.objectContaining({
       id: "22222222-2222-4222-8222-222222222222", kind: "canonical_fact"
     })]);
+  });
+
+  it("caps v5 executor retrieval and serialized requests at the writer and smaller reviewer provider windows", async () => {
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "observe" });
+    const job = completeGenerationExecutionPayload();
+    job.context_options = {
+      ...job.context_options,
+      budgetTokens: 4_000_000,
+      modelContextWindowTokens: 2_000_000,
+      recentTurns: 11,
+      storyMemoryPolicy: {
+        policy, policyHash: storyMemoryPolicyHash(policy), castContext: true,
+        contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+        promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+        providerConfigurationFingerprint: effectiveProviderConfigurationFingerprint({
+          providerId: claim.providerProfileId, providerType: "openai_compatible", endpointIdentity: "", model: "test-model",
+          contextWindowTokens: 1_000_000, maxOutputTokens: 512, temperature: 0, requestTimeoutMs: 1_000,
+          configuration: {}, effectiveContextWindowTokens: 1_000_000, inputSafetyPolicy: "estimated_20_percent_plus_1024"
+        })
+      }
+    } as never;
+    job.generation_base_identity = { ...job.generation_base_identity, version: "generation-base-v4", recentWindowTurns: 11,
+      recentWindowFingerprint: "d".repeat(64), characterProfileRevision: 0, characterProfileFingerprint: "e".repeat(64),
+      castRevision: 0, castTimelineRevision: 0, castFingerprint: "f".repeat(64), castCoverageStartTurn: null,
+      castTrackedThroughTurn: null } as never;
+    const templates = validPromptSnapshot();
+    const reviewerPrompt = (protocolIdentity: string) => ({ content: "Review the captured evidence.",
+      hash: sha256("Review the captured evidence."), source: "shipped" as const, protocolIdentity });
+    job.prompt_snapshot = {
+      version: 2, templates, continuityReview: {
+        review: reviewerPrompt("story-continuity-review-v1"), repair: reviewerPrompt("story-continuity-repair-v1")
+      },
+      storyMemoryCompatibility: {
+        protocolIdentity: castStoryMemoryPromptCompatibilityIdentity(),
+        templateHashes: { story_system: templates.story_system.hash, event_extension: templates.event_extension.hash }
+      }
+    } as never;
+    const basePromptProtocol = providerPromptProtocolVersion(templates as GenerationExecutionPayload["prompt_snapshot"]);
+    job.prompt_protocol_version = `story-memory-cast-v1|${CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION}|${HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION}|${basePromptProtocol}`;
+    const reviewerProfile = {
+      ownerUserId: claim.ownerUserId, providerProfileId: claim.providerProfileId, profileRevision: "profile-r1",
+      authorityRevision: "authority-r1", providerType: "openrouter" as const,
+      selection: { kind: "model" as const, modelId: "writer-model" }, contextWindowTokens: 1_000_000,
+      maxOutputTokens: 512, endpointReference: "test-endpoint", credentialReference: claim.providerProfileId,
+      protocolVersion: "text-execution-route-basis-v2"
+    };
+    const reviewerSnapshot = await resolveContinuityReviewExecution({
+      profile: reviewerProfile,
+      policy: { version: 1, primary: { selection: { kind: "openrouter_preset", slug: "cap-reviewer" },
+        overrides: { conservativeContextWindowTokens: 500_000 } }, maximumAutomaticFallbacks: 0 },
+      ports: {
+        resolvePreset: async ({ slug }) => ({ slug, name: "Cap reviewer", versionId: "reviewer-v1", version: 1,
+          systemPrompt: "", config: { model: "vendor/reviewer" }, configHash: "b".repeat(64) }),
+        discoverModels: async ({ modelIds }) => modelIds.map((id) => ({ id, contextWindowTokens: 500_000, maxOutputTokens: 512 }))
+      },
+      prepareResponseContracts: async (routeBasis) => {
+        const queuedPolicy = queuedResponsePolicyV2Schema.parse({ version: 2, policy: "required", providerProfileId: claim.providerProfileId,
+          admission: { mode: "json_schema", basis: "preset_trusted" },
+          authority: { kind: "preset_trusted", routeBasisHash: routeBasis.routeBasisHash, selection: routeBasis.selection,
+            endpointReference: routeBasis.endpointReference, credentialReference: routeBasis.credentialReference,
+            authorityRevision: routeBasis.authorityRevision, profileRevision: routeBasis.profileRevision },
+          operationClosureVersion: 2, invocationKeys: ["continuity_review:nonstream"] });
+        return resolveGenerationResponseContractsV2({ queuedPolicy, capabilityEvidenceHash: "c".repeat(64) });
+      }
+    });
+    job.orchestration_private = { continuityReviewExecution: reviewerSnapshot } as never;
+
+    const repository = {
+      loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
+      saveOrchestration: vi.fn(async () => true), savePartialNarration: vi.fn(async () => true),
+      saveStreamingSegments: vi.fn(async () => true), recordAttempt: vi.fn(async () => undefined),
+      markRecoverable: vi.fn(async () => true), markValidating: vi.fn(async () => true), markCommitting: vi.fn(async () => true),
+      commitAcceptedTurn: vi.fn(async () => ({ turnId: "00000000-0000-4000-8000-000000000006" })), markFailed: vi.fn(async () => true)
+    } as unknown as GenerationExecutionRepository;
+    const capturedScopes: Array<{ retrievalBudgetTokens: number }> = [];
+    const reservations: Array<{ recentTurnIds: string[]; protectedFactIds: string[] }> = [];
+    const authority = { authority: { rules: [], worldCanon: {}, selectedCharacterId: null,
+      currentContinuity: { continuitySummary: "", openThreads: [], canonicalFacts: [], scratchpad: "", trackers: [],
+        rpgStats: [], eventTriggers: [], pendingEventTriggers: [] }, latestTurn: null,
+      scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [],
+      storyLedger: { entries: [], omittedThroughTurn: null }, protectedFacts: [], protectedFactsOmitted: 0,
+      characterAuthority: { source: "none", name: "", characterText: "", profile: null } },
+      baseIdentity: job.generation_base_identity, candidates: [], chronicleRetrieval: DEDICATED_CHUNKED_AUDIT };
+    const captureGenerationAuthority = vi.fn(async (_pool, scope) => { capturedScopes.push(scope); return authority; });
+    const loadGenerationCandidates = vi.fn(async (_pool, scope, captured, reservation) => {
+      capturedScopes.push(scope);
+      reservations.push(reservation);
+      return { ...captured, candidates: [] };
+    });
+    const requests: Array<Record<string, unknown>> = [];
+    const reviewerRequests: Array<{ request: Record<string, unknown>; preparedRequest: { body: string; payloadHash: string; budgetAudit: unknown } }> = [];
+    const provider = {
+      id: claim.providerProfileId, name: "Capped writer", providerRole: "text" as const,
+      providerType: "openai_compatible" as const, model: "test-model", contextWindowTokens: 1_000_000,
+      maxOutputTokens: 512, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: vi.fn(async (request: Record<string, unknown>) => {
+        requests.push(request);
+        return { content: JSON.stringify({ narration: "The observatory door opens onto a quiet moonlit hall.",
+          choices: ["Enter the hall.", "Wait outside.", "Inspect the lock.", "Call for the keeper."],
+          custom_action_suggestion: "Study the observatory lens.", scratchpad: "", tracker_updates: [], image_prompt: "",
+          continuity_summary: "The door is open.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }),
+          responseId: "cap-response", finishReason: "stop", outputLimited: false, modelInstanceId: "test-instance",
+          usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 }, reportedCost: null, rawMetadata: {} };
+      })
+    };
+    const collaborators = {
+      memory: { captureGenerationAuthority, loadGenerationCandidates,
+        buildContextPreview: vi.fn(async () => ({ campaign: { id: claim.campaignId, worldVersionId: job.world_version_id,
+          selectedCharacterId: null, characterProfileRevision: 0 }, selectedCompression: null, retrieval: {},
+        chronicleRetrieval: DEDICATED_CHUNKED_AUDIT, scopes: { worldCanon: {}, campaignCanon: {}, chronicle: [],
+          currentScene: null, currentContinuity: { continuitySummary: "", openThreads: [], canonicalFacts: [], scratchpad: "" } } })) },
+      illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) },
+      preparedTextExecutor: { execute: vi.fn(async ({ request, preparedRequest }) => {
+        reviewerRequests.push({ request, preparedRequest });
+        return { content: JSON.stringify({ verdict: "pass", findings: [] }), responseId: "review-response",
+          finishReason: "stop", outputLimited: false, modelInstanceId: "reviewer-instance",
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 }, reportedCost: null, rawMetadata: {} };
+      }) },
+      loadTextExecution: vi.fn(async () => provider), promptFromSnapshot: vi.fn(() => "Write a concise fictional scene."),
+      recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
+    } as unknown as GenerationExecutionCollaborators;
+
+    await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
+      .execute({ workerId: "worker-a", leaseSeconds: 30, claim })).resolves.toBe(true);
+
+    expect(captureGenerationAuthority).toHaveBeenCalledOnce();
+    expect(loadGenerationCandidates).toHaveBeenCalledOnce();
+    expect(reservations).toHaveLength(1);
+    expect(capturedScopes).toHaveLength(2);
+    expect(capturedScopes[0]).toBe(capturedScopes[1]);
+    expect(capturedScopes[0]!.retrievalBudgetTokens).toBeGreaterThan(512);
+    expect(capturedScopes[0]!.retrievalBudgetTokens).toBeLessThan(999_488);
+    expect(repository.commitAcceptedTurn).toHaveBeenCalledOnce();
+    const accepted = (repository.commitAcceptedTurn as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      story: unknown; contextDiagnostics: { effectiveContextWindow: number; inputTokenLimit: number;
+        reservedOutputTokens: number; estimatedPromptTokens: number };
+    };
+    expect(accepted.contextDiagnostics).toMatchObject({ effectiveContextWindow: 1_000_000,
+      inputTokenLimit: 999_488, reservedOutputTokens: 512 });
+    expect(accepted.contextDiagnostics.estimatedPromptTokens
+      + estimatedInputSafetyAllowanceTokens(accepted.contextDiagnostics.estimatedPromptTokens)
+      + accepted.contextDiagnostics.reservedOutputTokens).toBeLessThanOrEqual(1_000_000);
+    expect(accepted.story).toMatchObject({ narration: "The observatory door opens onto a quiet moonlit hall." });
+    expect(requests).toHaveLength(1);
+    const writerRequest = requests.find((request) => request.effectiveContextWindowTokens === 1_000_000);
+    expect(writerRequest).toBeDefined();
+    expect(writerRequest!.canonicalBudgeting).toBe(true);
+    expect(JSON.parse(String(writerRequest!.input))).toHaveProperty("authoritative_context");
+    expect(reviewerRequests).toHaveLength(1);
+    const reviewerRequest = reviewerRequests[0]!;
+    expect(reviewerSnapshot.primary?.effectiveContextWindowTokens).toBe(500_000);
+    expect(reviewerRequest.request.input).toContain("story-continuity-review-v1");
+    expect(reviewerRequest.preparedRequest.body).toContain('"response_format":{"type":"json_schema"');
+    expect(reviewerRequest.preparedRequest.payloadHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(reviewerRequest.preparedRequest.budgetAudit).toMatchObject({ requestTokens: 2_975,
+      inputLimit: 499_488, outputReserveTokens: 512, safetyAllowanceTokens: 1_619 });
+    expect(2_975 + 1_619 + 512).toBeLessThan(500_000);
+    process.stderr.write(`${JSON.stringify({ executorProviderCapEvidence: {
+      configuredCampaignBudget: 4_000_000, effectiveWriterContextWindow: accepted.contextDiagnostics.effectiveContextWindow,
+      writerInputLimit: accepted.contextDiagnostics.inputTokenLimit, retrievalBudgetTokens: capturedScopes[0]!.retrievalBudgetTokens,
+      reviewerContextWindow: reviewerSnapshot.primary!.effectiveContextWindowTokens,
+      reviewerBudget: reviewerRequest.preparedRequest.budgetAudit, accepted: true
+    } })}\n`);
   });
 });
