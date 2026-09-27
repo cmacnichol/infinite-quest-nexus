@@ -28,6 +28,7 @@ import type {
   MemoryGenerationContextPreviewScope,
   MemoryGenerationAuthorityContext,
   MemoryGenerationAuthorityScope,
+  GenerationHistoryReservation,
   MemoryPublicResult,
   MemoryTransactionContext,
   MemoryWorkerClaimRequest,
@@ -72,6 +73,16 @@ export interface MemoryGenerationTransactionPort {
   loadGenerationContext(
     database: MemoryTransactionContext,
     scope: MemoryGenerationAuthorityScope,
+  ): Promise<MemoryGenerationAuthorityContext>;
+  captureGenerationAuthority(
+    database: MemoryTransactionContext,
+    scope: MemoryGenerationAuthorityScope,
+  ): Promise<MemoryGenerationAuthorityContext>;
+  loadGenerationCandidates(
+    database: MemoryTransactionContext,
+    scope: MemoryGenerationAuthorityScope,
+    authority: MemoryGenerationAuthorityContext,
+    reservation?: GenerationHistoryReservation,
   ): Promise<MemoryGenerationAuthorityContext>;
   enqueueEmbeddingReindex(
     database: MemoryTransactionContext,

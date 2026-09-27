@@ -168,6 +168,8 @@ describe("PostgreSQL Chronicle generation transaction port", () => {
     const embeddings = embeddingPort({ resolve: vi.fn() });
     const transaction = createPostgresChronicleGenerationTransactionPort({ embeddings });
     expect(transaction).toHaveProperty("loadGenerationContext");
+    expect(transaction).toHaveProperty("captureGenerationAuthority");
+    expect(transaction).toHaveProperty("loadGenerationCandidates");
     expect(transaction).not.toHaveProperty("previewGenerationContext");
   });
   it("keeps hybrid retrieval selection and audit provenance for complete private candidates", async () => {

@@ -163,6 +163,15 @@ export type MemoryGenerationAuthorityScope = CampaignWorldVersionMemoryScope & R
   storyMemoryPolicy?: StoryMemoryPolicySnapshot;
 }>;
 
+/** Exact v5 sources already selected by the captured writer/reviewer pass. */
+export type GenerationHistoryReservation = Readonly<{
+  recentTurnIds: readonly string[];
+  protectedFactIds: readonly string[];
+}>;
+
+/** Source-verified optional fact identities admitted to v5 Chronicle retrieval. */
+export type GenerationVerifiedFactSet = readonly string[];
+
 
 export type MemoryWorkerClaimRequest = Readonly<{
   workerId: string;

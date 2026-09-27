@@ -1,6 +1,8 @@
 import type {
   MemoryGenerationAuthorityContext,
-  MemoryGenerationAuthorityScope
+  MemoryGenerationAuthorityScope,
+  GenerationHistoryReservation,
+  GenerationVerifiedFactSet
 } from "../../application/src/memory/types.js";
 import {
   hasGenerationCharacterAuthority,
@@ -19,7 +21,8 @@ import {
   loadCurrentContinuityCorrection,
   materializeGenerationContinuity,
   loadAcceptedGenerationContinuity,
-  materializeInitialGenerationContinuity
+  materializeInitialGenerationContinuity,
+  loadVerifiedProtectedFacts
 } from "./campaign-continuity-repository.js";
 
 function invalidRules(): never {
@@ -180,9 +183,16 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
   scope: MemoryGenerationAuthorityScope,
   authorityContext: MemoryGenerationAuthorityContext,
   dependencies: ChronicleGenerationTransactionDependencies,
+  reservation?: GenerationHistoryReservation,
   options: Readonly<{ useSavepoints?: boolean }> = {},
 ): Promise<MemoryGenerationAuthorityContext> {
   const baseTurnNumber = Number(authorityContext.baseIdentity.baseTurnNumber);
+  // Chronicle projections are retrieval pointers, never fact authority.  The
+  // bounded Task 6 verifier admits only IDs whose accepted/correction source
+  // snapshot (including the latest complete correction frontier) agrees.
+  const verifiedOptionalFactIds: GenerationVerifiedFactSet | undefined = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)
+    ? (await loadVerifiedProtectedFacts(client, scope, baseTurnNumber)).facts.map((fact) => fact.id)
+    : undefined;
   const retrieval = await loadPostgresChronicleGenerationCandidates(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
@@ -191,7 +201,9 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
     throughTurnNumber: baseTurnNumber,
     ...(authorityContext.authority.castSnapshot ? { castSnapshot: castGenerationSnapshotSchema.parse(authorityContext.authority.castSnapshot) } : {}),
     ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
-    ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy })
+    ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
+    ...(reservation === undefined ? {} : { generationExclusions: reservation }),
+    ...(verifiedOptionalFactIds === undefined ? {} : { verifiedCanonicalFactIds: verifiedOptionalFactIds })
   }, dependencies, options);
   const candidates: readonly GenerationContextCandidate[] = retrieval.candidates;
   return {
