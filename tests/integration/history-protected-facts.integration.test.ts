@@ -1,9 +1,13 @@
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadCurrentContinuityCorrection, loadVerifiedProtectedFacts, verifyCapturedOptionalGenerationFacts } from "../../packages/database/src/campaign-continuity-repository.js";
 import { buildCanonicalChronicleFacts } from "../../packages/domain/src/chronicle-memory-helpers.js";
+import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
+import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
+import { CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 
@@ -76,6 +80,43 @@ integration("verified protected-fact authority", () => {
     expect(result.candidateRows).toBe(2);
     expect(result.sourceBytes).toBeGreaterThan(0);
     await expect(pool.query("SELECT id,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId])).resolves.toMatchObject({ rows: before.rows });
+  });
+
+  it("captures a nonempty correction frontier before the base and retains it through a later accepted turn", async () => {
+    const scope = await fixture();
+    const staleSnapshot = { canonicalFacts: ["The stale harbor watch remains."], canonicalFactUpdates: [] };
+    const staleTurnId = await acceptedTurn(scope.campaignId, 1, staleSnapshot);
+    const stale = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId: staleTurnId, ...staleSnapshot, entityCatalog: [] })[0]!;
+    await insertAcceptedFact(scope, staleTurnId, 1, stale);
+    const retainedId = crypto.randomUUID();
+    const retainedContent = "The corrected harbor watch stands at the west gate.";
+    const correction = await pool.query<{ id: string }>(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,revision,effective_turn_number,state_snapshot_private)
+      VALUES($1,$2,1,2,$3::jsonb) RETURNING id`, [ownerUserId, scope.campaignId, JSON.stringify({
+        continuitySummary: "The corrected harbor watch remains in force.", scratchpad: "", openThreads: [],
+        canonicalFacts: [{ id: retainedId, content: retainedContent }], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+      })]);
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_state_edit_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,2,0,$6,lower($6),2)`, [retainedId, ownerUserId, scope.campaignId, scope.worldVersionId, correction.rows[0]!.id, retainedContent]);
+    await acceptedTurn(scope.campaignId, 3, { canonicalFacts: [], canonicalFactUpdates: [] });
+    const policy = defaultStoryMemoryPolicy("r3");
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "a".repeat(64) } as const;
+
+    const authority = await withTransaction(pool, async (client) => {
+      const frozen = await resolveGenerationAuthoritySnapshot(client, { ownerUserId, ...scope, operationKind: "append", expectedTurnNumber: 4,
+        baseIdentityVersion: "generation-base-v4", captureRecentWindow: true, recentWindowTurns: 11,
+        captureStoryLedger: true, captureProtectedFacts: true });
+      return loadPostgresChronicleGenerationAuthorityContext(client, { ownerUserId, ...scope, operationKind: "append", expectedTurnNumber: 4,
+        query: "harbor watch", expectedBaseIdentity: frozen.baseIdentity, storyMemoryPolicy });
+    });
+    expect(authority.authority.optionalFactFrontier).toMatchObject({
+      stateEditId: correction.rows[0]!.id, effectiveTurnNumber: 2, facts: [{ id: retainedId, content: retainedContent }]
+    });
+    const client = await pool.connect();
+    try {
+      await expect(verifyCapturedOptionalGenerationFacts(client, { ownerUserId, ...scope }, 3, [stale.id, retainedId],
+        authority.authority.optionalFactFrontier)).resolves.toEqual([retainedId]);
+    } finally { client.release(); }
   });
 
   it("accepts a turn-zero correction fact only when its complete correction source verifies", async () => {

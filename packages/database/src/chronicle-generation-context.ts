@@ -146,13 +146,16 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
       [scope.ownerUserId, scope.campaignId, baseTurnNumber]
     )
     : null;
+  const optionalFactFrontierContinuity = optionalFactFrontier?.rows[0]
+    ? await loadCurrentContinuityCorrection(client, scope, baseTurnNumber, { complete: true, latestAtOrBefore: true })
+    : null;
   const capturedOptionalFactFrontier: GenerationOptionalFactFrontier | undefined = optionalFactFrontier?.rows[0]
     ? {
       stateEditId: optionalFactFrontier.rows[0].id,
       effectiveTurnNumber: optionalFactFrontier.rows[0].effective_turn_number,
       // `complete: true` preserves an intentionally empty correction and
       // withholds invalid source IDs before this immutable capture escapes.
-      facts: continuity.canonicalFacts.flatMap((fact) => fact.id ? [{ id: fact.id, content: fact.content }] : [])
+      facts: optionalFactFrontierContinuity?.canonicalFacts.flatMap((fact) => fact.id ? [{ id: fact.id, content: fact.content }] : []) ?? []
     }
     : undefined;
   return memoryGenerationAuthorityContextSchema.parse({

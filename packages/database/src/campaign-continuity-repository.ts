@@ -128,7 +128,7 @@ export async function loadCurrentContinuityCorrection(
   client: DatabaseClient,
   scope: CampaignWorldVersionMemoryScope,
   baseTurnNumber: number,
-  options: Readonly<{ complete?: boolean }> = {},
+  options: Readonly<{ complete?: boolean; latestAtOrBefore?: boolean }> = {},
 ): Promise<CampaignRuntimeStateContent | null> {
   const result = await client.query<{ id: string; state_snapshot_private: unknown }>(
     `SELECT edit.id, edit.state_snapshot_private
@@ -139,8 +139,8 @@ export async function loadCurrentContinuityCorrection(
       WHERE campaign.id = $2
         AND campaign.owner_user_id = $1
         AND campaign.world_version_id = $3
-        AND edit.effective_turn_number = $4
-      ORDER BY edit.revision DESC
+        AND edit.effective_turn_number ${options.latestAtOrBefore ? "<=" : "="} $4
+      ORDER BY ${options.latestAtOrBefore ? "edit.effective_turn_number DESC," : ""}edit.revision DESC
       LIMIT 1`,
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber]
   );
