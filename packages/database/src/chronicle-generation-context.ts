@@ -21,8 +21,7 @@ import {
   loadCurrentContinuityCorrection,
   materializeGenerationContinuity,
   loadAcceptedGenerationContinuity,
-  materializeInitialGenerationContinuity,
-  loadVerifiedProtectedFacts
+  materializeInitialGenerationContinuity
 } from "./campaign-continuity-repository.js";
 
 function invalidRules(): never {
@@ -187,11 +186,11 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
   options: Readonly<{ useSavepoints?: boolean }> = {},
 ): Promise<MemoryGenerationAuthorityContext> {
   const baseTurnNumber = Number(authorityContext.baseIdentity.baseTurnNumber);
-  // Chronicle projections are retrieval pointers, never fact authority.  The
-  // bounded Task 6 verifier admits only IDs whose accepted/correction source
-  // snapshot (including the latest complete correction frontier) agrees.
+  // The authority capture already ran Task 6's bounded source verifier while
+  // holding the generation authority fence. Reuse those IDs rather than
+  // rereading a correction frontier that could have changed after capture.
   const verifiedOptionalFactIds: GenerationVerifiedFactSet | undefined = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)
-    ? (await loadVerifiedProtectedFacts(client, scope, baseTurnNumber)).facts.map((fact) => fact.id)
+    ? authorityContext.authority.protectedFacts?.map((fact) => fact.id) ?? []
     : undefined;
   const retrieval = await loadPostgresChronicleGenerationCandidates(client, {
     ownerUserId: scope.ownerUserId,

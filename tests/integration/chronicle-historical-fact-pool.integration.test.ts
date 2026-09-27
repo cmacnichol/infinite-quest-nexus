@@ -128,7 +128,7 @@ integration("Historical fact candidate lanes", () => {
     ];
     const rows = await pool.query<{ id: string; entity_ids: string[]; metadata: { historicalEntityMatch: boolean } }>(HISTORICAL_FACT_POOL_SQL,
       [ownerUserId, value.campaignId, value.worldVersionId, 3, 256, ["Blue Keeper Twin 守り手"], catalog.map((entity) => entity.id),
-        historicalFactAliasPatterns(catalog, catalog.map((entity) => entity.id)), null]);
+        historicalFactAliasPatterns(catalog, catalog.map((entity) => entity.id)), null, []]);
     const byId = new Map(rows.rows.map((row) => [row.id, row]));
     expect(byId.get(alias)?.metadata.historicalEntityMatch).toBe(true);
     expect(byId.get(unicode)?.metadata.historicalEntityMatch).toBe(true);
@@ -146,8 +146,8 @@ integration("Historical fact candidate lanes", () => {
     expect(first.candidates).toHaveLength(256);
     expect((await value.read("")).candidates).toEqual(first.candidates);
     expect((await value.read("obsidian covenant")).candidates.map((candidate) => candidate.id)).not.toContain(foreign);
-    const wrongOwner = await pool.query(HISTORICAL_FACT_POOL_SQL, [crypto.randomUUID(), value.campaignId, value.worldVersionId, 3, 256, ["lantern"], [], [], null]);
-    const wrongWorld = await pool.query(HISTORICAL_FACT_POOL_SQL, [ownerUserId, value.campaignId, other.worldVersionId, 3, 256, ["lantern"], [], [], null]);
+    const wrongOwner = await pool.query(HISTORICAL_FACT_POOL_SQL, [crypto.randomUUID(), value.campaignId, value.worldVersionId, 3, 256, ["lantern"], [], [], null, []]);
+    const wrongWorld = await pool.query(HISTORICAL_FACT_POOL_SQL, [ownerUserId, value.campaignId, other.worldVersionId, 3, 256, ["lantern"], [], [], null, []]);
     expect(wrongOwner.rows).toEqual([]);
     expect(wrongWorld.rows).toEqual([]);
   });

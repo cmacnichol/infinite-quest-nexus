@@ -566,10 +566,12 @@ async function loadContextMemories(
        SELECT id, turn_id, memory_kind, ordinal, content, token_estimate, importance, entities, entity_ids, metadata,
               created_at,
               CASE WHEN $4 = '' THEN 0::real
-                   ELSE ${rankExpression("search_document", 15)} END AS relevance
+                   ELSE ${rankExpression("search_document", 17)} END AS relevance
          FROM chronicle_memories
         WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
           AND ($6::integer IS NULL OR ordinal <= $6::integer)
+          AND (turn_id IS NULL OR NOT (turn_id::text = ANY($15::text[])))
+          AND NOT (memory_kind='canonical_fact' AND id::text = ANY($16::text[]))
           AND ($6::integer IS NULL OR memory_kind NOT IN ('legacy_summary','canonical_fact'))
           AND (memory_kind <> 'canonical_fact' OR CASE WHEN jsonb_typeof(metadata->'structuredFactIds')='array' THEN
               jsonb_array_length(metadata->'structuredFactIds')>0
@@ -611,7 +613,9 @@ async function loadContextMemories(
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, lookupQuery, scope.request.recentTurns,
       scope.request.throughTurnNumber ?? null, queryEntityIds, limits.canonicalCandidates,
       limits.canonicalCandidates / 2, limits.turnSequenceCoverage, limits.canonicalCandidates / 2,
-      limits.turnLexicalCandidates, limits.entityCandidates, limits.candidatePool, ...(boundedQueries ? [boundedQueries] : [])]
+      limits.turnLexicalCandidates, limits.entityCandidates, limits.candidatePool,
+      [...(scope.generationExclusions?.recentTurnIds ?? [])], [...(scope.generationExclusions?.protectedFactIds ?? [])],
+      ...(boundedQueries ? [boundedQueries] : [])]
   );
   if (scope.request.throughTurnNumber === undefined) return [...result.rows];
   if (scope.storyMemoryPolicy && boundedQueries) {
@@ -621,7 +625,8 @@ async function loadContextMemories(
       scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber,
       limits.historicalCanonicalFacts, boundedQueries, queryEntityIds,
       historicalFactAliasPatterns(entityCatalog, queryEntityIds),
-      temporal !== null && Number.isSafeInteger(temporal) && temporal <= scope.request.throughTurnNumber ? temporal : null
+      temporal !== null && Number.isSafeInteger(temporal) && temporal <= scope.request.throughTurnNumber ? temporal : null,
+      [...(scope.generationExclusions?.protectedFactIds ?? [])]
     ]);
     return [...result.rows, ...historical.rows].sort((left, right) => left.ordinal - right.ordinal
       || left.memory_kind.localeCompare(right.memory_kind) || compareDeterministically(left.id, right.id));
@@ -633,14 +638,15 @@ async function loadContextMemories(
             0.85::real AS importance, entities, entity_ids,
             jsonb_build_object('structuredFactIds', jsonb_build_array(id::text)) AS metadata,
             CASE WHEN $4 = '' THEN 0::real
-                 ELSE ${rankExpression("to_tsvector('english', content)", 7)} END AS relevance
+                 ELSE ${rankExpression("to_tsvector('english', content)", 8)} END AS relevance
        FROM campaign_canonical_facts
       WHERE owner_user_id = $1 AND campaign_id = $2 AND world_version_id = $3
         AND valid_from_turn <= $5 AND (valid_until_turn IS NULL OR valid_until_turn > $5)
+        AND NOT (id::text = ANY($7::text[]))
       ORDER BY source_turn_number DESC, source_fact_index
       LIMIT $6::integer`,
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, lookupQuery, scope.request.throughTurnNumber,
-      limits.historicalCanonicalFacts, ...(boundedQueries ? [boundedQueries] : [])]
+      limits.historicalCanonicalFacts, [...(scope.generationExclusions?.protectedFactIds ?? [])], ...(boundedQueries ? [boundedQueries] : [])]
   );
   return [...result.rows, ...historical.rows]
     .sort((left, right) => left.ordinal - right.ordinal
@@ -1361,7 +1367,10 @@ async function chunkIndexReady(
   return result.rows[0]?.chunk_index_ready === true;
 }
 
-function authorizedChunkCte(): string {
+function authorizedChunkCte(exclusions?: Readonly<{ turnParameter: number; factParameter: number }>): string {
+  const excludedSources = exclusions ? `
+          AND (parent.turn_id IS NULL OR NOT (parent.turn_id::text = ANY($${exclusions.turnParameter}::text[])))
+          AND NOT (parent.memory_kind='canonical_fact' AND parent.id::text = ANY($${exclusions.factParameter}::text[]))` : "";
   return `authorized AS MATERIALIZED (
        SELECT chunk.id AS candidate_id,chunk.parent_memory_id,
               parent.turn_id AS parent_turn_id,parent.memory_kind AS parent_memory_kind,
@@ -1384,6 +1393,7 @@ function authorizedChunkCte(): string {
           AND chunk.chunking_protocol_version=${CHUNK_PROTOCOL_LITERAL}
           AND ${TERMINAL_CHUNK_PREDICATE}
           AND ($4::integer IS NULL OR parent.ordinal <= $4::integer)
+          ${excludedSources}
           AND ($4::integer IS NULL OR parent.memory_kind NOT IN ('legacy_summary','canonical_fact'))
           AND (parent.memory_kind <> 'canonical_fact' OR CASE WHEN jsonb_typeof(parent.metadata->'structuredFactIds')='array'
              AND $4::integer IS NULL THEN
@@ -1477,6 +1487,9 @@ async function loadSemanticRankFamily(
   const dimensionsParameter = modelParameter + 1;
   const fingerprintParameter = dimensionsParameter + 1;
   const limitParameter = fingerprintParameter + 1;
+  const exclusions = scope.generationExclusions
+    ? { turnParameter: limitParameter + 1, factParameter: limitParameter + 2 }
+    : undefined;
   const identity = requests[0]!;
   const values: unknown[] = [
     scope.ownerUserId,
@@ -1488,11 +1501,12 @@ async function loadSemanticRankFamily(
     identity.model,
     identity.vector?.length ?? 0,
     identity.fingerprint,
-    candidateLimit
+    candidateLimit,
+    ...(exclusions ? [[...scope.generationExclusions!.recentTurnIds], [...scope.generationExclusions!.protectedFactIds]] : [])
   ];
   const result = await client.query<BatchedChunkCandidateRow>(
     `/* chronicle_rank_batch:semantic */
-     WITH ${authorizedChunkCte()},
+     WITH ${authorizedChunkCte(exclusions)},
      request_variants(request_ordinal,variant_kind,query_vector) AS (VALUES ${requestValuesSql})
      SELECT request.request_ordinal,candidate.signal_rank,${CHUNK_RANK_RESULT_COLUMNS}
        FROM request_variants request
@@ -1527,9 +1541,12 @@ async function loadFullTextRankFamily(
     return `(${index}::integer,$${variantParameter}::text,$${variantParameter + 1}::text)`;
   }).join(",");
   const limitParameter = 5 + requests.length * 2;
+  const exclusions = scope.generationExclusions
+    ? { turnParameter: limitParameter + 1, factParameter: limitParameter + 2 }
+    : undefined;
   const result = await client.query<BatchedChunkCandidateRow>(
     `/* chronicle_rank_batch:full_text */
-     WITH ${authorizedChunkCte()},
+     WITH ${authorizedChunkCte(exclusions)},
      request_variants(request_ordinal,variant_kind,query_text) AS (VALUES ${requestValuesSql})
      SELECT request.request_ordinal,candidate.signal_rank,${CHUNK_RANK_RESULT_COLUMNS}
        FROM request_variants request
@@ -1548,7 +1565,8 @@ async function loadFullTextRankFamily(
        ) candidate
       ORDER BY request.request_ordinal,candidate.signal_rank,candidate.parent_memory_id,candidate.candidate_id`,
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber ?? null,
-      ...requests.flatMap((request) => [request.variant.kind, request.query?.trim() ?? ""]), candidateLimit]
+      ...requests.flatMap((request) => [request.variant.kind, request.query?.trim() ?? ""]), candidateLimit,
+      ...(exclusions ? [[...scope.generationExclusions!.recentTurnIds], [...scope.generationExclusions!.protectedFactIds]] : [])]
   );
   storeChunkRankRows(requests, result.rows, results);
 }
@@ -1566,9 +1584,12 @@ async function loadEntityRankFamily(
     return `(${index}::integer,$${variantParameter}::text,$${variantParameter + 1}::text[])`;
   }).join(",");
   const limitParameter = 5 + requests.length * 2;
+  const exclusions = scope.generationExclusions
+    ? { turnParameter: limitParameter + 1, factParameter: limitParameter + 2 }
+    : undefined;
   const result = await client.query<BatchedChunkCandidateRow>(
     `/* chronicle_rank_batch:entity */
-     WITH ${authorizedChunkCte()},
+     WITH ${authorizedChunkCte(exclusions)},
      request_variants(request_ordinal,variant_kind,entity_ids) AS (VALUES ${requestValuesSql})
      SELECT request.request_ordinal,candidate.signal_rank,${CHUNK_RANK_RESULT_COLUMNS}
        FROM request_variants request
@@ -1588,7 +1609,8 @@ async function loadEntityRankFamily(
        ) candidate
       ORDER BY request.request_ordinal,candidate.signal_rank,candidate.parent_memory_id,candidate.candidate_id`,
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber ?? null,
-      ...requests.flatMap((request) => [request.variant.kind, [...(request.entityIds ?? [])]]), candidateLimit]
+      ...requests.flatMap((request) => [request.variant.kind, [...(request.entityIds ?? [])]]), candidateLimit,
+      ...(exclusions ? [[...scope.generationExclusions!.recentTurnIds], [...scope.generationExclusions!.protectedFactIds]] : [])]
   );
   storeChunkRankRows(requests, result.rows, results);
 }
@@ -1602,9 +1624,10 @@ async function loadStaticRankFamily(
 ): Promise<void> {
   if (!requests.length) return;
   const temporalAnchor = requests.find((request) => request.signal === "temporal")?.temporalAnchor ?? 0;
+  const exclusions = scope.generationExclusions ? { turnParameter: 7, factParameter: 8 } : undefined;
   const result = await client.query<BatchedChunkCandidateRow>(
     `/* chronicle_rank_batch:static */
-     WITH ${authorizedChunkCte()}, ranked AS (
+     WITH ${authorizedChunkCte(exclusions)}, ranked AS (
        SELECT 0::integer AS request_ordinal,candidate.* FROM LATERAL (
          SELECT authorized.*,row_number() OVER (
                   ORDER BY parent_ordinal DESC,parent_memory_id,candidate_id
@@ -1653,7 +1676,8 @@ async function loadStaticRankFamily(
        FROM ranked
       ORDER BY request_ordinal,signal_rank,parent_memory_id,candidate_id`,
     [scope.ownerUserId, scope.campaignId, scope.worldVersionId, scope.request.throughTurnNumber ?? null,
-      candidateLimit, temporalAnchor]
+      candidateLimit, temporalAnchor,
+      ...(exclusions ? [[...scope.generationExclusions!.recentTurnIds], [...scope.generationExclusions!.protectedFactIds]] : [])]
   );
   storeChunkRankRows(requests, result.rows, results);
 }
