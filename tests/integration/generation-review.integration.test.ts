@@ -71,6 +71,26 @@ integration("PostgreSQL generation review persistence", () => {
     expect(JSON.stringify(result.rows[0]!.projected)).not.toContain(privateCanary);
   });
 
+  it("does not project stale allowlisted failures from inactive continuity checkpoints", async () => {
+    const privateState = {
+      generationReview: {
+        version: 1, reviewId: crypto.randomUUID(), revision: 1, state: "pending", stage: "continuity", candidateScope: "final",
+        reasons: ["review_unavailable"], eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+        gateCandidate: { story: { narration: "Preserved candidate." } }
+      },
+      continuityReview: { version: 2, status: "not_started", unavailableReason: "output_limit", attempts: [] }
+    };
+    const result = await pool.query<{ projected: Record<string, unknown> }>(
+      `SELECT ${generationReviewSummaryProjection("orchestration_private")} AS projected
+         FROM (SELECT $1::jsonb AS orchestration_private) AS fixture`,
+      [JSON.stringify(privateState)]
+    );
+    expect(result.rows[0]!.projected).toMatchObject({
+      version: 1, state: "pending", reasons: ["review_unavailable"], candidatePresent: true
+    });
+    expect(result.rows[0]!.projected).not.toHaveProperty("technicalDiagnostic");
+  });
+
   function commands() {
     return createPostgresGenerationCommandRepository(pool, {
       resolvePromptSnapshot: (client, scopedOwner, campaignId) => loadPromptSnapshotForTest(client, scopedOwner, campaignId),

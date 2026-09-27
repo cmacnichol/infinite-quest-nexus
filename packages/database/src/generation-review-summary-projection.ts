@@ -65,7 +65,7 @@ export function continuityReviewTechnicalDiagnosticProjection(privateColumn: str
   const attemptCount = `GREATEST(CASE WHEN jsonb_typeof(${array}) = 'array' THEN jsonb_array_length(${array}) ELSE 0 END, 1)`;
   const failure = `COALESCE(${path("fallbackPreparationFailure,failure")}, CASE WHEN ${path("status")} = 'dispatched' AND ${path("attempts,-1,route")} = 'fallback' THEN ${privateColumn} #>> '{continuityReview,attempts,0,outcome,failure}' END, ${privateColumn} #>> '{continuityReview,attempts,-1,outcome,failure}', ${path("outcome,failure")}, ${path("unavailableReason")})`;
   const category = `CASE WHEN ${failure} IN ('output_limit','invalid_output','provider_timeout','provider_failed','context_budget_exceeded','evidence_unavailable') THEN ${failure} ELSE NULL END`;
-  return `CASE WHEN ${path("version")} = '2' AND ${category} IS NOT NULL THEN jsonb_build_object(
+  return `CASE WHEN ${path("version")} = '2' AND ${path("status")} IN ('dispatched', 'completed') AND ${category} IS NOT NULL THEN jsonb_build_object(
     'version', 1,
     'category', ${category},
     'phase', CASE WHEN ${path("fallbackPreparationFailure,failure")} IS NOT NULL THEN 'continuity_review_fallback_preparation'
