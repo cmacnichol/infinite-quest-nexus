@@ -100,8 +100,9 @@ import {
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { withTransaction } from "./pool.js";
-import { textExecutionPlanSchema, textExecutionRouteBasisSchema, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
+import { deriveTextExecutionPlan, textExecutionPlanSchema, textExecutionRouteBasisSchema, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../contracts/src/text-execution-plan.js";
 import { continuityReviewExecutionSnapshotSchema, type ContinuityReviewExecutionSnapshot } from "../../contracts/src/continuity-review-execution.js";
+import { stableJsonHash } from "../../contracts/src/provider-output-schema.js";
 
 async function enqueueChunkIndexBestEffort(
   client: DatabaseClient,
@@ -171,7 +172,63 @@ function responseContractInvocations(value: unknown): readonly ResponseContractI
   });
 }
 
-function responseContractState(jobId: string, value: GenerationOrchestrationState): void {
+async function completedReviewerPhysicalAttempt(
+  client: DatabaseClient,
+  scope: Readonly<{ jobId: string; ownerUserId: string }>,
+  value: GenerationOrchestrationState
+): Promise<boolean> {
+  const review = continuityReviewCheckpointSchema.safeParse(value.continuityReview);
+  const reviewer = continuityReviewExecutionSnapshotSchema.safeParse(value.continuityReviewExecution);
+  if (!review.success || !reviewer.success || !reviewer.data.enabled || !reviewer.data.primary
+    || review.data.status !== "completed" || !review.data.reviewRequestHash
+    || review.data.binding.reviewerExecutionSnapshotHash !== reviewer.data.snapshotHash) return false;
+  const route = reviewer.data.primary;
+  const contract = route.responseContracts.contracts["continuity_review:nonstream"];
+  if (!contract || contract.operation !== "continuity_review" || contract.streaming) return false;
+  const result = await client.query<{
+    planHash: string; requestedModel: string; requestedPresetSlug: string | null; requestedPresetVersionId: string | null;
+    requestedPresetConfigHash: string | null; requestPayloadHash: string; requestBody: string; status: string;
+    outcome: string | null; emittedOutput: boolean;
+  }>(`SELECT plan_hash AS "planHash",requested_model AS "requestedModel",
+              requested_preset_slug AS "requestedPresetSlug",requested_preset_version_id AS "requestedPresetVersionId",
+              requested_preset_config_hash AS "requestedPresetConfigHash",request_payload_hash AS "requestPayloadHash",
+              request_body AS "requestBody",status,outcome,emitted_output AS "emittedOutput"
+       FROM prepared_text_physical_attempts
+      WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+        AND logical_reservation->>'invocationId'=$3`, [
+    scope.ownerUserId, scope.jobId, `continuity-review:primary:${review.data.bindingHash}`
+  ]);
+  const attempt = result.rows[0];
+  if (!attempt || result.rows.length !== 1 || attempt.status !== "completed" || attempt.outcome !== "succeeded"
+    || !attempt.emittedOutput || attempt.requestPayloadHash !== review.data.reviewRequestHash
+    || attempt.requestPayloadHash !== sha256Hex(attempt.requestBody)
+    || attempt.requestedModel !== route.routeBasis.candidates[0]?.modelId) return false;
+  const preset = route.routeBasis.preset;
+  if (preset
+    ? attempt.requestedPresetSlug !== preset.slug || attempt.requestedPresetVersionId !== preset.versionId || attempt.requestedPresetConfigHash !== preset.configHash
+    : attempt.requestedPresetSlug !== null || attempt.requestedPresetVersionId !== null || attempt.requestedPresetConfigHash !== null) return false;
+  try {
+    const wire = JSON.parse(attempt.requestBody) as { messages?: Array<{ role?: unknown; content?: unknown }>; response_format?: { type?: unknown; json_schema?: { name?: unknown; strict?: unknown; schema?: unknown } } };
+    const systemPrompt = wire.messages?.find((message) => message?.role === "system")?.content;
+    if (typeof systemPrompt !== "string") return false;
+    const prefix = route.routeBasis.presetSystemPrompt ? `${route.routeBasis.presetSystemPrompt}\n\n` : "";
+    const operationPrompt = prefix && systemPrompt.startsWith(prefix) ? systemPrompt.slice(prefix.length) : systemPrompt;
+    if (attempt.planHash !== deriveTextExecutionPlan(route.routeBasis, operationPrompt).planHash) return false;
+    if (contract.mode === "json_schema") {
+      const format = wire.response_format;
+      if (format?.type !== "json_schema" || format.json_schema?.name !== contract.schemaName || format.json_schema?.strict !== true
+        || stableJsonHash(format.json_schema?.schema) !== contract.schemaHash) return false;
+    } else if (wire.response_format?.type !== "json_object") return false;
+  } catch { return false; }
+  return true;
+}
+
+async function responseContractState(
+  client: DatabaseClient,
+  scope: Readonly<{ jobId: string; ownerUserId: string }>,
+  value: GenerationOrchestrationState
+): Promise<void> {
+  const { jobId } = scope;
   try {
   if (value.textExecutionRouteBasis !== undefined && !readTextExecutionRouteBasis(value.textExecutionRouteBasis)) {
     throw new Error(`Generation ${jobId} has an invalid frozen text execution route basis.`);
@@ -239,7 +296,14 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
         throw new Error("Scene coverage replay checkpoint does not match its completed v2 invocation.");
       }
     }
-    if (value.continuityReview?.reviewRequestHash && value.continuityReview.status === "completed" && !completedFor(value.continuityReview.reviewRequestHash, ["story_continuity_review"])) throw new Error("Continuity review checkpoint has no completed v2 invocation.");
+    if (value.continuityReview?.reviewRequestHash && value.continuityReview.status === "completed") {
+      const reviewerBound = value.continuityReview.binding.reviewerExecutionSnapshotHash !== undefined;
+      if (reviewerBound
+        ? !await completedReviewerPhysicalAttempt(client, scope, value)
+        : !completedFor(value.continuityReview.reviewRequestHash, ["story_continuity_review"])) {
+        throw new Error("Continuity review checkpoint has no completed replay evidence.");
+      }
+    }
     return;
   }
   const frozenV1 = frozen?.version === 1 ? frozen : undefined;
@@ -306,9 +370,13 @@ function responseContractState(jobId: string, value: GenerationOrchestrationStat
       throw new Error("Scene rewrite checkpoint does not match its response-contract invocation.");
     }
     const review = value.continuityReview;
-    if (review?.reviewRequestHash && review.status === "completed"
-      && !completedFor(review.reviewRequestHash, ["story_continuity_review"])) {
-      throw new Error("Continuity review checkpoint does not match its response-contract invocation.");
+    if (review?.reviewRequestHash && review.status === "completed") {
+      const reviewerBound = review.binding.reviewerExecutionSnapshotHash !== undefined;
+      if (reviewerBound
+        ? !await completedReviewerPhysicalAttempt(client, scope, value)
+        : !completedFor(review.reviewRequestHash, ["story_continuity_review"])) {
+        throw new Error("Continuity review checkpoint does not match its response-contract invocation.");
+      }
     }
   }
   } catch {
@@ -384,7 +452,7 @@ async function updateResponseContractInvocation(
       [scope.jobId, scope.ownerUserId, scope.workerId]
     );
     const row = result.rows[0]; if (!row) return null;
-    responseContractState(scope.jobId, row.orchestrationPrivate);
+    await responseContractState(client, scope, row.orchestrationPrivate);
     const ledger = [...(responseContractInvocations(row.orchestrationPrivate.responseContractInvocations) ?? [])];
     const index = ledger.findIndex((item) => item.id === invocationId);
     if (index < 0) return null;
@@ -1328,7 +1396,7 @@ async function commitAcceptedTurn(
   }
   const storedJob = lease.rows[0]!;
   try {
-    responseContractState(storedJob.id, storedJob.orchestration_private);
+    await responseContractState(client, scope, storedJob.orchestration_private);
   } catch {
     throw Object.assign(new Error("The persisted response-contract replay evidence is invalid."), {
       code: "generation_checkpoint_incompatible"
@@ -1847,7 +1915,7 @@ export function createPostgresGenerationExecutionRepository(
       const row = result.rows[0];
       if (!row) return null;
       let responseContractValid = true;
-      try { responseContractState(row.id, row.orchestration_private); } catch { responseContractValid = false; }
+      try { await responseContractState(client, request.claim, row.orchestration_private); } catch { responseContractValid = false; }
       const storedReview = row.orchestration_private?.generationReview === undefined
         ? undefined : generationReviewCheckpointSchema.safeParse(row.orchestration_private.generationReview);
       if (!responseContractValid || (row.orchestration_private?.continuityReview !== undefined && !continuityReviewCheckpointSchema.safeParse(row.orchestration_private.continuityReview).success)
@@ -2019,7 +2087,7 @@ export function createPostgresGenerationExecutionRepository(
           ...(priorFailures === undefined ? (suppliedFailures === undefined ? {} : { preparedResponseFailures: suppliedFailures })
             : appendOnly ? { preparedResponseFailures: suppliedFailures } : { preparedResponseFailures: priorFailures })
         };
-        responseContractState(scope.jobId, merged);
+        await responseContractState(client, scope, merged);
         return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =
               CASE WHEN $4::jsonb ? 'generationReview' THEN ($4::jsonb - 'queuedResponsePolicy' - 'frozenResponseContracts' - 'responseContractInvocations' - 'textExecutionPlan' - 'textExecutionRouteBasis' - 'continuityReviewExecution')
@@ -2092,7 +2160,7 @@ export function createPostgresGenerationExecutionRepository(
           [scope.jobId, scope.ownerUserId, scope.workerId]
         );
         const row = result.rows[0]; if (!row) return null;
-        responseContractState(scope.jobId, row.orchestrationPrivate);
+        await responseContractState(client, scope, row.orchestrationPrivate);
         const frozen = readFrozenResponseContractsVersioned(row.orchestrationPrivate.frozenResponseContracts);
         const logicalAttempt = row.orchestrationPrivate.logicalAttempt;
         if (!logicalAttempt || !hasValidLogicalAttempt(logicalAttempt) || input.logicalAttemptId !== logicalAttempt.id

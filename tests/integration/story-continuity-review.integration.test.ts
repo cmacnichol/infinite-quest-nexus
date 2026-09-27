@@ -135,6 +135,16 @@ integration("T17 durable continuity review", () => {
     return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "PRIVATE_REVIEW_CANARY: fixture reviewer reports a grounded conflict." }] : [] });
   }
 
+  function preparedContinuityReviewResponse(input: string): string {
+    const reviewInput = JSON.parse(input) as { draft: { narration: string }; evidence: Array<{ id: string; content: string }> };
+    const basis = reviewInput.evidence.find((entry) => entry.content.length > 0);
+    if (!basis) throw new Error("Prepared review fixture requires selected evidence.");
+    const verdict = reviewSequence.shift() ?? reviewVerdict;
+    const start = extensionConflict ? reviewInput.draft.narration.indexOf("The bell rings") : 0;
+    const quote = reviewInput.draft.narration.slice(start, start + 4);
+    return JSON.stringify({ version: "story-continuity-review-v1", verdict, findings: verdict === "conflict" ? [{ kind: "contradiction", category: "location", severity: "contradiction", basis: { kind: "source", evidenceId: basis.id, quote: basis.content.slice(0, 20) }, output: { path: "/narration", start, end: start + quote.length, quote }, explanation: "PRIVATE_REVIEW_CANARY: prepared fixture reviewer reports a grounded conflict." }] : [] });
+  }
+
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 6);
     await migrateDatabase(pool, resolve(repositoryRoot, "database/migrations"));
@@ -1729,8 +1739,8 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
-    const deadline = outcome !== "complete";
+  it.each(["complete", "deadline", "unbound", "tampered", "failed"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+    const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
     const nativeProvider = await createProvider(pool, {
@@ -1790,9 +1800,29 @@ integration("T17 durable continuity review", () => {
           responseId: "interrupted-native", returnedModel: plan.candidates[0]!.modelId
         });
       }
+      const content = operation === "story_continuity_review"
+        ? preparedContinuityReviewResponse(request.input)
+        : reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] }));
+      const responseId = randomUUID();
+      if (operation === "story_continuity_review") {
+        if (!preparedRequest || !logicalReservation) throw new Error("Prepared reviewer fixture requires durable request evidence.");
+        const actualPlan = plan as typeof plan & { planHash: string; preset: { slug: string; versionId: string; configHash: string } | null; candidates: Array<{ modelId: string; providerPolicy: Record<string, unknown>; contextWindowTokens: number; maxOutputTokens: number }> };
+        const actualReservation = logicalReservation as { kind: "story"; ownerUserId: string; generationJobId: string; invocationId: string; workerId: string };
+        await pool.query(`INSERT INTO prepared_text_physical_attempts (
+          owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,
+          requested_preset_slug,requested_preset_version_id,requested_preset_config_hash,candidate_ordinal,
+          requested_model,provider_policy,request_payload_hash,request_body,status,outcome,
+          provider_response_id,returned_model,emitted_output,dispatched_at,completed_at
+        ) VALUES ($1,'story',$2,$3::jsonb,$4,$5,$6,$7,0,$8,$9::jsonb,$10,$11,'completed','succeeded',$12,$8,true,clock_timestamp(),clock_timestamp())`, [
+          actualReservation.ownerUserId, `${actualReservation.generationJobId}:${actualReservation.invocationId}`,
+          JSON.stringify(actualReservation), actualPlan.planHash, actualPlan.preset?.slug ?? null,
+          actualPlan.preset?.versionId ?? null, actualPlan.preset?.configHash ?? null, actualPlan.candidates[0]!.modelId,
+          JSON.stringify(actualPlan.candidates[0]!.providerPolicy), preparedRequest.payloadHash, preparedRequest.body, responseId
+        ]);
+      }
       return {
-      content: reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] })),
-      responseId: randomUUID(), finishReason: "stop", outputLimited: false, modelInstanceId: plan.candidates[0]!.modelId,
+      content,
+      responseId, finishReason: "stop", outputLimited: false, modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
       ...(preparedRequest ? { preparedRequest } : {})
     }; });
@@ -1833,7 +1863,9 @@ integration("T17 durable continuity review", () => {
       expect(input.plan.prompt).not.toContain("Native frozen preset instruction.");
       expect(input.plan.candidates[0]!.modelId).toBe(input.operation === "story_continuity_review" ? "@preset/reviewer" : "@preset/keep");
       expect(input.preparedRequest?.body).toBeDefined();
-      expect(JSON.parse(input.preparedRequest!.body).model).toBe("@preset/keep");
+      expect(JSON.parse(input.preparedRequest!.body).model).toBe(
+        input.operation === "story_continuity_review" ? "@preset/reviewer" : "@preset/keep"
+      );
     }
     const reviewerDispatch = preparedTextExecutor.mock.calls[1]![0] as {
       invocationKey?: string; routeBasis?: unknown; frozenResponseContracts?: unknown; logicalReservation?: unknown;
@@ -1856,19 +1888,44 @@ integration("T17 durable continuity review", () => {
     expect(preparedBodies.map((body) => JSON.parse(body).max_tokens)).toEqual([48_000, 48_000]);
     expect(preparedBodies[0]).toBe(durableNativeRequests.primaryReservation.requestBody);
     expect(durableNativeRequests.primaryResult.contextDiagnostics.requestTokens).toBe(estimateStoryTokens(preparedBodies[0]!));
-    expect(preparedBodies.map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
+    expect(preparedBodies.slice(0, 1).map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
     expect(verifyTextExecutionRouteAuthority).toHaveBeenCalled();
     const reviewCheckpoint = (await pool.query<{
-      review: { binding: { reviewerExecutionSnapshotHash?: string; producingRequestHash: string } };
+      review: { bindingHash: string; binding: { reviewerExecutionSnapshotHash?: string; producingRequestHash: string } };
       reviewer: { snapshotHash: string };
     }>("SELECT orchestration_private->'continuityReview' AS review, orchestration_private->'continuityReviewExecution' AS reviewer FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
     expect(reviewCheckpoint.review.binding.reviewerExecutionSnapshotHash).toBe(reviewCheckpoint.reviewer.snapshotHash);
     expect(reviewCheckpoint.review.binding.producingRequestHash).toBe(sha256Hex(preparedBodies[0]!));
+    await expect(pool.query<{
+      status: string; outcome: string | null; emittedOutput: boolean; requestPayloadHash: string;
+      requestedModel: string; invocationId: string;
+    }>(`SELECT status,outcome,emitted_output AS "emittedOutput",request_payload_hash AS "requestPayloadHash",
+                 requested_model AS "requestedModel",logical_reservation->>'invocationId' AS "invocationId"
+          FROM prepared_text_physical_attempts
+         WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+           AND logical_reservation->>'invocationId'=$3`, [
+      ownerUserId, job.id, `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`
+    ])).resolves.toMatchObject({ rows: [{
+      status: "completed", outcome: "succeeded", emittedOutput: true,
+      requestPayloadHash: reviewerDispatch.preparedRequest!.payloadHash,
+      requestedModel: "@preset/reviewer",
+      invocationId: `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`
+    }] });
     const candidate = (await pool.query<{ candidate: { storyHash: string; story: { narration: string } } }>(
       "SELECT orchestration_private->'generationReview'->'gateCandidate' AS candidate FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.candidate;
     expect(sha256Hex(canonicalEvidenceJson(candidate.story))).toBe(candidate.storyHash);
 
+    if (outcome === "tampered") {
+      await pool.query(`UPDATE prepared_text_physical_attempts SET emitted_output=false
+        WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+          AND logical_reservation->>'invocationId'=$3`, [ownerUserId, job.id, `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`]);
+    }
+    if (outcome === "failed") {
+      await pool.query(`UPDATE prepared_text_physical_attempts SET outcome='failed',failure_reason='unknown'
+        WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+          AND logical_reservation->>'invocationId'=$3`, [ownerUserId, job.id, `continuity-review:primary:${reviewCheckpoint.review.bindingHash}`]);
+    }
     await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
     const offlinePreparedExecutor = vi.fn(async () => { throw new Error("Keep must not execute a prepared native route"); });
     const offlineAuthority = vi.fn(async () => { throw new Error("Keep must not read native route authority"); });
@@ -1881,10 +1938,16 @@ integration("T17 durable continuity review", () => {
     const keepWorker = `native-keep-final-${randomUUID()}`;
     const keepClaim = await repository.claimNext({ workerId: keepWorker, leaseSeconds: 30 });
     expect(keepClaim?.jobId).toBe(job.id);
-    await expect(createGenerationExecutor({ pool, repository, collaborators: offlineCollaborators }).execute({ claim: keepClaim!, workerId: keepWorker, leaseSeconds: 30 })).resolves.toBe(true);
+    await expect(createGenerationExecutor({ pool, repository, collaborators: offlineCollaborators }).execute({ claim: keepClaim!, workerId: keepWorker, leaseSeconds: 30 })).resolves.toBe(!(outcome === "tampered" || outcome === "failed"));
     expect(offlinePreparedExecutor).not.toHaveBeenCalled();
     expect(offlineAuthority).not.toHaveBeenCalled();
     expect(offlineLoadTextExecution).not.toHaveBeenCalled();
+    if (outcome === "tampered" || outcome === "failed") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_checkpoint_incompatible"
+      });
+      return;
+    }
     await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ status: "completed" });
     await expect(pool.query<{ narration: string; candidateHash: string }>(
       "SELECT narration,model_metadata->'reviewAcceptance'->>'candidateHash' AS \"candidateHash\" FROM turns WHERE campaign_id=$1 AND turn_number=$2",
