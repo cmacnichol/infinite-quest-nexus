@@ -123,6 +123,7 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 - [ ] Run tests; introduce a v5 authority-reservation phase before retrieval using final serializers/reviewer estimator/quotas. Reserve cast/history/recents without Chronicle candidates, pass actual IDs, retain reservation through final planning. Tasks 5–7 extend it.
 - [ ] Final planning must retain reserved sources or recompute exclusions/selection; never silently drop a source whose alternative was excluded. If exact pre-reservation cannot be shared, retain narration candidates until final selection rather than approximate captured-ID exclusion.
 - [ ] Dedupe narration by turn, facts by verified ID. Apply exclusions before upstream rank-family limits where feasible; test replenishment, not only absence.
+- [ ] Verify optional Chronicle fact candidates against accepted/correction sources and the captured complete-correction frontier before granting prompt or supersession authority. Active projection intervals alone are insufficient: test a stale active fact removed by an earlier empty correction, mismatched source content/index, and valid omitted facts/siblings that remain retrievable. Share the bounded source verifier; never repair projections during reads or infer IDs from rendered text.
 - [ ] GREEN: focused units/PostgreSQL and old goldens; commit.
 
 ## Task 4: F1 — Token-aware selection with observable guards
@@ -131,12 +132,12 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 **Interfaces:** `maximumParentTokens?: number`; `chronicleParentTokens(content: string): number`; `generationChronicleRetrievalLimits(budget, options?: { historyCoverage?: boolean })`. Diagnostics: limits, selected estimates, unique skips, `stopReason: "parent_limit" | "token_limit" | "diversity_limit" | "candidate_pool_limit" | "exhausted"`.
 
-- [ ] RED: skip oversized parent, fit later small one; exact boundary, zero/invalid budget and empty pool terminate. Old diagnostics unchanged; exact cap with no remaining candidates reports exhausted.
-- [ ] RED: fact-dense fixture supplies more distinct accepted turns/facts than v4. If new count guard still binds, report it rather than claiming tokens alone bind.
-- [ ] RED: complete narration exceeds allowance but certified excerpt fits final request; retain an excerpt-capable candidate path. Facts stay whole. Separate upstream estimates from actually sent tokens: estimate the usable expanded certified projection, while allowing final planning to choose the complete parent when it fits. Preserve valid narration sibling spans when a parent is ranked by its action chunk.
-- [ ] Implement 1.5× allowance/4× parent guard only for v5, deterministic diversity/per-turn limits, unique skip counts and diversity stop reason.
-- [ ] Do not blindly multiply all SQL pools. Measure bounded expansion at 32k/128k/1m/4m; add replenishment only if existing pools starve selection, with fixed observable ceiling recorded before v5 enablement.
-- [ ] GREEN: units/retrieval suites and synthetic 300-/2,000-turn comparisons. Record SQL rows/count, runtime, peak pool, selected sources and final tokens; keep public-preview limits unchanged. Commit with limitations.
+- [x] RED: skip oversized parent, fit later small one; exact boundary, zero/invalid budget and empty pool terminate. Old diagnostics unchanged; exact cap with no remaining candidates reports exhausted.
+- [x] RED: fact-dense fixture supplies more distinct accepted turns/facts than v4. If new count guard still binds, report it rather than claiming tokens alone bind.
+- [x] RED: complete narration exceeds allowance but certified excerpt fits final request; retain an excerpt-capable candidate path. Facts stay whole. Separate upstream estimates from actually sent tokens: estimate the usable expanded certified projection, while allowing final planning to choose the complete parent when it fits. Preserve valid narration sibling spans when a parent is ranked by its action chunk.
+- [x] Implement 1.5× allowance/4× parent guard only for v5, deterministic diversity/per-turn limits, unique skip counts and diversity stop reason.
+- [x] Do not blindly multiply all SQL pools. Measure bounded expansion at 32k/128k/1m/4m; add replenishment only if existing pools starve selection, with fixed observable ceiling recorded before v5 enablement.
+- [x] GREEN: units/retrieval suites and synthetic 300-/2,000-turn comparisons. Record SQL rows/count, runtime, peak pool, selected sources and final tokens; keep public-preview limits unchanged. Commit with limitations.
 
 ## Task 5: F3 partial — Intent ledger and measured reservation
 
@@ -144,30 +145,33 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 **Interfaces:** `StoryLedgerSourceTurn = Readonly<{ turnId: string; turnNumber: number; inputMode: "action" | "scene"; action: string }>`; `StoryLedgerEntry` replaces `action` with `direction`. `StoryLedger = Readonly<{ version: "story-ledger-v1"; entries: readonly StoryLedgerEntry[]; omittedThroughTurn: number | null }>`; `ledgerDirectionExcerpt(text: string, maximumCharacters: number): string`; `selectStoryLedger(turns: readonly StoryLedgerSourceTurn[], options: { budgetTokens: number; directionCharacters: number }): StoryLedger`. Authority gains optional `storyLedger`; evidence group `ledger` retains semantic role `player_intent`.
 
-- [ ] RED: chronology, shuffled input, empty/no-budget, huge/whitespace/mechanics-only input, Unicode and “Continue”. Ellipsis counts inside 480 characters. Derive boundary budgets from exact serialization, not approximate comments or changing tests to match implementation.
-- [ ] RED: requested action fails in narration; ledger remains intent, cannot establish an event/fact ID, and reviewer evidence preserves the distinction.
-- [ ] RED: large override/current scene/world authority or smaller reviewer leaves little room. History never makes otherwise feasible mandatory authority overflow. Mandatory authority alone too large retains safe recovery before provider I/O.
-- [ ] Run tests; load scoped `< baseTurnNumber` rows with bounded newest-first keyset paging in the authority transaction. Normalize before excerpting; do not load every full action. Order by turn number and ID; report older omissions and interior gaps honestly.
-- [ ] Support >20,000-turn campaigns without parsing every turn through an array cap; cap selected records, page input and retain omission metadata. Test owner/campaign/world canaries, base 0/1, replacement cutoff and imported gaps.
-- [ ] Shared reservation: measure complete mandatory authority and cast first. H is the nonnegative minimum of remaining context, writer and enabled-reviewer headroom including safety allowances. Fact/ledger ceilings are 15%/25% of the same H. Apply existing recent/world shares to remaining capacity after those reservations; unused shares remain available to optional history.
-- [ ] Reserve newest whole ledger entries with exact serialized trial costs including wrappers/reviewer manifest. Stop at first non-fitting entry, preserve suffix/omission boundary. Remove reserved recent duplicates without claiming missing history is necessarily in the summary; do not grow reservation after retrieval.
-- [ ] Add v5-only instruction: “storyLedger records earlier player intent, not proof of events. Accepted narration and current canonical state establish outcomes. Unlisted history is unknown; do not invent it.” Preserve old prompt bytes.
-- [ ] Manifest pointers describe final sent intent projections, not full original input. Test pointer/hash, strict roundtrip, reviewer serialization and old-protocol absence.
-- [ ] GREEN: pure/schema/planner and new PostgreSQL suite, including long-history row/lock bounds; commit. F3 remains partial.
+- [x] RED: chronology, shuffled input, empty/no-budget, huge/whitespace/mechanics-only input, Unicode and “Continue”. Ellipsis counts inside 480 characters. Derive boundary budgets from exact serialization, not approximate comments or changing tests to match implementation.
+- [x] RED: requested action fails in narration; ledger remains intent, cannot establish an event/fact ID, and reviewer evidence preserves the distinction.
+- [x] RED: large override/current scene/world authority or smaller reviewer leaves little room. History never makes otherwise feasible mandatory authority overflow. Mandatory authority alone too large retains safe recovery before provider I/O.
+- [x] Run tests; load scoped `< baseTurnNumber` rows with bounded newest-first keyset paging in the authority transaction. Normalize before excerpting; do not load every full action. Order by turn number and ID; report older omissions and interior gaps honestly.
+- [x] Support >20,000-turn campaigns without parsing every turn through an array cap; cap selected records, page input and retain omission metadata. Test owner/campaign/world canaries, base 0/1, replacement cutoff and imported gaps.
+- [x] Shared reservation: measure complete mandatory authority and cast first. H is the nonnegative minimum of remaining context, writer and enabled-reviewer headroom including safety allowances. Fact/ledger ceilings are 15%/25% of the same H. Apply existing recent/world shares to remaining capacity after those reservations; unused shares remain available to optional history.
+- [x] Reserve newest whole ledger entries with exact serialized trial costs including wrappers/reviewer manifest. Stop at first non-fitting entry, preserve suffix/omission boundary. Remove reserved recent duplicates without claiming missing history is necessarily in the summary; do not grow reservation after retrieval.
+- [x] Add v5-only instruction: “storyLedger records earlier player intent, not proof of events. Accepted narration and current canonical state establish outcomes. Unlisted history is unknown; do not invent it.” Preserve old prompt bytes.
+- [x] Manifest pointers describe final sent intent projections, not full original input. Test pointer/hash, strict roundtrip, reviewer serialization and old-protocol absence.
+- [x] GREEN: pure/schema/planner and new PostgreSQL suite, including long-history row/lock bounds; commit. F3 remains partial.
 
+Implementation note (Task 5): the bounded ledger module and exact suffix reservation helper live under `packages/application/src/memory/`. Capture reads at most four 128-row keyset pages; each raw direction is limited to 12,000 characters / 48,000 UTF-8 bytes before normalization. Optional strict `storyLedger.coverage` distinguishes the unread prefix, interior missing turns, filtered directions, oversized directions, and loaded rows. The final writer/reviewer measurement selects whole entries; the 512-row source guard remains a coverage limit, not proof of complete history. Independent review approved commit `f37b89d3`.
 ## Task 6: F5 — Complete verified active facts
 
 **Files/tests:** new facts module, source verifier, authority/types/schemas, planner/executor; new `tests/unit/story-history-facts.test.ts`; `tests/unit/campaign-continuity-repository.test.ts`, planner/executor units; new history-coverage integration, historical-fact integration and `tests/integration/story-continuity-review.integration.test.ts`.
 
 **Interfaces:** `ProtectedFact = Readonly<{ id: string; turnNumber: number; content: string }>`; `selectProtectedFacts(facts: readonly ProtectedFact[], budgetTokens: number): Readonly<{ facts: readonly ProtectedFact[]; omittedCount: number }>`; optional authority `protectedFacts`, `protectedFactsOmitted`.
 
-- [ ] RED: facts active at base only (`valid_from_turn <= base`, `valid_until_turn IS NULL OR > base`); exclude foreign/future/superseded/duplicate/invalid-source facts. Order ties by source turn, source fact index, then ID.
-- [ ] RED: intentional empty/full correction removes obsolete facts; retained/correction IDs remain verified against scoped content. Imported/missing rows cannot gain invented IDs. Test index lag/rebuild without repairing authority on read.
-- [ ] RED: oversized fact does not block later smaller facts. Select newest-first, skip non-fitting whole records, return chronology and exact omitted count; a fact subset need not be contiguous history.
-- [ ] Run tests; implement bounded scoped paging with existing fact-source verification. Never truncate content while retaining UUID. If sanitization cannot preserve verified complete fiction-safe content, omit it and withhold supersession authority.
-- [ ] Reserve facts within measured 15% ceiling and exact writer/reviewer costs; exclude only selected IDs. Omitted verified facts remain retrievable; unseen siblings of aggregate parents are not discarded.
-- [ ] Extend `sentCanonicalFactIds`/manifest from actually sent complete facts only. Test included fact can be superseded while omitted/foreign/truncated fact cannot, including enforce review/repair.
-- [ ] GREEN: focused units, history-coverage/historical-fact/continuity-review PostgreSQL and old goldens; commit.
+- [x] RED: facts active at base only (`valid_from_turn <= base`, `valid_until_turn IS NULL OR > base`); exclude foreign/future/superseded/duplicate/invalid-source facts. Order ties by source turn, source fact index, then ID.
+- [x] RED: intentional empty/full correction removes obsolete facts; retained/correction IDs remain verified against scoped content. Imported/missing rows cannot gain invented IDs. Test index lag/rebuild without repairing authority on read.
+- [x] RED: oversized fact does not block later smaller facts. Select newest-first, skip non-fitting whole records, return chronology and exact omitted count; a fact subset need not be contiguous history.
+- [x] Run tests; implement bounded scoped paging with existing fact-source verification. Never truncate content while retaining UUID. If sanitization cannot preserve verified complete fiction-safe content, omit it and withhold supersession authority.
+- [x] Reserve facts within measured 15% ceiling and exact writer/reviewer costs; exclude only selected IDs. Omitted verified facts remain retrievable; unseen siblings of aggregate parents are not discarded.
+- [x] Extend `sentCanonicalFactIds`/manifest from actually sent complete facts only. Test included fact can be superseded while omitted/foreign/truncated fact cannot, including enforce review/repair.
+- [x] GREEN: focused units, history-coverage/historical-fact/continuity-review PostgreSQL and old goldens; commit.
+
+Implementation note: source verification is bounded to 512 candidates and 1,000,000 canonical-source JSON bytes. Exact protected-fact reservation allows 64 measurements, with an all-fit fast path and explicit unexamined omissions. The partial-fit benchmark selected 185 facts in about 4 seconds; combined-layer/lease measurements remain a Task 12 gate. Retained correction IDs preserve original provenance and index. Task 3 must still integrate optional-source verification and selected-only exclusions before enablement.
 
 ## Task 7: F6 — Recent-window identity throughout lifecycle
 
