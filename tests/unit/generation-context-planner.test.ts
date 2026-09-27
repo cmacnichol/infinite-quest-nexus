@@ -41,6 +41,74 @@ function run(context: any, limit = 32_000) {
   return planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [], { profile: "brief", minWords: 100, maxWords: 120 }, "scene", limit, limit - 100, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
 }
 describe("layered generation context planner", () => {
+  it("serializes v5 layers in stable wire order through the provider body", () => {
+    const context: any = recentContext();
+    context.baseIdentity.baseTurnNumber = 4;
+    context.authority.latestTurn = { action: "Prior action", narration: "Current scene marker", inputMode: "scene" };
+    context.authority.characterAuthority = { name: "Mira", profile: { identity: { aliases: [] } } };
+    context.authority.storyLedger = { entries: [
+      { turnId: "ledger-1", turnNumber: 1, inputMode: "action", direction: "Older intent marker" },
+      { turnId: "ledger-2", turnNumber: 2, inputMode: "action", direction: "Newer intent marker" }
+    ], omittedThroughTurn: null };
+    const castId = "33333333-3333-4333-8333-333333333333";
+    const castSnapshot = { version: "cast-context-v1", scope: { ownerUserId: castId, campaignId: castId }, worldVersionId: castId,
+      revision: 1, boundary: { turnNumber: 4, timelineRevision: 0 }, coverageStartTurn: null, trackedThroughTurn: null, discoveryStatus: "pending",
+      characters: [{ id: castId, name: "Mara", aliases: ["The Watcher"], origin: { kind: "manual" }, profile: {},
+        pinned: true, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 }],
+      details: [{ characterId: castId, observations: [], overrides: [{ field: "appearance.description", value: "green eyes",
+        evidence: { kind: "user", editId: castId, effectiveTurnNumber: 0 } }] }] };
+    context.authority.castSnapshot = castSnapshot;
+    Object.assign(context.baseIdentity, { version: "generation-base-v4", castRevision: 1, castTimelineRevision: 0,
+      castFingerprint: castGenerationSnapshotFingerprint(castSnapshot), castCoverageStartTurn: null, castTrackedThroughTurn: null });
+    context.authority.protectedFacts = [
+      { id: "11111111-1111-4111-8111-111111111111", turnNumber: 1, content: "Older protected fact marker" },
+      { id: "22222222-2222-4222-8222-222222222222", turnNumber: 2, content: "Newer protected fact marker" }
+    ];
+    context.authority.currentContinuity = { continuitySummary: "Continuity marker", scratchpad: "", canonicalFacts: [], openThreads: [], trackers: [] };
+    context.authority.worldReferenceSource = { worldVersionId: "world-v1", worldContent: { entities: [], relationships: [] } };
+    context.candidates = [
+      { id: "chronicle-1", turnId: "chronicle-turn-1", ordinal: 1, kind: "turn_fiction", content: "Older Chronicle marker", tokenEstimate: 5, rank: 1 },
+      { id: "chronicle-2", turnId: "chronicle-turn-2", ordinal: 2, kind: "turn_fiction", content: "Newer Chronicle marker", tokenEstimate: 5, rank: 2 }
+    ];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Visit The Watcher", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 100_000, 99_900, "attempt", "story_memory",
+      defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const body = JSON.parse(serializeProviderRequest(plannerProvider(), { systemPrompt: "System", input: result.storyInput }).body);
+    const userContent = JSON.parse(body.messages.find((message: { role: string }) => message.role === "user").content);
+    const sent = userContent.authoritative_context;
+
+    expect(Object.keys(sent)).toEqual([
+      "authoritativeRules", "worldCanon", "selectedCharacterId", "selectedCharacterAuthority", "cast", "worldReferences",
+      "currentContinuity", "protectedFacts", "protectedFactsOmitted", "storyLedger", "chronicle", "recentTurns", "currentScene"
+    ]);
+    expect(sent.storyLedger.entries.map((entry: { turnNumber: number }) => entry.turnNumber)).toEqual([1, 2]);
+    expect(sent.protectedFacts.map((fact: { turnNumber: number }) => fact.turnNumber)).toEqual([1, 2]);
+    expect(sent.chronicle.map((entry: { ordinal: number }) => entry.ordinal)).toEqual([1, 2]);
+    expect(sent.recentTurns.map((entry: { turnNumber: number }) => entry.turnNumber)).toEqual([2, 3]);
+    expect(sent.currentScene.narration).toBe("Current scene marker");
+    expect(userContent.current_turn_input).toEqual({ mode: "scene", text: "Visit The Watcher" });
+    expect(body.messages.findIndex((message: { role: string }) => message.role === "user")).toBeGreaterThan(0);
+  });
+
+  it("keeps empty optional v5 layers before the final scene and current input", () => {
+    const context: any = plannerContext(null);
+    context.authority.storyLedger = { entries: [], omittedThroughTurn: null };
+    context.authority.protectedFacts = [];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Empty-layer input", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 100_000, 99_900, "attempt", "story_memory",
+      defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const body = JSON.parse(serializeProviderRequest(plannerProvider(), { systemPrompt: "System", input: result.storyInput }).body);
+    const userContent = JSON.parse(body.messages.find((message: { role: string }) => message.role === "user").content);
+    const sent = userContent.authoritative_context;
+
+    expect(sent.protectedFacts).toEqual([]);
+    expect(sent.storyLedger.entries).toEqual([]);
+    expect(sent.chronicle).toEqual([]);
+    expect(sent.recentTurns).toEqual([]);
+    expect(Object.keys(sent).at(-1)).toBe("currentScene");
+    expect(userContent.current_turn_input).toEqual({ mode: "scene", text: "Empty-layer input" });
+  });
+
   it("fits the final review with a full 48000-token output reserve by pruning optional history before generation", () => {
     const context: any = plannerContext(null);
     context.candidates = Array.from({ length: 20 }, (_, i) => ({ id: `history-${i}`, turnId: null, ordinal: i, kind: "turn_fiction",

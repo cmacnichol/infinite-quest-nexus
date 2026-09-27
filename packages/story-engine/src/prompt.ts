@@ -26,6 +26,36 @@ export function compactStoryLengthWordRange(storyLength: StoryLengthWordRange): 
   };
 }
 
+/** Stable v5 provider-wire projection. Legacy context objects keep their original insertion order. */
+export function projectHistoryCoverageContext<T extends Record<string, unknown>>(context: T): T {
+  const projected: Record<string, unknown> = {};
+  const consumed = new Set<string>();
+  const append = (key: string) => {
+    if (!Object.hasOwn(context, key)) return;
+    projected[key] = context[key];
+    consumed.add(key);
+  };
+
+  append("authoritativeRules");
+  append("worldCanon");
+  append("selectedCharacterId");
+  append("selectedCharacterAuthority");
+  append("cast");
+  append("worldReferences");
+  append("currentContinuity");
+  append("protectedFacts");
+  append("protectedFactsOmitted");
+  append("storyLedger");
+  append("chronicle");
+  append("recentTurns");
+  for (const [key, value] of Object.entries(context)) {
+    if (key === "currentScene" || consumed.has(key)) continue;
+    projected[key] = value;
+  }
+  append("currentScene");
+  return projected as T;
+}
+
 export function buildStoryUserPrompt(
   context: unknown,
   action: string,
@@ -85,6 +115,7 @@ export function buildStoryMemoryUserPrompt(
 ): string {
   const prompt = JSON.parse(buildStoryUserPrompt(context, action, compact, fictionGuidance, storyLength, inputMode)) as {
     instructions: string[];
+    authoritative_context: unknown;
   };
   prompt.instructions = prompt.instructions.map((instruction) => instruction === "The current turn input is a scene direction: its concrete events, dialogue, sensory details, outcomes, and required beats are facts that happen in this turn."
     ? "The current turn input is a requested scene direction. Dramatize its requested beats consistently with authoritative continuity; it is not accepted history and cannot establish its own facts."
@@ -97,5 +128,8 @@ export function buildStoryMemoryUserPrompt(
   if (historyCoverage) prompt.instructions.splice(3, 0,
     "storyLedger records earlier player intent, not proof of events. Accepted narration and current canonical state establish outcomes. Unlisted history is unknown; do not invent it."
   );
+  if (historyCoverage && prompt.authoritative_context && typeof prompt.authoritative_context === "object" && !Array.isArray(prompt.authoritative_context)) {
+    prompt.authoritative_context = projectHistoryCoverageContext(prompt.authoritative_context as Record<string, unknown>);
+  }
   return JSON.stringify(prompt);
 }

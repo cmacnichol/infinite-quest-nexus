@@ -6,7 +6,7 @@ import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol } from "../..
 import { canonicalEvidenceJson, createStoryEvidence, generationEvidenceManifestHash, hasGenerationCharacterAuthority, type GenerationContextCandidate, type GenerationEvidenceManifest, type StoryEvidence } from "../../../packages/application/src/memory/generation-context.js";
 import type { MemoryGenerationAuthorityContext } from "../../../packages/application/src/index.js";
 import type { StoryLengthWordRange } from "../../../packages/contracts/src/story-settings.js";
-import { ContextBudgetError, buildStoryMemoryUserPrompt, buildStoryUserPrompt, containsMechanicsLanguage, estimatedInputSafetyAllowanceTokens, estimateStoryTokens, planContext, serializeProviderRequest, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
+import { ContextBudgetError, buildStoryMemoryUserPrompt, buildStoryUserPrompt, containsMechanicsLanguage, estimatedInputSafetyAllowanceTokens, estimateStoryTokens, planContext, projectHistoryCoverageContext, serializeProviderRequest, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
 import { selectWorldFictionReferences, sha256, stableStringify } from "../../../packages/domain/src/index.js";
 import type { RuntimeTextExecution as GenerationTextProvider } from "./provider-credential-transport-adapter.js";
 import { isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
@@ -329,34 +329,37 @@ export function planGenerationPromptContext(
       scope: "chronicle"
     }))
   ];
-  const promptContext = (selected: readonly Readonly<{ id: string }>[]) => ({
-    ...authorityContext,
-    ...(castSelection?.content && selected.some((block) => block.id === "cast-context")
-      ? { cast: JSON.parse(castSelection.content) as SentCast } : {}),
-    ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: selected.filter((block: { id: string; scope?: string }) => block.scope === "world")
-      .map((block) => worldReferences.find((reference) => reference.sourceId === block.id))
-      .filter((reference): reference is typeof worldReferences[number] => Boolean(reference))
-      .map(({ sourceId, sourcePath, content }) => ({ sourceId, sourcePath, content })) } : {}),
-    ...(layered ? { recentTurns: recentRecords.filter((turn) => selected.some((block) => block.id === `recent:${turn.sourceId}`)).sort((a, b) => a.turnNumber - b.turnNumber) } : {}),
-    ...(historyCoverage ? (() => {
-      const reservedRecentIds = new Set(selected.filter((block: { id: string; scope?: string }) => block.scope === "recent")
-        .map((block) => block.id.slice("recent:".length)));
-      const entries = ledgerRecords.filter((entry) => selected.some((block) => block.id === `ledger:${entry.turnId}`)
-        && !reservedRecentIds.has(entry.turnId));
-      const absent = ledgerRecords.filter((entry) => !entries.some((selectedEntry) => selectedEntry.turnId === entry.turnId));
-      return { storyLedger: { version: "story-ledger-v1" as const, entries,
-        omittedThroughTurn: Math.max(authority.storyLedger?.omittedThroughTurn ?? 0, ...absent.map((entry) => entry.turnNumber)) || null,
-        ...(authority.storyLedger?.coverage ? { coverage: authority.storyLedger.coverage } : {}) } };
-    })() : {}),
-    ...(historyCoverage ? (() => {
-      const facts = protectedFactRecords.filter((fact) => selected.some((block) => block.id === `protected-fact:${fact.id}`));
-      const omitted = protectedFactRecords.length - facts.length;
-      return { protectedFacts: facts, protectedFactsOmitted: (authority.protectedFactsOmitted ?? 0) + withheldProtectedFactCount + omitted };
-    })() : {}),
-    chronicle: selected.filter((block: { id: string; scope?: string }) => block.scope === "chronicle")
-      .map((block) => candidates.find((candidate) => candidate.id === block.id))
-      .filter((candidate): candidate is PromptCandidate => Boolean(candidate))
-  });
+  const promptContext = (selected: readonly Readonly<{ id: string }>[]) => {
+    const sentContext = {
+      ...authorityContext,
+      ...(castSelection?.content && selected.some((block) => block.id === "cast-context")
+        ? { cast: JSON.parse(castSelection.content) as SentCast } : {}),
+      ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: selected.filter((block: { id: string; scope?: string }) => block.scope === "world")
+        .map((block) => worldReferences.find((reference) => reference.sourceId === block.id))
+        .filter((reference): reference is typeof worldReferences[number] => Boolean(reference))
+        .map(({ sourceId, sourcePath, content }) => ({ sourceId, sourcePath, content })) } : {}),
+      ...(layered ? { recentTurns: recentRecords.filter((turn) => selected.some((block) => block.id === `recent:${turn.sourceId}`)).sort((a, b) => a.turnNumber - b.turnNumber) } : {}),
+      ...(historyCoverage ? (() => {
+        const reservedRecentIds = new Set(selected.filter((block: { id: string; scope?: string }) => block.scope === "recent")
+          .map((block) => block.id.slice("recent:".length)));
+        const entries = ledgerRecords.filter((entry) => selected.some((block) => block.id === `ledger:${entry.turnId}`)
+          && !reservedRecentIds.has(entry.turnId));
+        const absent = ledgerRecords.filter((entry) => !entries.some((selectedEntry) => selectedEntry.turnId === entry.turnId));
+        return { storyLedger: { version: "story-ledger-v1" as const, entries,
+          omittedThroughTurn: Math.max(authority.storyLedger?.omittedThroughTurn ?? 0, ...absent.map((entry) => entry.turnNumber)) || null,
+          ...(authority.storyLedger?.coverage ? { coverage: authority.storyLedger.coverage } : {}) } };
+      })() : {}),
+      ...(historyCoverage ? (() => {
+        const facts = protectedFactRecords.filter((fact) => selected.some((block) => block.id === `protected-fact:${fact.id}`));
+        const omitted = protectedFactRecords.length - facts.length;
+        return { protectedFacts: facts, protectedFactsOmitted: (authority.protectedFactsOmitted ?? 0) + withheldProtectedFactCount + omitted };
+      })() : {}),
+      chronicle: selected.filter((block: { id: string; scope?: string }) => block.scope === "chronicle")
+        .map((block) => candidates.find((candidate) => candidate.id === block.id))
+        .filter((candidate): candidate is PromptCandidate => Boolean(candidate))
+    };
+    return historyCoverage ? projectHistoryCoverageContext(sentContext) : sentContext;
+  };
   const planOptions = (planBlocks: readonly ContextBudgetBlock[]) => ({
     blocks: planBlocks,
     contextLimit,
