@@ -117,14 +117,14 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 **Interfaces:** `GenerationHistoryReservation = Readonly<{ recentTurnIds: readonly string[]; protectedFactIds: readonly string[] }>`; retrieval `generationExclusions?: GenerationHistoryReservation`; selector `excludedParentTurnIds?`, `excludedCanonicalFactIds?` readonly string arrays.
 
-- [ ] RED: capture 1–11, fit 10–11; exclude only 10–11. Verified excerpt from 9 remains selectable. A recent gap stops verbatim selection, not all older retrieval.
-- [ ] RED: facts from recent/base turns survive unless their IDs are sent. Multi-fact parent with excluded and unseen facts cannot be dropped wholesale; use individually verified facts or suppress only fully covered parents.
-- [ ] RED: chunked, lexical-only, semantic-unavailable and index-unready paths obey exclusions; old protocols retain ordering/shape. High-ranked duplicates do not starve older-source replenishment.
-- [ ] Run tests; introduce a v5 authority-reservation phase before retrieval using final serializers/reviewer estimator/quotas. Reserve cast/history/recents without Chronicle candidates, pass actual IDs, retain reservation through final planning. Tasks 5–7 extend it.
-- [ ] Final planning must retain reserved sources or recompute exclusions/selection; never silently drop a source whose alternative was excluded. If exact pre-reservation cannot be shared, retain narration candidates until final selection rather than approximate captured-ID exclusion.
-- [ ] Dedupe narration by turn, facts by verified ID. Apply exclusions before upstream rank-family limits where feasible; test replenishment, not only absence.
-- [ ] Verify optional Chronicle fact candidates against accepted/correction sources and the captured complete-correction frontier before granting prompt or supersession authority. Active projection intervals alone are insufficient: test a stale active fact removed by an earlier empty correction, mismatched source content/index, and valid omitted facts/siblings that remain retrievable. Share the bounded source verifier; never repair projections during reads or infer IDs from rendered text.
-- [ ] GREEN: focused units/PostgreSQL and old goldens; commit.
+- [x] RED: capture 1–11, fit 10–11; exclude only 10–11. Verified excerpt from 9 remains selectable. A recent gap stops verbatim selection, not all older retrieval.
+- [x] RED: facts from recent/base turns survive unless their IDs are sent. Multi-fact parent with excluded and unseen facts cannot be dropped wholesale; use individually verified facts or suppress only fully covered parents.
+- [x] RED: chunked, lexical-only, semantic-unavailable and index-unready paths obey exclusions; old protocols retain ordering/shape. High-ranked duplicates do not starve older-source replenishment.
+- [x] Run tests; introduce a v5 authority-reservation phase before retrieval using final serializers/reviewer estimator/quotas. Reserve cast/history/recents without Chronicle candidates, pass actual IDs, retain reservation through final planning. Tasks 5–7 extend it.
+- [x] Final planning must retain reserved sources or recompute exclusions/selection; never silently drop a source whose alternative was excluded. If exact pre-reservation cannot be shared, retain narration candidates until final selection rather than approximate captured-ID exclusion.
+- [x] Dedupe narration by turn, facts by verified ID. Apply exclusions before upstream rank-family limits where feasible; test replenishment, not only absence.
+- [x] Verify optional Chronicle fact candidates against accepted/correction sources and the captured complete-correction frontier before granting prompt or supersession authority. Active projection intervals alone are insufficient: test a stale active fact removed by an earlier empty correction, mismatched source content/index, and valid omitted facts/siblings that remain retrievable. Share the bounded source verifier; never repair projections during reads or infer IDs from rendered text.
+- [x] GREEN: focused units/PostgreSQL and old goldens; commit.
 
 ## Task 4: F1 — Token-aware selection with observable guards
 
@@ -179,11 +179,11 @@ Implementation note: source verification is bounded to 512 candidates and 1,000,
 
 **Interfaces:** optional `ResolveRequest.recentWindowTurns`; optional `GenerationBaseIdentityV3.recentWindowTurns`, inherited by V4. Absence retains 2. This protocol emits only 11 as the new value, paired with `recentWindowFingerprint`; reject unsupported/mismatched combinations.
 
-- [ ] RED: v5 r2/r3 capture up to 11 effective earlier turns; v3/v4 retain two; r1 adds none. Early campaigns work. Preserve `recentTurnTarget === 3` layered eligibility without mutating frozen policy.
-- [ ] RED: enqueue → execution → lease reclaim → commit use identical window/fingerprint; correction of oldest newly captured turn invalidates stale authority. Replacement N sees only through base N−1.
-- [ ] Run tests; find every authority resolver, identity parser/comparison, commit/Keep/checkpoint and relevant portability reader. Propagate stored size on every revalidation path; choose new size only at enqueue from frozen protocol. Never infer from current defaults or backfill historical identities.
-- [ ] Add cross-field validation, exact old field absence, contiguous newest-first reservation and ascending sent recents. Use reserved IDs for Task 3 exclusions; omitted recents remain optional evidence.
-- [ ] GREEN: units/PostgreSQL covering retries, stale claimant rejection, expired leases, Keep and history corrections. Resume cannot regenerate a valid saved candidate. Commit.
+- [x] RED: v5 r2/r3 capture up to 11 effective earlier turns; v3/v4 retain two; r1 adds none. Early campaigns work. Preserve `recentTurnTarget === 3` layered eligibility without mutating frozen policy.
+- [x] RED: enqueue → execution → lease reclaim → commit use identical window/fingerprint; correction of oldest newly captured turn invalidates stale authority. Replacement N sees only through base N−1.
+- [x] Run tests; find every authority resolver, identity parser/comparison, commit/Keep/checkpoint and relevant portability reader. Propagate stored size on every revalidation path; choose new size only at enqueue from frozen protocol. Never infer from current defaults or backfill historical identities.
+- [x] Add cross-field validation, exact old field absence, contiguous newest-first reservation and ascending sent recents. Use reserved IDs for Task 3 exclusions; omitted recents remain optional evidence.
+- [x] GREEN: units/PostgreSQL covering retries, stale claimant rejection, expired leases, Keep and history corrections. Resume cannot regenerate a valid saved candidate. Commit.
 
 ## Task 8: F7 — Stable layer order ending with current scene
 
@@ -191,9 +191,9 @@ Implementation note: source verification is bounded to 512 candidates and 1,000,
 
 **Interface:** v5 wire order: rules → world canon → character → cast → world references → current continuity → protected facts → intent ledger → Chronicle → recent turns → current scene. Account for every optional field before final scene.
 
-- [ ] RED: inspect actual provider body, not just intermediate object keys. Test empty/nonempty layers, chronology within arrays, final current scene followed by current input.
-- [ ] Implement one v5 projection shared by measurement, transport and manifest; retain old insertion order/bytes. Overlapping layers are not one globally chronological event timeline.
-- [ ] GREEN: planner/payload integration, pointers/hashes and old goldens; commit. Live quality claims require separately authorized A/B evidence.
+- [x] RED: inspect actual provider body, not just intermediate object keys. Test empty/nonempty layers, chronology within arrays, final current scene followed by current input.
+- [x] Implement one v5 projection shared by measurement, transport and manifest; retain old insertion order/bytes. Overlapping layers are not one globally chronological event timeline.
+- [x] GREEN: planner/payload integration, pointers/hashes and old goldens; commit. Live quality claims require separately authorized A/B evidence.
 
 ## Task 9: F8 — Tail scene query and source validation
 
@@ -201,9 +201,9 @@ Implementation note: source verification is bounded to 512 candidates and 1,000,
 
 **Interface:** `sceneHintTail(content: string, maximumCharacters: number): string`, bounded normalized tail with safe word/Unicode boundaries; zero limit yields empty text.
 
-- [ ] RED: empty/short/long/no-space/multibyte inputs, zero/invalid limits, disjoint opening/ending canaries; ending retained and length <= 1,000.
-- [ ] RED: integrated v5 query uses effective base-turn ending including corrections; v4 keeps prefix. Missing/stale Chronicle cannot substitute a different turn as current; use captured base scene. No extra provider call merely to choose tail.
-- [ ] Implement gated wiring after fiction sanitization; preserve cache query identity/fallback. GREEN unit/PostgreSQL comparison and old fixtures; commit. Live A/B remains separately authorized.
+- [x] RED: empty/short/long/no-space/multibyte inputs, zero/invalid limits, disjoint opening/ending canaries; ending retained and length <= 1,000.
+- [x] RED: integrated v5 query uses effective base-turn ending including corrections; v4 keeps prefix. Missing/stale Chronicle cannot substitute a different turn as current; use captured base scene. No extra provider call merely to choose tail.
+- [x] Implement gated wiring after fiction sanitization; preserve cache query identity/fallback. GREEN unit/PostgreSQL comparison and old fixtures; commit. Live A/B remains separately authorized.
 
 ## Task 10: F9 — Strict diagnostics from final evidence
 
@@ -211,32 +211,32 @@ Implementation note: source verification is bounded to 512 candidates and 1,000,
 
 **Interface:** strict `HistoryCoverageDiagnostics`, not arbitrary `Record<string, string | number>`. Include configured limits; selected candidate estimates; unique skips/exclusions; fixed stop/fallback enums; ledger sent/omitted boundary; facts sent/omitted; recents captured/sent; final context/writer/reviewer tokens. Unavailable stages are null, not fabricated zeroes.
 
-- [ ] RED: attempt metadata roundtrips v5 `contextDiagnostics.layers.history`; old shape unchanged. Unknown keys/arbitrary strings/private canaries fail validation.
-- [ ] RED: counters match final manifest after dedupe, excerpts and trimming; distinguish selected candidates from sent evidence and estimates from final request totals.
-- [ ] Explicitly project approved fields, never spread arbitrary retrieval/error objects. Audit strict persisted metadata schemas.
-- [ ] GREEN: units/PostgreSQL roundtrip including lexical fallback/empty pool; commit. Provide content-free operator read-only query using verified current metadata path.
+- [x] RED: attempt metadata roundtrips v5 `contextDiagnostics.layers.history`; old shape unchanged. Unknown keys/arbitrary strings/private canaries fail validation.
+- [x] RED: counters match final manifest after dedupe, excerpts and trimming; distinguish selected candidates from sent evidence and estimates from final request totals.
+- [x] Explicitly project approved fields, never spread arbitrary retrieval/error objects. Audit strict persisted metadata schemas.
+- [x] GREEN: units/PostgreSQL roundtrip including lexical fallback/empty pool; commit. Provide content-free operator read-only query using verified current metadata path.
 
 ## Task 11: New-job enablement and rollback documentation
 
 **Files/tests:** snapshot repository, new ADR 0040 if free, integrity doc/review status; `tests/integration/story-memory-enrollment.integration.test.ts`, compatibility and cast-generation integration.
 
-- [ ] RED: new cast-enabled snapshots use v5; cast-disabled/legacy unchanged; old jobs retain protocol. Shape-compatible overrides need no re-acknowledgement ([ADR 0039](../../architecture/0039-implicit-prompt-override-acknowledgement.md)).
-- [ ] Complete Tasks 1–10 and relevant Task 12 compatibility/budget/recovery/performance gates before flipping. Related failures block enablement, not automatically classified as old failures.
-- [ ] Change new eligible snapshots only: no stored snapshot rewrite, reenrollment, override edit, backfill or accepted-turn mutation.
-- [ ] Write ADR with residual budgets, intent/outcome distinction, fact verification, actual-source exclusions, guards, identity and measured limits. Mark F3 partial; other findings addressed only after tests pass, not because this plan exists.
-- [ ] Document operator-approved rollout per [deployment runbook](../../runbooks/deployment.md): every potential claimant understands v5 before enqueue; prevent older workers claiming new v5 jobs in mixed deployments.
-- [ ] Rollback stops new v5 production and drains/retains outstanding work on compatible readers before removing support. Never rewrite jobs as v4 or discard valid candidates. Compatible rollback can retain v5 readers while changing only enqueue default.
-- [ ] GREEN: enrollment/compatibility/override/goldens and synthetic mixed-reader rollback tests; commit separately from readers. Do not deploy.
+- [x] RED: new cast-enabled snapshots use v5; cast-disabled/legacy unchanged; old jobs retain protocol. Shape-compatible overrides need no re-acknowledgement ([ADR 0039](../../architecture/0039-implicit-prompt-override-acknowledgement.md)).
+- [x] Complete Tasks 1–10 and relevant Task 12 compatibility/budget/recovery/performance gates before flipping. Related failures block enablement, not automatically classified as old failures.
+- [x] Change new eligible snapshots only: no stored snapshot rewrite, reenrollment, override edit, backfill or accepted-turn mutation.
+- [x] Write ADR with residual budgets, intent/outcome distinction, fact verification, actual-source exclusions, guards, identity and measured limits. Mark F3 partial; other findings addressed only after tests pass, not because this plan exists.
+- [x] Document operator-approved rollout per [deployment runbook](../../runbooks/deployment.md): every potential claimant understands v5 before enqueue; prevent older workers claiming new v5 jobs in mixed deployments.
+- [x] Rollback stops new v5 production and drains/retains outstanding work on compatible readers before removing support. Never rewrite jobs as v4 or discard valid candidates. Compatible rollback can retain v5 readers while changing only enqueue default.
+- [x] GREEN: enrollment/compatibility/override/goldens and synthetic mixed-reader rollback tests; commit separately from readers. Do not deploy.
 
 ## Task 12: Full verification and handoff
 
-- [ ] Run `corepack pnpm check`, `corepack pnpm test:unit`, `git diff --check`; retain full logs/exit codes and compare exact baseline failures. No tail-only failure reporting.
-- [ ] Run affected PostgreSQL `chronicle-*`, `campaign-cast-*`, `story-continuity-*`, `generation-*`, `story-memory-*`, new history-coverage and story-context payload suites; include additional checks required by changed contracts.
-- [ ] Verify Task 0 hashes unchanged and persisted request/checkpoint replay end-to-end. Report primary/review/repair calls separately; no new generation on Keep/resume.
-- [ ] Compare synthetic v4/v5 at 32k/64k/128k/256k/1m/4m with provider-limited envelopes/smaller reviewer. Report distinct turns/facts, final headroom, omissions, SQL rows/count, runtime and lock duration. Include >20,000-turn loader stress; configured budget never overrides provider.
-- [ ] Verify isolation, mechanics separation, visible supersession authority, replacement cutoff, corrected state, Keep integrity and independent image failure. Intent/excerpts do not equal complete event history.
-- [ ] Review entire diff and exact-file staging. Independent agents only if authorized by chosen workflow. No UI change planned; if introduced, rendered-browser verification/screenshots become required.
-- [ ] Hand off passed/failed/skipped evidence, deferred F3 synopsis/compaction, remaining finite guards, and operator-only deploy/backfill/A/B steps. No live quality claims from deterministic fixtures.
+- [x] Run `corepack pnpm check`, `corepack pnpm test:unit`, `git diff --check`; retain full logs/exit codes and compare exact baseline failures. No tail-only failure reporting.
+- [x] Run affected PostgreSQL `chronicle-*`, `campaign-cast-*`, `story-continuity-*`, `generation-*`, `story-memory-*`, new history-coverage and story-context payload suites; include additional checks required by changed contracts.
+- [x] Verify Task 0 hashes unchanged and persisted request/checkpoint replay end-to-end. Report primary/review/repair calls separately; no new generation on Keep/resume.
+- [x] Compare synthetic v4/v5 at 32k/64k/128k/256k/1m/4m with provider-limited envelopes/smaller reviewer. Report distinct turns/facts, final headroom, omissions, SQL rows/count, runtime and lock duration. Include >20,000-turn loader stress; configured budget never overrides provider.
+- [x] Verify isolation, mechanics separation, visible supersession authority, replacement cutoff, corrected state, Keep integrity and independent image failure. Intent/excerpts do not equal complete event history.
+- [x] Review entire diff and exact-file staging. Independent agents only if authorized by chosen workflow. No UI change planned; if introduced, rendered-browser verification/screenshots become required.
+- [x] Hand off passed/failed/skipped evidence, deferred F3 synopsis/compaction, remaining finite guards, and operator-only deploy/backfill/A/B steps. No live quality claims from deterministic fixtures.
 
 ## Disposable PostgreSQL procedure (implementation only)
 
@@ -260,3 +260,6 @@ Retain full log/exit status. Restore prior environment variable in `finally`; re
 - 2026-09-27: Reviewed against `bb360620`; corrected baseline/signature, privacy/exclusions, budgets, fact authority, lifecycle/rollback gaps and verification. F3 explicitly limited to intent-ledger increment. Documentation only; implementation/runtime tests not performed.
 
 - 2026-09-27 implementation: Task 0 complete at cddfbf7b; 28 frozen-context goldens and TypeScript passed, independently reviewed. Baseline full static check passed; unit and PostgreSQL pre-existing failures recorded in execution ledger.
+
+
+Implementation completed through 16661d50 on 2026-09-27 with independent Terra/Luna review. See [verification, limits, rulings and handoff](../../review/turn-context-history-coverage-handoff-2026-09-27.md). F3 remains intent-only partial; deployment and live-provider validation were not performed.
