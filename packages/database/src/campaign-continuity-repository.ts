@@ -6,7 +6,7 @@ import { buildCanonicalChronicleFacts, combineCanonicalChronicleFacts } from "..
 import { createCorrectionCanonicalFactId, normalizeCanonicalFactContent } from "../../domain/src/canonical-facts.js";
 import type { ProtectedFact, ProtectedFactSourceCoverage } from "../../application/src/memory/story-history-facts.js";
 
-type VerifiedFact = Readonly<{ id: string; content: string; factIndex?: number }>;
+type VerifiedFact = Readonly<{ id: string; content: string; factIndex?: number; sourceStateEditId?: string | null }>;
 type ProtectedFactCandidate = Readonly<{
   id: string;
   content: string | null;
@@ -72,7 +72,8 @@ export function materializeCorrectedGenerationContinuity(snapshot: unknown,
   source: Readonly<{ campaignId: string; stateEditId: string }>, activeFacts: readonly VerifiedFact[]): CampaignRuntimeStateContent {
   const state = authorityBoundary(() => campaignRuntimeStateContentSchema.parse(snapshot));
   return { ...state, canonicalFacts: state.canonicalFacts.map((fact, index) => ({ ...fact,
-    id: verifiedFactId(fact.id ?? createCorrectionCanonicalFactId(source.campaignId, source.stateEditId, index), fact.content, activeFacts, index)
+    id: verifiedFactId(fact.id ?? createCorrectionCanonicalFactId(source.campaignId, source.stateEditId, index), fact.content, activeFacts,
+      fact.id === null || activeFacts.some((active) => active.id === fact.id && active.sourceStateEditId === source.stateEditId) ? index : undefined)
   })) };
 }
 
@@ -81,7 +82,7 @@ export async function loadActiveGenerationFacts(client: DatabaseClient, scope: C
   baseTurnNumber: number, candidateIds: readonly string[],
   source: Readonly<{ turnId?: string; stateEditId?: string; retainedIds?: readonly string[] }> = {}): Promise<readonly VerifiedFact[]> {
   if (!candidateIds.length) return [];
-  const result = await client.query<VerifiedFact>(`SELECT id,content,source_fact_index AS "factIndex" FROM campaign_canonical_facts
+  const result = await client.query<VerifiedFact>(`SELECT id,content,source_fact_index AS "factIndex",source_state_edit_id AS "sourceStateEditId" FROM campaign_canonical_facts
     WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
       AND valid_from_turn <= $4 AND (valid_until_turn IS NULL OR valid_until_turn > $4)
       AND id=ANY($5::uuid[])
@@ -253,7 +254,8 @@ export async function loadVerifiedProtectedFacts(
   const frontierFacts = frontier?.canonical_facts === null ? null : frontier
     ? safelyMaterialize(() => materializeCorrectedGenerationContinuity(compactCorrectionSnapshot(frontier.canonical_facts),
       { campaignId: scope.campaignId, stateEditId: frontier.id }, eligible.map((candidate) => ({
-        id: candidate.id, content: candidate.content, factIndex: candidate.source_fact_index
+        id: candidate.id, content: candidate.content, factIndex: candidate.source_fact_index,
+        sourceStateEditId: candidate.source_state_edit_id
       }))))
     : null;
 
@@ -338,7 +340,8 @@ export async function loadVerifiedProtectedFacts(
     const matchingTurn = source ? candidatesForSource.filter((candidate) => candidate.source_turn_number === source.effective_turn_number) : [];
     const materialized = source && matchingTurn.length ? safelyMaterialize(() => materializeCorrectedGenerationContinuity(
       compactCorrectionSnapshot(source.canonical_facts), { campaignId: scope.campaignId, stateEditId: source.id },
-      matchingTurn.map((candidate) => ({ id: candidate.id, content: candidate.content, factIndex: candidate.source_fact_index }))
+      matchingTurn.map((candidate) => ({ id: candidate.id, content: candidate.content, factIndex: candidate.source_fact_index,
+        sourceStateEditId: candidate.source_state_edit_id }))
     )) : null;
     if (!materialized) continue;
     for (const candidate of matchingTurn) if (sourceIndexMatches(candidate, materialized.canonicalFacts)) {

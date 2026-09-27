@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { loadVerifiedProtectedFacts } from "../../packages/database/src/campaign-continuity-repository.js";
+import { loadCurrentContinuityCorrection, loadVerifiedProtectedFacts } from "../../packages/database/src/campaign-continuity-repository.js";
 import { buildCanonicalChronicleFacts } from "../../packages/domain/src/chronicle-memory-helpers.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
@@ -46,6 +46,12 @@ integration("verified protected-fact authority", () => {
   async function load(scope: { campaignId: string; worldVersionId: string }, baseTurnNumber = 3) {
     const client = await pool.connect();
     try { return await loadVerifiedProtectedFacts(client, { ownerUserId, ...scope }, baseTurnNumber); }
+    finally { client.release(); }
+  }
+
+  async function loadCorrection(scope: { campaignId: string; worldVersionId: string }, complete = false) {
+    const client = await pool.connect();
+    try { return await loadCurrentContinuityCorrection(client, { ownerUserId, ...scope }, 3, complete ? { complete: true } : {}); }
     finally { client.release(); }
   }
 
@@ -183,5 +189,43 @@ integration("verified protected-fact authority", () => {
 
     await expect(load(acceptedScope)).resolves.toMatchObject({ facts: [] });
     await expect(load(correctionScope)).resolves.toMatchObject({ facts: [] });
+  });
+
+  it("retains reordered correction IDs from their original source while withholding a tampered new correction ID", async () => {
+    const scope = await fixture();
+    const removedId = crypto.randomUUID();
+    const retainedId = crypto.randomUUID();
+    const newId = crypto.randomUUID();
+    const removedContent = "The discarded harbor watch no longer applies.";
+    const retainedContent = "The retained harbor watch stays in force.";
+    const newContent = "The new correction has a tampered source slot.";
+    const sourceSnapshot = { canonicalFacts: [
+      { id: removedId, content: removedContent },
+      { id: retainedId, content: retainedContent }
+    ], canonicalFactUpdates: [] };
+    const sourceTurnId = await acceptedTurn(scope.campaignId, 1, sourceSnapshot);
+    await insertAcceptedFact(scope, sourceTurnId, 1, { id: removedId, content: removedContent, factIndex: 0 });
+    await insertAcceptedFact(scope, sourceTurnId, 1, { id: retainedId, content: retainedContent, factIndex: 1 });
+    const correctionSnapshot = {
+      continuitySummary: "", scratchpad: "", openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [],
+      canonicalFacts: [{ id: retainedId, content: retainedContent }, { id: newId, content: newContent }]
+    };
+    const correction = await pool.query<{ id: string }>(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,revision,effective_turn_number,state_snapshot_private)
+      VALUES($1,$2,1,3,$3::jsonb) RETURNING id`, [ownerUserId, scope.campaignId, JSON.stringify(correctionSnapshot)]);
+    await pool.query("UPDATE campaign_canonical_facts SET valid_until_turn=3 WHERE id=$1", [removedId]);
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_state_edit_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,3,7,$6,lower($6),3)`, [newId, ownerUserId, scope.campaignId, scope.worldVersionId, correction.rows[0]!.id, newContent]);
+    const before = await pool.query("SELECT id,source_turn_id,source_state_edit_id,source_fact_index,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId]);
+
+    await expect(loadCorrection(scope)).resolves.toMatchObject({
+      canonicalFacts: [{ id: retainedId, content: retainedContent }, { id: newId, content: newContent }]
+    });
+    await expect(loadCorrection(scope, true)).resolves.toMatchObject({
+      canonicalFacts: [{ id: retainedId, content: retainedContent }, { id: null, content: newContent }]
+    });
+    await expect(load(scope)).resolves.toMatchObject({
+      facts: [{ id: retainedId, turnNumber: 1, content: retainedContent }]
+    });
+    await expect(pool.query("SELECT id,source_turn_id,source_state_edit_id,source_fact_index,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId])).resolves.toMatchObject({ rows: before.rows });
   });
 });

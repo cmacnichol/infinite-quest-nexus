@@ -149,7 +149,7 @@ describe("loadCurrentContinuityCorrection", () => {
     const state = materializeGenerationContinuity({ canonicalFacts: [{ id, content: "The repaired gate remains open." }] });
 
     expect(materializeCorrectedGenerationContinuity(state, { campaignId: scope.campaignId, stateEditId }, [
-      { id, content: "The repaired gate remains open.", factIndex: 1 }
+      { id, content: "The repaired gate remains open.", factIndex: 1, sourceStateEditId: stateEditId }
     ]).canonicalFacts).toEqual([{ id: null, content: "The repaired gate remains open." }]);
   });
 
