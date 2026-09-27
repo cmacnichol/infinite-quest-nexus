@@ -174,6 +174,7 @@ export const historyCoverageDiagnosticsSchema = z.object({
     stopReason: historyCandidateStopReasonSchema.nullable(),
     fallbackReason: historyFallbackReasonSchema.nullable(),
     duplicateExcluded: historyDiagnosticCountSchema,
+    sourceValidationFailureCount: historyDiagnosticCountSchema,
     sourceValidationExcluded: historyDiagnosticCountSchema
   }).strict(),
   ledger: z.object({

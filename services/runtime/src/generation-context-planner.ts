@@ -267,14 +267,30 @@ export function planGenerationPromptContext(
   ]);
   const seen = new Set<string>();
   let sourceValidationFailures = 0;
+  const sourceValidationFailureIds = new Set<string>();
+  const sourceValidationExcludedIds = new Set<string>();
   const excerptAlternatives = new Map<string, PromptCandidate>();
   const candidates = context.candidates.map((source) => {
     const candidate = candidateRecord(source);
-    if (source.sourceValidationFailed) sourceValidationFailures++;
+    if (source.sourceValidationFailed) {
+      sourceValidationFailures++;
+      sourceValidationFailureIds.add(candidate.id);
+      // Optional canonical facts need complete source verification before they
+      // can regain authority. A retained whole turn_fiction parent is safe;
+      // an unverified canonical fact is not.
+      if (source.kind === "canonical_fact") {
+        sourceValidationExcludedIds.add(candidate.id);
+        return null;
+      }
+    }
     if (!hasGenerationCharacterAuthority(context.baseIdentity) || policy?.excerptPolicy !== "verified_spans_v1" || source.kind !== "turn_fiction" || !source.narrativeSource) return candidate;
     const normalized = normalizeStoryEvidenceSource(source.content);
     const excerpt = selectVerifiedNarrativeExcerpt(normalized, source.narrativeSource.spans.map((span) => ({ ...span, normalizationVersion: source.narrativeSource!.normalizationVersion, sourceHash: source.narrativeSource!.sourceHash })));
-    if (!excerpt) { sourceValidationFailures++; return candidate; }
+    if (!excerpt) {
+      sourceValidationFailures++;
+      sourceValidationFailureIds.add(candidate.id);
+      return candidate;
+    }
     // Economical complete records remain whole. Large parents can use exact
     // certified spans with adjacent sentences; the final wire budget still decides.
     if (excerpt.content.length >= normalized.length) return candidate;
@@ -282,7 +298,8 @@ export function planGenerationPromptContext(
     excerptAlternatives.set(candidate.id, alternative);
     if (excerpt.content.length * 4 >= normalized.length || estimateStoryTokens(normalized) <= Math.min(contextLimit, inputLimit) * 0.15) return candidate;
     return alternative;
-  }).filter((candidate) => {
+  }).filter((candidate): candidate is PromptCandidate => {
+    if (!candidate) return false;
     if (!candidate.id || !candidate.content) return false;
     if (!layered) return true;
     const identity = candidate.kind === "canonical_fact" ? `fact:${candidate.id}` : candidate.turnId ? `turn:${candidate.turnId}` : `source:${candidate.id}`;
@@ -662,7 +679,8 @@ export function planGenerationPromptContext(
         ? context.chronicleRetrieval.fallbackCode ?? "none"
         : null,
       duplicateExcluded: duplicateIds.length,
-      sourceValidationExcluded: sourceValidationFailures
+      sourceValidationFailureCount: sourceValidationFailureIds.size,
+      sourceValidationExcluded: sourceValidationExcludedIds.size
     },
     ledger: authority.storyLedger ? {
       capturedCount: ledgerRecords.length,

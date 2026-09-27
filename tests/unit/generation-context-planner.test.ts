@@ -110,7 +110,7 @@ describe("layered generation context planner", () => {
     expect(userContent.current_turn_input).toEqual({ mode: "scene", text: "Empty-layer input" });
   });
 
-  it("projects v5 history coverage from final sent layers without retaining source content or identifiers", () => {
+  it("projects v5 history coverage from final sent layers and separates validation failures from sent candidates", () => {
     const context: any = recentContext();
     context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
       coverage: { unreadThroughTurn: 1, missingTurnCount: 1, filteredDirectionCount: 2, oversizedDirectionCount: 3, loadedRows: 6 },
@@ -122,27 +122,52 @@ describe("layered generation context planner", () => {
     context.authority.protectedFactsOmitted = 2;
     context.authority.protectedFactsCoverage = { candidateRows: 3, sourceBytes: 72, sourceLimitReached: false,
       oversizedCandidateCount: 0, futureSourceCount: 1, withheldCandidateCount: 1 };
-    context.candidates = [{ id: "opaque-source-canary", turnId: "opaque-turn-canary", ordinal: 1, kind: "turn_fiction", content: "Private candidate evidence.", tokenEstimate: 7, rank: 1 }];
+    context.candidates = [{ id: "opaque-source-canary", turnId: "opaque-turn-canary", ordinal: 1, kind: "turn_fiction", content: "Private candidate evidence.", tokenEstimate: 7, rank: 1,
+      sourceValidationFailed: true, narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: "f".repeat(64), spans: [{ start: 0, end: 10 }] } }];
     context.chronicleSelectionDiagnostics = { candidatePoolLimit: 2_000, candidatePoolCandidatesRemoved: 4,
       selectedParentTokens: 12, stopReason: "candidate_pool_limit" };
     context.chronicleRetrieval = { fallbackCode: "chunk_index_not_ready" };
     const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
       { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
-      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      "22222222-2222-4222-8222-222222222222", "story_memory", storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" }), undefined, undefined, undefined,
       HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
     const diagnostic = historyCoverageDiagnosticsSchema.parse((result.layerDiagnostics as any).history);
 
     expect(diagnostic).toMatchObject({
       limits: { contextTokens: 32_000, writerInputTokens: 31_900, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
       candidates: { selectedCount: 1, selectedEstimateTokens: 7, candidatePoolCandidatesRemoved: 4,
-        stopReason: "candidate_pool_limit", fallbackReason: "chunk_index_not_ready" },
+        stopReason: "candidate_pool_limit", fallbackReason: "chunk_index_not_ready",
+        sourceValidationFailureCount: 1, sourceValidationExcluded: 0 },
       ledger: { capturedCount: 2, sentCount: 1, omittedCount: 1, coveredByRecentCount: 1, sourceExcludedCount: 6 },
       facts: { sourceCount: 1, sentCount: 1, omittedCount: 0, sourceOmittedCount: 2,
         measurementLimit: 64, measurementLimitHit: false, unexaminedCount: 0 },
       recents: { capturedCount: 2, sentCount: 2, targetCount: 3 },
       finalTokens: { context: result.contextPlan.contextTokens, writerRequest: result.contextPlan.requestTokens, reviewerRequest: null }
     });
+    expect(result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "retrieved" && entry.source.id === "opaque-turn-canary")).toHaveLength(1);
     expect(JSON.stringify(diagnostic)).not.toMatch(/ledger-one|turn-2|Complete private fact|opaque-source-canary|opaque-turn-canary|Private/);
+  });
+
+  it("retains a whole narration fallback but withholds an unverified canonical-fact source", () => {
+    const context: any = recentContext();
+    context.candidates = [
+      { id: "whole-narration-fallback", turnId: "turn-narration", ordinal: 1, kind: "turn_fiction", content: "The lantern remained lit.", tokenEstimate: 6, rank: 1,
+        sourceValidationFailed: true, narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: "f".repeat(64), spans: [{ start: 0, end: 10 }] } },
+      { id: "unverified-supersession", turnId: null, ordinal: 1, kind: "canonical_fact", content: "The earlier lantern fact was superseded.", tokenEstimate: 8, rank: 2,
+        sourceValidationFailed: true }
+    ];
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const diagnostic = historyCoverageDiagnosticsSchema.parse((result.layerDiagnostics as any).history);
+
+    expect(result.promptContext.chronicle.map((candidate) => candidate.id)).toEqual(["whole-narration-fallback"]);
+    expect(result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "retrieved").map((entry) => entry.source.id))
+      .toEqual(["turn-narration"]);
+    expect(result.storyInput).not.toContain("earlier lantern fact was superseded");
+    expect(diagnostic.candidates).toMatchObject({ selectedCount: 1, sourceValidationFailureCount: 2, sourceValidationExcluded: 1 });
   });
 
   it("fits the final review with a full 48000-token output reserve by pruning optional history before generation", () => {
