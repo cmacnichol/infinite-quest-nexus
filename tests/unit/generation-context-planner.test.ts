@@ -95,6 +95,109 @@ describe("layered generation context planner", () => {
     expect(() => plan(12_000)).toThrow(/context_budget_exceeded/);
   });
 
+  it("sends v5 ledger directions as player intent with final projection pointers only", () => {
+    const context: any = recentContext();
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 2, filteredDirectionCount: 3, oversizedDirectionCount: 4, loadedRows: 5 }, entries: [
+      { turnId: "ledger-2", turnNumber: 2, inputMode: "action", direction: "Ask the keeper about the sealed gate." },
+      { turnId: "ledger-3", turnNumber: 3, inputMode: "scene", direction: "Continue." }
+    ] };
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r3"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.storyLedger!.entries.map((entry: { turnId: string }) => entry.turnId)).toEqual(["ledger-2", "ledger-3"]);
+    expect(result.promptContext.storyLedger!.coverage).toEqual(context.authority.storyLedger.coverage);
+    expect(result.storyInput).toContain("storyLedger records earlier player intent, not proof of events.");
+    const evidence = result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "ledger");
+    expect(evidence).toHaveLength(2);
+    expect(evidence.every((entry) => entry.semanticRole === "player_intent" && /^\/storyLedger\/entries\/\d+\/direction$/u.test(entry.sourcePath))).toBe(true);
+    expect(() => bindManifestToProducingRequest(result.sourceManifest!, result.contextPlan.serializedRequest)).not.toThrow();
+  });
+
+  it.each(["generation-base-v3", "generation-base-v4"] as const)("keeps %s prompt bytes when optional ledger coverage is injected outside v5", (version) => {
+    const context: any = plannerContext(null);
+    if (version === "generation-base-v4") Object.assign(context.baseIdentity, {
+      version, castRevision: 0, castTimelineRevision: 0, castFingerprint: "c".repeat(64), castCoverageStartTurn: null, castTrackedThroughTurn: null
+    });
+    const baseline = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_900, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 2, filteredDirectionCount: 3, oversizedDirectionCount: 4, loadedRows: 5 },
+      entries: [{ turnId: "ledger-injected", turnNumber: 1, inputMode: "action", direction: "Injected intent." }] };
+    const injected = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_900, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
+
+    expect(injected.storyInput).toBe(baseline.storyInput);
+    expect(injected.contextPlan.serializedRequest).toBe(baseline.contextPlan.serializedRequest);
+    expect(injected.promptContext).not.toHaveProperty("storyLedger");
+  });
+
+  it("reserves a measured newest ledger suffix with bounded writer and reviewer trials", () => {
+    const context: any = recentContext();
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: null,
+      coverage: { unreadThroughTurn: null, missingTurnCount: 0, filteredDirectionCount: 0, oversizedDirectionCount: 0, loadedRows: 512 },
+      entries: Array.from({ length: 512 }, (_, index) => ({
+        turnId: `ledger-${index + 1}`, turnNumber: index + 1, inputMode: "action", direction: `Ask about marker ${index + 1}. `.repeat(8)
+      })) };
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
+      (manifest) => estimateStoryTokens(JSON.stringify({ reviewer: true, manifest })), 31_900,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const reservation = (result.layerDiagnostics as any).ledgerReservation;
+
+    expect(result.promptContext.storyLedger!.entries.length).toBeGreaterThan(0);
+    expect(result.promptContext.storyLedger!.entries.length).toBeLessThan(512);
+    expect(result.promptContext.storyLedger!.entries[0]!.turnNumber).toBe(512 - result.promptContext.storyLedger!.entries.length + 1);
+    expect(reservation).toMatchObject({ measurementTrialCount: expect.any(Number), writerSerializationCount: expect.any(Number), reviewerSerializationCount: expect.any(Number) });
+    expect(reservation.measurementTrialCount).toBeLessThanOrEqual(12);
+    expect(reservation.writerSerializationCount).toBe(reservation.measurementTrialCount * 2);
+    expect(reservation.reviewerSerializationCount).toBe(reservation.measurementTrialCount);
+    expect(reservation.elapsedMilliseconds).toBeGreaterThanOrEqual(0);
+    process.stderr.write(`${JSON.stringify({ historyLedgerReservationMetrics: { sourceEntries: 512, selectedEntries: result.promptContext.storyLedger!.entries.length,
+      measurementTrials: reservation.measurementTrialCount, writerSerializations: reservation.writerSerializationCount,
+      reviewerSerializations: reservation.reviewerSerializationCount, elapsedMilliseconds: Math.round(reservation.elapsedMilliseconds * 100) / 100 } })}\n`);
+  }, 20_000);
+
+  it("keeps ledger intent when the matching recent turn is not actually reserved", () => {
+    const context: any = recentContext();
+    context.recentTurns[0].narration = "Too large to reserve. ".repeat(5_000);
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 0, filteredDirectionCount: 0, oversizedDirectionCount: 0, loadedRows: 2 },
+      entries: [
+        { turnId: "turn-2", turnNumber: 2, inputMode: "action", direction: "Ask the keeper about the lantern." },
+        { turnId: "turn-3", turnNumber: 3, inputMode: "action", direction: "Wait for the tide." }
+      ] };
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.recentTurns!.map((entry: { sourceId: string }) => entry.sourceId)).toEqual(["turn-3"]);
+    expect(result.promptContext.storyLedger!.entries.map((entry: { turnId: string }) => entry.turnId)).toContain("turn-2");
+  });
+
+  it("keeps feasible large mandatory authority within a smaller reviewer cap by omitting ledger history", () => {
+    const context: any = recentContext();
+    context.authority.rules = ["The sealed gate remains closed. ".repeat(1_200)];
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: null,
+      coverage: { unreadThroughTurn: null, missingTurnCount: 0, filteredDirectionCount: 0, oversizedDirectionCount: 0, loadedRows: 3 },
+      entries: [1, 2, 3].map((turnNumber) => ({ turnId: `ledger-${turnNumber}`, turnNumber, inputMode: "action", direction: "Search the quay for the silver seal. ".repeat(20) })) };
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const reviewCost = (manifest: NonNullable<ReturnType<typeof run>["sourceManifest"]>) => 10_000 + manifest.entries.filter((entry) => entry.selectionGroup === "ledger").length * 1_000;
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, reviewCost, 13_030,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.storyInput).toContain("The sealed gate remains closed.");
+    expect(result.promptContext.storyLedger!.entries).toEqual([]);
+    expect(result.contextPlan.additionalRequestTokens + estimatedInputSafetyAllowanceTokens(result.contextPlan.additionalRequestTokens)).toBeLessThanOrEqual(13_030);
+  });
+
   it("does not measure continuity review when the frozen policy disables it", () => {
     let reviewMeasurements = 0;
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "off" });
@@ -103,6 +206,13 @@ describe("layered generation context planner", () => {
       "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, () => { reviewMeasurements++; return 100_000; });
     expect(reviewMeasurements).toBe(0);
     expect(result.promptContext.recentTurns).toHaveLength(2);
+  });
+  it("ignores a supplied reviewer limit in v5 when policy review is disabled", () => {
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "off" });
+    expect(() => planGenerationPromptContext(recentContext(), plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, () => 100_000, 1,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION)).not.toThrow();
   });
   it.each(["action", "scene"] as const)("sends bounded cast corrections with exact evidence in %s mode", (mode) => {
     const context: any = plannerContext({ source: "none", name: "", characterText: "", profile: null });

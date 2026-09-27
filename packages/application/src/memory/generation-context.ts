@@ -1,4 +1,5 @@
 import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, sha256Hex, z } from "@infinite-quest/contracts";
+import { storyLedgerSchema } from "./story-history-ledger.js";
 export type { ReviewEvidenceReference } from "@infinite-quest/contracts";
 
 /** Private only: these values are not public preview projections. */
@@ -66,6 +67,7 @@ export const generationContextAuthoritySchema = z.object({
   trackers: campaignRuntimeStateContentSchema.shape.trackers, rpgStats: campaignRuntimeStateContentSchema.shape.rpgStats,
   eventTriggers: campaignRuntimeStateContentSchema.shape.eventTriggers,
   pendingEventTriggers: campaignRuntimeStateContentSchema.shape.pendingEventTriggers,
+  storyLedger: storyLedgerSchema.optional(),
   latestTurn: z.object({ action: z.string(), narration: z.string(), inputMode: z.enum(["action", "scene"]).optional() }).strict().nullable()
 }).strict();
 export type GenerationContextAuthority = DeepReadonly<z.infer<typeof generationContextAuthoritySchema>>;
@@ -127,7 +129,7 @@ const evidenceShapeSchema = z.object({
   semanticRole: z.enum(["accepted_narration", "player_intent", "world_reference", "world_rule", "character_authority", "corrected_state", "current_continuity", "canonical_fact", "derived_summary"]),
   form: z.enum(["complete", "excerpt"]), content: z.string(), spans: z.array(spanSchema),
   sourceLength: ordinalSchema, canonicalFactId: z.string().uuid().nullable(), rank: z.number().finite(),
-  selectionGroup: z.enum(["protected", "direction", "recent", "world", "cast", "historical_fact", "retrieved"]),
+  selectionGroup: z.enum(["protected", "direction", "recent", "ledger", "world", "cast", "historical_fact", "retrieved"]),
   sourcePath: jsonPointerSchema, normalizationVersion: z.enum(["fiction-safe-json-v1", "story-fiction-source-v1"])
 }).strict();
 export type SourceRef = DeepReadonly<z.infer<typeof sourceRefSchema>>;

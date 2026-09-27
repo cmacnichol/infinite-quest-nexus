@@ -12,6 +12,7 @@ import type {
   LegacyGenerationBaseIdentity
 } from "../../application/src/memory/generation-context.js";
 import type { GenerationRecentTurn } from "../../application/src/memory/generation-context.js";
+import { ledgerDirectionExcerpt, type StoryLedger } from "../../application/src/memory/story-history-ledger.js";
 export type GenerationBaseIdentity = LegacyGenerationBaseIdentity | GenerationBaseIdentityV3 | GenerationBaseIdentityV4;
 
 export type ResolvedGenerationAuthority = Readonly<{
@@ -20,6 +21,7 @@ export type ResolvedGenerationAuthority = Readonly<{
   worldVersionId: string;
   baseIdentity: GenerationBaseIdentity;
   recentTurns?: readonly GenerationRecentTurn[];
+  storyLedger?: StoryLedger;
   castSnapshot?: CastGenerationSnapshot;
 }>;
 
@@ -31,6 +33,8 @@ type ResolveRequest = Readonly<{
   /** Policy attempts bind effective character authority; historical jobs retain their stored legacy shape. */
   baseIdentityVersion?: "legacy" | "generation-base-v3" | "generation-base-v4";
   captureRecentWindow?: boolean;
+  /** V5 only: bounded, transaction-scoped player-intent source projection. */
+  captureStoryLedger?: boolean;
 }>;
 
 function characterAuthorityIdentity(
@@ -142,6 +146,49 @@ export async function resolveGenerationAuthoritySnapshot(
       narrationCorrectionRevision: row.correction_revision };
     return { ...source, sourceHash: sha256(stableStringify(source)) };
   });
+  const ledgerRows = request.captureStoryLedger && modern && baseTurnNumber > 0 ? await (async () => {
+    const rows: { turn_id: string; turn_number: number; input_mode: "action" | "scene"; action: string | null }[] = [];
+    let cursor: { turnNumber: number; turnId: string } | null = null;
+    // Four small keyset pages cap source materialization at 512 records even
+    // for long-running campaigns, while retaining an honest lower omission.
+    for (let page = 0; page < 4; page++) {
+      const result: { rows: { turn_id: string; turn_number: number; input_mode: "action" | "scene"; action: string | null }[] } = await client.query<{ turn_id: string; turn_number: number; input_mode: "action" | "scene"; action: string | null }>(
+        `SELECT t.id AS turn_id,t.turn_number,t.input_mode,
+                CASE WHEN char_length(t.action) <= 12000 AND octet_length(t.action) <= 48000 THEN t.action ELSE NULL END AS action
+           FROM turns t JOIN campaigns c ON c.id=t.campaign_id AND c.owner_user_id=t.owner_user_id
+          WHERE t.owner_user_id=$1 AND t.campaign_id=$2 AND c.world_version_id=$3 AND t.turn_number < $4
+            AND ($5::int IS NULL OR (t.turn_number,t.id) < ($5,$6))
+          ORDER BY t.turn_number DESC,t.id DESC LIMIT 128`,
+        [request.ownerUserId, request.campaignId, campaign.world_version_id, baseTurnNumber, cursor?.turnNumber ?? null, cursor?.turnId ?? null]
+      );
+      rows.push(...result.rows);
+      const last: { turn_id: string; turn_number: number } | undefined = result.rows.at(-1);
+      if (!last || result.rows.length < 128) break;
+      cursor = { turnNumber: last.turn_number, turnId: last.turn_id };
+    }
+    return rows;
+  })() : undefined;
+  const storyLedger: StoryLedger | undefined = ledgerRows ? (() => {
+    const entries = ledgerRows.flatMap((row) => {
+      if (row.action === null) return [];
+      const direction = ledgerDirectionExcerpt(row.action, 480);
+      return direction ? [{ turnId: row.turn_id, turnNumber: row.turn_number, inputMode: row.input_mode, direction }] : [];
+    }).sort((left, right) => left.turnNumber - right.turnNumber || left.turnId.localeCompare(right.turnId));
+    const lowest = ledgerRows.at(-1)?.turn_number ?? null;
+    const highest = ledgerRows[0]?.turn_number ?? null;
+    const inspectedTurnCount = lowest === null || highest === null ? 0 : highest - lowest + 1;
+    const missingTurnCount = Math.max(0, inspectedTurnCount - ledgerRows.length);
+    const oversizedDirectionCount = ledgerRows.filter((row) => row.action === null).length;
+    const filteredDirectionCount = ledgerRows.filter((row) => row.action !== null && !ledgerDirectionExcerpt(row.action, 480)).length;
+    // Full source capacity leaves an unread prefix unless the inspected range
+    // reaches turn one. This remains distinct from gaps inside that range.
+    const unreadThroughTurn = ledgerRows.length === 512 && lowest !== null && lowest !== 1 ? lowest - 1 : null;
+    const omittedThroughTurn = Math.max(unreadThroughTurn ?? 0,
+      ...ledgerRows.filter((row) => row.action === null || !entries.some((entry) => entry.turnId === row.turn_id)).map((row) => row.turn_number)) || null;
+    return { version: "story-ledger-v1", entries, omittedThroughTurn, coverage: {
+      unreadThroughTurn, missingTurnCount, filteredDirectionCount, oversizedDirectionCount, loadedRows: ledgerRows.length
+    } };
+  })() : undefined;
   const legacyIdentity: LegacyGenerationBaseIdentity = {
     operationKind: request.operationKind,
     expectedTurnNumber: request.expectedTurnNumber,
@@ -180,6 +227,7 @@ export async function resolveGenerationAuthoritySnapshot(
     worldVersionId: campaign.world_version_id,
     baseIdentity,
     ...(cast ? { castSnapshot: cast.snapshot } : {}),
-    ...(recentTurns ? { recentTurns } : {})
+    ...(recentTurns ? { recentTurns } : {}),
+    ...(storyLedger ? { storyLedger } : {})
   };
 }

@@ -2,6 +2,7 @@ import type { ContextBudgetBlock } from "../../../packages/story-engine/src/cont
 import { normalizeStoryEvidenceSource, selectVerifiedNarrativeExcerpt } from "../../../packages/domain/src/story-evidence-spans.js";
 import { worldFictionOverview } from "../../../packages/domain/src/world-fiction-reference.js";
 import type { StoryMemoryPolicy } from "../../../packages/contracts/src/story-memory-policy.js";
+import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol } from "../../../packages/contracts/src/story-memory-policy.js";
 import { canonicalEvidenceJson, createStoryEvidence, generationEvidenceManifestHash, hasGenerationCharacterAuthority, type GenerationContextCandidate, type GenerationEvidenceManifest, type StoryEvidence } from "../../../packages/application/src/memory/generation-context.js";
 import type { MemoryGenerationAuthorityContext } from "../../../packages/application/src/index.js";
 import type { StoryLengthWordRange } from "../../../packages/contracts/src/story-settings.js";
@@ -10,6 +11,7 @@ import { selectWorldFictionReferences, sha256, stableStringify } from "../../../
 import type { RuntimeTextExecution as GenerationTextProvider } from "./provider-credential-transport-adapter.js";
 import { isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
 import { selectCastContext, type CastContextSelection } from "../../../packages/domain/src/campaign-cast-context.js";
+import { reserveNewestWholeSuffix } from "../../../packages/application/src/memory/story-history-reservation.js";
 
 type SentCast = { coverage: CastContextSelection["coverage"]; notice: string; characters: {
   characterId: string; revision: number; fields: { authority: "user" | "observation"; evidenceId: string;
@@ -108,6 +110,11 @@ function generationSourceManifest(
         rank: index, selectionGroup: "recent", sourcePath: `/recentTurns/${index}/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
     }
   }
+  const ledger = (sentAuthority.storyLedger as { entries?: readonly { turnId: string; turnNumber: number; inputMode: "action" | "scene"; direction: string }[] } | undefined)?.entries ?? [];
+  for (const [index, entry] of ledger.entries()) {
+    entries.push(completeEvidence({ source: { kind: "turn", id: entry.turnId, revision: sha256(stableStringify(entry)), turnNumber: entry.turnNumber },
+      semanticRole: "player_intent", rank: index, selectionGroup: "ledger", sourcePath: `/storyLedger/entries/${index}/direction`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+  }
   const historical = (sentAuthority.chronicle ?? []) as readonly PromptCandidate[];
   const sentCast = sentAuthority.cast as SentCast | undefined;
   if (sentCast) for (const field of ["coverage", "notice"] as const) {
@@ -177,6 +184,11 @@ export function planGenerationPromptContext(
   frozenContextProtocol?: string
 ) {
   const authority = context.authority;
+  const historyCoverage = isHistoryCoverageContextProtocol(frozenContextProtocol);
+  // We retain the complete bounded ledger source through reservation. A ledger
+  // direction overlaps only when its matching recent record actually survives
+  // exact packing; an available-but-omitted recent turn cannot erase intent.
+  const ledgerRecords = historyCoverage ? authority.storyLedger?.entries ?? [] : [];
   const castSnapshot = isGenerationBaseIdentityV4(context.baseIdentity) ? authority.castSnapshot : undefined;
   let castSelection: CastContextSelection | undefined;
   let castAllocatedTokens = 0;
@@ -218,6 +230,8 @@ export function planGenerationPromptContext(
     currentScene: fictionSafeAuthority(authority.latestTurn ?? null),
     ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: [] as readonly Readonly<{ sourceId: string; sourcePath: string; content: string }>[] } : {}),
     ...(layered ? { recentTurns: [] as typeof recentRecords } : {}),
+    ...(historyCoverage ? { storyLedger: { version: "story-ledger-v1" as const, entries: [] as typeof ledgerRecords,
+      omittedThroughTurn: authority.storyLedger?.omittedThroughTurn ?? null, ...(authority.storyLedger?.coverage ? { coverage: authority.storyLedger.coverage } : {}) } } : {}),
     chronicle: [] as readonly PromptCandidate[]
   };
   const duplicateIds: string[] = [];
@@ -256,11 +270,17 @@ export function planGenerationPromptContext(
     baseUrl: ""
   };
   const serialize = serializeStoryRequest ?? ((input: string) => serializeProviderRequest(serializationProfile, { systemPrompt, input }).body);
+  const reviewEnabled = Boolean(reviewInputTokens && attemptId && policy?.continuityReview !== "off");
+  let ledgerMeasurementActive = false;
+  let ledgerWriterSerializationCount = 0;
+  let ledgerReviewerSerializationCount = 0;
   const authorityRevision = sha256(stableStringify({ baseIdentity: context.baseIdentity, authority }));
   const blocks = [
     { id: "authority", revision: authorityRevision, content: stableStringify(authorityContext), protected: true, priority: 0, ordinal: 0, scope: "authority" },
     ...recentRecords.map((turn) => ({ id: `recent:${turn.sourceId}`, revision: context.recentTurns!.find((source) => source.turnId === turn.sourceId)!.sourceHash,
       content: stableStringify(turn), protected: false, priority: -turn.turnNumber, ordinal: turn.turnNumber, scope: "recent" })),
+    ...ledgerRecords.map((entry) => ({ id: `ledger:${entry.turnId}`, revision: sha256(stableStringify(entry)),
+      content: stableStringify(entry), protected: false, priority: -entry.turnNumber, ordinal: entry.turnNumber, scope: "ledger" })),
     ...worldReferences.map((reference, ordinal) => ({
       id: reference.sourceId, revision: sha256(reference.content), content: reference.content,
       protected: false, priority: reference.rank, ordinal, scope: "world"
@@ -284,6 +304,16 @@ export function planGenerationPromptContext(
       .filter((reference): reference is typeof worldReferences[number] => Boolean(reference))
       .map(({ sourceId, sourcePath, content }) => ({ sourceId, sourcePath, content })) } : {}),
     ...(layered ? { recentTurns: recentRecords.filter((turn) => selected.some((block) => block.id === `recent:${turn.sourceId}`)).sort((a, b) => a.turnNumber - b.turnNumber) } : {}),
+    ...(historyCoverage ? (() => {
+      const reservedRecentIds = new Set(selected.filter((block: { id: string; scope?: string }) => block.scope === "recent")
+        .map((block) => block.id.slice("recent:".length)));
+      const entries = ledgerRecords.filter((entry) => selected.some((block) => block.id === `ledger:${entry.turnId}`)
+        && !reservedRecentIds.has(entry.turnId));
+      const absent = ledgerRecords.filter((entry) => !entries.some((selectedEntry) => selectedEntry.turnId === entry.turnId));
+      return { storyLedger: { version: "story-ledger-v1" as const, entries,
+        omittedThroughTurn: Math.max(authority.storyLedger?.omittedThroughTurn ?? 0, ...absent.map((entry) => entry.turnNumber)) || null,
+        ...(authority.storyLedger?.coverage ? { coverage: authority.storyLedger.coverage } : {}) } };
+    })() : {}),
     chronicle: selected.filter((block: { id: string; scope?: string }) => block.scope === "chronicle")
       .map((block) => candidates.find((candidate) => candidate.id === block.id))
       .filter((candidate): candidate is PromptCandidate => Boolean(candidate))
@@ -292,22 +322,27 @@ export function planGenerationPromptContext(
     blocks: planBlocks,
     contextLimit,
     inputLimit,
-    ...(reviewInputTokens ? { additionalRequestInputLimit: reviewInputLimit ?? inputLimit } : {}),
+    ...(reviewEnabled ? { additionalRequestInputLimit: reviewInputLimit ?? inputLimit } : {}),
     count: estimateStoryTokens,
     safetyAllowanceTokens: estimatedInputSafetyAllowanceTokens,
     contextSafetyAllowanceTokens: 0,
     serializeContext: (selected: readonly Readonly<{ id: string }>[]) => stableStringify(promptContext(selected)),
     contextValue: promptContext,
-    serializeRequest: (selected: ReturnType<typeof promptContext>) => serialize(promptRoute === "story_memory"
-        ? buildStoryMemoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
+    serializeRequest: (selected: ReturnType<typeof promptContext>) => {
+      if (ledgerMeasurementActive) ledgerWriterSerializationCount++;
+      return serialize(promptRoute === "story_memory"
+        ? buildStoryMemoryUserPrompt(selected, action, false, guidance, storyLength, inputMode, historyCoverage)
         : buildStoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
-    ),
-    ...(reviewInputTokens && attemptId && policy?.continuityReview !== "off" ? {
+      );
+    },
+    ...(reviewEnabled ? {
       additionalRequestTokens: (selected: ReturnType<typeof promptContext>) => {
-        const body = serialize(buildStoryMemoryUserPrompt(selected, action, false, guidance, storyLength, inputMode));
-        const manifest = generationSourceManifest(attemptId, body, context, action, selected,
+        if (ledgerMeasurementActive) ledgerWriterSerializationCount++;
+        const body = serialize(buildStoryMemoryUserPrompt(selected, action, false, guidance, storyLength, inputMode, historyCoverage));
+        const manifest = generationSourceManifest(attemptId!, body, context, action, selected,
           worldReferences.filter((reference) => (selected.worldReferences ?? []).some((entry) => entry.sourceId === reference.sourceId)));
-        return reviewInputTokens(manifest);
+        if (ledgerMeasurementActive) ledgerReviewerSerializationCount++;
+        return reviewInputTokens!(manifest);
       }
     } : {}),
     protectedScope: "campaign_context" as const
@@ -336,11 +371,14 @@ export function planGenerationPromptContext(
   );
   const requestHeadroom = (plan: ReturnType<typeof measure>) => Math.min(
     inputLimit - writerRequestCost(plan),
-    (reviewInputLimit ?? inputLimit) - reviewRequestCost(plan)
+    ...(reviewEnabled ? [(reviewInputLimit ?? inputLimit) - reviewRequestCost(plan)] : [])
   );
   const useWorldQuota = hasGenerationCharacterAuthority(context.baseIdentity) && Boolean(authority.worldReferenceSource);
+  let historyReservationDiagnostics: { originalHeadroomTokens: number; ledgerBudgetTokens: number; factBudgetTokens: number;
+    measurementTrialCount: number; writerSerializationCount: number; reviewerSerializationCount: number; elapsedMilliseconds: number; firstOmittedTurnNumber: number | null;
+    postProjectionRemovedEntryCount: number } | undefined;
   let plan;
-  if (useWorldQuota || layered || castSnapshot) {
+  if (useWorldQuota || layered || castSnapshot || historyCoverage) {
     const authorityBlock = blocks[0]!;
     let protectedPlan = measure([authorityBlock]);
     const castBlocks: typeof blocks = [];
@@ -365,10 +403,47 @@ export function planGenerationPromptContext(
       }
     }
     const reservedAuthority = [authorityBlock, ...castBlocks];
-    const residual = Math.max(0, Math.min(
+    const originalHeadroom = Math.max(0, Math.min(
       contextLimit - protectedPlan.contextTokens,
       requestHeadroom(protectedPlan)
     ));
+    const ledgerCeiling = historyCoverage ? Math.floor(originalHeadroom * HISTORY_COVERAGE_POLICY.ledgerBudgetShare) : 0;
+    const factCeiling = historyCoverage ? Math.floor(originalHeadroom * HISTORY_COVERAGE_POLICY.protectedFactBudgetShare) : 0;
+    let selectedLedgerBlocks: typeof blocks = [];
+    if (historyCoverage) {
+      const ledgerBlocks = blocks.filter((candidate) => candidate.scope === "ledger")
+        .sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id));
+      const reservation = reserveNewestWholeSuffix({
+        entries: ledgerBlocks,
+        budgetTokens: ledgerCeiling,
+        measureTokens: (suffix) => {
+          ledgerMeasurementActive = true;
+          try {
+            const trial = measure([...reservedAuthority, ...suffix.map((block) => ({ ...block, protected: true }))]);
+            if (!suffix.every((block) => trial.selected.some((candidate) => candidate.id === block.id))) return Number.POSITIVE_INFINITY;
+            return Math.max(trial.contextTokens - protectedPlan.contextTokens, requestCostDelta(trial, protectedPlan));
+          } catch (error) {
+            if (error instanceof ContextBudgetError) return Number.POSITIVE_INFINITY;
+            throw error;
+          } finally {
+            ledgerMeasurementActive = false;
+          }
+        }
+      });
+      selectedLedgerBlocks = reservation.entries.map((block) => ({ ...block, protected: true }));
+      historyReservationDiagnostics = {
+        originalHeadroomTokens: originalHeadroom,
+        ledgerBudgetTokens: ledgerCeiling,
+        factBudgetTokens: factCeiling,
+        measurementTrialCount: reservation.trialCount,
+        writerSerializationCount: ledgerWriterSerializationCount,
+        reviewerSerializationCount: ledgerReviewerSerializationCount,
+        elapsedMilliseconds: reservation.elapsedMilliseconds,
+        firstOmittedTurnNumber: reservation.firstOmittedEntry?.ordinal ?? null,
+        postProjectionRemovedEntryCount: 0
+      };
+    }
+    const residual = Math.max(0, originalHeadroom - factCeiling - ledgerCeiling);
     const worldCeiling = Math.floor(residual * (policy?.worldResidualShare ?? 0.15));
     const recentCeiling = Math.floor(residual * (policy?.recentResidualShare ?? 0));
     const selectedRecentBlocks: typeof blocks = [];
@@ -376,7 +451,7 @@ export function planGenerationPromptContext(
       for (let ordinal = context.baseIdentity.baseTurnNumber - 1; ordinal >= Math.max(1, context.baseIdentity.baseTurnNumber - 2); ordinal--) {
         const block = blocks.find((candidate) => candidate.scope === "recent" && candidate.ordinal === ordinal);
         if (!block) { recentDiagnostics.firstGapReason = "recent_gap"; break; }
-        const trial = measure([...reservedAuthority, ...selectedRecentBlocks, block]);
+        const trial = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks, block]);
         if (!trial.selected.some((candidate) => candidate.id === block.id)) {
           recentDiagnostics.firstGapReason = trial.omitted[0]?.reason ?? "context_limit"; break;
         }
@@ -387,10 +462,23 @@ export function planGenerationPromptContext(
         recentDiagnostics.included++;
       }
     }
-    const worldBasePlan = measure([...reservedAuthority, ...selectedRecentBlocks]);
+    // A selected recent record already carries both the requested intent and
+    // accepted narration. Remove only those duplicate ledger projections and
+    // immediately remeasure the frozen selection before allocating optional
+    // world/retrieval records. Do not backfill from older ledger entries.
+    const reservedRecentIds = new Set(selectedRecentBlocks.map((block) => block.id.slice("recent:".length)));
+    const projectedLedgerBlocks = selectedLedgerBlocks.filter((block) => !reservedRecentIds.has(block.id.slice("ledger:".length)));
+    if (projectedLedgerBlocks.length !== selectedLedgerBlocks.length) {
+      historyReservationDiagnostics = historyReservationDiagnostics && {
+        ...historyReservationDiagnostics,
+        postProjectionRemovedEntryCount: selectedLedgerBlocks.length - projectedLedgerBlocks.length
+      };
+      selectedLedgerBlocks = projectedLedgerBlocks;
+    }
+    const worldBasePlan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks]);
     const selectedWorldBlocks: typeof blocks = [];
     for (const worldBlock of blocks.filter((block) => block.scope === "world").sort((left, right) => left.priority - right.priority || left.ordinal - right.ordinal || left.id.localeCompare(right.id))) {
-      const trial = measure([...reservedAuthority, ...selectedRecentBlocks, ...selectedWorldBlocks, worldBlock]);
+      const trial = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, worldBlock]);
       if (!trial.selected.some((block) => block.id === worldBlock.id)) continue;
       const added = Math.max(
         trial.contextTokens - worldBasePlan.contextTokens,
@@ -407,7 +495,7 @@ export function planGenerationPromptContext(
       if (layered && candidate.turnId && recentIds.has(candidate.turnId)) { duplicateIds.push(candidate.id); return false; }
       return true;
     });
-    plan = measure([...reservedAuthority, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
+    plan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
   } else {
     plan = measure(blocks);
   }
@@ -427,7 +515,7 @@ export function planGenerationPromptContext(
   }
   const selectedContext = promptContext(plan.selected);
   const storyInput = promptRoute === "story_memory"
-    ? buildStoryMemoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode)
+    ? buildStoryMemoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode, historyCoverage)
     : buildStoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode);
   const requestBody = serialize(storyInput);
   return {
@@ -439,6 +527,7 @@ export function planGenerationPromptContext(
       excerptsComplete: selectedContext.chronicle.filter((candidate) => !candidate.evidenceForm).length,
       excerptsPartial: selectedContext.chronicle.filter((candidate) => candidate.evidenceForm === "excerpt").length,
       sourceValidationFailures,
+      ...(historyReservationDiagnostics ? { ledgerReservation: historyReservationDiagnostics } : {}),
       components: Object.fromEntries(Object.entries(selectedContext).map(([key, value]) => [key, estimateStoryTokens(stableStringify(value))])),
       omitted: [
         ...duplicateIds.map((id) => ({ id, reason: "duplicate_source" as const })),

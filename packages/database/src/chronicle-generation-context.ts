@@ -11,6 +11,7 @@ import type { DatabaseClient } from "./pool.js";
 import { castGenerationSnapshotSchema } from "../../contracts/src/campaign-cast-context.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { characterFictionAuthority, stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
+import { isHistoryCoverageContextProtocol } from "../../contracts/src/story-memory-policy.js";
 import { loadPostgresChronicleGenerationCandidates } from "./chronicle-context-repository.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import {
@@ -50,7 +51,8 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const resolved = await resolveGenerationAuthoritySnapshot(client, {
     ...scope,
     ...(scope.expectedBaseIdentity && hasGenerationCharacterAuthority(scope.expectedBaseIdentity)
-      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined }
+      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
+        captureStoryLedger: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol) }
       : {})
   });
   if (scope.expectedBaseIdentity
@@ -139,6 +141,7 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
       rpgStats: continuity.rpgStats,
       eventTriggers: continuity.eventTriggers,
       pendingEventTriggers: continuity.pendingEventTriggers,
+      ...(resolved.storyLedger ? { storyLedger: resolved.storyLedger } : {}),
       latestTurn: latest?.rows[0] ? {
         ...(v3 ? { inputMode: latest.rows[0].input_mode } : {}),
         action: stripMechanicsLeakage(latest.rows[0].action).text,
