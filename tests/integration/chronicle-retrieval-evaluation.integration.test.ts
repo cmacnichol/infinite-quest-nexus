@@ -144,7 +144,7 @@ integration("Chronicle retrieval evaluation integration seam", () => {
     })).rejects.toBe(rollback);
   });
 
-  it("uses the frozen v5 context protocol for generation-only parent limits", async () => {
+  it("keeps the public preview on its legacy limits when a v5 snapshot is present", async () => {
     const fixtureCorpus = JSON.parse(await readFile(
       resolve("tests/fixtures/chronicle-retrieval-evaluation.v3.json"),
       "utf8"
@@ -172,18 +172,14 @@ integration("Chronicle retrieval evaluation integration seam", () => {
         ...seeded.cases[0]!.scope,
         request: { ...seeded.cases[0]!.scope.request, retrievalBudgetTokens: 32_000 },
         storyMemoryPolicy: v5
-      } as Parameters<typeof application.generation.buildContextPreview>[1];
+      };
       const preview = await application.generation.buildContextPreview(database, scope);
       const retrieval = preview.retrieval as Record<string, unknown>;
       const diversity = retrieval.diversity as Record<string, unknown>;
 
-      expect(diversity).toMatchObject({
-        maximumParentTokens: 48_000,
-        maximumParents: 64,
-        maximumParentsPerTurn: 8,
-        stopReason: expect.any(String)
-      });
-      expect(diversity.selectedParentTokens).toEqual(expect.any(Number));
+      expect(diversity).not.toHaveProperty("maximumParentTokens");
+      expect(diversity).not.toHaveProperty("maximumParents");
+      expect(diversity).not.toHaveProperty("selectedParentTokens");
       throw rollback;
     })).rejects.toBe(rollback);
   });

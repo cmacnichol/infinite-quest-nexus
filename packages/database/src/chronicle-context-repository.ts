@@ -1,4 +1,4 @@
-import { normalizeStoryEvidenceSource, verifyStoryEvidenceSpan, type StorySourceSpan } from "../../domain/src/story-evidence-spans.js";
+import { normalizeStoryEvidenceSource, selectVerifiedNarrativeExcerpt, verifyStoryEvidenceSpan, type StorySourceSpan } from "../../domain/src/story-evidence-spans.js";
 import { createHash } from "node:crypto";
 import type { ChronicleContextPreview, MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
 import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
@@ -25,6 +25,35 @@ const MAX_HISTORY_COVERAGE_PARENTS_PER_TURN = 250;
 // The rank-fusion union may be much larger than the SQL per-signal limit.
 // Bound v5's in-process MMR input independently of those query pools.
 const MAX_HISTORY_COVERAGE_SELECTION_CANDIDATES = 2_000;
+
+function boundedHistoryCoverageParents<T extends Readonly<{ parentMemoryId: string }>>(
+  candidates: readonly T[]
+): Readonly<{ candidates: readonly T[]; distinctParentCount: number }> {
+  const parents: T[] = [];
+  const seenParents = new Set<string>();
+  for (const candidate of candidates) {
+    if (seenParents.has(candidate.parentMemoryId)) continue;
+    seenParents.add(candidate.parentMemoryId);
+    if (parents.length < MAX_HISTORY_COVERAGE_SELECTION_CANDIDATES) parents.push(candidate);
+  }
+  return { candidates: parents, distinctParentCount: seenParents.size };
+}
+
+function historyCoverageSelectionDiagnostics(
+  selection: ReturnType<typeof selectDiverseChronicleParents>,
+  distinctParentCount: number,
+  selectedInputParents: number
+): ChronicleParentSelectionDiagnostics {
+  return {
+    ...selection.diagnostics,
+    candidatePoolLimit: MAX_HISTORY_COVERAGE_SELECTION_CANDIDATES,
+    candidatePoolCandidatesRemoved: Math.max(0, distinctParentCount - selectedInputParents),
+    // The input guard hid distinct parents from selection, so its stop reason
+    // must win over a downstream parent/token limit that cannot inspect them.
+    ...(distinctParentCount > selectedInputParents
+      ? { stopReason: "candidate_pool_limit" as const } : {})
+  };
+}
 import {
   buildChronicleEntityCatalog,
   CHRONICLE_EMBEDDING_PROTOCOL_VERSION,
@@ -156,6 +185,8 @@ export type ChronicleGenerationCandidate = Readonly<{
 export type ChronicleGenerationCandidateResult = Readonly<{
   candidates: readonly ChronicleGenerationCandidate[];
   chronicleRetrieval: ChronicleRetrievalAudit;
+  /** Private, content-free v5 selection accounting for generation diagnostics. */
+  selectionDiagnostics?: ChronicleParentSelectionDiagnostics;
 }>;
 
 type ChunkCandidateRow = Readonly<{
@@ -185,6 +216,7 @@ type BatchedChunkCandidateRow = ChunkCandidateRow & Readonly<{
 type ChunkedRankFusionResult = Readonly<{
   retrieval: Record<string, unknown>;
   selectedParentContent: ReadonlyMap<string, string>;
+  selectionDiagnostics?: ChronicleParentSelectionDiagnostics;
   selectedNarrativeSpans?: ReadonlyMap<string, readonly StorySourceSpan[]> | undefined;
   providerFingerprint: string | null;
   costIds: readonly string[];
@@ -216,6 +248,7 @@ type RetrievalExecution = Readonly<{
   memories: ContextMemoryRow[];
   retrieval: Record<string, unknown>;
   selectedParentContent: ReadonlyMap<string, string> | null;
+  selectionDiagnostics?: ChronicleParentSelectionDiagnostics;
   selectedNarrativeSpans?: ReadonlyMap<string, readonly StorySourceSpan[]> | undefined;
   latencyMs: number;
   providerFingerprint: string | null;
@@ -230,6 +263,7 @@ type ChronicleRetrievalStage = Readonly<{
   expandedQuery: string;
   memories: ContextMemoryRow[];
   selectedParentContent: ReadonlyMap<string, string> | null;
+  selectionDiagnostics?: ChronicleParentSelectionDiagnostics;
   selectedNarrativeSpans?: ReadonlyMap<string, readonly StorySourceSpan[]> | undefined;
   retrieval: Record<string, unknown>;
   chronicleRetrieval: ChronicleRetrievalAudit;
@@ -439,9 +473,12 @@ export function generationChronicleRetrievalLimits(retrievalBudgetTokens: number
   };
 }
 
-function generationRetrievalLimits(scope: ChronicleRetrievalScope): ReturnType<typeof generationChronicleRetrievalLimits> {
+function generationRetrievalLimits(
+  scope: ChronicleRetrievalScope,
+  generationCandidates = false
+): ReturnType<typeof generationChronicleRetrievalLimits> {
   return generationChronicleRetrievalLimits(scope.request.retrievalBudgetTokens, {
-    historyCoverage: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)
+    historyCoverage: generationCandidates && isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)
   });
 }
 
@@ -491,20 +528,29 @@ function selectHistoryCoverageLegacyParents(
       embedding: null,
       fusedRank: index + 1
     }));
-  return selectDiverseChronicleParents(candidates, {
+  const boundedCandidates = boundedHistoryCoverageParents(candidates);
+  const selection = selectDiverseChronicleParents(boundedCandidates.candidates, {
     ...generationRankFusionProfile(profile, limits).diversityPolicy,
     latestSceneParentMemoryId
   });
+  return {
+    ...selection,
+    diagnostics: historyCoverageSelectionDiagnostics(
+      selection,
+      boundedCandidates.distinctParentCount,
+      boundedCandidates.candidates.length
+    )
+  };
 }
 
 async function loadContextMemories(
   client: DatabaseClient,
   scope: ChronicleRetrievalScope,
+  limits: ReturnType<typeof generationChronicleRetrievalLimits>,
   query: string,
   queryEntityIds: string[],
   entityCatalog: readonly EntityReference[] = [],
 ): Promise<ContextMemoryRow[]> {
-  const limits = generationRetrievalLimits(scope);
   const castAliases = scope.castSnapshot ? matchEntityReferences(scope.request.query, entityCatalog)
     .filter(({ entity }) => entity.source === "campaign")
     .flatMap(({ entity }) => [entity.displayName, ...entity.aliases]).slice(0, 24)
@@ -639,7 +685,7 @@ export async function loadPostgresChronicleGenerationCandidates(
       recentTurns: 8,
       throughTurnNumber: scope.throughTurnNumber
     }
-  }, dependencies, options);
+  }, dependencies, { ...options, generationCandidates: true });
   const selectedParentContent = stage.selectedParentContent;
   const selected = (selectedParentContent === null
     ? stage.memories
@@ -667,7 +713,11 @@ export async function loadPostgresChronicleGenerationCandidates(
       spans: stage.selectedNarrativeSpans.get(memory.id)!.map(({ start, end }) => ({ start, end }))
     } } : {})
   }));
-  return { candidates, chronicleRetrieval: stage.chronicleRetrieval };
+  return {
+    candidates,
+    chronicleRetrieval: stage.chronicleRetrieval,
+    ...(stage.selectionDiagnostics ? { selectionDiagnostics: stage.selectionDiagnostics } : {})
+  };
 }
 
 function contextMetrics(row: ContextMetricRow): ContextMetrics {
@@ -866,6 +916,7 @@ async function loadContextConfig(
 async function applyContextSemanticRelevance(
   client: DatabaseClient,
   scope: ChronicleRetrievalScope,
+  limits: ReturnType<typeof generationChronicleRetrievalLimits>,
   query: string,
   memories: ContextMemoryRow[],
   queryEntityIds: string[],
@@ -877,7 +928,6 @@ async function applyContextSemanticRelevance(
   useSavepoints = true,
   balancedVariants?: readonly ChronicleQueryVariant[],
 ): Promise<LegacyRetrievalResult> {
-  const limits = generationRetrievalLimits(scope);
   const normalizedQuery = (balancedVariants ? balancedVariants.map((variant) => variant.query).join("\n") : query).toLowerCase();
   const queryEntityIdSet = new Set(queryEntityIds);
   const newestOrdinal = memories.reduce((maximum, memory) => Math.max(maximum, memory.ordinal), 0);
@@ -1726,6 +1776,8 @@ async function applyChunkedRankFusion(
   client: DatabaseClient,
   campaign: ContextCampaignRow,
   scope: ChronicleRetrievalScope,
+  limits: ReturnType<typeof generationChronicleRetrievalLimits>,
+  historyCoverage: boolean,
   memories: ContextMemoryRow[],
   entityCatalog: readonly EntityReference[],
   config: EmbeddingConfigRow,
@@ -1738,7 +1790,7 @@ async function applyChunkedRankFusion(
     ? dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2
     : generationRankFusionProfile(
       dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2,
-      generationRetrievalLimits(scope)
+      limits
     );
   const candidateLimit = Math.max(1, Math.floor(rankFusionProfile.candidateLimits.perSignal));
   const variants = plannedChunkQueries(scope, memories, entityCatalog);
@@ -2036,18 +2088,8 @@ async function applyChunkedRankFusion(
   const latestSceneParentMemoryId = memories.filter((memory) => memory.memory_kind === "turn_fiction")
     .sort((left, right) => left.ordinal - right.ordinal || compareDeterministically(left.id, right.id))
     .at(-1)?.id ?? null;
-  const historyCoverage = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol);
-  const selectionFused = !historyCoverage ? fused : (() => {
-    const selected: Array<(typeof fused)[number]> = [];
-    const seenParents = new Set<string>();
-    for (const candidate of fused) {
-      if (seenParents.has(candidate.parentMemoryId)) continue;
-      seenParents.add(candidate.parentMemoryId);
-      selected.push(candidate);
-      if (selected.length >= MAX_HISTORY_COVERAGE_SELECTION_CANDIDATES) break;
-    }
-    return selected;
-  })();
+  const boundedParents = historyCoverage ? boundedHistoryCoverageParents(fused) : null;
+  const selectionFused = boundedParents?.candidates ?? fused;
   // Vectors are only needed for the maximal-marginal-relevance penalty over fused candidates.
   // Selecting them inside every rank query rendered the whole campaign's vectors as text once
   // per signal per variant, which is what made retrieval latency grow with campaign length.
@@ -2065,6 +2107,8 @@ async function applyChunkedRankFusion(
     );
     for (const row of vectors.rows) embeddingByCandidateId.set(row.id, parseVector(row.embedding));
   }
+  const verifiedNarrationSpansByParent = new Map<string, StorySourceSpan[]>();
+  const parentContentById = new Map<string, string>();
   const verifiedNarrationProjectionByParent = new Map<string, string>();
   if (scope.storyMemoryPolicy?.policy.excerptPolicy === "verified_spans_v1") {
     for (const candidate of fused) {
@@ -2072,7 +2116,17 @@ async function applyChunkedRankFusion(
       const certificate = row?.chunk_metadata?.sourceEvidence as StorySourceSpan | undefined;
       if (row?.chunk_kind !== "turn_narration" || !certificate
         || !verifyStoryEvidenceSpan(normalizeStoryEvidenceSource(row.parent_content), certificate, row.chunk_content)) continue;
-      verifiedNarrationProjectionByParent.set(row.parent_memory_id, `Narration: ${row.chunk_content}`);
+      parentContentById.set(row.parent_memory_id, row.parent_content);
+      const spans = verifiedNarrationSpansByParent.get(row.parent_memory_id) ?? [];
+      spans.push(certificate);
+      verifiedNarrationSpansByParent.set(row.parent_memory_id, spans);
+    }
+    for (const [parentMemoryId, spans] of verifiedNarrationSpansByParent) {
+      const excerpt = selectVerifiedNarrativeExcerpt(
+        normalizeStoryEvidenceSource(parentContentById.get(parentMemoryId) ?? ""),
+        spans
+      );
+      if (excerpt) verifiedNarrationProjectionByParent.set(parentMemoryId, excerpt.content);
     }
   }
   const rankedChunkParents = selectionFused.flatMap((candidate, index) => {
@@ -2122,22 +2176,16 @@ async function applyChunkedRankFusion(
     ...rankFusionProfile.diversityPolicy,
     latestSceneParentMemoryId
   });
-  const parentSelectionDiagnostics: ChronicleParentSelectionDiagnostics = {
-    ...parentSelection.diagnostics,
-    ...(historyCoverage ? {
-      candidatePoolLimit: MAX_HISTORY_COVERAGE_SELECTION_CANDIDATES,
-      candidatePoolCandidatesRemoved: Math.max(0, fused.length - selectionFused.length),
-      ...(fused.length > selectionFused.length && parentSelection.diagnostics.stopReason === "exhausted"
-        ? { stopReason: "candidate_pool_limit" as const } : {})
-    } : {})
-  };
+  const parentSelectionDiagnostics: ChronicleParentSelectionDiagnostics = boundedParents
+    ? historyCoverageSelectionDiagnostics(parentSelection, boundedParents.distinctParentCount, selectionFused.length)
+    : parentSelection.diagnostics;
   const selectedParentContent = new Map(parentSelection.parents.map((parent) => (
     [parent.parentMemoryId, parent.content] as const
   )));
   const selectedParentIds = new Set(selectedParentContent.keys());
   const selectedNarrativeSpans = new Map<string, StorySourceSpan[]>();
   if (scope.storyMemoryPolicy?.policy.excerptPolicy === "verified_spans_v1") {
-    for (const candidate of selectionFused) {
+    for (const candidate of fused) {
       const row = candidateRows.get(candidate.candidateId);
       if (!row || !selectedParentIds.has(row.parent_memory_id) || row.chunk_kind !== "turn_narration") continue;
       const certificate = row.chunk_metadata?.sourceEvidence as StorySourceSpan | undefined;
@@ -2196,6 +2244,7 @@ async function applyChunkedRankFusion(
       diversity: parentSelectionDiagnostics
     },
     selectedParentContent,
+    selectionDiagnostics: parentSelectionDiagnostics,
     selectedNarrativeSpans,
     providerFingerprint,
     costIds,
@@ -2273,9 +2322,11 @@ export async function loadChronicleRetrievalStage(
   client: DatabaseClient,
   scope: ChronicleRetrievalScope,
   dependencies: ChronicleGenerationTransactionDependencies,
-  options: Readonly<{ useSavepoints?: boolean }> = {},
+  options: Readonly<{ useSavepoints?: boolean; generationCandidates?: boolean }> = {},
 ): Promise<ChronicleRetrievalStage> {
   const useSavepoints = options.useSavepoints ?? true;
+  const limits = generationRetrievalLimits(scope, options.generationCandidates === true);
+  const historyCoverage = limits.maximumParentTokens !== undefined;
   const campaign = await loadContextCampaign(client, scope);
   // Preview is always a sanitized retrieval projection. Complete corrected
   // authority belongs exclusively to loadPostgresChronicleGenerationContext.
@@ -2301,7 +2352,7 @@ export async function loadChronicleRetrievalStage(
     const preliminaryQuery = expandEntityQuery(scope.request.query, immutableWorldCatalog);
     const preliminaryEntityIds = matchEntityReferences(scope.request.query, immutableWorldCatalog)
       .map((match) => match.entity.id);
-    const cutoffMemories = await loadContextMemories(client, scope, preliminaryQuery, preliminaryEntityIds, immutableWorldCatalog);
+    const cutoffMemories = await loadContextMemories(client, scope, limits, preliminaryQuery, preliminaryEntityIds, immutableWorldCatalog);
     entityCatalog = cutoffSafeEntityCatalog(
       completeEntityCatalog,
       cutoffMemories,
@@ -2309,11 +2360,11 @@ export async function loadChronicleRetrievalStage(
     );
     entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
     queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).flatMap(({ entity }) => [entity.id, ...(entity.equivalentIds ?? [])]);
-    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds, entityCatalog);
+    memories = await loadContextMemories(client, scope, limits, entityExpandedQuery, queryEntityIds, entityCatalog);
   } else {
     entityExpandedQuery = expandEntityQuery(scope.request.query, entityCatalog);
     queryEntityIds = matchEntityReferences(scope.request.query, entityCatalog).flatMap(({ entity }) => [entity.id, ...(entity.equivalentIds ?? [])]);
-    memories = await loadContextMemories(client, scope, entityExpandedQuery, queryEntityIds, entityCatalog);
+    memories = await loadContextMemories(client, scope, limits, entityExpandedQuery, queryEntityIds, entityCatalog);
   }
   if (cast) {
     // Rebuild only this private retrieval projection when persisted metadata is behind.
@@ -2344,7 +2395,7 @@ export async function loadChronicleRetrievalStage(
     const startedAt = performance.now();
     const result = await applyContextSemanticRelevance(
       client,
-      scope,
+      scope, limits,
       expandedQuery,
       executionMemories,
       queryEntityIds,
@@ -2356,8 +2407,6 @@ export async function loadChronicleRetrievalStage(
       useSavepoints,
       queryPlan?.variants
     );
-    const limits = generationRetrievalLimits(scope);
-    const historyCoverage = limits.maximumParentTokens !== undefined;
     const selection = historyCoverage ? selectHistoryCoverageLegacyParents(
       executionMemories,
       dependencies.rankFusionProfile ?? CHRONICLE_RETRIEVAL_PROFILE_V2,
@@ -2373,6 +2422,7 @@ export async function loadChronicleRetrievalStage(
         ...(selection ? { diversity: selection.diagnostics satisfies ChronicleParentSelectionDiagnostics } : {})
       },
       selectedParentContent: selection ? new Map(selection.parents.map((parent) => [parent.parentMemoryId, parent.content] as const)) : null,
+      ...(selection ? { selectionDiagnostics: selection.diagnostics } : {}),
       latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
       providerFingerprint: result.providerFingerprint,
       costIds: result.costIds,
@@ -2471,7 +2521,7 @@ export async function loadChronicleRetrievalStage(
           const result = await applyChunkedRankFusion(
             client,
             campaign,
-            scope,
+            scope, limits, historyCoverage,
             executionMemories,
             entityCatalog,
             config,
@@ -2538,6 +2588,7 @@ export async function loadChronicleRetrievalStage(
       memories: attempt.executionMemories,
       retrieval: attempt.result.retrieval,
       selectedParentContent: attempt.result.selectedParentContent,
+      ...(attempt.result.selectionDiagnostics ? { selectionDiagnostics: attempt.result.selectionDiagnostics } : {}),
       selectedNarrativeSpans: attempt.result.selectedNarrativeSpans,
       latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
       providerFingerprint: attempt.result.providerFingerprint,
@@ -2705,6 +2756,7 @@ export async function loadChronicleRetrievalStage(
     expandedQuery,
     memories,
     selectedParentContent,
+    ...(productionExecution.selectionDiagnostics ? { selectionDiagnostics: productionExecution.selectionDiagnostics } : {}),
     retrieval,
     chronicleRetrieval,
     config,

@@ -133,7 +133,7 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 - [ ] RED: skip oversized parent, fit later small one; exact boundary, zero/invalid budget and empty pool terminate. Old diagnostics unchanged; exact cap with no remaining candidates reports exhausted.
 - [ ] RED: fact-dense fixture supplies more distinct accepted turns/facts than v4. If new count guard still binds, report it rather than claiming tokens alone bind.
-- [ ] RED: complete narration exceeds allowance but certified excerpt fits final request; retain an excerpt-capable candidate path. Facts stay whole. Separate upstream estimates from actually sent tokens.
+- [ ] RED: complete narration exceeds allowance but certified excerpt fits final request; retain an excerpt-capable candidate path. Facts stay whole. Separate upstream estimates from actually sent tokens: estimate the usable expanded certified projection, while allowing final planning to choose the complete parent when it fits. Preserve valid narration sibling spans when a parent is ranked by its action chunk.
 - [ ] Implement 1.5× allowance/4× parent guard only for v5, deterministic diversity/per-turn limits, unique skip counts and diversity stop reason.
 - [ ] Do not blindly multiply all SQL pools. Measure bounded expansion at 32k/128k/1m/4m; add replenishment only if existing pools starve selection, with fixed observable ceiling recorded before v5 enablement.
 - [ ] GREEN: units/retrieval suites and synthetic 300-/2,000-turn comparisons. Record SQL rows/count, runtime, peak pool, selected sources and final tokens; keep public-preview limits unchanged. Commit with limitations.

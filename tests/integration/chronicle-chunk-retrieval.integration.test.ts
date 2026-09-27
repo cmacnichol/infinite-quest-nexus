@@ -311,9 +311,11 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const memory = await parent(fixture, { turnId: oldTurn, kind: "turn_fiction", ordinal: 1, content });
     const latest = await parent(fixture, { turnId: latestId, kind: "turn_fiction", ordinal: 2, content: "Present scene." });
     await embeddedChunk(fixture, providerId, { parentId: latest.id, parentContentHash: latest.contentHash, kind: "turn_narration", content: "Present scene.", vector: [1, 0] });
+    await embeddedChunk(fixture, providerId, { parentId: memory.id, parentContentHash: memory.contentHash,
+      kind: "turn_action", content: "copper gate Vale ".repeat(30), vector: [1, 0] });
     const chunkId = crypto.randomUUID();
     await embeddedChunk(fixture, providerId, { id: chunkId, parentId: memory.id, parentContentHash: memory.contentHash,
-      kind: "turn_narration", content: passage, vector: [1, 0] });
+      chunkOrdinal: 1, kind: "turn_narration", content: passage, vector: [1, 0] });
     const factContent = "The complete canonical fact says Vale keeps the copper gate locked, even when v5 admits an excerpt-capable narration.";
     const factId = crypto.randomUUID();
     await pool.query(`INSERT INTO campaign_canonical_facts
@@ -350,6 +352,70 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(stale.candidates.find((candidate) => candidate.id === memory.id)).toBeUndefined();
     expect(plan(stale).sourceManifest?.entries.some((entry) => entry.form === "excerpt")).toBe(false);
     expect(plan(stale).layerDiagnostics.sourceValidationFailures).toBe(0);
+  });
+
+  it("reports the v5 distinct-parent input guard on index-unready fallback", async () => {
+    const { fixture, providerId } = await configuredFixture("v5 fallback parent guard");
+    const parentCount = 2_001;
+    await pool.query(`INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+      SELECT $1,$2,n,'Guard action','Guard narration','{}'::jsonb FROM generate_series(1,$3) n`,
+    [fixture.ownerUserId, fixture.campaignId, parentCount]);
+    await pool.query(`INSERT INTO chronicle_memories(owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance)
+      SELECT $1,$2,$3,t.id,'turn_fiction',t.turn_number,'Fallback parent ' || t.turn_number,8,0.8
+      FROM turns t WHERE t.campaign_id=$2`, [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [fixture.campaignId, parentCount]);
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const context = await transaction(providerId, []).loadGenerationContext(pool, {
+      ...fixture, operationKind: "append", expectedTurnNumber: parentCount + 1, query: "fallback parent",
+      retrievalBudgetTokens: 4_000_000, storyMemoryPolicy
+    });
+    expect(context.chronicleRetrieval?.effectiveImplementation).toBe("legacy_hybrid");
+    expect(context.chronicleSelectionDiagnostics).toMatchObject({
+      candidatePoolLimit: 2_000,
+      candidatePoolCandidatesRemoved: 1,
+      stopReason: "candidate_pool_limit"
+    });
+  });
+
+  it("does not report the v5 candidate-pool guard for more than 2,000 fused chunks from two parents", async () => {
+    const { fixture, providerId } = await configuredFixture("v5 multichunk parent guard");
+    const firstTurn = await turn(fixture, 1, "Remember the first guard.", "The first guard watches the gate.");
+    const secondTurn = await turn(fixture, 2, "Remember the second guard.", "The second guard watches the gate.");
+    const latestTurn = await turn(fixture, 3, "Wait.", "The present guard watches the gate.");
+    await pool.query("UPDATE campaigns SET active_turn_number=3 WHERE id=$1", [fixture.campaignId]);
+    const first = await parent(fixture, { turnId: firstTurn, kind: "turn_fiction", ordinal: 1, content: "The first guard watches the gate." });
+    const second = await parent(fixture, { turnId: secondTurn, kind: "turn_fiction", ordinal: 2, content: "The second guard watches the gate." });
+    const latest = await parent(fixture, { turnId: latestTurn, kind: "turn_fiction", ordinal: 3, content: "The present guard watches the gate." });
+    for (const source of [first, second, latest]) {
+      await embeddedChunk(fixture, providerId, { parentId: source.id, parentContentHash: source.contentHash,
+        kind: "turn_narration", content: "guard watches the gate", vector: [1, 0] });
+    }
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const originalFuse = rankFusion.fuseChronicleRanks;
+    const spy = vi.spyOn(rankFusion, "fuseChronicleRanks").mockImplementation((inputs, profile) => {
+      const fused = originalFuse(inputs, profile);
+      const representatives = fused.slice(0, 2);
+      return representatives.length ? Array.from({ length: 2_100 }, (_, index) => ({
+        ...representatives[index % representatives.length]!, score: 2_100 - index
+      })) : fused;
+    });
+    try {
+      const context = await transaction(providerId, []).loadGenerationContext(pool, {
+        ...fixture, operationKind: "append", expectedTurnNumber: 4, query: "guard gate",
+        retrievalBudgetTokens: 32_000, storyMemoryPolicy
+      });
+      expect(context.chronicleSelectionDiagnostics).toMatchObject({
+        candidatePoolLimit: 2_000,
+        candidatePoolCandidatesRemoved: 0
+      });
+      expect(context.chronicleSelectionDiagnostics?.stopReason).not.toBe("candidate_pool_limit");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it.each([300, 2_000])("measures bounded v5 PostgreSQL retrieval over %i embedded turns", async (turnCount) => {

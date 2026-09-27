@@ -83,10 +83,23 @@ export const generationRecentTurnSchema = z.object({
   action: z.string(), narration: z.string(), narrationCorrectionRevision: ordinalSchema, sourceHash: hashSchema
 }).strict();
 export type GenerationRecentTurn = DeepReadonly<z.infer<typeof generationRecentTurnSchema>>;
+/**
+ * Private retrieval-selection counts for provider generation. This deliberately
+ * contains no candidate identifiers, source text, or public-preview fields.
+ */
+export const generationChronicleSelectionDiagnosticsSchema = z.object({
+  maximumParents: ordinalSchema.optional(), maximumParentsPerTurn: ordinalSchema.optional(),
+  maximumParentTokens: ordinalSchema.optional(), selectedParentTokens: ordinalSchema.optional(),
+  tokenLimitParentsRemoved: ordinalSchema.optional(), candidatePoolLimit: ordinalSchema.optional(),
+  candidatePoolCandidatesRemoved: ordinalSchema.optional(),
+  stopReason: z.enum(["parent_limit", "token_limit", "diversity_limit", "candidate_pool_limit", "exhausted"]).optional()
+}).strict();
+export type GenerationChronicleSelectionDiagnostics = DeepReadonly<z.infer<typeof generationChronicleSelectionDiagnosticsSchema>>;
 export const memoryGenerationAuthorityContextSchema = z.object({
   authority: generationContextAuthoritySchema, candidates: z.array(generationContextCandidateSchema),
   recentTurns: z.array(generationRecentTurnSchema).max(2).optional(),
-  baseIdentity: generationBaseIdentitySchema, chronicleRetrieval: chronicleRetrievalAuditSchema.optional()
+  baseIdentity: generationBaseIdentitySchema, chronicleRetrieval: chronicleRetrievalAuditSchema.optional(),
+  chronicleSelectionDiagnostics: generationChronicleSelectionDiagnosticsSchema.optional()
 }).strict().superRefine((value, context) => {
   const cast = value.authority.castSnapshot;
   if (!isGenerationBaseIdentityV4(value.baseIdentity)) {

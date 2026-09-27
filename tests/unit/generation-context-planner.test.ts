@@ -263,6 +263,17 @@ describe("layered generation context planner", () => {
     expect(result.layerDiagnostics.sourceValidationFailures).toBe(1);
     expect(result.layerDiagnostics.excerptsPartial).toBe(0);
   });
+  it("keeps a certified narration whole when the complete record is economical", () => {
+    const context = recentContext();
+    const content = `${"Old scenery. ".repeat(24)}The lantern is lit. ${"More scenery. ".repeat(24)}`.trim();
+    const start = content.indexOf("The lantern");
+    context.candidates = [{ id: "economical", turnId: "old", ordinal: 1, kind: "turn_fiction", content, tokenEstimate: 200, rank: 1,
+      narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), spans: [{ start, end: start + "The lantern is lit.".length }] } }];
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Find lantern", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_900, undefined, "story_memory", policy);
+    expect(result.promptContext.chronicle[0]).toMatchObject({ id: "economical", content });
+    expect(result.promptContext.chronicle[0]?.evidenceForm).toBeUndefined();
+  });
   it("falls back to certified excerpt when an economical whole parent loses to protected authority", () => {
     const context = recentContext(); context.recentTurns = [];
     const content = `${"Old scenery. ".repeat(90)}The sapphire is hidden. Its hiding place is unknown to Vale. ${"More scenery. ".repeat(90)}`.trim();

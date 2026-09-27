@@ -179,7 +179,8 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
   return {
     ...authorityContext,
     candidates,
-    chronicleRetrieval: retrieval.chronicleRetrieval
+    chronicleRetrieval: retrieval.chronicleRetrieval,
+    ...(retrieval.selectionDiagnostics ? { chronicleSelectionDiagnostics: retrieval.selectionDiagnostics } : {})
   };
 }
 

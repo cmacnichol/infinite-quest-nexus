@@ -51,9 +51,24 @@ describe("canonical private generation context", () => {
     expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, baseIdentity }).success).toBe(false);
   });
   it("retains the complete baseline fields and explicitly reads legacy identities", () => {
-    expect(context.memoryGenerationAuthorityContextSchema.parse(JSON.parse(JSON.stringify({ authority, candidates: [], baseIdentity })))).toEqual({ authority, candidates: [], baseIdentity });
+    const baseline = context.memoryGenerationAuthorityContextSchema.parse(JSON.parse(JSON.stringify({ authority, candidates: [], baseIdentity })));
+    expect(baseline).toEqual({ authority, candidates: [], baseIdentity });
+    expect(baseline).not.toHaveProperty("chronicleSelectionDiagnostics");
     expect(context.readLegacyGenerationBaseIdentity(baseIdentity)).toEqual(baseIdentity);
     expect(context.generationContextSnapshotSchema.safeParse({ version: "current-continuity-v3", ownerUserId: uuid, campaignId: uuid, worldVersionId: uuid, baseIdentity, protectedAuthority: authority, candidates: [] }).success).toBe(false);
+  });
+
+  it("retains only content-free private v5 selection diagnostics", () => {
+    const diagnostics = {
+      maximumParents: 64, maximumParentsPerTurn: 8, maximumParentTokens: 48_000,
+      selectedParentTokens: 12_400, tokenLimitParentsRemoved: 3,
+      candidatePoolLimit: 2_000, candidatePoolCandidatesRemoved: 1,
+      stopReason: "candidate_pool_limit" as const
+    };
+    expect(context.generationChronicleSelectionDiagnosticsSchema.parse(diagnostics)).toEqual(diagnostics);
+    expect(context.generationChronicleSelectionDiagnosticsSchema.safeParse({ ...diagnostics, candidateId: uuid }).success).toBe(false);
+    const value = { authority, candidates: [], baseIdentity, chronicleSelectionDiagnostics: diagnostics };
+    expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
   });
 
   it("requires every old dependency and the new profile fence in v3", () => {
