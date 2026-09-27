@@ -1739,7 +1739,7 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "output_limited", "invalid_output"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
     const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
@@ -1801,7 +1801,7 @@ integration("T17 durable continuity review", () => {
         });
       }
       const content = operation === "story_continuity_review"
-        ? preparedContinuityReviewResponse(request.input)
+        ? outcome === "invalid_output" ? "malformed reviewer response" : preparedContinuityReviewResponse(request.input)
         : reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] }));
       const responseId = randomUUID();
       if (operation === "story_continuity_review") {
@@ -1813,11 +1813,12 @@ integration("T17 durable continuity review", () => {
           requested_preset_slug,requested_preset_version_id,requested_preset_config_hash,candidate_ordinal,
           requested_model,provider_policy,request_payload_hash,request_body,status,outcome,
           provider_response_id,returned_model,emitted_output,dispatched_at,completed_at
-        ) VALUES ($1,'story',$2,$3::jsonb,$4,$5,$6,$7,0,$8,$9::jsonb,$10,$11,'completed','succeeded',$12,$8,true,clock_timestamp(),clock_timestamp())`, [
+        ) VALUES ($1,'story',$2,$3::jsonb,$4,$5,$6,$7,0,$8,$9::jsonb,$10,$11,'completed','succeeded',$12,$8,$13,clock_timestamp(),clock_timestamp())`, [
           actualReservation.ownerUserId, `${actualReservation.generationJobId}:${actualReservation.invocationId}`,
           JSON.stringify(actualReservation), actualPlan.planHash, actualPlan.preset?.slug ?? null,
           actualPlan.preset?.versionId ?? null, actualPlan.preset?.configHash ?? null, actualPlan.candidates[0]!.modelId,
-          JSON.stringify(actualPlan.candidates[0]!.providerPolicy), preparedRequest.payloadHash, preparedRequest.body, responseId
+          JSON.stringify(actualPlan.candidates[0]!.providerPolicy), preparedRequest.payloadHash, preparedRequest.body, responseId,
+          outcome !== "invalid_output"
         ]);
         if (outcome === "transport_failed") {
           await pool.query(`UPDATE prepared_text_physical_attempts
@@ -1829,7 +1830,7 @@ integration("T17 durable continuity review", () => {
       }
       return {
       content,
-      responseId, finishReason: "stop", outputLimited: false, modelInstanceId: plan.candidates[0]!.modelId,
+      responseId, finishReason: "stop", outputLimited: outcome === "output_limited" && operation === "story_continuity_review", modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
       ...(preparedRequest ? { preparedRequest } : {})
     }; });
@@ -1875,6 +1876,27 @@ integration("T17 durable continuity review", () => {
            FROM generation_jobs WHERE id=$1`, [job.id]
       )).resolves.toMatchObject({ rows: [{ verdict: "unavailable", unavailableReason: "provider_failed",
         outcome: { kind: "technical_failure", failure: "provider_failed" } }] });
+      return;
+    }
+    if (outcome === "output_limited" || outcome === "invalid_output") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required"
+      });
+      await expect(pool.query<{ unavailableReason: string; outcome: { kind: string; failure: string }; status: string; physicalOutcome: string; emittedOutput: boolean }>(
+        `SELECT orchestration_private->'continuityReview'->>'unavailableReason' AS "unavailableReason",
+                orchestration_private->'continuityReview'->'outcome' AS "outcome",
+                orchestration_private->'continuityReview'->>'status' AS "status",
+                attempt.outcome AS "physicalOutcome",attempt.emitted_output AS "emittedOutput"
+           FROM generation_jobs job
+           JOIN prepared_text_physical_attempts attempt
+             ON attempt.owner_user_id=job.owner_user_id
+            AND attempt.logical_kind='story'
+            AND attempt.logical_reservation->>'generationJobId'=job.id::text
+            AND attempt.logical_reservation->>'invocationId'=('continuity-review:primary:' || (job.orchestration_private #>> '{continuityReview,bindingHash}'))
+          WHERE job.id=$1`, [job.id]
+      )).resolves.toMatchObject({ rows: [{ unavailableReason: outcome === "output_limited" ? "output_limit" : "invalid_output",
+        outcome: { kind: "technical_failure", failure: outcome === "output_limited" ? "output_limit" : "invalid_output" },
+        status: "completed", physicalOutcome: "succeeded", emittedOutput: outcome === "output_limited" }] });
       return;
     }
     expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);

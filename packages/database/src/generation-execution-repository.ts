@@ -203,9 +203,14 @@ async function completedReviewerPhysicalAttempt(
   const technicalFailure = review.data.outcome?.kind === "technical_failure" ? review.data.outcome : null;
   const physicalOutcomeMatches = semanticOutcome
     ? attempt?.outcome === "succeeded" && attempt.emittedOutput
-    : technicalFailure !== null && attempt?.outcome === "failed" && !attempt.emittedOutput
-      && (technicalFailure.failure !== "provider_timeout" || attempt.failureReason === "deadline")
-      && (technicalFailure.failure !== "provider_failed" || attempt.failureReason !== "deadline");
+    : technicalFailure !== null && (
+      ((technicalFailure.failure === "output_limit" || technicalFailure.failure === "invalid_output")
+        && attempt?.outcome === "succeeded")
+      || (technicalFailure.failure === "provider_timeout"
+        && attempt?.outcome === "failed" && attempt.failureReason === "deadline")
+      || (technicalFailure.failure === "provider_failed"
+        && attempt?.outcome === "failed" && attempt.failureReason !== "deadline")
+    );
   if (!attempt || result.rows.length !== 1 || attempt.status !== "completed" || !physicalOutcomeMatches
     || attempt.requestPayloadHash !== review.data.reviewRequestHash
     || attempt.requestPayloadHash !== sha256Hex(attempt.requestBody)
