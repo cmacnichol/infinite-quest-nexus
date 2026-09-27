@@ -945,7 +945,19 @@ export function sentCanonicalFactIds(storyInput: string): string[] {
       ? [candidate.id]
       : [];
   }) : [];
-  return [...new Set([...continuityFactIds, ...selectedHistoricalFactIds, ...repairFactIds])];
+  // V5 facts enter only through the complete source-verified projection. A
+  // missing or transformed content field therefore withholds its UUID rather
+  // than making a clipped fact eligible for supersession.
+  const selectedProtectedFactIds = Array.isArray((authority as { protectedFacts?: unknown }).protectedFacts)
+    ? ((authority as { protectedFacts: unknown[] }).protectedFacts).flatMap((fact) => {
+      if (!fact || typeof fact !== "object") return [];
+      const record = fact as { id?: unknown; content?: unknown; turnNumber?: unknown };
+      const turnNumber = record.turnNumber;
+      return typeof record.id === "string" && typeof record.content === "string" && record.content.length > 0
+        && typeof turnNumber === "number" && Number.isSafeInteger(turnNumber) && turnNumber >= 0 ? [record.id] : [];
+    })
+    : [];
+  return [...new Set([...continuityFactIds, ...selectedHistoricalFactIds, ...selectedProtectedFactIds, ...repairFactIds])];
 }
 
 function preparedRequestForResult(

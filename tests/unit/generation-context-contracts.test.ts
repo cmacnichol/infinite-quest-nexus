@@ -71,6 +71,16 @@ describe("canonical private generation context", () => {
     expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
   });
 
+  it("accepts only complete protected-fact authority records and an explicit omission count", () => {
+    const protectedFact = { id: uuid, turnNumber: 0, content: "The corrected harbor remains sealed." };
+    const value = { authority: { ...authority, protectedFacts: [protectedFact], protectedFactsOmitted: 2,
+      protectedFactsCoverage: { candidateRows: 3, sourceBytes: 400_292, sourceLimitReached: false,
+        oversizedCandidateCount: 1, futureSourceCount: 1, withheldCandidateCount: 2 } }, candidates: [], baseIdentity };
+    expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
+    expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, authority: { ...value.authority,
+      protectedFacts: [{ ...protectedFact, content: "" }] } }).success).toBe(false);
+  });
+
   it("requires every old dependency and the new profile fence in v3", () => {
     const newBase = { ...baseIdentity, version: "generation-base-v3", characterProfileRevision: 0, characterProfileFingerprint: hash };
     expect(context.generationBaseIdentityV3Schema.parse(newBase)).toEqual(newBase);

@@ -5,7 +5,8 @@ import {
   materializeAcceptedGenerationContinuity,
   materializeCorrectedGenerationContinuity,
   materializeInitialGenerationContinuity,
-  loadAcceptedGenerationContinuity
+  loadAcceptedGenerationContinuity,
+  loadVerifiedProtectedFacts
 } from "../../packages/database/src/campaign-continuity-repository.js";
 import type { DatabaseClient } from "../../packages/database/src/pool.js";
 import { buildCanonicalChronicleFacts } from "../../packages/domain/src/chronicle-memory-helpers.js";
@@ -24,6 +25,63 @@ function clientReturning(rows: readonly Record<string, unknown>[]): DatabaseClie
 }
 
 describe("loadCurrentContinuityCorrection", () => {
+  it("withholds pre-correction projection rows absent from an earlier empty frontier while retaining later verified facts", async () => {
+    const retainedTurnId = "00000000-0000-4000-8000-000000000004";
+    const staleTurnId = "00000000-0000-4000-8000-000000000005";
+    const retained = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId: retainedTurnId,
+      canonicalFacts: ["The old gate is open."], entityCatalog: [] })[0]!;
+    const later = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId: staleTurnId,
+      canonicalFacts: ["A new brass key is visible."], entityCatalog: [] })[0]!;
+    const queries: string[] = [];
+    const client = { query: vi.fn(async (statement: string) => {
+      queries.push(statement);
+      if (statement.includes("FROM campaign_canonical_facts fact")) return { rows: [
+        { id: retained.id, content: retained.content, source_turn_number: 1, source_fact_index: 0, source_turn_id: retainedTurnId, source_state_edit_id: null },
+        { id: later.id, content: later.content, source_turn_number: 3, source_fact_index: 0, source_turn_id: staleTurnId, source_state_edit_id: null }
+      ] };
+      if (statement.includes("FROM campaign_state_edits edit")) return { rows: [{ id: "00000000-0000-4000-8000-000000000006", effective_turn_number: 2, canonical_facts: [] }] };
+      if (statement.includes("octet_length")) return { rows: [
+        { id: retainedTurnId, source_bytes: 100 }, { id: staleTurnId, source_bytes: 100 }
+      ] };
+      if (statement.includes("FROM turns turn_row")) return { rows: [
+        { id: retainedTurnId, turn_number: 1, canonical_facts: ["The old gate is open."], canonical_fact_updates: [] },
+        { id: staleTurnId, turn_number: 3, canonical_facts: ["A new brass key is visible."], canonical_fact_updates: [] }
+      ] };
+      throw new Error(`Unexpected query: ${statement}`);
+    }) } as unknown as DatabaseClient;
+
+    await expect(loadVerifiedProtectedFacts(client, scope, 3)).resolves.toMatchObject({
+      facts: [{ id: later.id, turnNumber: 3, content: "A new brass key is visible." }],
+      omittedCount: 1
+    });
+    expect(queries.every((statement) => /^\s*SELECT/u.test(statement))).toBe(true);
+  });
+
+  it("withholds oversized and future-source candidates before source materialization and reports bounded coverage", async () => {
+    const turnId = "00000000-0000-4000-8000-000000000004";
+    const fact = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId,
+      canonicalFacts: ["The safe harbor bell rings at dawn."], entityCatalog: [] })[0]!;
+    const client = { query: vi.fn(async (statement: string) => {
+      if (statement.includes("FROM campaign_canonical_facts fact")) return { rows: [
+        { id: fact.id, content: fact.content, source_turn_number: 2, source_fact_index: 0, source_turn_id: turnId, source_state_edit_id: null },
+        { id: "00000000-0000-4000-8000-000000000007", content: null, source_turn_number: 2, source_fact_index: 1, source_turn_id: turnId, source_state_edit_id: null },
+        { id: "00000000-0000-4000-8000-000000000008", content: "A future row must not be trusted.", source_turn_number: 4, source_fact_index: 0, source_turn_id: "00000000-0000-4000-8000-000000000009", source_state_edit_id: null }
+      ] };
+      if (statement.includes("FROM campaign_state_edits edit")) return { rows: [] };
+      if (statement.includes("octet_length")) return { rows: [{ id: turnId, source_bytes: 100 }] };
+      if (statement.includes("FROM turns turn_row")) return { rows: [{ id: turnId, turn_number: 2,
+        canonical_facts: ["The safe harbor bell rings at dawn."], canonical_fact_updates: [] }] };
+      throw new Error(`Unexpected query: ${statement}`);
+    }) } as unknown as DatabaseClient;
+
+    await expect(loadVerifiedProtectedFacts(client, scope, 3)).resolves.toMatchObject({
+      facts: [{ id: fact.id, turnNumber: 2, content: fact.content }],
+      omittedCount: 2,
+      coverage: { candidateRows: 3, oversizedCandidateCount: 1, futureSourceCount: 1, withheldCandidateCount: 2 }
+    });
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining("turn_row.turn_number <= $5"), expect.any(Array));
+  });
+
   it("combines accepted structured updates first with plain additions using persisted identities", () => {
     const turnId = "00000000-0000-4000-8000-000000000004";
     const snapshot = { canonicalFacts: ["The gate is open.", "The keeper has departed."],

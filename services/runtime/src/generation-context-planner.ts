@@ -12,6 +12,7 @@ import type { RuntimeTextExecution as GenerationTextProvider } from "./provider-
 import { isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
 import { selectCastContext, type CastContextSelection } from "../../../packages/domain/src/campaign-cast-context.js";
 import { reserveNewestWholeSuffix } from "../../../packages/application/src/memory/story-history-reservation.js";
+import type { ProtectedFact } from "../../../packages/application/src/memory/story-history-facts.js";
 
 type SentCast = { coverage: CastContextSelection["coverage"]; notice: string; characters: {
   characterId: string; revision: number; fields: { authority: "user" | "observation"; evidenceId: string;
@@ -21,6 +22,9 @@ type SentCast = { coverage: CastContextSelection["coverage"]; notice: string; ch
 const PRIVATE_MECHANICS_AUTHORITY_KEYS = new Set([
   "rpgStats", "eventTriggers", "pendingEventTriggers", "defaultTriggers", "mechanicsPrivate", "roll"
 ]);
+
+/** Fixed v5 guard: exact fact measurement must not starve a short worker lease. */
+export const MAX_PROTECTED_FACT_MEASUREMENTS = 64;
 
 /** Removes private mechanics/trigger state before any fiction-authority payload is rendered. */
 function fictionSafeAuthority<T>(value: T): T {
@@ -62,26 +66,30 @@ function generationSourceManifest(
 ): GenerationEvidenceManifest {
   const authority = context.authority;
   const entries: StoryEvidence[] = [];
+  // `createStoryEvidence` hashes its source document by default.  The fact
+  // entries all point at this immutable, serialized authority, so retain the
+  // identical hash once instead of serializing a large fact set per entry.
+  const sentAuthorityEvidenceOptions = { contentHash: sha256(canonicalEvidenceJson(sentAuthority)) };
   const worldRevision = authority.worldReferenceSource?.worldVersionId ?? "legacy-world";
   const worldSource = { kind: "world" as const, id: worldRevision, revision: worldRevision, turnNumber: null };
-  entries.push(completeEvidence({ source: worldSource, semanticRole: "world_rule", rank: 0, selectionGroup: "protected", sourcePath: "/authoritativeRules", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
-  entries.push(completeEvidence({ source: worldSource, semanticRole: "world_rule", rank: 0, selectionGroup: "protected", sourcePath: "/worldCanon", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+  entries.push(completeEvidence({ source: worldSource, semanticRole: "world_rule", rank: 0, selectionGroup: "protected", sourcePath: "/authoritativeRules", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
+  entries.push(completeEvidence({ source: worldSource, semanticRole: "world_rule", rank: 0, selectionGroup: "protected", sourcePath: "/worldCanon", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
   if (Object.hasOwn(sentAuthority, "selectedCharacterAuthority")) {
     const characterSourceId = [authority.selectedCharacterId, authority.characterAuthority?.name]
       .find((value): value is string => typeof value === "string" && Boolean(value.trim())) ?? "selected-character";
-    entries.push(completeEvidence({ source: { kind: "character", id: characterSourceId, revision: String(hasGenerationCharacterAuthority(context.baseIdentity) ? context.baseIdentity.characterProfileRevision : 0), turnNumber: null }, semanticRole: "character_authority", rank: 0, selectionGroup: "protected", sourcePath: "/selectedCharacterAuthority", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+    entries.push(completeEvidence({ source: { kind: "character", id: characterSourceId, revision: String(hasGenerationCharacterAuthority(context.baseIdentity) ? context.baseIdentity.characterProfileRevision : 0), turnNumber: null }, semanticRole: "character_authority", rank: 0, selectionGroup: "protected", sourcePath: "/selectedCharacterAuthority", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
   }
   const stateSource = { kind: "state_edit" as const, id: context.baseIdentity.baseTurnId ?? "campaign-current-state", revision: String(context.baseIdentity.campaignStateRevision), turnNumber: context.baseIdentity.baseTurnNumber };
-  entries.push(completeEvidence({ source: stateSource, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/currentContinuity", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+  entries.push(completeEvidence({ source: stateSource, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/currentContinuity", normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
   const facts = Array.isArray((sentAuthority.currentContinuity as { canonicalFacts?: unknown })?.canonicalFacts)
     ? (sentAuthority.currentContinuity as { canonicalFacts: readonly { id?: unknown }[] }).canonicalFacts : [];
   for (const [index, fact] of facts.entries()) {
     const factId = typeof fact.id === "string" ? fact.id : null;
-    entries.push(completeEvidence({ source: { kind: "canonical_fact", id: factId ?? `campaign-fact-${index}`, revision: String(context.baseIdentity.campaignStateRevision), turnNumber: context.baseIdentity.baseTurnNumber }, semanticRole: "canonical_fact", rank: index, selectionGroup: "protected", sourcePath: `/currentContinuity/canonicalFacts/${index}`, normalizationVersion: "fiction-safe-json-v1", canonicalFactId: factId }, sentAuthority));
+    entries.push(completeEvidence({ source: { kind: "canonical_fact", id: factId ?? `campaign-fact-${index}`, revision: String(context.baseIdentity.campaignStateRevision), turnNumber: context.baseIdentity.baseTurnNumber }, semanticRole: "canonical_fact", rank: index, selectionGroup: "protected", sourcePath: `/currentContinuity/canonicalFacts/${index}`, normalizationVersion: "fiction-safe-json-v1", canonicalFactId: factId }, sentAuthority, sentAuthorityEvidenceOptions));
   }
   if (sentAuthority.currentScene !== null && sentAuthority.currentScene !== undefined) {
     for (const [field, role] of [["action", "player_intent"], ["narration", "accepted_narration"]] as const) {
-      entries.push(completeEvidence({ source: { kind: "turn", id: context.baseIdentity.baseTurnId ?? "latest-effective-scene", revision: context.baseIdentity.narrationFingerprint ?? String(context.baseIdentity.campaignStateRevision), turnNumber: context.baseIdentity.baseTurnNumber }, semanticRole: role, rank: 0, selectionGroup: "protected", sourcePath: `/currentScene/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+      entries.push(completeEvidence({ source: { kind: "turn", id: context.baseIdentity.baseTurnId ?? "latest-effective-scene", revision: context.baseIdentity.narrationFingerprint ?? String(context.baseIdentity.campaignStateRevision), turnNumber: context.baseIdentity.baseTurnNumber }, semanticRole: role, rank: 0, selectionGroup: "protected", sourcePath: `/currentScene/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
     }
   }
   const directionDocument = { text: action };
@@ -107,31 +115,39 @@ function generationSourceManifest(
     const original = context.recentTurns?.find((source) => source.turnId === turn.sourceId);
     for (const [field, role] of [["intent", "player_intent"], ["acceptedNarration", "accepted_narration"]] as const) {
       entries.push(completeEvidence({ source: { kind: "turn", id: turn.sourceId, revision: String(original?.narrationCorrectionRevision ?? 0), turnNumber: turn.turnNumber }, semanticRole: role,
-        rank: index, selectionGroup: "recent", sourcePath: `/recentTurns/${index}/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+        rank: index, selectionGroup: "recent", sourcePath: `/recentTurns/${index}/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
     }
   }
   const ledger = (sentAuthority.storyLedger as { entries?: readonly { turnId: string; turnNumber: number; inputMode: "action" | "scene"; direction: string }[] } | undefined)?.entries ?? [];
   for (const [index, entry] of ledger.entries()) {
     entries.push(completeEvidence({ source: { kind: "turn", id: entry.turnId, revision: sha256(stableStringify(entry)), turnNumber: entry.turnNumber },
-      semanticRole: "player_intent", rank: index, selectionGroup: "ledger", sourcePath: `/storyLedger/entries/${index}/direction`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+      semanticRole: "player_intent", rank: index, selectionGroup: "ledger", sourcePath: `/storyLedger/entries/${index}/direction`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
+  }
+  const protectedFacts = (sentAuthority.protectedFacts as readonly ProtectedFact[] | undefined) ?? [];
+  for (const [index, fact] of protectedFacts.entries()) {
+    entries.push(completeEvidence({ source: { kind: "canonical_fact", id: fact.id, revision: sha256(fact.content), turnNumber: fact.turnNumber },
+      // A selected historical fact must remain in the review/repair evidence
+      // set, so it is protected once it has been sent.
+      semanticRole: "canonical_fact", rank: index, selectionGroup: "protected", sourcePath: `/protectedFacts/${index}/content`,
+      normalizationVersion: "fiction-safe-json-v1", canonicalFactId: fact.id }, sentAuthority, sentAuthorityEvidenceOptions));
   }
   const historical = (sentAuthority.chronicle ?? []) as readonly PromptCandidate[];
   const sentCast = sentAuthority.cast as SentCast | undefined;
   if (sentCast) for (const field of ["coverage", "notice"] as const) {
     entries.push(completeEvidence({ source: { kind: "cast", id: `cast-${field}`,
       revision: isGenerationBaseIdentityV4(context.baseIdentity) ? context.baseIdentity.castFingerprint : "unavailable", turnNumber: context.baseIdentity.baseTurnNumber },
-    semanticRole: "current_continuity", rank: 0, selectionGroup: "cast", sourcePath: `/cast/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+    semanticRole: "current_continuity", rank: 0, selectionGroup: "cast", sourcePath: `/cast/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
   }
   for (const [index, character] of (sentCast?.characters ?? []).entries()) {
     const source = { kind: "cast" as const, id: character.characterId, revision: String(character.revision), turnNumber: context.baseIdentity.baseTurnNumber };
     entries.push(completeEvidence({ source, semanticRole: "character_authority", rank: index, selectionGroup: "cast",
-      sourcePath: `/cast/characters/${index}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+      sourcePath: `/cast/characters/${index}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
     for (const [fieldIndex, field] of character.fields.entries()) {
       entries.push(completeEvidence({ source: { ...source, id: `${character.characterId}:${field.evidenceId}`,
         turnNumber: field.source.effectiveTurnNumber ?? field.source.turnNumber ?? null },
       semanticRole: field.authority === "user" ? "corrected_state"
         : field.source.kind === "world" || field.source.kind === "historical_world" ? "world_reference" : "accepted_narration", rank: index, selectionGroup: "cast",
-      sourcePath: `/cast/characters/${index}/fields/${fieldIndex}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority));
+      sourcePath: `/cast/characters/${index}/fields/${fieldIndex}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
     }
   }
   for (const [index, candidate] of historical.entries()) {
@@ -146,7 +162,7 @@ function generationSourceManifest(
     entries.push(completeEvidence({ source: { kind: candidate.kind === "canonical_fact" ? "canonical_fact" : "turn", id: candidate.turnId ?? candidate.id, revision: sha256(candidate.content), turnNumber: candidate.ordinal },
       semanticRole: candidate.kind === "canonical_fact" ? "canonical_fact" : candidate.kind.includes("summary") ? "derived_summary" : "accepted_narration",
       rank: candidate.rank, selectionGroup: candidate.kind === "canonical_fact" ? "historical_fact" : "retrieved", sourcePath: `/chronicle/${index}/content`, normalizationVersion: "fiction-safe-json-v1",
-      canonicalFactId: candidate.kind === "canonical_fact" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(candidate.id) ? candidate.id : null }, sentAuthority));
+      canonicalFactId: candidate.kind === "canonical_fact" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(candidate.id) ? candidate.id : null }, sentAuthority, sentAuthorityEvidenceOptions));
   }
   const body = { version: "generation-evidence-v1" as const, attemptId, producingRequestHash: sha256(requestBody), entries, requiredReviewEvidenceIds: entries.filter((entry) => entry.selectionGroup === "protected" || entry.selectionGroup === "cast").map((entry) => entry.id) };
   return { ...body, manifestHash: generationEvidenceManifestHash(body) };
@@ -189,6 +205,14 @@ export function planGenerationPromptContext(
   // direction overlaps only when its matching recent record actually survives
   // exact packing; an available-but-omitted recent turn cannot erase intent.
   const ledgerRecords = historyCoverage ? authority.storyLedger?.entries ?? [] : [];
+  // The source loader has already verified these complete records. Keep the
+  // exact strings here: any future sanitizer that changes a fact must withhold
+  // it rather than preserving its UUID with altered authority text.
+  const protectedFactRecords: readonly ProtectedFact[] = historyCoverage
+    ? (authority.protectedFacts ?? []).flatMap((fact) => typeof fact.id === "string" && typeof fact.content === "string"
+      && fact.content.length > 0 && !containsMechanicsLanguage(fact.content) ? [{ id: fact.id, turnNumber: fact.turnNumber, content: fact.content }] : [])
+    : [];
+  const withheldProtectedFactCount = historyCoverage ? (authority.protectedFacts?.length ?? 0) - protectedFactRecords.length : 0;
   const castSnapshot = isGenerationBaseIdentityV4(context.baseIdentity) ? authority.castSnapshot : undefined;
   let castSelection: CastContextSelection | undefined;
   let castAllocatedTokens = 0;
@@ -232,10 +256,15 @@ export function planGenerationPromptContext(
     ...(layered ? { recentTurns: [] as typeof recentRecords } : {}),
     ...(historyCoverage ? { storyLedger: { version: "story-ledger-v1" as const, entries: [] as typeof ledgerRecords,
       omittedThroughTurn: authority.storyLedger?.omittedThroughTurn ?? null, ...(authority.storyLedger?.coverage ? { coverage: authority.storyLedger.coverage } : {}) } } : {}),
+    ...(historyCoverage ? { protectedFacts: [] as readonly ProtectedFact[],
+      protectedFactsOmitted: (authority.protectedFactsOmitted ?? 0) + withheldProtectedFactCount } : {}),
     chronicle: [] as readonly PromptCandidate[]
   };
   const duplicateIds: string[] = [];
-  const protectedFactIds = new Set((authority.currentContinuity?.canonicalFacts ?? []).map((fact) => fact.id).filter(Boolean));
+  const protectedFactIds = new Set([
+    ...(authority.currentContinuity?.canonicalFacts ?? []).map((fact) => fact.id).filter(Boolean),
+    ...protectedFactRecords.map((fact) => fact.id)
+  ]);
   const seen = new Set<string>();
   let sourceValidationFailures = 0;
   const excerptAlternatives = new Map<string, PromptCandidate>();
@@ -274,6 +303,9 @@ export function planGenerationPromptContext(
   let ledgerMeasurementActive = false;
   let ledgerWriterSerializationCount = 0;
   let ledgerReviewerSerializationCount = 0;
+  let factMeasurementActive = false;
+  let factWriterSerializationCount = 0;
+  let factReviewerSerializationCount = 0;
   const authorityRevision = sha256(stableStringify({ baseIdentity: context.baseIdentity, authority }));
   const blocks = [
     { id: "authority", revision: authorityRevision, content: stableStringify(authorityContext), protected: true, priority: 0, ordinal: 0, scope: "authority" },
@@ -281,6 +313,8 @@ export function planGenerationPromptContext(
       content: stableStringify(turn), protected: false, priority: -turn.turnNumber, ordinal: turn.turnNumber, scope: "recent" })),
     ...ledgerRecords.map((entry) => ({ id: `ledger:${entry.turnId}`, revision: sha256(stableStringify(entry)),
       content: stableStringify(entry), protected: false, priority: -entry.turnNumber, ordinal: entry.turnNumber, scope: "ledger" })),
+    ...protectedFactRecords.map((fact, index) => ({ id: `protected-fact:${fact.id}`, revision: sha256(fact.content),
+      content: fact.content, protected: false, priority: -fact.turnNumber, ordinal: index, scope: "protected_fact" })),
     ...worldReferences.map((reference, ordinal) => ({
       id: reference.sourceId, revision: sha256(reference.content), content: reference.content,
       protected: false, priority: reference.rank, ordinal, scope: "world"
@@ -314,6 +348,11 @@ export function planGenerationPromptContext(
         omittedThroughTurn: Math.max(authority.storyLedger?.omittedThroughTurn ?? 0, ...absent.map((entry) => entry.turnNumber)) || null,
         ...(authority.storyLedger?.coverage ? { coverage: authority.storyLedger.coverage } : {}) } };
     })() : {}),
+    ...(historyCoverage ? (() => {
+      const facts = protectedFactRecords.filter((fact) => selected.some((block) => block.id === `protected-fact:${fact.id}`));
+      const omitted = protectedFactRecords.length - facts.length;
+      return { protectedFacts: facts, protectedFactsOmitted: (authority.protectedFactsOmitted ?? 0) + withheldProtectedFactCount + omitted };
+    })() : {}),
     chronicle: selected.filter((block: { id: string; scope?: string }) => block.scope === "chronicle")
       .map((block) => candidates.find((candidate) => candidate.id === block.id))
       .filter((candidate): candidate is PromptCandidate => Boolean(candidate))
@@ -330,6 +369,7 @@ export function planGenerationPromptContext(
     contextValue: promptContext,
     serializeRequest: (selected: ReturnType<typeof promptContext>) => {
       if (ledgerMeasurementActive) ledgerWriterSerializationCount++;
+      if (factMeasurementActive) factWriterSerializationCount++;
       return serialize(promptRoute === "story_memory"
         ? buildStoryMemoryUserPrompt(selected, action, false, guidance, storyLength, inputMode, historyCoverage)
         : buildStoryUserPrompt(selected, action, false, guidance, storyLength, inputMode)
@@ -338,10 +378,12 @@ export function planGenerationPromptContext(
     ...(reviewEnabled ? {
       additionalRequestTokens: (selected: ReturnType<typeof promptContext>) => {
         if (ledgerMeasurementActive) ledgerWriterSerializationCount++;
+        if (factMeasurementActive) factWriterSerializationCount++;
         const body = serialize(buildStoryMemoryUserPrompt(selected, action, false, guidance, storyLength, inputMode, historyCoverage));
         const manifest = generationSourceManifest(attemptId!, body, context, action, selected,
           worldReferences.filter((reference) => (selected.worldReferences ?? []).some((entry) => entry.sourceId === reference.sourceId)));
         if (ledgerMeasurementActive) ledgerReviewerSerializationCount++;
+        if (factMeasurementActive) factReviewerSerializationCount++;
         return reviewInputTokens!(manifest);
       }
     } : {}),
@@ -377,6 +419,9 @@ export function planGenerationPromptContext(
   let historyReservationDiagnostics: { originalHeadroomTokens: number; ledgerBudgetTokens: number; factBudgetTokens: number;
     measurementTrialCount: number; writerSerializationCount: number; reviewerSerializationCount: number; elapsedMilliseconds: number; firstOmittedTurnNumber: number | null;
     postProjectionRemovedEntryCount: number } | undefined;
+  let factReservationDiagnostics: { originalHeadroomTokens: number; factBudgetTokens: number; sourceFactCount: number;
+    selectedFactCount: number; omittedFactCount: number; measurementTrialCount: number; writerSerializationCount: number;
+    reviewerSerializationCount: number; measurementLimitHit: boolean; unexaminedFactCount: number; elapsedMilliseconds: number } | undefined;
   let plan;
   if (useWorldQuota || layered || castSnapshot || historyCoverage) {
     const authorityBlock = blocks[0]!;
@@ -409,6 +454,83 @@ export function planGenerationPromptContext(
     ));
     const ledgerCeiling = historyCoverage ? Math.floor(originalHeadroom * HISTORY_COVERAGE_POLICY.ledgerBudgetShare) : 0;
     const factCeiling = historyCoverage ? Math.floor(originalHeadroom * HISTORY_COVERAGE_POLICY.protectedFactBudgetShare) : 0;
+    let selectedFactBlocks: typeof blocks = [];
+    if (historyCoverage) {
+      const factBlocks = blocks.filter((candidate) => candidate.scope === "protected_fact");
+      const startedAt = performance.now();
+      let measurementTrialCount = 0;
+      let measurementLimitHit = false;
+      let unexaminedFactCount = 0;
+      const measureFacts = (factSelection: typeof blocks) => {
+        if (measurementTrialCount >= MAX_PROTECTED_FACT_MEASUREMENTS) return null;
+        factMeasurementActive = true;
+        measurementTrialCount++;
+        try { return measure([...reservedAuthority, ...factSelection.map((candidate) => ({ ...candidate, protected: true }))]); }
+        catch (error) {
+          if (error instanceof ContextBudgetError) return null;
+          throw error;
+        } finally { factMeasurementActive = false; }
+      };
+      const selectedFacts = (trial: ReturnType<typeof measure> | null, factSelection: typeof blocks) => trial !== null
+        && factSelection.every((candidate) => trial.selected.some((block) => block.id === candidate.id));
+      const fitsFactQuota = (trial: ReturnType<typeof measure> | null, factSelection: typeof blocks) => {
+        if (!selectedFacts(trial, factSelection) || trial === null) return false;
+        return Math.max(trial.contextTokens - protectedPlan.contextTokens, requestCostDelta(trial, protectedPlan)) <= factCeiling;
+      };
+      // The full ordered set is an exact, semantics-preserving fast path: if
+      // it fits as whole records under the same fixed fact quota, the
+      // newest-first skip-nonfit loop would select every record as well.
+      // This avoids rebuilding a multi-megabyte reviewer manifest once per
+      // fact for the common high-headroom case.
+      let allFactsFit = false;
+      if (factBlocks.length) {
+        const trial = measureFacts(factBlocks);
+        if (fitsFactQuota(trial, factBlocks)) {
+          selectedFactBlocks = factBlocks.map((candidate) => ({ ...candidate, protected: true }));
+          allFactsFit = true;
+        }
+      }
+      // Establish the largest fitting newest contiguous run with exact,
+      // monotone suffix probes. That run is identical to greedy selection up
+      // to its first nonfit; afterwards older heterogeneous records are still
+      // examined individually, so this is not suffix-only fact selection.
+      let nextOlderIndex = factBlocks.length - 1;
+      if (!allFactsFit && factBlocks.length && measurementTrialCount < MAX_PROTECTED_FACT_MEASUREMENTS) {
+        let fittingLength = 0;
+        let failingLength = factBlocks.length;
+        while (fittingLength + 1 < failingLength && measurementTrialCount < MAX_PROTECTED_FACT_MEASUREMENTS) {
+          const candidateLength = Math.ceil((fittingLength + failingLength) / 2);
+          const suffix = factBlocks.slice(factBlocks.length - candidateLength);
+          if (fitsFactQuota(measureFacts(suffix), suffix)) fittingLength = candidateLength;
+          else failingLength = candidateLength;
+        }
+        selectedFactBlocks = factBlocks.slice(factBlocks.length - fittingLength).map((candidate) => ({ ...candidate, protected: true }));
+        nextOlderIndex = factBlocks.length - fittingLength - 1;
+      }
+      // Facts deliberately do not use reserveNewestWholeSuffix: a too-large
+      // newer fact must not prevent an older smaller fact from fitting.
+      for (let index = nextOlderIndex; !allFactsFit && index >= 0; index -= 1) {
+        if (measurementTrialCount >= MAX_PROTECTED_FACT_MEASUREMENTS) {
+          measurementLimitHit = true;
+          unexaminedFactCount = index + 1;
+          break;
+        }
+        const candidate = factBlocks[index]!;
+        const trial = measureFacts([...selectedFactBlocks, candidate]);
+        if (fitsFactQuota(trial, [...selectedFactBlocks, candidate])) selectedFactBlocks = [{ ...candidate, protected: true }, ...selectedFactBlocks];
+      }
+      factReservationDiagnostics = {
+        originalHeadroomTokens: originalHeadroom, factBudgetTokens: factCeiling, sourceFactCount: protectedFactRecords.length,
+        selectedFactCount: selectedFactBlocks.length, omittedFactCount: protectedFactRecords.length - selectedFactBlocks.length,
+        measurementTrialCount, writerSerializationCount: factWriterSerializationCount,
+        reviewerSerializationCount: factReviewerSerializationCount, measurementLimitHit, unexaminedFactCount,
+        elapsedMilliseconds: performance.now() - startedAt
+      };
+    }
+    // Keep the original H-derived 25% allocation, but charge each ledger
+    // suffix against the authority plus the fact records already reserved.
+    // H is deliberately never recomputed after fact selection.
+    const factBaselinePlan = measure([...reservedAuthority, ...selectedFactBlocks]);
     let selectedLedgerBlocks: typeof blocks = [];
     if (historyCoverage) {
       const ledgerBlocks = blocks.filter((candidate) => candidate.scope === "ledger")
@@ -419,9 +541,9 @@ export function planGenerationPromptContext(
         measureTokens: (suffix) => {
           ledgerMeasurementActive = true;
           try {
-            const trial = measure([...reservedAuthority, ...suffix.map((block) => ({ ...block, protected: true }))]);
+            const trial = measure([...reservedAuthority, ...selectedFactBlocks, ...suffix.map((block) => ({ ...block, protected: true }))]);
             if (!suffix.every((block) => trial.selected.some((candidate) => candidate.id === block.id))) return Number.POSITIVE_INFINITY;
-            return Math.max(trial.contextTokens - protectedPlan.contextTokens, requestCostDelta(trial, protectedPlan));
+            return Math.max(trial.contextTokens - factBaselinePlan.contextTokens, requestCostDelta(trial, factBaselinePlan));
           } catch (error) {
             if (error instanceof ContextBudgetError) return Number.POSITIVE_INFINITY;
             throw error;
@@ -451,7 +573,7 @@ export function planGenerationPromptContext(
       for (let ordinal = context.baseIdentity.baseTurnNumber - 1; ordinal >= Math.max(1, context.baseIdentity.baseTurnNumber - 2); ordinal--) {
         const block = blocks.find((candidate) => candidate.scope === "recent" && candidate.ordinal === ordinal);
         if (!block) { recentDiagnostics.firstGapReason = "recent_gap"; break; }
-        const trial = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks, block]);
+        const trial = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedFactBlocks, ...selectedRecentBlocks, block]);
         if (!trial.selected.some((candidate) => candidate.id === block.id)) {
           recentDiagnostics.firstGapReason = trial.omitted[0]?.reason ?? "context_limit"; break;
         }
@@ -475,10 +597,10 @@ export function planGenerationPromptContext(
       };
       selectedLedgerBlocks = projectedLedgerBlocks;
     }
-    const worldBasePlan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks]);
+    const worldBasePlan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedFactBlocks, ...selectedRecentBlocks]);
     const selectedWorldBlocks: typeof blocks = [];
     for (const worldBlock of blocks.filter((block) => block.scope === "world").sort((left, right) => left.priority - right.priority || left.ordinal - right.ordinal || left.id.localeCompare(right.id))) {
-      const trial = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, worldBlock]);
+      const trial = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedFactBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, worldBlock]);
       if (!trial.selected.some((block) => block.id === worldBlock.id)) continue;
       const added = Math.max(
         trial.contextTokens - worldBasePlan.contextTokens,
@@ -495,7 +617,7 @@ export function planGenerationPromptContext(
       if (layered && candidate.turnId && recentIds.has(candidate.turnId)) { duplicateIds.push(candidate.id); return false; }
       return true;
     });
-    plan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
+    plan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedFactBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
   } else {
     plan = measure(blocks);
   }
@@ -528,6 +650,7 @@ export function planGenerationPromptContext(
       excerptsPartial: selectedContext.chronicle.filter((candidate) => candidate.evidenceForm === "excerpt").length,
       sourceValidationFailures,
       ...(historyReservationDiagnostics ? { ledgerReservation: historyReservationDiagnostics } : {}),
+      ...(factReservationDiagnostics ? { factReservation: factReservationDiagnostics } : {}),
       components: Object.fromEntries(Object.entries(selectedContext).map(([key, value]) => [key, estimateStoryTokens(stableStringify(value))])),
       omitted: [
         ...duplicateIds.map((id) => ({ id, reason: "duplicate_source" as const })),

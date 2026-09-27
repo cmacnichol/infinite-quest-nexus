@@ -52,7 +52,8 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
     ...scope,
     ...(scope.expectedBaseIdentity && hasGenerationCharacterAuthority(scope.expectedBaseIdentity)
       ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
-        captureStoryLedger: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol) }
+        captureStoryLedger: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol),
+        captureProtectedFacts: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol) }
       : {})
   });
   if (scope.expectedBaseIdentity
@@ -142,6 +143,8 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
       eventTriggers: continuity.eventTriggers,
       pendingEventTriggers: continuity.pendingEventTriggers,
       ...(resolved.storyLedger ? { storyLedger: resolved.storyLedger } : {}),
+      ...(resolved.protectedFacts ? { protectedFacts: resolved.protectedFacts, protectedFactsOmitted: resolved.protectedFactsOmitted ?? 0,
+        protectedFactsCoverage: resolved.protectedFactsCoverage } : {}),
       latestTurn: latest?.rows[0] ? {
         ...(v3 ? { inputMode: latest.rows[0].input_mode } : {}),
         action: stripMechanicsLeakage(latest.rows[0].action).text,

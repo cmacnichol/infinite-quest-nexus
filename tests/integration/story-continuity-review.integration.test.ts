@@ -2672,11 +2672,64 @@ integration("T17 durable continuity review", () => {
     } finally { repairSupersedesFactId = null; }
   });
 
-  it("rejects a semantic repair that supersedes a canonical fact omitted from its repair authority", async () => {
-    const { job, application, campaignId } = await enqueue("enforce");
+  it("commits a v5 repair that supersedes a complete source-verified protected fact actually sent by the planner", async () => {
+    const factId = randomUUID();
+    const content = "The old observatory charter names Mira as its keeper.";
+    const { job, application } = await enqueue("enforce", false, async (campaignId) => {
+      const source = (await pool.query<{ world_version_id: string; id: string; turn_number: number; state_snapshot_private: Record<string, unknown> }>(
+        "SELECT c.world_version_id,t.id,t.turn_number,t.state_snapshot_private FROM campaigns c JOIN turns t ON t.campaign_id=c.id AND t.turn_number=1 WHERE c.id=$1",
+        [campaignId]
+      )).rows[0]!;
+      await pool.query("UPDATE turns SET state_snapshot_private=$2::jsonb WHERE id=$1", [source.id,
+        JSON.stringify({ ...source.state_snapshot_private, canonicalFacts: [{ id: factId, content }], canonicalFactUpdates: [] })]);
+      await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+        VALUES($1,$2,$3,$4,$5,$6,0,$7,$8,$6)`, [factId, ownerUserId, campaignId, source.world_version_id, source.id,
+        source.turn_number, content, content.toLocaleLowerCase("en-US")]);
+    }, "Wait at the observatory.", false, providerId, true);
+    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
+      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!;
+    const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
+    await pool.query(
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+    );
+    reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; repairSupersedesFactId = factId; requests.length = 0;
+    try {
+      await runGenerationJob(pool, `semantic-protected-fact-${randomUUID()}`, 30, credentialSecret);
+      const gate = await application.getReview({ ownerUserId, jobId: job.id });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: gate.reviewId, revision: gate.revision, decision: "retry" });
+      await runGenerationJob(pool, `semantic-protected-fact-retry-${randomUUID()}`, 30, credentialSecret);
+      const primaryBody = requests.find((body) => body.includes("protectedFacts"))!;
+      const primary = JSON.parse(JSON.parse(primaryBody).messages[1].content);
+      const repairBody = requests.find((body) => body.includes("story-continuity-repair-v1"))!;
+      const repair = JSON.parse(JSON.parse(repairBody).messages[1].content);
+      expect(primary.authoritative_context.protectedFacts).toEqual([{ id: factId, turnNumber: 1, content }]);
+      expect(repair.protected_authority).toEqual(expect.arrayContaining([
+        expect.objectContaining({ content, required: true, role: "canonical_fact", canonicalFactId: factId, form: "complete" })
+      ]));
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+      await expect(pool.query<{ valid_until_turn: number | null; superseded_by_fact_id: string | null }>(
+        "SELECT valid_until_turn,superseded_by_fact_id FROM campaign_canonical_facts WHERE id=$1", [factId]
+      )).resolves.toMatchObject({ rows: [expect.objectContaining({ valid_until_turn: expect.any(Number), superseded_by_fact_id: expect.any(String) })] });
+    } finally { repairSupersedesFactId = null; }
+  });
+
+  it("rejects a v5 semantic repair that supersedes a fact omitted from its repair authority", async () => {
+    const { job, application, campaignId } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, true);
     const source = (await pool.query<{ world_version_id: string; id: string; turn_number: number }>("SELECT c.world_version_id,t.id,t.turn_number FROM campaigns c JOIN turns t ON t.campaign_id=c.id AND t.turn_number=c.active_turn_number WHERE c.id=$1", [campaignId])).rows[0]!;
     const factId = randomUUID();
     await pool.query("INSERT INTO campaign_canonical_facts (id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn) VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,$6)", [factId, ownerUserId, campaignId, source.world_version_id, source.id, source.turn_number, "The keeper is absent.", "the keeper is absent."]);
+    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
+      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!;
+    const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
+    await pool.query(
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+    );
     reviewVerdict = "pass"; reviewSequence = ["conflict", "pass"]; repairSupersedesFactId = factId; requests.length = 0;
     try {
       await runGenerationJob(pool, `semantic-omitted-fact-${randomUUID()}`, 30, credentialSecret);

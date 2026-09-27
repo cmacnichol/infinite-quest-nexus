@@ -13,6 +13,8 @@ import type {
 } from "../../application/src/memory/generation-context.js";
 import type { GenerationRecentTurn } from "../../application/src/memory/generation-context.js";
 import { ledgerDirectionExcerpt, type StoryLedger } from "../../application/src/memory/story-history-ledger.js";
+import { loadVerifiedProtectedFacts } from "./campaign-continuity-repository.js";
+import type { ProtectedFact, ProtectedFactSourceCoverage } from "../../application/src/memory/story-history-facts.js";
 export type GenerationBaseIdentity = LegacyGenerationBaseIdentity | GenerationBaseIdentityV3 | GenerationBaseIdentityV4;
 
 export type ResolvedGenerationAuthority = Readonly<{
@@ -22,6 +24,9 @@ export type ResolvedGenerationAuthority = Readonly<{
   baseIdentity: GenerationBaseIdentity;
   recentTurns?: readonly GenerationRecentTurn[];
   storyLedger?: StoryLedger;
+  protectedFacts?: readonly ProtectedFact[];
+  protectedFactsOmitted?: number;
+  protectedFactsCoverage?: ProtectedFactSourceCoverage;
   castSnapshot?: CastGenerationSnapshot;
 }>;
 
@@ -35,6 +40,8 @@ type ResolveRequest = Readonly<{
   captureRecentWindow?: boolean;
   /** V5 only: bounded, transaction-scoped player-intent source projection. */
   captureStoryLedger?: boolean;
+  /** V5 only: complete source-verified canonical facts for optional prompt use. */
+  captureProtectedFacts?: boolean;
 }>;
 
 function characterAuthorityIdentity(
@@ -189,6 +196,11 @@ export async function resolveGenerationAuthoritySnapshot(
       unreadThroughTurn, missingTurnCount, filteredDirectionCount, oversizedDirectionCount, loadedRows: ledgerRows.length
     } };
   })() : undefined;
+  const protectedFactSource = request.captureProtectedFacts && modern
+    ? await loadVerifiedProtectedFacts(client, {
+      ownerUserId: request.ownerUserId, campaignId: request.campaignId, worldVersionId: campaign.world_version_id
+    }, baseTurnNumber)
+    : undefined;
   const legacyIdentity: LegacyGenerationBaseIdentity = {
     operationKind: request.operationKind,
     expectedTurnNumber: request.expectedTurnNumber,
@@ -228,6 +240,8 @@ export async function resolveGenerationAuthoritySnapshot(
     baseIdentity,
     ...(cast ? { castSnapshot: cast.snapshot } : {}),
     ...(recentTurns ? { recentTurns } : {}),
-    ...(storyLedger ? { storyLedger } : {})
+    ...(storyLedger ? { storyLedger } : {}),
+    ...(protectedFactSource ? { protectedFacts: protectedFactSource.facts, protectedFactsOmitted: protectedFactSource.omittedCount,
+      protectedFactsCoverage: protectedFactSource.coverage } : {})
   };
 }

@@ -1496,6 +1496,23 @@ describe("generation executor adapter", () => {
     expect(sentCanonicalFactIds(request)).toEqual([continuityFact, selectedHistoricalFact]);
   });
 
+  it("authorizes only complete protected-fact records actually carried by the producing request", () => {
+    const selected = "11111111-1111-4111-8111-111111111111";
+    const clipped = "22222222-2222-4222-8222-222222222222";
+    const foreign = "33333333-3333-4333-8333-333333333333";
+    const request = JSON.stringify({ messages: [{ role: "user", content: JSON.stringify({
+      authoritative_context: {
+        protectedFacts: [
+          { id: selected, turnNumber: 4, content: "The verified lantern remains lit." },
+          { id: clipped, turnNumber: 4, content: "" }
+        ],
+        storyLedger: { entries: [{ direction: `Intent text must not authorize ${foreign}.` }] }
+      }
+    }) }] });
+
+    expect(sentCanonicalFactIds(request)).toEqual([selected]);
+  });
+
   it("authorizes only complete canonical facts carried by a semantic-repair envelope", () => {
     const allowed = "11111111-1111-4111-8111-111111111111";
     const omitted = "22222222-2222-4222-8222-222222222222";

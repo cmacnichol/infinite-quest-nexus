@@ -1,5 +1,6 @@
 import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, sha256Hex, z } from "@infinite-quest/contracts";
 import { storyLedgerSchema } from "./story-history-ledger.js";
+import { protectedFactSchema, protectedFactSourceCoverageSchema } from "./story-history-facts.js";
 export type { ReviewEvidenceReference } from "@infinite-quest/contracts";
 
 /** Private only: these values are not public preview projections. */
@@ -68,6 +69,9 @@ export const generationContextAuthoritySchema = z.object({
   eventTriggers: campaignRuntimeStateContentSchema.shape.eventTriggers,
   pendingEventTriggers: campaignRuntimeStateContentSchema.shape.pendingEventTriggers,
   storyLedger: storyLedgerSchema.optional(),
+  protectedFacts: z.array(protectedFactSchema).max(512).optional(),
+  protectedFactsOmitted: z.number().int().min(0).optional(),
+  protectedFactsCoverage: protectedFactSourceCoverageSchema.optional(),
   latestTurn: z.object({ action: z.string(), narration: z.string(), inputMode: z.enum(["action", "scene"]).optional() }).strict().nullable()
 }).strict();
 export type GenerationContextAuthority = DeepReadonly<z.infer<typeof generationContextAuthoritySchema>>;
