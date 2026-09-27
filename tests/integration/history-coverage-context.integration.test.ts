@@ -300,6 +300,21 @@ integration("history coverage intent authority", () => {
     // configured budget. A provider cap may bind a row, but it may not turn
     // later rows into a duplicate of an earlier envelope.
     expect([...effectiveWriterEnvelopes]).toEqual([...budgets]);
+    // Task3 binds retrieval to the provider's effective input envelope, not a
+    // larger configured campaign setting. Keep this cap-binding case separate
+    // from the six supported-envelope rows above.
+    const configuredCampaignBudget = 4_000_000;
+    const cappedWriter = { ...provider, id: "matrix-capped-writer", contextWindowTokens: 1_000_000 };
+    const cappedReviewer = { ...provider, id: "matrix-capped-reviewer", contextWindowTokens: 500_000 };
+    const cappedWriterInputLimit = cappedWriter.contextWindowTokens - cappedWriter.maxOutputTokens;
+    const cappedFixedEnvelope = 4_036;
+    const cappedSafeRetrievalBudget = Math.max(512, Math.min(configuredCampaignBudget, cappedWriterInputLimit - cappedFixedEnvelope));
+    expect(cappedSafeRetrievalBudget).toBe(995_452);
+    expect(cappedSafeRetrievalBudget).toBeLessThan(configuredCampaignBudget);
+    expect(cappedReviewer.contextWindowTokens).toBeLessThan(cappedWriter.contextWindowTokens);
+    matrixMetrics.push({ configuredCampaignBudget, effectiveWriterContextWindow: cappedWriter.contextWindowTokens,
+      writerInputLimit: cappedWriterInputLimit, safeRetrievalBudget: cappedSafeRetrievalBudget,
+      reviewerContextWindowTokens: cappedReviewer.contextWindowTokens, contentFree: true });
     process.stderr.write(`${JSON.stringify({ historyCoveragePreenableMatrix: matrixMetrics })}\n`);
     process.stderr.write(`${JSON.stringify({ historyCoverageCompositionMetrics: { writerBytes: new TextEncoder().encode(planned.contextPlan.serializedRequest).byteLength, reviewerBytes: new TextEncoder().encode(review.body).byteLength, ledgerEntries: ledgerEvidence.length, measurementTrials: (planned.layerDiagnostics as any).ledgerReservation.measurementTrialCount, writerSerializations: (planned.layerDiagnostics as any).ledgerReservation.writerSerializationCount, reviewerSerializations: (planned.layerDiagnostics as any).ledgerReservation.reviewerSerializationCount } })}\n`);
   });
