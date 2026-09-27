@@ -1767,7 +1767,11 @@ integration("T17 durable continuity review", () => {
     reviewVerdict = deadline ? "pass" : "conflict";
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
-    const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest }: { plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string; request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string } }) => {
+    const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest, invocationKey, routeBasis, frozenResponseContracts, logicalReservation }: {
+      plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string;
+      request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string };
+      invocationKey?: string; routeBasis?: unknown; frozenResponseContracts?: unknown; logicalReservation?: unknown;
+    }) => {
       if (deadline && operation === "story_generation") {
         if (outcome === "unbound") throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Missing wire evidence.");
         const content = reply("Mira waits at the observatory.");
@@ -1823,7 +1827,10 @@ integration("T17 durable continuity review", () => {
       expect(input.preparedRequest?.body).toBeDefined();
       expect(JSON.parse(input.preparedRequest!.body).model).toBe("@preset/keep");
     }
-    const reviewerDispatch = preparedTextExecutor.mock.calls[1]![0];
+    const reviewerDispatch = preparedTextExecutor.mock.calls[1]![0] as {
+      invocationKey?: string; routeBasis?: unknown; frozenResponseContracts?: unknown; logicalReservation?: unknown;
+      preparedRequest?: { body: string; payloadHash: string };
+    };
     expect(reviewerDispatch.invocationKey).toBe("continuity_review:nonstream");
     expect(reviewerDispatch.routeBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "keep" } });
     expect(reviewerDispatch.frozenResponseContracts).toMatchObject({ version: 2, contracts: {
