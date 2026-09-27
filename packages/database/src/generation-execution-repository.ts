@@ -179,7 +179,7 @@ async function completedReviewerPhysicalAttempt(
 ): Promise<boolean> {
   const review = continuityReviewCheckpointSchema.safeParse(value.continuityReview);
   const reviewer = continuityReviewExecutionSnapshotSchema.safeParse(value.continuityReviewExecution);
-  if (!review.success || !reviewer.success || !reviewer.data.enabled || !reviewer.data.primary
+  if (!review.success || review.data.version !== 2 || !reviewer.success || !reviewer.data.enabled || !reviewer.data.primary
     || review.data.status !== "completed" || !review.data.reviewRequestHash
     || review.data.binding.reviewerExecutionSnapshotHash !== reviewer.data.snapshotHash) return false;
   const route = reviewer.data.primary;
@@ -188,19 +188,26 @@ async function completedReviewerPhysicalAttempt(
   const result = await client.query<{
     planHash: string; requestedModel: string; requestedPresetSlug: string | null; requestedPresetVersionId: string | null;
     requestedPresetConfigHash: string | null; requestPayloadHash: string; requestBody: string; status: string;
-    outcome: string | null; emittedOutput: boolean;
+    outcome: string | null; failureReason: string | null; emittedOutput: boolean;
   }>(`SELECT plan_hash AS "planHash",requested_model AS "requestedModel",
               requested_preset_slug AS "requestedPresetSlug",requested_preset_version_id AS "requestedPresetVersionId",
               requested_preset_config_hash AS "requestedPresetConfigHash",request_payload_hash AS "requestPayloadHash",
-              request_body AS "requestBody",status,outcome,emitted_output AS "emittedOutput"
+              request_body AS "requestBody",status,outcome,failure_reason AS "failureReason",emitted_output AS "emittedOutput"
        FROM prepared_text_physical_attempts
       WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
         AND logical_reservation->>'invocationId'=$3`, [
     scope.ownerUserId, scope.jobId, `continuity-review:primary:${review.data.bindingHash}`
   ]);
   const attempt = result.rows[0];
-  if (!attempt || result.rows.length !== 1 || attempt.status !== "completed" || attempt.outcome !== "succeeded"
-    || !attempt.emittedOutput || attempt.requestPayloadHash !== review.data.reviewRequestHash
+  const semanticOutcome = review.data.verdict !== "unavailable";
+  const technicalFailure = review.data.outcome?.kind === "technical_failure" ? review.data.outcome : null;
+  const physicalOutcomeMatches = semanticOutcome
+    ? attempt?.outcome === "succeeded" && attempt.emittedOutput
+    : technicalFailure !== null && attempt?.outcome === "failed" && !attempt.emittedOutput
+      && (technicalFailure.failure !== "provider_timeout" || attempt.failureReason === "deadline")
+      && (technicalFailure.failure !== "provider_failed" || attempt.failureReason !== "deadline");
+  if (!attempt || result.rows.length !== 1 || attempt.status !== "completed" || !physicalOutcomeMatches
+    || attempt.requestPayloadHash !== review.data.reviewRequestHash
     || attempt.requestPayloadHash !== sha256Hex(attempt.requestBody)
     || attempt.requestedModel !== route.routeBasis.candidates[0]?.modelId) return false;
   const preset = route.routeBasis.preset;
