@@ -5,6 +5,7 @@ import { generationEvidenceManifestHash, generationEvidenceManifestSchema, type 
 import type { StoryTurnOutput } from "../../../packages/contracts/src/story-prompt.js";
 import { sha256, stableStringify } from "../../../packages/domain/src/text.js";
 import { CONTINUITY_REVIEW_CONTRACT, buildContinuityReviewInput, validateContinuityReview, type ContinuityReviewInput } from "../../../packages/story-engine/src/continuity-review.js";
+import { continuityReviewSchema } from "../../../packages/contracts/src/story-continuity-review.js";
 import { effectiveRequestOutputTokens, estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
 import { ContextBudgetError } from "../../../packages/story-engine/src/context-budget.js";
 import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
@@ -12,10 +13,45 @@ import type { ProviderRequest } from "../../../packages/story-engine/src/provide
 import type { PreparedResponseContract } from "../../../packages/contracts/src/text-response-format.js";
 import type { TextExecutionPlan } from "../../../packages/contracts/src/text-execution-plan.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
+import { continuityReviewAttemptOutcomeSchema, type ContinuityReviewAttemptOutcome, continuityReviewProviderMetadataSchema } from "../../../packages/contracts/src/generation-review.js";
 
 export class ContinuityReviewUnavailableError extends Error {
   readonly code = "continuity_review_unavailable";
   constructor() { super("continuity_review_unavailable: the complete bound review could not be prepared or verified."); }
+}
+
+export class ContinuityReviewAttemptError extends Error {
+  readonly code: string;
+  readonly outcome: Extract<ContinuityReviewAttemptOutcome, { kind: "technical_failure" }>;
+  constructor(failure: Extract<ContinuityReviewAttemptOutcome, { kind: "technical_failure" }>['failure'], providerMetadata: Extract<ContinuityReviewAttemptOutcome, { kind: "technical_failure" }>['providerMetadata'], cause?: unknown) {
+    super(failure === "evidence_unavailable" ? "continuity_review_unavailable" : `continuity_review_${failure}`, { cause });
+    this.name = "ContinuityReviewAttemptError";
+    this.code = failure === "output_limit" ? "continuity_review_output_limited"
+      : failure === "evidence_unavailable" ? "continuity_review_unavailable" : `continuity_review_${failure}`;
+    this.outcome = continuityReviewAttemptOutcomeSchema.parse({ version: 2, kind: "technical_failure", failure, providerMetadata }) as Extract<ContinuityReviewAttemptOutcome, { kind: "technical_failure" }>;
+  }
+}
+
+function safeProviderMetadata(result: Awaited<ReturnType<RuntimeTextExecution["execute"]>>): z.infer<typeof continuityReviewProviderMetadataSchema> {
+  const finishReasons = ["stop", "length", "max_tokens", "content_filter", "tool_calls"] as const;
+  const finishReason: z.infer<typeof continuityReviewProviderMetadataSchema>['finishReason'] = finishReasons.find((reason) => result.finishReason === reason) ?? "unknown";
+  const outputTokens = Number.isSafeInteger(result.usage?.outputTokens) && result.usage.outputTokens >= 0 ? result.usage.outputTokens : null;
+  return { finishReason, outputTokens };
+}
+
+function transportFailure(error: unknown): "provider_timeout" | "provider_failed" {
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) return "provider_timeout";
+  const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "";
+  const message = error instanceof Error ? error.message : "";
+  return /timeout|timed[_ ]out|request_timeout|etimedout/iu.test(`${code} ${message}`) ? "provider_timeout" : "provider_failed";
+}
+
+function shouldPropagateProviderError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { code?: unknown; responseFormatDiagnosticCode?: unknown };
+  if (value.code === "generation_cancelled" || value.code === "lease_lost") return true;
+  return ["provider_schema_unsupported", "provider_schema_invalid", "provider_route_unavailable", "provider_refusal"]
+    .includes(String(value.responseFormatDiagnosticCode ?? ""));
 }
 
 /** Why a continuity review checkpoint could not reach a verdict. Recorded
@@ -23,6 +59,8 @@ export class ContinuityReviewUnavailableError extends Error {
  * live logs. Production evidence: unavailable rows previously carried no
  * reason at all, so the cause could not be told apart after the fact. */
 export type ContinuityReviewUnavailableReason =
+  | "output_limit"
+  | "provider_timeout"
   | "context_budget_exceeded"
   | "provider_failed"
   | "invalid_output"
@@ -40,7 +78,12 @@ export function continuityReviewUnavailableReason(error: unknown): ContinuityRev
     ? (error as { code: string }).code
     : null;
   if (error instanceof ContinuityReviewUnavailableError || code === "continuity_review_unavailable") return "evidence_unavailable";
+  if (error instanceof ContinuityReviewAttemptError) return error.outcome.failure;
+  if (code === "continuity_review_output_limited") return "output_limit";
   if (error instanceof z.ZodError || error instanceof SyntaxError) return "invalid_output";
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) return "provider_timeout";
+  if ((typeof code === "string" && /timeout|timed_out|request_timeout/iu.test(code))
+    || (error instanceof Error && /timeout|timed out/iu.test(error.message))) return "provider_timeout";
   return "provider_failed";
 }
 function castAuthorityContract(protocolIdentity: string | undefined, manifest: GenerationEvidenceManifest): string {
@@ -204,13 +247,25 @@ export function estimateContinuityReviewPlanningTokens(input: Omit<ContinuityRev
 }
 
 export async function executePreparedContinuityReview(provider: RuntimeTextExecution, prepared: PreparedContinuityReview) {
-  const result = await provider.execute(prepared.request);
+  let result: Awaited<ReturnType<RuntimeTextExecution["execute"]>>;
+  try { result = await provider.execute(prepared.request); }
+  catch (error) {
+    if (shouldPropagateProviderError(error)) throw error;
+    throw new ContinuityReviewAttemptError(transportFailure(error), null);
+  }
   return validatePreparedContinuityReviewResult(prepared, result);
 }
 
 export function validatePreparedContinuityReviewResult(prepared: PreparedContinuityReview, result: Awaited<ReturnType<RuntimeTextExecution["execute"]>>) {
-  if (result.preparedRequest?.payloadHash !== prepared.requestHash || sha256(result.preparedRequest.body) !== prepared.requestHash) throw new ContinuityReviewUnavailableError();
+  const metadata = safeProviderMetadata(result);
+  if (result.preparedRequest?.payloadHash !== prepared.requestHash || sha256(result.preparedRequest.body) !== prepared.requestHash)
+    throw new ContinuityReviewAttemptError("evidence_unavailable", metadata);
+  if (result.outputLimited) throw new ContinuityReviewAttemptError("output_limit", metadata);
   let raw: unknown;
-  try { raw = result.outputLimited ? null : JSON.parse(result.content); } catch { raw = null; }
-  return { result, review: validateContinuityReview(prepared.input, raw), requestHash: prepared.requestHash };
+  try { raw = JSON.parse(result.content); }
+  catch { throw new ContinuityReviewAttemptError("invalid_output", metadata); }
+  if (!continuityReviewSchema.safeParse(raw).success) throw new ContinuityReviewAttemptError("invalid_output", metadata);
+  const review = validateContinuityReview(prepared.input, raw);
+  const outcome = continuityReviewAttemptOutcomeSchema.parse({ version: 2, kind: "semantic_verdict", review, providerMetadata: metadata });
+  return { result, review, outcome, requestHash: prepared.requestHash };
 }

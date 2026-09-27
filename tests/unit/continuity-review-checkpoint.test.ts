@@ -18,9 +18,24 @@ describe("durable continuity review checkpoint", () => {
     expect(continuityReviewCheckpointSchema.safeParse({ ...checkpoint, bindingHash: "2".repeat(64) }).success).toBe(false);
     expect(() => assertContinuityReviewCommit("off", undefined, binding)).not.toThrow();
   });
+  it("preserves historical v1 uncertainty without inventing a technical cause", () => {
+    const legacy = { ...checkpoint, verdict: "uncertain", result: { version: "story-continuity-review-v1", verdict: "uncertain", findings: [] } };
+    const parsed = continuityReviewCheckpointSchema.parse(legacy);
+    expect(parsed.version).toBe(1);
+    expect(parsed.verdict).toBe("uncertain");
+    expect(parsed).not.toHaveProperty("outcome");
+  });
+  it("persists v2 technical failures without a semantic verdict and rejects inconsistent outcomes", () => {
+    const failure = { version: 2 as const, kind: "technical_failure" as const, failure: "output_limit" as const,
+      providerMetadata: { finishReason: "length" as const, outputTokens: 1000 } };
+    const current = { ...checkpoint, version: 2, verdict: "unavailable", result: null, outcome: failure };
+    expect(continuityReviewCheckpointSchema.safeParse(current).success).toBe(true);
+    expect(continuityReviewCheckpointSchema.safeParse({ ...current, verdict: "uncertain" }).success).toBe(false);
+    expect(continuityReviewCheckpointSchema.safeParse({ ...current, outcome: { ...failure, verdict: "uncertain" } }).success).toBe(false);
+  });
   it("persists an optional diagnosable reason on an unavailable review, and still parses older rows without one", () => {
     const unavailable = { ...checkpoint, verdict: "unavailable" as const, result: null, reviewRequestHash: null };
-    for (const unavailableReason of ["context_budget_exceeded", "provider_failed", "invalid_output", "evidence_unavailable"] as const) {
+    for (const unavailableReason of ["output_limit", "provider_timeout", "context_budget_exceeded", "provider_failed", "invalid_output", "evidence_unavailable"] as const) {
       const withReason = continuityReviewCheckpointSchema.safeParse({ ...unavailable, unavailableReason });
       expect(withReason.success).toBe(true);
       expect(withReason.success && withReason.data.unavailableReason).toBe(unavailableReason);

@@ -1,6 +1,22 @@
 import { z } from "zod";
 import { continuityReviewSchema } from "./story-continuity-review.js";
 
+/** Safe provider metadata only; raw output and provider-private references never enter this record. */
+export const continuityReviewProviderMetadataSchema = z.strictObject({
+  finishReason: z.enum(["stop", "length", "max_tokens", "content_filter", "tool_calls", "unknown"]),
+  outputTokens: z.number().int().nonnegative().safe().nullable()
+});
+
+/** Durable attempt result: technical failures cannot carry a semantic verdict. */
+export const continuityReviewAttemptOutcomeSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ version: z.literal(2), kind: z.literal("semantic_verdict"), review: continuityReviewSchema,
+    providerMetadata: continuityReviewProviderMetadataSchema.nullable() }),
+  z.strictObject({ version: z.literal(2), kind: z.literal("technical_failure"),
+    failure: z.enum(["output_limit", "invalid_output", "provider_timeout", "provider_failed", "context_budget_exceeded", "evidence_unavailable"]),
+    providerMetadata: continuityReviewProviderMetadataSchema.nullable() })
+]);
+export type ContinuityReviewAttemptOutcome = z.infer<typeof continuityReviewAttemptOutcomeSchema>;
+
 export const generationReviewStageSchema = z.enum(["structure", "choices", "scene_coverage", "event_coverage", "continuity"]);
 export const generationReviewReasonCodeSchema = z.enum(["scene_beats_missing", "narrative_conflict", "review_uncertain", "review_unavailable", "invalid_choices", "invalid_structure", "output_incomplete", "mechanics_contamination", "event_coverage_failed", "candidate_stale", "candidate_invalid", "provider_interrupted"]);
 

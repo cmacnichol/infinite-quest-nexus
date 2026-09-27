@@ -183,7 +183,30 @@ describe("exact continuity review provider request", () => {
       preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) } });
 
     await expect(executePreparedContinuityReview({ ...provider, execute } as typeof provider, prepared))
-      .rejects.toMatchObject({ code: "continuity_review_output_limited" });
+      .rejects.toMatchObject({ code: "continuity_review_output_limited", outcome: { kind: "technical_failure", failure: "output_limit" } });
+  });
+  it.each([
+    ["malformed JSON", "{"],
+    ["schema-invalid JSON", JSON.stringify({ version: "story-continuity-review-v1", verdict: "maybe", findings: [] })]
+  ])("classifies %s as technical invalid output", async (_label, content) => {
+    const prepared = prepare();
+    await expect(executePreparedContinuityReview({ ...provider, execute: async () => ({ content, outputLimited: false,
+      preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) } }) } as typeof provider, prepared))
+      .rejects.toMatchObject({ outcome: { kind: "technical_failure", failure: "invalid_output" } });
+  });
+  it("retains a validated semantic uncertain verdict as uncertainty", async () => {
+    const prepared = prepare();
+    const result = await executePreparedContinuityReview({ ...provider, execute: async () => ({
+      content: JSON.stringify({ version: "story-continuity-review-v1", verdict: "uncertain", findings: [] }), outputLimited: false,
+      preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) }
+    }) } as typeof provider, prepared);
+    expect(result.review.verdict).toBe("uncertain");
+    expect(result.outcome.kind).toBe("semantic_verdict");
+  });
+  it("classifies a transport timeout as a technical failure", async () => {
+    const prepared = prepare();
+    await expect(executePreparedContinuityReview({ ...provider, execute: async () => { throw Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" }); } } as typeof provider, prepared))
+      .rejects.toMatchObject({ outcome: { kind: "technical_failure", failure: "provider_timeout" } });
   });
   it("prepares a complete self-contained repair without private scratchpad or a continuation", () => {
     const prepared = prepareContinuityRepair({ provider, manifest, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft,
@@ -249,7 +272,7 @@ describe("continuity review unavailable reason", () => {
       .toBe("evidence_unavailable");
     expect(continuityReviewUnavailableReason(new z.ZodError([]))).toBe("invalid_output");
     expect(continuityReviewUnavailableReason(new SyntaxError("Unexpected token"))).toBe("invalid_output");
-    expect(continuityReviewUnavailableReason(new Error("network timeout"))).toBe("provider_failed");
+    expect(continuityReviewUnavailableReason(new Error("network timeout"))).toBe("provider_timeout");
     expect(continuityReviewUnavailableReason("not an error")).toBe("provider_failed");
   });
 });

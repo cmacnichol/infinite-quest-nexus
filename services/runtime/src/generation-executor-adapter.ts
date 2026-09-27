@@ -1,5 +1,6 @@
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
-import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult, continuityReviewUnavailableReason } from "./story-continuity-review-adapter.js";
+import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult, continuityReviewUnavailableReason, ContinuityReviewAttemptError } from "./story-continuity-review-adapter.js";
+import { continuityReviewAttemptOutcomeSchema } from "../../../packages/contracts/src/generation-review.js";
 import { prepareGenerationReview } from "./generation-review-adapter.js";
 import { recoverInterruptedStory } from "../../../packages/story-engine/src/interrupted-story.js";
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
@@ -4308,9 +4309,10 @@ async function executeLoadedGeneration(
       else if (existing.success) {
         // A prior lease may have dispatched the call. Do not silently duplicate
         // its cost or assume the missing response was a semantic pass.
-        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null, unavailableReason: "provider_failed" };
+        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null, unavailableReason: "provider_failed",
+          ...(existing.data.version === 2 ? { outcome: { version: 2, kind: "technical_failure", failure: "provider_failed", providerMetadata: null } as const } : {}) };
       } else {
-        checkpoint = { version: 1, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null };
+        checkpoint = { version: 2, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null, outcome: null };
         try {
           if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
           const prepared = prepareContinuityReview({ provider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
@@ -4330,7 +4332,7 @@ async function executeLoadedGeneration(
             ledgerDependencies, provider, job, "story_continuity_review", prepared.request, prepared.textExecutionPlan
           ));
           const validated = validatePreparedContinuityReviewResult(prepared, reviewed);
-          checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"] };
+          checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"], outcome: validated.outcome };
         } catch (error) {
           if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "") || isV2PreparedContractFailure(error, job)) throw error;
           if (error instanceof ContextBudgetError) {
@@ -4340,7 +4342,11 @@ async function executeLoadedGeneration(
               countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
             });
           }
-          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null, unavailableReason: continuityReviewUnavailableReason(error) };
+          const unavailableReason = continuityReviewUnavailableReason(error);
+          const outcome = error instanceof ContinuityReviewAttemptError
+            ? error.outcome
+            : continuityReviewAttemptOutcomeSchema.parse({ version: 2, kind: "technical_failure", failure: unavailableReason, providerMetadata: null });
+          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null, unavailableReason, outcome };
         }
       }
       const reviewDiagnostic = projectSafeGenerationDiagnostic({
