@@ -37,6 +37,18 @@ import { loadConfig, prepareIllustrationTextExecution } from "../../services/run
 import { installIntegrationProviderTransport } from "./provider-transport-test-helper.js";
 import { deriveStoryContinuityRunFromExecutorCapture, evaluateStoryContinuity, type StoryContinuityEvidence } from "../../scripts/lib/story-continuity-evaluator.js";
 
+const plannerCalls = vi.hoisted(() => [] as unknown[][]);
+vi.mock("../../services/runtime/src/generation-context-planner.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/runtime/src/generation-context-planner.js")>();
+  return {
+    ...actual,
+    planGenerationPromptContext(...args: Parameters<typeof actual.planGenerationPromptContext>) {
+      plannerCalls.push(args);
+      return actual.planGenerationPromptContext(...args);
+    }
+  };
+});
+
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
 const credentialSecret = "story-continuity-evaluator-fixture-secret";
@@ -2298,7 +2310,8 @@ integration("T17 durable continuity review", () => {
       }), ownerUserId]
     );
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
-    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined,
+      { installedCapability: "r3", enforceEnabled: true, castContextEnabled: true }, true);
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
       action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
       providerProfileId: narrowReviewerProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
@@ -2310,11 +2323,24 @@ integration("T17 durable continuity review", () => {
     expect((await pool.query<{ version: string }>(
       "SELECT generation_base_identity->>'version' AS version FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.version).toMatch(/^generation-base-v[34]$/);
+    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
+      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!;
+    const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
+    await pool.query(
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+    );
     requests.length = 0;
+    plannerCalls.length = 0;
     await runGenerationJob(pool, `narrow-reviewer-budget-${randomUUID()}`, 30, credentialSecret);
+    const plannerCall = plannerCalls.at(-1);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "context_budget_exceeded" });
+    expect(plannerCall?.[14]).toBe(904);
+    expect(plannerCall?.[15]).toBe("current-continuity-v5");
     expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(0);
     expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(0);
-    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
   });
 
   it("keeps an uncovered scene main exactly, then pauses again for a later final continuity conflict", async () => {
@@ -2779,6 +2805,71 @@ integration("T17 durable continuity review", () => {
     await expect(pool.query<{ orchestration_private: { primaryResult: { requestPayloadHash: string } } }>(
       "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
     )).resolves.toMatchObject({ rows: [{ orchestration_private: { primaryResult: { requestPayloadHash: requestHash } } }] });
+  });
+
+  it("reclaims a persisted v5 review checkpoint through the same provider and commits without another primary call", async () => {
+    const { job, application } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, true);
+    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
+      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!;
+    const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
+    await pool.query(
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+    );
+    reviewVerdict = "pass";
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const saved = await repository.saveOrchestration(scope, value);
+      if (!interrupted && value.continuityReview?.status === "completed") {
+        interrupted = true;
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+        throw Object.assign(new Error("Injected termination after same-provider v5 review checkpoint"), { code: "generation_cancelled" });
+      }
+      return saved;
+    } };
+    const firstWorkerId = `v5-same-provider-${randomUUID()}`;
+    const firstClaim = await repository.claimNext({ workerId: firstWorkerId, leaseSeconds: 30 });
+    expect(firstClaim?.jobId).toBe(job.id);
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: firstClaim!, workerId: firstWorkerId, leaseSeconds: 30 });
+    const beforeReclaim = (await pool.query<{ orchestration_private: { primaryResult: { requestPayloadHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    const requestHash = beforeReclaim.primaryResult.requestPayloadHash;
+    const callsBeforeReclaim = requests.length;
+    await runGenerationJob(pool, `v5-same-provider-reclaim-${randomUUID()}`, 30, credentialSecret);
+    expect(requests).toHaveLength(callsBeforeReclaim);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    await expect(pool.query<{ orchestration_private: { primaryResult: { requestPayloadHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ orchestration_private: { primaryResult: { requestPayloadHash: requestHash } } }] });
+  });
+
+  it.each([
+    { protocol: "current-continuity-v3", castContextEnabled: false },
+    { protocol: "current-continuity-v4", castContextEnabled: true }
+  ] as const)("dispatches one primary request from a queued frozen $protocol job after live enrollment changes", async ({ protocol, castContextEnabled }) => {
+    const { job, application, campaignId } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, castContextEnabled);
+    const queued = (await pool.query<{ context_options: Record<string, unknown>; orchestration_private: Record<string, unknown>; prompt_protocol_version: string }>(
+      "SELECT context_options,orchestration_private,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!;
+    const frozenPolicy = queued.context_options.storyMemoryPolicy as Record<string, unknown>;
+    expect(frozenPolicy).toMatchObject({ contextProtocol: protocol });
+    expect(queued.orchestration_private).not.toHaveProperty("primaryResult.requestPayloadHash");
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId }, { capability: "r1", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: true });
+    reviewVerdict = "pass";
+    requests.length = 0;
+    await runGenerationJob(pool, `queued-${protocol}-${randomUUID()}`, 30, credentialSecret);
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(1);
+    const after = (await pool.query<{ context_options: Record<string, unknown> }>(
+      "SELECT context_options FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!;
+    expect(after.context_options.storyMemoryPolicy).toEqual(frozenPolicy);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
   });
 
   it("preserves the candidate and exposes review budget counts when complete evidence cannot fit", async () => {
