@@ -1747,7 +1747,7 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "prepared_identity_mismatch", "prepared_identity_missing_physical", "prepared_identity_tampered_physical", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
     const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
@@ -1862,6 +1862,16 @@ integration("T17 durable continuity review", () => {
               AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId]);
           throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Fixture reviewer deadline.");
         }
+        if (outcome === "prepared_identity_missing_physical") {
+          await pool.query(`DELETE FROM prepared_text_physical_attempts
+            WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+              AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId]);
+        }
+        if (outcome === "prepared_identity_tampered_physical") {
+          await pool.query(`UPDATE prepared_text_physical_attempts SET request_payload_hash=$4
+            WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+              AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId, "0".repeat(64)]);
+        }
       }
       return {
       content,
@@ -1873,7 +1883,8 @@ integration("T17 durable continuity review", () => {
         || (outcome === "fallback_retry_after_technical" && reviewerDispatches < 4)
         || outcome === "fallback_both_output_limited") && operation === "story_continuity_review", modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
-      ...(preparedRequest ? { preparedRequest } : {})
+      ...(preparedRequest ? { preparedRequest: outcome.startsWith("prepared_identity_") && operation === "story_continuity_review"
+        ? { body: preparedRequest.body, payloadHash: "0".repeat(64) } : preparedRequest } : {})
     }; });
     const composedCollaborators = createGenerationExecutionCollaborators(
       pool,
@@ -1978,6 +1989,30 @@ integration("T17 durable continuity review", () => {
         status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["narrative_conflict"] }
       });
       expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
+      return;
+    }
+    if (outcome === "prepared_identity_mismatch") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      await expect(application.getReview({ ownerUserId, jobId: job.id })).resolves.toMatchObject({ state: "pending", stage: "continuity", canKeep: true });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
+      await expect(pool.query<{ unavailableReason: string; outcome: { kind: string; failure: string }; resultTurnId: string | null; candidateHash: string | null; acceptedTurnCount: string }>(
+        `SELECT orchestration_private->'continuityReview'->>'unavailableReason' AS "unavailableReason",
+                orchestration_private->'continuityReview'->'outcome' AS "outcome",result_turn_id AS "resultTurnId",
+                orchestration_private #>> '{generationReview,gateCandidate,storyHash}' AS "candidateHash",
+                (SELECT count(*) FROM turns WHERE campaign_id=$2 AND turn_number=$3) AS "acceptedTurnCount"
+           FROM generation_jobs WHERE id=$1`, [job.id, imported.campaignId, job.expectedTurnNumber]
+      )).resolves.toMatchObject({ rows: [{ unavailableReason: "evidence_unavailable",
+        outcome: { kind: "technical_failure", failure: "evidence_unavailable" }, resultTurnId: null,
+        candidateHash: expect.stringMatching(/^[a-f0-9]{64}$/u), acceptedTurnCount: "0" }] });
+      return;
+    }
+    if (outcome === "prepared_identity_missing_physical" || outcome === "prepared_identity_tampered_physical") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_checkpoint_incompatible", resultTurnId: null
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.operation)).toEqual(["story_generation", "story_continuity_review"]);
       return;
     }
     const review = await application.getReview({ ownerUserId, jobId: job.id });

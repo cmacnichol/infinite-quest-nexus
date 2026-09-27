@@ -215,6 +215,8 @@ async function completedReviewerPhysicalAttempt(
     : technicalFailure !== null && (
       ((technicalFailure.failure === "output_limit" || technicalFailure.failure === "invalid_output")
         && attempt?.outcome === "succeeded")
+      || (technicalFailure.failure === "evidence_unavailable"
+        && attempt?.outcome === "succeeded" && attempt.emittedOutput)
       || (technicalFailure.failure === "provider_timeout"
         && attempt?.outcome === "failed" && attempt.failureReason === "deadline")
       || (technicalFailure.failure === "provider_failed"
