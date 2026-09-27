@@ -28,8 +28,10 @@ describe("durable continuity review checkpoint", () => {
   it("persists v2 technical failures without a semantic verdict and rejects inconsistent outcomes", () => {
     const failure = { version: 2 as const, kind: "technical_failure" as const, failure: "output_limit" as const,
       providerMetadata: { finishReason: "length" as const, outputTokens: 1000 } };
-    const current = { ...checkpoint, version: 2, verdict: "unavailable", result: null, outcome: failure };
+    const current = { ...checkpoint, version: 2, verdict: "unavailable", result: null, unavailableReason: "output_limit", outcome: failure };
     expect(continuityReviewCheckpointSchema.safeParse(current).success).toBe(true);
+    expect(continuityReviewCheckpointSchema.safeParse({ ...current, unavailableReason: "provider_failed" }).success).toBe(false);
+    expect(continuityReviewCheckpointSchema.safeParse({ ...current, unavailableReason: undefined }).success).toBe(false);
     expect(continuityReviewCheckpointSchema.safeParse({ ...current, verdict: "uncertain" }).success).toBe(false);
     expect(continuityReviewCheckpointSchema.safeParse({ ...current, outcome: { ...failure, verdict: "uncertain" } }).success).toBe(false);
   });

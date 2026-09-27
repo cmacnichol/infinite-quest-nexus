@@ -47,6 +47,9 @@ const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...
   if (value.outcome.kind === "technical_failure" && (value.verdict !== "unavailable" || value.result !== null)) {
     context.addIssue({ code: "custom", message: "Technical failure cannot claim a semantic verdict." });
   }
+  if (value.outcome.kind === "technical_failure" && value.unavailableReason !== value.outcome.failure) {
+    context.addIssue({ code: "custom", message: "Technical checkpoint reason must match its attempt outcome." });
+  }
 });
 /** Explicitly reads frozen v1 checkpoints and newly versioned v2 outcomes. */
 export const continuityReviewCheckpointSchema = z.union([continuityReviewCheckpointV1Schema, continuityReviewCheckpointV2Schema]);

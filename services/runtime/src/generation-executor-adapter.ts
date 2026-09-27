@@ -1864,6 +1864,15 @@ async function evaluateTriggers(
   return activatedEventsFromResponse(response.content, triggers, job.expected_turn_number);
 }
 
+export function completeContinuityReviewTechnicalFailure(checkpoint: ContinuityReviewCheckpoint, error: unknown): ContinuityReviewCheckpoint {
+  const unavailableReason = continuityReviewUnavailableReason(error);
+  const outcome = error instanceof ContinuityReviewAttemptError
+    ? error.outcome
+    : continuityReviewAttemptOutcomeSchema.parse({ version: 2, kind: "technical_failure", failure: unavailableReason, providerMetadata: null });
+  return continuityReviewCheckpointSchema.parse({ ...checkpoint, version: 2, status: "completed", verdict: "unavailable", result: null,
+    unavailableReason, outcome });
+}
+
 export function createGenerationExecutor(
   dependencies: GenerationExecutorDependencies
 ): GenerationExecutor {
@@ -4342,11 +4351,7 @@ async function executeLoadedGeneration(
               countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
             });
           }
-          const unavailableReason = continuityReviewUnavailableReason(error);
-          const outcome = error instanceof ContinuityReviewAttemptError
-            ? error.outcome
-            : continuityReviewAttemptOutcomeSchema.parse({ version: 2, kind: "technical_failure", failure: unavailableReason, providerMetadata: null });
-          checkpoint = { ...checkpoint, status: "completed", verdict: "unavailable", result: null, unavailableReason, outcome };
+          checkpoint = completeContinuityReviewTechnicalFailure(checkpoint, error);
         }
       }
       const reviewDiagnostic = projectSafeGenerationDiagnostic({
