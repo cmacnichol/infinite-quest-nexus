@@ -4412,11 +4412,13 @@ async function executeLoadedGeneration(
         const fallbackAction = checkpoint.version === 2 && checkpoint.attempts
           ? nextContinuityReviewAction({ maximumAutomaticFallbacks: reviewerExecution?.maximumAutomaticFallbacks ?? 0,
             hasFallback: reviewerExecution?.fallback !== null && reviewerExecution?.fallback !== undefined,
+            fallbackPreparationFailed: checkpoint.fallbackPreparationFailure !== undefined,
             attempts: checkpoint.attempts.map((attempt) => ({ route: attempt.route, status: attempt.reservationStatus, outcome: attempt.outcome })) })
           : { kind: "pause-for-decision" as const };
         if (fallbackAction.kind === "dispatch-fallback" && reviewerExecution?.fallback && finalManifest && binding.producingRequestHash) {
           const fallbackCheckpoint = checkpoint as Extract<ContinuityReviewCheckpoint, { version: 2 }> & { attempts: NonNullable<Extract<ContinuityReviewCheckpoint, { version: 2 }> ["attempts"]> };
           const fallbackRoute = reviewerExecution.fallback;
+          let fallbackDispatched = false;
           try {
             const fallbackProvider = {
               id: job.provider_profile_id, name: "Frozen continuity reviewer fallback", providerRole: "text" as const,
@@ -4446,6 +4448,7 @@ async function executeLoadedGeneration(
             if (!reviewCycleId && fallbackLedger.reviewsConsumed >= 2) throw Object.assign(new Error("Continuity review allowance consumed."), { code: "continuity_review_unavailable" });
             orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint,
               logicalAttempt: { ...fallbackLedger, reviewsConsumed: fallbackLedger.reviewsConsumed + 1 } });
+            fallbackDispatched = true;
             const fallbackReviewed = await phase("story_continuity_review", () => requirePreparedTextExecutor(collaborators).execute({
               plan: fallbackFrozen.plan, operation: "story_continuity_review", ownerUserId: job.owner_user_id,
               providerProfileId: job.provider_profile_id, request: fallbackFrozen.request, preparedRequest: fallbackFrozen.preparedRequest,
@@ -4463,7 +4466,20 @@ async function executeLoadedGeneration(
                 reservationStatus: "completed" as const, responseReference: fallbackReviewed.responseId || null, outcome: fallbackValidated.outcome } : attempt) };
           } catch (error) {
             if (["generation_cancelled", "lease_lost"].includes(errorCodeFrom(error) ?? "") || isV2PreparedContractFailure(error, job)) throw error;
-            checkpoint = completeContinuityReviewTechnicalFailure(checkpoint, error);
+            if (fallbackDispatched) {
+              checkpoint = completeContinuityReviewTechnicalFailure(checkpoint, error);
+            } else {
+              if (error instanceof ContextBudgetError) {
+                reviewBudgetDiagnostic = projectSafeGenerationDiagnostic({
+                  code: error.code, operation: "story_continuity_review", action: "adjust_context", scope: error.scope,
+                  requiredTokens: error.requiredTokens, availableTokens: error.availableTokens,
+                  countMode: "estimated", estimatorVersion: "story-token-estimate-v1"
+                });
+              }
+              checkpoint = { ...fallbackCheckpoint, fallbackPreparationFailure: {
+                version: 1, route: "fallback", failure: continuityReviewUnavailableReason(error)
+              } };
+            }
           }
         }
       }

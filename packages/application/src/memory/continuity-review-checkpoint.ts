@@ -54,10 +54,17 @@ const continuityReviewAttemptSchema = z.object({
     context.addIssue({ code: "custom", message: "Reviewer attempt ordinal must match its route." });
   }
 });
+const fallbackPreparationFailureSchema = z.object({
+  version: z.literal(1),
+  route: z.literal("fallback"),
+  failure: z.enum(["output_limit", "invalid_output", "provider_timeout", "provider_failed", "context_budget_exceeded", "evidence_unavailable"])
+}).strict();
 const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...continuityReviewCheckpointBase,
   outcome: continuityReviewAttemptOutcomeSchema.nullable(),
   /** Present for frozen reviewer routes; old v2 checkpoints remain readable. */
   attempts: z.array(continuityReviewAttemptSchema).min(1).max(2).optional(),
+  /** A fallback request that could not be safely prepared has no provider dispatch. */
+  fallbackPreparationFailure: fallbackPreparationFailureSchema.optional(),
   /** A user-authorized technical retry creates a new bounded reviewer cycle. */
   cycleId: hash.optional()
 }).strict().superRefine((value, context) => {
@@ -94,6 +101,10 @@ const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...
     if (value.attempts.some((attempt) => attempt.cycleId !== value.cycleId)) {
       context.addIssue({ code: "custom", message: "Reviewer attempts must retain their cycle identity." });
     }
+  }
+  if (value.fallbackPreparationFailure && (value.status !== "completed" || value.outcome.kind !== "technical_failure"
+    || value.attempts?.at(-1)?.route !== "primary" || value.attempts.at(-1)?.reservationStatus !== "completed")) {
+    context.addIssue({ code: "custom", message: "Fallback preparation failure requires a completed technical primary attempt." });
   }
 });
 /** Explicitly reads frozen v1 checkpoints and newly versioned v2 outcomes. */

@@ -1747,7 +1747,7 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
     const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
@@ -1766,8 +1766,8 @@ integration("T17 durable continuity review", () => {
         continuityReviewExecutionPolicy: {
           version: 1,
           primary: { selection: { kind: "openrouter_preset", slug: "reviewer" }, overrides: { parameters: { temperature: 0 } } },
-          ...(["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass"].includes(outcome) ? { fallback: { selection: { kind: "openrouter_preset", slug: "fallback" }, overrides: { parameters: { temperature: 0 } } } } : {}),
-          maximumAutomaticFallbacks: ["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass"].includes(outcome) ? 1 : 0
+          ...(["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"].includes(outcome) ? { fallback: { selection: { kind: "openrouter_preset", slug: "fallback" }, overrides: { parameters: { temperature: 0 }, ...(outcome === "fallback_preparation_overflow" ? { conservativeContextWindowTokens: 1 } : {}) } } } : {}),
+          maximumAutomaticFallbacks: ["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass", "fallback_preparation_overflow"].includes(outcome) ? 1 : 0
         }
       },
       apiKey: "native-keep-fixture"
@@ -1869,6 +1869,7 @@ integration("T17 durable continuity review", () => {
         || (outcome === "fallback_after_output_limit" && plan.candidates[0]!.modelId === "@preset/reviewer")
         || (outcome === "fallback_policy_frozen" && plan.candidates[0]!.modelId === "@preset/reviewer")
         || (outcome === "fallback_replacement_pass" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_preparation_overflow" && plan.candidates[0]!.modelId === "@preset/reviewer")
         || (outcome === "fallback_retry_after_technical" && reviewerDispatches < 4)
         || outcome === "fallback_both_output_limited") && operation === "story_continuity_review", modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
@@ -1951,6 +1952,18 @@ integration("T17 durable continuity review", () => {
         status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
       });
       expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
+      return;
+    }
+    if (outcome === "fallback_preparation_overflow") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
+      expect(await repository.claimNext({ workerId: `fallback-overflow-resume-${randomUUID()}`, leaseSeconds: 30 })).toBeNull();
+      expect(preparedTextExecutor.mock.calls).toHaveLength(2);
+      await expect(pool.query<{ failure: { route: string; failure: string } }>(
+        "SELECT orchestration_private->'continuityReview'->'fallbackPreparationFailure' AS failure FROM generation_jobs WHERE id=$1", [job.id]
+      )).resolves.toMatchObject({ rows: [{ failure: { route: "fallback", failure: "context_budget_exceeded" } }] });
       return;
     }
     if (outcome === "fallback_both_output_limited") {

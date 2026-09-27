@@ -25,6 +25,12 @@ describe("continuity review attempt policy", () => {
     ] })).toEqual({ kind: "dispatch-fallback", ordinal: 2 });
   });
 
+  it("does not redispatch a fallback whose request could not be prepared", () => {
+    expect(nextContinuityReviewAction({ maximumAutomaticFallbacks: 1, hasFallback: true, fallbackPreparationFailed: true, attempts: [
+      { route: "primary", status: "completed", outcome: technical("output_limit") }
+    ] })).toEqual({ kind: "pause-for-decision" });
+  });
+
   it("pauses after both reviewer routes have technical failures", () => {
     expect(nextContinuityReviewAction({ maximumAutomaticFallbacks: 1, hasFallback: true, attempts: [
       { route: "primary", status: "completed", outcome: technical("provider_timeout") },

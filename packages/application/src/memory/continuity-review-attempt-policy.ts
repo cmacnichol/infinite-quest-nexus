@@ -25,13 +25,14 @@ const fallbackEligible = new Set(["output_limit", "invalid_output", "provider_ti
 export function nextContinuityReviewAction(input: Readonly<{
   maximumAutomaticFallbacks: 0 | 1;
   hasFallback: boolean;
+  fallbackPreparationFailed?: boolean;
   attempts: readonly ContinuityReviewAttempt[];
 }>): ContinuityReviewNextAction {
   const latest = input.attempts.at(-1);
   if (!latest) return { kind: "dispatch-primary", ordinal: 1 };
   if (latest.status !== "completed" || !latest.outcome) return { kind: "pause-for-decision" };
   if (latest.outcome.kind === "semantic_verdict") return { kind: "accept-review-result" };
-  if (latest.route === "primary" && input.maximumAutomaticFallbacks === 1 && input.hasFallback
+  if (!input.fallbackPreparationFailed && latest.route === "primary" && input.maximumAutomaticFallbacks === 1 && input.hasFallback
     && fallbackEligible.has(latest.outcome.failure ?? "")) {
     return { kind: "dispatch-fallback", ordinal: 2 };
   }
