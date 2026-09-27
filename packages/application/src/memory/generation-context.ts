@@ -1,4 +1,4 @@
-import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, sha256Hex, z } from "@infinite-quest/contracts";
+import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol, sha256Hex, z, type StoryMemoryPolicySnapshot } from "@infinite-quest/contracts";
 import { storyLedgerSchema } from "./story-history-ledger.js";
 import { protectedFactSchema, protectedFactSourceCoverageSchema } from "./story-history-facts.js";
 export type { ReviewEvidenceReference } from "@infinite-quest/contracts";
@@ -21,15 +21,24 @@ export type LegacyGenerationBaseIdentity = DeepReadonly<z.infer<typeof legacyGen
 export function readLegacyGenerationBaseIdentity(value: unknown): LegacyGenerationBaseIdentity {
   return legacyGenerationBaseIdentitySchema.parse(value);
 }
-export const generationBaseIdentityV3Schema = legacyGenerationBaseIdentitySchema.extend({
+const generationBaseIdentityV3ShapeSchema = legacyGenerationBaseIdentitySchema.extend({
   version: z.literal("generation-base-v3"), characterProfileRevision: ordinalSchema, characterProfileFingerprint: hashSchema,
-  recentWindowFingerprint: hashSchema.optional()
+  recentWindowFingerprint: hashSchema.optional(), recentWindowTurns: z.literal(HISTORY_COVERAGE_POLICY.recentWindowTurns).optional()
 }).strict();
+function requireRecentWindowFingerprint(
+  value: { recentWindowTurns?: number | undefined; recentWindowFingerprint?: string | undefined },
+  context: z.RefinementCtx
+): void {
+  if (value.recentWindowTurns !== undefined && value.recentWindowFingerprint === undefined) {
+    context.addIssue({ code: "custom", path: ["recentWindowFingerprint"], message: "An explicit recent window requires its frozen fingerprint." });
+  }
+}
+export const generationBaseIdentityV3Schema = generationBaseIdentityV3ShapeSchema.superRefine(requireRecentWindowFingerprint);
 export type GenerationBaseIdentityV3 = DeepReadonly<z.infer<typeof generationBaseIdentityV3Schema>>;
-export const generationBaseIdentityV4Schema = generationBaseIdentityV3Schema.extend({
+export const generationBaseIdentityV4Schema = generationBaseIdentityV3ShapeSchema.extend({
   version: z.literal("generation-base-v4"), castRevision: ordinalSchema, castTimelineRevision: ordinalSchema,
   castFingerprint: hashSchema, castCoverageStartTurn: ordinalSchema.min(1).nullable(), castTrackedThroughTurn: ordinalSchema.nullable()
-}).strict();
+}).strict().superRefine(requireRecentWindowFingerprint);
 export type GenerationBaseIdentityV4 = DeepReadonly<z.infer<typeof generationBaseIdentityV4Schema>>;
 export const generationBaseIdentitySchema = z.union([legacyGenerationBaseIdentitySchema, generationBaseIdentityV3Schema, generationBaseIdentityV4Schema]);
 export type GenerationBaseIdentity = DeepReadonly<z.infer<typeof generationBaseIdentitySchema>>;
@@ -45,6 +54,32 @@ export function isGenerationBaseIdentityV4(value: GenerationBaseIdentity): value
 }
 export function hasGenerationCharacterAuthority(value: GenerationBaseIdentity): value is GenerationBaseIdentityV3 | GenerationBaseIdentityV4 {
   return isGenerationBaseIdentityV3(value) || isGenerationBaseIdentityV4(value);
+}
+
+/** A stored history window may only be interpreted with its frozen policy. */
+export function assertGenerationBaseIdentityRecentWindowCompatibility(
+  identity: GenerationBaseIdentity,
+  storyMemoryPolicy: StoryMemoryPolicySnapshot | null | undefined
+): void {
+  const recentWindowTurns = hasGenerationCharacterAuthority(identity) ? identity.recentWindowTurns : undefined;
+  const recentWindowFingerprint = hasGenerationCharacterAuthority(identity) ? identity.recentWindowFingerprint : undefined;
+  if (recentWindowTurns !== undefined && recentWindowFingerprint === undefined) {
+    throw new Error("An explicit recent window requires its frozen fingerprint.");
+  }
+  if (!storyMemoryPolicy || !isHistoryCoverageContextProtocol(storyMemoryPolicy.contextProtocol)) {
+    if (recentWindowTurns !== undefined) throw new Error("Historical context protocols cannot acquire an explicit recent window.");
+    return;
+  }
+  if (!isGenerationBaseIdentityV4(identity)) throw new Error("History coverage requires captured cast authority.");
+  if (storyMemoryPolicy.policy.capability === "r1") {
+    if (recentWindowTurns !== undefined || recentWindowFingerprint !== undefined) {
+      throw new Error("R1 history coverage cannot acquire a recent-turn window.");
+    }
+    return;
+  }
+  if (recentWindowTurns !== HISTORY_COVERAGE_POLICY.recentWindowTurns || recentWindowFingerprint === undefined) {
+    throw new Error("History coverage requires the frozen eleven-turn recent window.");
+  }
 }
 
 /** T04 resolves the complete profile at capture; absent authority is explicit, never synthesized. */
@@ -103,10 +138,16 @@ export const generationChronicleSelectionDiagnosticsSchema = z.object({
 export type GenerationChronicleSelectionDiagnostics = DeepReadonly<z.infer<typeof generationChronicleSelectionDiagnosticsSchema>>;
 export const memoryGenerationAuthorityContextSchema = z.object({
   authority: generationContextAuthoritySchema, candidates: z.array(generationContextCandidateSchema),
-  recentTurns: z.array(generationRecentTurnSchema).max(2).optional(),
+  recentTurns: z.array(generationRecentTurnSchema).max(HISTORY_COVERAGE_POLICY.recentWindowTurns).optional(),
   baseIdentity: generationBaseIdentitySchema, chronicleRetrieval: chronicleRetrievalAuditSchema.optional(),
   chronicleSelectionDiagnostics: generationChronicleSelectionDiagnosticsSchema.optional()
 }).strict().superRefine((value, context) => {
+  const recentLimit = hasGenerationCharacterAuthority(value.baseIdentity)
+    && value.baseIdentity.recentWindowTurns === HISTORY_COVERAGE_POLICY.recentWindowTurns
+    ? HISTORY_COVERAGE_POLICY.recentWindowTurns : 2;
+  if ((value.recentTurns?.length ?? 0) > recentLimit) {
+    context.addIssue({ code: "custom", path: ["recentTurns"], message: "Recent turns exceed the frozen recent-window identity." });
+  }
   const cast = value.authority.castSnapshot;
   if (!isGenerationBaseIdentityV4(value.baseIdentity)) {
     if (cast) context.addIssue({ code: "custom", message: "Historical generation bases cannot acquire cast authority." });

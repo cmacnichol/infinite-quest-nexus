@@ -38,10 +38,21 @@ type ResolveRequest = Readonly<{
   /** Policy attempts bind effective character authority; historical jobs retain their stored legacy shape. */
   baseIdentityVersion?: "legacy" | "generation-base-v3" | "generation-base-v4";
   captureRecentWindow?: boolean;
+  /** Explicit frozen v5 history window. Absence retains the historical two-turn reader. */
+  recentWindowTurns?: 11;
   /** V5 only: bounded, transaction-scoped player-intent source projection. */
   captureStoryLedger?: boolean;
   /** V5 only: complete source-verified canonical facts for optional prompt use. */
   captureProtectedFacts?: boolean;
+}>;
+
+type RecentWindowRow = Readonly<{
+  turn_id: string;
+  turn_number: number;
+  action: string;
+  input_mode: "action" | "scene";
+  effective_narration: string;
+  correction_revision: number;
 }>;
 
 function characterAuthorityIdentity(
@@ -136,16 +147,31 @@ export async function resolveGenerationAuthoritySnapshot(
     );
   const baseTurn = baseTurnResult.rows[0] ?? null;
   const modern = request.baseIdentityVersion === "generation-base-v3" || request.baseIdentityVersion === "generation-base-v4";
-  const recentRows = request.captureRecentWindow && modern
-    ? (await client.query<{ turn_id: string; turn_number: number; action: string; input_mode: "action" | "scene";
-      effective_narration: string; correction_revision: number }>(
+  const recentWindowTurns = request.recentWindowTurns ?? 2;
+  const queriedRecentRows: readonly RecentWindowRow[] | undefined = request.captureRecentWindow && modern
+    ? (await client.query<RecentWindowRow>(
       `SELECT t.id AS turn_id,t.turn_number,t.action,t.input_mode,e.effective_narration,e.correction_revision
        FROM turns t JOIN effective_turn_narrations e ON e.turn_id=t.id AND e.campaign_id=t.campaign_id AND e.owner_user_id=t.owner_user_id
        JOIN campaigns c ON c.id=t.campaign_id AND c.owner_user_id=t.owner_user_id
        WHERE t.owner_user_id=$1 AND t.campaign_id=$2 AND c.world_version_id=$3
          AND t.turn_number >= $4 AND t.turn_number < $5 ORDER BY t.turn_number`,
-      [request.ownerUserId, request.campaignId, campaign.world_version_id, Math.max(1, baseTurnNumber - 2), baseTurnNumber]
+       [request.ownerUserId, request.campaignId, campaign.world_version_id, Math.max(1, baseTurnNumber - recentWindowTurns), baseTurnNumber]
     )).rows : undefined;
+  // Historical v3/v4 captures preserve their raw bounded query exactly. V5
+  // reserves only the newest contiguous suffix, so a missing predecessor is
+  // neither fingerprinted nor withheld from later retrieval.
+  const recentRows = queriedRecentRows && request.recentWindowTurns !== undefined
+    ? (() => {
+      let expectedTurnNumber = baseTurnNumber - 1;
+      const newestFirst: RecentWindowRow[] = [];
+      for (const row of [...queriedRecentRows].reverse()) {
+        if (row.turn_number !== expectedTurnNumber) break;
+        newestFirst.push(row);
+        expectedTurnNumber--;
+      }
+      return newestFirst.reverse();
+    })()
+    : queriedRecentRows;
   const recentTurns = recentRows?.map((row): GenerationRecentTurn => {
     const source = { turnId: row.turn_id, turnNumber: row.turn_number, inputMode: row.input_mode,
       action: sanitizeChronicleFictionString(row.action, Number.MAX_SAFE_INTEGER),
@@ -217,7 +243,8 @@ export async function resolveGenerationAuthoritySnapshot(
     ? {
       ...legacyIdentity,
       version: "generation-base-v3",
-      ...(recentRows ? { recentWindowFingerprint: sha256(stableStringify(recentRows)) } : {}),
+      ...(recentRows ? { recentWindowFingerprint: sha256(stableStringify(recentRows)),
+        ...(request.recentWindowTurns === undefined ? {} : { recentWindowTurns: request.recentWindowTurns }) } : {}),
       ...characterAuthorityIdentity(
         campaign.selected_character_id,
         campaign.character_profile,

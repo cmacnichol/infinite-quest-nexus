@@ -2328,7 +2328,7 @@ integration("T17 durable continuity review", () => {
     )).rows[0]!;
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
       [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
         captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
     );
@@ -2691,7 +2691,7 @@ integration("T17 durable continuity review", () => {
     )).rows[0]!;
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
       [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
         captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
     );
@@ -2726,7 +2726,7 @@ integration("T17 durable continuity review", () => {
     )).rows[0]!;
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
       [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
         captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
     );
@@ -2820,7 +2820,7 @@ integration("T17 durable continuity review", () => {
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     expect(frozenPolicy).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v4", promptProtocol: "story-v17-campaign-cast" });
     await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
       [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
         captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
     );
@@ -2867,7 +2867,7 @@ integration("T17 durable continuity review", () => {
     )).rows[0]!;
     const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
     await pool.query(
-      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3,generation_base_identity=generation_base_identity || '{\"recentWindowTurns\":11}'::jsonb WHERE id=$1",
       [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
         captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
     );

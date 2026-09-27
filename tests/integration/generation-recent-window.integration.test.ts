@@ -7,6 +7,8 @@ import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { sha256 } from "../../packages/domain/src/text.js";
 import { createPostgresCampaignCastRepository } from "../../packages/database/src/campaign-cast-repository.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
+import { CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 integration("direct recent effective turn window", () => {
@@ -26,6 +28,11 @@ integration("direct recent effective turn window", () => {
       [ownerUserId, scope.campaignId, ordinal, `Intent ${ordinal}.`, `Accepted narration ${ordinal}.`, ordinal % 2 ? "action" : "scene"]);
     return scope;
   }
+  const historyPolicy = (() => {
+    const policy = defaultStoryMemoryPolicy("r3");
+    return { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "a".repeat(64) } as const;
+  })();
   async function capture(scope: Awaited<ReturnType<typeof fixture>>, expectedTurnNumber: number, operationKind: "append" | "replace_latest" = "append",
     baseIdentityVersion: "generation-base-v3" | "generation-base-v4" = "generation-base-v3") {
     return withTransaction(pool, async (client) => {
@@ -95,5 +102,41 @@ integration("direct recent effective turn window", () => {
     expect(after.frozen.baseIdentity).not.toEqual(before.frozen.baseIdentity);
     expect(after.context.recentTurns?.[1]).toMatchObject({ narration: "A corrected predecessor.", narrationCorrectionRevision: 1 });
     await expect(withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client, { ...before.input, expectedBaseIdentity: before.frozen.baseIdentity }))).rejects.toMatchObject({ code: "authoritative_context_invalid" });
+  });
+
+  it("captures an eleven-turn v5 suffix, excludes a replacement base, and fences its oldest predecessor", async () => {
+    const scope = await fixture(14);
+    const before = await withTransaction(pool, async (client) => {
+      const input = { ...scope, expectedTurnNumber: 15, operationKind: "append" as const, query: "Continue." };
+      const frozen = await resolveGenerationAuthoritySnapshot(client, {
+        ...input, baseIdentityVersion: "generation-base-v4", captureRecentWindow: true, recentWindowTurns: 11
+      });
+      const context = await loadPostgresChronicleGenerationAuthorityContext(client, { ...input, expectedBaseIdentity: frozen.baseIdentity, storyMemoryPolicy: historyPolicy });
+      return { frozen, context, input };
+    });
+    expect(before.frozen.baseIdentity).toMatchObject({ recentWindowTurns: 11, recentWindowFingerprint: expect.any(String) });
+    expect(before.context.recentTurns?.map((turn) => turn.turnNumber)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+
+    const replacement = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
+      ...scope, expectedTurnNumber: 14, operationKind: "replace_latest", baseIdentityVersion: "generation-base-v4",
+      captureRecentWindow: true, recentWindowTurns: 11
+    }));
+    expect(replacement.recentTurns?.map((turn) => turn.turnNumber)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+
+    const oldest = await pool.query<{ id: string; narration: string }>("SELECT id,narration FROM turns WHERE campaign_id=$1 AND turn_number=3", [scope.campaignId]);
+    await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,reason,source,created_by_user_id)
+      VALUES($1,$2,$3,1,'A corrected oldest window predecessor.', $4,'Test','administrative',$1)`, [ownerUserId, scope.campaignId, oldest.rows[0]!.id, sha256(oldest.rows[0]!.narration)]);
+    await expect(withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client,
+      { ...before.input, expectedBaseIdentity: before.frozen.baseIdentity, storyMemoryPolicy: historyPolicy }))).rejects.toMatchObject({ code: "authoritative_context_invalid" });
+  });
+
+  it("does not claim a v5 window across a missing predecessor", async () => {
+    const scope = await fixture(14);
+    await pool.query("DELETE FROM turns WHERE campaign_id=$1 AND turn_number=8", [scope.campaignId]);
+    const frozen = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
+      ...scope, expectedTurnNumber: 15, operationKind: "append", baseIdentityVersion: "generation-base-v4",
+      captureRecentWindow: true, recentWindowTurns: 11
+    }));
+    expect(frozen.recentTurns?.map((turn) => turn.turnNumber)).toEqual([9, 10, 11, 12, 13]);
   });
 });

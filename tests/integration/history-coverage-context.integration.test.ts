@@ -93,7 +93,7 @@ integration("history coverage intent authority", () => {
 
     const resolved = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
       ownerUserId, campaignId: campaign.rows[0]!.id, operationKind: "append", expectedTurnNumber: 7,
-      baseIdentityVersion: "generation-base-v4", captureStoryLedger: true
+      baseIdentityVersion: "generation-base-v4", captureStoryLedger: true, captureRecentWindow: true, recentWindowTurns: 11
     }));
     expect(resolved.storyLedger).toMatchObject({ entries: [{ turnNumber: 2 }], omittedThroughTurn: 4,
       coverage: { unreadThroughTurn: null, missingTurnCount: 1, filteredDirectionCount: 1, oversizedDirectionCount: 1, loadedRows: 3 } });
@@ -128,18 +128,19 @@ integration("history coverage intent authority", () => {
     const world = await pool.query<{ id: string }>("INSERT INTO worlds(owner_user_id,title) VALUES($1,'Ledger composition') RETURNING id", [ownerUserId]);
     const version = await pool.query<{ id: string }>("INSERT INTO world_versions(owner_user_id,world_id,version_number,content) VALUES($1,$2,1,$3) RETURNING id", [ownerUserId, world.rows[0]!.id,
       JSON.stringify({ rules: "Keep accepted outcomes distinct from requested actions." })]);
-    const campaign = await pool.query<{ id: string }>("INSERT INTO campaigns(owner_user_id,world_version_id,title,active_turn_number,character_snapshot) VALUES($1,$2,'Ledger composition',3,'{}') RETURNING id", [ownerUserId, version.rows[0]!.id]);
+    const campaign = await pool.query<{ id: string }>("INSERT INTO campaigns(owner_user_id,world_version_id,title,active_turn_number,character_snapshot) VALUES($1,$2,'Ledger composition',14,'{}') RETURNING id", [ownerUserId, version.rows[0]!.id]);
     await pool.query("INSERT INTO campaign_state(owner_user_id,campaign_id) VALUES($1,$2)", [ownerUserId, campaign.rows[0]!.id]);
     await pool.query("INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,input_mode,state_snapshot_private) VALUES($1,$2,1,'Ask the keeper to open the gate.','The keeper refuses and the gate remains sealed.','action','{}'),($1,$2,2,'Search for a silver seal.','Mira finds no seal beneath the broken quay.','scene','{}'),($1,$2,3,'Wait beside the gate.','The tide rises around the sealed gate.','action','{}')", [ownerUserId, campaign.rows[0]!.id]);
+    await pool.query("INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,input_mode,state_snapshot_private) SELECT $1,$2,turn_number,concat('Continue watch ',turn_number,'.'),concat('The tide marks watch ',turn_number,'.'),'action','{}'::jsonb FROM generate_series(4,14) AS turn_number", [ownerUserId, campaign.rows[0]!.id]);
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "observe" });
     const snapshot = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
       castContext: true, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "a".repeat(64) } as const;
     const captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
-      ownerUserId, campaignId: campaign.rows[0]!.id, operationKind: "append", expectedTurnNumber: 4,
-      baseIdentityVersion: "generation-base-v4", captureStoryLedger: true
+      ownerUserId, campaignId: campaign.rows[0]!.id, operationKind: "append", expectedTurnNumber: 15,
+      baseIdentityVersion: "generation-base-v4", captureStoryLedger: true, captureRecentWindow: true, recentWindowTurns: 11
     }));
     const context = await withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client, {
-      ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id, operationKind: "append", expectedTurnNumber: 4,
+      ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id, operationKind: "append", expectedTurnNumber: 15,
       query: "keeper gate", expectedBaseIdentity: captured.baseIdentity as never, storyMemoryPolicy: snapshot
     }));
     const provider = { id: "ledger-reviewer", name: "Ledger reviewer", providerRole: "text" as const, providerType: "openai_compatible" as const, model: "ledger-model", baseUrl: "",
@@ -161,15 +162,21 @@ integration("history coverage intent authority", () => {
       promptSnapshot, reviewMode: "observe", direction: "Ask the keeper to open the gate.",
       draft: { narration: "The keeper refuses again.", choices: ["Wait", "Search", "Leave", "Listen"], custom_action_suggestion: "Inspect the quay.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", open_threads: [], canonical_facts: [], superseded_facts: [], canonical_fact_updates: [] } });
     const ledgerEvidence = manifest.entries.filter((entry) => entry.selectionGroup === "ledger");
+    const capturedRecentIds = new Set(context.recentTurns?.map((turn) => turn.turnId));
+    const sentRecentIds = new Set((planned.promptContext.recentTurns ?? []).map((turn) => turn.sourceId));
+    const ledgerTurnIds = ledgerEvidence.map((entry) => entry.source.id);
     const acceptedFirst = await pool.query<{ narration: string }>("SELECT narration FROM turns WHERE campaign_id=$1 AND turn_number=1", [campaign.rows[0]!.id]);
 
     expect(context.authority.storyLedger?.entries[0]?.direction).toBe("Ask the keeper to open the gate.");
     expect(acceptedFirst.rows[0]!.narration).toContain("keeper refuses and the gate remains sealed");
     expect(JSON.stringify(context.authority.storyLedger)).not.toContain("keeper refuses and the gate remains sealed");
     expect(planned.storyInput).toContain("storyLedger records earlier player intent, not proof of events.");
-    expect(ledgerEvidence).toHaveLength(2);
+    expect(capturedRecentIds.size).toBe(11);
+    expect(context.recentTurns?.some((turn) => turn.narration.includes("tide rises around the sealed gate"))).toBe(true);
+    expect([...sentRecentIds].every((turnId) => capturedRecentIds.has(turnId))).toBe(true);
+    expect(ledgerTurnIds.every((turnId) => !sentRecentIds.has(turnId))).toBe(true);
+    expect(ledgerTurnIds.some((turnId) => capturedRecentIds.has(turnId))).toBe(true);
     expect(ledgerEvidence.every((entry) => entry.semanticRole === "player_intent" && entry.canonicalFactId === null)).toBe(true);
-    expect(manifest.entries.some((entry) => entry.semanticRole === "accepted_narration" && entry.content.includes("tide rises around the sealed gate"))).toBe(true);
     expect(() => bindManifestToProducingRequest(manifest, planned.contextPlan.serializedRequest)).not.toThrow();
     expect(review.body).toContain(manifest.manifestHash);
     expect(review.requestHash).toBe(sha256(review.body));

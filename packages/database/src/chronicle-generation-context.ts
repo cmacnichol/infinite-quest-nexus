@@ -4,6 +4,7 @@ import type {
 } from "../../application/src/memory/types.js";
 import {
   hasGenerationCharacterAuthority,
+  assertGenerationBaseIdentityRecentWindowCompatibility,
   memoryGenerationAuthorityContextSchema,
   type GenerationContextCandidate
 } from "../../application/src/memory/generation-context.js";
@@ -48,10 +49,21 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   client: DatabaseClient,
   scope: MemoryGenerationAuthorityScope,
 ): Promise<MemoryGenerationAuthorityContext> {
+  if (scope.expectedBaseIdentity) {
+    try {
+      assertGenerationBaseIdentityRecentWindowCompatibility(scope.expectedBaseIdentity, scope.storyMemoryPolicy);
+    } catch {
+      throw Object.assign(new Error("The frozen recent-window identity is incompatible with its policy."), {
+        code: "authoritative_context_invalid",
+        field: "context_settings"
+      });
+    }
+  }
   const resolved = await resolveGenerationAuthoritySnapshot(client, {
     ...scope,
     ...(scope.expectedBaseIdentity && hasGenerationCharacterAuthority(scope.expectedBaseIdentity)
       ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
+        ...(scope.expectedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: scope.expectedBaseIdentity.recentWindowTurns }),
         captureStoryLedger: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol),
         captureProtectedFacts: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol) }
       : {})

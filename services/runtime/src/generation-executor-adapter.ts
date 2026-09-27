@@ -7,7 +7,7 @@ import { recoverInterruptedStory } from "../../../packages/story-engine/src/inte
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
-import { canonicalEvidenceJson, hasGenerationCharacterAuthority, isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
+import { assertGenerationBaseIdentityRecentWindowCompatibility, canonicalEvidenceJson, hasGenerationCharacterAuthority, isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
 export { planGenerationPromptContext } from "./generation-context-planner.js";
 import {
@@ -1977,6 +1977,13 @@ async function executeLoadedGeneration(
   const frozenStoryMemoryPolicySnapshot = frozenStoryMemoryPolicy?.success
     ? frozenStoryMemoryPolicy.data
     : null;
+  try {
+    assertGenerationBaseIdentityRecentWindowCompatibility(job.generation_base_identity, frozenStoryMemoryPolicySnapshot);
+  } catch {
+    throw Object.assign(new Error("The frozen recent-window identity is incompatible with its policy."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
   if (frozenStoryMemoryPolicy && !frozenStoryMemoryPolicy.success) {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id, ownerUserId: job.owner_user_id, workerId, providerResponseId: null, providerFinishReason: null,

@@ -92,6 +92,21 @@ describe("canonical private generation context", () => {
     }
     expect(() => context.readLegacyGenerationBaseIdentity(newBase)).toThrow();
   });
+
+  it("keeps historical recent-window bytes absent while admitting only the frozen eleven-turn identity", () => {
+    const v3 = { ...baseIdentity, version: "generation-base-v3" as const, characterProfileRevision: 0, characterProfileFingerprint: hash };
+    const v4 = { ...v3, version: "generation-base-v4" as const, castRevision: 4, castTimelineRevision: 2,
+      castFingerprint: hash, castCoverageStartTurn: 1, castTrackedThroughTurn: 1 };
+    expect(context.generationBaseIdentityV3Schema.parse(v3)).toEqual(v3);
+    expect(context.generationBaseIdentityV4Schema.parse(v4)).toEqual(v4);
+    expect(context.generationBaseIdentityV3Schema.parse(v3)).not.toHaveProperty("recentWindowTurns");
+    for (const identity of [v3, v4]) {
+      const captured = { ...identity, recentWindowTurns: 11, recentWindowFingerprint: hash };
+      expect(context.generationBaseIdentitySchema.parse(captured)).toEqual(captured);
+      expect(context.generationBaseIdentitySchema.safeParse({ ...identity, recentWindowTurns: 11 }).success).toBe(false);
+      expect(context.generationBaseIdentitySchema.safeParse({ ...identity, recentWindowTurns: 10, recentWindowFingerprint: hash }).success).toBe(false);
+    }
+  });
 });
 
 describe("source-bound evidence manifest", () => {
