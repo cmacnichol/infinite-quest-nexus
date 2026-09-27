@@ -14,6 +14,12 @@ import { createPostgresChronicleGenerationTransactionPort } from "../../packages
 import type { ChronicleContextPreview } from "../../packages/application/src/memory/index.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
 import {
+  defaultStoryMemoryPolicy,
+  storyMemoryPolicyHash,
+  type StoryMemoryPolicySnapshot
+} from "../../packages/contracts/src/story-memory-policy.js";
+import { HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
+import {
   evaluateChronicleRetrieval,
   type ChronicleRetrievalApplication,
   type ChronicleRetrievalCorpus
@@ -134,6 +140,50 @@ integration("Chronicle retrieval evaluation integration seam", () => {
       expect(report.cases[0]!.retrievedLabels).not.toContain("long-parent-owner-decoy");
       expect(report.cases[0]!.retrievedLabels).not.toContain("long-parent-campaign-decoy");
       expect(report.cases[0]!.retrievedLabels).not.toContain("long-parent-world-version-decoy");
+      throw rollback;
+    })).rejects.toBe(rollback);
+  });
+
+  it("uses the frozen v5 context protocol for generation-only parent limits", async () => {
+    const fixtureCorpus = JSON.parse(await readFile(
+      resolve("tests/fixtures/chronicle-retrieval-evaluation.v3.json"),
+      "utf8"
+    )) as ChronicleRetrievalCorpus;
+    const fixture = fixtureCorpus.cases.find((candidate) => candidate.id === "long-parent-budget-1024");
+    expect(fixture).toBeDefined();
+    const policy = defaultStoryMemoryPolicy("r3");
+    const v5: StoryMemoryPolicySnapshot = {
+      policy,
+      policyHash: storyMemoryPolicyHash(policy),
+      contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true,
+      promptProtocol: "story-v17-campaign-cast",
+      providerConfigurationFingerprint: "a".repeat(64)
+    };
+    const rollback = new Error("Rollback v5 retrieval fixture.");
+
+    await expect(withTransaction(pool, async (database) => {
+      const seeded = await seedCorpus(database, ownerUserId, {
+        version: fixtureCorpus.version,
+        cases: [{ ...fixture!, scope: { ...fixture!.scope, request: { ...fixture!.scope.request, throughTurnNumber: 2 } } }]
+      }, "chunked_hybrid");
+      const application = retrievalApplication();
+      const scope = {
+        ...seeded.cases[0]!.scope,
+        request: { ...seeded.cases[0]!.scope.request, retrievalBudgetTokens: 32_000 },
+        storyMemoryPolicy: v5
+      } as Parameters<typeof application.generation.buildContextPreview>[1];
+      const preview = await application.generation.buildContextPreview(database, scope);
+      const retrieval = preview.retrieval as Record<string, unknown>;
+      const diversity = retrieval.diversity as Record<string, unknown>;
+
+      expect(diversity).toMatchObject({
+        maximumParentTokens: 48_000,
+        maximumParents: 64,
+        maximumParentsPerTurn: 8,
+        stopReason: expect.any(String)
+      });
+      expect(diversity.selectedParentTokens).toEqual(expect.any(Number));
       throw rollback;
     })).rejects.toBe(rollback);
   });

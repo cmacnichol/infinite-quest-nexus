@@ -48,4 +48,17 @@ describe("generation Chronicle retrieval budget", () => {
       entityCandidates: 8_000
     });
   });
+
+  it("adds the v5-only token allowance and parent guard without widening SQL pools", () => {
+    const v4 = generationChronicleRetrievalLimits(32_000);
+    const v5 = generationChronicleRetrievalLimits(32_000, { historyCoverage: true });
+
+    expect(v4).not.toHaveProperty("maximumParentTokens");
+    expect(v5).toEqual({
+      ...v4,
+      maximumParents: 64,
+      maximumParentsPerTurn: 8,
+      maximumParentTokens: 48_000
+    });
+  });
 });

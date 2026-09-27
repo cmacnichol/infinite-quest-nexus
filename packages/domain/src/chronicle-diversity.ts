@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ChronicleChunkKind, ChronicleMemoryKind } from "./chronicle-chunking.js";
+import { estimateTokens } from "./text.js";
 
 export type ChronicleParentCandidate = Readonly<{
   candidateId: string;
@@ -14,6 +15,8 @@ export type ChronicleParentCandidate = Readonly<{
   chunkOrdinal: number;
   chunkKind: ChronicleChunkKind;
   chunkContent: string;
+  /** Verified projection used only for v5 token admission; canonical content remains unchanged. */
+  tokenContent?: string;
   embedding: readonly number[] | null;
   fusedRank: number;
 }>;
@@ -21,6 +24,8 @@ export type ChronicleParentCandidate = Readonly<{
 export type ChronicleParentSelectionPolicy = Readonly<{
   maximumParents: number;
   maximumParentsPerTurn?: number;
+  /** A v5-only cumulative allowance for rendered parent projections. */
+  maximumParentTokens?: number;
   includeAdjacentNarration?: boolean;
   semanticSimilarityPenalty?: number;
   kindDiversityBonus?: number;
@@ -50,6 +55,14 @@ export type ChronicleParentSelectionDiagnostics = Readonly<{
   selectedEntityIds: number;
   turnLimitParentsRemoved: number;
   selectedParents: number;
+  maximumParents?: number;
+  maximumParentsPerTurn?: number;
+  maximumParentTokens?: number;
+  selectedParentTokens?: number;
+  tokenLimitParentsRemoved?: number;
+  candidatePoolLimit?: number;
+  candidatePoolCandidatesRemoved?: number;
+  stopReason?: "parent_limit" | "token_limit" | "diversity_limit" | "candidate_pool_limit" | "exhausted";
 }>;
 
 export type ChronicleParentSelection = Readonly<{
@@ -129,6 +142,11 @@ function selectedContent(
   return `Narration: ${candidate.chunkContent}`;
 }
 
+/** Uses the same deterministic estimate that Chronicle records elsewhere. */
+export function chronicleParentTokens(content: string): number {
+  return Math.max(0, estimateTokens(content));
+}
+
 export function selectDiverseChronicleParents(
   candidates: readonly ChronicleParentCandidate[],
   policy: ChronicleParentSelectionPolicy
@@ -151,6 +169,10 @@ export function selectDiverseChronicleParents(
     : Number.isFinite(policy.maximumParentsPerTurn)
       ? Math.max(0, Math.floor(policy.maximumParentsPerTurn))
       : 0;
+  const hasTokenLimit = policy.maximumParentTokens !== undefined;
+  const maximumParentTokens = !hasTokenLimit ? 0 : Number.isFinite(policy.maximumParentTokens)
+    ? Math.max(0, Math.floor(policy.maximumParentTokens!))
+    : 0;
   const semanticSimilarityPenalty = finiteNonNegative(policy.semanticSimilarityPenalty, 4);
   const kindDiversityBonus = finiteNonNegative(policy.kindDiversityBonus, 1);
   const entityDiversityBonus = finiteNonNegative(policy.entityDiversityBonus, 0.5);
@@ -167,10 +189,22 @@ export function selectDiverseChronicleParents(
     && strongestByParent.has(policy.latestSceneParentMemoryId) ? 1 : 0;
   let semanticPenaltiesApplied = 0;
   let turnLimitParentsRemoved = 0;
+  let tokenLimitParentsRemoved = 0;
+  let selectedParentTokens = 0;
   const maximumSimilarityByCandidateId = new Map<string, number>();
   let remaining = maximumParents > 0 ? [...strongestByParent.values()].filter((candidate) => (
     candidate.parentMemoryId !== policy.latestSceneParentMemoryId
   )) : [];
+  const contentForCandidate = (candidate: ChronicleParentCandidate): string => selectedContent(
+    candidate,
+    chunksByParent.get(candidate.parentMemoryId) ?? [],
+    policy.includeAdjacentNarration === true
+  );
+  // Generation receives the complete candidate source. Only an independently
+  // verified projection may be charged at its shorter rendered size.
+  const tokensForCandidate = (candidate: ChronicleParentCandidate): number => chronicleParentTokens(
+    candidate.tokenContent ?? candidate.parentContent
+  );
   while (remaining.length > 0 && selectedCandidates.length < maximumParents) {
     const eligible: ChronicleParentCandidate[] = [];
     for (const candidate of remaining) {
@@ -185,6 +219,10 @@ export function selectDiverseChronicleParents(
       if (candidate.parentTurnId !== null
         && (parentsByTurn.get(candidate.parentTurnId) ?? 0) >= maximumParentsPerTurn) {
         turnLimitParentsRemoved += 1;
+        continue;
+      }
+      if (hasTokenLimit && selectedParentTokens + tokensForCandidate(candidate) > maximumParentTokens) {
+        tokenLimitParentsRemoved += 1;
         continue;
       }
       eligible.push(candidate);
@@ -224,6 +262,7 @@ export function selectDiverseChronicleParents(
     factIds.forEach((factId) => selectedCanonicalFactIds.add(factId));
     selectedKinds.add(candidate.memoryKind);
     candidate.entityIds.forEach((entityId) => selectedEntityIds.add(entityId));
+    if (hasTokenLimit) selectedParentTokens += tokensForCandidate(candidate);
     remaining = eligible.filter((value) => value.parentMemoryId !== candidate.parentMemoryId);
     if (semanticSimilarityPenalty > 0) {
       for (const remainingCandidate of remaining) {
@@ -237,11 +276,7 @@ export function selectDiverseChronicleParents(
     selectedCandidates.push(candidate);
   }
   const parents = selectedCandidates.map((candidate) => {
-    const content = selectedContent(
-      candidate,
-      chunksByParent.get(candidate.parentMemoryId) ?? [],
-      policy.includeAdjacentNarration === true
-    );
+    const content = contentForCandidate(candidate);
     return {
       parentMemoryId: candidate.parentMemoryId,
       parentTurnId: candidate.parentTurnId,
@@ -252,6 +287,21 @@ export function selectDiverseChronicleParents(
       entityIds: [...candidate.entityIds]
     };
   });
+  const eligibleRemaining = remaining.some((candidate) => {
+    if (selectedContentHashes.has(normalizedContentHash(candidate.parentContent))) return false;
+    if (canonicalFactIds(candidate).some((factId) => selectedCanonicalFactIds.has(factId))) return false;
+    if (candidate.parentTurnId !== null
+      && (parentsByTurn.get(candidate.parentTurnId) ?? 0) >= maximumParentsPerTurn) return false;
+    return !hasTokenLimit || selectedParentTokens + tokensForCandidate(candidate) <= maximumParentTokens;
+  });
+  const stopReason = selectedCandidates.length >= maximumParents && eligibleRemaining
+    ? "parent_limit"
+    : tokenLimitParentsRemoved > 0 && !eligibleRemaining && turnLimitParentsRemoved === 0
+      && canonicalLineagesCollapsed === 0 && normalizedDuplicatesRemoved === 0
+      ? "token_limit"
+      : !eligibleRemaining && (turnLimitParentsRemoved > 0 || canonicalLineagesCollapsed > 0 || normalizedDuplicatesRemoved > 0)
+        ? "diversity_limit"
+        : "exhausted";
   return {
     parents,
     diagnostics: {
@@ -265,7 +315,15 @@ export function selectDiverseChronicleParents(
       selectedKinds: selectedKinds.size,
       selectedEntityIds: selectedEntityIds.size,
       turnLimitParentsRemoved,
-      selectedParents: parents.length
+      selectedParents: parents.length,
+      ...(hasTokenLimit ? {
+        maximumParents,
+        maximumParentsPerTurn,
+        maximumParentTokens,
+        selectedParentTokens,
+        tokenLimitParentsRemoved,
+        stopReason
+      } : {})
     }
   };
 }

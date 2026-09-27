@@ -129,7 +129,7 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 **Files/tests:** diversity/retrieval modules and `ChronicleProductionRankFusionProfile` declaration if needed; diversity units; `tests/integration/chronicle-retrieval-evaluation.integration.test.ts`, `tests/integration/chronicle-retrieval-observability.integration.test.ts`.
 
-**Interfaces:** `maximumParentTokens?: number`; `chronicleParentTokens(content: string): number`; `generationChronicleRetrievalLimits(budget, options?: { historyCoverage?: boolean })`. Diagnostics: limits, selected estimates, unique skips, `stopReason: "parent_limit" | "token_limit" | "diversity_limit" | "exhausted"`.
+**Interfaces:** `maximumParentTokens?: number`; `chronicleParentTokens(content: string): number`; `generationChronicleRetrievalLimits(budget, options?: { historyCoverage?: boolean })`. Diagnostics: limits, selected estimates, unique skips, `stopReason: "parent_limit" | "token_limit" | "diversity_limit" | "candidate_pool_limit" | "exhausted"`.
 
 - [ ] RED: skip oversized parent, fit later small one; exact boundary, zero/invalid budget and empty pool terminate. Old diagnostics unchanged; exact cap with no remaining candidates reports exhausted.
 - [ ] RED: fact-dense fixture supplies more distinct accepted turns/facts than v4. If new count guard still binds, report it rather than claiming tokens alone bind.

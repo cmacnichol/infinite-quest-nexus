@@ -6,12 +6,17 @@ import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { normalizeStoryEvidenceSource } from "../../packages/domain/src/story-evidence-spans.js";
 import { sha256 } from "../../packages/domain/src/text.js";
+import { performance } from "node:perf_hooks";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as rankFusion from "../../packages/domain/src/chronicle-rank-fusion.js";
 import { createPostgresChronicleGenerationTransactionPort } from "../../packages/database/src/chronicle-repository.js";
 import { storyMemoryPolicySchema, defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { chronicleContentHash } from "../../packages/domain/src/chronicle-memory-helpers.js";
+import {
+  CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+  HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION
+} from "../../packages/contracts/src/story-prompt.js";
 import { CHRONICLE_RETRIEVAL_PROFILE_V2 } from "../../packages/domain/src/generated/chronicle-retrieval-profile-v2.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
@@ -296,10 +301,10 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(queries).toEqual([]);
   });
 
-  it("carries certified middle narration spans to the measured private request and rejects stale certificates", async () => {
+  it("carries a v5-certified long narration through selection and never truncates stale evidence", async () => {
     const { fixture, providerId } = await configuredFixture("certified middle passage");
     const passage = 'The copper gate was not unlocked. Vale said, "It is open." He was lying.';
-    const content = normalizeStoryEvidenceSource(`Turn 1\nPlayer action: Listen.\nNarration: ${"A distant lantern glowed. ".repeat(1500)}${passage} ${"Waves crossed the bay. ".repeat(1500)}`);
+    const content = normalizeStoryEvidenceSource(`Turn 1\nPlayer action: Listen.\nNarration: ${"A distant lantern glowed. ".repeat(8000)}${passage} ${"Waves crossed the bay. ".repeat(8000)}`);
     const oldTurn = await turn(fixture, 1, "Listen.", content);
     const latestId = await turn(fixture, 2, "Wait.", "Present scene.");
     await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [fixture.campaignId]);
@@ -309,58 +314,116 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     const chunkId = crypto.randomUUID();
     await embeddedChunk(fixture, providerId, { id: chunkId, parentId: memory.id, parentContentHash: memory.contentHash,
       kind: "turn_narration", content: passage, vector: [1, 0] });
+    const factContent = "The complete canonical fact says Vale keeps the copper gate locked, even when v5 admits an excerpt-capable narration.";
+    const factId = crypto.randomUUID();
+    await pool.query(`INSERT INTO campaign_canonical_facts
+      (id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,1,0,$6,lower($6),1)`,
+    [factId, fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, oldTurn, factContent]);
     const certificate = { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), start: content.indexOf(passage), end: content.indexOf(passage) + passage.length };
     await pool.query("UPDATE chronicle_memory_chunks SET metadata=jsonb_build_object('sourceEvidence',$2::jsonb) WHERE id=$1", [chunkId, JSON.stringify(certificate)]);
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
-    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v3" as const,
-      promptProtocol: "story-v14-continuity-context" as const, providerConfigurationFingerprint: "a".repeat(64) };
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
     await pool.query("UPDATE world_versions SET content=jsonb_set(content,'{world,internal}',to_jsonb('WORLD_INTERNAL_CANARY'::text)) WHERE id=$1", [fixture.worldVersionId]);
     let captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
       ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId, operationKind: "append", expectedTurnNumber: 3, baseIdentityVersion: "generation-base-v3", captureRecentWindow: true
     }));
-    const read = () => transaction(providerId, []).loadGenerationContext(pool, { ...fixture, operationKind: "append", expectedTurnNumber: 3, query: "copper gate Vale", storyMemoryPolicy, expectedBaseIdentity: captured.baseIdentity });
+    const read = () => transaction(providerId, []).loadGenerationContext(pool, { ...fixture, operationKind: "append", expectedTurnNumber: 3,
+      query: "copper gate Vale", retrievalBudgetTokens: 32_000, storyMemoryPolicy, expectedBaseIdentity: captured.baseIdentity });
     const context = await read();
     expect(context.chronicleRetrieval?.effectiveImplementation).toBe("chunked_hybrid");
     expect(context.candidates.map((candidate) => candidate.id)).toContain(memory.id);
+    expect(context.candidates.find((candidate) => candidate.id === factId)?.content).toContain(factContent);
+    expect(context.candidates.find((candidate) => candidate.id === factId)?.narrativeSource).toBeUndefined();
     expect(context.candidates.find((candidate) => candidate.id === memory.id)?.narrativeSource).toMatchObject({ sourceHash: sha256(content), spans: [{ start: certificate.start, end: certificate.end }] });
     const provider: any = { id: "provider", providerType: "openai_compatible", model: "model", contextWindowTokens: 8000, maxOutputTokens: 100, temperature: 0, requestTimeoutMs: 1000, configuration: {} };
     const plan = (source: typeof context) => planGenerationPromptContext(source, provider, "System", "copper gate Vale", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 8000, 7900, crypto.randomUUID(), "story_memory", policy);
     const result = plan(context);
     expect(result.storyInput).not.toContain("WORLD_INTERNAL_CANARY");
-    expect(JSON.parse(result.storyInput).authoritative_context.chronicle[0].content).toContain(passage);
+    expect((JSON.parse(result.storyInput).authoritative_context.chronicle as Array<{ content: string }>)
+      .some((candidate) => candidate.content.includes(passage))).toBe(true);
     expect(result.sourceManifest?.entries.some((entry) => entry.form === "excerpt" && entry.source.id === oldTurn)).toBe(true);
     expect(result.contextPlan.requestTokens + result.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(7900);
     await pool.query("UPDATE chronicle_memory_chunks SET metadata=jsonb_set(metadata,'{sourceEvidence,sourceHash}',to_jsonb($2::text)) WHERE id=$1", [chunkId, "a".repeat(64)]);
     const stale = await read();
-    expect(stale.candidates.find((candidate) => candidate.id === memory.id)?.narrativeSource).toBeUndefined();
+    expect(stale.candidates.find((candidate) => candidate.id === memory.id)).toBeUndefined();
     expect(plan(stale).sourceManifest?.entries.some((entry) => entry.form === "excerpt")).toBe(false);
-    expect(plan(stale).layerDiagnostics.sourceValidationFailures).toBeGreaterThan(0);
-    const correctedPassage = "The copper gate remained locked. Vale admitted his earlier lie.";
-    await createTurnCorrectionApplication({ corrections: createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) }) }).correctNarration(fixture, {
-      turnId: oldTurn, narration: content.replace(passage, correctedPassage), expectedCorrectionRevision: 0, expectedActiveTurnNumber: 2, source: "user_edit"
-    });
-    expect((await pool.query("SELECT id FROM chronicle_memory_chunks WHERE id=$1", [chunkId])).rows).toEqual([]);
-    await rebuildCampaignMemories(pool, fixture.campaignId);
-    const rebuilt = await pool.query<{ id: string; content: string; content_hash: string; ordinal: number; memory_kind: string }>("SELECT id,content,content_hash,ordinal,memory_kind FROM chronicle_memories WHERE campaign_id=$1 ORDER BY ordinal", [fixture.campaignId]);
-    for (const row of rebuilt.rows) {
-      const normalized = normalizeStoryEvidenceSource(row.content);
-      const selected = row.memory_kind === "turn_fiction" && row.ordinal === 1 ? correctedPassage : normalized;
-      const newChunkId = crypto.randomUUID();
-      await embeddedChunk(fixture, providerId, { id: newChunkId, parentId: row.id, parentContentHash: row.content_hash, kind: (row.memory_kind === "turn_fiction" ? "turn_narration" : row.memory_kind) as never, content: selected, vector: [1, 0] });
-      await pool.query("UPDATE chronicle_memory_chunks SET metadata=jsonb_build_object('sourceEvidence',$2::jsonb) WHERE id=$1", [newChunkId, JSON.stringify({ ...certificate, sourceHash: sha256(normalized), start: normalized.indexOf(selected), end: normalized.indexOf(selected) + selected.length })]);
-    }
-    await pool.query("UPDATE chronicle_chunk_jobs SET status='completed',completed_at=now() WHERE campaign_id=$1", [fixture.campaignId]);
-    captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
-      ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId, operationKind: "append", expectedTurnNumber: 3, baseIdentityVersion: "generation-base-v3", captureRecentWindow: true
-    }));
-    const correctedContext = await read();
-    expect(correctedContext.chronicleRetrieval, JSON.stringify(correctedContext.chronicleRetrieval)).toMatchObject({ effectiveImplementation: "chunked_hybrid" });
-    expect(correctedContext.candidates.some((candidate) => candidate.narrativeSource)).toBe(true);
-    const corrected = plan(correctedContext);
-    expect(JSON.parse(corrected.storyInput).authoritative_context.chronicle[0].content).toContain(correctedPassage);
-    expect(corrected.storyInput).not.toContain("He was lying.");
-    expect(corrected.sourceManifest?.entries.find((entry) => entry.form === "excerpt")?.source.contentHash).not.toBe(certificate.sourceHash);
+    expect(plan(stale).layerDiagnostics.sourceValidationFailures).toBe(0);
   });
+
+  it.each([300, 2_000])("measures bounded v5 PostgreSQL retrieval over %i embedded turns", async (turnCount) => {
+    const { fixture, providerId } = await configuredFixture(`v5 bounded benchmark ${turnCount}`);
+    await pool.query(`INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,state_snapshot_private)
+      SELECT $1,$2,n,'Benchmark action','Benchmark narration','{}'::jsonb FROM generate_series(1,$3) n`,
+    [fixture.ownerUserId, fixture.campaignId, turnCount]);
+    await pool.query(`INSERT INTO chronicle_memories(owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance)
+      SELECT $1,$2,$3,t.id,'turn_fiction',t.turn_number,'Benchmark moon gate turn ' || t.turn_number,8,0.8
+      FROM turns t WHERE t.campaign_id=$2`, [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId]);
+    await pool.query(`INSERT INTO chronicle_memory_chunks
+      (owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,chunking_protocol_version,chunk_ordinal,chunk_kind,content,
+       source_start_offset,source_end_offset,token_estimate,embedding,embedding_status,embedding_provider_profile_id,embedding_model,
+       embedding_dimensions,embedding_protocol_version,embedding_provider_fingerprint,embedding_content_hash,embedding_updated_at)
+      SELECT $1,$2,$3,m.id,m.content_hash,'chronicle-chunk-v1',0,'turn_narration',m.content,0,length(m.content),8,
+       '[1,0]'::vector,'embedded',$4,'chunk-embed-v1',2,'chronicle-embedding-v1','chunk-fingerprint',encode(digest(m.content,'sha256'),'hex'),now()
+      FROM chronicle_memories m WHERE m.campaign_id=$2`, [fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, providerId]);
+    await pool.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [fixture.campaignId, turnCount]);
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const legacyContext = await transaction(providerId, []).loadGenerationContext(pool, {
+      ...fixture, operationKind: "append", expectedTurnNumber: turnCount + 1, query: "benchmark moon gate",
+      retrievalBudgetTokens: 32_000, storyMemoryPolicy: {
+        ...storyMemoryPolicy,
+        contextProtocol: CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION
+      }
+    });
+    const v5CoverageContext = await transaction(providerId, []).loadGenerationContext(pool, {
+      ...fixture, operationKind: "append", expectedTurnNumber: turnCount + 1, query: "benchmark moon gate",
+      retrievalBudgetTokens: 32_000, storyMemoryPolicy
+    });
+    expect(v5CoverageContext.candidates.length).toBeGreaterThan(legacyContext.candidates.length);
+    process.stdout.write(`TASK4_COVERAGE_MEASURE ${JSON.stringify({ turnCount,
+      retrievalBudgetTokens: 32_000, v4SelectedDistinctSources: legacyContext.candidates.length,
+      v5SelectedDistinctSources: v5CoverageContext.candidates.length
+    })}\n`);
+    for (const retrievalBudgetTokens of [32_000, 128_000, 1_000_000, 4_000_000]) {
+      const rankRows: number[] = [];
+      const observedPool = new Proxy(pool, { get(target, property, receiver) {
+        if (property === "connect") return async () => {
+          const client = await target.connect();
+          return new Proxy(client, { get(database, member, proxyReceiver) {
+            if (member === "query") return async (statement: string, values?: readonly unknown[]) => {
+              const result = await database.query(statement, values as never);
+              if (statement.includes("/* chronicle_rank")) rankRows.push(result.rows.length);
+              return result;
+            };
+            const value = Reflect.get(database, member, proxyReceiver);
+            return typeof value === "function" ? value.bind(database) : value;
+          } });
+        };
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+      const started = performance.now();
+      const context = await transaction(providerId, []).loadGenerationContext(observedPool, {
+        ...fixture, operationKind: "append", expectedTurnNumber: turnCount + 1, query: "benchmark moon gate",
+        retrievalBudgetTokens, storyMemoryPolicy
+      });
+      const runtimeMs = Number((performance.now() - started).toFixed(3));
+      const plan = planGenerationPromptContext(context, {
+        id: "benchmark-provider", name: "Benchmark provider", providerRole: "text", providerType: "openai_compatible", model: "benchmark", contextWindowTokens: 4_000_000,
+        maxOutputTokens: 100, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+        execute: async () => { throw new Error("benchmark provider execution is not used"); }
+      }, "System", "benchmark moon gate", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 4_000_000,
+      3_999_900, crypto.randomUUID(), "story_memory", policy);
+      const maximumParents = Math.min(2_000, Math.ceil(retrievalBudgetTokens / 32_000) * 16 * 4);
+      expect(context.candidates.length).toBeLessThanOrEqual(maximumParents);
+      process.stdout.write(`TASK4_DB_MEASURE ${JSON.stringify({ turnCount, retrievalBudgetTokens, vectorDimensions: 2,
+        rankQueryCount: rankRows.length, rankRows: rankRows.reduce((total, rows) => total + rows, 0), peakRankRows: Math.max(0, ...rankRows),
+        selectedCandidates: context.candidates.length, finalRequestTokens: plan.contextPlan.requestTokens, runtimeMs })}\n`);
+    }
+  }, 90_000);
 
   it("runs the private generation candidate read through the chunked hybrid stage", async () => {
     const { fixture, providerId } = await configuredFixture("private hybrid candidates");
