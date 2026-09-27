@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   generationRequestSchema,
   generationRetryLatestRequestSchema,
@@ -72,6 +72,12 @@ integration("PostgreSQL generation execution repository", () => {
       enabled: true,
       configuration: {}
     }, credentialSecret)).id;
+  });
+
+  // Every case creates durable queued/leased jobs. Remove its imported
+  // campaign graph so claimNext cannot observe a prior case's job.
+  afterEach(async () => {
+    await pool.query("DELETE FROM campaigns WHERE owner_user_id=$1", [ownerUserId]);
   });
 
   afterAll(async () => {
