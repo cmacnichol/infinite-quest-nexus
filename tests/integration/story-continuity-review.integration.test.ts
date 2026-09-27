@@ -1735,7 +1735,14 @@ integration("T17 durable continuity review", () => {
       maxOutputTokens: 48_000,
       temperature: 0,
       enabled: true,
-      configuration: { textResponseFormatPolicy: "auto" },
+      configuration: {
+        textResponseFormatPolicy: "auto",
+        continuityReviewExecutionPolicy: {
+          version: 1,
+          primary: { selection: { kind: "openrouter_preset", slug: "keep" }, overrides: { parameters: { temperature: 0 } } },
+          maximumAutomaticFallbacks: 0
+        }
+      },
       apiKey: "native-keep-fixture"
     }, credentialSecret);
     const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
@@ -1816,6 +1823,15 @@ integration("T17 durable continuity review", () => {
       expect(input.preparedRequest?.body).toBeDefined();
       expect(JSON.parse(input.preparedRequest!.body).model).toBe("@preset/keep");
     }
+    const reviewerDispatch = preparedTextExecutor.mock.calls[1]![0];
+    expect(reviewerDispatch.invocationKey).toBe("continuity_review:nonstream");
+    expect(reviewerDispatch.routeBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "keep" } });
+    expect(reviewerDispatch.frozenResponseContracts).toMatchObject({ version: 2, contracts: {
+      "continuity_review:nonstream": expect.any(Object)
+    } });
+    expect(reviewerDispatch.logicalReservation).toMatchObject({ kind: "story", generationJobId: job.id,
+      invocationId: expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}$/u) });
+    expect(reviewerDispatch.preparedRequest?.payloadHash).toBe(sha256Hex(reviewerDispatch.preparedRequest!.body));
     const durableNativeRequests = (await pool.query<{
       orchestrationPrivate: { primaryReservation: { requestBody: string }; primaryResult: { contextDiagnostics: { requestTokens: number } }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
     }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestrationPrivate;
@@ -1825,6 +1841,12 @@ integration("T17 durable continuity review", () => {
     expect(durableNativeRequests.primaryResult.contextDiagnostics.requestTokens).toBe(estimateStoryTokens(preparedBodies[0]!));
     expect(preparedBodies.map(sha256Hex)).toEqual(durableNativeRequests.responseContractInvocations.map((entry) => entry.requestPayloadHash));
     expect(verifyTextExecutionRouteAuthority).toHaveBeenCalled();
+    const reviewCheckpoint = (await pool.query<{
+      review: { binding: { reviewerExecutionSnapshotHash?: string; producingRequestHash: string } };
+      reviewer: { snapshotHash: string };
+    }>("SELECT orchestration_private->'continuityReview' AS review, orchestration_private->'continuityReviewExecution' AS reviewer FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
+    expect(reviewCheckpoint.review.binding.reviewerExecutionSnapshotHash).toBe(reviewCheckpoint.reviewer.snapshotHash);
+    expect(reviewCheckpoint.review.binding.producingRequestHash).toBe(sha256Hex(preparedBodies[0]!));
     const candidate = (await pool.query<{ candidate: { storyHash: string; story: { narration: string } } }>(
       "SELECT orchestration_private->'generationReview'->'gateCandidate' AS candidate FROM generation_jobs WHERE id=$1", [job.id]
     )).rows[0]!.candidate;
