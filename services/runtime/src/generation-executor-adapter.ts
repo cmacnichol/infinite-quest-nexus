@@ -2554,6 +2554,15 @@ async function executeLoadedGeneration(
 
     const frozenResponseContracts = job.orchestration_private?.frozenResponseContracts;
     const frozenContracts = frozenResponseContracts?.contracts;
+    const planningReviewerRoute = job.orchestration_private?.continuityReviewExecution?.enabled
+      ? job.orchestration_private.continuityReviewExecution.primary
+      : null;
+    // Measure exact reviewer wire requests even when a tentative optional
+    // context record exceeds the reviewer cap; planContext then omits that
+    // record instead of the serializer aborting the whole planning pass.
+    const reviewerSerializationRoute = planningReviewerRoute
+      ? { ...planningReviewerRoute, effectiveContextWindowTokens: Number.MAX_SAFE_INTEGER }
+      : null;
     const initialLogicalAttempt = (orchestration.logicalAttempt?.id ?? job.id) === job.id;
     // Use the captured delivery choice for both context packing and dispatch.
     const usesV2FrozenDelivery = frozenResponseContracts?.version === 2 && frozenContracts !== undefined;
@@ -2581,12 +2590,27 @@ async function executeLoadedGeneration(
         }, storyTextExecutionPlan).body : undefined,
         frozenStoryMemoryPolicySnapshot && frozenStoryMemoryPolicySnapshot.policy.continuityReview !== "off"
           ? (manifest) => estimateContinuityReviewPlanningTokens({
-            provider, manifest, producingRequestHash: manifest.producingRequestHash,
+            provider: planningReviewerRoute ? {
+              ...provider, model: planningReviewerRoute.routeBasis.candidates[0]!.modelId,
+              contextWindowTokens: planningReviewerRoute.effectiveContextWindowTokens,
+              maxOutputTokens: planningReviewerRoute.effectiveOutputTokens,
+              temperature: planningReviewerRoute.routeBasis.parameters.temperature ?? 0,
+              requestTimeoutMs: planningReviewerRoute.routeBasis.requestTimeoutMs
+            } : provider,
+            manifest, producingRequestHash: manifest.producingRequestHash,
             promptSnapshot: frozenPromptEnvelope, reviewMode: frozenStoryMemoryPolicySnapshot.policy.continuityReview as "observe" | "enforce",
             direction: safeAction, candidateOutputTokens: effectiveMaxOutputTokens(provider, job),
             prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
-            ...(frozenContracts ? { serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan) } : {})
-          }) : undefined
+            ...(reviewerSerializationRoute ? {
+              bindRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerSerializationRoute, request).request,
+              serializeRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerSerializationRoute, request).preparedRequest
+            } : frozenContracts ? {
+              serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan)
+            } : {})
+          }) : undefined,
+        planningReviewerRoute
+          ? planningReviewerRoute.effectiveContextWindowTokens - planningReviewerRoute.effectiveOutputTokens
+          : undefined
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
@@ -4324,8 +4348,13 @@ async function executeLoadedGeneration(
       // An unavailable or uncertain review retry authorizes one new reviewer
       // call only.  It never carries forward a prior non-pass as a repair
       // authorization, and a newly discovered conflict receives its own gate.
+      const savedCheckpointForCycle = continuityReviewCheckpointSchema.safeParse(orchestration.continuityReview);
+      const checkpointBelongsToRetryCycle = savedCheckpointForCycle.success
+        && savedCheckpointForCycle.data.version === 2
+        && savedCheckpointForCycle.data.cycleId === reviewCycleId;
       if (continuityRetryReceipt && savedReview.success
-          && !savedReview.data.reasons.includes("narrative_conflict")) {
+          && !savedReview.data.reasons.includes("narrative_conflict")
+          && !checkpointBelongsToRetryCycle) {
         orchestration = await persistOrchestration(repository, scope, job, { continuityReview: undefined });
       }
       const existing = continuityReviewCheckpointSchema.safeParse(orchestration.continuityReview);
@@ -4339,8 +4368,10 @@ async function executeLoadedGeneration(
       else if (existing.success) {
         // A prior lease may have dispatched the call. Do not silently duplicate
         // its cost or assume the missing response was a semantic pass.
-        checkpoint = continuityReviewCheckpointSchema.parse({ ...existing.data, status: "completed", verdict: "unavailable", result: null,
-          unavailableReason: "provider_failed", outcome: { version: 2, kind: "technical_failure", failure: "provider_failed", providerMetadata: null } });
+        checkpoint = existing.data.version === 1
+          ? continuityReviewCheckpointSchema.parse({ ...existing.data, status: "completed", verdict: "unavailable", result: null })
+          : continuityReviewCheckpointSchema.parse({ ...existing.data, status: "completed", verdict: "unavailable", result: null,
+            unavailableReason: "provider_failed", outcome: { version: 2, kind: "technical_failure", failure: "provider_failed", providerMetadata: null } });
       } else {
         checkpoint = { version: 2, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null, outcome: null,
           ...(reviewCycleId ? { cycleId: reviewCycleId } : {}) };

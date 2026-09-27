@@ -21,7 +21,7 @@ import { getProviderOutputSchemaV2, selectProviderOutputSchemaV2, type ProviderO
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { responseContractInvocationClosureV2 } from "./generation-response-contract.js";
 import { resolveEffectiveTextExecutionOverrides } from "./text-execution-overrides.js";
-import { resolveContinuityReviewExecution } from "./continuity-review-execution.js";
+import { disabledContinuityReviewExecution, resolveContinuityReviewExecution } from "./continuity-review-execution.js";
 import { resolveGenerationResponseContractsV2 } from "./generation-response-contract.js";
 import { queuedResponsePolicyV2Schema } from "../../../packages/contracts/src/generation-response-contract.js";
 import { continuityReviewExecutionPolicySchema } from "../../../packages/contracts/src/continuity-review-execution.js";
@@ -203,8 +203,12 @@ function createQueuedTextExecutionPreparation(
 ): Pick<PostgresGenerationCommandRepositoryDependencies, "prepareQueuedTextExecution" | "verifyQueuedTextExecution"> {
   return {
     prepareQueuedTextExecution: async (scope): Promise<PreparedQueuedTextExecution | undefined> => {
-      const campaign = await pool.query<{ textProviderProfileId: string | null }>(
-        `SELECT text_provider_profile_id AS "textProviderProfileId" FROM campaigns WHERE id=$1 AND owner_user_id=$2`,
+      const campaign = await pool.query<{ textProviderProfileId: string | null; continuityReviewMode: "off" | "observe" | "enforce" | null }>(
+        `SELECT campaign.text_provider_profile_id AS "textProviderProfileId", enrollment.review_mode AS "continuityReviewMode"
+           FROM campaigns campaign
+           LEFT JOIN campaign_story_memory_enrollments enrollment
+             ON enrollment.campaign_id=campaign.id AND enrollment.owner_user_id=campaign.owner_user_id
+          WHERE campaign.id=$1 AND campaign.owner_user_id=$2`,
         [scope.campaignId, scope.ownerUserId]
       );
       if (!campaign.rows[0]) throw new GenerationApplicationError("not_found", { campaignId: scope.campaignId });
@@ -238,12 +242,15 @@ function createQueuedTextExecutionPreparation(
           : { requestOverrides: scope.requestedTextExecutionOverrides })
       });
       const reviewerAdvertisements = new Map<string, NonNullable<Awaited<ReturnType<typeof providers.responseFormatInventory.listModels>>["models"][number]["responseFormatAdvertisement"]>>();
-      const rawReviewerPolicy = defaultProfile.configuration.continuityReviewExecutionPolicy;
+      const reviewMode = campaign.rows[0].continuityReviewMode ?? "off";
+      const rawReviewerPolicy = reviewMode === "off" ? undefined : defaultProfile.configuration.continuityReviewExecutionPolicy;
       const reviewerPolicy = rawReviewerPolicy == null ? undefined : continuityReviewExecutionPolicySchema.parse(rawReviewerPolicy);
       if (reviewerPolicy && (!defaultProfile.executionRevision || !defaultProfile.authorityRevision)) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
       }
-      const continuityReviewExecution = reviewerPolicy
+      const continuityReviewExecution = reviewMode === "off"
+        ? disabledContinuityReviewExecution()
+        : reviewerPolicy
         ? await resolveContinuityReviewExecution({
           profile: {
             ownerUserId: scope.ownerUserId, providerProfileId, profileRevision: defaultProfile.executionRevision!,

@@ -78,6 +78,22 @@ describe("layered generation context planner", () => {
     expect(reviewTokens + estimatedInputSafetyAllowanceTokens(reviewTokens)).toBeLessThanOrEqual(31_900);
     expect(result.layerDiagnostics.omitted.length).toBeGreaterThan(0);
   });
+  it("uses independent writer and reviewer input limits when packing optional evidence", () => {
+    const context = recentContext();
+    context.candidates = [{ id: "history", turnId: null, ordinal: 1, kind: "turn_fiction", content: "Useful history. ".repeat(900), tokenEstimate: 3600, rank: 1 }];
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const reviewCost = (manifest: NonNullable<ReturnType<typeof run>["sourceManifest"]>) =>
+      20_000 + manifest.entries.filter((entry) => entry.selectionGroup === "retrieved").length * 20_000;
+    const plan = (reviewLimit: number) => planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, reviewCost, reviewLimit);
+
+    expect(plan(60_000).promptContext.chronicle).toHaveLength(1);
+    expect(plan(30_000).promptContext.chronicle).toHaveLength(0);
+    expect(plan(31_900).promptContext.chronicle).toHaveLength(0);
+    expect(() => plan(12_000)).toThrow(/context_budget_exceeded/);
+  });
+
   it("does not measure continuity review when the frozen policy disables it", () => {
     let reviewMeasurements = 0;
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "off" });

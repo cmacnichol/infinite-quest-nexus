@@ -1666,6 +1666,72 @@ integration("T17 durable continuity review", () => {
     } finally { reviewSequence = []; }
   });
 
+  it.each(["dispatched", "completed"] as const)("reclaims a continuity Retry checkpoint at %s without a second reviewer call", async (crashAt) => {
+    const { job, application } = await enqueue("enforce");
+    reviewVerdict = "pass"; reviewSequence = ["uncertain", "pass"]; requests.length = 0;
+    await runGenerationJob(pool, `continuity-cycle-initial-${randomUUID()}`, 30, credentialSecret);
+    const offered = await application.getReview({ ownerUserId, jobId: job.id });
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: offered.reviewId, revision: offered.revision, decision: "retry" });
+    const before = (await pool.query<{ orchestration_private: { generationReview: { gateCandidate: { storyHash: string } }; sourceEvidenceManifest: { manifestHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const updated = await repository.saveOrchestration(scope, value);
+      if (!interrupted && value.continuityReview?.version === 2 && value.continuityReview.cycleId && value.continuityReview.status === crashAt) {
+        interrupted = true;
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+        throw Object.assign(new Error("Injected termination during a user-authorized continuity Retry"), { code: "generation_cancelled" });
+      }
+      return updated;
+    } };
+    const workerId = `continuity-cycle-crash-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+    const callsBeforeReclaim = requests.filter((body) => body.includes("story-continuity-review-v1")).length;
+    await runGenerationJob(pool, `continuity-cycle-reclaim-${randomUUID()}`, 30, credentialSecret);
+    const after = (await pool.query<{ orchestration_private: { continuityReview: { cycleId?: string }; generationReview: { gateCandidate: { storyHash: string } }; sourceEvidenceManifest: { manifestHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(callsBeforeReclaim);
+    expect(after.continuityReview.cycleId).toBeTruthy();
+    expect(after.generationReview.gateCandidate.storyHash).toBe(before.generationReview.gateCandidate.storyHash);
+    expect(after.sourceEvidenceManifest.manifestHash).toBe(before.sourceEvidenceManifest.manifestHash);
+  });
+
+  it("recovers a physically attested historical v1 dispatched review as unavailable without another call", async () => {
+    const { job, application, campaignId } = await enqueue("enforce");
+    reviewVerdict = "pass"; requests.length = 0;
+    const before = await acceptedAuthoritySnapshot(campaignId);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const current = value.continuityReview as any;
+      if (!interrupted && current?.version === 2 && current.status === "completed" && current.verdict === "pass") {
+        interrupted = true;
+        const { outcome: _outcome, attempts: _attempts, fallbackPreparationFailure: _fallbackPreparationFailure, cycleId: _cycleId, ...legacy } = current;
+        await repository.saveOrchestration(scope, { ...value, continuityReview: { ...legacy, version: 1, status: "dispatched", verdict: "unavailable", result: null } });
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+        throw Object.assign(new Error("Injected restart with a historically shaped v1 checkpoint"), { code: "generation_cancelled" });
+      }
+      return repository.saveOrchestration(scope, value);
+    } };
+    const workerId = `historical-v1-reclaim-${randomUUID()}`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: claim!, workerId, leaseSeconds: 30 });
+    const callsBeforeReclaim = requests.filter((body) => body.includes("story-continuity-review-v1")).length;
+    await runGenerationJob(pool, `historical-v1-reclaim-resume-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_review_required" });
+    expect(await application.getReview({ ownerUserId, jobId: job.id })).toMatchObject({ state: "pending", stage: "continuity", reasons: ["review_unavailable"] });
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(callsBeforeReclaim);
+    expect(await acceptedAuthoritySnapshot(campaignId)).toEqual(before);
+  });
+
   it("re-offers the original final candidate after a failed authorized continuity retry and keeps it offline", async () => {
     await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [providerId, JSON.stringify({ streaming: true, textResponseFormatPolicy: "auto" })]);
     const { job, application, campaignId } = await enqueue("enforce");
@@ -2159,6 +2225,94 @@ integration("T17 durable continuity review", () => {
       "SELECT narration,model_metadata->'reviewAcceptance'->>'candidateHash' AS \"candidateHash\" FROM turns WHERE campaign_id=$1 AND turn_number=$2",
       [imported.campaignId, job.expectedTurnNumber]
     )).resolves.toMatchObject({ rows: [{ narration: candidate.story.narration, candidateHash: candidate.storyHash }] });
+  });
+
+  it("does not resolve a deleted reviewer selection when review is off, while observe and enforce still reject it", async () => {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
+    const reviewerUnavailableProvider = await createProvider(pool, {
+      name: `T17 missing reviewer ${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "@preset/keep", contextWindowTokens: 163_840,
+      maxOutputTokens: 48_000, temperature: 0, enabled: true,
+      configuration: { textResponseFormatPolicy: "auto", continuityReviewExecutionPolicy: {
+        version: 1, primary: { selection: { kind: "model", modelId: "deleted-reviewer" } }, maximumAutomaticFallbacks: 0
+      } }, apiKey: "native-missing-reviewer-fixture"
+    }, credentialSecret);
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Missing reviewer ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "missing-reviewer.story", story }));
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "off" }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+      providerProfileId: reviewerUnavailableProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
+      idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+    }));
+    expect(job.status).toBe("queued");
+    expect((await pool.query<{ reviewer: { enabled: boolean } }>("SELECT orchestration_private->'continuityReviewExecution' AS reviewer FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.reviewer).toMatchObject({ enabled: false });
+    await runGenerationJob(pool, `off-missing-reviewer-${randomUUID()}`, 30, credentialSecret);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+
+    for (const mode of ["observe", "enforce"] as const) {
+      const campaignStory = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+      campaignStory.world.title = `Missing reviewer ${mode} ${randomUUID()}`;
+      const campaign = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: `missing-reviewer-${mode}.story`, story: campaignStory }));
+      await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: campaign.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
+      await expect(application.enqueueAppend({ ownerUserId, campaignId: campaign.campaignId }, generationRequestSchema.parse({
+        action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+        providerProfileId: reviewerUnavailableProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
+        idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+      }))).rejects.toThrow();
+    }
+  });
+
+  it("rejects a known enforced reviewer overflow before the writer provider dispatches", async () => {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
+    const narrowReviewerProvider = await createProvider(pool, {
+      name: `T17 narrow reviewer ${randomUUID()}`, providerType: "openrouter", providerRole: "text",
+      baseUrl: `http://127.0.0.1:${address.port}`, defaultModel: "@preset/keep", contextWindowTokens: 163_840,
+      maxOutputTokens: 48_000, temperature: 0, enabled: true,
+      configuration: { textResponseFormatPolicy: "auto", continuityReviewExecutionPolicy: {
+        version: 1, primary: { selection: { kind: "openrouter_preset", slug: "reviewer" },
+          overrides: { parameters: { temperature: 0, max_tokens: 4_096 }, conservativeContextWindowTokens: 5_000 } },
+        maximumAutomaticFallbacks: 0
+      } }, apiKey: "native-narrow-reviewer-fixture"
+    }, credentialSecret);
+    const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
+    story.world.title = `Narrow reviewer ${randomUUID()}`;
+    const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "narrow-reviewer.story", story }));
+    await pool.query(
+      `UPDATE campaigns SET selected_character_id='mira', character_profile=$2::jsonb, character_profile_revision=1
+        WHERE id=$1 AND owner_user_id=$3`,
+      [imported.campaignId, JSON.stringify({
+        name: "Campaign Mira",
+        profile: {
+          identity: { aliases: ["Fox"] },
+          story: { keyRelationships: "Mira keeps the observatory's full history." },
+          appearance: { clothing: "blue cloak" },
+          unclassifiedNotes: "Complete fiction note."
+        }
+      }), ownerUserId]
+    );
+    await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
+    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+      action: "Wait at the observatory.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit",
+      providerProfileId: narrowReviewerProvider.id, textSelection: { kind: "openrouter_preset", slug: "keep" },
+      idempotencyKey: randomUUID(), context: { budgetTokens: 32_000, compression: "full", recentTurns: 8 }
+    }));
+    expect((await pool.query<{ reviewer: { enabled: boolean; primary: { effectiveContextWindowTokens: number; effectiveOutputTokens: number } } }>(
+      "SELECT orchestration_private->'continuityReviewExecution' AS reviewer FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.reviewer).toMatchObject({ enabled: true, primary: { effectiveContextWindowTokens: 5_000, effectiveOutputTokens: 4_096 } });
+    expect((await pool.query<{ version: string }>(
+      "SELECT generation_base_identity->>'version' AS version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.version).toMatch(/^generation-base-v[34]$/);
+    requests.length = 0;
+    await runGenerationJob(pool, `narrow-reviewer-budget-${randomUUID()}`, 30, credentialSecret);
+    expect(requests.filter((body) => !body.includes("story-continuity-review-v1"))).toHaveLength(0);
+    expect(requests.filter((body) => body.includes("story-continuity-review-v1"))).toHaveLength(0);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
   });
 
   it("keeps an uncovered scene main exactly, then pauses again for a later final continuity conflict", async () => {
