@@ -296,12 +296,18 @@ integration("story context payload baseline shape", () => {
     const actual = requests.slice(before);
 
     expect(actual).toHaveLength(2);
-    for (const request of actual) {
-      const system = (request.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
-      expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
-      expect(system.lastIndexOf("Output canonical_facts contains strings only"))
-        .toBeGreaterThan(system.indexOf(creativeOverride));
-    }
+    const primarySystem = (actual[0]!.parsed.messages as { role: string; content: string }[])
+      .find((message) => message.role === "system")?.content ?? "";
+    expect(primarySystem).toContain(creativeOverride);
+    expect(primarySystem).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+    expect(primarySystem.lastIndexOf("Output canonical_facts contains strings only"))
+      .toBeGreaterThan(primarySystem.indexOf(creativeOverride));
+
+    const repair = actual[1]!;
+    const repairSystem = (repair.parsed.messages as { role: string; content: string }[])
+      .find((message) => message.role === "system")?.content ?? "";
+    expect(repairSystem).toContain("Choice-only output contract v2.");
+    expect(repairSystem).toContain("Return one strict JSON object with exactly choices and custom_action_suggestion; return no narration, facts, trackers, explanations, or other fields.");
   });
 
   it("rejects a corrupted frozen non-enrolled proof without queuing a retry", async () => {
@@ -658,13 +664,21 @@ Use only the bounded supplied context. Do not claim that all campaign history wa
       await dispatch(fixture.campaignId, "Set the relay scene.", true, "scene", true);
       const actual = requests.slice(before);
       expect(actual).toHaveLength(2);
-      for (const request of actual) {
-        const messages = request.parsed.messages as { role: string; content: string }[];
-        expect(messages.find((message) => message.role === "system")?.content).toContain(STORY_MEMORY_MANDATORY_CONTRACT);
-        expect(messages.find((message) => message.role === "system")?.content).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
-        expect(messages.find((message) => message.role === "system")?.content).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
-        expect(request.body).not.toContain("are facts that happen in this turn");
-      }
+      const primary = actual[0]!;
+      const primarySystem = (primary.parsed.messages as { role: string; content: string }[])
+        .find((message) => message.role === "system")?.content ?? "";
+      expect(primarySystem).toContain(STORY_MEMORY_MANDATORY_CONTRACT);
+      expect(primarySystem).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+      expect(primarySystem).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+      expect(primary.body).not.toContain("are facts that happen in this turn");
+
+      const repair = actual[1]!;
+      const repairSystem = (repair.parsed.messages as { role: string; content: string }[])
+        .find((message) => message.role === "system")?.content ?? "";
+      expect(repairSystem).toContain("Choice-only output contract v2.");
+      expect(repairSystem).toContain("The supplied final narration and continuity are protected authority.");
+      expect(repairSystem).toContain("Return one strict JSON object with exactly choices and custom_action_suggestion; return no narration, facts, trackers, explanations, or other fields.");
+      expect(repairSystem).not.toContain("Output canonical_facts contains strings only");
       expect((await pool.query("SELECT narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [fixture.campaignId])).rows[0]!.narration)
         .toBe(storyContinuityCandidateOutput.narration);
     });

@@ -227,9 +227,10 @@ integration("T19 story-memory archive compatibility", () => {
       expect(restored.rows[0]!.world_version_id).not.toBe(source.world_version_id);
     }
     expect(JSON.stringify(restored.rows[0]!.character_profile)).toContain(profileMarker);
-    // Operational source enrollment is excluded; the destination applies its Max default.
+    // The archived r1/off source enrollment is operational, so the destination
+    // campaign trigger supplies the post-0112 r3/off default.
     await expect(pool.query("SELECT campaign_id,capability,review_mode FROM campaign_story_memory_enrollments WHERE owner_user_id=$1", [ownerUserId]))
-      .resolves.toMatchObject({ rows: [{ campaign_id: restored.rows[0]!.id, capability: "r3", review_mode: "enforce" }] });
+      .resolves.toMatchObject({ rows: [{ campaign_id: restored.rows[0]!.id, capability: "r3", review_mode: "off" }] });
 
 
     providerId = (await createProvider(pool, {
