@@ -89,6 +89,23 @@ describe("cast discovery admission execution", () => {
     expect(loadTextExecution).not.toHaveBeenCalled();
   });
 
+  it.each(["executionRevision", "authorityRevision"] as const)("rejects a reloaded route basis with a mismatched %s", async (revision) => {
+    const routeBasis = {
+      version: 2 as const, selection: { kind: "model" as const, modelId: "story-model" }, preset: null,
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "", parameters: {}, endpointReference: "endpoint", credentialReference: "profile",
+      profileRevision: "profile-r7", authorityRevision: "authority-r3", requestTimeoutMs: 30_000,
+      protocolVersion: "route-basis-v2", routeBasisHash: "b".repeat(64)
+    };
+    const job = { ...completeGenerationExecutionPayload(), orchestration_private: { textExecutionRouteBasis: routeBasis } };
+    const liveExecution = { id: claim.providerProfileId, executionRevision: revision === "executionRevision" ? "profile-r8" : "profile-r7",
+      authorityRevision: revision === "authorityRevision" ? "authority-r4" : "authority-r3" } as Awaited<ReturnType<GenerationExecutionCollaborators["loadTextExecution"]>>;
+    const loadTextExecution = vi.fn(async () => liveExecution);
+
+    await expect(castDiscoveryAdmissionExecution(job, {} as never, loadTextExecution))
+      .rejects.toMatchObject({ code: "invalid_execution_revision" });
+  });
+
   it("maps only recognized admission error codes and never returns arbitrary error text", () => {
     expect(castAdmissionFailureReason(Object.assign(new Error("private story canary"), { code: "invalid_execution_revision" })))
       .toBe("invalid_execution_revision");
