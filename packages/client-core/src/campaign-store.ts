@@ -554,7 +554,8 @@ function reviewSummary(detail: import("@infinite-quest/contracts").GenerationRev
     candidateScope: detail.candidateScope,
     reasons: [...detail.reasons],
     canKeep: detail.canKeep,
-    canRetry: detail.canRetry
+    canRetry: detail.canRetry,
+    ...(detail.technicalDiagnostic ? { technicalDiagnostic: clone(detail.technicalDiagnostic) } : {})
   };
   return detail.version === 2
     ? { ...base, version: 2, canRepairFormat: detail.canRepairFormat === true, formatRepair: detail.formatRepair ?? null }

@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
 import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
+import { generationReviewSummaryProjection } from "../../packages/database/src/generation-review-summary-projection.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../packages/application/src/generation/review-checkpoint.js";
 import { canonicalEvidenceJson } from "../../packages/application/src/memory/generation-context.js";
 import { factFormatRepairHash, generationRequestSchema, sha256Hex, storyTurnOutputSchema } from "../../packages/contracts/src/index.js";
@@ -39,6 +40,35 @@ integration("PostgreSQL generation review persistence", () => {
       "UPDATE generation_jobs SET status='discarded', lease_owner=NULL, lease_expires_at=NULL WHERE owner_user_id=$1 AND status IN ('queued','assessing','generating','validating','committing','recoverable')",
       [ownerUserId]
     );
+  });
+
+  it("projects only the bounded continuity fallback status in PostgreSQL", async () => {
+    const privateCanary = "PRIVATE_CONTINUITY_REVIEW_REQUEST_CANARY";
+    const privateState = {
+      generationReview: {
+        version: 1, reviewId: crypto.randomUUID(), revision: 1, state: "pending", stage: "continuity", candidateScope: "final",
+        reasons: ["review_unavailable"], eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
+        gateCandidate: { story: { narration: privateCanary } },
+        prompt: privateCanary
+      },
+      continuityReview: {
+        version: 2, status: "dispatched", verdict: "unavailable", unavailableReason: "output_limit",
+        outcome: null, prompt: privateCanary, requestBody: privateCanary,
+        attempts: [
+          { ordinal: 1, route: "primary", reservationStatus: "completed", outcome: { kind: "technical_failure", failure: "output_limit" } },
+          { ordinal: 2, route: "fallback", reservationStatus: "dispatched", outcome: null }
+        ]
+      }
+    };
+    const result = await pool.query<{ projected: Record<string, unknown> }>(
+      `SELECT ${generationReviewSummaryProjection("orchestration_private")} AS projected
+         FROM (SELECT $1::jsonb AS orchestration_private) AS fixture`,
+      [JSON.stringify(privateState)]
+    );
+    expect(result.rows[0]!.projected).toMatchObject({
+      technicalDiagnostic: { version: 1, category: "output_limit", phase: "continuity_review_fallback", attemptCount: 2, maxAttempts: 2, state: "retrying" }
+    });
+    expect(JSON.stringify(result.rows[0]!.projected)).not.toContain(privateCanary);
   });
 
   function commands() {

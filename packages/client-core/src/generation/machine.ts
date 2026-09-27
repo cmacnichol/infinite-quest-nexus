@@ -37,6 +37,7 @@ function isSameSnapshot(left: GenerationStreamSnapshot, right: GenerationStreamS
     && left.errorMessage === right.errorMessage
     && left.resultTurnId === right.resultTurnId
     && isSameReview(supportedReview(left.review), supportedReview(right.review))
+    && JSON.stringify(left.continuityReviewDiagnostic) === JSON.stringify(right.continuityReviewDiagnostic)
     && isSameResponseFormat(left.responseFormat, right.responseFormat);
 }
 

@@ -39,6 +39,7 @@ interface ReviewFixtureOptions {
   readonly decisionNetworkLost?: boolean;
   readonly decisionDelayMs?: number;
   readonly revokeKeepInCurrentDetail?: boolean;
+  readonly technicalDiagnostic?: { version: 1; category: "output_limit" | "invalid_output" | "provider_timeout" | "provider_failed" | "context_budget_exceeded" | "evidence_unavailable"; phase: "continuity_review_primary" | "continuity_review_fallback" | "continuity_review_fallback_preparation"; attemptCount: 1 | 2; maxAttempts: 1 | 2; state: "retrying" | "incomplete" };
 }
 
 async function installReviewApi(page: Page, canKeep = true, decisionFails = false, decisionCompletes = false, options: ReviewFixtureOptions = {}) {
@@ -57,11 +58,22 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
             description: "Repair fact formatting and keep the narration unchanged." as const
           } : null
         }
-      : { version: 1 as const, reviewId, revision: 1, state: "pending" as const, stage: options.structureReview ? "structure" as const : "continuity" as const, candidateScope: "final" as const, reasons: [options.structureReview ? "invalid_structure" as const : canKeep ? "narrative_conflict" as const : "invalid_choices" as const], canKeep: options.structureReview ? false : canKeep, canRetry: true };
+      : { version: 1 as const, reviewId, revision: 1, state: "pending" as const, stage: options.structureReview ? "structure" as const : "continuity" as const, candidateScope: "final" as const, reasons: [options.technicalDiagnostic && !options.structureReview ? "review_unavailable" as const : options.structureReview ? "invalid_structure" as const : canKeep ? "narrative_conflict" as const : "invalid_choices" as const], canKeep: options.structureReview ? false : canKeep, canRetry: true };
   if (options.interrupted) { review.reasons = ["provider_interrupted"]; review.canRetry = false; }
+  if (options.technicalDiagnostic) {
+    review.technicalDiagnostic = options.technicalDiagnostic;
+    if (options.technicalDiagnostic.state === "retrying") { review.canKeep = false; review.canRetry = false; }
+  }
   const candidateNarration = options.structureReview && !options.formatRepair ? null : "The lighthouse bell answered across the harbor.";
   const candidateChoices = options.structureReview && !options.formatRepair ? [] : ["Follow the bell", "Wait at the quay"];
-  const detail: Record<string, any> | null = options.futureReview ? null : { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: options.structureReview || options.formatRepair ? "The provider response has invalid structure." : canKeep ? "The candidate may conflict with established story continuity." : "The candidate choices do not meet the required structure." }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0, ...(options.revokeKeepInCurrentDetail ? { canKeep: false } : {}), ...(options.validationIssues ? { validationIssues: options.validationIssues } : {}) };
+  const findingMessage = options.technicalDiagnostic
+    ? "The automated review was unavailable for this candidate."
+    : options.structureReview || options.formatRepair
+      ? "The provider response has invalid structure."
+      : canKeep
+        ? "The candidate may conflict with established story continuity."
+        : "The candidate choices do not meet the required structure.";
+  const detail: Record<string, any> | null = options.futureReview ? null : { ...review, narration: candidateNarration, choices: candidateChoices, findings: [{ code: review.reasons[0], message: findingMessage }], retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0, ...(options.revokeKeepInCurrentDetail ? { canKeep: false } : {}), ...(options.validationIssues ? { validationIssues: options.validationIssues } : {}) };
   const decisions: Record<string, unknown>[] = [];
   if (options.interrupted && detail) detail.findings = [{ code: "provider_interrupted", message: "The provider stream was interrupted. A complete candidate passed validation and was preserved for your decision." }];
   const writePaths: string[] = [];
@@ -310,6 +322,41 @@ async function installStagedReviewStream(page: Page, snapshots: { readonly gener
 }
 
 for (const surface of ["legacy", "web-next"] as const) {
+  test(`${surface} restores the paused candidate while an automatic continuity fallback is still running`, async ({ page }) => {
+    const api = await installReviewApi(page, true, false, false, { technicalDiagnostic: {
+      version: 1, category: "output_limit", phase: "continuity_review_fallback", attemptCount: 2, maxAttempts: 2, state: "retrying"
+    } });
+    await openReview(page, surface, api.fixture.campaignId);
+    await page.reload();
+    const recovery = recoveryFor(page, surface);
+    await expect(recovery).toContainText("Retrying continuity review");
+    await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
+    await expect(recovery.getByRole("button", { name: /Keep this turn|Retry continuity review|Continue with retry/u })).toHaveCount(0);
+    expect(api.writePaths).toEqual([]);
+  });
+
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+    test(`${surface} ${viewport.width}x${viewport.height} explains exhausted continuity review and keeps only authorized decisions`, async ({ page }) => {
+      const api = await installReviewApi(page, true, false, false, { technicalDiagnostic: {
+        version: 1, category: "output_limit", phase: "continuity_review_fallback", attemptCount: 2, maxAttempts: 2, state: "incomplete"
+      } });
+      await page.setViewportSize(viewport);
+      await openReview(page, surface, api.fixture.campaignId);
+      const recovery = recoveryFor(page, surface);
+      await expect(recovery).toContainText("Continuity review reached its output limit. Your story is saved.");
+      await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
+      const keep = surface === "legacy" ? page.locator("#btnKeepGenerationReview") : recovery.getByRole("button", { name: "Keep this turn", exact: true });
+      const retry = surface === "legacy" ? page.locator("#btnRetryGenerationReview") : recovery.getByRole("button", { name: "Retry continuity review", exact: true });
+      await expect(keep).toBeVisible();
+      await expect(retry).toBeVisible();
+      await expect(recovery).not.toContainText("story itself failed validation");
+      await page.screenshot({ path: `docs/review/assets/generation-format-recovery/${surface}-continuity-output-limit-${viewport.width}.png`, fullPage: true });
+      await retry.click();
+      await expect.poll(() => api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
+      expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+    });
+  }
+
   test(`${surface} reloads a structure review ahead of context advice and posts only its explicit Retry decision`, async ({ page }) => {
     const api = await installReviewApi(page, false, false, false, { structureReview: true, validationIssues: [
       { field: "canonical_fact_updates", code: "missing_array" },
@@ -689,7 +736,9 @@ for (const surface of ["legacy", "web-next"] as const) {
   });
 
   test(`${surface} preserves the old accepted turn during a replace-latest review until Keep commits`, async ({ page }) => {
-    const api = await installReviewApi(page, true, false, true, { replaceLatest: true });
+    const api = await installReviewApi(page, true, false, true, { replaceLatest: true, technicalDiagnostic: {
+      version: 1, category: "output_limit", phase: "continuity_review_fallback", attemptCount: 2, maxAttempts: 2, state: "incomplete"
+    } });
     if (surface === "legacy") {
       const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
       await page.route("**/vendor/photoswipe/photoswipe.css", route => route.fulfill({ contentType: "text/css", body: "" }));
@@ -698,6 +747,7 @@ for (const surface of ["legacy", "web-next"] as const) {
     await page.goto(surface === "legacy" ? `${legacyOrigin}/story/${api.fixture.campaignId}` : `${webNextOrigin}/app/story/${api.fixture.campaignId}`);
     const recovery = page.locator(surface === "legacy" ? "#generationRecoveryPanel" : "[data-story-recovery]");
     await expect(page.locator("body")).toContainText("The platform is quiet, with three marked paths ahead.");
+    await expect(recovery).toContainText("Continuity review reached its output limit. Your story is saved.");
     await expect(recovery).toContainText("The lighthouse bell answered across the harbor.");
     const keep = surface === "legacy" ? page.locator("#btnKeepGenerationReview") : recovery.getByRole("button", { name: "Keep this turn", exact: true });
     await keep.click();

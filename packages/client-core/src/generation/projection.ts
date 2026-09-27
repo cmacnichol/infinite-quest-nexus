@@ -3,6 +3,7 @@ import {
   generationResponseFormatProjectionSchema,
   generationReviewDetailSchema,
   generationReviewSummarySchema,
+  generationReviewTechnicalDiagnosticSchema,
   type GenerationResult,
   type GenerationStreamSnapshot,
   type SafeGenerationDiagnostic,
@@ -108,16 +109,24 @@ export function generationReviewPresentation(review: unknown, _diagnostic?: unkn
   const fallbackMessage = summary.data.reasons.includes("invalid_structure")
     ? "The candidate does not meet the required story structure."
     : "This turn needs your review.";
+  const technical = summary.data.technicalDiagnostic;
+  const technicalMessage = technical?.state === "retrying"
+    ? "Retrying continuity review"
+    : technical?.category === "output_limit"
+      ? "Continuity review reached its output limit. Your story is saved."
+      : technical ? "Continuity review remains incomplete. Your story is saved." : null;
   return {
     state: "review",
-    message: fallbackMessage,
+    message: technicalMessage ?? fallbackMessage,
     canKeep: summary.data.canKeep,
     canRetry: summary.data.canRetry,
     canRepairFormat: summary.data.version === 2 && summary.data.canRepairFormat,
     keepDescription: summary.data.candidateScope === "main"
       ? "Keep this text and finish the turn; normal event content may still be added."
       : "Keep this saved turn exactly as reviewed.",
-    retryDescription: summary.data.version === 2 && summary.data.canRepairFormat
+    retryDescription: technical
+      ? "Retry the continuity review; your saved story candidate will be reviewed again."
+      : summary.data.version === 2 && summary.data.canRepairFormat
       ? "Retry replaces this candidate with a new generation."
       : matchesDetail ? parsedDetail.data.retryDescription : "Retry this generation stage.",
     repairDescription: summary.data.version === 2 && summary.data.formatRepair !== null
@@ -126,6 +135,16 @@ export function generationReviewPresentation(review: unknown, _diagnostic?: unkn
       ? summary.data.formatRepair.planHash : null,
     retryFailure: matchesDetail ? parsedDetail.data.retryFailure : null
   };
+}
+
+/** Fixed public status text for an automatic continuity-review fallback. */
+export function generationReviewTechnicalDiagnosticMessage(value: unknown): string | null {
+  const parsed = generationReviewTechnicalDiagnosticSchema.safeParse(value);
+  if (!parsed.success) return null;
+  if (parsed.data.state === "retrying") return "Retrying continuity review";
+  return parsed.data.category === "output_limit"
+    ? "Continuity review reached its output limit. Your story is saved."
+    : "Continuity review remains incomplete. Your story is saved.";
 }
 
 /**
@@ -294,6 +313,7 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         errorMessage: snapshot.errorMessage,
         ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
         ...(snapshot.review === undefined ? {} : { review: snapshot.review }),
+        ...(snapshot.continuityReviewDiagnostic === undefined ? {} : { continuityReviewDiagnostic: snapshot.continuityReviewDiagnostic }),
         ...(snapshot.responseFormat === undefined ? {} : { responseFormat: snapshot.responseFormat })
       }
     : {
@@ -311,6 +331,7 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         errorMessage: snapshot.errorMessage,
         ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
         ...(snapshot.review === undefined ? {} : { review: snapshot.review }),
+        ...(snapshot.continuityReviewDiagnostic === undefined ? {} : { continuityReviewDiagnostic: snapshot.continuityReviewDiagnostic }),
         ...(snapshot.responseFormat === undefined ? {} : { responseFormat: snapshot.responseFormat })
       };
 }
