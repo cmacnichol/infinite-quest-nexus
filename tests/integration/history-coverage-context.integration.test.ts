@@ -144,7 +144,10 @@ integration("history coverage intent authority", () => {
     }));
     const legacyContext = await withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client, {
       ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id, operationKind: "append", expectedTurnNumber: 15,
-      query: "keeper gate", expectedBaseIdentity: capturedV4.baseIdentity as never, storyMemoryPolicy: legacySnapshot
+      query: "keeper gate", expectedBaseIdentity: capturedV4.baseIdentity as never,
+      // v4 has no history context protocol identity at runtime; the loader's
+      // static policy input has not yet been widened for that historical form.
+      storyMemoryPolicy: legacySnapshot as typeof snapshot
     }));
     const captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
       ownerUserId, campaignId: campaign.rows[0]!.id, operationKind: "append", expectedTurnNumber: 15,
@@ -214,7 +217,7 @@ integration("history coverage intent authority", () => {
         content: "Retrieved accepted narration: the keeper hid the silver seal beneath the quay.",
         tokenEstimate: 20,
         rank: 1
-      }]
+      }] as const
     };
     const legacyMatrixContext = { ...legacyContext, candidates: matrixContext.candidates };
     const legacyMatrixContextWithIgnoredV5Fields = {

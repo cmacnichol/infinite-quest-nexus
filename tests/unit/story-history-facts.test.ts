@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectProtectedFacts, type ProtectedFact } from "../../packages/application/src/memory/story-history-facts.js";
+import { selectProtectedFacts, type ProtectedFact } from "../../packages/domain/src/story-history-projection.js";
 
 const facts = (values: readonly string[]): readonly ProtectedFact[] => values.map((content, index) => ({
   id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,

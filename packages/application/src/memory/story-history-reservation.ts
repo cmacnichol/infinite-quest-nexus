@@ -21,12 +21,13 @@ export function reserveNewestWholeSuffix<Entry>(input: Readonly<{
   entries: readonly Entry[];
   budgetTokens: number;
   measureTokens: (entries: readonly Entry[]) => number;
+  now?: () => number;
 }>): ExactSuffixReservation<Entry> {
   const entries = [...input.entries];
   if (!Number.isFinite(input.budgetTokens) || input.budgetTokens < 0) {
     throw new Error("Exact suffix reservation requires a nonnegative finite budget.");
   }
-  const started = performance.now();
+  const started = input.now?.() ?? 0;
   const measured = new Map<number, number>();
   const costAt = (start: number): number => {
     const cached = measured.get(start);
@@ -61,7 +62,7 @@ export function reserveNewestWholeSuffix<Entry>(input: Readonly<{
   return Object.freeze({
     entries: Object.freeze(selected),
     trialCount: measured.size,
-    elapsedMilliseconds: performance.now() - started,
+    elapsedMilliseconds: (input.now?.() ?? started) - started,
     measuredTokens: fits(start) ? costAt(start) : null,
     firstOmittedEntry: start > 0 ? entries[start - 1] ?? null : null
   });

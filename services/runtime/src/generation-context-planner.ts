@@ -558,6 +558,7 @@ export function planGenerationPromptContext(
       const reservation = reserveNewestWholeSuffix({
         entries: ledgerBlocks,
         budgetTokens: ledgerCeiling,
+        now: () => performance.now(),
         measureTokens: (suffix) => {
           ledgerMeasurementActive = true;
           try {

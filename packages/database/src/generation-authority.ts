@@ -12,7 +12,7 @@ import type {
   LegacyGenerationBaseIdentity
 } from "../../application/src/memory/generation-context.js";
 import type { GenerationRecentTurn } from "../../application/src/memory/generation-context.js";
-import { ledgerDirectionExcerpt, type StoryLedger } from "../../application/src/memory/story-history-ledger.js";
+import { ledgerDirectionExcerpt, type StoryLedger } from "../../domain/src/story-history-projection.js";
 import { loadVerifiedProtectedFacts } from "./campaign-continuity-repository.js";
 import type { ProtectedFact, ProtectedFactSourceCoverage } from "../../application/src/memory/story-history-facts.js";
 export type GenerationBaseIdentity = LegacyGenerationBaseIdentity | GenerationBaseIdentityV3 | GenerationBaseIdentityV4;

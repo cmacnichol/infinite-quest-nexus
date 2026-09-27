@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ledgerDirectionExcerpt, selectStoryLedger } from "../../packages/application/src/memory/story-history-ledger.js";
+import { ledgerDirectionExcerpt, selectStoryLedger } from "../../packages/domain/src/story-history-projection.js";
 import { estimateTokens, stableStringify } from "../../packages/domain/src/index.js";
 import { generationContextAuthoritySchema } from "../../packages/application/src/memory/generation-context.js";
 
