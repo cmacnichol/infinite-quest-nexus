@@ -9,6 +9,7 @@ import { continuityReviewSchema } from "../../../packages/contracts/src/story-co
 import { effectiveRequestOutputTokens, estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../../packages/story-engine/src/provider-request.js";
 import { ContextBudgetError } from "../../../packages/story-engine/src/context-budget.js";
 import { estimateStoryTokens } from "../../../packages/story-engine/src/token-estimate.js";
+import { PreparedRouteTerminalError } from "../../../packages/story-engine/src/preset-route-execution.js";
 import type { ProviderRequest } from "../../../packages/story-engine/src/providers.js";
 import type { PreparedResponseContract } from "../../../packages/contracts/src/text-response-format.js";
 import type { TextExecutionPlan } from "../../../packages/contracts/src/text-execution-plan.js";
@@ -73,6 +74,7 @@ export type ContinuityReviewUnavailableReason =
  * ad-hoc `Object.assign(new Error(...), { code })` at a call site. */
 export function continuityReviewUnavailableReason(error: unknown): ContinuityReviewUnavailableReason {
   if (error instanceof ContextBudgetError) return "context_budget_exceeded";
+  if (error instanceof PreparedRouteTerminalError && error.reason === "deadline") return "provider_timeout";
   const code = typeof error === "object" && error !== null && "code" in error
     && typeof (error as { code?: unknown }).code === "string"
     ? (error as { code: string }).code

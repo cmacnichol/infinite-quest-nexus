@@ -2,6 +2,7 @@ import { PROMPT_TEMPLATE_CATALOG, CONTINUITY_REVIEW_PROMPT_CATALOG } from "../..
 import { describe, expect, it, vi } from "vitest";
 import { prepareContinuityRepair, prepareContinuityReview, executePreparedContinuityReview, estimateContinuityReviewPlanningTokens, ContinuityReviewUnavailableError, continuityReviewUnavailableReason } from "../../services/runtime/src/story-continuity-review-adapter.js";
 import { ContextBudgetError } from "../../packages/story-engine/src/context-budget.js";
+import { PreparedRouteTerminalError } from "../../packages/story-engine/src/preset-route-execution.js";
 import { z } from "zod";
 import { createStoryEvidence, generationEvidenceManifestHash } from "../../packages/application/src/memory/generation-context.js";
 import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt.js";
@@ -273,6 +274,7 @@ describe("continuity review unavailable reason", () => {
     expect(continuityReviewUnavailableReason(new z.ZodError([]))).toBe("invalid_output");
     expect(continuityReviewUnavailableReason(new SyntaxError("Unexpected token"))).toBe("invalid_output");
     expect(continuityReviewUnavailableReason(new Error("network timeout"))).toBe("provider_timeout");
+    expect(continuityReviewUnavailableReason(new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Route deadline."))).toBe("provider_timeout");
     expect(continuityReviewUnavailableReason("not an error")).toBe("provider_failed");
   });
 });

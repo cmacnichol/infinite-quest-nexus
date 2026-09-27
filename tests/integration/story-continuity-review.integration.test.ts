@@ -1739,7 +1739,7 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "output_limited", "invalid_output"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
     const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
@@ -1827,6 +1827,13 @@ integration("T17 durable continuity review", () => {
               AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId]);
           throw new PreparedRouteTerminalError("prepared_route_terminal", "provider_unavailable", "Fixture reviewer transport failure.");
         }
+        if (outcome === "review_deadline") {
+          await pool.query(`UPDATE prepared_text_physical_attempts
+            SET outcome='failed',failure_reason='deadline',emitted_output=false
+            WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
+              AND logical_reservation->>'invocationId'=$3`, [actualReservation.ownerUserId, actualReservation.generationJobId, actualReservation.invocationId]);
+          throw new PreparedRouteTerminalError("prepared_route_deadline_exceeded", "deadline", "Fixture reviewer deadline.");
+        }
       }
       return {
       content,
@@ -1876,6 +1883,18 @@ integration("T17 durable continuity review", () => {
            FROM generation_jobs WHERE id=$1`, [job.id]
       )).resolves.toMatchObject({ rows: [{ verdict: "unavailable", unavailableReason: "provider_failed",
         outcome: { kind: "technical_failure", failure: "provider_failed" } }] });
+      return;
+    }
+    if (outcome === "review_deadline") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required"
+      });
+      await expect(pool.query<{ unavailableReason: string; outcome: { kind: string; failure: string } }>(
+        `SELECT orchestration_private->'continuityReview'->>'unavailableReason' AS "unavailableReason",
+                orchestration_private->'continuityReview'->'outcome' AS "outcome"
+           FROM generation_jobs WHERE id=$1`, [job.id]
+      )).resolves.toMatchObject({ rows: [{ unavailableReason: "provider_timeout",
+        outcome: { kind: "technical_failure", failure: "provider_timeout" } }] });
       return;
     }
     if (outcome === "output_limited" || outcome === "invalid_output") {
