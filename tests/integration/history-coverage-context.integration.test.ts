@@ -3,16 +3,16 @@ import { resolve } from "node:path";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
-import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
+import { loadPostgresChronicleGenerationAuthorityContext, loadPostgresChronicleGenerationCandidatesContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { estimateContinuityReviewPlanningTokens, prepareContinuityReview } from "../../services/runtime/src/story-continuity-review-adapter.js";
 import { bindManifestToProducingRequest } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
-import { generationEvidenceManifestSchema } from "../../packages/application/src/memory/generation-context.js";
+import { generationEvidenceManifestSchema, historyCoverageDiagnosticsSchema } from "../../packages/application/src/memory/generation-context.js";
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySchema } from "../../packages/contracts/src/story-memory-policy.js";
 import { CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { CONTINUITY_REVIEW_PROMPT_CATALOG, PROMPT_TEMPLATE_CATALOG } from "../../packages/contracts/src/prompt-library.js";
 import { sha256 } from "../../packages/domain/src/index.js";
-import { estimatedInputSafetyAllowanceTokens, estimateStoryTokens } from "../../packages/story-engine/src/index.js";
+import { buildStoryMemoryUserPrompt, estimatedInputSafetyAllowanceTokens, estimateStoryTokens } from "../../packages/story-engine/src/index.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 
@@ -226,18 +226,20 @@ integration("history coverage intent authority", () => {
     };
     const budgets = [32_000, 64_000, 128_000, 256_000, 1_000_000, 4_000_000] as const;
     const matrixMetrics: unknown[] = [];
+    const effectiveWriterEnvelopes = new Set<number>();
     for (const configuredBudget of budgets) {
       const writer = {
         ...provider,
         id: `matrix-writer-${configuredBudget}`,
-        contextWindowTokens: Math.min(configuredBudget, 256_000)
+        contextWindowTokens: configuredBudget
       };
+      effectiveWriterEnvelopes.add(writer.contextWindowTokens);
       // Every row deliberately has an enabled, smaller reviewer. The 32k row
       // also establishes that a configured budget cannot override that cap.
       const reviewer = {
         ...provider,
         id: `matrix-reviewer-${configuredBudget}`,
-        contextWindowTokens: Math.min(Math.max(16_000, Math.floor(configuredBudget / 2)), 64_000)
+        contextWindowTokens: Math.max(16_000, Math.floor(configuredBudget / 2))
       };
       const writerInputLimit = writer.contextWindowTokens - writer.maxOutputTokens;
       const reviewerInputLimit = reviewer.contextWindowTokens;
@@ -294,7 +296,173 @@ integration("history coverage intent authority", () => {
         writerSerializations: (v5.layerDiagnostics as any).ledgerReservation.writerSerializationCount,
         reviewerSerializations: (v5.layerDiagnostics as any).ledgerReservation.reviewerSerializationCount });
     }
+    // Task 12 requires a distinct effective writer envelope for each
+    // configured budget. A provider cap may bind a row, but it may not turn
+    // later rows into a duplicate of an earlier envelope.
+    expect([...effectiveWriterEnvelopes]).toEqual([...budgets]);
     process.stderr.write(`${JSON.stringify({ historyCoveragePreenableMatrix: matrixMetrics })}\n`);
     process.stderr.write(`${JSON.stringify({ historyCoverageCompositionMetrics: { writerBytes: new TextEncoder().encode(planned.contextPlan.serializedRequest).byteLength, reviewerBytes: new TextEncoder().encode(review.body).byteLength, ledgerEntries: ledgerEvidence.length, measurementTrials: (planned.layerDiagnostics as any).ledgerReservation.measurementTrialCount, writerSerializations: (planned.layerDiagnostics as any).ledgerReservation.writerSerializationCount, reviewerSerializations: (planned.layerDiagnostics as any).ledgerReservation.reviewerSerializationCount } })}\n`);
   });
+
+  it("measures one captured authority through reservation, retrieval, and final serializer planning at every supported envelope", async () => {
+    const world = await pool.query<{ id: string }>("INSERT INTO worlds(owner_user_id,title) VALUES($1,'Lease benchmark') RETURNING id", [ownerUserId]);
+    const version = await pool.query<{ id: string }>("INSERT INTO world_versions(owner_user_id,world_id,version_number,content) VALUES($1,$2,1,$3) RETURNING id", [ownerUserId, world.rows[0]!.id,
+      JSON.stringify({ rules: "Treat accepted evidence as authority." })]);
+    const campaign = await pool.query<{ id: string }>("INSERT INTO campaigns(owner_user_id,world_version_id,title,active_turn_number,character_snapshot) VALUES($1,$2,'Lease benchmark',513,'{}') RETURNING id", [ownerUserId, version.rows[0]!.id]);
+    await pool.query("INSERT INTO campaign_state(owner_user_id,campaign_id) VALUES($1,$2)", [ownerUserId, campaign.rows[0]!.id]);
+    const factRecords = Array.from({ length: 512 }, (_, index) => ({ id: crypto.randomUUID(), content: `Verified fact ${index}. ${"f".repeat(600)}` }));
+    await pool.query(`INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,input_mode,state_snapshot_private)
+      SELECT $1,$2,turn_number,concat('Intent ',turn_number,'. ',repeat('l',320)),concat('Accepted ',turn_number,'.'),'action','{}'::jsonb
+      FROM generate_series(1,512) AS turn_number`, [ownerUserId, campaign.rows[0]!.id]);
+    const baseTurn = await pool.query<{ id: string }>(`INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,input_mode,state_snapshot_private,accepted_at)
+      VALUES($1,$2,513,'Current intent.','Current accepted scene.','action',$3::jsonb,now()) RETURNING id`, [ownerUserId, campaign.rows[0]!.id,
+      // Accepted turn snapshots deliberately cap additions at 100. The
+      // authority reader separately verifies the full bounded projection from
+      // campaign_canonical_facts, which is the 512-row source being measured.
+      JSON.stringify({ canonicalFacts: factRecords.slice(0, 100), canonicalFactUpdates: [] })]);
+    const correction = await pool.query<{ id: string }>(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,effective_turn_number,revision,state_snapshot_private,changed_fields)
+      VALUES($1,$2,513,1,$3::jsonb,'["canonicalFacts"]'::jsonb) RETURNING id`, [ownerUserId, campaign.rows[0]!.id,
+      JSON.stringify({ continuitySummary: "", openThreads: [], canonicalFacts: factRecords, scratchpad: "", trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] })]);
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_state_edit_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      SELECT (item->>'id')::uuid,$1,$2,$3,$4,513,ordinality - 1,item->>'content',lower(item->>'content'),513
+      FROM jsonb_array_elements($5::jsonb) WITH ORDINALITY AS values(item, ordinality)`, [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, correction.rows[0]!.id, JSON.stringify(factRecords)]);
+    const embeddingProvider = await pool.query<{ id: string }>(`INSERT INTO provider_profiles(owner_user_id,name,provider_type,provider_role,base_url,default_model)
+      VALUES($1,'Lease embedding','openai_compatible','embedding','http://fixture.invalid/v1','lease-embed') RETURNING id`, [ownerUserId]);
+    const embeddingProviderId = embeddingProvider.rows[0]!.id;
+    await pool.query(`INSERT INTO campaign_memory_configs(campaign_id,owner_user_id,embedding_enabled,embedding_provider_profile_id,embedding_model,retrieval_implementation,retrieval_shadow_enabled)
+      VALUES($1,$2,true,$3,'lease-embed','chunked_hybrid',false)`, [campaign.rows[0]!.id, ownerUserId, embeddingProviderId]);
+    await pool.query(`INSERT INTO chronicle_memories(id,owner_user_id,campaign_id,world_version_id,turn_id,memory_kind,ordinal,content,token_estimate,importance,entities,entity_ids,metadata)
+      SELECT gen_random_uuid(),$1,$2,$3,turn_row.id,
+             CASE floor((source.ordinal - 1) / 512)::int WHEN 0 THEN 'turn_fiction' WHEN 1 THEN 'open_thread' WHEN 2 THEN 'campaign_summary' ELSE 'canonical_fact' END,
+             turn_row.turn_number,concat('Retrieved evidence ',source.ordinal,'. ',repeat('r',1500)),376,0.8,ARRAY[]::text[],ARRAY[]::text[],'{}'::jsonb
+      FROM generate_series(1,1950) AS source(ordinal)
+      JOIN turns turn_row ON turn_row.campaign_id=$2 AND turn_row.turn_number=((source.ordinal - 1) % 512) + 1`, [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id]);
+    await pool.query(`INSERT INTO chronicle_memory_chunks(id,owner_user_id,campaign_id,world_version_id,parent_memory_id,parent_content_hash,chunking_protocol_version,chunk_ordinal,chunk_kind,content,source_start_offset,source_end_offset,token_estimate,entities,entity_ids,embedding,embedding_status,embedding_provider_profile_id,embedding_model,embedding_dimensions,embedding_protocol_version,embedding_provider_fingerprint,embedding_content_hash,embedding_updated_at)
+      SELECT gen_random_uuid(),memory.owner_user_id,memory.campaign_id,memory.world_version_id,memory.id,memory.content_hash,'chronicle-chunk-v1',0,
+             CASE memory.memory_kind WHEN 'turn_fiction' THEN 'turn_narration' ELSE memory.memory_kind END,memory.content,0,length(memory.content),memory.token_estimate,ARRAY[]::text[],ARRAY[]::text[],'[1,0]'::vector,'embedded',$4,'lease-embed',2,'chronicle-embedding-v1','lease-fingerprint',encode(digest(memory.content,'sha256'),'hex'),now()
+      FROM chronicle_memories memory WHERE memory.owner_user_id=$1 AND memory.campaign_id=$2 AND memory.world_version_id=$3`, [ownerUserId, campaign.rows[0]!.id, version.rows[0]!.id, embeddingProviderId]);
+    const seededCandidateParents = Number((await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM chronicle_memories WHERE campaign_id=$1", [campaign.rows[0]!.id])).rows[0]!.count);
+    expect(seededCandidateParents).toBe(1_950);
+
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "observe" });
+    const snapshot = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "b".repeat(64) } as const;
+    const scope = { ownerUserId, campaignId: campaign.rows[0]!.id, worldVersionId: version.rows[0]!.id, operationKind: "append" as const,
+      expectedTurnNumber: 514, query: "retrieved evidence", storyMemoryPolicy: snapshot };
+    const frozen = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
+      ...scope, baseIdentityVersion: "generation-base-v4", captureStoryLedger: true, captureProtectedFacts: true,
+      captureRecentWindow: true, recentWindowTurns: 11
+    }));
+    let authorityQueries = 0;
+    const authorityStartedAt = performance.now();
+    const authority = await withTransaction(pool, async (client) => {
+      const metered = { query: async (...args: any[]) => { authorityQueries++; return (client.query as any)(...args); } };
+      return loadPostgresChronicleGenerationAuthorityContext(metered as never, { ...scope, expectedBaseIdentity: frozen.baseIdentity as never });
+    });
+    const authorityLockMs = performance.now() - authorityStartedAt;
+    const dependencies = { embeddings: {
+      async resolve() { return { status: "resolved" as const, resolutionSource: "dedicated_embedding" as const, resolvedRole: "embedding" as const, providerProfileId: embeddingProviderId, providerType: "openai_compatible", model: "lease-embed" }; },
+      async load() { return { id: embeddingProviderId, model: "lease-embed", providerType: "openai_compatible", configuration: { embeddingDimensions: 2 }, async embed(documents: readonly string[]) { return { embeddings: documents.map(() => [1, 0]), responseId: "fixture", usage: {}, reportedCost: null }; } }; },
+      async embed(provider: any, documents: readonly string[]) { return provider.embed(documents); },
+      async fingerprint() { return "lease-fingerprint"; }, async recordHealth() {}, async recordCost() { return null; }, logDiagnostic() {}
+    } } as never;
+    const promptSnapshot = { version: 2,
+      templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" as const }])),
+      continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" as const, protocolIdentity: value.protocolIdentity }])) };
+    const provider = { id: "lease-writer", name: "Lease writer", providerRole: "text" as const, providerType: "openai_compatible" as const, model: "lease-model", baseUrl: "", maxOutputTokens: 512, temperature: 0, requestTimeoutMs: 1_000, configuration: {}, async execute() { throw new Error("Provider dispatch is outside the serializer benchmark."); } };
+    // This is the same configuration-to-residual calculation Task3 uses before
+    // creating generationMemoryScope. The planner receives the configured
+    // campaign budget; the loader receives only the safe residual.
+    const fixedPromptEnvelopeTokens = estimateStoryTokens(PROMPT_TEMPLATE_CATALOG.story_system.defaultContent)
+      + estimateStoryTokens(buildStoryMemoryUserPrompt({ worldCanon: {}, campaignCanon: {}, chronicle: [], currentScene: null }, "retrieved evidence", false, [], { profile: "brief", minWords: 100, maxWords: 120 }, "action"))
+      + 1_024;
+    // These are the only supported envelopes able to carry all 512 protected
+    // facts. The 1m row must exercise candidate trimming; the 4m row must
+    // retain the complete actual retrieved source set.
+    const budgets = [1_000_000, 4_000_000] as const;
+    const metrics: unknown[] = [];
+    let retrievalQueries = 0;
+    let retrievalRows = 0;
+    for (const configuredBudget of budgets) {
+      const effectiveWriterContextWindow = configuredBudget;
+      const writer = { ...provider, id: `lease-writer-${configuredBudget}`, contextWindowTokens: effectiveWriterContextWindow };
+      const writerInputLimit = writer.contextWindowTokens - writer.maxOutputTokens;
+      const safeRetrievalBudget = Math.max(512, Math.min(configuredBudget, writerInputLimit - fixedPromptEnvelopeTokens));
+      expect(safeRetrievalBudget).toBe(configuredBudget - provider.maxOutputTokens - fixedPromptEnvelopeTokens);
+      const reviewer = { ...provider, id: `lease-reviewer-${configuredBudget}`, contextWindowTokens: Math.max(16_000, Math.floor(effectiveWriterContextWindow / 2)) };
+      const reviewerInputLimit = reviewer.contextWindowTokens - reviewer.maxOutputTokens;
+      const reviewerEstimator = (manifest: NonNullable<ReturnType<typeof planGenerationPromptContext>["sourceManifest"]>) => estimateContinuityReviewPlanningTokens({ provider: reviewer, manifest, producingRequestHash: manifest.producingRequestHash, promptSnapshot, reviewMode: "observe", direction: "Continue.", candidateOutputTokens: reviewer.maxOutputTokens });
+      const rowStartedAt = performance.now();
+      const reservationStartedAt = performance.now();
+      const reservationPlan = planGenerationPromptContext({ ...authority, candidates: [] }, writer, "Write a scene.", "Continue.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", configuredBudget, writerInputLimit, "77777777-7777-4777-8777-777777777777", "story_memory", policy, undefined, reviewerEstimator, reviewerInputLimit, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+      const reservationMs = performance.now() - reservationStartedAt;
+      const reservation = { recentTurnIds: reservationPlan.promptContext.recentTurns?.map((turn) => turn.sourceId) ?? [], protectedFactIds: reservationPlan.promptContext.protectedFacts?.map((fact) => fact.id) ?? [] };
+      const retrievalStartedAt = performance.now();
+      const retrievalClient = await pool.connect();
+      let retrieved;
+      try {
+        const metered = { query: async (...args: any[]) => { retrievalQueries++; const result = await (retrievalClient.query as any)(...args); retrievalRows += result.rows?.length ?? 0; return result; } };
+        retrieved = await loadPostgresChronicleGenerationCandidatesContext(metered as never, { ...scope, retrievalBudgetTokens: safeRetrievalBudget }, authority, dependencies, reservation, { useSavepoints: false });
+      } finally { retrievalClient.release(); }
+      const retrievalMs = performance.now() - retrievalStartedAt;
+      const finalStartedAt = performance.now();
+      const planned = planGenerationPromptContext(retrieved!, writer, "Write a scene.", "Continue.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", configuredBudget, writerInputLimit, "77777777-7777-4777-8777-777777777777", "story_memory", policy, undefined, reviewerEstimator, reviewerInputLimit, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+      const manifest = generationEvidenceManifestSchema.parse(planned.sourceManifest);
+      const review = prepareContinuityReview({ provider: reviewer, manifest, producingRequestHash: manifest.producingRequestHash, promptSnapshot, reviewMode: "observe", direction: "Continue.", draft: { narration: "A deterministic draft.", choices: ["Wait", "Search", "Leave", "Listen"], custom_action_suggestion: "Inspect.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "", open_threads: [], canonical_facts: [], superseded_facts: [], canonical_fact_updates: [] } });
+      const finalPlanningMs = performance.now() - finalStartedAt;
+      const diagnostics = historyCoverageDiagnosticsSchema.parse((planned.layerDiagnostics as any).history);
+      const factReservation = (planned.layerDiagnostics as any).factReservation;
+      const writerRequired = planned.contextPlan.requestTokens + estimatedInputSafetyAllowanceTokens(planned.contextPlan.requestTokens) + writer.maxOutputTokens;
+      const reviewerRequired = review.requestTokens + review.safetyAllowanceTokens + reviewer.maxOutputTokens;
+      expect(writerRequired).toBeLessThanOrEqual(writer.contextWindowTokens);
+      expect(reviewerRequired).toBeLessThanOrEqual(reviewer.contextWindowTokens);
+      expect(reviewer.contextWindowTokens).toBeLessThan(writer.contextWindowTokens);
+      expect(() => bindManifestToProducingRequest(manifest, planned.contextPlan.serializedRequest)).not.toThrow();
+      expect(review.body).toContain(manifest.manifestHash);
+      const manifestFactIds = new Set(manifest.entries.flatMap((entry) => entry.canonicalFactId ? [entry.canonicalFactId] : []));
+      // Continuity and retrieved entries may legitimately repeat a fact ID;
+      // every fact reserved before retrieval must survive into final planning.
+      for (const factId of reservation.protectedFactIds) expect(manifestFactIds).toContain(factId);
+      expect(diagnostics.ledger?.capturedCount).toBe(512);
+      expect(factReservation.sourceFactCount).toBe(512);
+      expect(factReservation.selectedFactCount).toBe(reservation.protectedFactIds.length);
+      // The reservation is reused as a retrieval exclusion, not as a lossy
+      // authority mutation. Final planning therefore retains the full 512-row
+      // source count and reports its own selected/omitted result.
+      expect(diagnostics.facts?.sourceCount).toBe(512);
+      expect(diagnostics.candidates.sourceCount).toBeLessThanOrEqual(retrieved!.candidates.length);
+      expect(diagnostics.candidates.omittedCount).toBe(diagnostics.candidates.sourceCount - diagnostics.candidates.selectedCount);
+      expect(retrieved!.candidates.length).toBeLessThanOrEqual(seededCandidateParents);
+      expect(manifest.entries.filter((entry) => entry.selectionGroup === "retrieved" || entry.selectionGroup === "historical_fact")).toHaveLength(diagnostics.candidates.selectedCount);
+      if (configuredBudget === 1_000_000) {
+        expect(diagnostics.candidates.selectedCount).toBeLessThan(retrieved!.candidates.length);
+      } else {
+        expect(diagnostics.candidates.selectedCount).toBeLessThanOrEqual(retrieved!.candidates.length);
+      }
+      expect(JSON.stringify(diagnostics)).not.toMatch(/Verified fact|Retrieved evidence|Provider dispatch/u);
+      const maxSynchronousMs = Math.max(authorityLockMs, reservationMs, finalPlanningMs);
+      expect(maxSynchronousMs).toBeLessThan(15_000);
+      metrics.push({ configuredBudget, effectiveWriterContextWindow, writerCap: writer.contextWindowTokens, reviewerCap: reviewer.contextWindowTokens,
+        fixedPromptEnvelopeTokens, writerInputLimit, safeRetrievalBudget,
+        authorityQueries, authorityLockMs: Math.round(authorityLockMs * 100) / 100, retrievalQueries, retrievalRows,
+        seededCandidateParents, loaderCandidates: retrieved!.candidates.length, sourceCandidates: diagnostics.candidates.sourceCount, selectedCandidates: diagnostics.candidates.selectedCount,
+        omittedCandidates: diagnostics.candidates.omittedCount,
+        serializerGuardExcludedCandidates: diagnostics.candidates.serializerGuardExcludedCount, candidateBatchedTrials: diagnostics.candidates.batchedTrialCount,
+        sourceLedger: diagnostics.ledger?.capturedCount, selectedLedger: diagnostics.ledger?.sentCount, omittedLedger: diagnostics.ledger?.omittedCount,
+        sourceFacts: factReservation.sourceFactCount, reservedFacts: factReservation.selectedFactCount,
+        omittedBeforeRetrievalFacts: factReservation.omittedFactCount, selectedFacts: diagnostics.facts?.sentCount,
+        omittedAfterRetrievalFacts: diagnostics.facts?.omittedCount, unexaminedFacts: factReservation.unexaminedFactCount,
+        reservationMs: Math.round(reservationMs * 100) / 100,
+        retrievalMs: Math.round(retrievalMs * 100) / 100, finalPlanningMs: Math.round(finalPlanningMs * 100) / 100,
+        maxSynchronousMs: Math.round(maxSynchronousMs * 100) / 100, totalElapsedMs: Math.round((performance.now() - rowStartedAt) * 100) / 100,
+        writerHeadroom: writer.contextWindowTokens - writerRequired, reviewerHeadroom: reviewer.contextWindowTokens - reviewerRequired,
+        writerTokens: planned.contextPlan.requestTokens, reviewerTokens: review.requestTokens,
+        writerBytes: new TextEncoder().encode(planned.contextPlan.serializedRequest).byteLength, reviewerBytes: new TextEncoder().encode(review.body).byteLength });
+    }
+    expect(authority.authority.protectedFacts).toHaveLength(512);
+    expect(authority.authority.storyLedger?.entries).toHaveLength(512);
+    expect(authorityLockMs).toBeLessThan(15_000);
+    expect(metrics).toHaveLength(2);
+    process.stderr.write(`${JSON.stringify({ historyCoverageLeaseSerializerMetrics: metrics })}\n`);
+  }, 60_000);
 });

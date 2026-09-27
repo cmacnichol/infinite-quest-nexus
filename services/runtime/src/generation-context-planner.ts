@@ -26,6 +26,9 @@ const PRIVATE_MECHANICS_AUTHORITY_KEYS = new Set([
 /** Fixed v5 guard: exact fact measurement must not starve a short worker lease. */
 export const MAX_PROTECTED_FACT_MEASUREMENTS = 64;
 
+/** Bounds the exact partial-fit probe after the full-set fit proof. */
+export const MAX_HISTORY_COVERAGE_PARTIAL_CANDIDATE_PROBES = 8;
+
 /** Removes private mechanics/trigger state before any fiction-authority payload is rendered. */
 function fictionSafeAuthority<T>(value: T): T {
   if (Array.isArray(value)) return value.map((entry) => fictionSafeAuthority(entry)) as T;
@@ -65,6 +68,8 @@ function generationSourceManifest(
   selectedWorld: readonly ReturnType<typeof selectWorldFictionReferences>["entries"][number][]
 ): GenerationEvidenceManifest {
   const authority = context.authority;
+  const sourceCandidateById = new Map(context.candidates.map((candidate) => [candidate.id, candidate]));
+  const recentSourceById = new Map((context.recentTurns ?? []).map((turn) => [turn.turnId, turn]));
   const entries: StoryEvidence[] = [];
   // `createStoryEvidence` hashes its source document by default.  The fact
   // entries all point at this immutable, serialized authority, so retain the
@@ -112,7 +117,7 @@ function generationSourceManifest(
   }
   const recentSent = (sentAuthority.recentTurns ?? []) as readonly { sourceId: string; turnNumber: number }[];
   for (const [index, turn] of recentSent.entries()) {
-    const original = context.recentTurns?.find((source) => source.turnId === turn.sourceId);
+    const original = recentSourceById.get(turn.sourceId);
     for (const [field, role] of [["intent", "player_intent"], ["acceptedNarration", "accepted_narration"]] as const) {
       entries.push(completeEvidence({ source: { kind: "turn", id: turn.sourceId, revision: String(original?.narrationCorrectionRevision ?? 0), turnNumber: turn.turnNumber }, semanticRole: role,
         rank: index, selectionGroup: "recent", sourcePath: `/recentTurns/${index}/${field}`, normalizationVersion: "fiction-safe-json-v1" }, sentAuthority, sentAuthorityEvidenceOptions));
@@ -151,7 +156,7 @@ function generationSourceManifest(
     }
   }
   for (const [index, candidate] of historical.entries()) {
-    const original = context.candidates.find((source) => source.id === candidate.id);
+    const original = sourceCandidateById.get(candidate.id);
     if (candidate.evidenceForm === "excerpt" && original?.narrativeSource && candidate.sourceSpans) {
       entries.push(createStoryEvidence({ source: { kind: "turn", id: candidate.turnId ?? candidate.id, revision: original.narrativeSource.sourceHash, turnNumber: candidate.ordinal },
         semanticRole: "accepted_narration", rank: candidate.rank, selectionGroup: "retrieved", form: "excerpt", spans: candidate.sourceSpans,
@@ -270,7 +275,7 @@ export function planGenerationPromptContext(
   const sourceValidationFailureIds = new Set<string>();
   const sourceValidationExcludedIds = new Set<string>();
   const excerptAlternatives = new Map<string, PromptCandidate>();
-  const candidates = context.candidates.map((source) => {
+  let candidates = context.candidates.map((source) => {
     const candidate = candidateRecord(source);
     if (source.sourceValidationFailed) {
       sourceValidationFailures++;
@@ -309,6 +314,7 @@ export function planGenerationPromptContext(
     }
     seen.add(identity); return true;
   });
+  const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const serializationProfile: TextProviderProfile = {
     ...provider,
     // Serialization needs the provider wire shape only; the live execution
@@ -347,33 +353,33 @@ export function planGenerationPromptContext(
     }))
   ];
   const promptContext = (selected: readonly Readonly<{ id: string }>[]) => {
+    const selectedIds = new Set(selected.map((block) => block.id));
     const sentContext = {
       ...authorityContext,
-      ...(castSelection?.content && selected.some((block) => block.id === "cast-context")
+      ...(castSelection?.content && selectedIds.has("cast-context")
         ? { cast: JSON.parse(castSelection.content) as SentCast } : {}),
       ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: selected.filter((block: { id: string; scope?: string }) => block.scope === "world")
         .map((block) => worldReferences.find((reference) => reference.sourceId === block.id))
         .filter((reference): reference is typeof worldReferences[number] => Boolean(reference))
         .map(({ sourceId, sourcePath, content }) => ({ sourceId, sourcePath, content })) } : {}),
-      ...(layered ? { recentTurns: recentRecords.filter((turn) => selected.some((block) => block.id === `recent:${turn.sourceId}`)).sort((a, b) => a.turnNumber - b.turnNumber) } : {}),
+      ...(layered ? { recentTurns: recentRecords.filter((turn) => selectedIds.has(`recent:${turn.sourceId}`)).sort((a, b) => a.turnNumber - b.turnNumber) } : {}),
       ...(historyCoverage ? (() => {
         const reservedRecentIds = new Set(selected.filter((block: { id: string; scope?: string }) => block.scope === "recent")
           .map((block) => block.id.slice("recent:".length)));
-        const entries = ledgerRecords.filter((entry) => selected.some((block) => block.id === `ledger:${entry.turnId}`)
+        const entries = ledgerRecords.filter((entry) => selectedIds.has(`ledger:${entry.turnId}`)
           && !reservedRecentIds.has(entry.turnId));
-        const absent = ledgerRecords.filter((entry) => !entries.some((selectedEntry) => selectedEntry.turnId === entry.turnId));
+        const selectedLedgerIds = new Set(entries.map((entry) => entry.turnId));
+        const absent = ledgerRecords.filter((entry) => !selectedLedgerIds.has(entry.turnId));
         return { storyLedger: { version: "story-ledger-v1" as const, entries,
           omittedThroughTurn: Math.max(authority.storyLedger?.omittedThroughTurn ?? 0, ...absent.map((entry) => entry.turnNumber)) || null,
           ...(authority.storyLedger?.coverage ? { coverage: authority.storyLedger.coverage } : {}) } };
       })() : {}),
       ...(historyCoverage ? (() => {
-        const facts = protectedFactRecords.filter((fact) => selected.some((block) => block.id === `protected-fact:${fact.id}`));
+        const facts = protectedFactRecords.filter((fact) => selectedIds.has(`protected-fact:${fact.id}`));
         const omitted = protectedFactRecords.length - facts.length;
         return { protectedFacts: facts, protectedFactsOmitted: (authority.protectedFactsOmitted ?? 0) + withheldProtectedFactCount + omitted };
       })() : {}),
-      chronicle: selected.filter((block: { id: string; scope?: string }) => block.scope === "chronicle")
-        .map((block) => candidates.find((candidate) => candidate.id === block.id))
-        .filter((candidate): candidate is PromptCandidate => Boolean(candidate))
+      chronicle: candidates.filter((candidate) => selectedIds.has(candidate.id))
     };
     return historyCoverage ? projectHistoryCoverageContext(sentContext) : sentContext;
   };
@@ -442,6 +448,8 @@ export function planGenerationPromptContext(
   let factReservationDiagnostics: { originalHeadroomTokens: number; factBudgetTokens: number; sourceFactCount: number;
     selectedFactCount: number; omittedFactCount: number; measurementTrialCount: number; writerSerializationCount: number;
     reviewerSerializationCount: number; measurementLimitHit: boolean; unexaminedFactCount: number; elapsedMilliseconds: number } | undefined;
+  let serializerGuardExcludedCount = 0;
+  let candidateBatchedTrialCount = 0;
   let plan;
   if (useWorldQuota || layered || castSnapshot || historyCoverage) {
     const authorityBlock = blocks[0]!;
@@ -634,11 +642,65 @@ export function planGenerationPromptContext(
     const recentIds = new Set(selectedRecentBlocks.map((block) => block.id.slice("recent:".length)));
     const historicalBlocks = blocks.filter((block) => {
       if (block.scope !== "chronicle") return false;
-      const candidate = candidates.find((candidate) => candidate.id === block.id)!;
+      const candidate = candidateById.get(block.id)!;
       if (layered && candidate.turnId && recentIds.has(candidate.turnId)) { duplicateIds.push(candidate.id); return false; }
       return true;
     });
-    plan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedFactBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
+    if (!historyCoverage) {
+      plan = measure([...reservedAuthority, ...selectedLedgerBlocks, ...selectedFactBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks, ...historicalBlocks]);
+    } else {
+      const fixedBlocks = [...reservedAuthority, ...selectedLedgerBlocks, ...selectedFactBlocks, ...selectedRecentBlocks, ...selectedWorldBlocks]
+        .map((block) => ({ ...block, protected: true }));
+      const orderedHistoricalBlocks = [...historicalBlocks].sort((left, right) => left.priority - right.priority
+        || (left.scope ?? "").localeCompare(right.scope ?? "") || left.ordinal - right.ordinal || left.id.localeCompare(right.id)
+        || left.revision.localeCompare(right.revision));
+    // A 4m envelope must not pay one complete serializer/reviewer pass for
+    // every candidate when the exact whole set fits. Prove that case once,
+    // using the same planner serializers, then keep the full ordered set.
+      let completePlan: ReturnType<typeof measure> | undefined;
+      try {
+        completePlan = measure([...fixedBlocks, ...orderedHistoricalBlocks.map((block) => ({ ...block, protected: true }))]);
+      } catch (error) {
+        if (!(error instanceof ContextBudgetError)) throw error;
+      }
+      if (completePlan) {
+        plan = completePlan;
+      } else {
+      // For a partial envelope, binary-search an exact whole prefix before
+      // probing a small deterministic tail for individually fitting records.
+      // The remaining records are reported as serializer-guard omissions so a
+      // synchronous lease cannot be starved by an unbounded greedy loop.
+        let fittingLength = 0;
+        let failingLength = orderedHistoricalBlocks.length;
+        let selected = fixedBlocks;
+        while (fittingLength + 1 < failingLength) {
+        const candidateLength = Math.ceil((fittingLength + failingLength) / 2);
+        candidateBatchedTrialCount++;
+        try {
+          const trial = measure([...fixedBlocks, ...orderedHistoricalBlocks.slice(0, candidateLength).map((block) => ({ ...block, protected: true }))]);
+          fittingLength = candidateLength;
+          selected = trial.selected.map((block) => ({ ...block, protected: true }));
+        } catch (error) {
+          if (!(error instanceof ContextBudgetError)) throw error;
+          failingLength = candidateLength;
+        }
+        }
+        selected = [...fixedBlocks, ...orderedHistoricalBlocks.slice(0, fittingLength).map((block) => ({ ...block, protected: true }))];
+        let nextIndex = fittingLength;
+        for (; nextIndex < orderedHistoricalBlocks.length && candidateBatchedTrialCount < MAX_HISTORY_COVERAGE_PARTIAL_CANDIDATE_PROBES; nextIndex += 1) {
+        candidateBatchedTrialCount++;
+        const candidate = orderedHistoricalBlocks[nextIndex]!;
+        try {
+          measure([...selected, { ...candidate, protected: true }]);
+          selected = [...selected, { ...candidate, protected: true }];
+        } catch (error) {
+          if (!(error instanceof ContextBudgetError)) throw error;
+        }
+        }
+        serializerGuardExcludedCount = orderedHistoricalBlocks.length - (selected.length - fixedBlocks.length);
+        plan = measure(selected);
+      }
+    }
   } else {
     plan = measure(blocks);
   }
@@ -672,8 +734,12 @@ export function planGenerationPromptContext(
       protectedFactMeasurements: MAX_PROTECTED_FACT_MEASUREMENTS
     },
     candidates: {
+      sourceCount: candidates.length,
       selectedCount: selectedContext.chronicle.length,
+      omittedCount: Math.max(0, candidates.length - selectedContext.chronicle.length),
       selectedEstimateTokens: Math.round(selectedContext.chronicle.reduce((total, candidate) => total + Math.max(0, candidate.estimatedTokens), 0)),
+      serializerGuardExcludedCount,
+      batchedTrialCount: candidateBatchedTrialCount,
       candidatePoolCandidatesRemoved: context.chronicleSelectionDiagnostics?.candidatePoolCandidatesRemoved ?? null,
       stopReason: context.chronicleSelectionDiagnostics?.stopReason ?? null,
       fallbackReason: context.chronicleRetrieval

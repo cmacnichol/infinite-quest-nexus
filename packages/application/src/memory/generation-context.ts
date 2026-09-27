@@ -110,7 +110,10 @@ export const generationContextAuthoritySchema = z.object({
   /** Captured Task 6 correction frontier for deferred optional fact checks. */
   optionalFactFrontier: z.object({
     stateEditId: z.string().uuid(), effectiveTurnNumber: ordinalSchema,
-    facts: z.array(z.object({ id: z.string().uuid(), content: z.string() }).strict()).max(100)
+    // A correction frontier can certify the same bounded 512 fact records as
+    // protected-fact authority; rejecting the larger valid capture would make
+    // the authority context internally inconsistent.
+    facts: z.array(z.object({ id: z.string().uuid(), content: z.string() }).strict()).max(512)
   }).strict().optional(),
   latestTurn: z.object({ action: z.string(), narration: z.string(), inputMode: z.enum(["action", "scene"]).optional() }).strict().nullable()
 }).strict();
@@ -168,8 +171,12 @@ export const historyCoverageDiagnosticsSchema = z.object({
     protectedFactMeasurements: z.literal(64)
   }).strict(),
   candidates: z.object({
+    sourceCount: historyDiagnosticCountSchema,
     selectedCount: historyDiagnosticCountSchema,
+    omittedCount: historyDiagnosticCountSchema,
     selectedEstimateTokens: historyDiagnosticTokenSchema,
+    serializerGuardExcludedCount: historyDiagnosticCountSchema,
+    batchedTrialCount: historyDiagnosticCountSchema,
     candidatePoolCandidatesRemoved: historyDiagnosticCountSchema.nullable(),
     stopReason: historyCandidateStopReasonSchema.nullable(),
     fallbackReason: historyFallbackReasonSchema.nullable(),
