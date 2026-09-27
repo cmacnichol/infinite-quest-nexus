@@ -116,3 +116,7 @@ These facts prove truncation, not why the provider consumed that many tokens. Re
 ## Plan status
 
 Implementation tasks 1–5 completed in scoped commits. Task 6 executed the deterministic unit, real-PostgreSQL, browser, typecheck, build, and diff checks; the full release suites contain failures and remain a release gate. Live-review evaluation, copied-campaign canaries, production policy enablement, and deployment were not authorized and remain skipped. The v1 rollback reader rejects v2 checkpoints, so rollback requires compatible-worker drain or an explicit pause before old workers return.
+
+## Execution appendix
+
+Tasks 1–5 are implemented and their focused RED/GREEN evidence is recorded in the task ledger. Task 6 completed the documented commands, but the full integration sweep failed in 10 of 118 files and the full unit command failed in two cases; release-only canary and live-review checks remain unchecked. The task database used the ignored dedicated `localhost:49186` URL, not the shared default authentication path. Rulings preserved from the execution ledger: retain the existing exception boundary for typed technical review outcomes; configure and freeze reviewer policy at the provider-profile route; reserve at most one fallback before dispatch and pause when a response cannot be reconciled; safe public diagnostics are allowlisted; and do not enable fallback without evaluated live evidence. Static baseline-reader inspection, rather than an executed old binary, established the v1/v2 rollback incompatibility.
