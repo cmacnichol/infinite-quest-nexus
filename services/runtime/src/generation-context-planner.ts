@@ -679,7 +679,7 @@ export function planGenerationPromptContext(
         try {
           const trial = measure([...fixedBlocks, ...orderedHistoricalBlocks.slice(0, candidateLength).map((block) => ({ ...block, protected: true }))]);
           fittingLength = candidateLength;
-          selected = trial.selected.map((block) => ({ ...block, protected: true }));
+          selected = trial.selected.map((block) => ({ ...block, scope: block.scope ?? "", protected: true }));
         } catch (error) {
           if (!(error instanceof ContextBudgetError)) throw error;
           failingLength = candidateLength;
