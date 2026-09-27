@@ -43,4 +43,4 @@ Optional verification is bounded at 2,048 selected candidate IDs. Correction-ori
 
 - `40a8f409 Defer v5 Chronicle candidate retrieval`
 - `3ac5fb69 Filter v5 Chronicle sources before rank limits`
-- Final fix-round commit follows this report.
+- `6ae7d882 Verify deferred Chronicle fact candidates`
