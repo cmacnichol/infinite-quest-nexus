@@ -3,7 +3,8 @@ import { isSourceBoundary, normalizeStoryEvidenceSource } from "./story-evidence
 
 export type StoryLedgerSourceTurn = Readonly<{ turnId: string; turnNumber: number; inputMode: "action" | "scene"; action: string }>;
 export type StoryLedgerEntry = Readonly<Omit<StoryLedgerSourceTurn, "action"> & { direction: string }>;
-export type StoryLedger = Readonly<{ version: "story-ledger-v1"; entries: readonly StoryLedgerEntry[]; omittedThroughTurn: number | null }>;
+export type StoryLedgerCoverage = Readonly<{ unreadThroughTurn: number | null; missingTurnCount: number; filteredDirectionCount: number; oversizedDirectionCount: number; loadedRows: number }>;
+export type StoryLedger = Readonly<{ version: "story-ledger-v1"; entries: readonly StoryLedgerEntry[]; omittedThroughTurn: number | null; coverage?: StoryLedgerCoverage }>;
 export type ProtectedFact = Readonly<{ id: string; turnNumber: number; content: string }>;
 
 function trimAtSafeBoundary(value: string, maximumCharacters: number): string {
