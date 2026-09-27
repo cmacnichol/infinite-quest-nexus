@@ -1,6 +1,6 @@
 # Turn Context History Coverage Implementation Plan
 
-> **For agentic workers:** Implement task-by-task using the execution workflow authorized by the user. Steps use checkbox syntax. This review changes documentation only; implementation and deployment have not been performed.
+> **For agentic workers:** Implement task-by-task using the execution workflow authorized by the user. Steps use checkbox syntax. Implementation is authorized with Terra and Luna subagents. Deployment and live-provider calls remain outside scope.
 
 **Goal:** Increase the accepted story evidence available to the next turn while preserving frozen requests, authoritative state, campaign isolation, and writer/reviewer budget limits.
 
@@ -40,7 +40,7 @@
 - Synthetic fixtures only. Diagnostics allow fixed enums, IDs, counts, hashes and token estimates, never arbitrary error strings, story text, credentials or provider responses.
 - Reproduce baseline failures rather than accepting old “known/flaky” exemptions. Distinguish unit, PostgreSQL, browser, deterministic-provider and live-provider evidence; report passed/failed/skipped with reasons.
 - Use repository-pinned pnpm; commands use `corepack pnpm`. Preserve user changes, stage exact files and do not add invented co-author identities.
-- Review tests for each changed file and follow the [test matrix](../../workflows/testing.md). RED precedes production edits; GREEN follows them. This plan review does not authorize implementation.
+- Review tests for each changed file and follow the [test matrix](../../workflows/testing.md). RED precedes production edits; GREEN follows them. The user authorized implementation on 2026-09-27; deployment remains excluded.
 
 ## Scope and review focus
 
@@ -83,11 +83,11 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 **Files:** plan/spec; new synthetic `tests/fixtures/history-coverage/`; `tests/unit/generation-context-planner.test.ts`.
 
-- [ ] Inspect status, HEAD, branch and instructions. Reuse this worktree; create `codex/turn-context-history` here when implementing if needed. Do not switch the main checkout to the obsolete remediation branch.
-- [ ] Check copied documents for private prose/secrets; retain the report as dated evidence.
-- [ ] Record `corepack pnpm --version`, `corepack pnpm check`, `corepack pnpm test:unit`, full logs and exit codes. Classify exact baseline failures, not counts alone.
-- [ ] **Before Task 1**, capture wire-body/manifest goldens on unchanged production code: legacy, v3 r1/r2/r3, v4 r2/r3, applicable cast states, direct/frozen-route serializers, review off/observe/enforce. Use valid deterministic UUIDs/schemas.
-- [ ] Pin PR #170 behavior with reviewer smaller than writer. Save source commit, inputs, expected bytes/hash; rerun to confirm PASS. Commit planning/baseline artifacts when implementing; no runtime edits yet.
+- [x] Inspect status, HEAD, branch and instructions. Reuse this worktree; create `codex/turn-context-history` here when implementing if needed. Do not switch the main checkout to the obsolete remediation branch.
+- [x] Check copied documents for private prose/secrets; retain the report as dated evidence.
+- [x] Record `corepack pnpm --version`, `corepack pnpm check`, `corepack pnpm test:unit`, full logs and exit codes. Classify exact baseline failures, not counts alone.
+- [x] **Before Task 1**, capture wire-body/manifest goldens on unchanged production code: legacy, v3 r1/r2/r3, v4 r2/r3, applicable cast states, direct/frozen-route serializers, review off/observe/enforce. Use valid deterministic UUIDs/schemas.
+- [x] Pin PR #170 behavior with reviewer smaller than writer. Save source commit, inputs, expected bytes/hash; rerun to confirm PASS. Commit planning/baseline artifacts when implementing; no runtime edits yet.
 
 ## Task 1: F4 — Cast admission and safe errors
 
@@ -95,10 +95,10 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 **Interfaces:** `castDiscoveryAdmissionExecution(job, provider, loadTextExecution): Promise<GenerationTextProvider>` with existing collaborator types; `castAdmissionFailureReason(error: unknown): "invalid_execution_revision" | "provider_unavailable" | "unexpected_error"`, mapped only from recognized typed codes.
 
-- [ ] RED: route-basis descriptor lacks revisions; load owner-scoped live execution. Non-route-basis job reuses valid provider. Match manual cast-scan requested-model handling; native presets retain native routing.
-- [ ] RED: persisted ready/unavailable admissions are reused; errors containing synthetic secrets/story canaries yield fixed codes only. Assert Story commit and single independent discovery enqueue despite preparation/illustration failures.
-- [ ] Run `corepack pnpm vitest run tests/unit/generation-executor-adapter.test.ts -t "cast|discovery admission"`; then implement resolution only for new admission, retaining frozen Story route.
-- [ ] GREEN: units and both PostgreSQL suites; commit exact files. Backfill remains operator-only. Discovery affects future cast snapshots; claim only already-captured Story requests unchanged.
+- [x] RED: route-basis descriptor lacks revisions; load owner-scoped live execution. Non-route-basis job reuses valid provider. Match manual cast-scan requested-model handling; native presets retain native routing.
+- [x] RED: persisted ready/unavailable admissions are reused; errors containing synthetic secrets/story canaries yield fixed codes only. Assert Story commit and single independent discovery enqueue despite preparation/illustration failures.
+- [x] Run `corepack pnpm vitest run tests/unit/generation-executor-adapter.test.ts -t "cast|discovery admission"`; then implement resolution only for new admission, retaining frozen Story route.
+- [x] GREEN: units and both PostgreSQL suites; commit exact files. Backfill remains operator-only. Discovery affects future cast snapshots; claim only already-captured Story requests unchanged.
 
 ## Task 2: Add v5 readers without enablement
 
@@ -106,10 +106,10 @@ Planner signature: retain argument 13 `serializeStoryRequest`, 14 `reviewInputTo
 
 **Interfaces:** export `HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION = "current-continuity-v5"`, `HISTORY_COVERAGE_POLICY`, `isHistoryCoverageContextProtocol(value: unknown): boolean`; append planner argument 16.
 
-- [ ] RED: v5 requires matching cast flag/prompt protocol; reject unknown/mismatched protocols. Old snapshots gain no defaults. Test executor argument wiring with a smaller reviewer limit.
-- [ ] Run focused suites; implement literal, schema, exports, gate and wiring. Leave new snapshot default at v4.
-- [ ] GREEN: units, Task 0 goldens, `corepack pnpm check`. Old protocols ignore new optional fields even if fixtures contain them.
-- [ ] PostgreSQL: queued historical jobs and prepared checkpoints retain request hash on restart; no replan from current defaults or extra provider call. Commit readers separately from enablement.
+- [x] RED: v5 requires matching cast flag/prompt protocol; reject unknown/mismatched protocols. Old snapshots gain no defaults. Test executor argument wiring with a smaller reviewer limit.
+- [x] Run focused suites; implement literal, schema, exports, gate and wiring. Leave new snapshot default at v4.
+- [x] GREEN: units, Task 0 goldens, `corepack pnpm check`. Old optional-field isolation will be tested when Tasks 5–7 introduce those fields; current frozen goldens stay unchanged.
+- [x] PostgreSQL: queued historical jobs retain captured policy/protocol across restart and changed live defaults, then make one initial primary call. Prepared checkpoints successfully resume with an unchanged provider and retain request hash without another primary call; incompatible provider changes remain fenced. Use the composed continuity-review suite where its recovery fixture supplies this boundary. Commit readers separately from enablement.
 
 ## Task 3: F2 — Exclude guaranteed sources without losing fallback
 
@@ -254,3 +254,5 @@ Retain full log/exit status. Restore prior environment variable in `finally`; re
 
 - 2026-09-26: Original plan written against remediation branch; implementation not started.
 - 2026-09-27: Reviewed against `bb360620`; corrected baseline/signature, privacy/exclusions, budgets, fact authority, lifecycle/rollback gaps and verification. F3 explicitly limited to intent-ledger increment. Documentation only; implementation/runtime tests not performed.
+
+- 2026-09-27 implementation: Task 0 complete at cddfbf7b; 28 frozen-context goldens and TypeScript passed, independently reviewed. Baseline full static check passed; unit and PostgreSQL pre-existing failures recorded in execution ledger.
