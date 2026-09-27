@@ -465,4 +465,22 @@ integration("history coverage intent authority", () => {
     expect(metrics).toHaveLength(2);
     process.stderr.write(`${JSON.stringify({ historyCoverageLeaseSerializerMetrics: metrics })}\n`);
   }, 60_000);
+
+  it("stress-measures distinct synthetic planner candidates without claiming PostgreSQL authority coverage", () => {
+    const context: any = { authority: { rules: [], worldCanon: {}, currentContinuity: { canonicalFacts: [], openThreads: [], trackers: [] }, scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [], latestTurn: null },
+      candidates: Array.from({ length: 1_950 }, (_, index) => ({ id: `synthetic-${index}`, turnId: null, ordinal: index + 1, kind: "campaign_summary", content: `Synthetic fiction-safe retrieval ${index}. ${"s".repeat(300)}`, tokenEstimate: 76, rank: index })),
+      baseIdentity: { version: "generation-base-v4", operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 0, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null, characterProfileRevision: 0, characterProfileFingerprint: "b".repeat(64), castRevision: 0, castTimelineRevision: 0, castFingerprint: "c".repeat(64), castCoverageStartTurn: null, castTrackedThroughTurn: null } };
+    const provider: any = { id: "synthetic", providerType: "openai_compatible", model: "synthetic", baseUrl: "", contextWindowTokens: 4_000_000, maxOutputTokens: 512, temperature: 0, requestTimeoutMs: 1_000, configuration: {} };
+    const policy = defaultStoryMemoryPolicy("r3");
+    const startedAt = performance.now();
+    const allFit = planGenerationPromptContext(context, provider, "System", "Continue.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 4_000_000, 3_999_488, "99999999-9999-4999-8999-999999999999", "story_memory", policy, undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const elapsedMs = performance.now() - startedAt;
+    const diag = historyCoverageDiagnosticsSchema.parse((allFit.layerDiagnostics as any).history);
+    expect(diag.candidates.sourceCount).toBe(1_950);
+    expect(diag.candidates.selectedCount).toBe(1_950);
+    expect(diag.candidates.omittedCount).toBe(0);
+    expect(diag.candidates.serializerGuardExcludedCount).toBe(0);
+    expect(JSON.stringify(diag)).not.toContain("Synthetic fiction-safe retrieval");
+    process.stderr.write(`${JSON.stringify({ historyCoverageSyntheticDistinctPlanner: { sourceCandidates: diag.candidates.sourceCount, selectedCandidates: diag.candidates.selectedCount, omittedCandidates: diag.candidates.omittedCount, guardExcludedCandidates: diag.candidates.serializerGuardExcludedCount, batchedTrials: diag.candidates.batchedTrialCount, elapsedMs: Math.round(elapsedMs * 100) / 100 } })}\n`);
+  }, 30_000);
 });
