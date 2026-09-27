@@ -157,6 +157,14 @@ integration("T17 durable continuity review", () => {
         } }));
         return;
       }
+      if (request.url === "/presets/reviewer") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "reviewer", name: "Frozen Reviewer", status: "active",
+          designated_version: { id: "reviewer-v1", version: 1, system_prompt: "Native frozen reviewer instruction.", config: { model: "t17-native-frozen", temperature: 0 } }
+        } }));
+        return;
+      }
       let body = "";
       request.setEncoding("utf8"); request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
@@ -1739,7 +1747,7 @@ integration("T17 durable continuity review", () => {
         textResponseFormatPolicy: "auto",
         continuityReviewExecutionPolicy: {
           version: 1,
-          primary: { selection: { kind: "openrouter_preset", slug: "keep" }, overrides: { parameters: { temperature: 0 } } },
+          primary: { selection: { kind: "openrouter_preset", slug: "reviewer" }, overrides: { parameters: { temperature: 0 } } },
           maximumAutomaticFallbacks: 0
         }
       },
@@ -1823,7 +1831,7 @@ integration("T17 durable continuity review", () => {
     for (const [input] of preparedTextExecutor.mock.calls) {
       expect(input.request.systemPrompt).toBe(input.plan.prompt);
       expect(input.plan.prompt).not.toContain("Native frozen preset instruction.");
-      expect(input.plan.candidates[0]!.modelId).toBe("@preset/keep");
+      expect(input.plan.candidates[0]!.modelId).toBe(input.operation === "story_continuity_review" ? "@preset/reviewer" : "@preset/keep");
       expect(input.preparedRequest?.body).toBeDefined();
       expect(JSON.parse(input.preparedRequest!.body).model).toBe("@preset/keep");
     }
@@ -1832,13 +1840,15 @@ integration("T17 durable continuity review", () => {
       preparedRequest?: { body: string; payloadHash: string };
     };
     expect(reviewerDispatch.invocationKey).toBe("continuity_review:nonstream");
-    expect(reviewerDispatch.routeBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "keep" } });
+    expect(reviewerDispatch.routeBasis).toMatchObject({ selection: { kind: "openrouter_preset", slug: "reviewer" } });
     expect(reviewerDispatch.frozenResponseContracts).toMatchObject({ version: 2, contracts: {
       "continuity_review:nonstream": expect.any(Object)
     } });
     expect(reviewerDispatch.logicalReservation).toMatchObject({ kind: "story", generationJobId: job.id,
       invocationId: expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}$/u) });
     expect(reviewerDispatch.preparedRequest?.payloadHash).toBe(sha256Hex(reviewerDispatch.preparedRequest!.body));
+    expect(JSON.parse(preparedTextExecutor.mock.calls[0]![0].preparedRequest!.body).model).toBe("@preset/keep");
+    expect(JSON.parse(reviewerDispatch.preparedRequest!.body).model).toBe("@preset/reviewer");
     const durableNativeRequests = (await pool.query<{
       orchestrationPrivate: { primaryReservation: { requestBody: string }; primaryResult: { contextDiagnostics: { requestTokens: number } }; responseContractInvocations: Array<{ requestPayloadHash: string }> };
     }>("SELECT orchestration_private AS \"orchestrationPrivate\" FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.orchestrationPrivate;
