@@ -21,3 +21,5 @@ The deterministic continuity workflow has focused unit, dedicated-PostgreSQL, an
 All reproducible integration failures except the transient campaign-cast-discovery result reproduced at baseline `900df97`: malformed snapshot handling, Story Direction payload assertions, story-memory review mode, oversized Story-only repair, migration-list assertions, System Archive, and resumable System Archive. The campaign-cast failure passed at baseline (54/54) and on a focused branch rerun (1/1), so it remains non-reproducible rather than a branch regression. Baseline evidence is stored in ignored task scratch logs and is not a release pass.
 
 No copied-campaign canary, paid live-review request, provider-quality comparison, production policy enablement, or deployment was authorized or performed. Automatic fallback remains disabled by default. Unit, PostgreSQL, and browser evidence does not establish live reviewer quality, completion rate, cost, or latency.
+
+The Task 6 integration run is a failed gate with incomplete aggregate per-test accounting: it captured 118 files and 10 failed files, but not aggregate passed/skipped test totals.
