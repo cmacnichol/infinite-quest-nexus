@@ -1358,7 +1358,10 @@ async function commitAcceptedTurn(
       const normalBinding = {
         draftHash: sha256Hex(stableStringify(story)), producingRequestHash: requestBody ? sha256Hex(requestBody) : null, manifestHash: manifest?.manifestHash ?? null, auxiliaryRequestHashes,
         providerConfigurationHash: policy.providerConfigurationFingerprint, promptHash: prompts.continuityReview!.review.hash,
-        promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash
+        promptProtocol: "story-continuity-review-v1", policyHash: policy.policyHash,
+        ...(storedJob.orchestration_private.continuityReviewExecution?.enabled
+          ? { reviewerExecutionSnapshotHash: storedJob.orchestration_private.continuityReviewExecution.snapshotHash }
+          : {})
       } as const;
       const review = generationReviewCheckpointSchema.safeParse(saved.generationReview);
       const isFinalContinuityCheckpoint = review.success && review.data.state === "decided"

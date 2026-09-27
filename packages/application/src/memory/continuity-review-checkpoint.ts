@@ -4,7 +4,9 @@ import { generationReviewCheckpointSchema } from "../generation/review-checkpoin
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
 export const reviewBindingSchema = z.object({
   draftHash: hash, producingRequestHash: hash.nullable(), manifestHash: hash.nullable(), auxiliaryRequestHashes: z.array(hash).max(4).optional(), providerConfigurationHash: hash,
-  promptHash: hash, promptProtocol: z.literal("story-continuity-review-v1"), policyHash: hash
+  promptHash: hash, promptProtocol: z.literal("story-continuity-review-v1"), policyHash: hash,
+  /** Absent for historical writer-routed reviews; present when a frozen reviewer route was selected. */
+  reviewerExecutionSnapshotHash: hash.optional()
 }).strict();
 export type ReviewBinding = Readonly<z.infer<typeof reviewBindingSchema>>;
 export function reviewBindingHash(binding: ReviewBinding): string { return sha256Hex(canonicalEvidenceJson(reviewBindingSchema.parse(binding))); }

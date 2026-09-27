@@ -18,6 +18,15 @@ describe("durable continuity review checkpoint", () => {
     expect(continuityReviewCheckpointSchema.safeParse({ ...checkpoint, bindingHash: "2".repeat(64) }).success).toBe(false);
     expect(() => assertContinuityReviewCommit("off", undefined, binding)).not.toThrow();
   });
+  it("binds a frozen reviewer snapshot when one selected the reviewer route, while accepting legacy bindings", () => {
+    const reviewerBound = { ...binding, reviewerExecutionSnapshotHash: "1".repeat(64) };
+    const reviewerCheckpoint = { ...checkpoint, binding: reviewerBound, bindingHash: reviewBindingHash(reviewerBound) };
+
+    expect(continuityReviewCheckpointSchema.parse(reviewerCheckpoint).binding.reviewerExecutionSnapshotHash).toBe("1".repeat(64));
+    expect(() => assertContinuityReviewCommit("enforce", reviewerCheckpoint, reviewerBound)).not.toThrow();
+    expect(() => assertContinuityReviewCommit("enforce", reviewerCheckpoint, binding)).toThrow();
+    expect(continuityReviewCheckpointSchema.parse(checkpoint).binding.reviewerExecutionSnapshotHash).toBeUndefined();
+  });
   it("preserves historical v1 uncertainty without inventing a technical cause", () => {
     const legacy = { ...checkpoint, verdict: "uncertain", result: { version: "story-continuity-review-v1", verdict: "uncertain", findings: [] } };
     const parsed = continuityReviewCheckpointSchema.parse(legacy);

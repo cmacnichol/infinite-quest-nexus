@@ -44,6 +44,42 @@ compatible configuration to resume; discard and explicitly re-enqueue it when
 appropriate. Do not assume that a policy toggle guarantees a pending job will
 continue.
 
+## Continuity reviewer execution policy
+
+The optional `continuityReviewExecutionPolicy` belongs in the safe
+configuration of a **Story text** provider profile. It selects the reviewer
+route while retaining that profile's endpoint and credentials; it never stores
+credentials and cannot use an illustration or embedding profile. Omitting the
+property, setting it to `null`, or removing it disables this rollout for newly
+queued jobs and records an explicit disabled snapshot. Existing jobs keep their
+already frozen route.
+
+Configure a primary reviewer first and leave automatic fallback off during the
+initial rollout:
+
+```json
+{
+  "continuityReviewExecutionPolicy": {
+    "version": 1,
+    "primary": {
+      "selection": { "kind": "openrouter_preset", "slug": "continuity-reviewer" },
+      "overrides": { "parameters": { "temperature": 0 } }
+    },
+    "maximumAutomaticFallbacks": 0
+  }
+}
+```
+
+`primary.selection` and optional `fallback.selection` use the same Model or
+OpenRouter Preset selection shape as the text profile. A fallback requires
+`maximumAutomaticFallbacks: 1`; otherwise it is retained as frozen policy data
+but is not automatically dispatched. The default is opt-in with
+`maximumAutomaticFallbacks: 0`. Each queued job freezes complete primary and
+fallback route bases, response-contract bundles, effective limits, and the
+reviewer snapshot hash. Later profile changes, including removal or `null`, do
+not change a frozen job. Remote preset requests retain their `@preset/<slug>`
+identity and use the text profile's server-side credential authority.
+
 ### Operator verification records
 
 Model discovery is advisory. Its process-local cache expires after 24 hours;

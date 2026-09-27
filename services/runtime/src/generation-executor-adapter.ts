@@ -4288,10 +4288,15 @@ async function executeLoadedGeneration(
         if (producingBody && orchestration.sourceEvidenceManifest) finalManifest = bindManifestToProducingRequest(orchestration.sourceEvidenceManifest, producingBody);
       } catch { /* Observe records unavailable source scope; enforce cannot pass it. */ }
       const auxiliaryRequestHashes = validatedChoiceRequestHashes(orchestration.choiceRepair, orchestration.validatedMainDraft?.story, effectiveProviderConfigurationHash(provider, job));
+      const reviewerExecution = job.orchestration_private?.continuityReviewExecution;
+      const reviewerRoute = reviewerExecution?.enabled
+        ? reviewerExecution.primary
+        : null;
       const binding = {
         draftHash: sha256(stableStringify(committedStory)), producingRequestHash: producingBody ? sha256(producingBody) : null, manifestHash: finalManifest?.manifestHash ?? null, auxiliaryRequestHashes,
         providerConfigurationHash: effectiveProviderConfigurationHash(provider, job), promptHash: promptSnapshot.continuityReview!.review.hash,
-        promptProtocol: "story-continuity-review-v1" as const, policyHash: frozenStoryMemoryPolicySnapshot.policyHash
+        promptProtocol: "story-continuity-review-v1" as const, policyHash: frozenStoryMemoryPolicySnapshot.policyHash,
+        ...(reviewerExecution?.enabled ? { reviewerExecutionSnapshotHash: reviewerExecution.snapshotHash } : {})
       };
       const bindingHash = reviewBindingHash(binding);
       const continuityRetryReceipt = savedReview.success && savedReview.data.state === "decided"
@@ -4325,9 +4330,6 @@ async function executeLoadedGeneration(
         checkpoint = { version: 2, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null, outcome: null };
         try {
           if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
-          const reviewerRoute = job.orchestration_private?.continuityReviewExecution?.enabled
-            ? job.orchestration_private.continuityReviewExecution.primary
-            : null;
           const reviewerProvider = reviewerRoute ? {
             id: job.provider_profile_id, name: "Frozen continuity reviewer", providerRole: "text" as const,
             providerType: reviewerRoute.providerType, model: reviewerRoute.routeBasis.candidates[0]!.modelId,
