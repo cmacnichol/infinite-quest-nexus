@@ -29,6 +29,7 @@ const securitySettingNames = [
   "CAST_EDITING_ENABLED",
   "CAST_DISCOVERY_ENABLED",
   "CAST_CONTEXT_ENABLED",
+  "HISTORY_COVERAGE_ENABLED",
   "CAST_BACKFILL_ENABLED",
   "TEXT_PROVIDER_CONCURRENCY",
   "SYSTEM_ARCHIVE_UPLOAD_TTL_SECONDS",
@@ -52,7 +53,7 @@ function minimumEnvironment(): void {
 describe("runtime security configuration", () => {
   it("requires discovery and editing before opting into cast context and history scans", () => {
     minimumEnvironment();
-    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false });
+    expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false, historyCoverageEnabled: true });
     process.env.CAST_CONTEXT_ENABLED = "true";
     process.env.CAST_BACKFILL_ENABLED = "true";
     expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castBackfillEnabled: false });
@@ -62,6 +63,8 @@ describe("runtime security configuration", () => {
     expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: true, castBackfillEnabled: true });
     process.env.CAST_CONTEXT_ENABLED = "false";
     expect(loadRuntimeConfig()).toMatchObject({ castContextEnabled: false, castDiscoveryEnabled: true });
+    process.env.HISTORY_COVERAGE_ENABLED = "false";
+    expect(loadRuntimeConfig()).toMatchObject({ historyCoverageEnabled: false });
   });
   it("bounds shared text provider capacity", () => {
     minimumEnvironment();

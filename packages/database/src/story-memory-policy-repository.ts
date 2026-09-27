@@ -1,5 +1,5 @@
 import { defaultStoryMemoryPolicy, effectiveProviderConfigurationFingerprint, resolveStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySchema, type StoryMemoryCapability, type StoryMemoryLevel, type StoryMemoryPolicySnapshot, type StoryMemorySettings } from "../../contracts/src/story-memory-policy.js";
-import { STORY_MEMORY_CONTEXT_POLICY_VERSION, STORY_MEMORY_PROMPT_PROTOCOL_VERSION, CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION } from "../../contracts/src/story-prompt.js";
+import { STORY_MEMORY_CONTEXT_POLICY_VERSION, STORY_MEMORY_PROMPT_PROTOCOL_VERSION, CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../contracts/src/story-prompt.js";
 import { sha256 } from "../../domain/src/index.js";
 import { resolveEffectiveContextWindowTokens } from "../../story-engine/src/context-budget.js";
 import { GenerationApplicationError } from "../../application/src/generation/errors.js";
@@ -8,7 +8,13 @@ import type { TextExecutionRouteBasis } from "../../contracts/src/text-execution
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 
-export type StoryMemoryOperatorConfig = Readonly<{ installedCapability: StoryMemoryCapability | null; enforceEnabled: boolean; castContextEnabled?: boolean }>;
+export type StoryMemoryOperatorConfig = Readonly<{
+  installedCapability: StoryMemoryCapability | null;
+  enforceEnabled: boolean;
+  castContextEnabled?: boolean;
+  /** Default only: compatible readers still execute already-frozen v5 jobs when this is false. */
+  historyCoverageEnabled?: boolean;
+}>;
 export type StoryMemoryEnrollmentInput = Readonly<{ capability: StoryMemoryCapability; reviewMode: "off" | "observe" | "enforce" }>;
 
 function availableLevels(config: StoryMemoryOperatorConfig): StoryMemoryLevel[] {
@@ -124,7 +130,9 @@ export async function resolveStoryMemoryPolicySnapshot(client: DatabaseClient, s
   );
   return {
     policy, policyHash: storyMemoryPolicyHash(policy),
-    ...(config.castContextEnabled ? { castContext: true as const, contextProtocol: CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION }
+    ...(config.castContextEnabled ? { castContext: true as const,
+      contextProtocol: config.historyCoverageEnabled === false ? CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION : HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION }
       : { contextProtocol: STORY_MEMORY_CONTEXT_POLICY_VERSION, promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION }),
     providerConfigurationFingerprint: effectiveProviderConfigurationFingerprint({
       providerId: scope.providerProfileId, providerType: row.provider_type,

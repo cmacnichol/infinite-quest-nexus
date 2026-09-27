@@ -456,7 +456,8 @@ export function createApiGenerationApplication(
       resolveStoryMemoryPolicySnapshot: (client, scope) => resolveStoryMemoryPolicySnapshot(client, scope, {
          installedCapability: resolvedOperatorConfig.installedCapability,
          enforceEnabled: resolvedOperatorConfig.enforceEnabled,
-         castContextEnabled: resolvedOperatorConfig.castContextEnabled === true
+         castContextEnabled: resolvedOperatorConfig.castContextEnabled === true,
+         historyCoverageEnabled: resolvedOperatorConfig.historyCoverageEnabled !== false
       }),
       resolveQueuedResponsePolicy: createQueuedResponsePolicyResolver(providers, nativeTextExecutionPlanAdmission),
       ...(nativeTextExecutionPlanAdmission ? createQueuedTextExecutionPreparation(pool, providers) : {}),
