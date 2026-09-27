@@ -173,7 +173,8 @@ export function planGenerationPromptContext(
   policy?: StoryMemoryPolicy,
   serializeStoryRequest?: (input: string) => string,
   reviewInputTokens?: (manifest: GenerationEvidenceManifest) => number,
-  reviewInputLimit?: number
+  reviewInputLimit?: number,
+  frozenContextProtocol?: string
 ) {
   const authority = context.authority;
   const castSnapshot = isGenerationBaseIdentityV4(context.baseIdentity) ? authority.castSnapshot : undefined;

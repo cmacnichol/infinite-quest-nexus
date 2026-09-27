@@ -4,6 +4,7 @@ import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt
 import { describe, expect, it } from "vitest";
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { storyMemoryPolicySchema, defaultStoryMemoryPolicy } from "../../packages/contracts/src/story-memory-policy.js";
+import { HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { estimateStoryTokens, estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import { sha256 } from "../../packages/domain/src/index.js";
@@ -78,7 +79,7 @@ describe("layered generation context planner", () => {
     expect(reviewTokens + estimatedInputSafetyAllowanceTokens(reviewTokens)).toBeLessThanOrEqual(31_900);
     expect(result.layerDiagnostics.omitted.length).toBeGreaterThan(0);
   });
-  it("uses independent writer and reviewer input limits when packing optional evidence", () => {
+  it("retains the smaller arg15 reviewer limit when a frozen v5 policy occupies arg16", () => {
     const context = recentContext();
     context.candidates = [{ id: "history", turnId: null, ordinal: 1, kind: "turn_fiction", content: "Useful history. ".repeat(900), tokenEstimate: 3600, rank: 1 }];
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
@@ -86,7 +87,7 @@ describe("layered generation context planner", () => {
       20_000 + manifest.entries.filter((entry) => entry.selectionGroup === "retrieved").length * 20_000;
     const plan = (reviewLimit: number) => planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
       { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
-      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, reviewCost, reviewLimit);
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, reviewCost, reviewLimit, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
 
     expect(plan(60_000).promptContext.chronicle).toHaveLength(1);
     expect(plan(30_000).promptContext.chronicle).toHaveLength(0);

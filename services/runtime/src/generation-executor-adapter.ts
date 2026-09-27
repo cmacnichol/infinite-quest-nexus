@@ -2646,7 +2646,8 @@ async function executeLoadedGeneration(
           }) : undefined,
         planningReviewerRoute
           ? planningReviewerRoute.effectiveContextWindowTokens - planningReviewerRoute.effectiveOutputTokens
-          : undefined
+          : undefined,
+        frozenStoryMemoryPolicySnapshot?.contextProtocol
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;

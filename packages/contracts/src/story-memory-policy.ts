@@ -6,7 +6,11 @@ import {
   STORY_MEMORY_CONTEXT_POLICY_VERSION,
   STORY_MEMORY_PROMPT_PROTOCOL_VERSION
 } from "./story-prompt.js";
-import { CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION, CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION } from "./story-prompt.js";
+import {
+  CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION
+} from "./story-prompt.js";
 
 type DeepReadonly<T> = T extends readonly (infer U)[] ? readonly DeepReadonly<U>[]
   : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
@@ -105,6 +109,21 @@ export const storyMemoryPolicySchema = z.discriminatedUnion("capability", [
 export type StoryMemoryPolicy = Readonly<z.infer<typeof storyMemoryPolicySchema>>;
 export type StoryMemoryCapability = z.infer<typeof storyMemoryCapabilitySchema>;
 
+/** Immutable v5 tuning values. They are read only after a matching frozen policy opts in. */
+export const HISTORY_COVERAGE_POLICY = {
+  recentWindowTurns: 11,
+  ledgerBudgetShare: 0.25,
+  protectedFactBudgetShare: 0.15,
+  ledgerDirectionCharacters: 480,
+  parentTokenMultiplier: 1.5,
+  parentCountMultiplier: 4,
+  sceneHintCharacters: 1000
+} as const;
+
+export function isHistoryCoverageContextProtocol(value: unknown): boolean {
+  return value === HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION;
+}
+
 export function defaultStoryMemoryPolicy(capability: StoryMemoryCapability): StoryMemoryPolicy {
   const common = { version: "story-memory-v1", queryPlanner: "balanced-v1", rankAggregation: "query_family_max_v1", worldResidualShare: 0.15, maximumSemanticRepairs: 1 } as const;
   if (capability === "r1") return storyMemoryPolicySchema.parse({ ...common, capability, recentTurnTarget: 1, recentResidualShare: 0, excerptPolicy: "whole_only", continuityReview: "off" });
@@ -176,7 +195,11 @@ export function resolveStoryMemoryPolicy(input: Readonly<{
 export const storyMemoryPolicySnapshotSchema = z.object({
   policy: storyMemoryPolicySchema,
   policyHash: z.string().regex(/^[a-f0-9]{64}$/),
-  contextProtocol: z.union([z.literal(STORY_MEMORY_CONTEXT_POLICY_VERSION), z.literal(CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION)]),
+  contextProtocol: z.union([
+    z.literal(STORY_MEMORY_CONTEXT_POLICY_VERSION),
+    z.literal(CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION),
+    z.literal(HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION)
+  ]),
   castContext: z.literal(true).optional(),
   promptProtocol: z.union([
     z.literal(LEGACY_STORY_MEMORY_PROMPT_PROTOCOL_VERSION),
@@ -186,8 +209,9 @@ export const storyMemoryPolicySnapshotSchema = z.object({
   providerConfigurationFingerprint: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict().superRefine((value, context) => {
   const cast = value.castContext === true;
-  if (cast !== (value.contextProtocol === CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION)
-    || cast !== (value.promptProtocol === CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)) {
+  const castContextProtocol = value.contextProtocol === CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION
+    || isHistoryCoverageContextProtocol(value.contextProtocol);
+  if (cast !== castContextProtocol || cast !== (value.promptProtocol === CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION)) {
     context.addIssue({ code: "custom", message: "Cast context requires matching frozen capability and protocols." });
   }
   if (storyMemoryPolicyHash(value.policy) !== value.policyHash) context.addIssue({ code: "custom", path: ["policyHash"], message: "Policy hash does not match the frozen policy." });

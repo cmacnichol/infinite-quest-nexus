@@ -254,7 +254,8 @@ integration("T17 durable continuity review", () => {
     prepareCampaign?: (campaignId: string) => Promise<void>,
     action = "Wait at the observatory.",
     storyOnly = scene,
-    textProviderProfileId = providerId
+    textProviderProfileId = providerId,
+    castContextEnabled = false
   ) {
     const story = JSON.parse(await readFile(resolve(repositoryRoot, "tests/fixtures/legacy-story.json"), "utf8"));
     story.world.title = `Review ${randomUUID()}`;
@@ -262,7 +263,8 @@ integration("T17 durable continuity review", () => {
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
     if (storyOnly) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     await prepareCampaign?.(imported.campaignId);
-    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true });
+    const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined,
+      { installedCapability: "r3", enforceEnabled: true, castContextEnabled });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
     return { job, application, campaignId: imported.campaignId };
   }
@@ -2729,6 +2731,54 @@ integration("T17 durable continuity review", () => {
     if (mutation === "provider" || initialTemperature !== undefined) await pool.query("UPDATE provider_profiles SET temperature=0 WHERE id=$1", [providerId]);
     expect(loadIllustration).not.toHaveBeenCalled();
     expect(await runGenerationJob(pool, `duplicate-${randomUUID()}`, 30, credentialSecret)).toBe(false);
+  });
+
+  it("reclaims a persisted v5 review checkpoint with its frozen request hash and no new primary call", async () => {
+    const { job, application } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, true);
+    const captured = (await pool.query<{ context_options: Record<string, unknown>; prompt_protocol_version: string }>(
+      "SELECT context_options,prompt_protocol_version FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!;
+    const frozenPolicy = captured.context_options.storyMemoryPolicy as Record<string, unknown>;
+    expect(frozenPolicy).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v4", promptProtocol: "story-v17-campaign-cast" });
+    await pool.query(
+      "UPDATE generation_jobs SET context_options=$2::jsonb,prompt_protocol_version=$3 WHERE id=$1",
+      [job.id, JSON.stringify({ ...captured.context_options, storyMemoryPolicy: { ...frozenPolicy, contextProtocol: "current-continuity-v5" } }),
+        captured.prompt_protocol_version.replace("current-continuity-v4", "current-continuity-v5")]
+    );
+    reviewVerdict = "pass";
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const providers = workerProviderGraph(pool, credentialSecret);
+    const collaborators = createGenerationExecutionCollaborators(pool, createApiIllustrationApplication(pool, providers.illustration), apiMemoryApplication(pool, credentialSecret), providers.generation);
+    let interrupted = false;
+    const wrapped = { ...repository, async saveOrchestration(scope: Parameters<typeof repository.saveOrchestration>[0], value: Parameters<typeof repository.saveOrchestration>[1]) {
+      const saved = await repository.saveOrchestration(scope, value);
+      if (!interrupted && value.continuityReview?.status === "completed") {
+        interrupted = true;
+        await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [job.id]);
+        throw Object.assign(new Error("Injected termination after v5 review checkpoint"), { code: "generation_cancelled" });
+      }
+      return saved;
+    } };
+    const firstWorkerId = `v5-checkpoint-${randomUUID()}`;
+    const firstClaim = await repository.claimNext({ workerId: firstWorkerId, leaseSeconds: 30 });
+    expect(firstClaim?.jobId).toBe(job.id);
+    await createGenerationExecutor({ pool, repository: wrapped, collaborators }).execute({ claim: firstClaim!, workerId: firstWorkerId, leaseSeconds: 30 });
+    const checkpoint = (await pool.query<{ orchestration_private: { primaryResult: { requestPayloadHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.orchestration_private;
+    const requestHash = checkpoint.primaryResult.requestPayloadHash;
+    const callsBeforeReclaim = requests.length;
+    await pool.query("UPDATE provider_profiles SET temperature=0.1 WHERE id=$1", [providerId]);
+    try {
+      await runGenerationJob(pool, `v5-reclaim-${randomUUID()}`, 30, credentialSecret);
+    } finally {
+      await pool.query("UPDATE provider_profiles SET temperature=0 WHERE id=$1", [providerId]);
+    }
+    expect(requests).toHaveLength(callsBeforeReclaim);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
+    await expect(pool.query<{ orchestration_private: { primaryResult: { requestPayloadHash: string } } }>(
+      "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
+    )).resolves.toMatchObject({ rows: [{ orchestration_private: { primaryResult: { requestPayloadHash: requestHash } } }] });
   });
 
   it("preserves the candidate and exposes review budget counts when complete evidence cannot fit", async () => {
