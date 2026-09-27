@@ -107,6 +107,11 @@ export const generationContextAuthoritySchema = z.object({
   protectedFacts: z.array(protectedFactSchema).max(512).optional(),
   protectedFactsOmitted: z.number().int().min(0).optional(),
   protectedFactsCoverage: protectedFactSourceCoverageSchema.optional(),
+  /** Captured Task 6 correction frontier for deferred optional fact checks. */
+  optionalFactFrontier: z.object({
+    stateEditId: z.string().uuid(), effectiveTurnNumber: ordinalSchema,
+    facts: z.array(z.object({ id: z.string().uuid(), content: z.string() }).strict()).max(100)
+  }).strict().optional(),
   latestTurn: z.object({ action: z.string(), narration: z.string(), inputMode: z.enum(["action", "scene"]).optional() }).strict().nullable()
 }).strict();
 export type GenerationContextAuthority = DeepReadonly<z.infer<typeof generationContextAuthoritySchema>>;

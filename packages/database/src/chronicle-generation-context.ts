@@ -2,7 +2,7 @@ import type {
   MemoryGenerationAuthorityContext,
   MemoryGenerationAuthorityScope,
   GenerationHistoryReservation,
-  GenerationVerifiedFactSet
+  GenerationOptionalFactFrontier
 } from "../../application/src/memory/types.js";
 import {
   hasGenerationCharacterAuthority,
@@ -138,6 +138,23 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const continuity = currentContinuity === null
     ? promptSafeContinuity
     : currentContinuity;
+  const optionalFactFrontier = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)
+    ? await client.query<{ id: string; effective_turn_number: number }>(
+      `SELECT id,effective_turn_number FROM campaign_state_edits
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND effective_turn_number <= $3
+        ORDER BY effective_turn_number DESC,revision DESC LIMIT 1`,
+      [scope.ownerUserId, scope.campaignId, baseTurnNumber]
+    )
+    : null;
+  const capturedOptionalFactFrontier: GenerationOptionalFactFrontier | undefined = optionalFactFrontier?.rows[0]
+    ? {
+      stateEditId: optionalFactFrontier.rows[0].id,
+      effectiveTurnNumber: optionalFactFrontier.rows[0].effective_turn_number,
+      // `complete: true` preserves an intentionally empty correction and
+      // withholds invalid source IDs before this immutable capture escapes.
+      facts: continuity.canonicalFacts.flatMap((fact) => fact.id ? [{ id: fact.id, content: fact.content }] : [])
+    }
+    : undefined;
   return memoryGenerationAuthorityContextSchema.parse({
     authority: {
       rules: completeRules(worldCanon.rules ?? worldCanon.story_rules ?? ""),
@@ -157,8 +174,12 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
       eventTriggers: continuity.eventTriggers,
       pendingEventTriggers: continuity.pendingEventTriggers,
       ...(resolved.storyLedger ? { storyLedger: resolved.storyLedger } : {}),
-      ...(resolved.protectedFacts ? { protectedFacts: resolved.protectedFacts, protectedFactsOmitted: resolved.protectedFactsOmitted ?? 0,
-        protectedFactsCoverage: resolved.protectedFactsCoverage } : {}),
+      ...(resolved.protectedFacts ? {
+        protectedFacts: resolved.protectedFacts,
+        protectedFactsOmitted: resolved.protectedFactsOmitted ?? 0,
+        protectedFactsCoverage: resolved.protectedFactsCoverage,
+      } : {}),
+      ...(capturedOptionalFactFrontier ? { optionalFactFrontier: capturedOptionalFactFrontier } : {}),
       latestTurn: latest?.rows[0] ? {
         ...(v3 ? { inputMode: latest.rows[0].input_mode } : {}),
         action: stripMechanicsLeakage(latest.rows[0].action).text,
@@ -186,12 +207,6 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
   options: Readonly<{ useSavepoints?: boolean }> = {},
 ): Promise<MemoryGenerationAuthorityContext> {
   const baseTurnNumber = Number(authorityContext.baseIdentity.baseTurnNumber);
-  // The authority capture already ran Task 6's bounded source verifier while
-  // holding the generation authority fence. Reuse those IDs rather than
-  // rereading a correction frontier that could have changed after capture.
-  const verifiedOptionalFactIds: GenerationVerifiedFactSet | undefined = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)
-    ? authorityContext.authority.protectedFacts?.map((fact) => fact.id) ?? []
-    : undefined;
   const retrieval = await loadPostgresChronicleGenerationCandidates(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
@@ -202,7 +217,7 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
     ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
     ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
     ...(reservation === undefined ? {} : { generationExclusions: reservation }),
-    ...(verifiedOptionalFactIds === undefined ? {} : { verifiedCanonicalFactIds: verifiedOptionalFactIds })
+    ...(authorityContext.authority.optionalFactFrontier === undefined ? {} : { optionalFactFrontier: authorityContext.authority.optionalFactFrontier })
   }, dependencies, options);
   const candidates: readonly GenerationContextCandidate[] = retrieval.candidates;
   return {

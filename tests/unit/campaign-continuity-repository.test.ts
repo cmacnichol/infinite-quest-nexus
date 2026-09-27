@@ -6,7 +6,8 @@ import {
   materializeCorrectedGenerationContinuity,
   materializeInitialGenerationContinuity,
   loadAcceptedGenerationContinuity,
-  loadVerifiedProtectedFacts
+  loadVerifiedProtectedFacts,
+  verifyCapturedOptionalGenerationFacts
 } from "../../packages/database/src/campaign-continuity-repository.js";
 import type { DatabaseClient } from "../../packages/database/src/pool.js";
 import { buildCanonicalChronicleFacts } from "../../packages/domain/src/chronicle-memory-helpers.js";
@@ -219,5 +220,61 @@ describe("loadCurrentContinuityCorrection", () => {
     }]);
 
     await expect(loadCurrentContinuityCorrection(client, scope, 7)).rejects.toThrow();
+  });
+});
+
+describe("captured optional Chronicle fact verification", () => {
+  it("withholds an active pre-frontier fact after the captured empty correction without rereading it", async () => {
+    const staleId = "00000000-0000-4000-8000-000000000010";
+    const client = { query: vi.fn(async (statement: string) => {
+      if (statement.includes("FROM campaign_canonical_facts")) return { rows: [{
+        id: staleId, content: "The old lock still opens.", source_turn_number: 1, source_fact_index: 0,
+        source_turn_id: "00000000-0000-4000-8000-000000000011", source_state_edit_id: null
+      }] };
+      throw new Error(`The captured frontier must avoid a mutable source read: ${statement}`);
+    }) } as unknown as DatabaseClient;
+
+    await expect(verifyCapturedOptionalGenerationFacts(client, scope, 3, [staleId], {
+      stateEditId: "00000000-0000-4000-8000-000000000012", effectiveTurnNumber: 2, facts: []
+    })).resolves.toEqual([]);
+    expect(client.query).toHaveBeenCalledOnce();
+  });
+
+  it("retains individually verified older optional facts and siblings outside the protected source window", async () => {
+    const oldId = "00000000-0000-4000-8000-000000000013";
+    const siblingId = "00000000-0000-4000-8000-000000000014";
+    const sourceId = "00000000-0000-4000-8000-000000000015";
+    const client = { query: vi.fn(async (statement: string) => {
+      if (statement.includes("FROM campaign_canonical_facts")) return { rows: [
+        { id: oldId, content: "The old observatory lens is silver.", source_turn_number: 3, source_fact_index: 0, source_turn_id: sourceId, source_state_edit_id: null },
+        { id: siblingId, content: "Its sibling lens is blue.", source_turn_number: 3, source_fact_index: 1, source_turn_id: sourceId, source_state_edit_id: null }
+      ] };
+      if (statement.includes("FROM turns")) return { rows: [{ id: sourceId, turn_number: 3, canonical_facts: [
+        { id: oldId, content: "The old observatory lens is silver." }, { id: siblingId, content: "Its sibling lens is blue." }
+      ], canonical_fact_updates: [] }] };
+      throw new Error(`Unexpected query: ${statement}`);
+    }) } as unknown as DatabaseClient;
+
+    await expect(verifyCapturedOptionalGenerationFacts(client, scope, 600, [oldId, siblingId], {
+      stateEditId: "00000000-0000-4000-8000-000000000016", effectiveTurnNumber: 2, facts: []
+    })).resolves.toEqual(expect.arrayContaining([oldId, siblingId]));
+  });
+
+  it("withholds a mismatched optional source projection while retaining its verified sibling", async () => {
+    const validId = "00000000-0000-4000-8000-000000000017";
+    const mismatchedId = "00000000-0000-4000-8000-000000000018";
+    const sourceId = "00000000-0000-4000-8000-000000000019";
+    const client = { query: vi.fn(async (statement: string) => {
+      if (statement.includes("FROM campaign_canonical_facts")) return { rows: [
+        { id: validId, content: "The moon key is whole.", source_turn_number: 3, source_fact_index: 0, source_turn_id: sourceId, source_state_edit_id: null },
+        { id: mismatchedId, content: "The tampered moon key is whole.", source_turn_number: 3, source_fact_index: 1, source_turn_id: sourceId, source_state_edit_id: null }
+      ] };
+      if (statement.includes("FROM turns")) return { rows: [{ id: sourceId, turn_number: 3,
+        canonical_facts: [{ id: validId, content: "The moon key is whole." }], canonical_fact_updates: [] }] };
+      throw new Error(`Unexpected query: ${statement}`);
+    }) } as unknown as DatabaseClient;
+
+    await expect(verifyCapturedOptionalGenerationFacts(client, scope, 3, [validId, mismatchedId], undefined))
+      .resolves.toEqual([validId]);
   });
 });

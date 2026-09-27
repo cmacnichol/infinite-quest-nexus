@@ -169,8 +169,16 @@ export type GenerationHistoryReservation = Readonly<{
   protectedFactIds: readonly string[];
 }>;
 
-/** Source-verified optional fact identities admitted to v5 Chronicle retrieval. */
-export type GenerationVerifiedFactSet = readonly string[];
+/**
+ * Complete correction authority captured before optional Chronicle retrieval.
+ * Deferred fact verification may read immutable accepted-turn sources, but it
+ * must never resolve a newer correction frontier.
+ */
+export type GenerationOptionalFactFrontier = Readonly<{
+  stateEditId: string;
+  effectiveTurnNumber: number;
+  facts: readonly Readonly<{ id: string; content: string }>[];
+}>;
 
 
 export type MemoryWorkerClaimRequest = Readonly<{

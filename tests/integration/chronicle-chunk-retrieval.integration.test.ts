@@ -285,9 +285,9 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     expect(lexicalParameters.length).toBeGreaterThan(0);
     for (const parameters of lexicalParameters) {
       expect(String(parameters[3]).length).toBeLessThanOrEqual(1_000);
-      expect(parameters[14]).toEqual(expect.any(Array));
-      expect((parameters[14] as string[]).every((value) => value.length <= 1_000)).toBe(true);
-      expect((parameters[14] as string[]).join(" ")).toContain("Find Zephyra");
+      expect(parameters[16]).toEqual(expect.any(Array));
+      expect((parameters[16] as string[]).every((value) => value.length <= 1_000)).toBe(true);
+      expect((parameters[16] as string[]).join(" ")).toContain("Find Zephyra");
     }
     expect(context.chronicleRetrieval).toMatchObject({ queryPlanning: {
       planner: "balanced-v1", rankAggregation: "query_family_max_v1",
@@ -322,6 +322,8 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       (id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
       VALUES($1,$2,$3,$4,$5,1,0,$6,lower($6),1)`,
     [factId, fixture.ownerUserId, fixture.campaignId, fixture.worldVersionId, oldTurn, factContent]);
+    // V5 may retrieve only facts verified against their captured turn source.
+    await pool.query("UPDATE turns SET state_snapshot_private=jsonb_build_object('canonicalFacts',jsonb_build_array(jsonb_build_object('id',$2::text,'content',$3::text))) WHERE id=$1", [oldTurn, factId, factContent]);
     const certificate = { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), start: content.indexOf(passage), end: content.indexOf(passage) + passage.length };
     await pool.query("UPDATE chronicle_memory_chunks SET metadata=jsonb_build_object('sourceEvidence',$2::jsonb) WHERE id=$1", [chunkId, JSON.stringify(certificate)]);
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
@@ -329,7 +331,8 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
     await pool.query("UPDATE world_versions SET content=jsonb_set(content,'{world,internal}',to_jsonb('WORLD_INTERNAL_CANARY'::text)) WHERE id=$1", [fixture.worldVersionId]);
     let captured = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client, {
-      ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId, operationKind: "append", expectedTurnNumber: 3, baseIdentityVersion: "generation-base-v3", captureRecentWindow: true
+      ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId, operationKind: "append", expectedTurnNumber: 3, baseIdentityVersion: "generation-base-v4", captureRecentWindow: true,
+      recentWindowTurns: 11, captureStoryLedger: true, captureProtectedFacts: true
     }));
     const read = () => transaction(providerId, []).loadGenerationContext(pool, { ...fixture, operationKind: "append", expectedTurnNumber: 3,
       query: "copper gate Vale", retrievalBudgetTokens: 32_000, storyMemoryPolicy, expectedBaseIdentity: captured.baseIdentity });

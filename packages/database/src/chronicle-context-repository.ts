@@ -1,12 +1,13 @@
 import { normalizeStoryEvidenceSource, selectVerifiedNarrativeExcerpt, verifyStoryEvidenceSpan, type StorySourceSpan } from "../../domain/src/story-evidence-spans.js";
 import { createHash } from "node:crypto";
 import type { ChronicleContextPreview, MemoryGenerationTransactionPort } from "../../application/src/memory/index.js";
-import type { GenerationHistoryReservation, GenerationVerifiedFactSet } from "../../application/src/memory/types.js";
+import type { GenerationHistoryReservation, GenerationOptionalFactFrontier } from "../../application/src/memory/types.js";
 import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 import { castGenerationSnapshotSchema, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 type ChronicleRetrievalScope = Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1]
-  & Readonly<{ storyMemoryPolicy?: StoryMemoryPolicySnapshot; castSnapshot?: CastGenerationSnapshot; generationExclusions?: GenerationHistoryReservation; verifiedCanonicalFactIds?: GenerationVerifiedFactSet }>;
+  & Readonly<{ storyMemoryPolicy?: StoryMemoryPolicySnapshot; castSnapshot?: CastGenerationSnapshot; generationExclusions?: GenerationHistoryReservation; optionalFactFrontier?: GenerationOptionalFactFrontier }>;
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
+import { verifyCapturedOptionalGenerationFacts } from "./campaign-continuity-repository.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
 import {
   CHRONICLE_RETRIEVAL_VERSION,
@@ -670,7 +671,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     storyMemoryPolicy?: StoryMemoryPolicySnapshot;
     castSnapshot?: CastGenerationSnapshot;
     generationExclusions?: GenerationHistoryReservation;
-    verifiedCanonicalFactIds?: GenerationVerifiedFactSet;
+    optionalFactFrontier?: GenerationOptionalFactFrontier;
   }>,
   dependencies: ChronicleGenerationTransactionDependencies,
   options: Readonly<{ useSavepoints?: boolean }> = {},
@@ -681,7 +682,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     worldVersionId: scope.worldVersionId,
     ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
     ...(scope.generationExclusions === undefined ? {} : { generationExclusions: scope.generationExclusions }),
-    ...(scope.verifiedCanonicalFactIds === undefined ? {} : { verifiedCanonicalFactIds: scope.verifiedCanonicalFactIds }),
+    ...(scope.optionalFactFrontier === undefined ? {} : { optionalFactFrontier: scope.optionalFactFrontier }),
     ...(scope.castSnapshot ? { castSnapshot: scope.castSnapshot } : {}),
     request: {
       // This request initializes retrieval only. It is never rendered or used
@@ -704,7 +705,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     // The base turn is protected authority and is rendered separately by the
     // provider prompt builder. Do not reintroduce it as optional Chronicle.
     .filter((memory) => !(memory.memory_kind === "turn_fiction" && memory.ordinal === scope.throughTurnNumber));
-  const candidates = [...selected]
+  let candidates = [...selected]
     .sort((left, right) => (right.relevance - left.relevance)
       || (right.importance - left.importance)
       || (right.ordinal - left.ordinal)
@@ -724,6 +725,12 @@ export async function loadPostgresChronicleGenerationCandidates(
       spans: stage.selectedNarrativeSpans.get(memory.id)!.map(({ start, end }) => ({ start, end }))
     } } : {})
   }));
+  if (isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)) {
+    const verifiedFactIds = new Set(await verifyCapturedOptionalGenerationFacts(client, scope, scope.throughTurnNumber,
+      candidates.filter((candidate) => candidate.kind === "canonical_fact").map((candidate) => candidate.id),
+      scope.optionalFactFrontier));
+    candidates = candidates.filter((candidate) => candidate.kind !== "canonical_fact" || verifiedFactIds.has(candidate.id));
+  }
   return {
     candidates,
     chronicleRetrieval: stage.chronicleRetrieval,
@@ -2413,10 +2420,6 @@ export async function loadChronicleRetrievalStage(
     const excludedFactIds = new Set(scope.generationExclusions.protectedFactIds);
     memories = memories.filter((memory) => !(memory.turn_id && excludedTurnIds.has(memory.turn_id))
       && !(memory.memory_kind === "canonical_fact" && excludedFactIds.has(memory.id)));
-  }
-  if (options.generationCandidates && scope.verifiedCanonicalFactIds) {
-    const verifiedCanonicalFactIds = new Set(scope.verifiedCanonicalFactIds);
-    memories = memories.filter((memory) => memory.memory_kind !== "canonical_fact" || verifiedCanonicalFactIds.has(memory.id));
   }
   // Count only the already owner/campaign/world-version/cutoff-filtered rows.
   // This safe aggregate lets callers verify scope eligibility without exposing

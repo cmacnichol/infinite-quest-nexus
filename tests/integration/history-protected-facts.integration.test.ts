@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
-import { loadCurrentContinuityCorrection, loadVerifiedProtectedFacts } from "../../packages/database/src/campaign-continuity-repository.js";
+import { loadCurrentContinuityCorrection, loadVerifiedProtectedFacts, verifyCapturedOptionalGenerationFacts } from "../../packages/database/src/campaign-continuity-repository.js";
 import { buildCanonicalChronicleFacts } from "../../packages/domain/src/chronicle-memory-helpers.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
@@ -127,6 +127,28 @@ integration("verified protected-fact authority", () => {
     expect(result.facts.length).toBeGreaterThan(0);
     expect(result.facts.length).toBeLessThanOrEqual(240);
     expect(result.omittedCount).toBe(240 - result.facts.length);
+  });
+
+  it("verifies bounded optional IDs beyond the protected 512-row source window and retains their sibling", async () => {
+    const scope = await fixture();
+    const oldSnapshot = { canonicalFacts: ["The old moon lens is silver.", "Its sibling lens is blue."], canonicalFactUpdates: [] };
+    const oldTurnId = await acceptedTurn(scope.campaignId, 1, oldSnapshot);
+    const [oldFact, sibling] = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId: oldTurnId, ...oldSnapshot, entityCatalog: [] });
+    await insertAcceptedFact(scope, oldTurnId, 1, oldFact!);
+    await insertAcceptedFact(scope, oldTurnId, 1, sibling!);
+    const newerTurnId = await acceptedTurn(scope.campaignId, 2, { canonicalFacts: [], canonicalFactUpdates: [] });
+    await pool.query(`INSERT INTO campaign_canonical_facts
+      (id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      SELECT gen_random_uuid(),$1,$2,$3,$4,2,n,'newer distractor ' || n, 'newer distractor ' || n,2
+        FROM generate_series(1,513) n`, [ownerUserId, scope.campaignId, scope.worldVersionId, newerTurnId]);
+    const capturedFrontier = { stateEditId: crypto.randomUUID(), effectiveTurnNumber: 0, facts: [] };
+
+    expect((await load(scope)).facts.map((fact) => fact.id)).not.toContain(oldFact!.id);
+    const client = await pool.connect();
+    try {
+      await expect(verifyCapturedOptionalGenerationFacts(client, { ownerUserId, ...scope }, 3,
+        [oldFact!.id, sibling!.id], capturedFrontier)).resolves.toEqual(expect.arrayContaining([oldFact!.id, sibling!.id]));
+    } finally { client.release(); }
   });
 
   it("withholds foreign, retired, future, mismatched, imported, and missing projection candidates without repairing rows", async () => {

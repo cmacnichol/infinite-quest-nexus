@@ -5,6 +5,7 @@ import { z } from "zod";
 import { buildCanonicalChronicleFacts, combineCanonicalChronicleFacts } from "../../domain/src/chronicle-memory-helpers.js";
 import { createCorrectionCanonicalFactId, normalizeCanonicalFactContent } from "../../domain/src/canonical-facts.js";
 import type { ProtectedFact, ProtectedFactSourceCoverage } from "../../application/src/memory/story-history-facts.js";
+import type { GenerationOptionalFactFrontier } from "../../application/src/memory/types.js";
 
 type VerifiedFact = Readonly<{ id: string; content: string; factIndex?: number; sourceStateEditId?: string | null }>;
 type ProtectedFactCandidate = Readonly<{
@@ -20,6 +21,8 @@ export const MAX_PROTECTED_FACT_CANDIDATE_ROWS = 512;
 export const MAX_PROTECTED_FACT_SOURCE_BYTES = 1_000_000;
 export const MAX_PROTECTED_FACT_CONTENT_CHARACTERS = 4_000;
 export const MAX_PROTECTED_FACT_CONTENT_BYTES = 16_000;
+/** Deferred retrieval verifies a finite selected candidate set, never a new frontier. */
+export const MAX_OPTIONAL_GENERATION_FACT_CANDIDATES = 2_048;
 const acceptedFactsSchema = z.object({
   canonicalFacts: z.array(z.union([z.string().min(1).max(4_000), z.object({ id: z.uuid().nullable(), content: z.string().min(1).max(4_000) }).strict()])).max(100).default([]),
   canonicalFactUpdates: z.array(z.object({ content: z.string().min(1).max(4_000),
@@ -364,4 +367,64 @@ export async function loadVerifiedProtectedFacts(
   };
   return { facts, omittedCount: ordered.length - facts.length, candidateRows: ordered.length, sourceBytes,
     sourceLimitReached: coverage.sourceLimitReached, coverage };
+}
+
+/**
+ * Verifies only the optional fact IDs that survived bounded Chronicle
+ * retrieval. The correction frontier came from the authority transaction;
+ * this function may read immutable accepted-turn snapshots but never resolves
+ * a newer correction or repairs a derived projection.
+ */
+export async function verifyCapturedOptionalGenerationFacts(
+  client: DatabaseClient,
+  scope: CampaignWorldVersionMemoryScope,
+  baseTurnNumber: number,
+  candidateIds: readonly string[],
+  frontier: GenerationOptionalFactFrontier | undefined,
+): Promise<readonly string[]> {
+  const ids = [...new Set(candidateIds)].slice(0, MAX_OPTIONAL_GENERATION_FACT_CANDIDATES);
+  if (!ids.length) return [];
+  const candidates = await client.query<ProtectedFactCandidate>(`SELECT id,content,source_turn_number,source_fact_index,
+      source_turn_id,source_state_edit_id
+    FROM campaign_canonical_facts
+    WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
+      AND id=ANY($4::uuid[]) AND valid_from_turn <= $5
+      AND (valid_until_turn IS NULL OR valid_until_turn > $5)
+      AND char_length(content) <= $6 AND octet_length(content) <= $7`,
+  [scope.ownerUserId, scope.campaignId, scope.worldVersionId, ids, baseTurnNumber,
+    MAX_PROTECTED_FACT_CONTENT_CHARACTERS, MAX_PROTECTED_FACT_CONTENT_BYTES]);
+  const verified = new Set<string>();
+  const frontierFacts = new Map((frontier?.facts ?? []).map((fact) => [fact.id, fact.content]));
+  const postFrontier = candidates.rows.filter((candidate) => !frontier || candidate.source_turn_number > frontier.effectiveTurnNumber);
+  for (const candidate of candidates.rows) {
+    if (!frontier || candidate.source_turn_number > frontier.effectiveTurnNumber) continue;
+    if (frontierFacts.get(candidate.id) !== undefined
+      && normalizeCanonicalFactContent(frontierFacts.get(candidate.id)!) === normalizeCanonicalFactContent(candidate.content!)) {
+      verified.add(candidate.id);
+    }
+  }
+  const sourceIds = [...new Set(postFrontier.flatMap((candidate) => candidate.source_turn_id ? [candidate.source_turn_id] : []))];
+  if (!sourceIds.length) return [...verified];
+  const sources = await client.query<{ id: string; turn_number: number; canonical_facts: unknown; canonical_fact_updates: unknown }>(`SELECT id,turn_number,
+      COALESCE(state_snapshot_private->'canonicalFacts','[]'::jsonb) AS canonical_facts,
+      COALESCE(state_snapshot_private->'canonicalFactUpdates','[]'::jsonb) AS canonical_fact_updates
+    FROM turns
+    WHERE owner_user_id=$1 AND campaign_id=$2 AND id=ANY($3::uuid[])
+      AND accepted_at IS NOT NULL AND turn_number <= $4`,
+  [scope.ownerUserId, scope.campaignId, sourceIds, baseTurnNumber]);
+  const sourcesById = new Map(sources.rows.map((source) => [source.id, source]));
+  for (const candidate of postFrontier) {
+    if (!candidate.source_turn_id || candidate.source_state_edit_id) continue;
+    const source = sourcesById.get(candidate.source_turn_id);
+    if (!source || source.turn_number !== candidate.source_turn_number) continue;
+    const materialized = safelyMaterialize(() => materializeAcceptedGenerationContinuity({
+      canonicalFacts: source.canonical_facts, canonicalFactUpdates: source.canonical_fact_updates
+    }, { campaignId: scope.campaignId, turnId: source.id }, [{
+      id: candidate.id, content: candidate.content!, factIndex: candidate.source_fact_index
+    }]));
+    if (materialized && sourceIndexMatches(candidate as ProtectedFactCandidate & { content: string }, materialized.canonicalFacts)) {
+      verified.add(candidate.id);
+    }
+  }
+  return [...verified];
 }

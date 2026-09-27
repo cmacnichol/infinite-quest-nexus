@@ -47,12 +47,14 @@ integration("Historical fact candidate lanes", () => {
       [ownerUserId, scope.campaignId, scope.worldVersionId, content, index, ids, ordinal]);
       return result.rows[0]!.id;
     };
-    const read = async (query: string, enrolled = true, cutoff = 3, castSnapshot?: CastGenerationSnapshot) => {
+    const read = async (query: string, enrolled = true, cutoff = 3, castSnapshot?: CastGenerationSnapshot,
+      generationExclusions?: { recentTurnIds: readonly string[]; protectedFactIds: readonly string[] }) => {
       const client = await pool.connect();
       try { return await loadPostgresChronicleGenerationCandidates(client, { ...scope, query, throughTurnNumber: cutoff, retrievalBudgetTokens: 32_000,
         ...(enrolled ? { storyMemoryPolicy: castSnapshot ? { ...storyMemoryPolicy, castContext: true,
           promptProtocol: "story-v17-campaign-cast", contextProtocol: "current-continuity-v4" } : storyMemoryPolicy } : {}),
-        ...(castSnapshot ? { castSnapshot } : {}) }, dependencies, { useSavepoints: false }); }
+        ...(castSnapshot ? { castSnapshot } : {}),
+        ...(generationExclusions ? { generationExclusions } : {}) }, dependencies, { useSavepoints: false }); }
       finally { client.release(); }
     };
     return { ...scope, fact, read };
@@ -101,6 +103,20 @@ integration("Historical fact candidate lanes", () => {
     expect(current.candidates.map((candidate) => candidate.id)).toEqual(expect.arrayContaining([exact, linked]));
     expect(current.candidates).toHaveLength(256);
     expect(new Set(current.candidates.map((candidate) => candidate.id)).size).toBe(256);
+  });
+
+  it("replenishes the lexical historical lane after reserved fact IDs consume its initial rank pool", async () => {
+    const value = await fixture(0);
+    const reserved = await Promise.all(Array.from({ length: 256 }, (_, index) =>
+      value.fact(`The lunar archive key opens vault ${index}.`, index)));
+    const eligible = await value.fact("The lunar archive key preserves the oldest vault oath.", 999);
+
+    const result = await value.read("lunar archive key vault", true, 3, undefined, {
+      recentTurnIds: [], protectedFactIds: reserved
+    });
+
+    expect(result.candidates.map((candidate) => candidate.id)).toContain(eligible);
+    expect(result.candidates.some((candidate) => reserved.includes(candidate.id))).toBe(false);
   });
 
   it("uses historical validity and excludes future facts without a derived rebuild", async () => {
