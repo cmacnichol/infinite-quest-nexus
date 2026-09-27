@@ -175,6 +175,14 @@ integration("T17 durable continuity review", () => {
         } }));
         return;
       }
+      if (request.url === "/presets/fallback") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ data: {
+          slug: "fallback", name: "Frozen Reviewer Fallback", status: "active",
+          designated_version: { id: "fallback-v1", version: 1, system_prompt: "Native fallback reviewer instruction.", config: { model: "t17-native-frozen", temperature: 0 } }
+        } }));
+        return;
+      }
       let body = "";
       request.setEncoding("utf8"); request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
@@ -1739,7 +1747,7 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
     const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
@@ -1758,7 +1766,8 @@ integration("T17 durable continuity review", () => {
         continuityReviewExecutionPolicy: {
           version: 1,
           primary: { selection: { kind: "openrouter_preset", slug: "reviewer" }, overrides: { parameters: { temperature: 0 } } },
-          maximumAutomaticFallbacks: 0
+          ...(["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict"].includes(outcome) ? { fallback: { selection: { kind: "openrouter_preset", slug: "fallback" }, overrides: { parameters: { temperature: 0 } } } } : {}),
+          maximumAutomaticFallbacks: ["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict"].includes(outcome) ? 1 : 0
         }
       },
       apiKey: "native-keep-fixture"
@@ -1783,6 +1792,7 @@ integration("T17 durable continuity review", () => {
     )).resolves.toMatchObject({ rows: [{ basis: { protocolVersion: "story-openrouter-preset-v2", preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
 
     reviewVerdict = deadline ? "pass" : "conflict";
+    if (outcome === "fallback_after_output_limit") reviewSequence = ["conflict", "pass"];
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
     const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest, invocationKey, routeBasis, frozenResponseContracts, logicalReservation }: {
@@ -1837,7 +1847,9 @@ integration("T17 durable continuity review", () => {
       }
       return {
       content,
-      responseId, finishReason: "stop", outputLimited: outcome === "output_limited" && operation === "story_continuity_review", modelInstanceId: plan.candidates[0]!.modelId,
+      responseId, finishReason: "stop", outputLimited: (outcome === "output_limited"
+        || (outcome === "fallback_after_output_limit" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || outcome === "fallback_both_output_limited") && operation === "story_continuity_review", modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
       ...(preparedRequest ? { preparedRequest } : {})
     }; });
@@ -1868,6 +1880,29 @@ integration("T17 durable continuity review", () => {
     if (outcome === "unbound") {
       expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "failed", resultTurnId: null });
       expect(preparedTextExecutor).toHaveBeenCalledTimes(1);
+      return;
+    }
+    if (outcome === "fallback_after_output_limit") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      expect(preparedTextExecutor.mock.calls.slice(1).map(([input]) => (input.logicalReservation as { invocationId?: string } | undefined)?.invocationId)).toEqual([
+        expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}$/u),
+        expect.stringMatching(/^continuity-review:fallback:[a-f0-9]{64}$/u)
+      ]);
+      return;
+    }
+    if (outcome === "fallback_both_output_limited") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      return;
+    }
+    if (outcome === "fallback_semantic_conflict") {
+      await expect(application.getJob({ ownerUserId, jobId: job.id })).resolves.toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["narrative_conflict"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
       return;
     }
     const review = await application.getReview({ ownerUserId, jobId: job.id });

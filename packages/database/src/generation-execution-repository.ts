@@ -182,7 +182,14 @@ async function completedReviewerPhysicalAttempt(
   if (!review.success || review.data.version !== 2 || !reviewer.success || !reviewer.data.enabled || !reviewer.data.primary
     || review.data.status !== "completed" || !review.data.reviewRequestHash
     || review.data.binding.reviewerExecutionSnapshotHash !== reviewer.data.snapshotHash) return false;
-  const route = reviewer.data.primary;
+  const durableAttempt = review.data.attempts?.at(-1);
+  if (durableAttempt && (durableAttempt.reservationStatus !== "completed" || durableAttempt.requestHash !== review.data.reviewRequestHash
+    || durableAttempt.outcome?.kind !== review.data.outcome?.kind)) return false;
+  // Task 3 checkpoints have no durable attempt list; retain their frozen
+  // primary attestation semantics. Task 4 checkpoints bind the active route.
+  const routeName = durableAttempt?.route ?? "primary";
+  const route = routeName === "fallback" ? reviewer.data.fallback : reviewer.data.primary;
+  if (!route) return false;
   const contract = route.responseContracts.contracts["continuity_review:nonstream"];
   if (!contract || contract.operation !== "continuity_review" || contract.streaming) return false;
   const result = await client.query<{
@@ -196,7 +203,7 @@ async function completedReviewerPhysicalAttempt(
        FROM prepared_text_physical_attempts
       WHERE owner_user_id=$1 AND logical_kind='story' AND logical_reservation->>'generationJobId'=$2
         AND logical_reservation->>'invocationId'=$3`, [
-    scope.ownerUserId, scope.jobId, `continuity-review:primary:${review.data.bindingHash}`
+    scope.ownerUserId, scope.jobId, `continuity-review:${routeName}:${review.data.bindingHash}${review.data.cycleId ? `:${review.data.cycleId}` : ""}`
   ]);
   const attempt = result.rows[0];
   const semanticOutcome = review.data.verdict !== "unavailable";
@@ -214,7 +221,8 @@ async function completedReviewerPhysicalAttempt(
   if (!attempt || result.rows.length !== 1 || attempt.status !== "completed" || !physicalOutcomeMatches
     || attempt.requestPayloadHash !== review.data.reviewRequestHash
     || attempt.requestPayloadHash !== sha256Hex(attempt.requestBody)
-    || attempt.requestedModel !== route.routeBasis.candidates[0]?.modelId) return false;
+    || attempt.requestedModel !== route.routeBasis.candidates[0]?.modelId
+    || (durableAttempt !== undefined && attempt.planHash !== durableAttempt.routePlanHash)) return false;
   const preset = route.routeBasis.preset;
   if (preset
     ? attempt.requestedPresetSlug !== preset.slug || attempt.requestedPresetVersionId !== preset.versionId || attempt.requestedPresetConfigHash !== preset.configHash

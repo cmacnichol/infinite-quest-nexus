@@ -34,8 +34,32 @@ function validateContinuityReviewCheckpoint(value: ContinuityReviewCheckpointFie
   if (value.verdict !== "unavailable" && value.unavailableReason !== undefined) context.addIssue({ code: "custom", message: "An unavailable reason only applies to an unavailable verdict." });
 }
 const continuityReviewCheckpointV1Schema = z.object({ version: z.literal(1), ...continuityReviewCheckpointBase }).strict().superRefine(validateContinuityReviewCheckpoint);
-const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...continuityReviewCheckpointBase,
+const continuityReviewAttemptSchema = z.object({
+  ordinal: z.union([z.literal(1), z.literal(2)]),
+  route: z.enum(["primary", "fallback"]),
+  cycleId: hash.optional(),
+  routePlanHash: hash,
+  requestHash: hash,
+  responseReference: z.string().min(1).max(256).nullable(),
+  reservationStatus: z.enum(["reserved", "dispatched", "completed"]),
   outcome: continuityReviewAttemptOutcomeSchema.nullable()
+}).strict().superRefine((value, context) => {
+  if ((value.reservationStatus === "reserved" || value.reservationStatus === "dispatched") && value.outcome !== null) {
+    context.addIssue({ code: "custom", message: "A reserved reviewer attempt cannot have an outcome." });
+  }
+  if (value.reservationStatus === "completed" && value.outcome === null) {
+    context.addIssue({ code: "custom", message: "A completed reviewer attempt requires an outcome." });
+  }
+  if (value.route === "primary" !== (value.ordinal === 1)) {
+    context.addIssue({ code: "custom", message: "Reviewer attempt ordinal must match its route." });
+  }
+});
+const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...continuityReviewCheckpointBase,
+  outcome: continuityReviewAttemptOutcomeSchema.nullable(),
+  /** Present for frozen reviewer routes; old v2 checkpoints remain readable. */
+  attempts: z.array(continuityReviewAttemptSchema).min(1).max(2).optional(),
+  /** A user-authorized technical retry creates a new bounded reviewer cycle. */
+  cycleId: hash.optional()
 }).strict().superRefine((value, context) => {
   validateContinuityReviewCheckpoint(value, context);
   if (value.status === "dispatched") {
@@ -51,6 +75,19 @@ const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...
   }
   if (value.outcome.kind === "technical_failure" && value.unavailableReason !== value.outcome.failure) {
     context.addIssue({ code: "custom", message: "Technical checkpoint reason must match its attempt outcome." });
+  }
+  if (value.attempts) {
+    const latest = value.attempts.at(-1)!;
+    if (latest.requestHash !== value.reviewRequestHash || latest.reservationStatus !== value.status
+      || latest.outcome?.kind !== value.outcome.kind) {
+      context.addIssue({ code: "custom", message: "The active reviewer attempt must match the review checkpoint." });
+    }
+    if (value.attempts.some((attempt, index) => attempt.ordinal !== index + 1)) {
+      context.addIssue({ code: "custom", message: "Reviewer attempts must be ordered and append-only." });
+    }
+    if (value.attempts.some((attempt) => attempt.cycleId !== value.cycleId)) {
+      context.addIssue({ code: "custom", message: "Reviewer attempts must retain their cycle identity." });
+    }
   }
 });
 /** Explicitly reads frozen v1 checkpoints and newly versioned v2 outcomes. */
