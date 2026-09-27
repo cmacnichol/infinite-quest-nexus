@@ -135,6 +135,7 @@ import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseCont
 import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
 import { presetPromptInjectedRemotely, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";
+import { prepareFrozenContinuityReviewRequest } from "./continuity-review-execution.js";
 import { capabilityRouteConfigHash } from "./provider-capability-cache.js";
 import { composePresetPrompt } from "../../../packages/story-engine/src/preset-prompt.js";
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
@@ -4324,10 +4325,24 @@ async function executeLoadedGeneration(
         checkpoint = { version: 2, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null, outcome: null };
         try {
           if (!finalManifest || !binding.producingRequestHash) throw Object.assign(new Error("Review input unavailable"), { code: "continuity_review_unavailable" });
-          const prepared = prepareContinuityReview({ provider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
-            promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory, effectiveContextWindowTokens: effectiveContextWindow,
+          const reviewerRoute = job.orchestration_private?.continuityReviewExecution?.enabled
+            ? job.orchestration_private.continuityReviewExecution.primary
+            : null;
+          const reviewerProvider = reviewerRoute ? {
+            id: job.provider_profile_id, name: "Frozen continuity reviewer", providerRole: "text" as const,
+            providerType: reviewerRoute.providerType, model: reviewerRoute.routeBasis.candidates[0]!.modelId,
+            contextWindowTokens: reviewerRoute.effectiveContextWindowTokens, maxOutputTokens: reviewerRoute.effectiveOutputTokens,
+            temperature: reviewerRoute.routeBasis.parameters.temperature ?? 0,
+            requestTimeoutMs: reviewerRoute.routeBasis.requestTimeoutMs, configuration: {}
+          } as GenerationTextProvider : provider;
+          const prepared = prepareContinuityReview({ provider: reviewerProvider, manifest: finalManifest, producingRequestHash: binding.producingRequestHash,
+            promptSnapshot: frozenPromptEnvelope, reviewMode, direction: safeAction, draft: committedStory,
+            effectiveContextWindowTokens: reviewerRoute?.effectiveContextWindowTokens ?? effectiveContextWindow,
             prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
-            ...(job.orchestration_private?.frozenResponseContracts ? {
+            ...(reviewerRoute ? {
+              bindRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerRoute, request).request,
+              serializeRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerRoute, request).preparedRequest
+            } : job.orchestration_private?.frozenResponseContracts ? {
               serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan)
             } : {}) });
           const priorLedger = orchestration.logicalAttempt ?? { version: 1 as const, id: job.id, semanticRepairsConsumed: 0,
@@ -4337,9 +4352,26 @@ async function executeLoadedGeneration(
           checkpoint = { ...checkpoint, status: "dispatched", reviewRequestHash: prepared.requestHash };
           orchestration = await persistOrchestration(repository, scope, job, { continuityReview: checkpoint,
             logicalAttempt: { ...priorLedger, reviewsConsumed: priorLedger.reviewsConsumed + 1 }, sourceEvidenceManifest: finalManifest });
-          const reviewed = await phase("story_continuity_review", () => callCampaignTextProvider(
-            ledgerDependencies, provider, job, "story_continuity_review", prepared.request, prepared.textExecutionPlan
-          ));
+          const reviewed = reviewerRoute
+            ? await phase("story_continuity_review", async () => {
+              const frozen = prepareFrozenContinuityReviewRequest(reviewerRoute, prepared.request);
+              if (frozen.preparedRequest.payloadHash !== prepared.requestHash) {
+                throw Object.assign(new Error("Frozen reviewer request differs from its checked review body."), {
+                  code: "response_contract_identity_mismatch"
+                });
+              }
+              return requirePreparedTextExecutor(collaborators).execute({
+                plan: frozen.plan, operation: "story_continuity_review", ownerUserId: job.owner_user_id,
+                providerProfileId: job.provider_profile_id, request: frozen.request, preparedRequest: frozen.preparedRequest,
+                invocationKey: "continuity_review:nonstream", frozenResponseContracts: reviewerRoute.responseContracts,
+                routeBasis: reviewerRoute.routeBasis, trustedOperationPrompt: frozen.trustedOperationPrompt,
+                logicalReservation: { kind: "story", ownerUserId: job.owner_user_id, generationJobId: job.id,
+                  invocationId: `continuity-review:primary:${bindingHash}`, workerId }
+              });
+            })
+            : await phase("story_continuity_review", () => callCampaignTextProvider(
+              ledgerDependencies, provider, job, "story_continuity_review", prepared.request, prepared.textExecutionPlan
+            ));
           const validated = validatePreparedContinuityReviewResult(prepared, reviewed);
           checkpoint = { ...checkpoint, status: "completed", verdict: validated.review.verdict, result: structuredClone(validated.review) as ContinuityReviewCheckpoint["result"], outcome: validated.outcome };
         } catch (error) {

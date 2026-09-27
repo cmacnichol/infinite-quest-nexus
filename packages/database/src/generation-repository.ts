@@ -6,6 +6,7 @@ import type {
   GenerationRetryLatestRequest
 } from "../../contracts/src/index.js";
 import { readQueuedResponsePolicyVersioned, type QueuedResponsePolicyVersioned } from "../../contracts/src/generation-response-contract.js";
+import { continuityReviewExecutionSnapshotHash, continuityReviewExecutionSnapshotSchema, type ContinuityReviewExecutionSnapshot } from "../../contracts/src/continuity-review-execution.js";
 import {
   GenerationApplicationError,
   type GenerationCommandRepository,
@@ -189,6 +190,7 @@ export type PreparedQueuedTextExecution = Readonly<{
   endpointIdentity: string;
   advertisement: ModelParameterAdvertisement | null;
   routeBasis?: TextExecutionRouteBasis;
+  continuityReviewExecution?: ContinuityReviewExecutionSnapshot;
 }>;
 
 function json(value: unknown): string {
@@ -475,6 +477,9 @@ export function createPostgresGenerationCommandRepository(
       const preparedBasis = preparedTextExecution?.routeBasis
         ? readTextExecutionRouteBasis(preparedTextExecution.routeBasis)
         : legacyPreparedBasis;
+      const disabledReviewExecution = { version: 1 as const, enabled: false, maximumAutomaticFallbacks: 0 as const, primary: null, fallback: null };
+      const continuityReviewExecution = continuityReviewExecutionSnapshotSchema.parse(preparedTextExecution?.continuityReviewExecution
+        ?? { ...disabledReviewExecution, snapshotHash: continuityReviewExecutionSnapshotHash(disabledReviewExecution) });
       if (preparedTextExecution?.routeBasis && !preparedBasis) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
       }
@@ -570,6 +575,7 @@ export function createPostgresGenerationCommandRepository(
               requestedModel, json(contextSnapshot), executionProtocolIdentity(dependencies.promptProtocolVersion(readablePromptSnapshot.templates as PromptSnapshot), generationPolicy, storyMemoryPolicy, readablePromptSnapshot.storyPromptCompatibility?.protocolIdentity),
               json({ requestFingerprint }), json(promptSnapshot), json(authority.baseIdentity), json(generationPolicy), json({
                 ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
+                continuityReviewExecution,
                 ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );
@@ -610,6 +616,9 @@ export function createPostgresGenerationCommandRepository(
       const preparedBasis = preparedTextExecution?.routeBasis
         ? readTextExecutionRouteBasis(preparedTextExecution.routeBasis)
         : legacyPreparedBasis;
+      const disabledReviewExecution = { version: 1 as const, enabled: false, maximumAutomaticFallbacks: 0 as const, primary: null, fallback: null };
+      const continuityReviewExecution = continuityReviewExecutionSnapshotSchema.parse(preparedTextExecution?.continuityReviewExecution
+        ?? { ...disabledReviewExecution, snapshotHash: continuityReviewExecutionSnapshotHash(disabledReviewExecution) });
       if (preparedTextExecution?.routeBasis && !preparedBasis) {
         throw new GenerationApplicationError("conflict", { reason: "provider_profile_changed_refresh_required" });
       }
@@ -765,6 +774,7 @@ export function createPostgresGenerationCommandRepository(
               json({ requestFingerprint }), json(promptSnapshot), replacementTurnId,
               baseTurnNumber, json(baseState), baseScratchpadSafeForPrompt, json(authority.baseIdentity), json(generationPolicy), json({
                 ...(queuedResponsePolicy ? { queuedResponsePolicy } : {}),
+                continuityReviewExecution,
                 ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );

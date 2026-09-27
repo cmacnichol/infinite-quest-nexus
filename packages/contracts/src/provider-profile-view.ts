@@ -3,6 +3,7 @@ import { apiTimestampSchema } from "./http.js";
 import { providerRoleSchema, providerTypeSchema } from "./generation.js";
 import { textModelSelectionSchema } from "./provider-selection.js";
 import { textExecutionOverridesSchema } from "./text-execution-plan.js";
+import { continuityReviewExecutionPolicySchema } from "./continuity-review-execution.js";
 
 export const CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY = Object.freeze({
   schemaVersion: "story-native-v1",
@@ -22,7 +23,8 @@ export const safeProviderConfigurationSchema = z.object({
   maximumAttempts: z.number().finite().optional(), retryLimit: z.number().int().nonnegative().optional(), allowPrivateArtifactHosts: z.boolean().optional(),
   embeddingMaxInputTokens: z.number().int().optional(), embeddingMaxBatchItems: z.number().int().optional(), embeddingMaxBatchTokens: z.number().int().optional(),
   embeddingDimensions: z.number().int().optional(), embeddingMaxRetries: z.number().int().optional(),
-  textResponseFormatPolicy: z.enum(["legacy", "auto", "required"]).optional(), textExecutionOverrides: textExecutionOverridesSchema.optional()
+  textResponseFormatPolicy: z.enum(["legacy", "auto", "required"]).optional(), textExecutionOverrides: textExecutionOverridesSchema.optional(),
+  continuityReviewExecutionPolicy: continuityReviewExecutionPolicySchema.nullable().optional()
 }).strict();
 
 const responseFormatCapabilitySchema = z.object({
@@ -44,7 +46,11 @@ export const safeProviderProfileViewSchema = z.object({
   healthStatus: z.enum(["unknown", "healthy", "degraded", "unavailable"]), consecutiveFailures: z.number().int().nonnegative(),
   lastHealthCheckAt: apiTimestampSchema.nullable(), lastHealthError: z.null(), hasApiKey: z.boolean(),
   createdAt: apiTimestampSchema, updatedAt: apiTimestampSchema, responseFormatCapability: responseFormatCapabilitySchema.optional()
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (value.providerRole !== "text" && value.configuration.continuityReviewExecutionPolicy != null) {
+    context.addIssue({ code: "custom", path: ["configuration", "continuityReviewExecutionPolicy"], message: "Continuity reviewer execution policy is available only on text provider profiles." });
+  }
+});
 
 export type SafeProviderConfiguration = Readonly<z.infer<typeof safeProviderConfigurationSchema>>;
 export type SafeProviderProfileView = Readonly<z.infer<typeof safeProviderProfileViewSchema>>;

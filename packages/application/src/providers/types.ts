@@ -4,6 +4,7 @@ import type {
   ProviderType
 } from "@infinite-quest/contracts";
 import type { TextExecutionOverrides, TextModelSelection } from "@infinite-quest/contracts";
+import type { ContinuityReviewExecutionPolicy } from "@infinite-quest/contracts";
 import type { OwnerScope } from "../generation/types.js";
 import type { ModelParameterAdvertisement, TextResponseFormatPolicy } from "@infinite-quest/contracts";
 import type { PresetPage, ResolvedPreset } from "@infinite-quest/contracts";
@@ -53,6 +54,7 @@ export type SafeProviderConfigurationFields = Readonly<{
   embeddingMaxRetries?: number;
   textResponseFormatPolicy?: TextResponseFormatPolicy;
   textExecutionOverrides?: TextExecutionOverrides;
+  continuityReviewExecutionPolicy?: ContinuityReviewExecutionPolicy | null;
 }>;
 
 declare const safeProviderConfigurationBrand: unique symbol;
