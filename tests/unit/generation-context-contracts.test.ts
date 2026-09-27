@@ -71,6 +71,32 @@ describe("canonical private generation context", () => {
     expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
   });
 
+  it("accepts only the fixed content-free v5 history coverage diagnostic vocabulary", () => {
+    const diagnostic = {
+      version: "history-coverage-diagnostics-v1",
+      limits: { contextTokens: 32_000, writerInputTokens: 31_000, reviewerInputTokens: 30_000,
+        recentWindowTurns: 11, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
+      candidates: { selectedCount: 3, selectedEstimateTokens: 1_240, candidatePoolCandidatesRemoved: 1,
+        stopReason: "candidate_pool_limit", fallbackReason: "none", duplicateExcluded: 2, sourceValidationExcluded: 1 },
+      ledger: { capturedCount: 5, sentCount: 2, omittedCount: 3, coveredByRecentCount: 1,
+        sourceExcludedCount: 4, unreadThroughTurn: null, budgetTokens: 2_000, measurementTrialCount: null },
+      facts: { sourceCount: 4, sentCount: 2, omittedCount: 2, sourceOmittedCount: 3,
+        budgetTokens: 1_200, measurementLimit: 64, measurementLimitHit: true, unexaminedCount: 1,
+        sourceCoverage: { candidateRows: 7, sourceBytes: 400_000, sourceLimitReached: false,
+          oversizedCandidateCount: 1, futureSourceCount: 1, withheldCandidateCount: 2 } },
+      recents: { capturedCount: 3, sentCount: 2, targetCount: 3, firstGapReason: null },
+      finalTokens: { context: 3_000, writerRequest: 4_000, reviewerRequest: 2_000 }
+    } as const;
+    expect(context.historyCoverageDiagnosticsSchema.parse(diagnostic)).toEqual(diagnostic);
+    for (const hostile of [
+      { ...diagnostic, arbitrary: "no" },
+      { ...diagnostic, candidates: { ...diagnostic.candidates, candidateId: uuid } },
+      { ...diagnostic, ledger: { ...diagnostic.ledger, direction: "PRIVATE_DIRECTION_CANARY" } },
+      { ...diagnostic, facts: { ...diagnostic.facts, error: "PRIVATE_ERROR_CANARY" } },
+      { ...diagnostic, candidates: { ...diagnostic.candidates, stopReason: "unbounded" } }
+    ]) expect(context.historyCoverageDiagnosticsSchema.safeParse(hostile).success).toBe(false);
+  });
+
   it("accepts only complete protected-fact authority records and an explicit omission count", () => {
     const protectedFact = { id: uuid, turnNumber: 0, content: "The corrected harbor remains sealed." };
     const value = { authority: { ...authority, protectedFacts: [protectedFact], protectedFactsOmitted: 2,

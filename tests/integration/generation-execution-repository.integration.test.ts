@@ -449,6 +449,7 @@ integration("PostgreSQL generation execution repository", () => {
     story: ReturnType<typeof supersedingStory>;
     responseId?: string;
     sentFactIds?: readonly string[];
+    contextDiagnostics?: Record<string, unknown>;
   }>): AcceptedGenerationCommit {
     return {
       scope: input.scope,
@@ -471,7 +472,7 @@ integration("PostgreSQL generation execution repository", () => {
         rawMetadata: {}
       },
       contextFingerprint: "canonical-fact-authorization-context",
-      contextDiagnostics: { retrieval: { selectedMemoryCount: 0 } },
+      contextDiagnostics: input.contextDiagnostics ?? { retrieval: { selectedMemoryCount: 0 } },
       ...(input.sentFactIds ? { sentFactIds: input.sentFactIds } : {}),
       chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
       inputs: input.job.orchestration_inputs,
@@ -487,6 +488,44 @@ integration("PostgreSQL generation execution repository", () => {
       onIllustrationEnqueueError: () => undefined
     };
   }
+
+  function historyCoverageDiagnostic() {
+    return {
+      version: "history-coverage-diagnostics-v1",
+      limits: { contextTokens: 16_000, writerInputTokens: 15_000, reviewerInputTokens: null,
+        recentWindowTurns: 11, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
+      candidates: { selectedCount: 1, selectedEstimateTokens: 8, candidatePoolCandidatesRemoved: 0,
+        stopReason: "exhausted", fallbackReason: "none", duplicateExcluded: 0, sourceValidationExcluded: 0 },
+      ledger: null,
+      facts: null,
+      recents: null,
+      finalTokens: { context: 400, writerRequest: 900, reviewerRequest: null }
+    } as const;
+  }
+
+  it("persists only strict content-free history coverage diagnostics", async () => {
+    const acceptedFixture = await campaign();
+    const accepted = await readyAcceptedCommit(acceptedFixture.campaignId, "history-diagnostic-valid-worker");
+    const valid = historyCoverageDiagnostic();
+    await expect(accepted.repository.commitAcceptedTurn(acceptedCommitInput({
+      ...accepted, story: supersedingStory([]), contextDiagnostics: { layers: { history: valid } }
+    }))).resolves.toMatchObject({ turnId: expect.any(String) });
+    const stored = await pool.query<{ model_metadata: { contextDiagnostics: { layers: { history: unknown } } } }>(
+      "SELECT model_metadata FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL ORDER BY turn_number DESC LIMIT 1",
+      [acceptedFixture.campaignId]
+    );
+    expect(stored.rows[0]?.model_metadata.contextDiagnostics.layers.history).toEqual(valid);
+
+    const rejectedFixture = await campaign();
+    const rejected = await readyAcceptedCommit(rejectedFixture.campaignId, "history-diagnostic-invalid-worker");
+    const before = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [rejectedFixture.campaignId]);
+    await expect(rejected.repository.commitAcceptedTurn(acceptedCommitInput({
+      ...rejected, story: supersedingStory([]), contextDiagnostics: { layers: { history: { ...historyCoverageDiagnostic(),
+        candidates: { ...historyCoverageDiagnostic().candidates, sourceId: "PRIVATE_HISTORY_ID_CANARY" } } } }
+    }))).rejects.toMatchObject({ code: "generation_checkpoint_incompatible" });
+    await expect(pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [rejectedFixture.campaignId]))
+      .resolves.toEqual(before);
+  });
 
   it("commits an enforced final Keep only for its exact stored candidate and preserves failed targets", async () => {
     const imported = await campaign();

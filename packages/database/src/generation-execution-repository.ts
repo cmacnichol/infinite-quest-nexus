@@ -43,7 +43,7 @@ import {
   type ResponseContractOperationV2,
   type SceneCoverageReplayCheckpoint
 } from "../../contracts/src/generation-response-contract.js";
-import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, historyCoverageDiagnosticsSchema, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
 import type {
   CampaignWorldVersionMemoryScope,
@@ -805,9 +805,18 @@ function hasValidPrimaryResult(value: unknown): boolean {
     && Array.isArray(result.sentFactIds) && result.sentFactIds.every((id) => typeof id === "string")
     && typeof result.providerConfigurationHash === "string" && result.providerConfigurationHash.length > 0
     && typeof result.contextFingerprint === "string" && result.contextFingerprint.length > 0
-    && typeof result.contextDiagnostics === "object" && result.contextDiagnostics !== null
+    && hasValidPersistedContextDiagnostics(result.contextDiagnostics)
     && typeof result.chronicleRetrieval === "object" && result.chronicleRetrieval !== null
     && (result.rawOutputReference === undefined || (typeof result.rawOutputReference === "string" && result.rawOutputReference.length > 0));
+}
+
+/** Existing attempt diagnostics remain opaque; only the new v5 private layer is closed. */
+function hasValidPersistedContextDiagnostics(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const diagnostics = value as Record<string, unknown>;
+  const layers = diagnostics.layers;
+  if (!layers || typeof layers !== "object" || Array.isArray(layers) || !Object.hasOwn(layers, "history")) return true;
+  return historyCoverageDiagnosticsSchema.safeParse((layers as Record<string, unknown>).history).success;
 }
 
 function hasValidPrimaryReservation(value: unknown): boolean {
@@ -1399,6 +1408,11 @@ async function commitAcceptedTurn(
   input: AcceptedGenerationCommit
 ): Promise<{ turnId: string }> {
   const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(input.chronicleRetrieval);
+  if (!hasValidPersistedContextDiagnostics(input.contextDiagnostics)) {
+    throw Object.assign(new Error("The persisted history-coverage diagnostic is invalid."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
   const { job, scope, provider, response, inputs, orchestration, collaborators } = input;
   // The commit boundary accepts only the current protocol. Historical/import
   // replay goes through the explicitly named Chronicle compatibility path.
@@ -2142,6 +2156,7 @@ export function createPostgresGenerationExecutionRepository(
           ...(priorFailures === undefined ? (suppliedFailures === undefined ? {} : { preparedResponseFailures: suppliedFailures })
             : appendOnly ? { preparedResponseFailures: suppliedFailures } : { preparedResponseFailures: priorFailures })
         };
+        if (!hasValidPrimaryResult(merged.primaryResult)) return false;
         await responseContractState(client, scope, merged);
         return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =

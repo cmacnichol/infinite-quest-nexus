@@ -3,7 +3,7 @@ import { normalizeStoryEvidenceSource, selectVerifiedNarrativeExcerpt } from "..
 import { worldFictionOverview } from "../../../packages/domain/src/world-fiction-reference.js";
 import type { StoryMemoryPolicy } from "../../../packages/contracts/src/story-memory-policy.js";
 import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol } from "../../../packages/contracts/src/story-memory-policy.js";
-import { canonicalEvidenceJson, createStoryEvidence, generationEvidenceManifestHash, hasGenerationCharacterAuthority, type GenerationContextCandidate, type GenerationEvidenceManifest, type StoryEvidence } from "../../../packages/application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, createStoryEvidence, generationEvidenceManifestHash, hasGenerationCharacterAuthority, historyCoverageDiagnosticsSchema, type GenerationContextCandidate, type GenerationEvidenceManifest, type StoryEvidence } from "../../../packages/application/src/memory/generation-context.js";
 import type { MemoryGenerationAuthorityContext } from "../../../packages/application/src/index.js";
 import type { StoryLengthWordRange } from "../../../packages/contracts/src/story-settings.js";
 import { ContextBudgetError, buildStoryMemoryUserPrompt, buildStoryUserPrompt, containsMechanicsLanguage, estimatedInputSafetyAllowanceTokens, estimateStoryTokens, planContext, projectHistoryCoverageContext, serializeProviderRequest, type TextProviderProfile } from "../../../packages/story-engine/src/index.js";
@@ -643,6 +643,62 @@ export function planGenerationPromptContext(
     ? buildStoryMemoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode, historyCoverage)
     : buildStoryUserPrompt(selectedContext, action, false, guidance, storyLength, inputMode);
   const requestBody = serialize(storyInput);
+  const historyDiagnostics = historyCoverage ? historyCoverageDiagnosticsSchema.parse({
+    version: "history-coverage-diagnostics-v1",
+    limits: {
+      contextTokens: contextLimit,
+      writerInputTokens: inputLimit,
+      reviewerInputTokens: reviewEnabled ? reviewInputLimit ?? inputLimit : null,
+      recentWindowTurns: HISTORY_COVERAGE_POLICY.recentWindowTurns,
+      candidatePoolLimit: context.chronicleSelectionDiagnostics?.candidatePoolLimit ?? null,
+      protectedFactMeasurements: MAX_PROTECTED_FACT_MEASUREMENTS
+    },
+    candidates: {
+      selectedCount: selectedContext.chronicle.length,
+      selectedEstimateTokens: Math.round(selectedContext.chronicle.reduce((total, candidate) => total + Math.max(0, candidate.estimatedTokens), 0)),
+      candidatePoolCandidatesRemoved: context.chronicleSelectionDiagnostics?.candidatePoolCandidatesRemoved ?? null,
+      stopReason: context.chronicleSelectionDiagnostics?.stopReason ?? null,
+      fallbackReason: context.chronicleRetrieval
+        ? context.chronicleRetrieval.fallbackCode ?? "none"
+        : null,
+      duplicateExcluded: duplicateIds.length,
+      sourceValidationExcluded: sourceValidationFailures
+    },
+    ledger: authority.storyLedger ? {
+      capturedCount: ledgerRecords.length,
+      sentCount: selectedContext.storyLedger?.entries.length ?? 0,
+      omittedCount: Math.max(0, ledgerRecords.length - (selectedContext.storyLedger?.entries.length ?? 0)),
+      coveredByRecentCount: historyReservationDiagnostics?.postProjectionRemovedEntryCount ?? 0,
+      sourceExcludedCount: (authority.storyLedger.coverage?.missingTurnCount ?? 0)
+        + (authority.storyLedger.coverage?.filteredDirectionCount ?? 0)
+        + (authority.storyLedger.coverage?.oversizedDirectionCount ?? 0),
+      unreadThroughTurn: authority.storyLedger.coverage?.unreadThroughTurn ?? null,
+      budgetTokens: historyReservationDiagnostics?.ledgerBudgetTokens ?? 0,
+      measurementTrialCount: historyReservationDiagnostics?.measurementTrialCount ?? null
+    } : null,
+    facts: authority.protectedFacts ? {
+      sourceCount: authority.protectedFacts.length,
+      sentCount: selectedContext.protectedFacts?.length ?? 0,
+      omittedCount: Math.max(0, authority.protectedFacts.length - (selectedContext.protectedFacts?.length ?? 0)),
+      sourceOmittedCount: (authority.protectedFactsOmitted ?? 0) + withheldProtectedFactCount,
+      budgetTokens: factReservationDiagnostics?.factBudgetTokens ?? 0,
+      measurementLimit: MAX_PROTECTED_FACT_MEASUREMENTS,
+      measurementLimitHit: factReservationDiagnostics?.measurementLimitHit ?? false,
+      unexaminedCount: factReservationDiagnostics?.unexaminedFactCount ?? 0,
+      sourceCoverage: authority.protectedFactsCoverage ?? null
+    } : null,
+    recents: context.recentTurns ? {
+      capturedCount: context.recentTurns.length,
+      sentCount: selectedContext.recentTurns?.length ?? 0,
+      targetCount: recentDiagnostics.target,
+      firstGapReason: recentDiagnostics.firstGapReason
+    } : null,
+    finalTokens: {
+      context: plan.contextTokens,
+      writerRequest: plan.requestTokens,
+      reviewerRequest: reviewEnabled ? plan.additionalRequestTokens ?? null : null
+    }
+  }) : undefined;
   return {
     layerDiagnostics: {
       ...(castSelection ? { cast: { allocatedTokens: castAllocatedTokens, estimatedTokens: castSelection.estimatedTokens,
@@ -654,6 +710,7 @@ export function planGenerationPromptContext(
       sourceValidationFailures,
       ...(historyReservationDiagnostics ? { ledgerReservation: historyReservationDiagnostics } : {}),
       ...(factReservationDiagnostics ? { factReservation: factReservationDiagnostics } : {}),
+      ...(historyDiagnostics ? { history: historyDiagnostics } : {}),
       components: Object.fromEntries(Object.entries(selectedContext).map(([key, value]) => [key, estimateStoryTokens(stableStringify(value))])),
       omitted: [
         ...duplicateIds.map((id) => ({ id, reason: "duplicate_source" as const })),

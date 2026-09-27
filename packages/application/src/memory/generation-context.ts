@@ -141,6 +141,76 @@ export const generationChronicleSelectionDiagnosticsSchema = z.object({
   stopReason: z.enum(["parent_limit", "token_limit", "diversity_limit", "candidate_pool_limit", "exhausted"]).optional()
 }).strict();
 export type GenerationChronicleSelectionDiagnostics = DeepReadonly<z.infer<typeof generationChronicleSelectionDiagnosticsSchema>>;
+
+/**
+ * Private v5 operator evidence. Every field is a bounded count, fixed enum,
+ * or token estimate; identifiers, source text, provider responses, and error
+ * strings are deliberately excluded.
+ */
+const historyDiagnosticCountSchema = z.number().int().min(0).max(4_000_000);
+const historyDiagnosticTokenSchema = z.number().int().min(0).max(4_000_000);
+const historyCandidateStopReasonSchema = z.enum([
+  "parent_limit", "token_limit", "diversity_limit", "candidate_pool_limit", "exhausted"
+]);
+const historyFallbackReasonSchema = z.enum([
+  "none", "empty_query", "semantic_not_configured", "provider_unavailable",
+  "semantic_retrieval_unavailable", "chunk_index_not_ready", "incompatible_chunk_embeddings"
+]);
+const historyRecentGapReasonSchema = z.enum(["recent_gap", "context_limit", "request_limit"]);
+export const historyCoverageDiagnosticsSchema = z.object({
+  version: z.literal("history-coverage-diagnostics-v1"),
+  limits: z.object({
+    contextTokens: historyDiagnosticTokenSchema,
+    writerInputTokens: historyDiagnosticTokenSchema,
+    reviewerInputTokens: historyDiagnosticTokenSchema.nullable(),
+    recentWindowTurns: z.literal(HISTORY_COVERAGE_POLICY.recentWindowTurns),
+    candidatePoolLimit: historyDiagnosticCountSchema.nullable(),
+    protectedFactMeasurements: z.literal(64)
+  }).strict(),
+  candidates: z.object({
+    selectedCount: historyDiagnosticCountSchema,
+    selectedEstimateTokens: historyDiagnosticTokenSchema,
+    candidatePoolCandidatesRemoved: historyDiagnosticCountSchema.nullable(),
+    stopReason: historyCandidateStopReasonSchema.nullable(),
+    fallbackReason: historyFallbackReasonSchema.nullable(),
+    duplicateExcluded: historyDiagnosticCountSchema,
+    sourceValidationExcluded: historyDiagnosticCountSchema
+  }).strict(),
+  ledger: z.object({
+    capturedCount: historyDiagnosticCountSchema,
+    sentCount: historyDiagnosticCountSchema,
+    omittedCount: historyDiagnosticCountSchema,
+    coveredByRecentCount: historyDiagnosticCountSchema,
+    sourceExcludedCount: historyDiagnosticCountSchema,
+    unreadThroughTurn: ordinalSchema.nullable(),
+    budgetTokens: historyDiagnosticTokenSchema,
+    /** Planning measurements are count-only; elapsed time remains unpersisted. */
+    measurementTrialCount: historyDiagnosticCountSchema.nullable()
+  }).strict().nullable(),
+  facts: z.object({
+    sourceCount: historyDiagnosticCountSchema,
+    sentCount: historyDiagnosticCountSchema,
+    omittedCount: historyDiagnosticCountSchema,
+    sourceOmittedCount: historyDiagnosticCountSchema,
+    budgetTokens: historyDiagnosticTokenSchema,
+    measurementLimit: z.literal(64),
+    measurementLimitHit: z.boolean(),
+    unexaminedCount: historyDiagnosticCountSchema,
+    sourceCoverage: protectedFactSourceCoverageSchema.nullable()
+  }).strict().nullable(),
+  recents: z.object({
+    capturedCount: historyDiagnosticCountSchema,
+    sentCount: historyDiagnosticCountSchema,
+    targetCount: historyDiagnosticCountSchema,
+    firstGapReason: historyRecentGapReasonSchema.nullable()
+  }).strict().nullable(),
+  finalTokens: z.object({
+    context: historyDiagnosticTokenSchema,
+    writerRequest: historyDiagnosticTokenSchema,
+    reviewerRequest: historyDiagnosticTokenSchema.nullable()
+  }).strict()
+}).strict();
+export type HistoryCoverageDiagnostics = DeepReadonly<z.infer<typeof historyCoverageDiagnosticsSchema>>;
 export const memoryGenerationAuthorityContextSchema = z.object({
   authority: generationContextAuthoritySchema, candidates: z.array(generationContextCandidateSchema),
   recentTurns: z.array(generationRecentTurnSchema).max(HISTORY_COVERAGE_POLICY.recentWindowTurns).optional(),

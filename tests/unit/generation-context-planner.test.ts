@@ -11,6 +11,7 @@ import { sha256 } from "../../packages/domain/src/index.js";
 import { bindManifestToProducingRequest } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
 import { sentCanonicalFactIds } from "../../services/runtime/src/generation-executor-adapter.js";
+import { historyCoverageDiagnosticsSchema } from "../../packages/application/src/memory/generation-context.js";
   function plannerContext(characterAuthority: unknown, version: "legacy" | "v3" = "v3") {
     const baseIdentity = version === "v3"
       ? { version: "generation-base-v3", operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null, characterProfileRevision: 1, characterProfileFingerprint: "b".repeat(64) }
@@ -107,6 +108,41 @@ describe("layered generation context planner", () => {
     expect(sent.recentTurns).toEqual([]);
     expect(Object.keys(sent).at(-1)).toBe("currentScene");
     expect(userContent.current_turn_input).toEqual({ mode: "scene", text: "Empty-layer input" });
+  });
+
+  it("projects v5 history coverage from final sent layers without retaining source content or identifiers", () => {
+    const context: any = recentContext();
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 1, filteredDirectionCount: 2, oversizedDirectionCount: 3, loadedRows: 6 },
+      entries: [
+        { turnId: "ledger-one", turnNumber: 1, inputMode: "action", direction: "Old private intent." },
+        { turnId: "turn-2", turnNumber: 2, inputMode: "action", direction: "Duplicate recent intent." }
+      ] };
+    context.authority.protectedFacts = [{ id: "11111111-1111-4111-8111-111111111111", turnNumber: 1, content: "Complete private fact." }];
+    context.authority.protectedFactsOmitted = 2;
+    context.authority.protectedFactsCoverage = { candidateRows: 3, sourceBytes: 72, sourceLimitReached: false,
+      oversizedCandidateCount: 0, futureSourceCount: 1, withheldCandidateCount: 1 };
+    context.candidates = [{ id: "opaque-source-canary", turnId: "opaque-turn-canary", ordinal: 1, kind: "turn_fiction", content: "Private candidate evidence.", tokenEstimate: 7, rank: 1 }];
+    context.chronicleSelectionDiagnostics = { candidatePoolLimit: 2_000, candidatePoolCandidatesRemoved: 4,
+      selectedParentTokens: 12, stopReason: "candidate_pool_limit" };
+    context.chronicleRetrieval = { fallbackCode: "chunk_index_not_ready" };
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const diagnostic = historyCoverageDiagnosticsSchema.parse((result.layerDiagnostics as any).history);
+
+    expect(diagnostic).toMatchObject({
+      limits: { contextTokens: 32_000, writerInputTokens: 31_900, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
+      candidates: { selectedCount: 1, selectedEstimateTokens: 7, candidatePoolCandidatesRemoved: 4,
+        stopReason: "candidate_pool_limit", fallbackReason: "chunk_index_not_ready" },
+      ledger: { capturedCount: 2, sentCount: 1, omittedCount: 1, coveredByRecentCount: 1, sourceExcludedCount: 6 },
+      facts: { sourceCount: 1, sentCount: 1, omittedCount: 0, sourceOmittedCount: 2,
+        measurementLimit: 64, measurementLimitHit: false, unexaminedCount: 0 },
+      recents: { capturedCount: 2, sentCount: 2, targetCount: 3 },
+      finalTokens: { context: result.contextPlan.contextTokens, writerRequest: result.contextPlan.requestTokens, reviewerRequest: null }
+    });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/ledger-one|turn-2|Complete private fact|opaque-source-canary|opaque-turn-canary|Private/);
   });
 
   it("fits the final review with a full 48000-token output reserve by pruning optional history before generation", () => {
