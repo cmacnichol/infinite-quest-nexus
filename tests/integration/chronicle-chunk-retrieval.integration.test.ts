@@ -185,7 +185,8 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
     providerId: string,
     queries: string[],
     providerRole: "embedding" | "text" = "embedding",
-    configuredDimensions: number | null = 2
+    configuredDimensions: number | null = 2,
+    embedBatches: string[][] = []
   ) {
     return createPostgresChronicleGenerationTransactionPort({
       embeddings: {
@@ -214,6 +215,7 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
         },
         async embed(provider, documents) {
           queries.push(...documents);
+          embedBatches.push([...documents]);
           return provider.embed(documents);
         },
         async fingerprint() { return "chunk-fingerprint"; },
@@ -246,6 +248,119 @@ integration("PostgreSQL Chronicle chunk retrieval", () => {
       expect(facts.length).toBeGreaterThan(0);
       expect(new Set(facts.map((fact) => fact.candidateId))).toEqual(new Set([factId]));
     } finally { spy.mockRestore(); }
+  });
+
+  it("uses the captured corrected base narration tail for v5 queries even when Chronicle is stale", async () => {
+    const { fixture, providerId } = await configuredFixture("captured v5 scene tail");
+    await turn(fixture, 1, "Enter the observatory.", "The observatory doors open.");
+    const baseTurnId = await turn(fixture, 2, "Read the old inscription.", "STALE_CHRONICLE_OPENING The old inscription remains.");
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [fixture.campaignId]);
+    const corrections = createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) });
+    const correctedNarration = `CORRECTED_BASE_OPENING ${"corrected scene detail ".repeat(90)} CORRECTED_BASE_ENDING`;
+    await corrections.correctNarration({ ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId }, {
+      turnId: baseTurnId, expectedActiveTurnNumber: 2, expectedCorrectionRevision: 0,
+      narration: correctedNarration, source: "user_edit"
+    });
+    await pool.query("DELETE FROM chronicle_memories WHERE campaign_id=$1 AND turn_id=$2", [fixture.campaignId, baseTurnId]);
+    await parent(fixture, { turnId: baseTurnId, kind: "turn_fiction", ordinal: 2,
+      content: `STALE_CHRONICLE_OPENING ${"derived memory ".repeat(80)} STALE_CHRONICLE_ENDING` });
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const readQueries = async (query: string) => {
+      const queries: string[] = [];
+      const embedBatches: string[][] = [];
+      const context = await transaction(providerId, queries, "embedding", 2, embedBatches).loadGenerationContext(pool, {
+        ...fixture, operationKind: "append", expectedTurnNumber: 3, query, storyMemoryPolicy
+      });
+      expect(embedBatches.length).toBeLessThanOrEqual(1);
+      expect(queries.every((value) => value.length <= 1_000)).toBe(true);
+      expect(queries.join("\n")).toContain("CORRECTED_BASE_ENDING");
+      expect(queries.join("\n")).not.toContain("CORRECTED_BASE_OPENING");
+      expect(queries.join("\n")).not.toMatch(/STALE_CHRONICLE_(?:OPENING|ENDING)/);
+      expect(queries.join("\n")).not.toContain("The observatory doors open.");
+      return context;
+    };
+    const staleContext = await readQueries("Inspect the inscription after a stale Chronicle row.");
+    expect(staleContext.chronicleRetrieval).toMatchObject({ fallbackCode: "chunk_index_not_ready" });
+  });
+
+  it("uses the captured v5 base narration tail when its Chronicle row is missing", async () => {
+    const { fixture, providerId } = await configuredFixture("missing v5 scene row");
+    await turn(fixture, 1, "Enter the observatory.", "The observatory doors open.");
+    const baseTurnId = await turn(fixture, 2, "Read the old inscription.", "The old inscription remains.");
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [fixture.campaignId]);
+    const correctedNarration = `MISSING_ROW_OPENING ${"corrected scene detail ".repeat(90)} MISSING_ROW_ENDING`;
+    await createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) }).correctNarration(
+      { ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId }, {
+        turnId: baseTurnId, expectedActiveTurnNumber: 2, expectedCorrectionRevision: 0,
+        narration: correctedNarration, source: "user_edit"
+      }
+    );
+    await pool.query("DELETE FROM chronicle_memories WHERE campaign_id=$1", [fixture.campaignId]);
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const queries: string[] = [];
+    const embedBatches: string[][] = [];
+    await transaction(providerId, queries, "embedding", 2, embedBatches).loadGenerationContext(pool, {
+      ...fixture, operationKind: "append", expectedTurnNumber: 3,
+      query: "Inspect the inscription without derived memory.", storyMemoryPolicy
+    });
+
+    expect(embedBatches.length).toBeLessThanOrEqual(1);
+    expect(queries.join("\n")).toContain("MISSING_ROW_ENDING");
+    expect(queries.join("\n")).not.toContain("MISSING_ROW_OPENING");
+  });
+
+  it("uses the corrected N-1 scene for v5 replacement queries and excludes the replaced turn", async () => {
+    const { fixture, providerId } = await configuredFixture("replacement base scene tail");
+    const baseTurnId = await turn(fixture, 1, "Study the map.", "The old map is folded away.");
+    const replacedTurnId = await turn(fixture, 2, "Cross the bridge.", "REPLACED_TURN_CANARY The bridge collapses.");
+    await pool.query("UPDATE campaigns SET active_turn_number=2 WHERE id=$1", [fixture.campaignId]);
+    const correctedNarration = `REPLACEMENT_BASE_OPENING ${"corrected base passage ".repeat(90)} REPLACEMENT_BASE_ENDING`;
+    await createPostgresTurnCorrectionRepository(pool, { memory: memoryGeneration(pool) }).correctNarration(
+      { ownerUserId: fixture.ownerUserId, campaignId: fixture.campaignId }, {
+        turnId: baseTurnId, expectedActiveTurnNumber: 2, expectedCorrectionRevision: 0,
+        narration: correctedNarration, source: "user_edit"
+      }
+    );
+    await pool.query("DELETE FROM chronicle_memories WHERE campaign_id=$1", [fixture.campaignId]);
+    await parent(fixture, { turnId: replacedTurnId, kind: "turn_fiction", ordinal: 2,
+      content: "REPLACED_TURN_CANARY stale narration for the turn being replaced." });
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: "story-v17-campaign-cast", providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const queries: string[] = [];
+    const embedBatches: string[][] = [];
+    await transaction(providerId, queries, "embedding", 2, embedBatches).loadGenerationContext(pool, {
+      ...fixture, operationKind: "replace_latest", expectedTurnNumber: 2,
+      query: "Replace the crossing narration.", storyMemoryPolicy
+    });
+
+    expect(embedBatches.length).toBeLessThanOrEqual(1);
+    expect(queries.join("\n")).toContain("REPLACEMENT_BASE_ENDING");
+    expect(queries.join("\n")).not.toContain("REPLACEMENT_BASE_OPENING");
+    expect(queries.join("\n")).not.toContain("REPLACED_TURN_CANARY");
+  });
+
+  it("keeps v4 scene query prefixes unchanged", async () => {
+    const { fixture, providerId } = await configuredFixture("v4 scene query prefix");
+    const currentTurnId = await turn(fixture, 1, "Wait by the fountain.", "The fountain ripples.");
+    await pool.query("UPDATE campaigns SET active_turn_number=1 WHERE id=$1", [fixture.campaignId]);
+    await parent(fixture, { turnId: currentTurnId, kind: "turn_fiction", ordinal: 1,
+      content: `V4_PREFIX_CANARY ${"historical scene detail ".repeat(80)} V4_ENDING_CANARY` });
+    const policy = defaultStoryMemoryPolicy("r1");
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: "current-continuity-v3" as const,
+      promptProtocol: "story-v14-continuity-context" as const, providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const queries: string[] = [];
+    await transaction(providerId, queries).loadGenerationContext(pool, {
+      ...fixture, operationKind: "append", expectedTurnNumber: 2,
+      query: "Remember the fountain.", storyMemoryPolicy
+    });
+
+    expect(queries.join("\n")).toContain("V4_PREFIX_CANARY");
+    expect(queries.join("\n")).not.toContain("V4_ENDING_CANARY");
   });
 
   it.each(["chunked_hybrid", "legacy_hybrid", "chunked_unavailable"])("uses balanced queries only for enrolled generation and separates its query cache: %s", async (implementation) => {

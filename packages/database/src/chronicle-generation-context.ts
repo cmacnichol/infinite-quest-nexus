@@ -210,6 +210,7 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
   options: Readonly<{ useSavepoints?: boolean }> = {},
 ): Promise<MemoryGenerationAuthorityContext> {
   const baseTurnNumber = Number(authorityContext.baseIdentity.baseTurnNumber);
+  const useCapturedSceneHint = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol);
   const retrieval = await loadPostgresChronicleGenerationCandidates(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
@@ -219,6 +220,7 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
     ...(authorityContext.authority.castSnapshot ? { castSnapshot: castGenerationSnapshotSchema.parse(authorityContext.authority.castSnapshot) } : {}),
     ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
     ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
+    ...(useCapturedSceneHint ? { capturedSceneNarration: authorityContext.authority.latestTurn?.narration ?? "" } : {}),
     ...(reservation === undefined ? {} : { generationExclusions: reservation }),
     ...(authorityContext.authority.optionalFactFrontier === undefined ? {} : { optionalFactFrontier: authorityContext.authority.optionalFactFrontier })
   }, dependencies, options);

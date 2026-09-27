@@ -5,7 +5,7 @@ import type { GenerationHistoryReservation, GenerationOptionalFactFrontier } fro
 import { HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 import { castGenerationSnapshotSchema, type CastGenerationSnapshot } from "../../contracts/src/campaign-cast-context.js";
 type ChronicleRetrievalScope = Parameters<MemoryGenerationTransactionPort["buildContextPreview"]>[1]
-  & Readonly<{ storyMemoryPolicy?: StoryMemoryPolicySnapshot; castSnapshot?: CastGenerationSnapshot; generationExclusions?: GenerationHistoryReservation; optionalFactFrontier?: GenerationOptionalFactFrontier }>;
+  & Readonly<{ storyMemoryPolicy?: StoryMemoryPolicySnapshot; castSnapshot?: CastGenerationSnapshot; generationExclusions?: GenerationHistoryReservation; optionalFactFrontier?: GenerationOptionalFactFrontier; capturedSceneNarration?: string }>;
 import { requireCampaignWorldVersionScope } from "../../application/src/memory/helpers.js";
 import { verifyCapturedOptionalGenerationFacts } from "./campaign-continuity-repository.js";
 import { toSafeProviderConfiguration } from "../../application/src/providers/index.js";
@@ -84,6 +84,7 @@ import {
 import {
   planChronicleQueries,
   planBalancedChronicleQueries,
+  sceneHintTail,
   type ChronicleQueryVariant
 } from "../../domain/src/chronicle-query-plan.js";
 import {
@@ -672,6 +673,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     castSnapshot?: CastGenerationSnapshot;
     generationExclusions?: GenerationHistoryReservation;
     optionalFactFrontier?: GenerationOptionalFactFrontier;
+    capturedSceneNarration?: string;
   }>,
   dependencies: ChronicleGenerationTransactionDependencies,
   options: Readonly<{ useSavepoints?: boolean }> = {},
@@ -683,6 +685,7 @@ export async function loadPostgresChronicleGenerationCandidates(
     ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
     ...(scope.generationExclusions === undefined ? {} : { generationExclusions: scope.generationExclusions }),
     ...(scope.optionalFactFrontier === undefined ? {} : { optionalFactFrontier: scope.optionalFactFrontier }),
+    ...(scope.capturedSceneNarration === undefined ? {} : { capturedSceneNarration: scope.capturedSceneNarration }),
     ...(scope.castSnapshot ? { castSnapshot: scope.castSnapshot } : {}),
     request: {
       // This request initializes retrieval only. It is never rendered or used
@@ -1768,12 +1771,17 @@ function chunkQueryPlanInput(
       terms
     }];
   });
+  const historyCoverageProtocol = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol);
   const input = {
     action: scope.request.query,
     ...(scope.request.throughTurnNumber === undefined ? {} : { throughTurnNumber: scope.request.throughTurnNumber }),
     entityHints,
-    sceneHints: memories.filter((memory) => memory.memory_kind === "turn_fiction")
-      .map((memory) => ({ ordinal: memory.ordinal, content: memory.content })),
+    sceneHints: historyCoverageProtocol
+      ? scope.capturedSceneNarration
+        ? [{ ordinal: scope.request.throughTurnNumber ?? 0, content: sceneHintTail(scope.capturedSceneNarration, 1_000) }]
+        : []
+      : memories.filter((memory) => memory.memory_kind === "turn_fiction")
+        .map((memory) => ({ ordinal: memory.ordinal, content: memory.content })),
     openThreadHints: memories.filter((memory) => memory.memory_kind === "open_thread")
       .map((memory) => ({ ordinal: memory.ordinal, content: memory.content }))
   };
