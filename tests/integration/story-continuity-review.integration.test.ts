@@ -2873,16 +2873,66 @@ integration("T17 durable continuity review", () => {
     const requestHash = checkpoint.primaryResult.requestPayloadHash;
     const callsBeforeReclaim = requests.length;
     await pool.query("UPDATE provider_profiles SET temperature=0.1 WHERE id=$1", [providerId]);
-    try {
-      await runGenerationJob(pool, `v5-reclaim-${randomUUID()}`, 30, credentialSecret);
-    } finally {
-      await pool.query("UPDATE provider_profiles SET temperature=0 WHERE id=$1", [providerId]);
-    }
+    try { await runGenerationJob(pool, `v5-reclaim-${randomUUID()}`, 30, credentialSecret); }
+    finally { await pool.query("UPDATE provider_profiles SET temperature=0 WHERE id=$1", [providerId]); }
     expect(requests).toHaveLength(callsBeforeReclaim);
     expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable" });
     await expect(pool.query<{ orchestration_private: { primaryResult: { requestPayloadHash: string } } }>(
       "SELECT orchestration_private FROM generation_jobs WHERE id=$1", [job.id]
     )).resolves.toMatchObject({ rows: [{ orchestration_private: { primaryResult: { requestPayloadHash: requestHash } } }] });
+  });
+
+  it("keeps a real v5 fourteen-turn review candidate without changing its frozen window or dispatching a new primary call", async () => {
+    const { job, application } = await enqueueRealV5ReviewCheckpoint();
+    reviewVerdict = "conflict";
+    requests.length = 0;
+    await runGenerationJob(pool, `v5-keep-candidate-${randomUUID()}`, 30, credentialSecret);
+    const review = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(review).toMatchObject({ state: "pending", canKeep: true });
+    const identity = (await pool.query<{ generation_base_identity: Record<string, unknown> }>("SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.generation_base_identity;
+    expect(identity).toMatchObject({ recentWindowTurns: 11, recentWindowFingerprint: expect.any(String) });
+    const callsBeforeKeep = requests.length;
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+    await runGenerationJob(pool, `v5-keep-resume-${randomUUID()}`, 30, credentialSecret);
+    expect(requests).toHaveLength(callsBeforeKeep);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect((await pool.query<{ generation_base_identity: Record<string, unknown> }>("SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.generation_base_identity).toEqual(identity);
+  });
+
+  it.each(["window", "protocol"] as const)("rejects Keep of a tampered saved v5 review candidate before another primary call (%s)", async (mutation) => {
+    const { job, application } = await enqueueRealV5ReviewCheckpoint();
+    reviewVerdict = "conflict"; requests.length = 0;
+    await runGenerationJob(pool, `v5-tamper-candidate-${randomUUID()}`, 30, credentialSecret);
+    const review = await application.getReview({ ownerUserId, jobId: job.id });
+    if (mutation === "window") {
+      await pool.query("UPDATE generation_jobs SET generation_base_identity=jsonb_set(generation_base_identity,'{recentWindowTurns}','10'::jsonb) WHERE id=$1", [job.id]);
+    } else {
+      const stored = (await pool.query<{ context_options: Record<string, unknown> }>("SELECT context_options FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.context_options;
+      const policy = stored.storyMemoryPolicy as Record<string, unknown>;
+      await pool.query("UPDATE generation_jobs SET context_options=$2::jsonb WHERE id=$1", [job.id, JSON.stringify({ ...stored, storyMemoryPolicy: { ...policy, contextProtocol: "current-continuity-v4" } })]);
+    }
+    const callsBeforeKeep = requests.length;
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+    await runGenerationJob(pool, `v5-tamper-keep-${randomUUID()}`, 30, credentialSecret);
+    expect(requests).toHaveLength(callsBeforeKeep);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "recoverable", errorCode: "generation_checkpoint_incompatible" });
+  });
+
+  it("keeps a genuine historical v4 review candidate whose frozen recent-window field is absent", async () => {
+    const { job, application } = await enqueue("enforce", false, undefined, "Wait at the observatory.", false, providerId, true);
+    reviewVerdict = "conflict"; requests.length = 0;
+    const before = (await pool.query<{ generation_base_identity: Record<string, unknown>; context_options: Record<string, unknown> }>("SELECT generation_base_identity,context_options FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!;
+    expect(before.context_options.storyMemoryPolicy).toMatchObject({ contextProtocol: "current-continuity-v4" });
+    expect(before.generation_base_identity).not.toHaveProperty("recentWindowTurns");
+    await runGenerationJob(pool, `v4-keep-candidate-${randomUUID()}`, 30, credentialSecret);
+    const review = await application.getReview({ ownerUserId, jobId: job.id });
+    expect(review).toMatchObject({ state: "pending", canKeep: true });
+    const callsBeforeKeep = requests.length;
+    await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: review.reviewId, revision: review.revision, decision: "keep" });
+    await runGenerationJob(pool, `v4-keep-resume-${randomUUID()}`, 30, credentialSecret);
+    expect(requests).toHaveLength(callsBeforeKeep);
+    expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed" });
+    expect((await pool.query<{ generation_base_identity: Record<string, unknown> }>("SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [job.id])).rows[0]!.generation_base_identity).toEqual(before.generation_base_identity);
   });
 
   it("reclaims a persisted v5 review checkpoint through the same provider and commits without another primary call", async () => {
