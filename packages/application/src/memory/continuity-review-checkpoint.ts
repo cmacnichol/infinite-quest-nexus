@@ -78,8 +78,14 @@ const continuityReviewCheckpointV2Schema = z.object({ version: z.literal(2), ...
   }
   if (value.attempts) {
     const latest = value.attempts.at(-1)!;
-    if (latest.requestHash !== value.reviewRequestHash || latest.reservationStatus !== value.status
-      || latest.outcome?.kind !== value.outcome.kind) {
+    // A lease can end after a request was durably dispatched but before its
+    // response was saved. Preserve that indeterminate reservation for an
+    // explicit decision; it is neither completed provider evidence nor safe
+    // to redispatch automatically.
+    const unreconciledDispatch = value.status === "completed" && value.outcome.kind === "technical_failure"
+      && latest.reservationStatus === "dispatched" && latest.outcome === null;
+    if (latest.requestHash !== value.reviewRequestHash || (!unreconciledDispatch
+      && (latest.reservationStatus !== value.status || latest.outcome?.kind !== value.outcome.kind))) {
       context.addIssue({ code: "custom", message: "The active reviewer attempt must match the review checkpoint." });
     }
     if (value.attempts.some((attempt, index) => attempt.ordinal !== index + 1)) {

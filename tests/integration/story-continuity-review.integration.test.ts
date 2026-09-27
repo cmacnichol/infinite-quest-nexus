@@ -1747,7 +1747,7 @@ integration("T17 durable continuity review", () => {
     }
   });
 
-  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
+  it.each(["complete", "deadline", "unbound", "tampered", "failed", "transport_failed", "review_deadline", "output_limited", "invalid_output", "fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass"])("keeps a queue-produced native preset candidate without a second prepared execution (outcome=%s)", async (outcome) => {
     const deadline = outcome === "deadline" || outcome === "unbound";
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("T17 fake provider did not bind.");
@@ -1766,8 +1766,8 @@ integration("T17 durable continuity review", () => {
         continuityReviewExecutionPolicy: {
           version: 1,
           primary: { selection: { kind: "openrouter_preset", slug: "reviewer" }, overrides: { parameters: { temperature: 0 } } },
-          ...(["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict"].includes(outcome) ? { fallback: { selection: { kind: "openrouter_preset", slug: "fallback" }, overrides: { parameters: { temperature: 0 } } } } : {}),
-          maximumAutomaticFallbacks: ["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict"].includes(outcome) ? 1 : 0
+          ...(["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass"].includes(outcome) ? { fallback: { selection: { kind: "openrouter_preset", slug: "fallback" }, overrides: { parameters: { temperature: 0 } } } } : {}),
+          maximumAutomaticFallbacks: ["fallback_after_output_limit", "fallback_both_output_limited", "fallback_semantic_conflict", "fallback_retry_after_technical", "fallback_policy_frozen", "fallback_reclaim_reserved", "fallback_replacement_pass"].includes(outcome) ? 1 : 0
         }
       },
       apiKey: "native-keep-fixture"
@@ -1777,7 +1777,7 @@ integration("T17 durable continuity review", () => {
     const imported = await importLegacyStory(pool, storyImportRequestSchema.parse({ sourceName: "native-keep.story", story }));
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: "enforce" }, { installedCapability: "r3", enforceEnabled: true });
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined, { installedCapability: "r3", enforceEnabled: true }, true);
-    const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({
+    const appendRequest = generationRequestSchema.parse({
       action: "Wait for the observatory keeper.",
       requestedInputMode: "action",
       resolvedInputMode: "action",
@@ -1786,15 +1786,28 @@ integration("T17 durable continuity review", () => {
       textSelection: { kind: "openrouter_preset", slug: "keep" },
       idempotencyKey: randomUUID(),
       context: { budgetTokens: 32000, compression: "full", recentTurns: 8 }
-    }));
+    });
+    const job = outcome === "fallback_replacement_pass"
+      ? await application.enqueueReplacement({ ownerUserId, campaignId: imported.campaignId }, generationRetryLatestRequestSchema.parse({
+        action: appendRequest.action, expectedCurrentTurnNumber: (await pool.query<{ active_turn_number: number }>("SELECT active_turn_number FROM campaigns WHERE id=$1", [imported.campaignId])).rows[0]!.active_turn_number,
+        requestedInputMode: appendRequest.requestedInputMode, resolvedInputMode: appendRequest.resolvedInputMode, inputModeSource: appendRequest.inputModeSource,
+        providerProfileId: nativeProvider.id, idempotencyKey: appendRequest.idempotencyKey, context: appendRequest.context
+      }))
+      : await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, appendRequest);
     await expect(pool.query<{ basis: { preset: { slug: string }; parameters: { temperature: number }; candidates: Array<{ modelId: string }> } }>(
       "SELECT orchestration_private->'textExecutionRouteBasis' AS basis FROM generation_jobs WHERE id=$1", [job.id]
     )).resolves.toMatchObject({ rows: [{ basis: { protocolVersion: "story-openrouter-preset-v2", preset: { slug: "keep" }, parameters: { temperature: 0.2 }, candidates: [{ modelId: "@preset/keep" }] } }] });
+    if (outcome === "fallback_policy_frozen") {
+      await pool.query("UPDATE provider_profiles SET configuration=$2::jsonb WHERE id=$1", [nativeProvider.id, JSON.stringify({ textResponseFormatPolicy: "auto" })]);
+    }
 
     reviewVerdict = deadline ? "pass" : "conflict";
     if (outcome === "fallback_after_output_limit") reviewSequence = ["conflict", "pass"];
+    if (outcome === "fallback_policy_frozen") reviewSequence = ["conflict", "pass"];
+    if (outcome === "fallback_replacement_pass") reviewSequence = ["conflict", "pass"];
     const repository = createPostgresGenerationExecutionRepository(pool);
     const providers = workerProviderGraph(pool, credentialSecret);
+    let reviewerDispatches = 0;
     const preparedTextExecutor = vi.fn(async ({ plan, operation, request, preparedRequest, invocationKey, routeBasis, frozenResponseContracts, logicalReservation }: {
       plan: { prompt: string; candidates: Array<{ modelId: string }> }; operation: string;
       request: { input: string; systemPrompt: string }; preparedRequest?: { body: string; payloadHash: string };
@@ -1815,9 +1828,14 @@ integration("T17 durable continuity review", () => {
         : reviewResponse(JSON.stringify({ messages: [{ content: plan.prompt }, { content: request.input }] }));
       const responseId = randomUUID();
       if (operation === "story_continuity_review") {
+        reviewerDispatches += 1;
         if (!preparedRequest || !logicalReservation) throw new Error("Prepared reviewer fixture requires durable request evidence.");
         const actualPlan = plan as typeof plan & { planHash: string; preset: { slug: string; versionId: string; configHash: string } | null; candidates: Array<{ modelId: string; providerPolicy: Record<string, unknown>; contextWindowTokens: number; maxOutputTokens: number }> };
         const actualReservation = logicalReservation as { kind: "story"; ownerUserId: string; generationJobId: string; invocationId: string; workerId: string };
+        if (outcome === "fallback_reclaim_reserved" && reviewerDispatches === 1) {
+          await pool.query("UPDATE generation_jobs SET lease_expires_at=now()-interval '1 second' WHERE id=$1", [actualReservation.generationJobId]);
+          throw Object.assign(new Error("Injected worker loss after reviewer reservation."), { code: "lease_lost" });
+        }
         await pool.query(`INSERT INTO prepared_text_physical_attempts (
           owner_user_id,logical_kind,reservation_key,logical_reservation,plan_hash,
           requested_preset_slug,requested_preset_version_id,requested_preset_config_hash,candidate_ordinal,
@@ -1849,6 +1867,9 @@ integration("T17 durable continuity review", () => {
       content,
       responseId, finishReason: "stop", outputLimited: (outcome === "output_limited"
         || (outcome === "fallback_after_output_limit" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_policy_frozen" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_replacement_pass" && plan.candidates[0]!.modelId === "@preset/reviewer")
+        || (outcome === "fallback_retry_after_technical" && reviewerDispatches < 4)
         || outcome === "fallback_both_output_limited") && operation === "story_continuity_review", modelInstanceId: plan.candidates[0]!.modelId,
       usage: { inputTokens: 80, outputTokens: 30, totalTokens: 110 }, reportedCost: null, rawMetadata: {},
       ...(preparedRequest ? { preparedRequest } : {})
@@ -1889,6 +1910,47 @@ integration("T17 durable continuity review", () => {
         expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}$/u),
         expect.stringMatching(/^continuity-review:fallback:[a-f0-9]{64}$/u)
       ]);
+      return;
+    }
+    if (outcome === "fallback_policy_frozen") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      return;
+    }
+    if (outcome === "fallback_replacement_pass") {
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String), operationKind: "replace_latest" });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer", "@preset/fallback"]);
+      return;
+    }
+    if (outcome === "fallback_retry_after_technical") {
+      const initial = await application.getReview({ ownerUserId, jobId: job.id });
+      expect(initial).toMatchObject({ state: "pending", stage: "continuity", reasons: ["review_unavailable"] });
+      await application.decideReview({ ownerUserId, jobId: job.id }, { reviewId: initial.reviewId, revision: initial.revision, decision: "retry" });
+      reviewSequence = ["conflict", "pass"];
+      const retryWorker = `native-keep-retry-${randomUUID()}`;
+      const retryClaim = await repository.claimNext({ workerId: retryWorker, leaseSeconds: 30 });
+      expect(retryClaim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: retryClaim!, workerId: retryWorker, leaseSeconds: 30 })).resolves.toBe(true);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual([
+        "@preset/keep", "@preset/reviewer", "@preset/fallback", "@preset/reviewer", "@preset/fallback"
+      ]);
+      expect(preparedTextExecutor.mock.calls.filter(([input]) => input.plan.candidates[0]!.modelId === "@preset/keep")).toHaveLength(1);
+      expect(preparedTextExecutor.mock.calls.slice(3).map(([input]) => (input.logicalReservation as { invocationId?: string } | undefined)?.invocationId)).toEqual([
+        expect.stringMatching(/^continuity-review:primary:[a-f0-9]{64}:[a-f0-9]{64}$/u),
+        expect.stringMatching(/^continuity-review:fallback:[a-f0-9]{64}:[a-f0-9]{64}$/u)
+      ]);
+      return;
+    }
+    if (outcome === "fallback_reclaim_reserved") {
+      const reclaimWorker = `native-keep-reclaim-${randomUUID()}`;
+      const reclaimClaim = await repository.claimNext({ workerId: reclaimWorker, leaseSeconds: 30 });
+      expect(reclaimClaim?.jobId).toBe(job.id);
+      await expect(createGenerationExecutor({ pool, repository, collaborators }).execute({ claim: reclaimClaim!, workerId: reclaimWorker, leaseSeconds: 30 })).resolves.toBe(true);
+      expect(await application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({
+        status: "recoverable", errorCode: "generation_review_required", review: { reasons: ["review_unavailable"] }
+      });
+      expect(preparedTextExecutor.mock.calls.map(([input]) => input.plan.candidates[0]!.modelId)).toEqual(["@preset/keep", "@preset/reviewer"]);
       return;
     }
     if (outcome === "fallback_both_output_limited") {

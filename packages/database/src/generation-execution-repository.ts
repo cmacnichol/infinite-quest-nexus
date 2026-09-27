@@ -183,6 +183,8 @@ async function completedReviewerPhysicalAttempt(
     || review.data.status !== "completed" || !review.data.reviewRequestHash
     || review.data.binding.reviewerExecutionSnapshotHash !== reviewer.data.snapshotHash) return false;
   const durableAttempt = review.data.attempts?.at(-1);
+  if (durableAttempt?.reservationStatus === "dispatched" && durableAttempt.outcome === null
+    && review.data.outcome?.kind === "technical_failure") return true;
   if (durableAttempt && (durableAttempt.reservationStatus !== "completed" || durableAttempt.requestHash !== review.data.reviewRequestHash
     || durableAttempt.outcome?.kind !== review.data.outcome?.kind)) return false;
   // Task 3 checkpoints have no durable attempt list; retain their frozen

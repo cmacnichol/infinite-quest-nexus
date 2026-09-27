@@ -4339,8 +4339,8 @@ async function executeLoadedGeneration(
       else if (existing.success) {
         // A prior lease may have dispatched the call. Do not silently duplicate
         // its cost or assume the missing response was a semantic pass.
-        checkpoint = { ...existing.data, status: "completed", verdict: "unavailable", result: null, unavailableReason: "provider_failed",
-          ...(existing.data.version === 2 ? { outcome: { version: 2, kind: "technical_failure", failure: "provider_failed", providerMetadata: null } as const } : {}) };
+        checkpoint = continuityReviewCheckpointSchema.parse({ ...existing.data, status: "completed", verdict: "unavailable", result: null,
+          unavailableReason: "provider_failed", outcome: { version: 2, kind: "technical_failure", failure: "provider_failed", providerMetadata: null } });
       } else {
         checkpoint = { version: 2, mode: reviewMode, binding, bindingHash, status: "completed", verdict: "unavailable", result: null, reviewRequestHash: null, outcome: null,
           ...(reviewCycleId ? { cycleId: reviewCycleId } : {}) };
