@@ -16,6 +16,8 @@ Exact selected turn/fact IDs are applied in SQL before rank/lane limits for stan
 
 The new PostgreSQL regression creates 513 newer facts so an old valid fact and sibling fall outside the protected 512-row source window. It proves that window omits the old fact while deferred candidate verification still admits both source-verified IDs. Another PostgreSQL regression fills a lexical historical lane with reserved IDs and proves the older eligible fact replenishes the lane.
 
+When the latest complete correction precedes the generation base, authority capture now materializes that correction snapshot itself, rather than the later accepted base continuity. This preserves its verified correction facts through later accepted turns while withholding stale pre-correction facts.
+
 ## RED / GREEN evidence
 
 - RED: `. .\.superpowers\sdd\2026-09-26-turn-context-history-coverage\test-env.ps1; corepack pnpm vitest run tests/unit/chronicle-transaction-repository.test.ts`
@@ -26,6 +28,13 @@ The new PostgreSQL regression creates 513 newer facts so an old valid fact and s
   - Exit `0`. `task-3-fix1-tsc-final.log`.
 - Legacy golden: `. .\.superpowers\sdd\2026-09-26-turn-context-history-coverage\test-env.ps1; corepack pnpm vitest run tests/unit/generation-context-history-coverage-baseline.test.ts`
   - Exit `0`; 28 tests. `task-3-fix1-goldens-final.log`.
+- Rereview diagnostic: the first focused-unit rerun exited `1` because the exact-correction unit stub exposed changed default ordering. Restoring the unchanged exact query order made the targeted at-or-before ordering opt-in. `task-3-fix2-unit.log` contains that terminal failure; the final rerun below is green.
+- Rereview GREEN: `. .\.superpowers\sdd\2026-09-26-turn-context-history-coverage\test-env.ps1; corepack pnpm vitest run tests/unit/campaign-continuity-repository.test.ts tests/unit/generation-context-contracts.test.ts tests/unit/generation-context-planner.test.ts tests/unit/chronicle-transaction-repository.test.ts`
+  - Exit `0`; 4 files, 101 tests. `task-3-fix2-unit-final.log`.
+- Rereview type check: `. .\.superpowers\sdd\2026-09-26-turn-context-history-coverage\test-env.ps1; corepack pnpm exec tsc -p tsconfig.json --noEmit`
+  - Exit `0`. Fresh terminal log: `task-3-fix2-tsc-final.log`.
+- Rereview legacy golden: same environment with `tests/unit/generation-context-history-coverage-baseline.test.ts`.
+  - Exit `0`; 28 tests. `task-3-fix2-goldens.log`.
 
 ## PostgreSQL evidence
 
@@ -34,6 +43,8 @@ The new PostgreSQL regression creates 513 newer facts so an old valid fact and s
 - Lexical replenishment: same environment/config with `tests/integration/chronicle-historical-fact-pool.integration.test.ts`.
   - Exit `0`; 8 passed and 1 skipped benchmark. `task-3-fix1-pg-replenishment.log`.
 - Earlier diagnostic PG attempts ended with exit `1`; their terminal logs are retained as `task-3-fix1-pg.log` and `task-3-fix1-pg-chunk-rerun.log`.
+- Rereview correction-frontier regression: same environment/config with `tests/integration/history-protected-facts.integration.test.ts`.
+  - Elevated, exit `0`; 9 passed. It creates a nonempty correction at turn 2, follows it with an accepted turn 3, then proves authority retains the correction fact and deferred verification excludes the stale turn-1 fact. `task-3-fix2-pg-frontier.log`.
 
 ## Residual guards and concerns
 
@@ -44,3 +55,5 @@ Optional verification is bounded at 2,048 selected candidate IDs. Correction-ori
 - `40a8f409 Defer v5 Chronicle candidate retrieval`
 - `3ac5fb69 Filter v5 Chronicle sources before rank limits`
 - `6ae7d882 Verify deferred Chronicle fact candidates`
+- `6416b1a6 Document Task 3 verification`
+- `4add6eaa Capture prior correction frontier`
