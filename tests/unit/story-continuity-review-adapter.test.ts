@@ -8,6 +8,7 @@ import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt
 import { sha256 } from "../../packages/domain/src/text.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/provider-request.js";
 import { CAST_STORY_AUTHORITY_CONTRACT, castStoryMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { continuityReviewOutputLimitFixture, continuityReviewOutputLimitResponse } from "../fixtures/continuity-review-output-limit.js";
 const requestHash = sha256("producing-request");
 const entry = createStoryEvidence({ source: { kind: "state_edit", id: "state", revision: "1", turnNumber: 1 }, semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text", normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null }, { text: "Mira waits at the lighthouse." });
 const body = { version: "generation-evidence-v1" as const, attemptId: "00000000-0000-4000-8000-000000000001", producingRequestHash: requestHash, entries: [entry], requiredReviewEvidenceIds: [entry.id] };
@@ -168,6 +169,21 @@ describe("exact continuity review provider request", () => {
     expect(execute).toHaveBeenCalledOnce();
     result.preparedRequest.payloadHash = "f".repeat(64);
     await expect(executePreparedContinuityReview({ ...provider, execute }, prepared)).rejects.toThrow(/continuity_review_unavailable/);
+  });
+  it("rejects a provider output limit as a typed failure instead of semantic uncertainty", async () => {
+    const evidence = createStoryEvidence({ source: { kind: "state_edit", id: "synthetic-state", revision: "1", turnNumber: 1 },
+      semanticRole: "current_continuity", rank: 0, selectionGroup: "protected", sourcePath: "/text",
+      normalizationVersion: "fiction-safe-json-v1", form: "complete", spans: [], canonicalFactId: null },
+    { text: continuityReviewOutputLimitFixture.evidence });
+    const fixtureBody = { ...body, entries: [evidence], requiredReviewEvidenceIds: [evidence.id] };
+    const fixtureManifest = { ...fixtureBody, manifestHash: generationEvidenceManifestHash(fixtureBody) };
+    const prepared = prepare({ manifest: fixtureManifest, direction: continuityReviewOutputLimitFixture.direction,
+      draft: storyTurnOutputSchema.parse(continuityReviewOutputLimitFixture.story) });
+    const execute = async () => ({ ...continuityReviewOutputLimitResponse,
+      preparedRequest: { body: prepared.body, payloadHash: sha256(prepared.body) } });
+
+    await expect(executePreparedContinuityReview({ ...provider, execute } as typeof provider, prepared))
+      .rejects.toMatchObject({ code: "continuity_review_output_limited" });
   });
   it("prepares a complete self-contained repair without private scratchpad or a continuation", () => {
     const prepared = prepareContinuityRepair({ provider, manifest, promptSnapshot: v1PromptSnapshot, direction: "Wait", rejectedDraft: draft,
