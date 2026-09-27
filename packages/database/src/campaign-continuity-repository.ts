@@ -52,7 +52,7 @@ function acceptedFactCandidates(snapshot: unknown, source: Readonly<{ campaignId
     // System Archive preserves object-shaped snapshots. An explicit null is not
     // permission to invent an identity; non-null IDs still require scoped rows.
     return portable && typeof portable !== "string" && !structured
-      ? { id: portable.id, content: fact.content, factIndex: undefined }
+      ? { id: portable.id, content: fact.content, factIndex: fact.factIndex }
       : { id: fact.id, content: fact.content, factIndex: fact.factIndex };
   });
 }
@@ -72,7 +72,7 @@ export function materializeCorrectedGenerationContinuity(snapshot: unknown,
   source: Readonly<{ campaignId: string; stateEditId: string }>, activeFacts: readonly VerifiedFact[]): CampaignRuntimeStateContent {
   const state = authorityBoundary(() => campaignRuntimeStateContentSchema.parse(snapshot));
   return { ...state, canonicalFacts: state.canonicalFacts.map((fact, index) => ({ ...fact,
-    id: verifiedFactId(fact.id ?? createCorrectionCanonicalFactId(source.campaignId, source.stateEditId, index), fact.content, activeFacts, fact.id ? undefined : index)
+    id: verifiedFactId(fact.id ?? createCorrectionCanonicalFactId(source.campaignId, source.stateEditId, index), fact.content, activeFacts, index)
   })) };
 }
 

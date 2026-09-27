@@ -165,4 +165,23 @@ integration("verified protected-fact authority", () => {
     } finally { client.release(); }
     await expect(pool.query("SELECT id,content,source_fact_index,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId])).resolves.toMatchObject({ rows: before.rows });
   });
+
+  it("withholds explicit-ID accepted and correction facts when only their source indices are tampered", async () => {
+    const acceptedScope = await fixture();
+    const acceptedId = crypto.randomUUID();
+    const acceptedContent = "The explicit accepted fact keeps its source slot.";
+    const acceptedTurnId = await acceptedTurn(acceptedScope.campaignId, 1, { canonicalFacts: [{ id: acceptedId, content: acceptedContent }], canonicalFactUpdates: [] });
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_turn_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,1,1,$6,lower($6),1)`, [acceptedId, ownerUserId, acceptedScope.campaignId, acceptedScope.worldVersionId, acceptedTurnId, acceptedContent]);
+    const correctionScope = await fixture();
+    const correctionId = crypto.randomUUID();
+    const correctionContent = "The explicit correction fact keeps its source slot.";
+    const edit = await pool.query<{ id: string }>(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,revision,effective_turn_number,state_snapshot_private)
+      VALUES($1,$2,1,0,$3::jsonb) RETURNING id`, [ownerUserId, correctionScope.campaignId, JSON.stringify({ canonicalFacts: [{ id: correctionId, content: correctionContent }] })]);
+    await pool.query(`INSERT INTO campaign_canonical_facts(id,owner_user_id,campaign_id,world_version_id,source_state_edit_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      VALUES($1,$2,$3,$4,$5,0,1,$6,lower($6),0)`, [correctionId, ownerUserId, correctionScope.campaignId, correctionScope.worldVersionId, edit.rows[0]!.id, correctionContent]);
+
+    await expect(load(acceptedScope)).resolves.toMatchObject({ facts: [] });
+    await expect(load(correctionScope)).resolves.toMatchObject({ facts: [] });
+  });
 });

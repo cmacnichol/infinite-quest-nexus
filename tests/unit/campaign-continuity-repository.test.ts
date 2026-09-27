@@ -98,10 +98,20 @@ describe("loadCurrentContinuityCorrection", () => {
     const turnId = "00000000-0000-4000-8000-000000000004";
     const id = "00000000-0000-4000-8000-000000000005";
     const snapshot = { canonicalFacts: [{ id, content: "The keeper returned." }, { id: null, content: "The gate is open." }, "The bell rang."] };
-    const client = clientReturning([{ id, content: "The keeper returned." }]);
+    const client = clientReturning([{ id, content: "The keeper returned.", factIndex: 0 }]);
     const result = await loadAcceptedGenerationContinuity(client, scope, { turnId, turnNumber: 3, snapshot });
     expect(result.canonicalFacts).toEqual([{ id, content: "The keeper returned." }, { id: null, content: "The gate is open." }, { id: null, content: "The bell rang." }]);
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining("source_turn_id=$6"), expect.arrayContaining([[id, expect.any(String)]]));
+  });
+
+  it("withholds an explicit accepted fact ID when its active projection index disagrees", () => {
+    const turnId = "00000000-0000-4000-8000-000000000004";
+    const id = "00000000-0000-4000-8000-000000000005";
+    const snapshot = { canonicalFacts: [{ id, content: "The keeper returned." }] };
+
+    expect(materializeAcceptedGenerationContinuity(snapshot, { campaignId: scope.campaignId, turnId }, [
+      { id, content: "The keeper returned.", factIndex: 1 }
+    ]).canonicalFacts).toEqual([{ id: null, content: "The keeper returned." }]);
   });
 
   it("rejects accepted source values that the derived helper would silently clip", () => {
@@ -131,6 +141,16 @@ describe("loadCurrentContinuityCorrection", () => {
     expect(materializeCorrectedGenerationContinuity({ ...state, canonicalFacts: [], continuitySummary: "", openThreads: [], scratchpad: "" },
       { campaignId: scope.campaignId, stateEditId }, [{ id, content: "The keeper returned." }]).canonicalFacts).toEqual([]);
     expect(() => materializeCorrectedGenerationContinuity({ canonicalFacts: [] }, { campaignId: scope.campaignId, stateEditId }, [])).toThrow();
+  });
+
+  it("withholds an explicit correction fact ID when its active projection index disagrees", () => {
+    const stateEditId = "00000000-0000-4000-8000-000000000005";
+    const id = "00000000-0000-4000-8000-000000000006";
+    const state = materializeGenerationContinuity({ canonicalFacts: [{ id, content: "The repaired gate remains open." }] });
+
+    expect(materializeCorrectedGenerationContinuity(state, { campaignId: scope.campaignId, stateEditId }, [
+      { id, content: "The repaired gate remains open.", factIndex: 1 }
+    ]).canonicalFacts).toEqual([{ id: null, content: "The repaired gate remains open." }]);
   });
 
   it("keeps imported initial prose without manufacturing accepted-turn IDs", () => {
