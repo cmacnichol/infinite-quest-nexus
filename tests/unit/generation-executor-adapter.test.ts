@@ -17,6 +17,8 @@ import { continuityReviewCheckpointSchema, reviewBindingHash } from "../../packa
 import { generationExecutionProtocolIdentity, PreparedResponseContractError, serializeProviderRequest, storyOnlyPromptSnapshot } from "../../packages/story-engine/src/index.js";
 import {
   createGenerationExecutor,
+  castAdmissionFailureReason,
+  castDiscoveryAdmissionExecution,
   completeContinuityReviewTechnicalFailure,
   callCampaignTextProvider,
   appendFactFormatRepairApplication,
@@ -53,6 +55,49 @@ const claim: ClaimedGeneration = {
   operationKind: "append",
   replacementTurnId: null
 };
+
+describe("cast discovery admission execution", () => {
+  it("loads the owner-scoped live execution for route-basis jobs with the queued model selection", async () => {
+    const routeBasis = {
+      version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+      preset: { slug: "night-shift", versionId: "v1", configHash: "a".repeat(64) },
+      candidates: [{ modelId: "story-model", providerPolicy: {}, contextWindowTokens: 16_000, maxOutputTokens: 1_000 }],
+      presetSystemPrompt: "Use spare prose.", parameters: { temperature: 0.2 }, endpointReference: "endpoint",
+      credentialReference: "profile", profileRevision: "profile-r7", authorityRevision: "authority-r3", requestTimeoutMs: 30_000,
+      protocolVersion: "route-basis-v2", routeBasisHash: "b".repeat(64)
+    };
+    const job = { ...completeGenerationExecutionPayload(), requested_model: "@preset/night-shift",
+      orchestration_private: { textExecutionRouteBasis: routeBasis } };
+    const frozenStoryProvider = { id: claim.providerProfileId, model: "story-model", executionRevision: undefined };
+    const liveExecution = { id: claim.providerProfileId, model: "@preset/night-shift", executionRevision: "profile-r7",
+      authorityRevision: "authority-r3", textSelection: { kind: "openrouter_preset" as const, slug: "night-shift" } } as Awaited<ReturnType<GenerationExecutionCollaborators["loadTextExecution"]>>;
+    const loadTextExecution = vi.fn(async (..._args: [string, string, string?]) => liveExecution);
+
+    const result = await castDiscoveryAdmissionExecution(job, frozenStoryProvider as never, loadTextExecution);
+
+    expect(loadTextExecution).toHaveBeenCalledWith(claim.ownerUserId, claim.providerProfileId, "@preset/night-shift");
+    expect(result).toBe(liveExecution);
+    expect(result.textSelection).toEqual({ kind: "openrouter_preset", slug: "night-shift" });
+  });
+
+  it("reuses the already owner-scoped provider when the job has no route basis", async () => {
+    const job = completeGenerationExecutionPayload();
+    const provider = { id: claim.providerProfileId, model: "test-model" };
+    const loadTextExecution = vi.fn();
+
+    await expect(castDiscoveryAdmissionExecution(job, provider as never, loadTextExecution)).resolves.toBe(provider);
+    expect(loadTextExecution).not.toHaveBeenCalled();
+  });
+
+  it("maps only recognized admission error codes and never returns arbitrary error text", () => {
+    expect(castAdmissionFailureReason(Object.assign(new Error("private story canary"), { code: "invalid_execution_revision" })))
+      .toBe("invalid_execution_revision");
+    expect(castAdmissionFailureReason(Object.assign(new Error("provider token canary"), { code: "provider_unavailable" })))
+      .toBe("provider_unavailable");
+    expect(castAdmissionFailureReason(new Error("synthetic secret and story canaries"))).toBe("unexpected_error");
+    expect(castAdmissionFailureReason({ code: "synthetic secret and story canary" })).toBe("unexpected_error");
+  });
+});
 
 /**
  * Task 8 Step 3 golden fixture: the exact byte-for-byte provider request the
@@ -2398,7 +2443,7 @@ describe("generation executor adapter", () => {
     expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ illustrationTextExecutionSnapshot: frozenSnapshot }));
   });
 
-  it.each(["unavailable", "ready", "saved", "disabled"] as const)("commits accepted story with illustration metadata outage and %s discovery admission", async (discovery) => {
+  it.each(["unavailable", "ready", "saved", "saved-unavailable", "disabled"] as const)("commits accepted story with illustration metadata outage and %s discovery admission", async (discovery) => {
     const job = completeGenerationExecutionPayload();
     const basis = { version: 2 as const, selection: { kind: "model" as const, modelId: "fixture" }, preset: null,
       candidates: [{ modelId: "fixture", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }],
@@ -2406,6 +2451,7 @@ describe("generation executor adapter", () => {
       profileRevision: "fixture", authorityRevision: "fixture", requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
     const frozen = { providerProfileId: claim.providerProfileId, plan: deriveTextExecutionPlan({ ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) }, "Frozen discovery fixture.") };
     if (discovery === "saved") job.orchestration_private.castDiscoveryAdmission = { status: "ready", execution: frozen };
+    if (discovery === "saved-unavailable") job.orchestration_private.castDiscoveryAdmission = { status: "unavailable" };
     const output = JSON.stringify({ narration: "The observatory door opens onto a quiet moonlit hall.", choices: ["Enter.", "Wait.", "Study.", "Call."],
       custom_action_suggestion: "Study the door.", scratchpad: "", tracker_updates: [], image_prompt: "", continuity_summary: "",
       canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
@@ -2426,11 +2472,12 @@ describe("generation executor adapter", () => {
       illustration: { loadStreamingIllustrationConfig: vi.fn(async () => null) }, loadTextExecution: vi.fn(async () => provider),
       prepareIllustrationTextExecution: vi.fn(async () => { throw new Error("synthetic metadata outage"); }),
       ...(discovery === "disabled" ? {} : { prepareCastDiscoveryExecution: vi.fn(async () => {
-        if (discovery === "unavailable") throw new Error("synthetic discovery metadata outage");
+        if (discovery === "unavailable") throw Object.assign(new Error("CAST_PRIVATE_SECRET_STORY_CANARY"), { code: "provider_unavailable" });
         return frozen;
       }) }),
       promptFromSnapshot: vi.fn(() => "Write fiction."), recordProfileCost: vi.fn(async () => undefined), attributeGenerationCostsToTurn: vi.fn(async () => undefined)
     } as unknown as GenerationExecutionCollaborators;
+    const warningLogs = discovery === "unavailable" ? vi.spyOn(logger, "warn") : undefined;
 
     await expect(createGenerationExecutor({ pool: {} as DatabasePool, repository, collaborators })
       .execute({ workerId: "illustration-preflight-outage", leaseSeconds: 30, claim })).resolves.toBe(true);
@@ -2439,10 +2486,16 @@ describe("generation executor adapter", () => {
       illustrationTextExecutionSnapshot: { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" }
     }));
     expect(repository.markRecoverable).not.toHaveBeenCalled();
-    if (discovery === "unavailable") expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ castDiscoveryUnavailable: true }));
+    if (discovery === "unavailable" || discovery === "saved-unavailable") expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ castDiscoveryUnavailable: true }));
     else if (discovery !== "disabled") expect(repository.commitAcceptedTurn).toHaveBeenCalledWith(expect.objectContaining({ castDiscoveryExecution: frozen }));
     else expect(vi.mocked(repository.commitAcceptedTurn).mock.calls[0]![0]).not.toHaveProperty("castDiscoveryExecution");
-    if (discovery !== "disabled") expect(collaborators.prepareCastDiscoveryExecution).toHaveBeenCalledTimes(discovery === "saved" ? 0 : 1);
+    if (discovery === "disabled") expect(collaborators.prepareCastDiscoveryExecution).toBeUndefined();
+    else expect(collaborators.prepareCastDiscoveryExecution).toHaveBeenCalledTimes(discovery === "saved" || discovery === "saved-unavailable" ? 0 : 1);
+    if (warningLogs) {
+      expect(JSON.stringify(warningLogs.mock.calls)).not.toContain("CAST_PRIVATE_SECRET_STORY_CANARY");
+      expect(JSON.stringify(warningLogs.mock.calls)).toContain("provider_unavailable");
+      warningLogs.mockRestore();
+    }
     expect(provider.execute).toHaveBeenCalledOnce();
   });
 

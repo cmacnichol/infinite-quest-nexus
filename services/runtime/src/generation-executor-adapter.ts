@@ -143,6 +143,42 @@ import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-p
 
 type GenerationTextProvider = RuntimeTextExecution;
 
+type CastAdmissionFailureReason = "invalid_execution_revision" | "provider_unavailable" | "unexpected_error";
+
+/**
+ * Cast discovery runs after the Story route has been frozen. A native route's
+ * synthetic Story descriptor intentionally has no live profile revisions, so
+ * discovery admission reloads owner-scoped execution using the queued model
+ * selection. This only prepares the optional future cast snapshot; it does
+ * not change the frozen Story route.
+ */
+export async function castDiscoveryAdmissionExecution(
+  job: GenerationExecutionPayload,
+  provider: GenerationTextProvider,
+  loadTextExecution: GenerationExecutionCollaborators["loadTextExecution"]
+): Promise<GenerationTextProvider> {
+  const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+  if (!routeBasis) return provider;
+  const requestedModel = routeBasis.selection.kind === "openrouter_preset"
+    ? `@preset/${routeBasis.selection.slug}`
+    : job.requested_model;
+  const execution = await loadTextExecution(job.owner_user_id, job.provider_profile_id, requestedModel);
+  if (!execution.executionRevision || execution.executionRevision !== routeBasis.profileRevision
+    || (routeBasis.authorityRevision !== undefined && execution.authorityRevision !== routeBasis.authorityRevision)) {
+    throw Object.assign(new Error("Cast discovery execution revision is incompatible."), { code: "invalid_execution_revision" });
+  }
+  return execution;
+}
+
+/** Projects provider preparation failures to fixed, non-sensitive codes. */
+export function castAdmissionFailureReason(error: unknown): CastAdmissionFailureReason {
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? (error as { code?: unknown }).code : undefined;
+  if (code === "invalid_execution_revision") return code;
+  if (code === "provider_unavailable") return code;
+  return "unexpected_error";
+}
+
 /**
  * Creates one invocation-specific prompt from private frozen route evidence.
  * The plan deliberately remains executor-local; provider requests carry only
@@ -2132,9 +2168,9 @@ async function executeLoadedGeneration(
             campaignId: job.campaign_id,
             operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
           });
-        } catch (error) {
+        } catch {
           logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
-            errorMessage: error instanceof Error ? error.message : String(error) });
+            errorCode: "illustration_text_route_unavailable" });
           illustrationTextExecutionSnapshot = { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
         }
       }
@@ -4706,10 +4742,12 @@ async function executeLoadedGeneration(
     if (collaborators.prepareCastDiscoveryExecution && !orchestration.castDiscoveryAdmission) {
       let admission: NonNullable<GenerationOrchestrationState["castDiscoveryAdmission"]>;
       try {
-        admission = { status: "ready", execution: await collaborators.prepareCastDiscoveryExecution({ ownerUserId: job.owner_user_id, execution: provider }) };
-      } catch {
+        const discoveryExecution = await castDiscoveryAdmissionExecution(job, provider, collaborators.loadTextExecution);
+        admission = { status: "ready", execution: await collaborators.prepareCastDiscoveryExecution({ ownerUserId: job.owner_user_id, execution: discoveryExecution }) };
+      } catch (error) {
         admission = { status: "unavailable" };
-        logger.warn({ event: "cast_discovery_admission_unavailable", generationJobId: job.id });
+        logger.warn({ event: "cast_discovery_admission_unavailable", generationJobId: job.id,
+          reason: castAdmissionFailureReason(error) });
       }
       orchestration = await persistOrchestration(repository, scope, job, { castDiscoveryAdmission: admission });
     }
