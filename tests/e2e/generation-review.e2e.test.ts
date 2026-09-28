@@ -322,6 +322,35 @@ async function installStagedReviewStream(page: Page, snapshots: { readonly gener
 }
 
 for (const surface of ["legacy", "web-next"] as const) {
+  for (const width of [1440, 390]) {
+    test(`${surface} ${width} continues retry after duplicate review updates without reloading`, async ({ page }, testInfo) => {
+      const api = await installReviewApi(page, true, false, false, { liveStream: true });
+      await installStagedReviewStream(page, api);
+      await page.setViewportSize({ width, height: 900 });
+      await openReview(page, surface, api.fixture.campaignId);
+      await expect.poll(() => page.evaluate(() => Boolean((window as Window & { __generationReviewFixtureAdvance?: () => void }).__generationReviewFixtureAdvance))).toBe(true);
+      await page.evaluate(() => {
+        const advance = (window as Window & { __generationReviewFixtureAdvance?: () => void }).__generationReviewFixtureAdvance;
+        advance?.();
+        advance?.();
+      });
+      const recovery = recoveryFor(page, surface);
+      const retry = recovery.getByRole("button", { name: "Continue with retry", exact: true });
+      await expect(retry).toBeVisible();
+      await retry.click();
+      await expect.poll(() => api.settledReviewDecisionRequests).toBe(1);
+      await expect(retry).toBeEnabled();
+      await page.evaluate(() => (window as Window & { __generationReviewFixtureCompleteAfterDecision?: () => void }).__generationReviewFixtureCompleteAfterDecision?.());
+      await expect.poll(() => api.resultRequests).toBe(1);
+      expect(await acceptedNarration(page, surface, 2)).toBe("The lighthouse bell answered across the harbor.");
+      await expect(recovery).toBeHidden();
+      expect(api.decisions).toEqual([{ reviewId, revision: 1, decision: "retry" }]);
+      expect(api.writePaths).toEqual([`POST /api/v1/generation-jobs/${jobId}/review-decision`]);
+      expect(api.consoleErrors).toEqual([]);
+      await expect(page).toHaveURL(new RegExp(`/story/${api.fixture.campaignId}$`, "u"));
+      await page.screenshot({ path: testInfo.outputPath("retry-completed.png"), fullPage: true });
+    });
+  }
   test(`${surface} restores the paused candidate while an automatic continuity fallback is still running`, async ({ page }) => {
     const api = await installReviewApi(page, true, false, false, { technicalDiagnostic: {
       version: 1, category: "output_limit", phase: "continuity_review_fallback", attemptCount: 2, maxAttempts: 2, state: "retrying"

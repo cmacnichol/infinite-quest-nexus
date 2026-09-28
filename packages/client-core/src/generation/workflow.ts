@@ -294,7 +294,8 @@ function createRun(
             let observation = await observeSnapshot(reconciled);
             // A new watcher must settle even if this run already observed the terminal snapshot.
             if (observation.kind === "duplicate"
-              && ["completed", "failed", "discarded", "cancelled", "recoverable"].includes(parsed.data.status)) {
+              && ["completed", "failed", "discarded", "cancelled", "recoverable"].includes(parsed.data.status)
+              && !(reconciled.status === "recoverable" && reconciled.review !== undefined)) {
               observation = {
                 kind: "accepted",
                 snapshot: parsed.data,

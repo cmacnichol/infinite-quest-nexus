@@ -27,6 +27,56 @@ function deferred<T>() {
 }
 
 describe("StoryGenerationController", () => {
+  it.each(["keep", "retry"] as const)("resumes a stopped monitor after an acknowledged %s review decision", async (decision) => {
+    const accepted = { id: jobId, status: "completed" } as never;
+    let queued = false;
+    const onError = vi.fn();
+    const onCompleted = vi.fn();
+    const durableRun = {
+      ...run(),
+      retryGeneration: vi.fn(run().retryGeneration),
+      async *watch(): AsyncIterable<GenerationEvent> {
+        if (!queued) throw new Error("Monitoring interrupted");
+        yield { type: "settled", outcome: "completed", result: accepted };
+      }
+    };
+    const controller = createStoryGenerationController({
+      workflow: { submit: vi.fn(async () => durableRun), resume: vi.fn() },
+      campaignStore: { attachGeneration: () => ({ apply: vi.fn(), loadReview: vi.fn(), decideReview: async () => { queued = true; } }) } as never,
+      idFactory: { create: () => "review-monitor-recovery" },
+      currentCampaign: () => ({ id: campaignId, activeTurnNumber: 0 }),
+      onError,
+      onCompleted
+    });
+    await controller.submitAppend({ action: "Open it.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit" });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    await expect(controller.decideReview({ reviewId: "44444444-4444-4444-8444-444444444444", revision: 1, decision })).resolves.toBe(true);
+    await vi.waitFor(() => expect(onCompleted).toHaveBeenCalledWith(accepted));
+    expect(durableRun.retryGeneration).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+  it("keeps the existing live monitor after a review decision", async () => {
+    const decisionSaved = deferred<void>();
+    const accepted = { id: jobId, status: "completed" } as never;
+    const onCompleted = vi.fn();
+    const watch = vi.fn(async function* (): AsyncIterable<GenerationEvent> {
+      await decisionSaved.promise;
+      yield { type: "settled", outcome: "completed", result: accepted };
+    });
+    const controller = createStoryGenerationController({
+      workflow: { submit: vi.fn(async () => ({ ...run(), watch })), resume: vi.fn() },
+      campaignStore: { attachGeneration: () => ({ apply: vi.fn(), loadReview: vi.fn(), decideReview: async () => {} }) } as never,
+      idFactory: { create: () => "review-live-monitor" },
+      currentCampaign: () => ({ id: campaignId, activeTurnNumber: 0 }),
+      onCompleted
+    });
+    await controller.submitAppend({ action: "Open it.", requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit" });
+    await controller.decideReview({ reviewId: "44444444-4444-4444-8444-444444444444", revision: 1, decision: "retry" });
+    decisionSaved.resolve();
+    await vi.waitFor(() => expect(onCompleted).toHaveBeenCalledWith(accepted));
+    expect(watch).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
   it("submits the real opening action with authoritative append provenance", async () => {
     const submitted: GenerationSubmissionInput[] = [];
     const workflow: GenerationWorkflow = {

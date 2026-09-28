@@ -168,6 +168,25 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
 }
 
 describe("generation workflow", () => {
+  it("keeps watching duplicate pending reviews until an explicit retry completes", async () => {
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const pending = snapshot({ status: "recoverable", review: reviewSummary() });
+    const source: GenerationSnapshotSource = {
+      async *watch() {
+        yield { kind: "snapshot", snapshot: pending };
+        yield { kind: "snapshot", snapshot: pending };
+        await run.decideReview({ reviewId: reviewDetail().reviewId, revision: 1, decision: "retry" });
+        yield { kind: "snapshot", snapshot: snapshot({ status: "queued", review: reviewSummary({ state: "decided", revision: 2 }) }) };
+        yield { kind: "snapshot", snapshot: snapshot({ status: "completed", attempts: 2 }) };
+      }
+    };
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => 1_000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+    const events = await collect(run.watch(signal()));
+    expect(events.at(-1)).toMatchObject({ type: "settled", outcome: "completed" });
+    expect(events.filter((event) => event.type === "status" && event.snapshot.status === "recoverable")).toHaveLength(1);
+    expect(client.retries).toBe(0);
+  });
   it("fetches only the selected review detail without starting or retrying generation", async () => {
     let reviewReads = 0;
     const client = api({

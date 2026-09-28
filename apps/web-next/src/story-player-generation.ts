@@ -53,6 +53,7 @@ interface AttachedRun {
   readonly session: GenerationProjectionSession;
   readonly abort: AbortController;
   readonly epoch: number;
+  monitoring: boolean;
 }
 
 /**
@@ -96,6 +97,8 @@ export function createStoryGenerationController(
   };
 
   const monitor = (entry: AttachedRun, retryFirst = false) => {
+    if (entry.monitoring) return;
+    entry.monitoring = true;
     void (async () => {
       let loadedReviewIdentity: string | null = null;
       try {
@@ -122,6 +125,8 @@ export function createStoryGenerationController(
         }
       } catch (error) {
         if (isCurrent(entry)) dependencies.onError?.(error);
+      } finally {
+        entry.monitoring = false;
       }
     })();
   };
@@ -134,7 +139,8 @@ export function createStoryGenerationController(
       run,
       session: dependencies.campaignStore.attachGeneration(run),
       abort: new AbortController(),
-      epoch
+      epoch,
+      monitoring: false
     };
     active = entry;
     // The saved review is read only after its public summary identifies one;
@@ -223,6 +229,10 @@ export function createStoryGenerationController(
       if (!entry || !isCurrent(entry)) return false;
       try {
         await entry.session.decideReview(request);
+        if (!isCurrent(entry)) return false;
+        // A successful decision queues this same job. Reconnect an ended
+        // watcher without issuing another retry or duplicating a live stream.
+        monitor(entry);
         return true;
       } catch (error) {
         if (isCurrent(entry)) dependencies.onError?.(error);
