@@ -9,6 +9,9 @@ import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/
 import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
 import { CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 
+import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
+import { serializeProviderRequest } from "../../packages/story-engine/src/index.js";
+
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 
 integration("verified protected-fact authority", () => {
@@ -119,6 +122,64 @@ integration("verified protected-fact authority", () => {
     } finally { client.release(); }
   });
 
+  it("captures all 910 correction facts from a frontier larger than one megabyte", async () => {
+    const scope = await fixture();
+    await acceptedTurn(scope.campaignId, 3, { canonicalFacts: [], canonicalFactUpdates: [] });
+    const facts = Array.from({ length: 910 }, (_, index) => ({ id: crypto.randomUUID(), content: `Harbor record ${index}: ${"x".repeat(1_200)}` }));
+    const edit = await pool.query<{ id: string }>(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,revision,effective_turn_number,state_snapshot_private)
+      VALUES($1,$2,1,3,$3::jsonb) RETURNING id`, [ownerUserId, scope.campaignId, JSON.stringify({
+        continuitySummary: "", scratchpad: "", openThreads: [], canonicalFacts: facts,
+        trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: []
+      })]);
+    await pool.query(`INSERT INTO campaign_canonical_facts
+      (id,owner_user_id,campaign_id,world_version_id,source_state_edit_id,source_turn_number,source_fact_index,content,normalized_content,valid_from_turn)
+      SELECT (fact.value->>'id')::uuid,$1,$2,$3,$4,3,(fact.ordinality-1)::integer,
+        fact.value->>'content',lower(fact.value->>'content'),3
+      FROM jsonb_array_elements($5::jsonb) WITH ORDINALITY fact(value,ordinality)`,
+      [ownerUserId, scope.campaignId, scope.worldVersionId, edit.rows[0]!.id, JSON.stringify(facts)]);
+    const result = await load(scope);
+    expect(result.facts).toHaveLength(910);
+    expect(result.facts).toEqual(facts.map((fact) => ({ ...fact, turnNumber: 3 })));
+    expect(result).toMatchObject({ candidateRows: 910, omittedCount: 0, sourceLimitReached: false });
+    expect(result.sourceBytes).toBeGreaterThan(1_000_000);
+    const policy = defaultStoryMemoryPolicy("r3");
+    const storyMemoryPolicy = { policy, policyHash: storyMemoryPolicyHash(policy), contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      castContext: true, promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION, providerConfigurationFingerprint: "a".repeat(64) } as const;
+    const captured = await withTransaction(pool, async (client) => {
+      const frozen = await resolveGenerationAuthoritySnapshot(client, { ownerUserId, ...scope, operationKind: "append", expectedTurnNumber: 4,
+        baseIdentityVersion: "generation-base-v4", captureRecentWindow: true, recentWindowTurns: 11,
+        captureStoryLedger: true, captureProtectedFacts: true });
+      return loadPostgresChronicleGenerationAuthorityContext(client, { ownerUserId, ...scope, operationKind: "append", expectedTurnNumber: 4,
+        query: "harbor", expectedBaseIdentity: frozen.baseIdentity, storyMemoryPolicy });
+    });
+    expect(captured.authority.optionalFactFrontier?.facts).toEqual(facts);
+    expect(captured.authority.protectedFacts).toHaveLength(910);
+    expect(captured.authority.currentContinuity.canonicalFacts).toEqual(facts);
+    const frozenCapture = JSON.stringify(captured);
+    const sourceBefore = await pool.query("SELECT state_snapshot_private FROM campaign_state_edits WHERE id=$1", [edit.rows[0]!.id]);
+    const provider = { id: "test-provider", name: "Test provider", providerRole: "text", baseUrl: "http://127.0.0.1:1", providerType: "openai_compatible", model: "test-model", contextWindowTokens: 6_100,
+      maxOutputTokens: 100, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      async execute(): Promise<never> { throw new Error("Planning must not dispatch a provider request."); } } as const;
+    const planned = planGenerationPromptContext(captured, provider, "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 6_000, 6_000, "fact-budget-test", "story_memory",
+      policy, undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const body = JSON.parse(serializeProviderRequest(provider, { systemPrompt: "System", input: planned.storyInput }).body);
+    const sent = JSON.parse(body.messages.find((message: { role: string }) => message.role === "user").content).authoritative_context;
+    const selected = sent.protectedFacts as { id: string; content: string; turnNumber: number }[];
+    expect(selected.length).toBeGreaterThan(0);
+    expect(selected.length).toBeLessThan(910);
+    expect(selected).toEqual(facts.slice(-selected.length).map((fact) => ({ ...fact, turnNumber: 3 })));
+    expect(sent.currentContinuity.canonicalFacts).toEqual([]);
+    for (const fact of selected) expect(planned.storyInput.split(fact.content)).toHaveLength(2);
+    expect(planned.storyInput).not.toContain(facts[0]!.content);
+    expect(planned.contextPlan.contextTokens).toBeLessThanOrEqual(6_000);
+    expect(planned.contextPlan.requestTokens + planned.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(6_000);
+    expect(JSON.stringify(captured)).toBe(frozenCapture);
+    expect((await pool.query("SELECT state_snapshot_private FROM campaign_state_edits WHERE id=$1", [edit.rows[0]!.id])).rows).toEqual(sourceBefore.rows);
+
+    expect((await pool.query("SELECT id FROM campaign_canonical_facts WHERE campaign_id=$1", [scope.campaignId])).rows).toHaveLength(910);
+  });
+
   it("accepts a turn-zero correction fact only when its complete correction source verifies", async () => {
     const scope = await fixture();
     const factId = crypto.randomUUID();
@@ -133,7 +194,7 @@ integration("verified protected-fact authority", () => {
     });
   });
 
-  it("bounds unique source bytes once for a fact-dense maximum snapshot", async () => {
+  it("accounts for unique source bytes once for a fact-dense accepted snapshot", async () => {
     const scope = await fixture();
     const canonicalFacts = Array.from({ length: 100 }, (_, index) => `Fact ${index}: ${"x".repeat(3_990)}`);
     const snapshot = { canonicalFacts, canonicalFactUpdates: [] };
@@ -152,10 +213,10 @@ integration("verified protected-fact authority", () => {
     process.stderr.write(`${JSON.stringify({ protectedFactSourceMetrics: { candidateRows: result.candidateRows, sourceBytes: result.sourceBytes, elapsedMs } })}\n`);
   });
 
-  it("caps many distinct verified sources by bytes before source materialization", async () => {
+  it("retains all verified sources when aggregate source bytes exceed one megabyte", async () => {
     const scope = await fixture();
     for (const turnNumber of [1, 2, 3]) {
-      const canonicalFacts = Array.from({ length: 80 }, (_, index) => `Turn ${turnNumber} fact ${index}: ${"y".repeat(3_980)}`);
+      const canonicalFacts = Array.from({ length: 100 }, (_, index) => `Turn ${turnNumber} fact ${index}: ${"y".repeat(3_980)}`);
       const snapshot = { canonicalFacts, canonicalFactUpdates: [] };
       const turnId = await acceptedTurn(scope.campaignId, turnNumber, snapshot);
       const facts = buildCanonicalChronicleFacts({ campaignId: scope.campaignId, turnId, ...snapshot, entityCatalog: [] });
@@ -163,14 +224,13 @@ integration("verified protected-fact authority", () => {
     }
     const result = await load(scope);
 
-    expect(result.candidateRows).toBe(240);
-    expect(result.sourceBytes).toBeLessThanOrEqual(1_000_000);
-    expect(result.facts.length).toBeGreaterThan(0);
-    expect(result.facts.length).toBeLessThanOrEqual(240);
-    expect(result.omittedCount).toBe(240 - result.facts.length);
+    expect(result.candidateRows).toBe(300);
+    expect(result.sourceBytes).toBeGreaterThan(1_000_000);
+    expect(result.facts).toHaveLength(300);
+    expect(result.omittedCount).toBe(0);
   });
 
-  it("verifies bounded optional IDs beyond the protected 512-row source window and retains their sibling", async () => {
+  it("retains verified older facts beyond 512 candidates while excluding invalid newer sources", async () => {
     const scope = await fixture();
     const oldSnapshot = { canonicalFacts: ["The old moon lens is silver.", "Its sibling lens is blue."], canonicalFactUpdates: [] };
     const oldTurnId = await acceptedTurn(scope.campaignId, 1, oldSnapshot);
@@ -184,7 +244,7 @@ integration("verified protected-fact authority", () => {
         FROM generate_series(1,513) n`, [ownerUserId, scope.campaignId, scope.worldVersionId, newerTurnId]);
     const capturedFrontier = { stateEditId: crypto.randomUUID(), effectiveTurnNumber: 0, facts: [] };
 
-    expect((await load(scope)).facts.map((fact) => fact.id)).not.toContain(oldFact!.id);
+    expect((await load(scope)).facts.map((fact) => fact.id)).toEqual([oldFact!.id, sibling!.id]);
     const client = await pool.connect();
     try {
       await expect(verifyCapturedOptionalGenerationFacts(client, { ownerUserId, ...scope }, 3,

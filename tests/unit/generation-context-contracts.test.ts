@@ -90,6 +90,9 @@ describe("canonical private generation context", () => {
       finalTokens: { context: 3_000, writerRequest: 4_000, reviewerRequest: 2_000 }
     } as const;
     expect(context.historyCoverageDiagnosticsSchema.parse(diagnostic)).toEqual(diagnostic);
+    const contextBounded = { ...diagnostic, limits: { ...diagnostic.limits, protectedFactMeasurements: null },
+      facts: { ...diagnostic.facts, measurementLimit: null, measurementLimitHit: false } };
+    expect(context.historyCoverageDiagnosticsSchema.parse(contextBounded)).toEqual(contextBounded);
     for (const hostile of [
       { ...diagnostic, arbitrary: "no" },
       { ...diagnostic, candidates: { ...diagnostic.candidates, candidateId: uuid } },
@@ -108,6 +111,15 @@ describe("canonical private generation context", () => {
     expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
     expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, authority: { ...value.authority,
       protectedFacts: [{ ...protectedFact, content: "" }] } }).success).toBe(false);
+  });
+
+  it("captures 910 complete correction facts without a collection or aggregate-byte ceiling", () => {
+    const facts = Array.from({ length: 910 }, (_, index) => ({ id: crypto.randomUUID(), content: `Fact ${index}: ${"x".repeat(1_200)}` }));
+    const value = { ...authority, protectedFacts: facts.map((fact) => ({ ...fact, turnNumber: 3 })),
+      optionalFactFrontier: { stateEditId: uuid, effectiveTurnNumber: 3, facts },
+      protectedFactsCoverage: { candidateRows: 910, sourceBytes: 1_200_000, sourceLimitReached: false,
+        oversizedCandidateCount: 0, futureSourceCount: 0, withheldCandidateCount: 0 } };
+    expect(context.generationContextAuthoritySchema.parse(value)).toEqual(value);
   });
 
   it("requires every old dependency and the new profile fence in v3", () => {

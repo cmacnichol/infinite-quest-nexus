@@ -25,9 +25,27 @@ reviewer headroom. Its intent ledger is player intent rather than evidence that
 an event occurred; accepted narration and current canonical state establish
 outcomes. Protected facts are complete only after scoped source/content
 verification. Retrieval excludes only sources actually reserved in the final
-request. Ledger, fact, parent, candidate-pool, and optional-fit guards are
+request. Ledger, parent, candidate-pool, and optional-fit guards are
 bounded and reported as such; configured campaign budget never overrides a
 frozen provider limit.
+
+Fact allocation was revised on 2026-09-28 after a valid 910-fact correction
+failed the former 512-record capture schema. Cumulative fact capture has no
+fixed record-count or aggregate source-byte ceiling. Source identity, ownership,
+correction-frontier checks and individual fact validation still apply.
+
+After mandatory scene authority and cast context, verified complete facts use
+the available context budget and independently measured writer/reviewer request
+limits, including output reservations and request safety allowances. There is
+no separate percentage quota or measurement-count cutoff for facts. Selection
+keeps the maximal newest whole suffix and drops oldest records first. If the
+newest record cannot fit, no facts are selected; older small records do not
+displace newer authority. Exact binary-search probes bound serialization work
+logarithmically without a fact-count cutoff; a composed regression checks
+planning against the minimum worker lease duration. Unused capacity
+remains available to optional history. Omission never deletes authoritative
+facts. Historical diagnostics with a 64-measurement limit remain readable;
+new diagnostics use null for that removed limit.
 
 F3 remains partial: accepted-event synopses and chapter compaction are deferred.
 

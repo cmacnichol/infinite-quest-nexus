@@ -104,16 +104,14 @@ export const generationContextAuthoritySchema = z.object({
   eventTriggers: campaignRuntimeStateContentSchema.shape.eventTriggers,
   pendingEventTriggers: campaignRuntimeStateContentSchema.shape.pendingEventTriggers,
   storyLedger: storyLedgerSchema.optional(),
-  protectedFacts: z.array(protectedFactSchema).max(512).optional(),
+  protectedFacts: z.array(protectedFactSchema).optional(),
   protectedFactsOmitted: z.number().int().min(0).optional(),
   protectedFactsCoverage: protectedFactSourceCoverageSchema.optional(),
   /** Captured Task 6 correction frontier for deferred optional fact checks. */
   optionalFactFrontier: z.object({
     stateEditId: z.string().uuid(), effectiveTurnNumber: ordinalSchema,
-    // A correction frontier can certify the same bounded 512 fact records as
-    // protected-fact authority; rejecting the larger valid capture would make
-    // the authority context internally inconsistent.
-    facts: z.array(z.object({ id: z.string().uuid(), content: z.string() }).strict()).max(512)
+    // Capture the complete frontier; prompt selection applies the context budget.
+    facts: z.array(z.object({ id: z.string().uuid(), content: z.string() }).strict())
   }).strict().optional(),
   latestTurn: z.object({ action: z.string(), narration: z.string(), inputMode: z.enum(["action", "scene"]).optional() }).strict().nullable()
 }).strict();
@@ -168,7 +166,7 @@ export const historyCoverageDiagnosticsSchema = z.object({
     reviewerInputTokens: historyDiagnosticTokenSchema.nullable(),
     recentWindowTurns: z.literal(HISTORY_COVERAGE_POLICY.recentWindowTurns),
     candidatePoolLimit: historyDiagnosticCountSchema.nullable(),
-    protectedFactMeasurements: z.literal(64)
+    protectedFactMeasurements: z.literal(64).nullable()
   }).strict(),
   candidates: z.object({
     sourceCount: historyDiagnosticCountSchema,
@@ -201,7 +199,7 @@ export const historyCoverageDiagnosticsSchema = z.object({
     omittedCount: historyDiagnosticCountSchema,
     sourceOmittedCount: historyDiagnosticCountSchema,
     budgetTokens: historyDiagnosticTokenSchema,
-    measurementLimit: z.literal(64),
+    measurementLimit: z.literal(64).nullable(),
     measurementLimitHit: z.boolean(),
     unexaminedCount: historyDiagnosticCountSchema,
     sourceCoverage: protectedFactSourceCoverageSchema.nullable()
