@@ -3,9 +3,9 @@ import type { GenerationExecutionPayload } from "../../packages/database/src/gen
 import type { DatabasePool } from "../../packages/database/src/pool.js";
 import { sha256 } from "../../packages/domain/src/index.js";
 import { PreparedResponseContractError, serializeProviderRequest } from "../../packages/story-engine/src/index.js";
-import { callCampaignTextProvider } from "../../services/runtime/src/generation-executor-adapter.js";
+import { callCampaignTextProvider, preparePrimaryReservation } from "../../services/runtime/src/generation-executor-adapter.js";
 
-const evidenceLimit = 1_000_000;
+const evidenceLimit = 32_000_000;
 
 function jobWithFrozenContract(): GenerationExecutionPayload {
   return {
@@ -54,7 +54,8 @@ function fixture() {
   const job = jobWithFrozenContract();
   const provider: any = {
     id: job.provider_profile_id, name: "Evidence limit fixture", providerRole: "text", providerType: "openai_compatible",
-    model: "test-model", contextWindowTokens: 4_000_000, maxOutputTokens: 2_000,
+    // Oversized synthetic window isolates the independent storage boundary tests.
+    model: "test-model", contextWindowTokens: 32_000_000, maxOutputTokens: 2_000,
     temperature: 0, requestTimeoutMs: 1_000, configuration: {}, execute: vi.fn()
   };
   const saveOrchestration = vi.fn(async (_scope: unknown, value: unknown) => {
@@ -87,6 +88,29 @@ function requestInputForExactBodyLength(provider: any, targetLength: number): st
 }
 
 describe("response-contract evidence request limit", () => {
+  it.each([2_441_404, 9_000_000])("reserves a %i-character request within the supported four-million-token window", (length) => {
+    const { job, provider } = fixture();
+    provider.contextWindowTokens = 4_000_000;
+    const input = requestInputForExactBodyLength(provider, length);
+    expect(preparePrimaryReservation(provider, job, "story_generation", { systemPrompt: "rules", input }, true).body).toHaveLength(length);
+  });
+
+  it("rejects oversized evidence before creating the primary reservation", () => {
+    const { job, provider } = fixture();
+    const input = requestInputForExactBodyLength(provider, evidenceLimit + 1);
+    expect(() => preparePrimaryReservation(provider, job, "story_generation", { systemPrompt: "rules", input }, true))
+      .toThrow(expect.objectContaining({ code: "response_contract_request_evidence_too_large" }));
+    expect(job.orchestration_private.primaryReservation).toBeUndefined();
+  });
+
+  it("still rejects a request exceeding the provider token window", () => {
+    const { job, provider } = fixture();
+    provider.contextWindowTokens = 32_000;
+    const input = requestInputForExactBodyLength(provider, 2_441_404);
+    expect(() => preparePrimaryReservation(provider, job, "story_generation", { systemPrompt: "rules", input }, true))
+      .toThrow(expect.objectContaining({ code: "context_budget_exceeded" }));
+  });
+
   it("rejects an uncapturable request before reservation or provider dispatch", async () => {
     const { job, provider, dependencies, reserve, dispatch, complete } = fixture();
     const input = requestInputForExactBodyLength(provider, evidenceLimit + 1);
@@ -105,13 +129,14 @@ describe("response-contract evidence request limit", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
-  it("retains the exact boundary request body when the provider reports a prepared failure", async () => {
+  it.each([2_441_404, 9_000_000, evidenceLimit])("retains an exact %i-character request body when the provider reports a prepared failure", async (length) => {
     const { job, provider, dependencies, saveOrchestration, reserve, dispatch, complete } = fixture();
-    const input = requestInputForExactBodyLength(provider, evidenceLimit);
+    if (length < evidenceLimit) provider.contextWindowTokens = 4_000_000;
+    const input = requestInputForExactBodyLength(provider, length);
     const expectedBody = serializeProviderRequest({ ...provider, baseUrl: "" }, {
       systemPrompt: "rules", input, responseContract: { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true }
     }).body;
-    expect(expectedBody).toHaveLength(evidenceLimit);
+    expect(expectedBody).toHaveLength(length);
     provider.execute = vi.fn(async (request: any) => {
       const prepared = serializeProviderRequest({ ...provider, baseUrl: "" }, request);
       throw new PreparedResponseContractError(new Error("provider rejected request"), prepared, {

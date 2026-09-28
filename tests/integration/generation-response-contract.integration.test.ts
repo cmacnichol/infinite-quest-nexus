@@ -373,7 +373,8 @@ integration("PostgreSQL response-contract persistence", () => {
     expect(await fixture.repository.saveOrchestration(fixture.scope, initial)).toBe(true);
     const primaryPrompt = "Write the next turn."; const repairPrompt = "Repair the rejected turn.";
     const primaryPlan = deriveTextExecutionPlan(routeBasis, primaryPrompt); const repairPlan = deriveTextExecutionPlan(routeBasis, repairPrompt);
-    const primaryBody = "{}"; const primaryHash = sha256Hex(primaryBody); const repairHash = "c".repeat(64);
+    // Large request evidence survives persistence and worker reclaim.
+    const primaryBody = JSON.stringify({ input: "x".repeat(2_441_404) }); const primaryHash = sha256Hex(primaryBody); const repairHash = "c".repeat(64);
     const primaryInput = { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "story_generation" as const, requestPayloadHash: primaryHash, request: v2Audit(frozen, primaryPrompt, primaryPlan, primaryHash), routeBasis, plan: primaryPlan, trustedOperationPrompt: primaryPrompt };
     const repairInput = { version: 2 as const, logicalAttemptId, invocationKey: "story:nonstream" as const, operation: "story_recovery" as const, requestPayloadHash: repairHash, request: v2Audit(frozen, repairPrompt, repairPlan, repairHash), routeBasis, plan: repairPlan, trustedOperationPrompt: repairPrompt };
     const primary = await fixture.repository.reserveResponseContractInvocation!(fixture.scope, primaryInput);

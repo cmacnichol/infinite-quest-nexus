@@ -1,3 +1,4 @@
+import { STORY_CONTEXT_BUDGET_TOKEN_VALUES } from "../../contracts/src/story-settings.js";
 import { applyCastBoundaryChange } from "./campaign-cast-lifecycle.js";
 import { enqueueCastDiscoveryWithClient, type CastDiscoveryExecution } from "./campaign-cast-job-repository.js";
 import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
@@ -133,8 +134,12 @@ const responseContractInvocationLedgerLimit = responseContractInvocationLedgerLi
  * length and the repository validation applied after PostgreSQL retrieval; it
  * is deliberately not a UTF-8 byte transport limit. Historical requests do
  * not use this new evidence path.
+ * Allow eight characters per token at the largest supported context setting
+ * (currently 4m tokens / 32m characters), including serialization headroom.
+ * This is a storage safeguard, not a tokenizer conversion; the independent
+ * provider token budget must still pass.
  */
-export const responseContractPreparedFailureRequestBodyCharacterLimit = 1_000_000;
+export const responseContractPreparedFailureRequestBodyCharacterLimit = Math.max(...STORY_CONTEXT_BUDGET_TOKEN_VALUES) * 8;
 
 type PreparedResponseFailureEvidence = NonNullable<GenerationOrchestrationState["preparedResponseFailures"]>[number];
 

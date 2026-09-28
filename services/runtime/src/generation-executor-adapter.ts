@@ -1230,6 +1230,18 @@ function replayValidatedSceneCoverage(
   return replay.result;
 }
 
+function assertResponseContractEvidenceFits(body: string): void {
+  if (body.length <= responseContractPreparedFailureRequestBodyCharacterLimit) return;
+  throw Object.assign(new Error(
+    "The prepared provider request exceeds the durable evidence limit. Reduce included context or shorten the input before retrying."
+  ), {
+    code: "response_contract_request_evidence_too_large",
+    scope: "provider_request",
+    requiredCharacters: body.length,
+    availableCharacters: responseContractPreparedFailureRequestBodyCharacterLimit
+  });
+}
+
 /** The reservation must be the dispatch body for contract jobs. Historical
  * jobs intentionally retain their pre-contract, callback-free reservation. */
 export function preparePrimaryReservation(
@@ -1267,7 +1279,10 @@ export function preparePrimaryReservation(
   // would interpret as an interrupted provider request.
   if (hasFrozenContracts) {
     const checked = prepareCheckedFrozenCampaignRequest(provider, job, operation, request, preboundPlan);
-    if (checked) return checked;
+    if (checked) {
+      assertResponseContractEvidenceFits(checked.body);
+      return checked;
+    }
   }
   const executionPlan = preboundPlan ?? deriveCampaignTextExecutionPlan(job, request.systemPrompt);
   const preparedRequest = bindCampaignTextExecutionPlan(job, request, executionPlan);
@@ -1634,16 +1649,7 @@ export async function callCampaignTextProvider(
   };
   if (invocation) {
     const checkedPrepared = prepared!;
-    if (checkedPrepared.body.length > responseContractPreparedFailureRequestBodyCharacterLimit) {
-      throw Object.assign(new Error(
-        "The prepared provider request exceeds the durable evidence limit. Reduce included context or shorten the input before retrying."
-      ), {
-        code: "response_contract_request_evidence_too_large",
-        scope: "provider_request",
-        requiredCharacters: checkedPrepared.body.length,
-        availableCharacters: responseContractPreparedFailureRequestBodyCharacterLimit
-      });
-    }
+    assertResponseContractEvidenceFits(checkedPrepared.body);
     if (!scope || !dependencies.repository.reserveResponseContractInvocation
       || !dependencies.repository.markResponseContractInvocationDispatched
       || !dependencies.repository.completeResponseContractInvocation) {

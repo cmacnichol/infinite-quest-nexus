@@ -37,6 +37,17 @@ model tokenizer. Provider-reported overflow remains recoverable and informs
 future calibration; it does not authorize clipping protected state or lowering
 the configured output reserve.
 
+Durable response-contract request evidence has a separate storage ceiling of
+32 million UTF-16 characters, derived from eight characters per token at the
+largest supported context setting (4 million tokens). This provides serialization
+headroom; it is not a token-count conversion or permission to exceed a provider's
+context window. Both request dispatch and evidence reload use the same ceiling.
+Primary generation checks the ceiling before persisting its reservation, so a
+storage rejection cannot create an apparent interrupted provider request on retry.
+No database migration is required. Older readers reject saved failure evidence
+above 1 million characters. Rollback therefore requires a compatible reader for
+any retained oversized evidence; draining active work alone does not remove it.
+
 Protected records are complete. The legacy planner adds optional recent turns and
 historical facts as complete records only when they fit, records omissions, and
 renders selected records in chronology. A protected-context shortfall returns a
