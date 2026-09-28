@@ -17,8 +17,6 @@ type ProtectedFactCandidate = Readonly<{
   source_state_edit_id: string | null;
 }>;
 
-export const MAX_PROTECTED_FACT_CANDIDATE_ROWS = 512;
-export const MAX_PROTECTED_FACT_SOURCE_BYTES = 1_000_000;
 export const MAX_PROTECTED_FACT_CONTENT_CHARACTERS = 4_000;
 export const MAX_PROTECTED_FACT_CONTENT_BYTES = 16_000;
 /** Deferred retrieval verifies a finite selected candidate set, never a new frontier. */
@@ -224,14 +222,14 @@ export async function loadVerifiedProtectedFacts(
   coverage: ProtectedFactSourceCoverage;
 }>> {
   const candidates = await client.query<ProtectedFactCandidate>(`SELECT fact.id,
-      CASE WHEN fact.source_turn_number <= $4 AND char_length(fact.content) <= $6 AND octet_length(fact.content) <= $7
+      CASE WHEN fact.source_turn_number <= $4 AND char_length(fact.content) <= $5 AND octet_length(fact.content) <= $6
         THEN fact.content ELSE NULL END AS content,fact.source_turn_number,fact.source_fact_index,
       fact.source_turn_id,fact.source_state_edit_id
     FROM campaign_canonical_facts fact
     WHERE fact.owner_user_id=$1 AND fact.campaign_id=$2 AND fact.world_version_id=$3
       AND fact.valid_from_turn <= $4 AND (fact.valid_until_turn IS NULL OR fact.valid_until_turn > $4)
-    ORDER BY fact.source_turn_number DESC,fact.source_fact_index DESC,fact.id DESC
-    LIMIT $5`, [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber, MAX_PROTECTED_FACT_CANDIDATE_ROWS,
+    ORDER BY fact.source_turn_number DESC,fact.source_fact_index DESC,fact.id DESC`,
+  [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber,
     MAX_PROTECTED_FACT_CONTENT_CHARACTERS, MAX_PROTECTED_FACT_CONTENT_BYTES]);
   const newestFirst = candidates.rows;
   const ordered = [...newestFirst].sort((left, right) => left.source_turn_number - right.source_turn_number
@@ -242,15 +240,14 @@ export async function loadVerifiedProtectedFacts(
     && candidate.source_turn_number <= baseTurnNumber);
   const frontierResult = await client.query<{ id: string; effective_turn_number: number; canonical_facts: unknown | null; source_bytes: number }>(
     `SELECT edit.id,edit.effective_turn_number,
-        CASE WHEN octet_length(COALESCE(edit.state_snapshot_private->'canonicalFacts','[]'::jsonb)::text) <= $5
-          THEN COALESCE(edit.state_snapshot_private->'canonicalFacts','[]'::jsonb) ELSE NULL END AS canonical_facts,
+        COALESCE(edit.state_snapshot_private->'canonicalFacts','[]'::jsonb) AS canonical_facts,
         octet_length(COALESCE(edit.state_snapshot_private->'canonicalFacts','[]'::jsonb)::text)::integer AS source_bytes
       FROM campaign_state_edits edit
       JOIN campaigns campaign ON campaign.id=edit.campaign_id AND campaign.owner_user_id=edit.owner_user_id
       WHERE edit.owner_user_id=$1 AND edit.campaign_id=$2 AND campaign.world_version_id=$3
         AND edit.effective_turn_number <= $4
       ORDER BY edit.effective_turn_number DESC,edit.revision DESC LIMIT 1`,
-    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber, MAX_PROTECTED_FACT_SOURCE_BYTES]
+    [scope.ownerUserId, scope.campaignId, scope.worldVersionId, baseTurnNumber]
   );
   const frontier = frontierResult.rows[0] ?? null;
   let sourceBytes = frontier?.canonical_facts === null ? 0 : frontier?.source_bytes ?? 0;
@@ -273,8 +270,7 @@ export async function loadVerifiedProtectedFacts(
       AND turn_row.accepted_at IS NOT NULL AND turn_row.id=ANY($4::uuid[]) AND turn_row.turn_number <= $5`,
   [scope.ownerUserId, scope.campaignId, scope.worldVersionId, acceptedIds, baseTurnNumber]) : { rows: [] as { id: string; source_bytes: number }[] };
   const acceptedAllowed: string[] = [];
-  for (const source of acceptedSizes.rows.sort((left, right) => acceptedIds.indexOf(left.id) - acceptedIds.indexOf(right.id))) {
-    if (source.source_bytes > MAX_PROTECTED_FACT_SOURCE_BYTES - sourceBytes) continue;
+  for (const source of acceptedSizes.rows) {
     acceptedAllowed.push(source.id);
     sourceBytes += source.source_bytes;
   }
@@ -296,8 +292,7 @@ export async function loadVerifiedProtectedFacts(
     WHERE edit.owner_user_id=$1 AND edit.campaign_id=$2 AND campaign.world_version_id=$3 AND edit.id=ANY($4::uuid[]) AND edit.effective_turn_number <= $5`,
   [scope.ownerUserId, scope.campaignId, scope.worldVersionId, editIds, baseTurnNumber]) : { rows: [] as { id: string; source_bytes: number }[] };
   const editAllowed: string[] = [];
-  for (const source of editSizes.rows.sort((left, right) => editIds.indexOf(left.id) - editIds.indexOf(right.id))) {
-    if (source.source_bytes > MAX_PROTECTED_FACT_SOURCE_BYTES - sourceBytes) continue;
+  for (const source of editSizes.rows) {
     editAllowed.push(source.id);
     sourceBytes += source.source_bytes;
   }
@@ -362,7 +357,7 @@ export async function loadVerifiedProtectedFacts(
     return [verified];
   });
   const coverage: ProtectedFactSourceCoverage = {
-    candidateRows: ordered.length, sourceBytes, sourceLimitReached: ordered.length === MAX_PROTECTED_FACT_CANDIDATE_ROWS,
+    candidateRows: ordered.length, sourceBytes, sourceLimitReached: false,
     oversizedCandidateCount, futureSourceCount, withheldCandidateCount: ordered.length - facts.length
   };
   return { facts, omittedCount: ordered.length - facts.length, candidateRows: ordered.length, sourceBytes,

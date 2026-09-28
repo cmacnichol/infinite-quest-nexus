@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  campaignRuntimeStateContentSchema,
   campaignRuntimeStateSchema,
   campaignRuntimeStateUpdateSchema
 } from "../../packages/contracts/src/generation.js";
@@ -31,6 +32,22 @@ describe("complete campaign runtime state", () => {
       effectiveTurnNumber: 2,
       ...fullState
     })).toMatchObject({ ...fullState, effectiveTurnNumber: 2 });
+  });
+
+  it("accepts cumulative fact collections beyond 2000 while validating each complete record", () => {
+    const canonicalFacts = Array.from({ length: 2_001 }, (_, index) => ({
+      id: index % 2 === 0 ? crypto.randomUUID() : null, content: `The keeper recorded harbor event ${index}.`
+    }));
+    const state = { ...fullState, canonicalFacts };
+    expect(campaignRuntimeStateContentSchema.parse(state).canonicalFacts).toEqual(canonicalFacts);
+    expect(campaignRuntimeStateUpdateSchema.parse({ ...state, expectedTurnNumber: 4, expectedRevision: 7 }).canonicalFacts).toEqual(canonicalFacts);
+    for (const invalidFact of [
+      { id: "invalid", content: "A valid description." },
+      { id: null, content: "" },
+      { id: null, content: "x".repeat(20_001) }
+    ]) {
+      expect(campaignRuntimeStateContentSchema.safeParse({ ...state, canonicalFacts: [...canonicalFacts, invalidFact] }).success).toBe(false);
+    }
   });
 
   it("returns stable canonical fact IDs", () => {

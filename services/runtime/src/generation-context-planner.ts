@@ -23,9 +23,6 @@ const PRIVATE_MECHANICS_AUTHORITY_KEYS = new Set([
   "rpgStats", "eventTriggers", "pendingEventTriggers", "defaultTriggers", "mechanicsPrivate", "roll"
 ]);
 
-/** Fixed v5 guard: exact fact measurement must not starve a short worker lease. */
-export const MAX_PROTECTED_FACT_MEASUREMENTS = 64;
-
 /** Bounds the exact partial-fit probe after the full-set fit proof. */
 export const MAX_HISTORY_COVERAGE_PARTIAL_CANDIDATE_PROBES = 8;
 
@@ -245,6 +242,15 @@ export function planGenerationPromptContext(
     })
     : null;
   const worldReferences = worldSelection?.entries ?? [];
+  const budgetedFacts = new Map(protectedFactRecords.map((fact) => [fact.id, fact.content]));
+  const currentFactRecords = historyCoverage ? (authority.currentContinuity?.canonicalFacts ?? [])
+    .filter((fact) => !fact.id || budgetedFacts.get(fact.id) !== fact.content) : [];
+  // Verified historical facts have their own whole-record budget selection.
+  // Do not also embed them in mandatory current state, where they could
+  // overflow before selection or leak omitted facts back into the request.
+  const currentContinuity = historyCoverage && authority.currentContinuity
+    ? { ...authority.currentContinuity, canonicalFacts: [] }
+    : authority.currentContinuity;
   const authorityContext = {
     authoritativeRules: Array.isArray(authority.rules) ? authority.rules : [],
     worldCanon: hasGenerationCharacterAuthority(context.baseIdentity) ? worldFictionOverview(authority.worldCanon) : fictionSafeAuthority(authority.worldCanon ?? {}),
@@ -255,7 +261,7 @@ export function planGenerationPromptContext(
     ...(hasGenerationCharacterAuthority(context.baseIdentity) && authority.characterAuthority
       ? { selectedCharacterAuthority: fictionSafeAuthority(authority.characterAuthority) }
       : {}),
-    currentContinuity: fictionSafeAuthority(authority.currentContinuity ?? {}),
+    currentContinuity: fictionSafeAuthority(currentContinuity ?? {}),
     currentScene: fictionSafeAuthority(authority.latestTurn ?? null),
     ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: [] as readonly Readonly<{ sourceId: string; sourcePath: string; content: string }>[] } : {}),
     ...(layered ? { recentTurns: [] as typeof recentRecords } : {}),
@@ -338,6 +344,9 @@ export function planGenerationPromptContext(
       content: stableStringify(entry), protected: false, priority: -entry.turnNumber, ordinal: entry.turnNumber, scope: "ledger" })),
     ...protectedFactRecords.map((fact, index) => ({ id: `protected-fact:${fact.id}`, revision: sha256(fact.content),
       content: fact.content, protected: false, priority: -fact.turnNumber, ordinal: index, scope: "protected_fact" })),
+    ...currentFactRecords.map((fact, index) => ({ id: `current-fact:${index}`, revision: sha256(fact.content),
+      content: fact.content, protected: false, priority: -context.baseIdentity.baseTurnNumber,
+      ordinal: protectedFactRecords.length + index, scope: "protected_fact" })),
     ...worldReferences.map((reference, ordinal) => ({
       id: reference.sourceId, revision: sha256(reference.content), content: reference.content,
       protected: false, priority: reference.rank, ordinal, scope: "world"
@@ -356,6 +365,9 @@ export function planGenerationPromptContext(
     const selectedIds = new Set(selected.map((block) => block.id));
     const sentContext = {
       ...authorityContext,
+      ...(historyCoverage && authorityContext.currentContinuity && typeof authorityContext.currentContinuity === "object"
+        ? { currentContinuity: { ...authorityContext.currentContinuity,
+          canonicalFacts: currentFactRecords.filter((_, index) => selectedIds.has(`current-fact:${index}`)) } } : {}),
       ...(castSelection?.content && selectedIds.has("cast-context")
         ? { cast: JSON.parse(castSelection.content) as SentCast } : {}),
       ...(hasGenerationCharacterAuthority(context.baseIdentity) ? { worldReferences: selected.filter((block: { id: string; scope?: string }) => block.scope === "world")
@@ -480,17 +492,16 @@ export function planGenerationPromptContext(
       contextLimit - protectedPlan.contextTokens,
       requestHeadroom(protectedPlan)
     ));
-    const ledgerCeiling = historyCoverage ? Math.floor(originalHeadroom * HISTORY_COVERAGE_POLICY.ledgerBudgetShare) : 0;
-    const factCeiling = historyCoverage ? Math.floor(originalHeadroom * HISTORY_COVERAGE_POLICY.protectedFactBudgetShare) : 0;
+    const factCeiling = historyCoverage ? originalHeadroom : 0;
     let selectedFactBlocks: typeof blocks = [];
     if (historyCoverage) {
-      const factBlocks = blocks.filter((candidate) => candidate.scope === "protected_fact");
+      const factBlocks = blocks.filter((candidate) => candidate.scope === "protected_fact")
+        .sort((left, right) => right.priority - left.priority || left.ordinal - right.ordinal || left.id.localeCompare(right.id));
       const startedAt = performance.now();
       let measurementTrialCount = 0;
-      let measurementLimitHit = false;
-      let unexaminedFactCount = 0;
+      const measurementLimitHit = false;
+      const unexaminedFactCount = 0;
       const measureFacts = (factSelection: typeof blocks) => {
-        if (measurementTrialCount >= MAX_PROTECTED_FACT_MEASUREMENTS) return null;
         factMeasurementActive = true;
         measurementTrialCount++;
         try { return measure([...reservedAuthority, ...factSelection.map((candidate) => ({ ...candidate, protected: true }))]); }
@@ -502,12 +513,11 @@ export function planGenerationPromptContext(
       const selectedFacts = (trial: ReturnType<typeof measure> | null, factSelection: typeof blocks) => trial !== null
         && factSelection.every((candidate) => trial.selected.some((block) => block.id === candidate.id));
       const fitsFactQuota = (trial: ReturnType<typeof measure> | null, factSelection: typeof blocks) => {
-        if (!selectedFacts(trial, factSelection) || trial === null) return false;
-        return Math.max(trial.contextTokens - protectedPlan.contextTokens, requestCostDelta(trial, protectedPlan)) <= factCeiling;
+        // Exact measurement checks each independent ceiling. Comparing a
+        // reviewer delta with writer headroom would discard facts that fit.
+        return selectedFacts(trial, factSelection);
       };
-      // The full ordered set is an exact, semantics-preserving fast path: if
-      // it fits as whole records under the same fixed fact quota, the
-      // newest-first skip-nonfit loop would select every record as well.
+      // The full ordered set is the fast path when every whole fact fits.
       // This avoids rebuilding a multi-megabyte reviewer manifest once per
       // fact for the common high-headroom case.
       let allFactsFit = false;
@@ -518,47 +528,34 @@ export function planGenerationPromptContext(
           allFactsFit = true;
         }
       }
-      // Establish the largest fitting newest contiguous run with exact,
-      // monotone suffix probes. That run is identical to greedy selection up
-      // to its first nonfit; afterwards older heterogeneous records are still
-      // examined individually, so this is not suffix-only fact selection.
-      let nextOlderIndex = factBlocks.length - 1;
-      if (!allFactsFit && factBlocks.length && measurementTrialCount < MAX_PROTECTED_FACT_MEASUREMENTS) {
+      // Drop oldest facts first by finding the maximal fitting newest whole
+      // suffix. Exact logarithmic probes avoid blocking worker lease renewal
+      // on one complete writer/reviewer serialization per omitted old fact.
+      // If the newest record cannot fit, the selected suffix is empty.
+      if (!allFactsFit && factBlocks.length) {
         let fittingLength = 0;
         let failingLength = factBlocks.length;
-        while (fittingLength + 1 < failingLength && measurementTrialCount < MAX_PROTECTED_FACT_MEASUREMENTS) {
+        while (fittingLength + 1 < failingLength) {
           const candidateLength = Math.ceil((fittingLength + failingLength) / 2);
           const suffix = factBlocks.slice(factBlocks.length - candidateLength);
           if (fitsFactQuota(measureFacts(suffix), suffix)) fittingLength = candidateLength;
           else failingLength = candidateLength;
         }
         selectedFactBlocks = factBlocks.slice(factBlocks.length - fittingLength).map((candidate) => ({ ...candidate, protected: true }));
-        nextOlderIndex = factBlocks.length - fittingLength - 1;
-      }
-      // Facts deliberately do not use reserveNewestWholeSuffix: a too-large
-      // newer fact must not prevent an older smaller fact from fitting.
-      for (let index = nextOlderIndex; !allFactsFit && index >= 0; index -= 1) {
-        if (measurementTrialCount >= MAX_PROTECTED_FACT_MEASUREMENTS) {
-          measurementLimitHit = true;
-          unexaminedFactCount = index + 1;
-          break;
-        }
-        const candidate = factBlocks[index]!;
-        const trial = measureFacts([...selectedFactBlocks, candidate]);
-        if (fitsFactQuota(trial, [...selectedFactBlocks, candidate])) selectedFactBlocks = [{ ...candidate, protected: true }, ...selectedFactBlocks];
       }
       factReservationDiagnostics = {
-        originalHeadroomTokens: originalHeadroom, factBudgetTokens: factCeiling, sourceFactCount: protectedFactRecords.length,
-        selectedFactCount: selectedFactBlocks.length, omittedFactCount: protectedFactRecords.length - selectedFactBlocks.length,
+        originalHeadroomTokens: originalHeadroom, factBudgetTokens: factCeiling, sourceFactCount: factBlocks.length,
+        selectedFactCount: selectedFactBlocks.length, omittedFactCount: factBlocks.length - selectedFactBlocks.length,
         measurementTrialCount, writerSerializationCount: factWriterSerializationCount,
         reviewerSerializationCount: factReviewerSerializationCount, measurementLimitHit, unexaminedFactCount,
         elapsedMilliseconds: performance.now() - startedAt
       };
     }
-    // Keep the original H-derived 25% allocation, but charge each ledger
-    // suffix against the authority plus the fact records already reserved.
-    // H is deliberately never recomputed after fact selection.
+    // Facts consume only their measured cost. Optional history shares the
+    // remaining capacity; unused fact headroom is never held back.
     const factBaselinePlan = measure([...reservedAuthority, ...selectedFactBlocks]);
+    const remainingHeadroom = Math.max(0, Math.min(contextLimit - factBaselinePlan.contextTokens, requestHeadroom(factBaselinePlan)));
+    const ledgerCeiling = historyCoverage ? Math.floor(remainingHeadroom * HISTORY_COVERAGE_POLICY.ledgerBudgetShare) : 0;
     let selectedLedgerBlocks: typeof blocks = [];
     if (historyCoverage) {
       const ledgerBlocks = blocks.filter((candidate) => candidate.scope === "ledger")
@@ -594,7 +591,7 @@ export function planGenerationPromptContext(
         postProjectionRemovedEntryCount: 0
       };
     }
-    const residual = Math.max(0, originalHeadroom - factCeiling - ledgerCeiling);
+    const residual = Math.max(0, remainingHeadroom - ledgerCeiling);
     const worldCeiling = Math.floor(residual * (policy?.worldResidualShare ?? 0.15));
     const recentCeiling = Math.floor(residual * (policy?.recentResidualShare ?? 0));
     const selectedRecentBlocks: typeof blocks = [];
@@ -731,7 +728,7 @@ export function planGenerationPromptContext(
       reviewerInputTokens: reviewEnabled ? reviewInputLimit ?? inputLimit : null,
       recentWindowTurns: HISTORY_COVERAGE_POLICY.recentWindowTurns,
       candidatePoolLimit: context.chronicleSelectionDiagnostics?.candidatePoolLimit ?? null,
-      protectedFactMeasurements: MAX_PROTECTED_FACT_MEASUREMENTS
+      protectedFactMeasurements: null
     },
     candidates: {
       sourceCount: candidates.length,
@@ -761,13 +758,15 @@ export function planGenerationPromptContext(
       budgetTokens: historyReservationDiagnostics?.ledgerBudgetTokens ?? 0,
       measurementTrialCount: historyReservationDiagnostics?.measurementTrialCount ?? null
     } : null,
-    facts: authority.protectedFacts ? {
-      sourceCount: authority.protectedFacts.length,
-      sentCount: selectedContext.protectedFacts?.length ?? 0,
-      omittedCount: Math.max(0, authority.protectedFacts.length - (selectedContext.protectedFacts?.length ?? 0)),
+    facts: authority.protectedFacts || currentFactRecords.length ? {
+      sourceCount: (authority.protectedFacts?.length ?? 0) + currentFactRecords.length,
+      sentCount: (selectedContext.protectedFacts?.length ?? 0)
+        + (selectedContext.currentContinuity?.canonicalFacts?.length ?? 0),
+      omittedCount: Math.max(0, (authority.protectedFacts?.length ?? 0) + currentFactRecords.length
+        - (selectedContext.protectedFacts?.length ?? 0) - (selectedContext.currentContinuity?.canonicalFacts?.length ?? 0)),
       sourceOmittedCount: (authority.protectedFactsOmitted ?? 0) + withheldProtectedFactCount,
       budgetTokens: factReservationDiagnostics?.factBudgetTokens ?? 0,
-      measurementLimit: MAX_PROTECTED_FACT_MEASUREMENTS,
+      measurementLimit: null,
       measurementLimitHit: factReservationDiagnostics?.measurementLimitHit ?? false,
       unexaminedCount: factReservationDiagnostics?.unexaminedFactCount ?? 0,
       sourceCoverage: authority.protectedFactsCoverage ?? null

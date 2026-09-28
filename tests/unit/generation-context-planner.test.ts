@@ -134,13 +134,13 @@ describe("layered generation context planner", () => {
     const diagnostic = historyCoverageDiagnosticsSchema.parse((result.layerDiagnostics as any).history);
 
     expect(diagnostic).toMatchObject({
-      limits: { contextTokens: 32_000, writerInputTokens: 31_900, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
+      limits: { contextTokens: 32_000, writerInputTokens: 31_900, candidatePoolLimit: 2_000, protectedFactMeasurements: null },
       candidates: { selectedCount: 1, selectedEstimateTokens: 7, candidatePoolCandidatesRemoved: 4,
         stopReason: "candidate_pool_limit", fallbackReason: "chunk_index_not_ready",
         sourceValidationFailureCount: 1, sourceValidationExcluded: 0 },
       ledger: { capturedCount: 2, sentCount: 1, omittedCount: 1, coveredByRecentCount: 1, sourceExcludedCount: 6 },
       facts: { sourceCount: 1, sentCount: 1, omittedCount: 0, sourceOmittedCount: 2,
-        measurementLimit: 64, measurementLimitHit: false, unexaminedCount: 0 },
+        measurementLimit: null, measurementLimitHit: false, unexaminedCount: 0 },
       recents: { capturedCount: 2, sentCount: 2, targetCount: 3 },
       finalTokens: { context: result.contextPlan.contextTokens, writerRequest: result.contextPlan.requestTokens, reviewerRequest: null }
     });
@@ -297,6 +297,62 @@ describe("layered generation context planner", () => {
       reviewerSerializations: reservation.reviewerSerializationCount, elapsedMilliseconds: Math.round(reservation.elapsedMilliseconds * 100) / 100 } })}\n`);
   }, 20_000);
 
+  it("uses available context for 910 facts and drops oldest facts only when the request is full", () => {
+    const context: any = recentContext();
+    context.authority.protectedFacts = Array.from({ length: 910 }, (_, index) => ({
+      id: `90000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      turnNumber: index + 1, content: `The harbor bell ${index + 1} remains silent.`
+    }));
+    context.authority.currentContinuity.canonicalFacts = context.authority.protectedFacts.map(({ id, content }: { id: string; content: string }) => ({ id, content }));
+    const plan = (limit: number) => planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", limit, limit - 100,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r3"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const roomy = plan(80_000);
+    expect(roomy.promptContext.protectedFacts).toHaveLength(910);
+    const tight = plan(8_000);
+    const selected = tight.promptContext.protectedFacts ?? [];
+    expect(selected.length).toBeGreaterThan(0);
+    expect(selected.length).toBeLessThan(910);
+    expect(selected).toEqual(context.authority.protectedFacts.slice(-selected.length));
+    expect(tight.contextPlan.contextTokens).toBeLessThanOrEqual(8_000);
+    expect(tight.contextPlan.requestTokens + tight.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(7_900);
+    expect((tight.layerDiagnostics as any).factReservation).toMatchObject({ measurementLimitHit: false, unexaminedFactCount: 0 });
+    expect(context.authority.protectedFacts).toHaveLength(910);
+  }, 30_000);
+
+  it("fits facts against independent writer and reviewer limits", () => {
+    const context: any = recentContext();
+    context.authority.protectedFacts = [{ id: "90000000-0000-4000-8000-000000000001", turnNumber: 1, content: "The harbor remains closed." }];
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
+      (manifest) => 1_000 + manifest.entries.filter((entry) => entry.semanticRole === "canonical_fact").length * 20_000,
+      100_000, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    expect(result.promptContext.protectedFacts).toEqual(context.authority.protectedFacts);
+    expect(result.contextPlan.requestTokens + result.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(7_900);
+    expect(result.contextPlan.additionalRequestTokens).toBeLessThanOrEqual(100_000);
+  });
+
+  it("budgets current facts without source IDs without dropping or inventing authority", () => {
+    const context: any = recentContext();
+    const facts = Array.from({ length: 910 }, (_, index) => ({ id: null, content: `Imported harbor fact ${index}: the bell remains silent.` }));
+    context.authority.currentContinuity.canonicalFacts = facts;
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r3"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const selected = (result.promptContext.currentContinuity as any).canonicalFacts;
+    expect(selected.length).toBeGreaterThan(0);
+    expect(selected.length).toBeLessThan(910);
+    expect(selected).toEqual(facts.slice(-selected.length));
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toEqual([]);
+    expect(context.authority.currentContinuity.canonicalFacts).toHaveLength(910);
+    expect(result.contextPlan.contextTokens).toBeLessThanOrEqual(8_000);
+    expect(result.contextPlan.requestTokens + result.contextPlan.safetyAllowanceTokens).toBeLessThanOrEqual(7_900);
+  }, 30_000);
+
   it("reserves complete verified facts against the shared headroom and binds only selected IDs", () => {
     const context: any = recentContext();
     context.authority.protectedFacts = [
@@ -317,7 +373,6 @@ describe("layered generation context planner", () => {
     const factEvidence = result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "protected" && entry.canonicalFactId);
 
     expect(selected.map((fact) => fact.id)).toEqual([
-      "10000000-0000-4000-8000-000000000001",
       "10000000-0000-4000-8000-000000000003"
     ]);
     expect(selected.every((fact) => fact.content.length < 4_000)).toBe(true);
@@ -326,7 +381,7 @@ describe("layered generation context planner", () => {
     expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toEqual(expect.arrayContaining(selected.map((fact) => fact.id)));
     expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).not.toContain("10000000-0000-4000-8000-000000000002");
     expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).not.toContain("10000000-0000-4000-8000-000000000004");
-    expect(result.promptContext.protectedFactsOmitted).toBe(2);
+    expect(result.promptContext.protectedFactsOmitted).toBe(3);
     expect(result.promptContext.storyLedger!.entries).toHaveLength(1);
     expect((result.layerDiagnostics as any).factReservation).toMatchObject({
       originalHeadroomTokens: (result.layerDiagnostics as any).ledgerReservation.originalHeadroomTokens,
@@ -338,10 +393,10 @@ describe("layered generation context planner", () => {
       .toBe((result.layerDiagnostics as any).factReservation.originalHeadroomTokens);
   }, 20_000);
 
-  it("matches exhaustive heterogeneous greedy selections while the fact guard is not reached", () => {
+  it("drops older facts before newer facts, including when the newest whole fact cannot fit", () => {
     const records = [
       { id: "40000000-0000-4000-8000-000000000001", content: "First small fact. ".repeat(4) },
-      { id: "40000000-0000-4000-8000-000000000002", content: "Oversized fact. ".repeat(2_000) },
+      { id: "40000000-0000-4000-8000-000000000002", content: "Oversized fact. ".repeat(20_000) },
       { id: "40000000-0000-4000-8000-000000000003", content: "Second small fact. ".repeat(4) },
       { id: "40000000-0000-4000-8000-000000000004", content: "Third small fact. ".repeat(4) }
     ];
@@ -357,7 +412,7 @@ describe("layered generation context planner", () => {
         "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
         (manifest) => estimateStoryTokens(JSON.stringify({ reviewer: true, manifest })), 15_900,
         HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
-      const expected = ordered.filter((fact) => fact.id !== records[1]!.id).map((fact) => fact.id);
+      const expected = ordered.slice(ordered.findIndex((fact) => fact.id === records[1]!.id) + 1).map((fact) => fact.id);
       expect((result.promptContext.protectedFacts ?? []).map((fact: { id: string }) => fact.id)).toEqual(expected);
       expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toEqual(expected);
       expect((result.layerDiagnostics as any).factReservation).toMatchObject({ measurementLimitHit: false, unexaminedFactCount: 0 });
@@ -403,25 +458,25 @@ describe("layered generation context planner", () => {
       content: `Protected partial fact ${index + 1}: ${"the harbor bell remains silent ".repeat(55)}`
     }));
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
-    const provider = { ...plannerProvider() as any, contextWindowTokens: 1_000_000, maxOutputTokens: 100 };
+    const provider = { ...plannerProvider() as any, contextWindowTokens: 250_000, maxOutputTokens: 100 };
     const prompts = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])),
       continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
     const result = planGenerationPromptContext(context, provider, "System", "Wait", [],
-      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 1_000_000, 999_900,
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 250_000, 249_900,
       "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
       (manifest) => estimateContinuityReviewPlanningTokens({ provider, manifest, producingRequestHash: manifest.producingRequestHash,
-        promptSnapshot: prompts, reviewMode: "enforce", direction: "Wait", candidateOutputTokens: 100 }), 999_900,
+        promptSnapshot: prompts, reviewMode: "enforce", direction: "Wait", candidateOutputTokens: 100 }), 249_900,
       HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
     const reservation = (result.layerDiagnostics as any).factReservation;
 
     expect(reservation.sourceFactCount).toBe(512);
-    expect(reservation.selectedFactCount).toBeGreaterThan(100);
+    expect(reservation.selectedFactCount).toBeGreaterThan(0);
     expect(reservation.selectedFactCount).toBeLessThan(512);
-    expect(reservation.measurementTrialCount).toBe(64);
+    expect(reservation.measurementTrialCount).toBeLessThanOrEqual(1 + Math.ceil(Math.log2(reservation.sourceFactCount)));
     expect(reservation.writerSerializationCount).toBe(reservation.measurementTrialCount * 2);
     expect(reservation.reviewerSerializationCount).toBe(reservation.measurementTrialCount);
-    expect(reservation.measurementLimitHit).toBe(true);
-    expect(reservation.unexaminedFactCount).toBeGreaterThan(0);
+    expect(reservation.measurementLimitHit).toBe(false);
+    expect(reservation.unexaminedFactCount).toBe(0);
     expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toEqual((result.promptContext.protectedFacts ?? []).map((fact: { id: string }) => fact.id));
     process.stderr.write(`${JSON.stringify({ protectedFactPartialReservationMetrics: { sourceFacts: reservation.sourceFactCount,
       selectedFacts: reservation.selectedFactCount, measurementTrials: reservation.measurementTrialCount,

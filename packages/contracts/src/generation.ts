@@ -341,7 +341,7 @@ export const campaignCanonicalFactEditorSchema = z.object({
 export const campaignRuntimeStateContentSchema = z.object({
   continuitySummary: z.string().max(20_000),
   openThreads: z.array(z.string().trim().min(1).max(4000)).max(MAX_CONTINUITY_OPEN_THREADS),
-  canonicalFacts: z.array(campaignCanonicalFactEditorSchema).max(2000),
+  canonicalFacts: z.array(campaignCanonicalFactEditorSchema),
   scratchpad: z.string().max(100_000),
   trackers: z.array(campaignTrackerSchema).max(200),
   rpgStats: z.array(playerRpgStatSchema).max(100),

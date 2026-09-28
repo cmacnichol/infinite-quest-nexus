@@ -7,7 +7,7 @@ export type ProtectedFact = Readonly<{
   content: string;
 }>;
 
-/** Content-free accounting for a deliberately finite verified fact source. */
+/** Content-free accounting for the complete verified fact source. */
 export type ProtectedFactSourceCoverage = Readonly<{
   candidateRows: number;
   sourceBytes: number;
@@ -24,10 +24,10 @@ export const protectedFactSchema = z.object({
 }).strict();
 
 export const protectedFactSourceCoverageSchema = z.object({
-  candidateRows: z.number().int().min(0).max(512),
-  sourceBytes: z.number().int().min(0).max(1_000_000),
+  candidateRows: z.number().int().min(0),
+  sourceBytes: z.number().int().min(0),
   sourceLimitReached: z.boolean(),
-  oversizedCandidateCount: z.number().int().min(0).max(512),
-  futureSourceCount: z.number().int().min(0).max(512),
-  withheldCandidateCount: z.number().int().min(0).max(512)
+  oversizedCandidateCount: z.number().int().min(0),
+  futureSourceCount: z.number().int().min(0),
+  withheldCandidateCount: z.number().int().min(0)
 }).strict();
