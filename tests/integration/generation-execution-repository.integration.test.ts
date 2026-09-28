@@ -1,12 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   generationRequestSchema,
   generationRetryLatestRequestSchema,
   storyTurnOutputSchema
 } from "../../packages/contracts/src/generation.js";
-import { defaultStoryMemoryPolicy, storyMemoryPolicyHash } from "../../packages/contracts/src/story-memory-policy.js";
+import { defaultStoryMemoryPolicy, storyMemoryPolicyHash, storyMemoryPolicySchema } from "../../packages/contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../packages/contracts/src/prompt-library.js";
 import { reviewBindingHash } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
@@ -74,6 +74,12 @@ integration("PostgreSQL generation execution repository", () => {
     }, credentialSecret)).id;
   });
 
+  // Every case creates durable queued/leased jobs. Remove its imported
+  // campaign graph so claimNext cannot observe a prior case's job.
+  afterEach(async () => {
+    await pool.query("DELETE FROM campaigns WHERE owner_user_id=$1", [ownerUserId]);
+  });
+
   afterAll(async () => {
     await pool.end();
   });
@@ -85,6 +91,13 @@ integration("PostgreSQL generation execution repository", () => {
       sourceName: "generation-execution-repository.story",
       story: fixture
     }));
+  }
+
+  async function extendAcceptedHistory(campaignId: string, throughTurnNumber = 14) {
+    await pool.query(`INSERT INTO turns(owner_user_id,campaign_id,turn_number,action,narration,input_mode,state_snapshot_private)
+      SELECT $1,$2,turn_number,concat('Continue watch ',turn_number,'.'),concat('The tide marks watch ',turn_number,'.'),'action','{}'::jsonb
+      FROM generate_series(3,$3) AS turn_number`, [ownerUserId, campaignId, throughTurnNumber]);
+    await pool.query("UPDATE campaigns SET active_turn_number=$2 WHERE id=$1", [campaignId, throughTurnNumber]);
   }
 
   function commands() {
@@ -115,6 +128,27 @@ integration("PostgreSQL generation execution repository", () => {
     });
   }
 
+  function historyCoveragePolicyCommands(capability: "r1" | "r3") {
+    const policy = capability === "r3"
+      ? storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy(capability), continuityReview: "off" })
+      : defaultStoryMemoryPolicy(capability);
+    return createPostgresGenerationCommandRepository(pool, {
+      resolvePromptSnapshot: (client, scopeOwnerUserId, campaignId) =>
+        loadPromptSnapshotForTest(client, scopeOwnerUserId, campaignId),
+      promptProtocolVersion: providerPromptProtocolVersion,
+      readTurnReportedCosts: (scopeOwnerUserId, _campaignId, turnIds) =>
+        readTurnReportedCostsForTest(pool, scopeOwnerUserId, [...turnIds]),
+      resolveStoryMemoryPolicySnapshot: async () => ({
+        policy,
+        policyHash: storyMemoryPolicyHash(policy),
+        contextProtocol: "current-continuity-v5" as const,
+        castContext: true,
+        promptProtocol: "story-v17-campaign-cast" as const,
+        providerConfigurationFingerprint: "a".repeat(64)
+      })
+    });
+  }
+
   async function queue(campaignId: string, action: string) {
     return commands().enqueueAppend(
       { ownerUserId, campaignId },
@@ -136,6 +170,59 @@ integration("PostgreSQL generation execution repository", () => {
       })
     );
   }
+
+  it.each([
+    { capability: "r3" as const, expectedWindow: 11 },
+    { capability: "r1" as const, expectedWindow: undefined }
+  ])("captures the frozen v5 recent-window choice at real enqueue for $capability", async ({ capability, expectedWindow }) => {
+    const imported = await campaign();
+    const job = await historyCoveragePolicyCommands(capability).enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRequestSchema.parse({ action: "Wait at the observatory.", providerProfileId, idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } })
+    );
+    const frozen = (await pool.query<{ generation_base_identity: { recentWindowTurns?: number; recentWindowFingerprint?: string } }>(
+      "SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [job.id]
+    )).rows[0]!.generation_base_identity;
+    if (expectedWindow === undefined) {
+      expect(frozen).not.toHaveProperty("recentWindowTurns");
+      expect(frozen).not.toHaveProperty("recentWindowFingerprint");
+    } else {
+      expect(frozen).toMatchObject({ recentWindowTurns: expectedWindow, recentWindowFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) });
+    }
+  });
+
+  it.each(["window", "policy"] as const)("rejects a tampered frozen v5 checkpoint $mutation before provider execution", async (mutation) => {
+    const imported = await campaign();
+    await extendAcceptedHistory(imported.campaignId);
+    const queued = await historyCoveragePolicyCommands("r3").enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action: "Protect the frozen checkpoint.", providerProfileId, idempotencyKey: crypto.randomUUID(), context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } })
+    );
+    if (mutation === "window") {
+      await pool.query("UPDATE generation_jobs SET generation_base_identity=jsonb_set(generation_base_identity,'{recentWindowTurns}','10'::jsonb) WHERE id=$1", [queued.id]);
+    } else {
+      const stored = (await pool.query<{ context_options: Record<string, unknown> }>("SELECT context_options FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]!.context_options;
+      const policy = stored.storyMemoryPolicy as Record<string, unknown>;
+      await pool.query("UPDATE generation_jobs SET context_options=$2::jsonb WHERE id=$1", [queued.id, JSON.stringify({ ...stored, storyMemoryPolicy: { ...policy, policy: { ...(policy.policy as Record<string, unknown>), capability: "r1" } } })]);
+    }
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: `v5-tamper-${mutation}`, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    await expect(repository.loadExecutionPayload({ workerId: `v5-tamper-${mutation}`, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+    expect((await pool.query("SELECT status,error_code FROM generation_jobs WHERE id=$1", [queued.id])).rows[0])
+      .toMatchObject({ status: "recoverable", error_code: "generation_checkpoint_incompatible" });
+  });
+
+  it("loads a historical v3 checkpoint whose recent-window field remains absent", async () => {
+    const imported = await campaign();
+    const queued = await queueEnrolledPolicy(imported.campaignId, "Resume historical checkpoint.", "r2");
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "historical-window-absent", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const payload = await repository.loadExecutionPayload({ workerId: "historical-window-absent", leaseSeconds: 30, claim: claim! });
+    expect(payload).not.toBeNull();
+    expect(payload?.generation_base_identity).not.toHaveProperty("recentWindowTurns");
+  });
 
   function supersedingStory(supersedesFactIds: readonly string[]) {
     return storyTurnOutputSchema.parse({
@@ -368,6 +455,7 @@ integration("PostgreSQL generation execution repository", () => {
     story: ReturnType<typeof supersedingStory>;
     responseId?: string;
     sentFactIds?: readonly string[];
+    contextDiagnostics?: Record<string, unknown>;
   }>): AcceptedGenerationCommit {
     return {
       scope: input.scope,
@@ -390,7 +478,7 @@ integration("PostgreSQL generation execution repository", () => {
         rawMetadata: {}
       },
       contextFingerprint: "canonical-fact-authorization-context",
-      contextDiagnostics: { retrieval: { selectedMemoryCount: 0 } },
+      contextDiagnostics: input.contextDiagnostics ?? { retrieval: { selectedMemoryCount: 0 } },
       ...(input.sentFactIds ? { sentFactIds: input.sentFactIds } : {}),
       chronicleRetrieval: DEDICATED_CHUNKED_AUDIT,
       inputs: input.job.orchestration_inputs,
@@ -406,6 +494,46 @@ integration("PostgreSQL generation execution repository", () => {
       onIllustrationEnqueueError: () => undefined
     };
   }
+
+  function historyCoverageDiagnostic() {
+    return {
+      version: "history-coverage-diagnostics-v1",
+      limits: { contextTokens: 16_000, writerInputTokens: 15_000, reviewerInputTokens: null,
+        recentWindowTurns: 11, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
+      candidates: { sourceCount: 1, selectedCount: 1, omittedCount: 0, selectedEstimateTokens: 8,
+        serializerGuardExcludedCount: 0, batchedTrialCount: 1, candidatePoolCandidatesRemoved: 0,
+        stopReason: "exhausted", fallbackReason: "none", duplicateExcluded: 0,
+        sourceValidationFailureCount: 0, sourceValidationExcluded: 0 },
+      ledger: null,
+      facts: null,
+      recents: null,
+      finalTokens: { context: 400, writerRequest: 900, reviewerRequest: null }
+    } as const;
+  }
+
+  it("persists only strict content-free history coverage diagnostics", async () => {
+    const acceptedFixture = await campaign();
+    const accepted = await readyAcceptedCommit(acceptedFixture.campaignId, "history-diagnostic-valid-worker");
+    const valid = historyCoverageDiagnostic();
+    await expect(accepted.repository.commitAcceptedTurn(acceptedCommitInput({
+      ...accepted, story: supersedingStory([]), contextDiagnostics: { layers: { history: valid } }
+    }))).resolves.toMatchObject({ turnId: expect.any(String) });
+    const stored = await pool.query<{ model_metadata: { contextDiagnostics: { layers: { history: unknown } } } }>(
+      "SELECT model_metadata FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL ORDER BY turn_number DESC LIMIT 1",
+      [acceptedFixture.campaignId]
+    );
+    expect(stored.rows[0]?.model_metadata.contextDiagnostics.layers.history).toEqual(valid);
+
+    const rejectedFixture = await campaign();
+    const rejected = await readyAcceptedCommit(rejectedFixture.campaignId, "history-diagnostic-invalid-worker");
+    const before = await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [rejectedFixture.campaignId]);
+    await expect(rejected.repository.commitAcceptedTurn(acceptedCommitInput({
+      ...rejected, story: supersedingStory([]), contextDiagnostics: { layers: { history: { ...historyCoverageDiagnostic(),
+        candidates: { ...historyCoverageDiagnostic().candidates, sourceId: "PRIVATE_HISTORY_ID_CANARY" } } } }
+    }))).rejects.toMatchObject({ code: "generation_checkpoint_incompatible" });
+    await expect(pool.query<{ count: number }>("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [rejectedFixture.campaignId]))
+      .resolves.toEqual(before);
+  });
 
   it("commits an enforced final Keep only for its exact stored candidate and preserves failed targets", async () => {
     const imported = await campaign();
@@ -1321,6 +1449,45 @@ integration("PostgreSQL generation execution repository", () => {
       expect((await pool.query("SELECT error_code FROM generation_jobs WHERE id=$1", [queued.id])).rows[0]).toMatchObject({ error_code: "generation_authority_stale" });
     } else {
       await expect(repository.commitAcceptedTurn(acceptedCommitInput({ scope, job: job!, story: supersedingStory([]) }))).rejects.toMatchObject({ code: "stale_campaign" });
+    }
+  });
+
+  it.each(["load", "commit"])("fences a corrected oldest frozen v5 recent turn at %s", async (phase) => {
+    const imported = await campaign();
+    await extendAcceptedHistory(imported.campaignId);
+    const queued = await historyCoveragePolicyCommands("r3").enqueueAppend(
+      { ownerUserId, campaignId: imported.campaignId },
+      generationRequestSchema.parse({ action: "Bind the eleven-turn frozen history.", providerProfileId, idempotencyKey: crypto.randomUUID(),
+        context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 } })
+    );
+    const frozen = (await pool.query<{ generation_base_identity: { baseTurnNumber: number; recentWindowTurns?: number; recentWindowFingerprint?: string } }>(
+      "SELECT generation_base_identity FROM generation_jobs WHERE id=$1", [queued.id]
+    )).rows[0]!.generation_base_identity;
+    expect(frozen).toMatchObject({ baseTurnNumber: 14, recentWindowTurns: 11, recentWindowFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) });
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const workerId = `v5-oldest-${phase}-fence-worker`;
+    const claim = await repository.claimNext({ workerId, leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(queued.id);
+    const scope = { jobId: queued.id, ownerUserId, workerId };
+    const job = await repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! });
+    expect(job).not.toBeNull();
+    const oldest = await pool.query<{ id: string; narration: string }>(
+      "SELECT id,narration FROM turns WHERE campaign_id=$1 AND turn_number=$2", [imported.campaignId, frozen.baseTurnNumber - frozen.recentWindowTurns!]
+    );
+    expect(oldest.rows).toHaveLength(1);
+    await pool.query(`INSERT INTO turn_narration_corrections(owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,reason,source,created_by_user_id)
+      VALUES($1,$2,$3,1,'Corrected oldest frozen recent history.', $4,'Fence test','administrative',$1)`,
+    [ownerUserId, imported.campaignId, oldest.rows[0]!.id, sha256(oldest.rows[0]!.narration)]);
+    if (phase === "load") {
+      await expect(repository.loadExecutionPayload({ workerId, leaseSeconds: 30, claim: claim! })).resolves.toBeNull();
+      expect((await pool.query("SELECT error_code FROM generation_jobs WHERE id=$1", [queued.id])).rows[0])
+        .toMatchObject({ error_code: "generation_authority_stale" });
+    } else {
+      expect(await repository.markGenerating(scope)).toBe(true);
+      expect(await repository.markValidating(scope)).toBe(true);
+      expect(await repository.markCommitting(scope)).toBe(true);
+      await expect(repository.commitAcceptedTurn(acceptedCommitInput({ scope, job: job!, story: supersedingStory([]) })))
+        .rejects.toMatchObject({ code: "stale_campaign" });
     }
   });
 

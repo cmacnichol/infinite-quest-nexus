@@ -3,6 +3,7 @@ export * from "./memory.js";
 export * from "./generation.js";
 export * from "./provider-selection.js";
 export * from "./physical-text-accounting.js";
+export * from "./token-estimate.js";
 export * from "./provider-presets.js";
 export * from "./provider-profile-view.js";
 export * from "./text-execution-plan.js";

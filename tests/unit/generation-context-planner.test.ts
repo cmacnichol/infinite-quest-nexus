@@ -4,11 +4,14 @@ import { storyTurnOutputSchema } from "../../packages/contracts/src/story-prompt
 import { describe, expect, it } from "vitest";
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { storyMemoryPolicySchema, defaultStoryMemoryPolicy } from "../../packages/contracts/src/story-memory-policy.js";
+import { HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION } from "../../packages/contracts/src/story-prompt.js";
 import { estimateStoryTokens, estimatedInputSafetyAllowanceTokens, serializeProviderRequest } from "../../packages/story-engine/src/index.js";
 import { getProviderOutputSchema } from "../../packages/story-engine/src/provider-output-schema.js";
 import { sha256 } from "../../packages/domain/src/index.js";
 import { bindManifestToProducingRequest } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
+import { sentCanonicalFactIds } from "../../services/runtime/src/generation-executor-adapter.js";
+import { historyCoverageDiagnosticsSchema } from "../../packages/application/src/memory/generation-context.js";
   function plannerContext(characterAuthority: unknown, version: "legacy" | "v3" = "v3") {
     const baseIdentity = version === "v3"
       ? { version: "generation-base-v3", operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null, characterProfileRevision: 1, characterProfileFingerprint: "b".repeat(64) }
@@ -39,6 +42,134 @@ function run(context: any, limit = 32_000) {
   return planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [], { profile: "brief", minWords: 100, maxWords: 120 }, "scene", limit, limit - 100, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
 }
 describe("layered generation context planner", () => {
+  it("serializes v5 layers in stable wire order through the provider body", () => {
+    const context: any = recentContext();
+    context.baseIdentity.baseTurnNumber = 4;
+    context.authority.latestTurn = { action: "Prior action", narration: "Current scene marker", inputMode: "scene" };
+    context.authority.characterAuthority = { name: "Mira", profile: { identity: { aliases: [] } } };
+    context.authority.storyLedger = { entries: [
+      { turnId: "ledger-1", turnNumber: 1, inputMode: "action", direction: "Older intent marker" },
+      { turnId: "ledger-2", turnNumber: 2, inputMode: "action", direction: "Newer intent marker" }
+    ], omittedThroughTurn: null };
+    const castId = "33333333-3333-4333-8333-333333333333";
+    const castSnapshot = { version: "cast-context-v1", scope: { ownerUserId: castId, campaignId: castId }, worldVersionId: castId,
+      revision: 1, boundary: { turnNumber: 4, timelineRevision: 0 }, coverageStartTurn: null, trackedThroughTurn: null, discoveryStatus: "pending",
+      characters: [{ id: castId, name: "Mara", aliases: ["The Watcher"], origin: { kind: "manual" }, profile: {},
+        pinned: true, ignored: false, revision: 1, firstObservedTurn: 0, lastObservedTurn: 0 }],
+      details: [{ characterId: castId, observations: [], overrides: [{ field: "appearance.description", value: "green eyes",
+        evidence: { kind: "user", editId: castId, effectiveTurnNumber: 0 } }] }] };
+    context.authority.castSnapshot = castSnapshot;
+    Object.assign(context.baseIdentity, { version: "generation-base-v4", castRevision: 1, castTimelineRevision: 0,
+      castFingerprint: castGenerationSnapshotFingerprint(castSnapshot), castCoverageStartTurn: null, castTrackedThroughTurn: null });
+    context.authority.protectedFacts = [
+      { id: "11111111-1111-4111-8111-111111111111", turnNumber: 1, content: "Older protected fact marker" },
+      { id: "22222222-2222-4222-8222-222222222222", turnNumber: 2, content: "Newer protected fact marker" }
+    ];
+    context.authority.currentContinuity = { continuitySummary: "Continuity marker", scratchpad: "", canonicalFacts: [], openThreads: [], trackers: [] };
+    context.authority.worldReferenceSource = { worldVersionId: "world-v1", worldContent: { entities: [], relationships: [] } };
+    context.candidates = [
+      { id: "chronicle-1", turnId: "chronicle-turn-1", ordinal: 1, kind: "turn_fiction", content: "Older Chronicle marker", tokenEstimate: 5, rank: 1 },
+      { id: "chronicle-2", turnId: "chronicle-turn-2", ordinal: 2, kind: "turn_fiction", content: "Newer Chronicle marker", tokenEstimate: 5, rank: 2 }
+    ];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Visit The Watcher", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 100_000, 99_900, "attempt", "story_memory",
+      defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const body = JSON.parse(serializeProviderRequest(plannerProvider(), { systemPrompt: "System", input: result.storyInput }).body);
+    const userContent = JSON.parse(body.messages.find((message: { role: string }) => message.role === "user").content);
+    const sent = userContent.authoritative_context;
+
+    expect(Object.keys(sent)).toEqual([
+      "authoritativeRules", "worldCanon", "selectedCharacterId", "selectedCharacterAuthority", "cast", "worldReferences",
+      "currentContinuity", "protectedFacts", "protectedFactsOmitted", "storyLedger", "chronicle", "recentTurns", "currentScene"
+    ]);
+    expect(sent.storyLedger.entries.map((entry: { turnNumber: number }) => entry.turnNumber)).toEqual([1, 2]);
+    expect(sent.protectedFacts.map((fact: { turnNumber: number }) => fact.turnNumber)).toEqual([1, 2]);
+    expect(sent.chronicle.map((entry: { ordinal: number }) => entry.ordinal)).toEqual([1, 2]);
+    expect(sent.recentTurns.map((entry: { turnNumber: number }) => entry.turnNumber)).toEqual([2, 3]);
+    expect(sent.currentScene.narration).toBe("Current scene marker");
+    expect(userContent.current_turn_input).toEqual({ mode: "scene", text: "Visit The Watcher" });
+    expect(body.messages.findIndex((message: { role: string }) => message.role === "user")).toBeGreaterThan(0);
+  });
+
+  it("keeps empty optional v5 layers before the final scene and current input", () => {
+    const context: any = plannerContext(null);
+    context.authority.storyLedger = { entries: [], omittedThroughTurn: null };
+    context.authority.protectedFacts = [];
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Empty-layer input", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 100_000, 99_900, "attempt", "story_memory",
+      defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const body = JSON.parse(serializeProviderRequest(plannerProvider(), { systemPrompt: "System", input: result.storyInput }).body);
+    const userContent = JSON.parse(body.messages.find((message: { role: string }) => message.role === "user").content);
+    const sent = userContent.authoritative_context;
+
+    expect(sent.protectedFacts).toEqual([]);
+    expect(sent.storyLedger.entries).toEqual([]);
+    expect(sent.chronicle).toEqual([]);
+    expect(sent.recentTurns).toEqual([]);
+    expect(Object.keys(sent).at(-1)).toBe("currentScene");
+    expect(userContent.current_turn_input).toEqual({ mode: "scene", text: "Empty-layer input" });
+  });
+
+  it("projects v5 history coverage from final sent layers and separates validation failures from sent candidates", () => {
+    const context: any = recentContext();
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 1, filteredDirectionCount: 2, oversizedDirectionCount: 3, loadedRows: 6 },
+      entries: [
+        { turnId: "ledger-one", turnNumber: 1, inputMode: "action", direction: "Old private intent." },
+        { turnId: "turn-2", turnNumber: 2, inputMode: "action", direction: "Duplicate recent intent." }
+      ] };
+    context.authority.protectedFacts = [{ id: "11111111-1111-4111-8111-111111111111", turnNumber: 1, content: "Complete private fact." }];
+    context.authority.protectedFactsOmitted = 2;
+    context.authority.protectedFactsCoverage = { candidateRows: 3, sourceBytes: 72, sourceLimitReached: false,
+      oversizedCandidateCount: 0, futureSourceCount: 1, withheldCandidateCount: 1 };
+    context.candidates = [{ id: "opaque-source-canary", turnId: "opaque-turn-canary", ordinal: 1, kind: "turn_fiction", content: "Private candidate evidence.", tokenEstimate: 7, rank: 1,
+      sourceValidationFailed: true, narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: "f".repeat(64), spans: [{ start: 0, end: 10 }] } }];
+    context.chronicleSelectionDiagnostics = { candidatePoolLimit: 2_000, candidatePoolCandidatesRemoved: 4,
+      selectedParentTokens: 12, stopReason: "candidate_pool_limit" };
+    context.chronicleRetrieval = { fallbackCode: "chunk_index_not_ready" };
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" }), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const diagnostic = historyCoverageDiagnosticsSchema.parse((result.layerDiagnostics as any).history);
+
+    expect(diagnostic).toMatchObject({
+      limits: { contextTokens: 32_000, writerInputTokens: 31_900, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
+      candidates: { selectedCount: 1, selectedEstimateTokens: 7, candidatePoolCandidatesRemoved: 4,
+        stopReason: "candidate_pool_limit", fallbackReason: "chunk_index_not_ready",
+        sourceValidationFailureCount: 1, sourceValidationExcluded: 0 },
+      ledger: { capturedCount: 2, sentCount: 1, omittedCount: 1, coveredByRecentCount: 1, sourceExcludedCount: 6 },
+      facts: { sourceCount: 1, sentCount: 1, omittedCount: 0, sourceOmittedCount: 2,
+        measurementLimit: 64, measurementLimitHit: false, unexaminedCount: 0 },
+      recents: { capturedCount: 2, sentCount: 2, targetCount: 3 },
+      finalTokens: { context: result.contextPlan.contextTokens, writerRequest: result.contextPlan.requestTokens, reviewerRequest: null }
+    });
+    expect(result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "retrieved" && entry.source.id === "opaque-turn-canary")).toHaveLength(1);
+    expect(JSON.stringify(diagnostic)).not.toMatch(/ledger-one|turn-2|Complete private fact|opaque-source-canary|opaque-turn-canary|Private/);
+  });
+
+  it("retains a whole narration fallback but withholds an unverified canonical-fact source", () => {
+    const context: any = recentContext();
+    context.candidates = [
+      { id: "whole-narration-fallback", turnId: "turn-narration", ordinal: 1, kind: "turn_fiction", content: "The lantern remained lit.", tokenEstimate: 6, rank: 1,
+        sourceValidationFailed: true, narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: "f".repeat(64), spans: [{ start: 0, end: 10 }] } },
+      { id: "unverified-supersession", turnId: null, ordinal: 1, kind: "canonical_fact", content: "The earlier lantern fact was superseded.", tokenEstimate: 8, rank: 2,
+        sourceValidationFailed: true }
+    ];
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const diagnostic = historyCoverageDiagnosticsSchema.parse((result.layerDiagnostics as any).history);
+
+    expect(result.promptContext.chronicle.map((candidate) => candidate.id)).toEqual(["whole-narration-fallback"]);
+    expect(result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "retrieved").map((entry) => entry.source.id))
+      .toEqual(["turn-narration"]);
+    expect(result.storyInput).not.toContain("earlier lantern fact was superseded");
+    expect(diagnostic.candidates).toMatchObject({ selectedCount: 1, sourceValidationFailureCount: 2, sourceValidationExcluded: 1 });
+  });
+
   it("fits the final review with a full 48000-token output reserve by pruning optional history before generation", () => {
     const context: any = plannerContext(null);
     context.candidates = Array.from({ length: 20 }, (_, i) => ({ id: `history-${i}`, turnId: null, ordinal: i, kind: "turn_fiction",
@@ -78,7 +209,7 @@ describe("layered generation context planner", () => {
     expect(reviewTokens + estimatedInputSafetyAllowanceTokens(reviewTokens)).toBeLessThanOrEqual(31_900);
     expect(result.layerDiagnostics.omitted.length).toBeGreaterThan(0);
   });
-  it("uses independent writer and reviewer input limits when packing optional evidence", () => {
+  it("retains the smaller arg15 reviewer limit when a frozen v5 policy occupies arg16", () => {
     const context = recentContext();
     context.candidates = [{ id: "history", turnId: null, ordinal: 1, kind: "turn_fiction", content: "Useful history. ".repeat(900), tokenEstimate: 3600, rank: 1 }];
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
@@ -86,12 +217,253 @@ describe("layered generation context planner", () => {
       20_000 + manifest.entries.filter((entry) => entry.selectionGroup === "retrieved").length * 20_000;
     const plan = (reviewLimit: number) => planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
       { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
-      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, reviewCost, reviewLimit);
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, reviewCost, reviewLimit, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
 
     expect(plan(60_000).promptContext.chronicle).toHaveLength(1);
     expect(plan(30_000).promptContext.chronicle).toHaveLength(0);
     expect(plan(31_900).promptContext.chronicle).toHaveLength(0);
     expect(() => plan(12_000)).toThrow(/context_budget_exceeded/);
+  });
+
+  it("sends v5 ledger directions as player intent with final projection pointers only", () => {
+    const context: any = recentContext();
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 2, filteredDirectionCount: 3, oversizedDirectionCount: 4, loadedRows: 5 }, entries: [
+      { turnId: "ledger-2", turnNumber: 2, inputMode: "action", direction: "Ask the keeper about the sealed gate." },
+      { turnId: "ledger-3", turnNumber: 3, inputMode: "scene", direction: "Continue." }
+    ] };
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r3"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.storyLedger!.entries.map((entry: { turnId: string }) => entry.turnId)).toEqual(["ledger-2", "ledger-3"]);
+    expect(result.promptContext.storyLedger!.coverage).toEqual(context.authority.storyLedger.coverage);
+    expect(result.storyInput).toContain("storyLedger records earlier player intent, not proof of events.");
+    const evidence = result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "ledger");
+    expect(evidence).toHaveLength(2);
+    expect(evidence.every((entry) => entry.semanticRole === "player_intent" && /^\/storyLedger\/entries\/\d+\/direction$/u.test(entry.sourcePath))).toBe(true);
+    expect(() => bindManifestToProducingRequest(result.sourceManifest!, result.contextPlan.serializedRequest)).not.toThrow();
+  });
+
+  it.each(["generation-base-v3", "generation-base-v4"] as const)("keeps %s prompt bytes when optional history fields are injected outside v5", (version) => {
+    const context: any = plannerContext(null);
+    if (version === "generation-base-v4") Object.assign(context.baseIdentity, {
+      version, castRevision: 0, castTimelineRevision: 0, castFingerprint: "c".repeat(64), castCoverageStartTurn: null, castTrackedThroughTurn: null
+    });
+    const baseline = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_900, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 2, filteredDirectionCount: 3, oversizedDirectionCount: 4, loadedRows: 5 },
+      entries: [{ turnId: "ledger-injected", turnNumber: 1, inputMode: "action", direction: "Injected intent." }] };
+    context.authority.protectedFacts = [{ id: "10000000-0000-4000-8000-000000000001", turnNumber: 1, content: "Injected protected fact." }];
+    context.authority.protectedFactsCoverage = { candidateRows: 1, sourceBytes: 24, sourceLimitReached: false,
+      withheldCandidateCount: 0, futureSourceCount: 0, oversizedCandidateCount: 0 };
+    const injected = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_900, "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));
+
+    expect(injected.storyInput).toBe(baseline.storyInput);
+    expect(injected.contextPlan.serializedRequest).toBe(baseline.contextPlan.serializedRequest);
+    expect(injected.promptContext).not.toHaveProperty("storyLedger");
+    expect(injected.promptContext).not.toHaveProperty("protectedFacts");
+    expect(injected.contextPlan.serializedRequest).not.toContain("protectedFacts");
+  });
+
+  it("reserves a measured newest ledger suffix with bounded writer and reviewer trials", () => {
+    const context: any = recentContext();
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: null,
+      coverage: { unreadThroughTurn: null, missingTurnCount: 0, filteredDirectionCount: 0, oversizedDirectionCount: 0, loadedRows: 512 },
+      entries: Array.from({ length: 512 }, (_, index) => ({
+        turnId: `ledger-${index + 1}`, turnNumber: index + 1, inputMode: "action", direction: `Ask about marker ${index + 1}. `.repeat(8)
+      })) };
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
+      (manifest) => estimateStoryTokens(JSON.stringify({ reviewer: true, manifest })), 31_900,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const reservation = (result.layerDiagnostics as any).ledgerReservation;
+
+    expect(result.promptContext.storyLedger!.entries.length).toBeGreaterThan(0);
+    expect(result.promptContext.storyLedger!.entries.length).toBeLessThan(512);
+    expect(result.promptContext.storyLedger!.entries[0]!.turnNumber).toBe(512 - result.promptContext.storyLedger!.entries.length + 1);
+    expect(reservation).toMatchObject({ measurementTrialCount: expect.any(Number), writerSerializationCount: expect.any(Number), reviewerSerializationCount: expect.any(Number) });
+    expect(reservation.measurementTrialCount).toBeLessThanOrEqual(12);
+    expect(reservation.writerSerializationCount).toBe(reservation.measurementTrialCount * 2);
+    expect(reservation.reviewerSerializationCount).toBe(reservation.measurementTrialCount);
+    expect(reservation.elapsedMilliseconds).toBeGreaterThanOrEqual(0);
+    process.stderr.write(`${JSON.stringify({ historyLedgerReservationMetrics: { sourceEntries: 512, selectedEntries: result.promptContext.storyLedger!.entries.length,
+      measurementTrials: reservation.measurementTrialCount, writerSerializations: reservation.writerSerializationCount,
+      reviewerSerializations: reservation.reviewerSerializationCount, elapsedMilliseconds: Math.round(reservation.elapsedMilliseconds * 100) / 100 } })}\n`);
+  }, 20_000);
+
+  it("reserves complete verified facts against the shared headroom and binds only selected IDs", () => {
+    const context: any = recentContext();
+    context.authority.protectedFacts = [
+      { id: "10000000-0000-4000-8000-000000000001", turnNumber: 1, content: "The oldest complete harbor fact remains visible. ".repeat(2) },
+      { id: "10000000-0000-4000-8000-000000000002", turnNumber: 2, content: "The oversized middle fact remains whole. ".repeat(2_000) },
+      { id: "10000000-0000-4000-8000-000000000003", turnNumber: 3, content: "The newest complete harbor fact remains visible. ".repeat(2) },
+      { id: "10000000-0000-4000-8000-000000000004", turnNumber: 4, content: "The roll of 19 decides the harbor crossing." }
+    ];
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: null,
+      entries: [{ turnId: "ledger-fact-boundary", turnNumber: 1, inputMode: "action", direction: "Ask about the protected harbor facts." }] };
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
+      (manifest) => estimateStoryTokens(JSON.stringify({ reviewer: true, manifest })), 7_900,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const selected = result.promptContext.protectedFacts as readonly { id: string; content: string }[];
+    const factEvidence = result.sourceManifest!.entries.filter((entry) => entry.selectionGroup === "protected" && entry.canonicalFactId);
+
+    expect(selected.map((fact) => fact.id)).toEqual([
+      "10000000-0000-4000-8000-000000000001",
+      "10000000-0000-4000-8000-000000000003"
+    ]);
+    expect(selected.every((fact) => fact.content.length < 4_000)).toBe(true);
+    expect(factEvidence.map((entry) => entry.canonicalFactId)).toEqual(selected.map((fact) => fact.id));
+    expect(factEvidence.every((entry) => entry.form === "complete" && /^\/protectedFacts\/\d+\/content$/u.test(entry.sourcePath))).toBe(true);
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toEqual(expect.arrayContaining(selected.map((fact) => fact.id)));
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).not.toContain("10000000-0000-4000-8000-000000000002");
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).not.toContain("10000000-0000-4000-8000-000000000004");
+    expect(result.promptContext.protectedFactsOmitted).toBe(2);
+    expect(result.promptContext.storyLedger!.entries).toHaveLength(1);
+    expect((result.layerDiagnostics as any).factReservation).toMatchObject({
+      originalHeadroomTokens: (result.layerDiagnostics as any).ledgerReservation.originalHeadroomTokens,
+      factBudgetTokens: (result.layerDiagnostics as any).ledgerReservation.factBudgetTokens,
+      measurementTrialCount: expect.any(Number), writerSerializationCount: expect.any(Number), reviewerSerializationCount: expect.any(Number),
+      measurementLimitHit: false, unexaminedFactCount: 0
+    });
+    expect((result.layerDiagnostics as any).ledgerReservation.originalHeadroomTokens)
+      .toBe((result.layerDiagnostics as any).factReservation.originalHeadroomTokens);
+  }, 20_000);
+
+  it("matches exhaustive heterogeneous greedy selections while the fact guard is not reached", () => {
+    const records = [
+      { id: "40000000-0000-4000-8000-000000000001", content: "First small fact. ".repeat(4) },
+      { id: "40000000-0000-4000-8000-000000000002", content: "Oversized fact. ".repeat(2_000) },
+      { id: "40000000-0000-4000-8000-000000000003", content: "Second small fact. ".repeat(4) },
+      { id: "40000000-0000-4000-8000-000000000004", content: "Third small fact. ".repeat(4) }
+    ];
+    const permutations = (values: typeof records): typeof records[] => values.length < 2 ? [values] : values.flatMap((value, index) =>
+      permutations(values.filter((_, candidateIndex) => candidateIndex !== index)).map((rest) => [value, ...rest]));
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+
+    for (const ordered of permutations(records)) {
+      const context: any = recentContext();
+      context.authority.protectedFacts = ordered.map((fact, index) => ({ ...fact, turnNumber: index + 1 }));
+      const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+        { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 16_000, 15_900,
+        "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
+        (manifest) => estimateStoryTokens(JSON.stringify({ reviewer: true, manifest })), 15_900,
+        HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+      const expected = ordered.filter((fact) => fact.id !== records[1]!.id).map((fact) => fact.id);
+      expect((result.promptContext.protectedFacts ?? []).map((fact: { id: string }) => fact.id)).toEqual(expected);
+      expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toEqual(expected);
+      expect((result.layerDiagnostics as any).factReservation).toMatchObject({ measurementLimitHit: false, unexaminedFactCount: 0 });
+    }
+  }, 20_000);
+
+  it("measures every supported protected fact with the real reviewer serializer in a large envelope", () => {
+    const context: any = recentContext();
+    context.authority.protectedFacts = Array.from({ length: 512 }, (_, index) => ({
+      id: `20000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      turnNumber: index + 1,
+      content: `Protected fact ${index + 1}: ${"the harbor bell remains silent ".repeat(55)}`
+    }));
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const provider = { ...plannerProvider() as any, contextWindowTokens: 4_000_000, maxOutputTokens: 100 };
+    const prompts = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])),
+      continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
+    const result = planGenerationPromptContext(context, provider, "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 4_000_000, 3_999_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
+      (manifest) => estimateContinuityReviewPlanningTokens({ provider, manifest, producingRequestHash: manifest.producingRequestHash,
+        promptSnapshot: prompts, reviewMode: "enforce", direction: "Wait", candidateOutputTokens: 100 }), 3_999_900,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const reservation = (result.layerDiagnostics as any).factReservation;
+
+    expect(reservation).toMatchObject({ sourceFactCount: 512, measurementTrialCount: 1 });
+    expect(Buffer.byteLength(JSON.stringify(context.authority.protectedFacts), "utf8")).toBeLessThan(1_000_000);
+    expect(reservation.selectedFactCount).toBe(512);
+    expect(reservation.writerSerializationCount).toBe(2);
+    expect(reservation.reviewerSerializationCount).toBe(1);
+    expect(reservation.elapsedMilliseconds).toBeGreaterThanOrEqual(0);
+    process.stderr.write(`${JSON.stringify({ protectedFactReservationMetrics: { sourceFacts: reservation.sourceFactCount,
+      selectedFacts: reservation.selectedFactCount, measurementTrials: reservation.measurementTrialCount,
+      writerSerializations: reservation.writerSerializationCount, reviewerSerializations: reservation.reviewerSerializationCount,
+      elapsedMilliseconds: Math.round(reservation.elapsedMilliseconds * 100) / 100 } })}\n`);
+  }, 30_000);
+
+  it("measures a many-fact partial fit with the real reviewer serializer", () => {
+    const context: any = recentContext();
+    context.authority.protectedFacts = Array.from({ length: 512 }, (_, index) => ({
+      id: `30000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      turnNumber: index + 1,
+      content: `Protected partial fact ${index + 1}: ${"the harbor bell remains silent ".repeat(55)}`
+    }));
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const provider = { ...plannerProvider() as any, contextWindowTokens: 1_000_000, maxOutputTokens: 100 };
+    const prompts = { version: 2, templates: Object.fromEntries(Object.entries(PROMPT_TEMPLATE_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped" }])),
+      continuityReview: Object.fromEntries(Object.entries(CONTINUITY_REVIEW_PROMPT_CATALOG).map(([key, value]) => [key, { content: value.defaultContent, hash: sha256(value.defaultContent), source: "shipped", protocolIdentity: value.protocolIdentity }])) };
+    const result = planGenerationPromptContext(context, provider, "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 1_000_000, 999_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined,
+      (manifest) => estimateContinuityReviewPlanningTokens({ provider, manifest, producingRequestHash: manifest.producingRequestHash,
+        promptSnapshot: prompts, reviewMode: "enforce", direction: "Wait", candidateOutputTokens: 100 }), 999_900,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+    const reservation = (result.layerDiagnostics as any).factReservation;
+
+    expect(reservation.sourceFactCount).toBe(512);
+    expect(reservation.selectedFactCount).toBeGreaterThan(100);
+    expect(reservation.selectedFactCount).toBeLessThan(512);
+    expect(reservation.measurementTrialCount).toBe(64);
+    expect(reservation.writerSerializationCount).toBe(reservation.measurementTrialCount * 2);
+    expect(reservation.reviewerSerializationCount).toBe(reservation.measurementTrialCount);
+    expect(reservation.measurementLimitHit).toBe(true);
+    expect(reservation.unexaminedFactCount).toBeGreaterThan(0);
+    expect(sentCanonicalFactIds(result.contextPlan.serializedRequest)).toEqual((result.promptContext.protectedFacts ?? []).map((fact: { id: string }) => fact.id));
+    process.stderr.write(`${JSON.stringify({ protectedFactPartialReservationMetrics: { sourceFacts: reservation.sourceFactCount,
+      selectedFacts: reservation.selectedFactCount, measurementTrials: reservation.measurementTrialCount,
+      writerSerializations: reservation.writerSerializationCount, reviewerSerializations: reservation.reviewerSerializationCount,
+      measurementLimitHit: reservation.measurementLimitHit, unexaminedFactCount: reservation.unexaminedFactCount,
+      elapsedMilliseconds: Math.round(reservation.elapsedMilliseconds * 100) / 100 } })}\n`);
+  }, 60_000);
+
+  it("keeps ledger intent when the matching recent turn is not actually reserved", () => {
+    const context: any = recentContext();
+    context.recentTurns[0].narration = "Too large to reserve. ".repeat(5_000);
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: 1,
+      coverage: { unreadThroughTurn: 1, missingTurnCount: 0, filteredDirectionCount: 0, oversizedDirectionCount: 0, loadedRows: 2 },
+      entries: [
+        { turnId: "turn-2", turnNumber: 2, inputMode: "action", direction: "Ask the keeper about the lantern." },
+        { turnId: "turn-3", turnNumber: 3, inputMode: "action", direction: "Wait for the tide." }
+      ] };
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 8_000, 7_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.promptContext.recentTurns!.map((entry: { sourceId: string }) => entry.sourceId)).toEqual(["turn-3"]);
+    expect(result.promptContext.storyLedger!.entries.map((entry: { turnId: string }) => entry.turnId)).toContain("turn-2");
+  });
+
+  it("keeps feasible large mandatory authority within a smaller reviewer cap by omitting ledger history", () => {
+    const context: any = recentContext();
+    context.authority.rules = ["The sealed gate remains closed. ".repeat(1_200)];
+    context.authority.storyLedger = { version: "story-ledger-v1", omittedThroughTurn: null,
+      coverage: { unreadThroughTurn: null, missingTurnCount: 0, filteredDirectionCount: 0, oversizedDirectionCount: 0, loadedRows: 3 },
+      entries: [1, 2, 3].map((turnNumber) => ({ turnId: `ledger-${turnNumber}`, turnNumber, inputMode: "action", direction: "Search the quay for the silver seal. ".repeat(20) })) };
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "enforce" });
+    const reviewCost = (manifest: NonNullable<ReturnType<typeof run>["sourceManifest"]>) => 10_000 + manifest.entries.filter((entry) => entry.selectionGroup === "ledger").length * 1_000;
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Wait", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, reviewCost, 13_030,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
+
+    expect(result.storyInput).toContain("The sealed gate remains closed.");
+    expect(result.promptContext.storyLedger!.entries).toEqual([]);
+    expect(result.contextPlan.additionalRequestTokens + estimatedInputSafetyAllowanceTokens(result.contextPlan.additionalRequestTokens)).toBeLessThanOrEqual(13_030);
   });
 
   it("does not measure continuity review when the frozen policy disables it", () => {
@@ -102,6 +474,13 @@ describe("layered generation context planner", () => {
       "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, () => { reviewMeasurements++; return 100_000; });
     expect(reviewMeasurements).toBe(0);
     expect(result.promptContext.recentTurns).toHaveLength(2);
+  });
+  it("ignores a supplied reviewer limit in v5 when policy review is disabled", () => {
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r3"), continuityReview: "off" });
+    expect(() => planGenerationPromptContext(recentContext(), plannerProvider(), "System", "Continue", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
+      "22222222-2222-4222-8222-222222222222", "story_memory", policy, undefined, () => 100_000, 1,
+      HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION)).not.toThrow();
   });
   it.each(["action", "scene"] as const)("sends bounded cast corrections with exact evidence in %s mode", (mode) => {
     const context: any = plannerContext({ source: "none", name: "", characterText: "", profile: null });
@@ -261,6 +640,17 @@ describe("layered generation context planner", () => {
     expect(result.promptContext.chronicle).toEqual([]);
     expect(result.layerDiagnostics.sourceValidationFailures).toBe(1);
     expect(result.layerDiagnostics.excerptsPartial).toBe(0);
+  });
+  it("keeps a certified narration whole when the complete record is economical", () => {
+    const context = recentContext();
+    const content = `${"Old scenery. ".repeat(24)}The lantern is lit. ${"More scenery. ".repeat(24)}`.trim();
+    const start = content.indexOf("The lantern");
+    context.candidates = [{ id: "economical", turnId: "old", ordinal: 1, kind: "turn_fiction", content, tokenEstimate: 200, rank: 1,
+      narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), spans: [{ start, end: start + "The lantern is lit.".length }] } }];
+    const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
+    const result = planGenerationPromptContext(context, plannerProvider(), "System", "Find lantern", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_900, undefined, "story_memory", policy);
+    expect(result.promptContext.chronicle[0]).toMatchObject({ id: "economical", content });
+    expect(result.promptContext.chronicle[0]?.evidenceForm).toBeUndefined();
   });
   it("falls back to certified excerpt when an economical whole parent loses to protected authority", () => {
     const context = recentContext(); context.recentTurns = [];

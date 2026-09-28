@@ -12,7 +12,8 @@ import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createCastDiscoveryJobRepository, enqueueCastDiscoveryWithClient } from "../../packages/database/src/campaign-cast-job-repository.js";
 import { applyCastBatchWithClient, createPostgresCampaignCastRepository, captureCastGenerationSnapshotWithClient } from "../../packages/database/src/campaign-cast-repository.js";
 import { deriveTextExecutionPlan, textExecutionRouteBasisHash } from "../../packages/contracts/src/text-execution-plan.js";
-import { CAST_DISCOVERY_SYSTEM_PROMPT } from "../../packages/contracts/src/prompt-library.js";
+import { CAST_DISCOVERY_SYSTEM_PROMPT, PROMPT_TEMPLATE_CATALOG, type PromptTemplateKey } from "../../packages/contracts/src/prompt-library.js";
+import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { createPostgresPreparedTextAttemptRepository } from "../../packages/database/src/prepared-text-attempt-repository.js";
 import { runCastDiscoveryOnce } from "../../packages/application/src/campaign-cast/discovery.js";
 import { prepareCastDiscoveryExecution } from "../../services/runtime/src/campaign-cast-discovery-adapter.js";
@@ -26,6 +27,11 @@ import { applyCastBoundaryChange } from "../../packages/database/src/campaign-ca
 import { exportCampaignCast, importCampaignCast } from "../../packages/database/src/campaign-cast-portability.js";
 import { applyValidatedCastDiscovery } from "../../packages/database/src/campaign-cast-discovery-publication.js";
 import { createCastBackfillRepository } from "../../packages/database/src/campaign-cast-backfill-repository.js";
+import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
+import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
+import { createGenerationExecutor } from "../../services/runtime/src/generation-executor-adapter.js";
+import { providerPromptProtocolVersion, loadPromptSnapshotForTest } from "../helpers/provider-application-fixtures.js";
+import { memoryGeneration } from "../helpers/memory-applications.js";
 
 describe("durable cast discovery", () => {
   let pool: DatabasePool, ownerUserId: string;
@@ -59,6 +65,102 @@ describe("durable cast discovery", () => {
     return { scope, turnIds, enqueue, execution, versionId };
   }
   const emptyOutput = { version: 1 as const, characters: [] };
+  it.each(["matching", "profile revision mismatch", "authority revision mismatch"] as const)(
+    "admits a generation-created native preset discovery route across a pre-commit retry with %s revisions",
+    async (revisionCase) => {
+      const f = await fixture(), providerProfileId = f.execution.providerProfileId;
+      await pool.query("INSERT INTO campaign_state (campaign_id,owner_user_id) VALUES ($1,$2)", [f.scope.campaignId, ownerUserId]);
+      await pool.query(`INSERT INTO provider_profiles(id,owner_user_id,provider_role,name,base_url,default_model,provider_type)
+        VALUES($1,$2,'text',$3,'https://fixture.invalid','@preset/night-shift','openrouter')`, [providerProfileId, ownerUserId, `Preset admission ${randomUUID()}`]);
+      const basis = { version: 2 as const, selection: { kind: "openrouter_preset" as const, slug: "night-shift" },
+        preset: { slug: "night-shift", versionId: "preset-v1", configHash: "a".repeat(64) },
+        candidates: [{ modelId: "@preset/night-shift", providerPolicy: {}, contextWindowTokens: 8000, maxOutputTokens: 2000 }],
+        presetSystemPrompt: "Keep the saved preset instructions.", parameters: {}, endpointReference: "fixture-endpoint",
+        credentialReference: providerProfileId, profileRevision: "profile-r7", authorityRevision: "authority-r3",
+        requestTimeoutMs: 30000, protocolVersion: "cast-discovery-v1", routeBasisHash: "0".repeat(64) };
+      const routeBasis = { ...basis, routeBasisHash: textExecutionRouteBasisHash(basis) };
+      const discoveryExecution = { providerProfileId, plan: deriveTextExecutionPlan(routeBasis, CAST_DISCOVERY_SYSTEM_PROMPT) };
+      const commands = createPostgresGenerationCommandRepository(pool, {
+        resolvePromptSnapshot: (_client, owner, campaignId) => loadPromptSnapshotForTest(pool, owner, campaignId),
+        promptProtocolVersion: providerPromptProtocolVersion,
+        prepareTextExecutionRouteBasis: async () => routeBasis,
+        verifyTextExecutionRouteBasis: async () => true,
+        readTurnReportedCosts: async () => new Map()
+      });
+      const queued = await commands.enqueueAppend(f.scope, generationRequestSchema.parse({
+        action: "Open the observatory door.", providerProfileId, model: "@preset/night-shift",
+        idempotencyKey: randomUUID(), context: { budgetTokens: 8000, compression: "full", recentTurns: 2 }
+      }));
+      const providerResult = { content: JSON.stringify({ narration: "The observatory opens onto a moonlit hall.",
+        choices: ["Enter.", "Wait.", "Study the door.", "Call out."], custom_action_suggestion: "Study the hall.", scratchpad: "",
+        tracker_updates: [], image_prompt: "", continuity_summary: "The observatory door opened.", canonical_facts: [],
+        superseded_facts: [], canonical_fact_updates: [], open_threads: [] }), responseId: "preset-story-result",
+        finishReason: "stop", outputLimited: false, modelInstanceId: "fixture", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, reportedCost: null, rawMetadata: {} };
+      let liveLoads = 0, admissionPreparations = 0, storyDispatches = 0, interruptBeforeCommit = true;
+      const liveExecution = { id: providerProfileId, name: "Live preset execution", providerRole: "text" as const,
+        providerType: "openrouter" as const, model: "@preset/night-shift", contextWindowTokens: 8000, maxOutputTokens: 2000,
+        temperature: 0, requestTimeoutMs: 30000, configuration: {},
+        executionRevision: revisionCase === "profile revision mismatch" ? "profile-r8" : "profile-r7",
+        authorityRevision: revisionCase === "authority revision mismatch" ? "authority-r4" : "authority-r3",
+        textSelection: { kind: "openrouter_preset" as const, slug: "night-shift" }, execute: async () => providerResult } satisfies RuntimeTextExecution;
+      const collaborators = {
+        memory: memoryGeneration(pool, "cast-admission-test-secret"),
+        illustration: { loadStreamingIllustrationConfig: async () => null, createProvisionalSet: async () => null,
+          createProvisionalSegment: async () => false, promoteProvisionalSet: async () => undefined,
+          orphanProvisionalSet: async () => undefined, enqueueAcceptedTurnIllustrationSegments: async () => null } as never,
+        loadTextExecution: async (owner: string, profile: string, model?: string) => {
+          liveLoads++;
+          expect([owner, profile, model]).toEqual([ownerUserId, providerProfileId, "@preset/night-shift"]);
+          return liveExecution;
+        },
+        prepareCastDiscoveryExecution: async ({ ownerUserId: owner, execution }: { ownerUserId: string; execution: RuntimeTextExecution }) => {
+          admissionPreparations++;
+          expect(owner).toBe(ownerUserId);
+          expect(execution).toBe(liveExecution);
+          expect(execution.textSelection).toEqual({ kind: "openrouter_preset", slug: "night-shift" });
+          return discoveryExecution;
+        },
+        verifyTextExecutionRouteAuthority: async (owner: string, saved: typeof routeBasis) =>
+          owner === ownerUserId && saved.routeBasisHash === routeBasis.routeBasisHash,
+        preparedTextExecutor: { async execute(input: { operation: string; plan: { selection: unknown } }) {
+          expect(input.plan.selection).toEqual({ kind: "openrouter_preset", slug: "night-shift" });
+          if (input.operation === "story_generation") storyDispatches++;
+          return providerResult;
+        } },
+        promptFromSnapshot: (snapshot: unknown, key: PromptTemplateKey) =>
+          (snapshot as Record<string, { content?: string }> | undefined)?.[key]?.content ?? PROMPT_TEMPLATE_CATALOG[key].defaultContent,
+        recordProfileCost: async () => null,
+        attributeGenerationCostsToTurn: async () => undefined
+      };
+      const baseRepository = createPostgresGenerationExecutionRepository(pool);
+      const repository = { ...baseRepository, async markCommitting(scope: Parameters<typeof baseRepository.markCommitting>[0]) {
+        if (interruptBeforeCommit) {
+          interruptBeforeCommit = false;
+          throw Object.assign(new Error("synthetic pre-commit interruption"), { code: "generation_failed" });
+        }
+        return baseRepository.markCommitting(scope);
+      } };
+      const executor = createGenerationExecutor({ pool, repository, collaborators: collaborators as never });
+      const firstClaim = await repository.claimNext({ workerId: "cast-admission-route", leaseSeconds: 30 });
+      expect(firstClaim?.jobId).toBe(queued.id);
+      await expect(executor.execute({ claim: firstClaim!, workerId: "cast-admission-route", leaseSeconds: 30 })).resolves.toBe(true);
+      expect((await pool.query("SELECT status,orchestration_private->'castDiscoveryAdmission' AS admission FROM generation_jobs WHERE id=$1", [queued.id])).rows[0])
+        .toMatchObject({ status: "failed", admission: { status: revisionCase === "matching" ? "ready" : "unavailable" } });
+
+      await commands.retry({ ownerUserId, jobId: queued.id });
+      const retryClaim = await repository.claimNext({ workerId: "cast-admission-route", leaseSeconds: 30 });
+      expect(retryClaim?.jobId).toBe(queued.id);
+      await expect(executor.execute({ claim: retryClaim!, workerId: "cast-admission-route", leaseSeconds: 30 })).resolves.toBe(true);
+
+      expect((await pool.query("SELECT status,result_turn_id FROM generation_jobs WHERE id=$1", [queued.id])).rows[0])
+        .toMatchObject({ status: "completed", result_turn_id: expect.any(String) });
+      expect((await pool.query("SELECT turn_number FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 ORDER BY turn_number", [f.scope.campaignId])).rows)
+        .toEqual([{ turn_number: 2 }]);
+      expect(liveLoads).toBe(1);
+      expect(admissionPreparations).toBe(revisionCase === "matching" ? 1 : 0);
+      expect(storyDispatches).toBeGreaterThan(0);
+    }
+  );
   it.each(["provider failure", "source race"])("leaves failed discovery intact on retry admission %s", async (mode) => {
     const f = await fixture();
     const id = (await withTransaction(pool, (client) => enqueueCastDiscoveryWithClient(client,

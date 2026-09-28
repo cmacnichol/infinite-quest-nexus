@@ -55,11 +55,12 @@ describe("safe public generation diagnostics", () => {
   it("reduces private planning layers to fixed counts and reason codes", () => {
     const privateId = "PRIVATE_EXCERPT_AND_SOURCE_ID";
     const safe = projectSafeGenerationContextDiagnostic({
-      layers: { recent: { target: 3, included: 1, firstGapReason: "recent_gap" }, duplicateSourceCount: 2, components: { rules: 120 }, excerptsComplete: 2, excerptsPartial: 1, sourceValidationFailures: 1, omitted: [{ id: privateId, reason: "context_limit" }] },
+      layers: { recent: { target: 3, included: 1, firstGapReason: "recent_gap" }, duplicateSourceCount: 2, components: { rules: 120 }, excerptsComplete: 2, excerptsPartial: 1, sourceValidationFailures: 1, omitted: [{ id: privateId, reason: "context_limit" }],
+        history: { version: "history-coverage-diagnostics-v1", sourceId: privateId, content: "PRIVATE_HISTORY_CANARY" } },
       worldReferenceOmissions: { unrecognizedRecordCount: 1, missingEndpointCount: 2, entityCapCount: 3 }
     });
     expect(safe).toMatchObject({ reasonCodes: expect.arrayContaining(["recent_gap", "context_limit", "unsupported_world_shape", "duplicate_source", "source_validation_failed"]), counts: { authorityComponents: 1, optionalEvidenceOmitted: 1, excerptsComplete: 2, excerptsPartial: 1, sourceValidationFailures: 1, worldReferencesOmitted: 6 } });
-    expect(JSON.stringify(safe)).not.toContain(privateId);
+    expect(JSON.stringify(safe)).not.toMatch(/PRIVATE_EXCERPT_AND_SOURCE_ID|PRIVATE_HISTORY_CANARY/);
   });
 
   it("renders only allowlisted protected component estimates", () => {

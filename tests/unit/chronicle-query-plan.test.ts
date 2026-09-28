@@ -1,7 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { planChronicleQueries } from "../../packages/domain/src/chronicle-query-plan.js";
+import { planChronicleQueries, sceneHintTail } from "../../packages/domain/src/chronicle-query-plan.js";
 
 describe("Chronicle query planning", () => {
+  it("normalizes and bounds a scene tail without losing the ending or splitting Unicode", () => {
+    expect(sceneHintTail("", 1000)).toBe("");
+    expect(sceneHintTail("  A quiet   scene.\n", 1000)).toBe("A quiet scene.");
+    expect(sceneHintTail(`OPENING_CANARY ${"word ".repeat(300)}ENDING_CANARY`, 1_000)).toContain("ENDING_CANARY");
+    expect(sceneHintTail(`OPENING_CANARY ${"word ".repeat(300)}ENDING_CANARY`, 1_000)).not.toContain("OPENING_CANARY");
+    expect(sceneHintTail(`OPENING_CANARY ${"word ".repeat(300)}ENDING_CANARY`, 1_000).length).toBeLessThanOrEqual(1_000);
+    expect(sceneHintTail(`OPENING_CANARY ${"x".repeat(1_200)}ENDING_CANARY`, 80)).toContain("ENDING_CANARY");
+    expect(sceneHintTail(`OPENING_CANARY ${"x".repeat(1_200)}ENDING_CANARY`, 80).length).toBeLessThanOrEqual(80);
+    expect(sceneHintTail(`OPENING_CANARY ${"story ".repeat(300)}ENDING_CANARY`, 100)).toContain("ENDING_CANARY");
+    expect(sceneHintTail("A multibyte 🧙🏽‍♀️ ending", 8)).not.toMatch(/[\uD800-\uDBFF]$/u);
+    expect(sceneHintTail("prefix 🧙", 2)).toBe("🧙");
+    expect(sceneHintTail("prefix 👩‍🚀", 3)).toBe("");
+    expect(sceneHintTail("prefix 👩‍🚀", 5)).toBe("👩‍🚀");
+    expect(sceneHintTail("A multibyte 🧙🏽‍♀️ ending", 0)).toBe("");
+    expect(sceneHintTail("A multibyte 🧙🏽‍♀️ ending", -1)).toBe("");
+    expect(sceneHintTail("A multibyte 🧙🏽‍♀️ ending", Number.NaN)).toBe("");
+    expect(sceneHintTail("A multibyte 🧙🏽‍♀️ ending", Number.POSITIVE_INFINITY)).toBe("");
+    expect(sceneHintTail("A multibyte 🧙🏽‍♀️ ending", 1.5)).toBe("");
+    expect(sceneHintTail("A multibyte 🧙🏽‍♀️ ending", 5_000).length).toBeLessThanOrEqual(1_000);
+  });
+
   it("builds deterministic independently bounded fiction-only variants through the requested turn", () => {
     const input = {
       action: "Follow Shade through the moon gate [[roll d20 target 15]].",

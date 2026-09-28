@@ -50,14 +50,14 @@ integration("Story Memory enrollment", () => {
     action: "Continue the enrollment boundary.", providerProfileId, idempotencyKey,
     context: { budgetTokens: 16_000, compression: "full", recentTurns: 8 }
   });
-  it("captures cast capability only when enabled without changing the saved older snapshot", async () => {
+  it("defaults newly captured cast-enabled snapshots to v5 without changing the saved legacy snapshot", async () => {
     const imported = await importCampaign("cast capability");
     const capture = (castContextEnabled: boolean) => withTransaction(pool, (client) => resolveStoryMemoryPolicySnapshot(client,
       { ownerUserId, campaignId: imported.campaignId, providerProfileId, requestedModel: "" },
       { installedCapability: "r3", enforceEnabled: true, castContextEnabled }));
     const old = await capture(false);
     const enabled = await capture(true);
-    expect(enabled).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v4", promptProtocol: "story-v17-campaign-cast" });
+    expect(enabled).toMatchObject({ castContext: true, contextProtocol: "current-continuity-v5", promptProtocol: "story-v17-campaign-cast" });
     expect(old).not.toHaveProperty("castContext");
     expect(await capture(false)).toEqual(old);
   });

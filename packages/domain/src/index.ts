@@ -20,3 +20,4 @@ export * from "./source-authoring-budget.js";
 export * from "./source-world-proposal.js";
 export * from "./campaign-cast.js";
 export * from "./campaign-cast-context.js";
+export * from "./story-history-projection.js";

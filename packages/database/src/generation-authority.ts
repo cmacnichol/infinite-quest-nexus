@@ -12,6 +12,9 @@ import type {
   LegacyGenerationBaseIdentity
 } from "../../application/src/memory/generation-context.js";
 import type { GenerationRecentTurn } from "../../application/src/memory/generation-context.js";
+import { ledgerDirectionExcerpt, type StoryLedger } from "../../domain/src/story-history-projection.js";
+import { loadVerifiedProtectedFacts } from "./campaign-continuity-repository.js";
+import type { ProtectedFact, ProtectedFactSourceCoverage } from "../../application/src/memory/story-history-facts.js";
 export type GenerationBaseIdentity = LegacyGenerationBaseIdentity | GenerationBaseIdentityV3 | GenerationBaseIdentityV4;
 
 export type ResolvedGenerationAuthority = Readonly<{
@@ -20,6 +23,10 @@ export type ResolvedGenerationAuthority = Readonly<{
   worldVersionId: string;
   baseIdentity: GenerationBaseIdentity;
   recentTurns?: readonly GenerationRecentTurn[];
+  storyLedger?: StoryLedger;
+  protectedFacts?: readonly ProtectedFact[];
+  protectedFactsOmitted?: number;
+  protectedFactsCoverage?: ProtectedFactSourceCoverage;
   castSnapshot?: CastGenerationSnapshot;
 }>;
 
@@ -31,6 +38,21 @@ type ResolveRequest = Readonly<{
   /** Policy attempts bind effective character authority; historical jobs retain their stored legacy shape. */
   baseIdentityVersion?: "legacy" | "generation-base-v3" | "generation-base-v4";
   captureRecentWindow?: boolean;
+  /** Explicit frozen v5 history window. Absence retains the historical two-turn reader. */
+  recentWindowTurns?: 11;
+  /** V5 only: bounded, transaction-scoped player-intent source projection. */
+  captureStoryLedger?: boolean;
+  /** V5 only: complete source-verified canonical facts for optional prompt use. */
+  captureProtectedFacts?: boolean;
+}>;
+
+type RecentWindowRow = Readonly<{
+  turn_id: string;
+  turn_number: number;
+  action: string;
+  input_mode: "action" | "scene";
+  effective_narration: string;
+  correction_revision: number;
 }>;
 
 function characterAuthorityIdentity(
@@ -125,16 +147,31 @@ export async function resolveGenerationAuthoritySnapshot(
     );
   const baseTurn = baseTurnResult.rows[0] ?? null;
   const modern = request.baseIdentityVersion === "generation-base-v3" || request.baseIdentityVersion === "generation-base-v4";
-  const recentRows = request.captureRecentWindow && modern
-    ? (await client.query<{ turn_id: string; turn_number: number; action: string; input_mode: "action" | "scene";
-      effective_narration: string; correction_revision: number }>(
+  const recentWindowTurns = request.recentWindowTurns ?? 2;
+  const queriedRecentRows: readonly RecentWindowRow[] | undefined = request.captureRecentWindow && modern
+    ? (await client.query<RecentWindowRow>(
       `SELECT t.id AS turn_id,t.turn_number,t.action,t.input_mode,e.effective_narration,e.correction_revision
        FROM turns t JOIN effective_turn_narrations e ON e.turn_id=t.id AND e.campaign_id=t.campaign_id AND e.owner_user_id=t.owner_user_id
        JOIN campaigns c ON c.id=t.campaign_id AND c.owner_user_id=t.owner_user_id
        WHERE t.owner_user_id=$1 AND t.campaign_id=$2 AND c.world_version_id=$3
          AND t.turn_number >= $4 AND t.turn_number < $5 ORDER BY t.turn_number`,
-      [request.ownerUserId, request.campaignId, campaign.world_version_id, Math.max(1, baseTurnNumber - 2), baseTurnNumber]
+       [request.ownerUserId, request.campaignId, campaign.world_version_id, Math.max(1, baseTurnNumber - recentWindowTurns), baseTurnNumber]
     )).rows : undefined;
+  // Historical v3/v4 captures preserve their raw bounded query exactly. V5
+  // reserves only the newest contiguous suffix, so a missing predecessor is
+  // neither fingerprinted nor withheld from later retrieval.
+  const recentRows = queriedRecentRows && request.recentWindowTurns !== undefined
+    ? (() => {
+      let expectedTurnNumber = baseTurnNumber - 1;
+      const newestFirst: RecentWindowRow[] = [];
+      for (const row of [...queriedRecentRows].reverse()) {
+        if (row.turn_number !== expectedTurnNumber) break;
+        newestFirst.push(row);
+        expectedTurnNumber--;
+      }
+      return newestFirst.reverse();
+    })()
+    : queriedRecentRows;
   const recentTurns = recentRows?.map((row): GenerationRecentTurn => {
     const source = { turnId: row.turn_id, turnNumber: row.turn_number, inputMode: row.input_mode,
       action: sanitizeChronicleFictionString(row.action, Number.MAX_SAFE_INTEGER),
@@ -142,6 +179,54 @@ export async function resolveGenerationAuthoritySnapshot(
       narrationCorrectionRevision: row.correction_revision };
     return { ...source, sourceHash: sha256(stableStringify(source)) };
   });
+  const ledgerRows = request.captureStoryLedger && modern && baseTurnNumber > 0 ? await (async () => {
+    const rows: { turn_id: string; turn_number: number; input_mode: "action" | "scene"; action: string | null }[] = [];
+    let cursor: { turnNumber: number; turnId: string } | null = null;
+    // Four small keyset pages cap source materialization at 512 records even
+    // for long-running campaigns, while retaining an honest lower omission.
+    for (let page = 0; page < 4; page++) {
+      const result: { rows: { turn_id: string; turn_number: number; input_mode: "action" | "scene"; action: string | null }[] } = await client.query<{ turn_id: string; turn_number: number; input_mode: "action" | "scene"; action: string | null }>(
+        `SELECT t.id AS turn_id,t.turn_number,t.input_mode,
+                CASE WHEN char_length(t.action) <= 12000 AND octet_length(t.action) <= 48000 THEN t.action ELSE NULL END AS action
+           FROM turns t JOIN campaigns c ON c.id=t.campaign_id AND c.owner_user_id=t.owner_user_id
+          WHERE t.owner_user_id=$1 AND t.campaign_id=$2 AND c.world_version_id=$3 AND t.turn_number < $4
+            AND ($5::int IS NULL OR (t.turn_number,t.id) < ($5,$6))
+          ORDER BY t.turn_number DESC,t.id DESC LIMIT 128`,
+        [request.ownerUserId, request.campaignId, campaign.world_version_id, baseTurnNumber, cursor?.turnNumber ?? null, cursor?.turnId ?? null]
+      );
+      rows.push(...result.rows);
+      const last: { turn_id: string; turn_number: number } | undefined = result.rows.at(-1);
+      if (!last || result.rows.length < 128) break;
+      cursor = { turnNumber: last.turn_number, turnId: last.turn_id };
+    }
+    return rows;
+  })() : undefined;
+  const storyLedger: StoryLedger | undefined = ledgerRows ? (() => {
+    const entries = ledgerRows.flatMap((row) => {
+      if (row.action === null) return [];
+      const direction = ledgerDirectionExcerpt(row.action, 480);
+      return direction ? [{ turnId: row.turn_id, turnNumber: row.turn_number, inputMode: row.input_mode, direction }] : [];
+    }).sort((left, right) => left.turnNumber - right.turnNumber || left.turnId.localeCompare(right.turnId));
+    const lowest = ledgerRows.at(-1)?.turn_number ?? null;
+    const highest = ledgerRows[0]?.turn_number ?? null;
+    const inspectedTurnCount = lowest === null || highest === null ? 0 : highest - lowest + 1;
+    const missingTurnCount = Math.max(0, inspectedTurnCount - ledgerRows.length);
+    const oversizedDirectionCount = ledgerRows.filter((row) => row.action === null).length;
+    const filteredDirectionCount = ledgerRows.filter((row) => row.action !== null && !ledgerDirectionExcerpt(row.action, 480)).length;
+    // Full source capacity leaves an unread prefix unless the inspected range
+    // reaches turn one. This remains distinct from gaps inside that range.
+    const unreadThroughTurn = ledgerRows.length === 512 && lowest !== null && lowest !== 1 ? lowest - 1 : null;
+    const omittedThroughTurn = Math.max(unreadThroughTurn ?? 0,
+      ...ledgerRows.filter((row) => row.action === null || !entries.some((entry) => entry.turnId === row.turn_id)).map((row) => row.turn_number)) || null;
+    return { version: "story-ledger-v1", entries, omittedThroughTurn, coverage: {
+      unreadThroughTurn, missingTurnCount, filteredDirectionCount, oversizedDirectionCount, loadedRows: ledgerRows.length
+    } };
+  })() : undefined;
+  const protectedFactSource = request.captureProtectedFacts && modern
+    ? await loadVerifiedProtectedFacts(client, {
+      ownerUserId: request.ownerUserId, campaignId: request.campaignId, worldVersionId: campaign.world_version_id
+    }, baseTurnNumber)
+    : undefined;
   const legacyIdentity: LegacyGenerationBaseIdentity = {
     operationKind: request.operationKind,
     expectedTurnNumber: request.expectedTurnNumber,
@@ -158,7 +243,8 @@ export async function resolveGenerationAuthoritySnapshot(
     ? {
       ...legacyIdentity,
       version: "generation-base-v3",
-      ...(recentRows ? { recentWindowFingerprint: sha256(stableStringify(recentRows)) } : {}),
+      ...(recentRows ? { recentWindowFingerprint: sha256(stableStringify(recentRows)),
+        ...(request.recentWindowTurns === undefined ? {} : { recentWindowTurns: request.recentWindowTurns }) } : {}),
       ...characterAuthorityIdentity(
         campaign.selected_character_id,
         campaign.character_profile,
@@ -180,6 +266,9 @@ export async function resolveGenerationAuthoritySnapshot(
     worldVersionId: campaign.world_version_id,
     baseIdentity,
     ...(cast ? { castSnapshot: cast.snapshot } : {}),
-    ...(recentTurns ? { recentTurns } : {})
+    ...(recentTurns ? { recentTurns } : {}),
+    ...(storyLedger ? { storyLedger } : {}),
+    ...(protectedFactSource ? { protectedFacts: protectedFactSource.facts, protectedFactsOmitted: protectedFactSource.omittedCount,
+      protectedFactsCoverage: protectedFactSource.coverage } : {})
   };
 }

@@ -1,9 +1,12 @@
 import type {
   MemoryGenerationAuthorityContext,
-  MemoryGenerationAuthorityScope
+  MemoryGenerationAuthorityScope,
+  GenerationHistoryReservation,
+  GenerationOptionalFactFrontier
 } from "../../application/src/memory/types.js";
 import {
   hasGenerationCharacterAuthority,
+  assertGenerationBaseIdentityRecentWindowCompatibility,
   memoryGenerationAuthorityContextSchema,
   type GenerationContextCandidate
 } from "../../application/src/memory/generation-context.js";
@@ -11,6 +14,7 @@ import type { DatabaseClient } from "./pool.js";
 import { castGenerationSnapshotSchema } from "../../contracts/src/campaign-cast-context.js";
 import { resolveGenerationAuthoritySnapshot } from "./generation-authority.js";
 import { characterFictionAuthority, stableStringify, stripMechanicsLeakage } from "../../domain/src/index.js";
+import { isHistoryCoverageContextProtocol } from "../../contracts/src/story-memory-policy.js";
 import { loadPostgresChronicleGenerationCandidates } from "./chronicle-context-repository.js";
 import type { ChronicleGenerationTransactionDependencies } from "./chronicle-repository.js";
 import {
@@ -47,10 +51,23 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   client: DatabaseClient,
   scope: MemoryGenerationAuthorityScope,
 ): Promise<MemoryGenerationAuthorityContext> {
+  if (scope.expectedBaseIdentity) {
+    try {
+      assertGenerationBaseIdentityRecentWindowCompatibility(scope.expectedBaseIdentity, scope.storyMemoryPolicy);
+    } catch {
+      throw Object.assign(new Error("The frozen recent-window identity is incompatible with its policy."), {
+        code: "authoritative_context_invalid",
+        field: "context_settings"
+      });
+    }
+  }
   const resolved = await resolveGenerationAuthoritySnapshot(client, {
     ...scope,
     ...(scope.expectedBaseIdentity && hasGenerationCharacterAuthority(scope.expectedBaseIdentity)
-      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined }
+      ? { baseIdentityVersion: scope.expectedBaseIdentity.version, captureRecentWindow: scope.expectedBaseIdentity.recentWindowFingerprint !== undefined,
+        ...(scope.expectedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: scope.expectedBaseIdentity.recentWindowTurns }),
+        captureStoryLedger: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol),
+        captureProtectedFacts: isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol) }
       : {})
   });
   if (scope.expectedBaseIdentity
@@ -121,6 +138,26 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
   const continuity = currentContinuity === null
     ? promptSafeContinuity
     : currentContinuity;
+  const optionalFactFrontier = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol)
+    ? await client.query<{ id: string; effective_turn_number: number }>(
+      `SELECT id,effective_turn_number FROM campaign_state_edits
+        WHERE owner_user_id=$1 AND campaign_id=$2 AND effective_turn_number <= $3
+        ORDER BY effective_turn_number DESC,revision DESC LIMIT 1`,
+      [scope.ownerUserId, scope.campaignId, baseTurnNumber]
+    )
+    : null;
+  const optionalFactFrontierContinuity = optionalFactFrontier?.rows[0]
+    ? await loadCurrentContinuityCorrection(client, scope, baseTurnNumber, { complete: true, latestAtOrBefore: true })
+    : null;
+  const capturedOptionalFactFrontier: GenerationOptionalFactFrontier | undefined = optionalFactFrontier?.rows[0]
+    ? {
+      stateEditId: optionalFactFrontier.rows[0].id,
+      effectiveTurnNumber: optionalFactFrontier.rows[0].effective_turn_number,
+      // `complete: true` preserves an intentionally empty correction and
+      // withholds invalid source IDs before this immutable capture escapes.
+      facts: optionalFactFrontierContinuity?.canonicalFacts.flatMap((fact) => fact.id ? [{ id: fact.id, content: fact.content }] : []) ?? []
+    }
+    : undefined;
   return memoryGenerationAuthorityContextSchema.parse({
     authority: {
       rules: completeRules(worldCanon.rules ?? worldCanon.story_rules ?? ""),
@@ -139,6 +176,13 @@ export async function loadPostgresChronicleGenerationAuthorityContext(
       rpgStats: continuity.rpgStats,
       eventTriggers: continuity.eventTriggers,
       pendingEventTriggers: continuity.pendingEventTriggers,
+      ...(resolved.storyLedger ? { storyLedger: resolved.storyLedger } : {}),
+      ...(resolved.protectedFacts ? {
+        protectedFacts: resolved.protectedFacts,
+        protectedFactsOmitted: resolved.protectedFactsOmitted ?? 0,
+        protectedFactsCoverage: resolved.protectedFactsCoverage,
+      } : {}),
+      ...(capturedOptionalFactFrontier ? { optionalFactFrontier: capturedOptionalFactFrontier } : {}),
       latestTurn: latest?.rows[0] ? {
         ...(v3 ? { inputMode: latest.rows[0].input_mode } : {}),
         action: stripMechanicsLeakage(latest.rows[0].action).text,
@@ -162,9 +206,11 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
   scope: MemoryGenerationAuthorityScope,
   authorityContext: MemoryGenerationAuthorityContext,
   dependencies: ChronicleGenerationTransactionDependencies,
+  reservation?: GenerationHistoryReservation,
   options: Readonly<{ useSavepoints?: boolean }> = {},
 ): Promise<MemoryGenerationAuthorityContext> {
   const baseTurnNumber = Number(authorityContext.baseIdentity.baseTurnNumber);
+  const useCapturedSceneHint = isHistoryCoverageContextProtocol(scope.storyMemoryPolicy?.contextProtocol);
   const retrieval = await loadPostgresChronicleGenerationCandidates(client, {
     ownerUserId: scope.ownerUserId,
     campaignId: scope.campaignId,
@@ -173,13 +219,17 @@ export async function loadPostgresChronicleGenerationCandidatesContext(
     throughTurnNumber: baseTurnNumber,
     ...(authorityContext.authority.castSnapshot ? { castSnapshot: castGenerationSnapshotSchema.parse(authorityContext.authority.castSnapshot) } : {}),
     ...(scope.retrievalBudgetTokens === undefined ? {} : { retrievalBudgetTokens: scope.retrievalBudgetTokens }),
-    ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy })
+    ...(scope.storyMemoryPolicy === undefined ? {} : { storyMemoryPolicy: scope.storyMemoryPolicy }),
+    ...(useCapturedSceneHint ? { capturedSceneNarration: authorityContext.authority.latestTurn?.narration ?? "" } : {}),
+    ...(reservation === undefined ? {} : { generationExclusions: reservation }),
+    ...(authorityContext.authority.optionalFactFrontier === undefined ? {} : { optionalFactFrontier: authorityContext.authority.optionalFactFrontier })
   }, dependencies, options);
   const candidates: readonly GenerationContextCandidate[] = retrieval.candidates;
   return {
     ...authorityContext,
     candidates,
-    chronicleRetrieval: retrieval.chronicleRetrieval
+    chronicleRetrieval: retrieval.chronicleRetrieval,
+    ...(retrieval.selectionDiagnostics ? { chronicleSelectionDiagnostics: retrieval.selectionDiagnostics } : {})
   };
 }
 

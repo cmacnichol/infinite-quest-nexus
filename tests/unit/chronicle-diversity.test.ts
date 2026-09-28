@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  chronicleParentTokens,
   selectDiverseChronicleParents,
   type ChronicleParentCandidate
 } from "../../packages/domain/src/chronicle-diversity.js";
@@ -25,6 +26,90 @@ function candidate(overrides: Partial<ChronicleParentCandidate> = {}): Chronicle
 }
 
 describe("Chronicle parent diversity", () => {
+  it("skips an oversized parent and selects a later parent that fits the token allowance", () => {
+    const fittingContent = "A compact, later parent.";
+    const selection = selectDiverseChronicleParents([
+      candidate({
+        candidateId: "oversized",
+        parentMemoryId: "oversized-parent",
+        parentTurnId: "oversized-turn",
+        parentContent: "Oversized parent. ".repeat(400),
+        chunkContent: "Oversized parent. ".repeat(400),
+        fusedRank: 1
+      }),
+      candidate({
+        candidateId: "fitting",
+        parentMemoryId: "fitting-parent",
+        parentTurnId: "fitting-turn",
+        parentContent: "A compact, later parent.",
+        chunkContent: "A compact, later parent.",
+        fusedRank: 2
+      })
+    ], { maximumParents: 2, maximumParentTokens: chronicleParentTokens(fittingContent) });
+
+    expect(selection.parents.map((parent) => parent.parentMemoryId)).toEqual(["fitting-parent"]);
+    expect(selection.diagnostics).toMatchObject({
+      maximumParentTokens: chronicleParentTokens(fittingContent),
+      selectedParentTokens: chronicleParentTokens(fittingContent),
+      tokenLimitParentsRemoved: 1,
+      stopReason: "token_limit"
+    });
+  });
+
+  it("includes a parent exactly at the token boundary and terminates zero, negative, and invalid token allowances", () => {
+    const content = "Exact boundary parent.";
+    const exact = selectDiverseChronicleParents([
+      candidate({ parentContent: content, chunkContent: content })
+    ], { maximumParents: 1, maximumParentTokens: chronicleParentTokens(content) });
+    const invalid = selectDiverseChronicleParents([
+      candidate({ parentContent: content, chunkContent: content })
+    ], { maximumParents: 1, maximumParentTokens: Number.NaN });
+    const zero = selectDiverseChronicleParents([
+      candidate({ parentContent: content, chunkContent: content })
+    ], { maximumParents: 1, maximumParentTokens: 0 });
+    const negative = selectDiverseChronicleParents([
+      candidate({ parentContent: content, chunkContent: content })
+    ], { maximumParents: 1, maximumParentTokens: -1 });
+
+    expect(exact.parents).toHaveLength(1);
+    expect(exact.diagnostics).toMatchObject({ selectedParentTokens: chronicleParentTokens(content), stopReason: "exhausted" });
+    expect(invalid.parents).toEqual([]);
+    expect(invalid.diagnostics).toMatchObject({ maximumParentTokens: 0, selectedParentTokens: 0, stopReason: "token_limit" });
+    expect(zero.diagnostics).toMatchObject({ maximumParentTokens: 0, selectedParentTokens: 0, tokenLimitParentsRemoved: 1, stopReason: "token_limit" });
+    expect(negative.diagnostics).toMatchObject({ maximumParentTokens: 0, selectedParentTokens: 0, tokenLimitParentsRemoved: 1, stopReason: "token_limit" });
+  });
+
+  it("keeps an excerpt-capable turn candidate when its complete parent exceeds the allowance", () => {
+    const certifiedExcerpt = "Narration: The verified narration excerpt names the moon gate.";
+    const selection = selectDiverseChronicleParents([
+      candidate({
+        parentContent: `Turn 4\\n${"Unrelated narration. ".repeat(500)}`,
+        chunkContent: "Unrelated narration. ".repeat(500),
+        chunkKind: "turn_narration",
+        tokenContent: certifiedExcerpt,
+        fusedRank: 1
+      })
+    ], {
+      maximumParents: 1,
+      maximumParentTokens: chronicleParentTokens(certifiedExcerpt)
+    });
+
+    expect(selection.parents).toMatchObject([{ content: `Narration: ${"Unrelated narration. ".repeat(500)}` }]);
+    expect(selection.diagnostics).toMatchObject({ stopReason: "exhausted", selectedParentTokens: chronicleParentTokens(certifiedExcerpt) });
+  });
+
+  it("charges the complete source when a narration chunk has no verified excerpt projection", () => {
+    const chunk = "Narration: compact chunk.";
+    const selection = selectDiverseChronicleParents([candidate({
+      parentContent: `Turn 4\\n${"Unverified source. ".repeat(500)}`,
+      chunkKind: "turn_narration",
+      chunkContent: "compact chunk."
+    })], { maximumParents: 1, maximumParentTokens: chronicleParentTokens(chunk) });
+
+    expect(selection.parents).toEqual([]);
+    expect(selection.diagnostics).toMatchObject({ selectedParentTokens: 0, tokenLimitParentsRemoved: 1, stopReason: "token_limit" });
+  });
+
   it.each([
     {
       chunkKind: "turn_action" as const,

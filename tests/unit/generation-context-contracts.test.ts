@@ -51,9 +51,63 @@ describe("canonical private generation context", () => {
     expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, baseIdentity }).success).toBe(false);
   });
   it("retains the complete baseline fields and explicitly reads legacy identities", () => {
-    expect(context.memoryGenerationAuthorityContextSchema.parse(JSON.parse(JSON.stringify({ authority, candidates: [], baseIdentity })))).toEqual({ authority, candidates: [], baseIdentity });
+    const baseline = context.memoryGenerationAuthorityContextSchema.parse(JSON.parse(JSON.stringify({ authority, candidates: [], baseIdentity })));
+    expect(baseline).toEqual({ authority, candidates: [], baseIdentity });
+    expect(baseline).not.toHaveProperty("chronicleSelectionDiagnostics");
     expect(context.readLegacyGenerationBaseIdentity(baseIdentity)).toEqual(baseIdentity);
     expect(context.generationContextSnapshotSchema.safeParse({ version: "current-continuity-v3", ownerUserId: uuid, campaignId: uuid, worldVersionId: uuid, baseIdentity, protectedAuthority: authority, candidates: [] }).success).toBe(false);
+  });
+
+  it("retains only content-free private v5 selection diagnostics", () => {
+    const diagnostics = {
+      maximumParents: 64, maximumParentsPerTurn: 8, maximumParentTokens: 48_000,
+      selectedParentTokens: 12_400, tokenLimitParentsRemoved: 3,
+      candidatePoolLimit: 2_000, candidatePoolCandidatesRemoved: 1,
+      stopReason: "candidate_pool_limit" as const
+    };
+    expect(context.generationChronicleSelectionDiagnosticsSchema.parse(diagnostics)).toEqual(diagnostics);
+    expect(context.generationChronicleSelectionDiagnosticsSchema.safeParse({ ...diagnostics, candidateId: uuid }).success).toBe(false);
+    const value = { authority, candidates: [], baseIdentity, chronicleSelectionDiagnostics: diagnostics };
+    expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
+  });
+
+  it("accepts only the fixed content-free v5 history coverage diagnostic vocabulary", () => {
+    const diagnostic = {
+      version: "history-coverage-diagnostics-v1",
+      limits: { contextTokens: 32_000, writerInputTokens: 31_000, reviewerInputTokens: 30_000,
+        recentWindowTurns: 11, candidatePoolLimit: 2_000, protectedFactMeasurements: 64 },
+      candidates: { sourceCount: 6, selectedCount: 3, omittedCount: 3, selectedEstimateTokens: 1_240,
+        serializerGuardExcludedCount: 1, batchedTrialCount: 2, candidatePoolCandidatesRemoved: 1,
+        stopReason: "candidate_pool_limit", fallbackReason: "none", duplicateExcluded: 2,
+        sourceValidationFailureCount: 1, sourceValidationExcluded: 1 },
+      ledger: { capturedCount: 5, sentCount: 2, omittedCount: 3, coveredByRecentCount: 1,
+        sourceExcludedCount: 4, unreadThroughTurn: null, budgetTokens: 2_000, measurementTrialCount: null },
+      facts: { sourceCount: 4, sentCount: 2, omittedCount: 2, sourceOmittedCount: 3,
+        budgetTokens: 1_200, measurementLimit: 64, measurementLimitHit: true, unexaminedCount: 1,
+        sourceCoverage: { candidateRows: 7, sourceBytes: 400_000, sourceLimitReached: false,
+          oversizedCandidateCount: 1, futureSourceCount: 1, withheldCandidateCount: 2 } },
+      recents: { capturedCount: 3, sentCount: 2, targetCount: 3, firstGapReason: null },
+      finalTokens: { context: 3_000, writerRequest: 4_000, reviewerRequest: 2_000 }
+    } as const;
+    expect(context.historyCoverageDiagnosticsSchema.parse(diagnostic)).toEqual(diagnostic);
+    for (const hostile of [
+      { ...diagnostic, arbitrary: "no" },
+      { ...diagnostic, candidates: { ...diagnostic.candidates, candidateId: uuid } },
+      { ...diagnostic, candidates: { ...diagnostic.candidates, omittedCount: undefined } },
+      { ...diagnostic, ledger: { ...diagnostic.ledger, direction: "PRIVATE_DIRECTION_CANARY" } },
+      { ...diagnostic, facts: { ...diagnostic.facts, error: "PRIVATE_ERROR_CANARY" } },
+      { ...diagnostic, candidates: { ...diagnostic.candidates, stopReason: "unbounded" } }
+    ]) expect(context.historyCoverageDiagnosticsSchema.safeParse(hostile).success).toBe(false);
+  });
+
+  it("accepts only complete protected-fact authority records and an explicit omission count", () => {
+    const protectedFact = { id: uuid, turnNumber: 0, content: "The corrected harbor remains sealed." };
+    const value = { authority: { ...authority, protectedFacts: [protectedFact], protectedFactsOmitted: 2,
+      protectedFactsCoverage: { candidateRows: 3, sourceBytes: 400_292, sourceLimitReached: false,
+        oversizedCandidateCount: 1, futureSourceCount: 1, withheldCandidateCount: 2 } }, candidates: [], baseIdentity };
+    expect(context.memoryGenerationAuthorityContextSchema.parse(value)).toEqual(value);
+    expect(context.memoryGenerationAuthorityContextSchema.safeParse({ ...value, authority: { ...value.authority,
+      protectedFacts: [{ ...protectedFact, content: "" }] } }).success).toBe(false);
   });
 
   it("requires every old dependency and the new profile fence in v3", () => {
@@ -66,6 +120,21 @@ describe("canonical private generation context", () => {
       expect(context.generationBaseIdentityV3Schema.safeParse(missing).success, key).toBe(false);
     }
     expect(() => context.readLegacyGenerationBaseIdentity(newBase)).toThrow();
+  });
+
+  it("keeps historical recent-window bytes absent while admitting only the frozen eleven-turn identity", () => {
+    const v3 = { ...baseIdentity, version: "generation-base-v3" as const, characterProfileRevision: 0, characterProfileFingerprint: hash };
+    const v4 = { ...v3, version: "generation-base-v4" as const, castRevision: 4, castTimelineRevision: 2,
+      castFingerprint: hash, castCoverageStartTurn: 1, castTrackedThroughTurn: 1 };
+    expect(context.generationBaseIdentityV3Schema.parse(v3)).toEqual(v3);
+    expect(context.generationBaseIdentityV4Schema.parse(v4)).toEqual(v4);
+    expect(context.generationBaseIdentityV3Schema.parse(v3)).not.toHaveProperty("recentWindowTurns");
+    for (const identity of [v3, v4]) {
+      const captured = { ...identity, recentWindowTurns: 11, recentWindowFingerprint: hash };
+      expect(context.generationBaseIdentitySchema.parse(captured)).toEqual(captured);
+      expect(context.generationBaseIdentitySchema.safeParse({ ...identity, recentWindowTurns: 11 }).success).toBe(false);
+      expect(context.generationBaseIdentitySchema.safeParse({ ...identity, recentWindowTurns: 10, recentWindowFingerprint: hash }).success).toBe(false);
+    }
   });
 });
 

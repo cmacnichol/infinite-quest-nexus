@@ -1,4 +1,6 @@
-import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, sha256Hex, z } from "@infinite-quest/contracts";
+import { campaignRuntimeStateContentSchema, characterProfileSchema, chronicleRetrievalAuditSchema, castGenerationSnapshotSchema, castGenerationSnapshotFingerprint, HISTORY_COVERAGE_POLICY, isHistoryCoverageContextProtocol, sha256Hex, z, type StoryMemoryPolicySnapshot } from "@infinite-quest/contracts";
+import { storyLedgerSchema } from "./story-history-ledger.js";
+import { protectedFactSchema, protectedFactSourceCoverageSchema } from "./story-history-facts.js";
 export type { ReviewEvidenceReference } from "@infinite-quest/contracts";
 
 /** Private only: these values are not public preview projections. */
@@ -19,15 +21,24 @@ export type LegacyGenerationBaseIdentity = DeepReadonly<z.infer<typeof legacyGen
 export function readLegacyGenerationBaseIdentity(value: unknown): LegacyGenerationBaseIdentity {
   return legacyGenerationBaseIdentitySchema.parse(value);
 }
-export const generationBaseIdentityV3Schema = legacyGenerationBaseIdentitySchema.extend({
+const generationBaseIdentityV3ShapeSchema = legacyGenerationBaseIdentitySchema.extend({
   version: z.literal("generation-base-v3"), characterProfileRevision: ordinalSchema, characterProfileFingerprint: hashSchema,
-  recentWindowFingerprint: hashSchema.optional()
+  recentWindowFingerprint: hashSchema.optional(), recentWindowTurns: z.literal(HISTORY_COVERAGE_POLICY.recentWindowTurns).optional()
 }).strict();
+function requireRecentWindowFingerprint(
+  value: { recentWindowTurns?: number | undefined; recentWindowFingerprint?: string | undefined },
+  context: z.RefinementCtx
+): void {
+  if (value.recentWindowTurns !== undefined && value.recentWindowFingerprint === undefined) {
+    context.addIssue({ code: "custom", path: ["recentWindowFingerprint"], message: "An explicit recent window requires its frozen fingerprint." });
+  }
+}
+export const generationBaseIdentityV3Schema = generationBaseIdentityV3ShapeSchema.superRefine(requireRecentWindowFingerprint);
 export type GenerationBaseIdentityV3 = DeepReadonly<z.infer<typeof generationBaseIdentityV3Schema>>;
-export const generationBaseIdentityV4Schema = generationBaseIdentityV3Schema.extend({
+export const generationBaseIdentityV4Schema = generationBaseIdentityV3ShapeSchema.extend({
   version: z.literal("generation-base-v4"), castRevision: ordinalSchema, castTimelineRevision: ordinalSchema,
   castFingerprint: hashSchema, castCoverageStartTurn: ordinalSchema.min(1).nullable(), castTrackedThroughTurn: ordinalSchema.nullable()
-}).strict();
+}).strict().superRefine(requireRecentWindowFingerprint);
 export type GenerationBaseIdentityV4 = DeepReadonly<z.infer<typeof generationBaseIdentityV4Schema>>;
 export const generationBaseIdentitySchema = z.union([legacyGenerationBaseIdentitySchema, generationBaseIdentityV3Schema, generationBaseIdentityV4Schema]);
 export type GenerationBaseIdentity = DeepReadonly<z.infer<typeof generationBaseIdentitySchema>>;
@@ -43,6 +54,32 @@ export function isGenerationBaseIdentityV4(value: GenerationBaseIdentity): value
 }
 export function hasGenerationCharacterAuthority(value: GenerationBaseIdentity): value is GenerationBaseIdentityV3 | GenerationBaseIdentityV4 {
   return isGenerationBaseIdentityV3(value) || isGenerationBaseIdentityV4(value);
+}
+
+/** A stored history window may only be interpreted with its frozen policy. */
+export function assertGenerationBaseIdentityRecentWindowCompatibility(
+  identity: GenerationBaseIdentity,
+  storyMemoryPolicy: StoryMemoryPolicySnapshot | null | undefined
+): void {
+  const recentWindowTurns = hasGenerationCharacterAuthority(identity) ? identity.recentWindowTurns : undefined;
+  const recentWindowFingerprint = hasGenerationCharacterAuthority(identity) ? identity.recentWindowFingerprint : undefined;
+  if (recentWindowTurns !== undefined && recentWindowFingerprint === undefined) {
+    throw new Error("An explicit recent window requires its frozen fingerprint.");
+  }
+  if (!storyMemoryPolicy || !isHistoryCoverageContextProtocol(storyMemoryPolicy.contextProtocol)) {
+    if (recentWindowTurns !== undefined) throw new Error("Historical context protocols cannot acquire an explicit recent window.");
+    return;
+  }
+  if (!isGenerationBaseIdentityV4(identity)) throw new Error("History coverage requires captured cast authority.");
+  if (storyMemoryPolicy.policy.capability === "r1") {
+    if (recentWindowTurns !== undefined || recentWindowFingerprint !== undefined) {
+      throw new Error("R1 history coverage cannot acquire a recent-turn window.");
+    }
+    return;
+  }
+  if (recentWindowTurns !== HISTORY_COVERAGE_POLICY.recentWindowTurns || recentWindowFingerprint === undefined) {
+    throw new Error("History coverage requires the frozen eleven-turn recent window.");
+  }
 }
 
 /** T04 resolves the complete profile at capture; absent authority is explicit, never synthesized. */
@@ -66,6 +103,18 @@ export const generationContextAuthoritySchema = z.object({
   trackers: campaignRuntimeStateContentSchema.shape.trackers, rpgStats: campaignRuntimeStateContentSchema.shape.rpgStats,
   eventTriggers: campaignRuntimeStateContentSchema.shape.eventTriggers,
   pendingEventTriggers: campaignRuntimeStateContentSchema.shape.pendingEventTriggers,
+  storyLedger: storyLedgerSchema.optional(),
+  protectedFacts: z.array(protectedFactSchema).max(512).optional(),
+  protectedFactsOmitted: z.number().int().min(0).optional(),
+  protectedFactsCoverage: protectedFactSourceCoverageSchema.optional(),
+  /** Captured Task 6 correction frontier for deferred optional fact checks. */
+  optionalFactFrontier: z.object({
+    stateEditId: z.string().uuid(), effectiveTurnNumber: ordinalSchema,
+    // A correction frontier can certify the same bounded 512 fact records as
+    // protected-fact authority; rejecting the larger valid capture would make
+    // the authority context internally inconsistent.
+    facts: z.array(z.object({ id: z.string().uuid(), content: z.string() }).strict()).max(512)
+  }).strict().optional(),
   latestTurn: z.object({ action: z.string(), narration: z.string(), inputMode: z.enum(["action", "scene"]).optional() }).strict().nullable()
 }).strict();
 export type GenerationContextAuthority = DeepReadonly<z.infer<typeof generationContextAuthoritySchema>>;
@@ -83,11 +132,105 @@ export const generationRecentTurnSchema = z.object({
   action: z.string(), narration: z.string(), narrationCorrectionRevision: ordinalSchema, sourceHash: hashSchema
 }).strict();
 export type GenerationRecentTurn = DeepReadonly<z.infer<typeof generationRecentTurnSchema>>;
+/**
+ * Private retrieval-selection counts for provider generation. This deliberately
+ * contains no candidate identifiers, source text, or public-preview fields.
+ */
+export const generationChronicleSelectionDiagnosticsSchema = z.object({
+  maximumParents: ordinalSchema.optional(), maximumParentsPerTurn: ordinalSchema.optional(),
+  maximumParentTokens: ordinalSchema.optional(), selectedParentTokens: ordinalSchema.optional(),
+  tokenLimitParentsRemoved: ordinalSchema.optional(), candidatePoolLimit: ordinalSchema.optional(),
+  candidatePoolCandidatesRemoved: ordinalSchema.optional(),
+  stopReason: z.enum(["parent_limit", "token_limit", "diversity_limit", "candidate_pool_limit", "exhausted"]).optional()
+}).strict();
+export type GenerationChronicleSelectionDiagnostics = DeepReadonly<z.infer<typeof generationChronicleSelectionDiagnosticsSchema>>;
+
+/**
+ * Private v5 operator evidence. Every field is a bounded count, fixed enum,
+ * or token estimate; identifiers, source text, provider responses, and error
+ * strings are deliberately excluded.
+ */
+const historyDiagnosticCountSchema = z.number().int().min(0).max(4_000_000);
+const historyDiagnosticTokenSchema = z.number().int().min(0).max(4_000_000);
+const historyCandidateStopReasonSchema = z.enum([
+  "parent_limit", "token_limit", "diversity_limit", "candidate_pool_limit", "exhausted"
+]);
+const historyFallbackReasonSchema = z.enum([
+  "none", "empty_query", "semantic_not_configured", "provider_unavailable",
+  "semantic_retrieval_unavailable", "chunk_index_not_ready", "incompatible_chunk_embeddings"
+]);
+const historyRecentGapReasonSchema = z.enum(["recent_gap", "context_limit", "request_limit"]);
+export const historyCoverageDiagnosticsSchema = z.object({
+  version: z.literal("history-coverage-diagnostics-v1"),
+  limits: z.object({
+    contextTokens: historyDiagnosticTokenSchema,
+    writerInputTokens: historyDiagnosticTokenSchema,
+    reviewerInputTokens: historyDiagnosticTokenSchema.nullable(),
+    recentWindowTurns: z.literal(HISTORY_COVERAGE_POLICY.recentWindowTurns),
+    candidatePoolLimit: historyDiagnosticCountSchema.nullable(),
+    protectedFactMeasurements: z.literal(64)
+  }).strict(),
+  candidates: z.object({
+    sourceCount: historyDiagnosticCountSchema,
+    selectedCount: historyDiagnosticCountSchema,
+    omittedCount: historyDiagnosticCountSchema,
+    selectedEstimateTokens: historyDiagnosticTokenSchema,
+    serializerGuardExcludedCount: historyDiagnosticCountSchema,
+    batchedTrialCount: historyDiagnosticCountSchema,
+    candidatePoolCandidatesRemoved: historyDiagnosticCountSchema.nullable(),
+    stopReason: historyCandidateStopReasonSchema.nullable(),
+    fallbackReason: historyFallbackReasonSchema.nullable(),
+    duplicateExcluded: historyDiagnosticCountSchema,
+    sourceValidationFailureCount: historyDiagnosticCountSchema,
+    sourceValidationExcluded: historyDiagnosticCountSchema
+  }).strict(),
+  ledger: z.object({
+    capturedCount: historyDiagnosticCountSchema,
+    sentCount: historyDiagnosticCountSchema,
+    omittedCount: historyDiagnosticCountSchema,
+    coveredByRecentCount: historyDiagnosticCountSchema,
+    sourceExcludedCount: historyDiagnosticCountSchema,
+    unreadThroughTurn: ordinalSchema.nullable(),
+    budgetTokens: historyDiagnosticTokenSchema,
+    /** Planning measurements are count-only; elapsed time remains unpersisted. */
+    measurementTrialCount: historyDiagnosticCountSchema.nullable()
+  }).strict().nullable(),
+  facts: z.object({
+    sourceCount: historyDiagnosticCountSchema,
+    sentCount: historyDiagnosticCountSchema,
+    omittedCount: historyDiagnosticCountSchema,
+    sourceOmittedCount: historyDiagnosticCountSchema,
+    budgetTokens: historyDiagnosticTokenSchema,
+    measurementLimit: z.literal(64),
+    measurementLimitHit: z.boolean(),
+    unexaminedCount: historyDiagnosticCountSchema,
+    sourceCoverage: protectedFactSourceCoverageSchema.nullable()
+  }).strict().nullable(),
+  recents: z.object({
+    capturedCount: historyDiagnosticCountSchema,
+    sentCount: historyDiagnosticCountSchema,
+    targetCount: historyDiagnosticCountSchema,
+    firstGapReason: historyRecentGapReasonSchema.nullable()
+  }).strict().nullable(),
+  finalTokens: z.object({
+    context: historyDiagnosticTokenSchema,
+    writerRequest: historyDiagnosticTokenSchema,
+    reviewerRequest: historyDiagnosticTokenSchema.nullable()
+  }).strict()
+}).strict();
+export type HistoryCoverageDiagnostics = DeepReadonly<z.infer<typeof historyCoverageDiagnosticsSchema>>;
 export const memoryGenerationAuthorityContextSchema = z.object({
   authority: generationContextAuthoritySchema, candidates: z.array(generationContextCandidateSchema),
-  recentTurns: z.array(generationRecentTurnSchema).max(2).optional(),
-  baseIdentity: generationBaseIdentitySchema, chronicleRetrieval: chronicleRetrievalAuditSchema.optional()
+  recentTurns: z.array(generationRecentTurnSchema).max(HISTORY_COVERAGE_POLICY.recentWindowTurns).optional(),
+  baseIdentity: generationBaseIdentitySchema, chronicleRetrieval: chronicleRetrievalAuditSchema.optional(),
+  chronicleSelectionDiagnostics: generationChronicleSelectionDiagnosticsSchema.optional()
 }).strict().superRefine((value, context) => {
+  const recentLimit = hasGenerationCharacterAuthority(value.baseIdentity)
+    && value.baseIdentity.recentWindowTurns === HISTORY_COVERAGE_POLICY.recentWindowTurns
+    ? HISTORY_COVERAGE_POLICY.recentWindowTurns : 2;
+  if ((value.recentTurns?.length ?? 0) > recentLimit) {
+    context.addIssue({ code: "custom", path: ["recentTurns"], message: "Recent turns exceed the frozen recent-window identity." });
+  }
   const cast = value.authority.castSnapshot;
   if (!isGenerationBaseIdentityV4(value.baseIdentity)) {
     if (cast) context.addIssue({ code: "custom", message: "Historical generation bases cannot acquire cast authority." });
@@ -114,7 +257,7 @@ const evidenceShapeSchema = z.object({
   semanticRole: z.enum(["accepted_narration", "player_intent", "world_reference", "world_rule", "character_authority", "corrected_state", "current_continuity", "canonical_fact", "derived_summary"]),
   form: z.enum(["complete", "excerpt"]), content: z.string(), spans: z.array(spanSchema),
   sourceLength: ordinalSchema, canonicalFactId: z.string().uuid().nullable(), rank: z.number().finite(),
-  selectionGroup: z.enum(["protected", "direction", "recent", "world", "cast", "historical_fact", "retrieved"]),
+  selectionGroup: z.enum(["protected", "direction", "recent", "ledger", "world", "cast", "historical_fact", "retrieved"]),
   sourcePath: jsonPointerSchema, normalizationVersion: z.enum(["fiction-safe-json-v1", "story-fiction-source-v1"])
 }).strict();
 export type SourceRef = DeepReadonly<z.infer<typeof sourceRefSchema>>;

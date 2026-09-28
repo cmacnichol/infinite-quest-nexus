@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createDatabasePool, initialOwnerId, withTransaction, type DatabaseClient, type DatabasePool } from "../../packages/database/src/pool.js";
-import { storyMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
+import { HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION, storyMemoryPromptCompatibilityIdentity } from "../../packages/contracts/src/story-prompt.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { loadPostgresChronicleGenerationAuthorityContext } from "../../packages/database/src/chronicle-generation-context.js";
 import { resolveGenerationAuthoritySnapshot } from "../../packages/database/src/generation-authority.js";
@@ -296,12 +296,18 @@ integration("story context payload baseline shape", () => {
     const actual = requests.slice(before);
 
     expect(actual).toHaveLength(2);
-    for (const request of actual) {
-      const system = (request.parsed.messages as { role: string; content: string }[]).find((message) => message.role === "system")?.content ?? "";
-      expect(system).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
-      expect(system.lastIndexOf("Output canonical_facts contains strings only"))
-        .toBeGreaterThan(system.indexOf(creativeOverride));
-    }
+    const primarySystem = (actual[0]!.parsed.messages as { role: string; content: string }[])
+      .find((message) => message.role === "system")?.content ?? "";
+    expect(primarySystem).toContain(creativeOverride);
+    expect(primarySystem).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+    expect(primarySystem.lastIndexOf("Output canonical_facts contains strings only"))
+      .toBeGreaterThan(primarySystem.indexOf(creativeOverride));
+
+    const repair = actual[1]!;
+    const repairSystem = (repair.parsed.messages as { role: string; content: string }[])
+      .find((message) => message.role === "system")?.content ?? "";
+    expect(repairSystem).toContain("Choice-only output contract v2.");
+    expect(repairSystem).toContain("Return one strict JSON object with exactly choices and custom_action_suggestion; return no narration, facts, trackers, explanations, or other fields.");
   });
 
   it("rejects a corrupted frozen non-enrolled proof without queuing a retry", async () => {
@@ -444,7 +450,7 @@ integration("story context payload baseline shape", () => {
     expect(serialized).not.toContain("scratchpad");
   });
 
-  it("serializes v3 selected sibling world lore through the PostgreSQL authority reader without running the guarded executor", async () => {
+  it("serializes v5 selected sibling world lore and input through the PostgreSQL authority reader", async () => {
     const fixture = await importedCampaign("v3-world-planner");
     const siblingLore = "The Sable Relay remembers every oath sworn beneath its blue lens.";
     const siblingRelationship = "The relay keeper still answers the Sable Relay after dusk.";
@@ -472,13 +478,23 @@ integration("story context payload baseline shape", () => {
       contextWindowTokens: 1_048_576, maxOutputTokens: 4_096, temperature: 0, requestTimeoutMs: 1_000,
       configuration: { textResponseFormatPolicy: "auto" } } as never;
     const planned = planGenerationPromptContext(context, provider, "Write a scene.", "Ask the Sable Relay about its keeper.", [],
-      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 1_000_000, 1_000_000, randomUUID());
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 1_000_000, 1_000_000, randomUUID(), "story_memory",
+      undefined, undefined, undefined, undefined, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
     const serialized = serializeProviderRequest(provider, { systemPrompt: "Write a scene.", input: planned.storyInput }).body;
     const sent = authoritativeContext({ body: serialized, bodySha256: createHash("sha256").update(serialized).digest("hex"), parsed: JSON.parse(serialized) });
+    const actualBody = JSON.parse(serialized);
+    const userContent = JSON.parse(actualBody.messages.find((message: { role: string }) => message.role === "user").content);
+    const layerKeys = Object.keys(sent);
 
     expect(JSON.stringify(sent.worldReferences)).toContain(siblingLore);
     expect(JSON.stringify(sent.worldReferences)).toContain(siblingRelationship);
     expect(planned.contextPlan.selected.some((block) => block.scope === "world")).toBe(true);
+    expect(layerKeys.indexOf("worldReferences")).toBeGreaterThan(layerKeys.indexOf("selectedCharacterAuthority"));
+    expect(layerKeys.indexOf("worldReferences")).toBeLessThan(layerKeys.indexOf("currentContinuity"));
+    expect(layerKeys.at(-1)).toBe("currentScene");
+    expect(userContent.current_turn_input.text).toBe("Ask the Sable Relay about its keeper.");
+    expect(planned.sourceManifest?.producingRequestHash).toBe(createHash("sha256").update(serialized).digest("hex"));
+    expect(planned.sourceManifest?.entries.some((entry) => entry.sourcePath === "/currentScene/action")).toBe(true);
   });
 
   // These probes are intentionally red on the pinned baseline. They are
@@ -648,13 +664,21 @@ Use only the bounded supplied context. Do not claim that all campaign history wa
       await dispatch(fixture.campaignId, "Set the relay scene.", true, "scene", true);
       const actual = requests.slice(before);
       expect(actual).toHaveLength(2);
-      for (const request of actual) {
-        const messages = request.parsed.messages as { role: string; content: string }[];
-        expect(messages.find((message) => message.role === "system")?.content).toContain(STORY_MEMORY_MANDATORY_CONTRACT);
-        expect(messages.find((message) => message.role === "system")?.content).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
-        expect(messages.find((message) => message.role === "system")?.content).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
-        expect(request.body).not.toContain("are facts that happen in this turn");
-      }
+      const primary = actual[0]!;
+      const primarySystem = (primary.parsed.messages as { role: string; content: string }[])
+        .find((message) => message.role === "system")?.content ?? "";
+      expect(primarySystem).toContain(STORY_MEMORY_MANDATORY_CONTRACT);
+      expect(primarySystem).toContain("Input canonical fact records may contain id, content, or retrieval metadata.");
+      expect(primarySystem).toContain("Output canonical_facts contains strings only, for facts newly established in this turn");
+      expect(primary.body).not.toContain("are facts that happen in this turn");
+
+      const repair = actual[1]!;
+      const repairSystem = (repair.parsed.messages as { role: string; content: string }[])
+        .find((message) => message.role === "system")?.content ?? "";
+      expect(repairSystem).toContain("Choice-only output contract v2.");
+      expect(repairSystem).toContain("The supplied final narration and continuity are protected authority.");
+      expect(repairSystem).toContain("Return one strict JSON object with exactly choices and custom_action_suggestion; return no narration, facts, trackers, explanations, or other fields.");
+      expect(repairSystem).not.toContain("Output canonical_facts contains strings only");
       expect((await pool.query("SELECT narration FROM turns WHERE campaign_id=$1 ORDER BY turn_number DESC LIMIT 1", [fixture.campaignId])).rows[0]!.narration)
         .toBe(storyContinuityCandidateOutput.narration);
     });

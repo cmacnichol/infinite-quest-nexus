@@ -75,6 +75,35 @@ function queryFrom(parts: readonly string[], maximumCharacters: number): string 
 }
 
 /**
+ * Returns a normalized, fiction-safe ending for a captured current scene.
+ * The result never exceeds 1,000 UTF-16 characters and avoids splitting a
+ * grapheme or retaining a partial leading word when possible.
+ */
+export function sceneHintTail(content: string, maximumCharacters: number): string {
+  if (!Number.isSafeInteger(maximumCharacters) || maximumCharacters <= 0) return "";
+  const limit = Math.min(maximumCharacters, 1_000);
+  const normalizedContent = sanitizeChronicleFictionString(content, content.length)
+    .normalize("NFKC").replace(/\s+/gu, " ").trim();
+  if (!normalizedContent) return "";
+  const characters = [...new Intl.Segmenter("en", { granularity: "grapheme" }).segment(normalizedContent)]
+    .map((segment) => segment.segment);
+  const tail: string[] = [];
+  let length = 0;
+  for (let index = characters.length - 1; index >= 0; index -= 1) {
+    const character = characters[index]!;
+    if (length + character.length > limit) break;
+    tail.push(character);
+    length += character.length;
+  }
+  tail.reverse();
+  if (tail.length < characters.length && tail[0] !== " ") {
+    const nextWord = tail.indexOf(" ");
+    if (nextWord >= 0) tail.splice(0, nextWord + 1);
+  }
+  return tail.join("").trimStart();
+}
+
+/**
  * Plans only bounded, fiction-safe queries from already scoped hints. Fields
  * outside this explicit input interface are deliberately unobservable.
  */

@@ -16,7 +16,7 @@ export function historicalFactAliasPatterns(catalog: readonly EntityReference[],
     .map((alias) => `(^|[^[:alnum:]_])${alias.split(" ").map((term) => term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("[[:space:]]+")}($|[^[:alnum:]_])`);
 }
 
-/** Parameters: owner, campaign, world, cutoff, pool size, bounded queries, entity IDs, alias patterns, explicit source turn. */
+/** Parameters: owner, campaign, world, cutoff, pool size, bounded queries, entity IDs, alias patterns, explicit source turn, excluded fact IDs. */
 export const HISTORICAL_FACT_POOL_SQL = `WITH
   query_terms AS MATERIALIZED (
     SELECT DISTINCT unnest(tsvector_to_array(to_tsvector('english', fragment))) AS term
@@ -32,6 +32,7 @@ export const HISTORICAL_FACT_POOL_SQL = `WITH
     FROM campaign_canonical_facts fact CROSS JOIN query
     WHERE owner_user_id=$1 AND campaign_id=$2 AND world_version_id=$3
       AND valid_from_turn <= $4 AND (valid_until_turn IS NULL OR valid_until_turn > $4)
+      AND NOT (fact.id::text = ANY($10::text[]))
   ), lexical_lane AS (
     SELECT id, row_number() OVER (ORDER BY lexical_score DESC, source_turn_number DESC, source_fact_index, id) AS lane_rank
     FROM eligible WHERE lexical_score>0

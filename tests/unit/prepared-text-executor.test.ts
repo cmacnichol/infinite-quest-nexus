@@ -211,8 +211,8 @@ describe("prepared text executor stream durability", () => {
     const frozen = { ...selected, selectionHash: frozenResponseContractsV2SelectionHash(selected) };
     const trustedOperationPrompt = "Check the final story.";
     const reviewPlan = deriveTextExecutionPlan(routeBasis, trustedOperationPrompt);
-    const request = { systemPrompt: reviewPlan.prompt, input: "Complete evidence. ".repeat(2_500), budgetOutput: { kind: "continuity_review" as const } };
-    const expectedOutputTokens = Math.min(maxOutputTokens, 16_384);
+    const request = { systemPrompt: reviewPlan.prompt, input: "Complete evidence. ".repeat(1_500), budgetOutput: { kind: "continuity_review" as const } };
+    const expectedOutputTokens = maxOutputTokens;
     const preparedRequest = serializeCheckedBoundFrozenPresetProviderRequest({
       providerType: "openrouter", baseUrl: "", model: "model-a", contextWindowTokens: 65_536, maxOutputTokens, temperature: 0.2
     }, request, { frozen, routeBasis, plan: reviewPlan, invocationKey, operation, trustedOperationPrompt }, {
@@ -221,7 +221,7 @@ describe("prepared text executor stream durability", () => {
     const execute = vi.fn(async (sent: ProviderRequest) => {
       expect(sent.preparedRequest?.body).toBe(preparedRequest.body);
       expect(sent.preparedRequest?.payloadHash).toBe(preparedRequest.payloadHash);
-      expect(JSON.parse(sent.preparedRequest!.body).max_tokens).toBe(expectedOutputTokens);
+      expect(JSON.parse(sent.preparedRequest!.body).max_tokens).toBe(maxOutputTokens);
       return result();
     });
     const executor = createPreparedTextExecutor({ attempts: repository(vi.fn()), loadAuthority: async () => authority(execute) });
@@ -230,6 +230,12 @@ describe("prepared text executor stream durability", () => {
     })).resolves.toMatchObject({ content: "accepted" });
     expect(execute).toHaveBeenCalledOnce();
     expect(routeBasis.candidates[0]!.maxOutputTokens).toBe(maxOutputTokens);
+
+    const oversizedRequest = { ...request, input: "Complete evidence. ".repeat(20_000) };
+    await expect(executor.execute({ ...executionInput(vi.fn()), plan: reviewPlan, operation, request: oversizedRequest,
+      preparedRequest, routeBasis, frozenResponseContracts: frozen, invocationKey, trustedOperationPrompt
+    })).rejects.toMatchObject({ code: "context_budget_exceeded" });
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it.each([false, true])("dispatches Story JSON Schema through the preset, including recovery=%s", async (recovery) => {

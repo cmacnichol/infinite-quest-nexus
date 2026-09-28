@@ -3025,15 +3025,10 @@ describe("generation HTTP route-to-workflow boundary", () => {
         })
       });
 
-      const rejection = await run.watch(new AbortController().signal)[Symbol.asyncIterator]().next()
-        .catch((error: unknown) => error);
-      expect(rejection).toMatchObject({
-        name: "GenerationWorkflowProtocolError",
-        kind: "invalid_snapshot",
-        cause: {
-          name: "ApiContractError",
-          correlationId: "malformed-snapshot-route"
-        }
+      const firstEvent = await run.watch(new AbortController().signal)[Symbol.asyncIterator]().next();
+      expect(firstEvent).toMatchObject({
+        done: false,
+        value: { type: "degraded", reason: "invalid_snapshot", consecutiveFailures: 1 }
       });
       expect(routeRequests).toEqual([
         `POST /api/v1/campaigns/${routeCampaignId}/generations`,

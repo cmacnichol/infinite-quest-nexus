@@ -7,7 +7,7 @@ import { recoverInterruptedStory } from "../../../packages/story-engine/src/inte
 import type { CastDiscoveryExecution } from "../../../packages/application/src/campaign-cast/discovery.js";
 import { applyAuthorizedFactFormatRepair, prepareFactFormatRepair } from "./fact-format-repair-adapter.js";
 import { generationReviewCheckpointSchema, type GenerationReviewCandidate } from "../../../packages/application/src/generation/review-checkpoint.js";
-import { canonicalEvidenceJson, hasGenerationCharacterAuthority, isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
+import { assertGenerationBaseIdentityRecentWindowCompatibility, canonicalEvidenceJson, hasGenerationCharacterAuthority, isGenerationBaseIdentityV4 } from "../../../packages/application/src/memory/generation-context.js";
 import { planGenerationPromptContext, type PromptCandidate } from "./generation-context-planner.js";
 export { planGenerationPromptContext } from "./generation-context-planner.js";
 import {
@@ -43,7 +43,7 @@ import {
   PromptTemplateKey
 } from "../../../packages/contracts/src/prompt-library.js";
 import { generationPolicySnapshotSchema } from "../../../packages/contracts/src/campaign-generation-policy.js";
-import { effectiveProviderConfigurationFingerprint, storyMemoryPolicySnapshotSchema } from "../../../packages/contracts/src/story-memory-policy.js";
+import { effectiveProviderConfigurationFingerprint, isHistoryCoverageContextProtocol, storyMemoryPolicySnapshotSchema } from "../../../packages/contracts/src/story-memory-policy.js";
 import { renderPromptTemplate } from "../../../packages/contracts/src/prompt-library.js";
 import {
   storyLengthProfileFromUnknown,
@@ -142,6 +142,42 @@ import { composePresetPrompt } from "../../../packages/story-engine/src/preset-p
 import type { PreparedAuthoringTextExecutor } from "./authoring-text-execution-preparation.js";
 
 type GenerationTextProvider = RuntimeTextExecution;
+
+type CastAdmissionFailureReason = "invalid_execution_revision" | "provider_unavailable" | "unexpected_error";
+
+/**
+ * Cast discovery runs after the Story route has been frozen. A native route's
+ * synthetic Story descriptor intentionally has no live profile revisions, so
+ * discovery admission reloads owner-scoped execution using the queued model
+ * selection. This only prepares the optional future cast snapshot; it does
+ * not change the frozen Story route.
+ */
+export async function castDiscoveryAdmissionExecution(
+  job: GenerationExecutionPayload,
+  provider: GenerationTextProvider,
+  loadTextExecution: GenerationExecutionCollaborators["loadTextExecution"]
+): Promise<GenerationTextProvider> {
+  const routeBasis = job.orchestration_private?.textExecutionRouteBasis;
+  if (!routeBasis) return provider;
+  const requestedModel = routeBasis.selection.kind === "openrouter_preset"
+    ? `@preset/${routeBasis.selection.slug}`
+    : job.requested_model;
+  const execution = await loadTextExecution(job.owner_user_id, job.provider_profile_id, requestedModel);
+  if (!execution.executionRevision || execution.executionRevision !== routeBasis.profileRevision
+    || (routeBasis.authorityRevision !== undefined && execution.authorityRevision !== routeBasis.authorityRevision)) {
+    throw Object.assign(new Error("Cast discovery execution revision is incompatible."), { code: "invalid_execution_revision" });
+  }
+  return execution;
+}
+
+/** Projects provider preparation failures to fixed, non-sensitive codes. */
+export function castAdmissionFailureReason(error: unknown): CastAdmissionFailureReason {
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? (error as { code?: unknown }).code : undefined;
+  if (code === "invalid_execution_revision") return code;
+  if (code === "provider_unavailable") return code;
+  return "unexpected_error";
+}
 
 /**
  * Creates one invocation-specific prompt from private frozen route evidence.
@@ -909,7 +945,19 @@ export function sentCanonicalFactIds(storyInput: string): string[] {
       ? [candidate.id]
       : [];
   }) : [];
-  return [...new Set([...continuityFactIds, ...selectedHistoricalFactIds, ...repairFactIds])];
+  // V5 facts enter only through the complete source-verified projection. A
+  // missing or transformed content field therefore withholds its UUID rather
+  // than making a clipped fact eligible for supersession.
+  const selectedProtectedFactIds = Array.isArray((authority as { protectedFacts?: unknown }).protectedFacts)
+    ? ((authority as { protectedFacts: unknown[] }).protectedFacts).flatMap((fact) => {
+      if (!fact || typeof fact !== "object") return [];
+      const record = fact as { id?: unknown; content?: unknown; turnNumber?: unknown };
+      const turnNumber = record.turnNumber;
+      return typeof record.id === "string" && typeof record.content === "string" && record.content.length > 0
+        && typeof turnNumber === "number" && Number.isSafeInteger(turnNumber) && turnNumber >= 0 ? [record.id] : [];
+    })
+    : [];
+  return [...new Set([...continuityFactIds, ...selectedHistoricalFactIds, ...selectedProtectedFactIds, ...repairFactIds])];
 }
 
 function preparedRequestForResult(
@@ -1929,6 +1977,13 @@ async function executeLoadedGeneration(
   const frozenStoryMemoryPolicySnapshot = frozenStoryMemoryPolicy?.success
     ? frozenStoryMemoryPolicy.data
     : null;
+  try {
+    assertGenerationBaseIdentityRecentWindowCompatibility(job.generation_base_identity, frozenStoryMemoryPolicySnapshot);
+  } catch {
+    throw Object.assign(new Error("The frozen recent-window identity is incompatible with its policy."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
   if (frozenStoryMemoryPolicy && !frozenStoryMemoryPolicy.success) {
     assertActiveGenerationUpdate(await repository.markRecoverable({
       jobId: job.id, ownerUserId: job.owner_user_id, workerId, providerResponseId: null, providerFinishReason: null,
@@ -2132,9 +2187,9 @@ async function executeLoadedGeneration(
             campaignId: job.campaign_id,
             operationPrompt: collaborators.promptFromSnapshot(job.prompt_snapshot, "illustration_refinement")
           });
-        } catch (error) {
+        } catch {
           logger.warn({ event: "accepted_turn_illustration_preparation_failed", generationJobId: job.id,
-            errorMessage: error instanceof Error ? error.message : String(error) });
+            errorCode: "illustration_text_route_unavailable" });
           illustrationTextExecutionSnapshot = { version: 3, state: "unavailable", errorCode: "illustration_text_route_unavailable" };
         }
       }
@@ -2355,9 +2410,7 @@ async function executeLoadedGeneration(
 
     // The authority read owns both scope verification and ranked candidates.
     // Do not select or mutate a public preview for provider work.
-    const generationContext = await phase("context_retrieval", () => collaborators.memory.loadGenerationContext(
-      pool,
-      {
+    const generationMemoryScope = {
         ownerUserId: job.owner_user_id,
         campaignId: job.campaign_id,
         worldVersionId: job.world_version_id ?? "",
@@ -2367,9 +2420,12 @@ async function executeLoadedGeneration(
         retrievalBudgetTokens: safeContextBudget,
         expectedBaseIdentity: job.generation_base_identity,
         ...(hasFrozenStoryMemoryPolicy ? { storyMemoryPolicy: frozenStoryMemoryPolicySnapshot } : {})
-      }
-    ));
-    const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(
+      };
+    const deferredHistoryCandidates = isHistoryCoverageContextProtocol(frozenStoryMemoryPolicySnapshot?.contextProtocol);
+    let generationContext = await phase("context_retrieval", () => deferredHistoryCandidates
+      ? collaborators.memory.captureGenerationAuthority(pool, generationMemoryScope)
+      : collaborators.memory.loadGenerationContext(pool, generationMemoryScope));
+    let chronicleRetrieval = chronicleRetrievalAuditSchema.parse(
       generationContext.chronicleRetrieval ?? NO_RETRIEVAL_AUDIT
     );
     let promptContext: Record<string, unknown> & { chronicle: readonly PromptCandidate[] } = {
@@ -2577,6 +2633,57 @@ async function executeLoadedGeneration(
         ...(stages.allowRpgAssessment ? fictionGuidanceForRoll(orchestration.roll || null) : []),
         ...(stages.allowEventEvaluation ? fictionGuidanceForEvents(orchestration.beforeEvents || []) : [])
       ].filter((entry) => entry && !containsMechanicsLanguage(entry));
+      if (deferredHistoryCandidates) {
+        // Use the same final writer/reviewer serializers as the subsequent
+        // plan, but omit optional candidates while reserving protected source
+        // IDs. Candidate retrieval consumes this immutable capture; it never
+        // resolves campaign authority a second time.
+        const reservationPlan = planGenerationPromptContext(
+          { ...generationContext, candidates: [] }, provider, storySystemPrompt, safeAction, safeGuidance,
+          storyLength, job.resolved_input_mode, configuredCampaignContextBudget, inputTokenLimit,
+          hasGenerationCharacterAuthority(generationContext.baseIdentity) ? job.id : undefined,
+          hasFrozenStoryMemoryPolicy ? "story_memory" : "legacy",
+          frozenStoryMemoryPolicySnapshot?.policy,
+          frozenContracts ? (input) => serializeFrozenCampaignRequest(provider, job, "story_generation", {
+            systemPrompt: storySystemPrompt, input,
+            ...(streamsPrimary ? { onChunk: () => undefined } : {})
+          }, storyTextExecutionPlan).body : undefined,
+          frozenStoryMemoryPolicySnapshot && frozenStoryMemoryPolicySnapshot.policy.continuityReview !== "off"
+            ? (manifest) => estimateContinuityReviewPlanningTokens({
+              provider: planningReviewerRoute ? {
+                ...provider, model: planningReviewerRoute.routeBasis.candidates[0]!.modelId,
+                contextWindowTokens: planningReviewerRoute.effectiveContextWindowTokens,
+                maxOutputTokens: planningReviewerRoute.effectiveOutputTokens,
+                temperature: planningReviewerRoute.routeBasis.parameters.temperature ?? 0,
+                requestTimeoutMs: planningReviewerRoute.routeBasis.requestTimeoutMs
+              } : provider,
+              manifest, producingRequestHash: manifest.producingRequestHash,
+              promptSnapshot: frozenPromptEnvelope, reviewMode: frozenStoryMemoryPolicySnapshot.policy.continuityReview as "observe" | "enforce",
+              direction: safeAction, candidateOutputTokens: effectiveMaxOutputTokens(provider, job),
+              prepareSystemPrompt: (operationPrompt) => prepareCampaignSystemPrompt(job, operationPrompt),
+              ...(reviewerSerializationRoute ? {
+                bindRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerSerializationRoute, request).request,
+                serializeRequest: (request) => prepareFrozenContinuityReviewRequest(reviewerSerializationRoute, request).preparedRequest
+              } : frozenContracts ? {
+                serializeRequest: (request, plan) => serializeFrozenCampaignRequest(provider, job, "story_continuity_review", request, plan)
+              } : {})
+            }) : undefined,
+          planningReviewerRoute
+            ? planningReviewerRoute.effectiveContextWindowTokens - planningReviewerRoute.effectiveOutputTokens
+            : undefined,
+          frozenStoryMemoryPolicySnapshot?.contextProtocol
+        );
+        const reservation = {
+          recentTurnIds: reservationPlan.promptContext.recentTurns?.map((turn) => turn.sourceId) ?? [],
+          protectedFactIds: reservationPlan.promptContext.protectedFacts?.map((fact) => fact.id) ?? []
+        };
+        generationContext = await phase("context_retrieval", () => collaborators.memory.loadGenerationCandidates(
+          pool, generationMemoryScope, generationContext, reservation
+        ));
+        chronicleRetrieval = chronicleRetrievalAuditSchema.parse(
+          generationContext.chronicleRetrieval ?? NO_RETRIEVAL_AUDIT
+        );
+      }
       assertActiveGenerationUpdate(await repository.markGenerating(scope), "entering generation");
       const planned = planGenerationPromptContext(
         generationContext, provider, storySystemPrompt, safeAction, safeGuidance,
@@ -2610,7 +2717,8 @@ async function executeLoadedGeneration(
           }) : undefined,
         planningReviewerRoute
           ? planningReviewerRoute.effectiveContextWindowTokens - planningReviewerRoute.effectiveOutputTokens
-          : undefined
+          : undefined,
+        frozenStoryMemoryPolicySnapshot?.contextProtocol
       );
       promptContext = planned.promptContext;
       const { storyInput, contextPlan } = planned;
@@ -4706,10 +4814,12 @@ async function executeLoadedGeneration(
     if (collaborators.prepareCastDiscoveryExecution && !orchestration.castDiscoveryAdmission) {
       let admission: NonNullable<GenerationOrchestrationState["castDiscoveryAdmission"]>;
       try {
-        admission = { status: "ready", execution: await collaborators.prepareCastDiscoveryExecution({ ownerUserId: job.owner_user_id, execution: provider }) };
-      } catch {
+        const discoveryExecution = await castDiscoveryAdmissionExecution(job, provider, collaborators.loadTextExecution);
+        admission = { status: "ready", execution: await collaborators.prepareCastDiscoveryExecution({ ownerUserId: job.owner_user_id, execution: discoveryExecution }) };
+      } catch (error) {
         admission = { status: "unavailable" };
-        logger.warn({ event: "cast_discovery_admission_unavailable", generationJobId: job.id });
+        logger.warn({ event: "cast_discovery_admission_unavailable", generationJobId: job.id,
+          reason: castAdmissionFailureReason(error) });
       }
       orchestration = await persistOrchestration(repository, scope, job, { castDiscoveryAdmission: admission });
     }

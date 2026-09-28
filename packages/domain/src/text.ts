@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { estimateTokens } from "@infinite-quest/contracts";
+export { estimateTokens };
 
 export type MechanicsLanguageMatch = {
   category: "dice" | "check" | "difficulty" | "numeric_resolution" | "result_label" | "engine_metadata";
@@ -67,13 +69,6 @@ const ENTITY_STOP_WORDS = new Set([
   "Infinite", "Inside", "Meanwhile", "Outside", "Player", "Story", "Suddenly", "The", "Then", "There",
   "They", "This", "Through", "Turn", "When", "Where", "While", "With", "Without"
 ]);
-
-export function estimateTokens(text: string): number {
-  const normalized = text.trim();
-  if (!normalized) return 0;
-  const words = normalized.match(/[\p{L}\p{N}_'-]+|[^\s]/gu)?.length ?? 0;
-  return Math.max(1, Math.ceil(Math.max(normalized.length / 4, words * 0.72)));
-}
 
 export function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);

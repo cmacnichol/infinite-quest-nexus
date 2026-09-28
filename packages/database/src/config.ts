@@ -65,6 +65,8 @@ export type RuntimeConfig = {
   castEditingEnabled?: boolean;
   castDiscoveryEnabled?: boolean;
   castContextEnabled?: boolean;
+  /** New eligible jobs use v5 unless an operator performs a compatible-reader rollback. */
+  historyCoverageEnabled?: boolean;
   castBackfillEnabled?: boolean;
   textProviderConcurrency?: number;
   /** Operator capability ceiling; defaults to R3 for Max campaign memory. */
@@ -279,6 +281,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     castEditingEnabled,
     castDiscoveryEnabled,
     castContextEnabled: booleanSetting("CAST_CONTEXT_ENABLED", false) && castDiscoveryEnabled,
+    historyCoverageEnabled: booleanSetting("HISTORY_COVERAGE_ENABLED", true),
     castBackfillEnabled: booleanSetting("CAST_BACKFILL_ENABLED", false) && castDiscoveryEnabled,
     textProviderConcurrency: requiredIntegerSetting("TEXT_PROVIDER_CONCURRENCY", 2, 1, 1000),
     storyMemoryCapability: storyMemoryCapabilitySetting(),

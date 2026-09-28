@@ -3,7 +3,7 @@ import { enqueueCastDiscoveryWithClient, type CastDiscoveryExecution } from "./c
 import { assertContinuityReviewCommit, assertGenerationReviewAcceptance, bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, type ContinuityReviewCheckpoint } from "../../application/src/memory/continuity-review-checkpoint.js";
 import { generationReviewCheckpointSchema, generationReviewFindingsHash, type GenerationReviewCheckpoint } from "../../application/src/generation/review-checkpoint.js";
 import type { GenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
-import { storyMemoryPolicySnapshotSchema } from "../../contracts/src/story-memory-policy.js";
+import { storyMemoryPolicySnapshotSchema, type StoryMemoryPolicySnapshot } from "../../contracts/src/story-memory-policy.js";
 import { assertContinuityReviewPromptSnapshot } from "../../contracts/src/prompt-library.js";
 import { sha256Hex } from "../../contracts/src/hash.js";
 import { responseFormatDiagnosticCodeSchema, responseInvocationKeySchema, type ResponseInvocationKeyV2 } from "../../contracts/src/text-response-format.js";
@@ -43,7 +43,7 @@ import {
   type ResponseContractOperationV2,
   type SceneCoverageReplayCheckpoint
 } from "../../contracts/src/generation-response-contract.js";
-import { canonicalEvidenceJson, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
+import { canonicalEvidenceJson, historyCoverageDiagnosticsSchema, type GenerationEvidenceManifest } from "../../application/src/memory/generation-context.js";
 import { projectSafeGenerationDiagnostic, type SafeGenerationDiagnostic } from "../../contracts/src/story-prompt.js";
 import type {
   CampaignWorldVersionMemoryScope,
@@ -90,6 +90,7 @@ import {
   sha256
 } from "../../domain/src/index.js";
 import {
+  assertGenerationBaseIdentityRecentWindowCompatibility,
   hasGenerationCharacterAuthority,
   readGenerationBaseIdentity
 } from "../../application/src/memory/generation-context.js";
@@ -804,9 +805,18 @@ function hasValidPrimaryResult(value: unknown): boolean {
     && Array.isArray(result.sentFactIds) && result.sentFactIds.every((id) => typeof id === "string")
     && typeof result.providerConfigurationHash === "string" && result.providerConfigurationHash.length > 0
     && typeof result.contextFingerprint === "string" && result.contextFingerprint.length > 0
-    && typeof result.contextDiagnostics === "object" && result.contextDiagnostics !== null
+    && hasValidPersistedContextDiagnostics(result.contextDiagnostics)
     && typeof result.chronicleRetrieval === "object" && result.chronicleRetrieval !== null
     && (result.rawOutputReference === undefined || (typeof result.rawOutputReference === "string" && result.rawOutputReference.length > 0));
+}
+
+/** Existing attempt diagnostics remain opaque; only the new v5 private layer is closed. */
+function hasValidPersistedContextDiagnostics(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const diagnostics = value as Record<string, unknown>;
+  const layers = diagnostics.layers;
+  if (!layers || typeof layers !== "object" || Array.isArray(layers) || !Object.hasOwn(layers, "history")) return true;
+  return historyCoverageDiagnosticsSchema.safeParse((layers as Record<string, unknown>).history).success;
 }
 
 function hasValidPrimaryReservation(value: unknown): boolean {
@@ -1398,6 +1408,11 @@ async function commitAcceptedTurn(
   input: AcceptedGenerationCommit
 ): Promise<{ turnId: string }> {
   const chronicleRetrieval = chronicleRetrievalAuditSchema.parse(input.chronicleRetrieval);
+  if (!hasValidPersistedContextDiagnostics(input.contextDiagnostics)) {
+    throw Object.assign(new Error("The persisted history-coverage diagnostic is invalid."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
   const { job, scope, provider, response, inputs, orchestration, collaborators } = input;
   // The commit boundary accepts only the current protocol. Historical/import
   // replay goes through the explicitly named Chronicle compatibility path.
@@ -1527,12 +1542,22 @@ async function commitAcceptedTurn(
     }
   }
   const storedBaseIdentity = readGenerationBaseIdentity(job.generation_base_identity);
+  const frozenStoryMemoryPolicy = storedJob.context_options?.storyMemoryPolicy
+    ? storyMemoryPolicySnapshotSchema.parse(storedJob.context_options.storyMemoryPolicy) : null;
+  try {
+    assertGenerationBaseIdentityRecentWindowCompatibility(storedBaseIdentity, frozenStoryMemoryPolicy);
+  } catch {
+    throw Object.assign(new Error("The frozen recent-window identity is incompatible with its policy."), {
+      code: "generation_checkpoint_incompatible"
+    });
+  }
   const authority = await resolveGenerationAuthoritySnapshot(client, {
     ownerUserId: job.owner_user_id,
     campaignId: job.campaign_id,
     operationKind: job.operation_kind,
     expectedTurnNumber: job.expected_turn_number,
-    ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
+    ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined,
+      ...(storedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: storedBaseIdentity.recentWindowTurns }) } : {})
   });
   if (!matchesGenerationBaseIdentity(storedBaseIdentity, authority.baseIdentity)) {
     throw Object.assign(new Error("Campaign authority changed before this generation could commit."), {
@@ -1997,6 +2022,25 @@ export function createPostgresGenerationExecutionRepository(
         );
         return null;
       }
+      let frozenStoryMemoryPolicy: StoryMemoryPolicySnapshot | null;
+      try {
+        const frozenContextOptions = row.context_options as Record<string, unknown>;
+        frozenStoryMemoryPolicy = frozenContextOptions.storyMemoryPolicy
+          ? storyMemoryPolicySnapshotSchema.parse(frozenContextOptions.storyMemoryPolicy) : null;
+        assertGenerationBaseIdentityRecentWindowCompatibility(storedBaseIdentity, frozenStoryMemoryPolicy);
+      } catch {
+        await client.query(
+          `UPDATE generation_jobs
+              SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
+                  error_message = 'Saved generation authority is incompatible with its frozen policy.',
+                  recovery_metadata = recovery_metadata || $4::jsonb,
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+              AND status = 'assessing' AND lease_expires_at > now()`,
+          [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_base_identity_policy_invalid" })]
+        );
+        return null;
+      }
       let authority: Awaited<ReturnType<typeof resolveGenerationAuthoritySnapshot>>;
       try {
         authority = await resolveGenerationAuthoritySnapshot(client, {
@@ -2004,7 +2048,8 @@ export function createPostgresGenerationExecutionRepository(
           campaignId: row.campaign_id,
           operationKind: row.operation_kind,
           expectedTurnNumber: row.expected_turn_number,
-          ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined } : {})
+          ...(hasGenerationCharacterAuthority(storedBaseIdentity) ? { baseIdentityVersion: storedBaseIdentity.version, captureRecentWindow: storedBaseIdentity.recentWindowFingerprint !== undefined,
+            ...(storedBaseIdentity.recentWindowTurns === undefined ? {} : { recentWindowTurns: storedBaseIdentity.recentWindowTurns }) } : {})
         });
       } catch (error) {
         const detail = error as { code?: unknown; field?: unknown };
@@ -2111,6 +2156,7 @@ export function createPostgresGenerationExecutionRepository(
           ...(priorFailures === undefined ? (suppliedFailures === undefined ? {} : { preparedResponseFailures: suppliedFailures })
             : appendOnly ? { preparedResponseFailures: suppliedFailures } : { preparedResponseFailures: priorFailures })
         };
+        if (!hasValidPrimaryResult(merged.primaryResult)) return false;
         await responseContractState(client, scope, merged);
         return changed(await client.query<{ id: string }>(
         `UPDATE generation_jobs SET orchestration_private =

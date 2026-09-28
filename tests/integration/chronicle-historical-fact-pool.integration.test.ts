@@ -47,12 +47,14 @@ integration("Historical fact candidate lanes", () => {
       [ownerUserId, scope.campaignId, scope.worldVersionId, content, index, ids, ordinal]);
       return result.rows[0]!.id;
     };
-    const read = async (query: string, enrolled = true, cutoff = 3, castSnapshot?: CastGenerationSnapshot) => {
+    const read = async (query: string, enrolled = true, cutoff = 3, castSnapshot?: CastGenerationSnapshot,
+      generationExclusions?: { recentTurnIds: readonly string[]; protectedFactIds: readonly string[] }) => {
       const client = await pool.connect();
       try { return await loadPostgresChronicleGenerationCandidates(client, { ...scope, query, throughTurnNumber: cutoff, retrievalBudgetTokens: 32_000,
         ...(enrolled ? { storyMemoryPolicy: castSnapshot ? { ...storyMemoryPolicy, castContext: true,
           promptProtocol: "story-v17-campaign-cast", contextProtocol: "current-continuity-v4" } : storyMemoryPolicy } : {}),
-        ...(castSnapshot ? { castSnapshot } : {}) }, dependencies, { useSavepoints: false }); }
+        ...(castSnapshot ? { castSnapshot } : {}),
+        ...(generationExclusions ? { generationExclusions } : {}) }, dependencies, { useSavepoints: false }); }
       finally { client.release(); }
     };
     return { ...scope, fact, read };
@@ -103,6 +105,20 @@ integration("Historical fact candidate lanes", () => {
     expect(new Set(current.candidates.map((candidate) => candidate.id)).size).toBe(256);
   });
 
+  it("replenishes the lexical historical lane after reserved fact IDs consume its initial rank pool", async () => {
+    const value = await fixture(0);
+    const reserved = await Promise.all(Array.from({ length: 256 }, (_, index) =>
+      value.fact(`The lunar archive key opens vault ${index}.`, index)));
+    const eligible = await value.fact("The lunar archive key preserves the oldest vault oath.", 999);
+
+    const result = await value.read("lunar archive key vault", true, 3, undefined, {
+      recentTurnIds: [], protectedFactIds: reserved
+    });
+
+    expect(result.candidates.map((candidate) => candidate.id)).toContain(eligible);
+    expect(result.candidates.some((candidate) => reserved.includes(candidate.id))).toBe(false);
+  });
+
   it("uses historical validity and excludes future facts without a derived rebuild", async () => {
     const value = await fixture();
     const old = await value.fact("The obsidian covenant remains binding.", 0);
@@ -128,7 +144,7 @@ integration("Historical fact candidate lanes", () => {
     ];
     const rows = await pool.query<{ id: string; entity_ids: string[]; metadata: { historicalEntityMatch: boolean } }>(HISTORICAL_FACT_POOL_SQL,
       [ownerUserId, value.campaignId, value.worldVersionId, 3, 256, ["Blue Keeper Twin 守り手"], catalog.map((entity) => entity.id),
-        historicalFactAliasPatterns(catalog, catalog.map((entity) => entity.id)), null]);
+        historicalFactAliasPatterns(catalog, catalog.map((entity) => entity.id)), null, []]);
     const byId = new Map(rows.rows.map((row) => [row.id, row]));
     expect(byId.get(alias)?.metadata.historicalEntityMatch).toBe(true);
     expect(byId.get(unicode)?.metadata.historicalEntityMatch).toBe(true);
@@ -146,8 +162,8 @@ integration("Historical fact candidate lanes", () => {
     expect(first.candidates).toHaveLength(256);
     expect((await value.read("")).candidates).toEqual(first.candidates);
     expect((await value.read("obsidian covenant")).candidates.map((candidate) => candidate.id)).not.toContain(foreign);
-    const wrongOwner = await pool.query(HISTORICAL_FACT_POOL_SQL, [crypto.randomUUID(), value.campaignId, value.worldVersionId, 3, 256, ["lantern"], [], [], null]);
-    const wrongWorld = await pool.query(HISTORICAL_FACT_POOL_SQL, [ownerUserId, value.campaignId, other.worldVersionId, 3, 256, ["lantern"], [], [], null]);
+    const wrongOwner = await pool.query(HISTORICAL_FACT_POOL_SQL, [crypto.randomUUID(), value.campaignId, value.worldVersionId, 3, 256, ["lantern"], [], [], null, []]);
+    const wrongWorld = await pool.query(HISTORICAL_FACT_POOL_SQL, [ownerUserId, value.campaignId, other.worldVersionId, 3, 256, ["lantern"], [], [], null, []]);
     expect(wrongOwner.rows).toEqual([]);
     expect(wrongWorld.rows).toEqual([]);
   });

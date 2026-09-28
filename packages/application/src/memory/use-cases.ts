@@ -25,6 +25,10 @@ export function createMemoryApplication(
         dependencies.transaction.buildContextPreview(database, scope),
       loadGenerationContext: (database, scope) =>
         dependencies.transaction.loadGenerationContext(database, scope),
+      captureGenerationAuthority: (database, scope) =>
+        dependencies.transaction.captureGenerationAuthority(database, scope),
+      loadGenerationCandidates: (database, scope, authority, reservation) =>
+        dependencies.transaction.loadGenerationCandidates(database, scope, authority, reservation),
       enqueueEmbeddingReindex: (database, scope) =>
         dependencies.transaction.enqueueEmbeddingReindex(database, scope),
       enqueueChunkIndex: (database, scope) =>

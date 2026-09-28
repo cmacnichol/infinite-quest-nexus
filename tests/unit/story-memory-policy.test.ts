@@ -3,10 +3,21 @@ import { createHash } from "node:crypto";
 import {
   defaultStoryMemoryPolicy,
   effectiveProviderConfigurationFingerprint,
+  HISTORY_COVERAGE_POLICY,
+  isHistoryCoverageContextProtocol,
   storyMemoryCapabilitySchema,
   storyMemoryPolicySchema,
+  storyMemoryPolicyHash,
+  storyMemoryPolicySnapshotSchema,
   resolveStoryMemoryPolicy,
 } from "../../packages/contracts/src/story-memory-policy.js";
+import {
+  CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+  CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+  HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+  STORY_MEMORY_CONTEXT_POLICY_VERSION,
+  STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+} from "../../packages/contracts/src/story-prompt.js";
 import {
   legacyPromptTemplateKeys,
   readPromptSnapshot,
@@ -56,6 +67,59 @@ describe("Story memory policy", () => {
       { contextWindowTokens: 16_384 }, { maxOutputTokens: 2_048 }, { temperature: 0.3 },
       { requestTimeoutMs: 60_000 }, { configuration: { retryLimit: 3 } }, { effectiveContextWindowTokens: 16_000 }
     ]) expect(effectiveProviderConfigurationFingerprint({ ...baseline, ...changed })).not.toBe(fingerprint);
+  });
+});
+
+describe("Story Memory frozen history-coverage readers", () => {
+  const providerConfigurationFingerprint = "a".repeat(64);
+  const policy = defaultStoryMemoryPolicy("r2");
+  const snapshot = (value: Record<string, unknown>) => ({
+    policy,
+    policyHash: storyMemoryPolicyHash(policy),
+    providerConfigurationFingerprint,
+    ...value,
+  });
+
+  it("recognizes only the frozen v5 history protocol and exposes its fixed policy", () => {
+    expect(HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION).toBe("current-continuity-v5");
+    expect(HISTORY_COVERAGE_POLICY).toEqual({
+      recentWindowTurns: 11,
+      ledgerBudgetShare: 0.25,
+      protectedFactBudgetShare: 0.15,
+      ledgerDirectionCharacters: 480,
+      parentTokenMultiplier: 1.5,
+      parentCountMultiplier: 4,
+      sceneHintCharacters: 1000,
+    });
+    expect(isHistoryCoverageContextProtocol(HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(true);
+    expect(isHistoryCoverageContextProtocol(CAST_STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(false);
+    expect(isHistoryCoverageContextProtocol(STORY_MEMORY_CONTEXT_POLICY_VERSION)).toBe(false);
+    expect(isHistoryCoverageContextProtocol("current-continuity-v6")).toBe(false);
+  });
+
+  it("admits v5 only with the captured cast and v17 prompt protocols", () => {
+    const v5 = snapshot({
+      castContext: true,
+      contextProtocol: HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      promptProtocol: CAST_STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+    });
+    expect(storyMemoryPolicySnapshotSchema.parse(v5)).toEqual(v5);
+    for (const incompatible of [
+      { ...v5, castContext: undefined },
+      { ...v5, promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION },
+      { ...v5, contextProtocol: "current-continuity-v6" },
+    ]) expect(storyMemoryPolicySnapshotSchema.safeParse(incompatible).success).toBe(false);
+  });
+
+  it("keeps old frozen snapshots free of history-coverage defaults", () => {
+    const v3 = snapshot({
+      contextProtocol: STORY_MEMORY_CONTEXT_POLICY_VERSION,
+      promptProtocol: STORY_MEMORY_PROMPT_PROTOCOL_VERSION,
+    });
+    const parsed = storyMemoryPolicySnapshotSchema.parse(v3);
+    expect(parsed).toEqual(v3);
+    expect(parsed).not.toHaveProperty("castContext");
+    expect(isHistoryCoverageContextProtocol(parsed.contextProtocol)).toBe(false);
   });
 });
 

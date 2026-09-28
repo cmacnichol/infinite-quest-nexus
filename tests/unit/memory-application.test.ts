@@ -43,6 +43,8 @@ describe("MemoryApplication", () => {
         autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
         buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
         loadGenerationContext: vi.fn(),
+        captureGenerationAuthority: vi.fn(),
+        loadGenerationCandidates: vi.fn(),
         enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
         enqueueChunkIndex: vi.fn().mockResolvedValue("chunk-1"),
         rebuildCampaignMemories: vi.fn().mockResolvedValue(3),
@@ -77,6 +79,8 @@ describe("MemoryApplication", () => {
       autoEnableCampaignEmbedding: vi.fn().mockResolvedValue({ enabled: true }),
       buildContextPreview: vi.fn().mockResolvedValue({ scopes: { campaignCanon: [] } }),
       loadGenerationContext: vi.fn(),
+      captureGenerationAuthority: vi.fn(),
+      loadGenerationCandidates: vi.fn(),
       enqueueEmbeddingReindex: vi.fn().mockResolvedValue("embedding-1"),
       enqueueChunkIndex: vi.fn().mockResolvedValue("chunk-1"),
       rebuildCampaignMemories: vi.fn().mockResolvedValue(2),
@@ -111,6 +115,19 @@ describe("MemoryApplication", () => {
       expectedTurnNumber: 1,
       query: "safe action"
     });
+    const captured = { authority: {}, candidates: [], baseIdentity: {} } as never;
+    await application.generation.captureGenerationAuthority(transaction, {
+      ...scope,
+      operationKind: "append",
+      expectedTurnNumber: 1,
+      query: "safe action"
+    });
+    await application.generation.loadGenerationCandidates(transaction, {
+      ...scope,
+      operationKind: "append",
+      expectedTurnNumber: 1,
+      query: "safe action"
+    }, captured, { recentTurnIds: [], protectedFactIds: [] });
     await application.generation.enqueueEmbeddingReindex(transaction, scope);
     await application.generation.enqueueChunkIndex(transaction, scope);
     await application.generation.rebuildCampaignMemories(transaction, scope);
@@ -128,7 +145,8 @@ describe("MemoryApplication", () => {
       narration: "safe narration"
     });
 
-    for (const callback of Object.values(callbacks)) {
+    for (const [name, callback] of Object.entries(callbacks)) {
+      if (name === "loadGenerationCandidates") continue;
       expect(callback).toHaveBeenCalledWith(transaction, expect.anything());
     }
     expect(callbacks.buildContextPreview).toHaveBeenCalledWith(transaction, {
@@ -143,6 +161,9 @@ describe("MemoryApplication", () => {
         generationJobId: "generation-1",
         operation: "retrieval_embedding"
       }
+    });
+    expect(callbacks.loadGenerationCandidates).toHaveBeenCalledWith(transaction, expect.anything(), captured, {
+      recentTurnIds: [], protectedFactIds: []
     });
   });
 });

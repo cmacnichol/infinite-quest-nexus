@@ -152,15 +152,15 @@ this is used as a release procedure.
    `0095_story_memory_capability_enrollment.sql` and
    `0096_campaign_memory_defaults.sql`, and deploy compatible API,
    runtime, worker, and both Story-interface builds.
-5. Check automatic Max enrollment and resolved operator settings while intake
+5. Before setting `HISTORY_COVERAGE_ENABLED=true`, verify that every API and
+   worker claimant runs a v5-compatible build. Keep intake stopped through any
+   mixed-version overlap so an older worker cannot claim a newly frozen v5 job.
+   Check automatic Max enrollment and resolved operator settings while intake
    remains stopped. Existing custom creative prompt overrides retain their
    bytes. They remain usable across prompt-protocol changes while the output
-   shape version is unchanged (ADR 0039); never rewrite them automatically. Use
-   campaign settings or the operator API for any deliberately reduced level.
-   After deploy, re-save the application story_system and event_extension
-   overrides once (this stamps the current Story Memory identity) before
-   removing any campaign copies, so a rollback to the previous image does not
-   block generation.
+   shape version is unchanged (ADR 0039); do not re-acknowledge, rewrite, or
+   re-save a shape-compatible override for the v5 rollout. Use campaign
+   settings or the operator API for any deliberately reduced level.
 6. Run copied-campaign canaries at 32k and at one larger window actually
    supported by the selected provider. A configured 2m or 4m campaign budget
    is not proof that a provider supports that request size. Inspect exact
@@ -207,6 +207,11 @@ Use the following terms consistently in release material:
 
 1. Stop intake and inventory every frozen Story Memory job plus every active
    lease. Drain or deliberately resolve these jobs before changing binaries.
+   For a v5 rollback, retain compatible v5 readers and set
+   `HISTORY_COVERAGE_ENABLED=false` only after the inventory is safe; this makes
+   later eligible cast snapshots v4. Never rewrite stored v5 jobs, re-enroll
+   campaigns, edit overrides, backfill history, mutate accepted turns, or
+   discard a valid candidate to perform this rollback.
 2. Disable future admission by returning the API capability to `off` and, when
    applicable, `STORY_MEMORY_ENFORCE_ENABLED=false`. Clear campaign enrollment
    only when the operator intends future jobs to be legacy; clearing does not

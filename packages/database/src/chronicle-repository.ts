@@ -819,6 +819,7 @@ export function createPostgresChronicleGenerationTransactionPort(
             scope,
             authorityContext,
             dependencies,
+            undefined,
             { useSavepoints: false }
           );
         } finally {
@@ -829,6 +830,23 @@ export function createPostgresChronicleGenerationTransactionPort(
       // commit, or extend that transaction with provider I/O; the caller gets
       // its locked authority snapshot and no optional derived retrieval.
       return loadPostgresChronicleGenerationContext(transactionClient(database), scope);
+    },
+    async captureGenerationAuthority(database, scope) {
+      const pool = transactionPool(database);
+      if (pool) return withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client, scope));
+      return loadPostgresChronicleGenerationAuthorityContext(transactionClient(database), scope);
+    },
+    async loadGenerationCandidates(database, scope, authorityContext, reservation) {
+      const pool = transactionPool(database);
+      if (!pool) return authorityContext;
+      const retrievalClient = await pool.connect();
+      try {
+        return await loadPostgresChronicleGenerationCandidatesContext(
+          retrievalClient, scope, authorityContext, dependencies, reservation, { useSavepoints: false }
+        );
+      } finally {
+        retrievalClient.release();
+      }
     }
   } satisfies MemoryGenerationTransactionPort;
 }

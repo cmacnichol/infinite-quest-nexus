@@ -163,6 +163,23 @@ export type MemoryGenerationAuthorityScope = CampaignWorldVersionMemoryScope & R
   storyMemoryPolicy?: StoryMemoryPolicySnapshot;
 }>;
 
+/** Exact v5 sources already selected by the captured writer/reviewer pass. */
+export type GenerationHistoryReservation = Readonly<{
+  recentTurnIds: readonly string[];
+  protectedFactIds: readonly string[];
+}>;
+
+/**
+ * Complete correction authority captured before optional Chronicle retrieval.
+ * Deferred fact verification may read immutable accepted-turn sources, but it
+ * must never resolve a newer correction frontier.
+ */
+export type GenerationOptionalFactFrontier = Readonly<{
+  stateEditId: string;
+  effectiveTurnNumber: number;
+  facts: readonly Readonly<{ id: string; content: string }>[];
+}>;
+
 
 export type MemoryWorkerClaimRequest = Readonly<{
   workerId: string;

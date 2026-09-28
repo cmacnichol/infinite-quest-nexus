@@ -69,9 +69,10 @@ integration("campaign cast composed generation", () => {
     return { ownerUserId, campaignId: imported.campaignId };
   }
 
-  it.each([["action", true, false, false], ["scene", true, false, false], ["action", false, false, false], ["scene", false, false, false],
-    ["action", true, true, false], ["scene", true, true, false], ["action", false, false, true], ["scene", false, false, true]] as const)
-    ("preserves %s generation with cast=%s, commit race=%s and historical retry=%s", async (mode, enabled, race, historicalRetry) => {
+  it.each([["action", true, false, false, false], ["scene", true, false, false, false], ["action", false, false, false, false], ["scene", false, false, false, false],
+    ["action", true, true, false, false], ["scene", true, true, false, false], ["action", false, false, true, false], ["scene", false, false, true, false],
+    ["action", true, false, false, true]] as const)
+    ("preserves %s generation with cast=%s, commit race=%s, historical retry=%s and admission outage=%s", async (mode, enabled, race, historicalRetry, admissionOutage) => {
     const scope = await campaign(), foreign = await campaign(true);
     const cast = createPostgresCampaignCastRepository(pool, { editingEnabled: true, discoveryEnabled: true });
     await cast.initialize(scope);
@@ -138,6 +139,13 @@ integration("campaign cast composed generation", () => {
           return { content, responseId: randomUUID(), finishReason: "stop", outputLimited: false, modelInstanceId: "cast-synthetic",
             usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30 }, reportedCost: null, rawMetadata: {} };
         } }),
+      ...(admissionOutage ? {
+        prepareCastDiscoveryExecution: async ({ execution }: { execution: { id: string } }) => {
+          expect(execution.id).toBe(providerProfileId);
+          throw Object.assign(new Error("CAST_PRIVATE_STORY_CANARY provider secret"), { code: "provider_unavailable" });
+        },
+        prepareIllustrationTextExecution: async () => { throw new Error("ILLUSTRATION_PRIVATE_CANARY"); }
+      } : {}),
       onProviderDispatch: (value) => { operation = value; },
       promptFromSnapshot: (snapshot, key) => (snapshot as Record<string, { content?: string }> | undefined)?.[key as PromptTemplateKey]?.content ?? PROMPT_TEMPLATE_CATALOG[key].defaultContent,
       recordProfileCost: async () => null, attributeGenerationCostsToTurn: async () => undefined
@@ -193,6 +201,12 @@ integration("campaign cast composed generation", () => {
     expect(outgoing.input).not.toContain(foreignPerson.character.id);
     const job = (await pool.query("SELECT status,result_turn_id FROM generation_jobs WHERE id=$1", [queued.id])).rows[0];
     expect(job).toMatchObject({ status: "completed", result_turn_id: expect.any(String) });
+    if (admissionOutage) {
+      expect((await pool.query("SELECT orchestration_private->'castDiscoveryAdmission' AS admission FROM generation_jobs WHERE id=$1", [queued.id])).rows[0].admission)
+        .toEqual({ status: "unavailable" });
+      expect((await pool.query("SELECT turn_number FROM campaign_cast_discovery_jobs WHERE campaign_id=$1 ORDER BY turn_number", [scope.campaignId])).rows)
+        .toEqual([{ turn_number: 1 }, { turn_number: 9 }]);
+    }
     const nextEnabled = enabled || historicalRetry;
     const next = await enqueue(nextEnabled);
     const authority = await withTransaction(pool, (client) => resolveGenerationAuthoritySnapshot(client,
