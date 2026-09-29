@@ -882,7 +882,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain('String(firstReadinessIssue?.message || "").trim()');
     expect(managementScript).toContain("function updateCampaignCreationAvailability()");
     expect(managementScript).toContain("elements.createCampaignModalBtn.disabled = !hasPublishedVersion || !worldVersionCampaignReady;");
-    expect(managementScript).toContain("elements.confirmCreateCampaign.disabled = !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;");
+    expect(managementScript).toContain("elements.confirmCreateCampaign.disabled = createCampaignSubmitting || !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;");
     expect(managementScript).toContain("This world version is not campaign-ready; update the draft and publish a new version");
     expect(managementScript).toContain("if (!worldVersionCampaignReady) {");
   });
