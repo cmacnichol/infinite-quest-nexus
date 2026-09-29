@@ -598,6 +598,20 @@ describe("playable character campaign readiness", () => {
     });
     expect(assessWorldCampaignReadiness(content)).toEqual({ ready: true, issues: [] });
   });
+
+  it("marks malformed event rules unready with bounded field guidance", () => {
+    const content = worldContentSchema.parse({
+      world: { title: "Rules Test World" },
+      playableCharacters: [{ id: "hero", name: "Hero", characterText: "Guidance" }],
+      eventTriggers: [{ id: "bad", name: "PRIVATE_RULE_NAME", trigger_condition: "   ", effect: "Open gate" }]
+    });
+    const readiness = assessWorldCampaignReadiness(content);
+    expect(readiness.ready).toBe(false);
+    expect(readiness.issues).toContainEqual(expect.objectContaining({
+      code: "invalid-event-rule", eventIndex: 0, field: "condition"
+    }));
+    expect(JSON.stringify(readiness)).not.toContain("PRIVATE_RULE_NAME");
+  });
 });
 
 describe("playable character selection", () => {

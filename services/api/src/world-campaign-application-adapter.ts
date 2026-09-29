@@ -25,6 +25,28 @@ export type WorldCampaignApplicationAdapter = Readonly<{
 }>;
 
 function applicationErrorMessage(error: WorldCampaignApplicationError): string {
+  if (error.reason === "invalid_transition") {
+    const issue = error.details.issues?.[0];
+    const index = typeof issue?.characterIndex === "number" && issue.characterIndex >= 0 && issue.characterIndex < 10_000
+      ? issue.characterIndex + 1 : null;
+    const eventIndex = typeof issue?.eventIndex === "number" && issue.eventIndex >= 0 && issue.eventIndex < 200
+      ? issue.eventIndex + 1 : null;
+    if (issue?.code === "no-playable-characters") return "This world version has no playable characters.";
+    if (issue?.code === "missing-character-id" && index) return `Playable character ${index} is missing an ID.`;
+    if (issue?.code === "duplicate-character-id" && index) return `Playable character ${index} has a duplicate ID.`;
+    if (issue?.code === "missing-character-name" && index) return `Playable character ${index} is missing a name.`;
+    if (issue?.code === "missing-character-text" && index) return `Playable character ${index} is missing character guidance.`;
+    if (issue?.code === "invalid-event-rule") {
+      if (eventIndex) {
+        const field = ["id", "label", "timing", "condition", "effect", "addTextAfter", "triggeredCount", "lastTriggeredTurn", "lastTriggeredAt"].includes(issue.field ?? "")
+          ? issue.field : null;
+        return `Event rule ${eventIndex}${field ? ` needs a valid ${field}` : " is invalid"}.`;
+      }
+      return "This world version has too many event rules (maximum 200).";
+    }
+    if (error.details.selectionIssue === "required") return "Select a playable character for this campaign.";
+    if (error.details.selectionIssue === "unknown") return "The selected playable character does not belong to this world version.";
+  }
   switch (error.reason) {
     case "world_not_found":
       return "World not found.";
@@ -67,10 +89,24 @@ export function mapWorldCampaignApplicationError(
       : error.kind === "unavailable"
         ? 503
         : 409;
+  const safeIssues = error.details.issues?.slice(0, 5).flatMap((issue) => {
+    const codes = ["no-playable-characters", "missing-character-id", "duplicate-character-id", "missing-character-name", "missing-character-text", "invalid-event-rule"];
+    if (!codes.includes(issue.code)) return [];
+    const fields = ["id", "label", "timing", "condition", "effect", "addTextAfter", "triggeredCount", "lastTriggeredTurn", "lastTriggeredAt"];
+    return [{
+      code: issue.code,
+      ...(typeof issue.characterIndex === "number" && issue.characterIndex >= 0 && issue.characterIndex < 10_000 ? { characterIndex: issue.characterIndex } : {}),
+      ...(typeof issue.eventIndex === "number" && issue.eventIndex >= 0 && issue.eventIndex < 200 ? { eventIndex: issue.eventIndex } : {}),
+      ...(fields.includes(issue.field ?? "") ? { field: issue.field } : {})
+    }];
+  });
   return Object.assign(new Error(applicationErrorMessage(error)), {
     name: "WorldCampaignHttpError",
     statusCode,
-    details: { code: error.reason, ...error.details }
+    details: error.reason === "invalid_transition"
+      ? { code: error.reason, issues: safeIssues,
+        ...(["required", "unknown"].includes(error.details.selectionIssue ?? "") ? { selectionIssue: error.details.selectionIssue } : {}) }
+      : { code: error.reason, ...error.details }
   });
 }
 
