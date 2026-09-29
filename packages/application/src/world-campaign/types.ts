@@ -118,6 +118,14 @@ export type WorldCampaignErrorDetails = Readonly<{
   unresolvedGenerationStatuses?: readonly string[];
   blockers?: readonly string[];
   findings?: readonly CampaignTransferFinding[];
+  issues?: readonly Readonly<{
+    code: string;
+    message: string;
+    characterIndex?: number;
+    eventIndex?: number;
+    field?: string;
+  }>[];
+  selectionIssue?: "required" | "unknown";
 }>;
 
 export type WorldCampaignRepositoryResult<T> =

@@ -23,6 +23,16 @@ describe("owner-bound portable world application", () => {
       expect(error).toMatchObject({ statusCode, message, details: { code: reason } });
     }
   });
+  it("shows bounded campaign readiness guidance without exposing authored text", () => {
+    const error = mapWorldCampaignApplicationError(new WorldCampaignApplicationError(
+      "invalid_request", "invalid_transition", {
+        issues: [{ code: "invalid-event-rule", message: "Event rule 1 needs a valid condition.", eventIndex: 0, field: "condition" }]
+      }
+    ));
+    expect(error.statusCode).toBe(400);
+    expect(error.message).toBe("Event rule 1 needs a valid condition.");
+    expect(JSON.stringify(error)).not.toContain("PRIVATE_WORLD_CONTENT");
+  });
   it("exports a whole world or exact world version without accepting caller authority", async () => {
     const ownerUserId = crypto.randomUUID();
     const worldId = crypto.randomUUID();

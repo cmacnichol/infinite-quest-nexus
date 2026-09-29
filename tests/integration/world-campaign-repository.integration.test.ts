@@ -433,12 +433,51 @@ integration("PostgreSQL world campaign repository adapters", () => {
       transaction, { ownerUserId }, { title: authored.world.title, content: authored }
     )));
     const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Invalid rule");
+    const summary = await adapters.transaction.read((transaction) => adapters.campaigns.getWorldVersionPlayableCharacterSummary(
+      transaction, { ownerUserId, worldVersionId: version.worldVersionId }
+    ));
+    expect(summary.readiness).toMatchObject({ ready: false, issues: [{ code: "invalid-event-rule", eventIndex: 0 }] });
     const result = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, {
       worldVersionId: version.worldVersionId, title: "Invalid campaign", storyLengthProfile: "standard",
       storyContextBudgetTokens: 32_000, turnControlStyle: "flexible_action"
     }));
-    expect(result).toMatchObject({ ok: false, failure: { reason: "invalid_transition" } });
+    expect(result).toMatchObject({ ok: false, failure: { reason: "invalid_transition", details: { issues: summary.readiness.issues } } });
     expect((await pool.query("SELECT count(*)::int AS count FROM campaigns WHERE world_version_id=$1", [version.worldVersionId])).rows[0].count).toBe(0);
+  });
+
+  it("requires a selection for multiple playable characters without inserting a campaign", async () => {
+    const adapters = createAdapters();
+    const authored = content("Two character world", "First");
+    authored.playableCharacters.push({ ...authored.playableCharacters[0]!, id: "second", name: "Second", characterText: "Second guidance", rpgStats: [], defaultTriggers: [] });
+    const world = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.createWorld(
+      transaction, { ownerUserId }, { title: authored.world.title, content: authored }
+    )));
+    const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Two characters");
+    const request = { worldVersionId: version.worldVersionId, title: "Selection campaign", storyLengthProfile: "standard" as const,
+      storyContextBudgetTokens: 32_000 as const, turnControlStyle: "flexible_action" as const };
+    const missing = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, request));
+    expect(missing).toMatchObject({ ok: false, failure: { reason: "invalid_transition", details: { selectionIssue: "required" } } });
+    const unknown = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, { ...request, selectedCharacterId: "absent" }));
+    expect(unknown).toMatchObject({ ok: false, failure: { reason: "invalid_transition", details: { selectionIssue: "unknown" } } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM campaigns WHERE world_version_id=$1", [version.worldVersionId])).rows[0].count).toBe(0);
+    const selected = await adapters.transaction.command((transaction) => adapters.campaigns.createCampaign(transaction, { ownerUserId }, { ...request, selectedCharacterId: "second" }));
+    expect(selected).toMatchObject({ ok: true, value: { selectedCharacterId: "second" } });
+  });
+
+  it("creates from historical named event rules and retains the published version", async () => {
+    const adapters = createAdapters();
+    const authored = content("Historical opening rules", "Historical");
+    const legacyRule = { id: "arrival", name: "Arrival", trigger_condition: "A traveler arrives.", effect: "Open the gate." };
+    authored.eventTriggers = [legacyRule];
+    const world = unwrap(await adapters.transaction.command((transaction) => adapters.worlds.createWorld(
+      transaction, { ownerUserId }, { title: authored.world.title, content: authored }
+    )));
+    const version = await publishFixtureWorld(adapters, world.id, world.draftRevision, "Historical rules");
+    const campaign = await createFixtureCampaign(adapters, version.worldVersionId, "Historical campaign");
+    expect((await pool.query("SELECT event_triggers FROM campaign_state WHERE campaign_id=$1", [campaign.created.id])).rows[0].event_triggers)
+      .toMatchObject([{ id: "arrival", label: "Arrival", timing: "before", condition: "A traveler arrives.", effect: "Open the gate." }]);
+    expect((await pool.query("SELECT content FROM world_versions WHERE id=$1", [version.worldVersionId])).rows[0].content.eventTriggers)
+      .toEqual([legacyRule]);
   });
 
   it("creates and lists raw-Date worlds only inside the explicit owner scope", async () => {

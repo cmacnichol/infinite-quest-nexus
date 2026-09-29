@@ -27,6 +27,22 @@ describe("campaign event trigger compatibility", () => {
     expect(source).toEqual(["When the bell rings, light the lantern.", structured]);
   });
 
+  it("accepts historical named rules without losing their ID, effect, or metadata", () => {
+    const source = [{
+      id: "arrival", name: "Arrival", trigger_condition: "The traveler reaches the gate.",
+      effect: "The keeper opens the gate.", triggeredCount: 2, lastTriggeredTurn: 4
+    }];
+    const normalized = normalizeCampaignEventTriggers(source);
+    expect(normalized).toEqual([{
+      id: "arrival", label: "Arrival", timing: "before",
+      condition: "The traveler reaches the gate.", effect: "The keeper opens the gate.",
+      triggeredCount: 2, lastTriggeredTurn: 4
+    }]);
+    expect(playerEventTriggerSchema.array().safeParse(normalized).success).toBe(true);
+    expect(normalizeCampaignEventTriggers(normalized)).toEqual(normalized);
+    expect(source[0]).toHaveProperty("name", "Arrival");
+  });
+
   it("does not silently erase unsupported or oversized authored rules", () => {
     const invalid = [null, 42, { condition: "Incomplete rule" }, "", "x".repeat(4001)];
     const result = normalizeCampaignEventTriggers(invalid);

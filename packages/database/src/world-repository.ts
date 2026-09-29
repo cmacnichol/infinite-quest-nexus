@@ -32,9 +32,8 @@ import {
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { normalizeCampaignTrackers } from "../../domain/src/campaign-trackers.js";
-import { normalizeCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
+import { validateCampaignEventTriggers } from "../../domain/src/campaign-event-triggers.js";
 import { validateWorldSourceMaterialForContent } from "../../domain/src/source-authoring.js";
-import { playerEventTriggerSchema } from "../../contracts/src/generation.js";
 import { sha256, stableStringify } from "../../domain/src/text.js";
 import {
   assessWorldCampaignReadiness,
@@ -1165,21 +1164,24 @@ function createPostgresCampaignRepository(
       const content = worldContentSchema.parse(source.content);
       const readiness = assessWorldCampaignReadiness(content);
       if (!readiness.ready) {
-        return failure("invalid_transition", { worldVersionId: request.worldVersionId });
+        return failure("invalid_transition", { worldVersionId: request.worldVersionId, issues: readiness.issues });
       }
       let seed: ReturnType<typeof campaignCharacterSeed>;
       try {
         seed = campaignCharacterSeed(content, request.selectedCharacterId);
       } catch {
-        return failure("invalid_transition", { worldVersionId: request.worldVersionId });
+        return failure("invalid_transition", {
+          worldVersionId: request.worldVersionId,
+          selectionIssue: content.playableCharacters.length > 1 && !request.selectedCharacterId ? "required" : "unknown"
+        });
       }
       const snapshot = characterSnapshot(seed.character);
       const campaignProfile = campaignProfileFromCharacter(seed.character);
-      const eventRules = playerEventTriggerSchema.array().max(200).safeParse(normalizeCampaignEventTriggers(content.eventTriggers));
-      if (!eventRules.success) {
-        return failure("invalid_transition", { worldVersionId: request.worldVersionId });
+      const eventRules = validateCampaignEventTriggers(content.eventTriggers);
+      if (!eventRules.rules) {
+        return failure("invalid_transition", { worldVersionId: request.worldVersionId, issues: eventRules.issues });
       }
-      const initialEventTriggers = eventRules.data;
+      const initialEventTriggers = eventRules.rules;
       const campaign = await client.query<{ id: string }>(
         `INSERT INTO campaigns (
            owner_user_id, world_version_id, title, story_length_profile, story_context_budget_tokens, turn_control_style,

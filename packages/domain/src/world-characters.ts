@@ -7,6 +7,7 @@ import {
   type WorldContent
 } from "../../contracts/src/world-library.js";
 import { stripMechanicsLeakage, truncateAtBoundary } from "./text.js";
+import { validateCampaignEventTriggers } from "./campaign-event-triggers.js";
 export { characterFictionAuthority, completeCharacterFictionProfile, type CharacterFictionAuthority } from "./character-fiction-authority.js";
 
 export type CampaignCharacterSeed = {
@@ -20,13 +21,16 @@ export type WorldCampaignReadinessIssueCode =
   | "missing-character-id"
   | "duplicate-character-id"
   | "missing-character-name"
-  | "missing-character-text";
+  | "missing-character-text"
+  | "invalid-event-rule";
 
 export type WorldCampaignReadinessIssue = {
   code: WorldCampaignReadinessIssueCode;
   message: string;
   characterIndex?: number;
   characterId?: string;
+  eventIndex?: number;
+  field?: string;
 };
 
 export type WorldCampaignReadinessAssessment = {
@@ -74,7 +78,7 @@ export function assessWorldCampaignReadiness(content: WorldContent): WorldCampai
     } else if (seenIds.has(id)) {
       issues.push({
         code: "duplicate-character-id",
-        message: `Playable character ID "${id}" is duplicated.`,
+        message: `Playable character ${characterIndex + 1} has a duplicate ID.`,
         characterIndex,
         characterId: id
       });
@@ -93,13 +97,14 @@ export function assessWorldCampaignReadiness(content: WorldContent): WorldCampai
     if (!characterText && !hasProfile) {
       issues.push({
         code: "missing-character-text",
-        message: `Playable character ${name ? `"${name}"` : characterIndex + 1} is missing character guidance.`,
+        message: `Playable character ${characterIndex + 1} is missing character guidance.`,
         characterIndex,
         ...(id ? { characterId: id } : {})
       });
     }
   }
 
+  issues.push(...validateCampaignEventTriggers(content.eventTriggers).issues);
   return { ready: issues.length === 0, issues };
 }
 

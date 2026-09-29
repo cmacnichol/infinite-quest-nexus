@@ -41,6 +41,7 @@ import {
   type PromptSnapshot
 } from "../../packages/contracts/src/index.js";
 import { buildServer } from "../../services/api/src/server.js";
+import { WorldCampaignApplicationError } from "../../packages/application/src/world-campaign/index.js";
 import { inertStorageServerOptions as serverOptions, testWorldCampaignApplication } from "../helpers/build-server-options.js";
 import { legacyDashboardRouteContracts, legacyStoryRouteContracts } from "../helpers/legacy-ui-route-contracts.js";
 import { providerPromptProtocolVersion } from "../helpers/provider-application-fixtures.js";
@@ -1016,6 +1017,31 @@ describe("client API route contracts without PostgreSQL", () => {
         rpgStatCount: 0,
         defaultTriggerCount: 0
       }]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns actionable campaign validation through the HTTP route without authored rule text", async () => {
+    const rawMarker = "PRIVATE_RULE_CONTENT";
+    const app = await buildServer(serverOptions({
+      config: config(storageRoot), pool: mockPool(),
+      worldCampaign: testWorldCampaignApplication({
+        createCampaign: async () => { throw new WorldCampaignApplicationError("invalid_request", "invalid_transition", {
+          issues: [{ code: "invalid-event-rule", message: rawMarker, eventIndex: 0, field: "condition" }]
+        }); }
+      })
+    }));
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/campaigns",
+        payload: { worldVersionId: WORLD_VERSION_ID, title: "Invalid rules campaign", selectedCharacterId: "observer",
+          storyLengthProfile: "standard", turnControlStyle: "flexible_action" }
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().message).toContain("Event rule 1 needs a valid condition.");
+      expect(response.body).not.toContain(rawMarker);
     } finally {
       await app.close();
     }
