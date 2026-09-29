@@ -15,7 +15,7 @@ function campaignFunctions(bindings: Record<string, unknown>) {
     if (!next) throw new Error(`Missing function boundary after ${name}`);
     return script.slice(definitionStart, start + 1 + next.index);
   });
-  return Function(...Object.keys(bindings), `let createCampaignSubmitting = false; ${sources.join("\n")}; return { openCreateCampaignDialog, createCampaignFromWorld };`)(...Object.values(bindings)) as {
+  return Function(...Object.keys(bindings), `let createCampaignSubmitting = false; let createCampaignCommitted = false; ${sources.join("\n")}; return { openCreateCampaignDialog, createCampaignFromWorld };`)(...Object.values(bindings)) as {
     openCreateCampaignDialog: () => void;
     createCampaignFromWorld: () => Promise<void>;
   };
@@ -66,9 +66,39 @@ describe("legacy campaign creation dialog", () => {
     await createCampaignFromWorld();
     expect(elements.createCampaignStatus?.hidden).toBe(true);
     expect(api).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(api.mock.calls[1][1].body)).toMatchObject({ title: "My Campaign", turnControlStyle: "flexible_scene", selectedCharacterId: "character-1" });
+    expect(JSON.parse(api.mock.calls[1]![1].body)).toMatchObject({ title: "My Campaign", turnControlStyle: "flexible_scene", selectedCharacterId: "character-1" });
     expect(loadCampaigns).toHaveBeenCalledWith("campaign-1");
     expect(dialog.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a committed campaign when list refresh fails without offering a creation retry", async () => {
+    const { document } = parseHTML(html);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLElement>;
+    for (const select of document.querySelectorAll("select")) {
+      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
+    }
+    const dialog = elements.createCampaignDialog as HTMLElement & { close: () => void };
+    dialog.close = vi.fn();
+    const api = vi.fn().mockResolvedValue({ id: "campaign-1", selectedCharacterName: "Hero" });
+    const loadCampaigns = vi.fn().mockRejectedValue(new Error("Connection lost"));
+    const worldMessage = vi.fn();
+    const { openCreateCampaignDialog, createCampaignFromWorld } = campaignFunctions({
+      elements, api, loadCampaigns, worldMessage, openManagedModal: vi.fn(),
+      selectedWorld: { id: "world-1" }, selectedWorldVersionId: () => "version-1",
+      worldVersionCampaignReady: true, worldVersionCharacters: [{ id: "character-1" }]
+    });
+
+    openCreateCampaignDialog();
+    (elements.newCampaignTitle as HTMLInputElement).value = "My Campaign";
+    await createCampaignFromWorld();
+
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(dialog.close).toHaveBeenCalledTimes(1);
+    expect((elements.newCampaignTitle as HTMLInputElement).value).toBe("");
+    expect(elements.createCampaignStatus!.hidden).toBe(true);
+    expect(worldMessage.mock.calls.some(([message, type]) => type === "error" && message.includes("Campaign was created") && message.includes("Refresh"))).toBe(true);
+    await createCampaignFromWorld();
+    expect(api).toHaveBeenCalledTimes(1);
   });
 
   it("clears a stale error when the dialog opens", () => {
@@ -77,8 +107,8 @@ describe("legacy campaign creation dialog", () => {
     for (const select of document.querySelectorAll("select")) {
       Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
     }
-    elements.createCampaignStatus.textContent = "Previous failure";
-    elements.createCampaignStatus.hidden = false;
+    elements.createCampaignStatus!.textContent = "Previous failure";
+    elements.createCampaignStatus!.hidden = false;
     const openManagedModal = vi.fn();
     const { openCreateCampaignDialog } = campaignFunctions({
       elements, openManagedModal, worldMessage: vi.fn(),
@@ -87,9 +117,9 @@ describe("legacy campaign creation dialog", () => {
     });
 
     openCreateCampaignDialog();
-    expect(elements.createCampaignStatus.textContent).toBe("");
-    expect(elements.createCampaignStatus.hidden).toBe(true);
+    expect(elements.createCampaignStatus!.textContent).toBe("");
+    expect(elements.createCampaignStatus!.hidden).toBe(true);
     expect(openManagedModal.mock.calls.length).toBe(1);
-    expect(openManagedModal.mock.calls[0][0] === elements.createCampaignDialog).toBe(true);
+    expect(openManagedModal.mock.calls[0]![0] === elements.createCampaignDialog).toBe(true);
   });
 });
