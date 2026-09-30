@@ -2929,7 +2929,7 @@ async function executeLoadedGeneration(
           || !sameFactIds(savedChoiceRepair.originalSentFactIds, sentCanonicalFactIds(savedChoiceRepair.originalRequestBody))) {
           throw new Error("Choice repair checkpoint provenance is incompatible.");
         }
-        const original = parseStoryOnlyOutput(savedChoiceRepair.originalResponse.content);
+        const original = parseStoryOnlyOutput(savedChoiceRepair.originalResponse.content, { validateOriginalChoices: true });
         if (original.ok || original.kind !== "choices" || stableStringify(original.base) !== stableStringify(savedChoiceRepair.base)) {
           throw new Error("Choice repair checkpoint does not match the original rejected draft.");
         }
@@ -3431,14 +3431,14 @@ async function executeLoadedGeneration(
       }
     }
     if (generationPolicy?.playMode === "story_only" && !validatedDraft) {
-      const choiceOnly = parseStoryOnlyOutput(result.content);
+      const choiceOnly = parseStoryOnlyOutput(result.content, { validateOriginalChoices: resumingPendingChoiceRepair });
       if (!choiceOnly.ok && choiceOnly.kind === "choices") {
         if (!choiceRetryReceipt) return pauseRejectedMain("choices", "invalid_choices");
       }
     }
     if (generationPolicy?.playMode === "story_only" && !validatedDraft
         && (!result.outputLimited || resumingPendingChoiceRepair)) {
-      const choiceOnly = parseStoryOnlyOutput(result.content);
+      const choiceOnly = parseStoryOnlyOutput(result.content, { validateOriginalChoices: resumingPendingChoiceRepair });
       if (!choiceOnly.ok && choiceOnly.kind === "choices") {
         const existing = orchestration.choiceRepair;
         if (existing?.status === "validated") {

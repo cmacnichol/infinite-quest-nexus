@@ -149,13 +149,21 @@ function normalizeHistoricalStoryOutput(parsed: unknown, defaults: StoryMemoryDe
 }
 
 /**
- * Current provider boundary: accept only documented no-op omissions and a
- * content-only fact wrapper, then let the strict wire schema reject anything
- * else. Historical/import compatibility remains in normalizeHistoricalStoryOutput.
+ * Current provider boundary: accept documented no-op omissions, a content-only
+ * fact wrapper, and surplus valid choices, then let the strict wire schema
+ * reject anything else. Historical/import compatibility stays separate.
  */
 function normalizeProviderStoryOutput(parsed: unknown): unknown {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const story = parsed as Record<string, unknown>;
+  // Providers can return extra options despite the exact-four wire contract.
+  // Validate every option before dropping any so malformed or mechanical text
+  // cannot disappear through normalization. The caller retains the raw response.
+  const choices = Array.isArray(story.choices) && story.choices.length > 4
+    && story.choices.every((choice) => storyTurnOutputSchema.shape.choices.element.safeParse(choice).success
+      && !containsMechanicsLanguage(choice))
+    ? story.choices.slice(0, 4)
+    : story.choices;
   const canonicalFacts = Array.isArray(story.canonical_facts)
     ? story.canonical_facts.map((fact) => {
       if (!fact || typeof fact !== "object" || Array.isArray(fact)) return fact;
@@ -167,6 +175,7 @@ function normalizeProviderStoryOutput(parsed: unknown): unknown {
     : story.canonical_facts;
   return {
     ...story,
+    ...(choices === story.choices ? {} : { choices }),
     ...(story.superseded_facts === undefined ? { superseded_facts: [] } : {}),
     ...(story.canonical_fact_updates === undefined ? { canonical_fact_updates: [] } : {}),
     ...(canonicalFacts === story.canonical_facts ? {} : { canonical_facts: canonicalFacts })

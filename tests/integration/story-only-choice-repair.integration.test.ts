@@ -207,6 +207,50 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
   }
 
 
+  it.each(["pending", "validated"])("resumes a pre-normalization surplus-choice checkpoint in %s state", async (status) => {
+    const fixture = await persistedValidatedRepair(`surplus-checkpoint-${status}`);
+    const repair = structuredClone(fixture.choiceRepair);
+    const original = repair.originalResponse as Record<string, unknown>;
+    original.content = output(["Enter.", "Listen.", "Wait.", "Speak.", "Leave."]);
+    repair.status = status;
+    if (status === "pending") {
+      delete repair.fields;
+      delete repair.resultHash;
+    }
+    await pool.query("UPDATE generation_jobs SET status='queued', orchestration_private=orchestration_private || $2::jsonb WHERE id=$1",
+      [fixture.queued.id, JSON.stringify({ choiceRepair: repair })]);
+    const operations: string[] = [];
+    const requests: string[] = [];
+    await execute(fixture.queued.id, `surplus-checkpoint-resume-${status}`,
+      status === "pending" ? [{ content: validRepair() }] : [], operations, requests);
+    await expect(pool.query("SELECT status,error_code FROM generation_jobs WHERE id=$1", [fixture.queued.id]))
+      .resolves.toMatchObject({ rows: [{ status: "completed", error_code: null }] });
+    expect(operations).toEqual(status === "pending" ? ["story_choice_repair"] : []);
+  }, 60_000);
+
+  it("commits surplus valid choices without a review or repair and retains the original response", async () => {
+    const imported = await campaign();
+    const queued = await enqueue(imported.campaignId);
+    const choices = ["Enter the observatory.", "Call for the keeper.", "Study the wet threshold.", "Circle the tower."];
+    const raw = output([...choices, "Wait beneath the awning."]);
+    const operations: string[] = [];
+    const requests: string[] = [];
+    await execute(queued.id, "surplus-choices", [{ content: raw }], operations, requests);
+    expect(operations).toEqual(["story_generation"]);
+    expect(requests).toHaveLength(1);
+    await expect(pool.query(
+      `SELECT j.status,t.choices,t.narration,t.custom_action_suggestion AS suggestion,
+              j.orchestration_private->'generationReview' AS review
+         FROM generation_jobs j JOIN turns t ON t.id=j.result_turn_id WHERE j.id=$1`, [queued.id]
+    )).resolves.toMatchObject({ rows: [{
+      status: "completed", choices, review: null,
+      narration: "Rain turns the observatory glass silver as Mara opens the west door.",
+      suggestion: "Ask why the lantern is burning."
+    }] });
+    await expect(pool.query("SELECT raw_output FROM generation_attempts WHERE generation_job_id=$1", [queued.id]))
+      .resolves.toMatchObject({ rows: [{ raw_output: raw }] });
+  }, 60_000);
+
   it("repairs duplicate choices once while preserving every non-choice field and original authority", async () => {
     const imported = await campaign();
     const sourceFactId = await seedCanonicalFact(imported.campaignId);
