@@ -1458,6 +1458,7 @@ function renderPromptLibrary(loadEditor = false) {
   const resetAvailable = campaignScope ? template.effectiveSource === "campaign" : template.effectiveSource === "application";
   elements.promptLibraryReset.textContent = campaignScope ? "Use inherited application prompt" : "Restore shipped default";
   elements.promptLibraryReset.disabled = !resetAvailable;
+  elements.promptLibraryResetCampaigns.classList.toggle("hidden", campaignScope || !template.campaignOverrideAllowed);
   renderPromptLibraryDirtyState();
   if (promptLibraryPreviewVisible) schedulePromptLibraryPreview();
   requestAnimationFrame(() => elements.promptLibraryList.querySelector(".prompt-library-item.active")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
@@ -1502,6 +1503,28 @@ async function resetPromptLibraryTemplate() {
     const response = await api("/api/v1/prompt-library/overrides", { method: "DELETE", body: JSON.stringify({ key: template.key, scope, ...(scope === "campaign" ? { campaignId: promptLibraryCampaignId() } : {}) }) });
     promptLibrary = response.library; elements.promptLibraryStatus.textContent = scope === "campaign" ? "Campaign override removed; the inherited application prompt is active." : "Application override removed; the shipped default is active."; elements.promptLibraryStatus.className = "status success"; renderPromptLibrary(true);
   } catch (error) { elements.promptLibraryStatus.textContent = error.message || String(error); elements.promptLibraryStatus.className = "status error"; }
+}
+
+async function resetAllCampaignPromptOverrides() {
+  const template = promptLibrarySelectedTemplate();
+  if (!template || !template.campaignOverrideAllowed || elements.promptLibraryScope.value !== "application") return;
+  if (promptLibraryIsDirty()) {
+    elements.promptLibraryStatus.textContent = "Save or discard your edits before resetting campaign overrides.";
+    elements.promptLibraryStatus.className = "status warning";
+    return;
+  }
+  if (!window.confirm(`Reset “${template.title}” for all your campaigns to the saved application default? This will overwrite all campaign overrides for this prompt by removing them. This cannot be undone. Other prompts and already queued jobs will not change.`)) return;
+  elements.promptLibraryResetCampaigns.disabled = true;
+  try {
+    await api("/api/v1/prompt-library/overrides", { method: "DELETE", body: JSON.stringify({ key: template.key, scope: "application", allCampaigns: true }) });
+    elements.promptLibraryStatus.textContent = `All your campaigns now inherit the application default for “${template.title}”. New jobs will use this prompt.`;
+    elements.promptLibraryStatus.className = "status success";
+  } catch (error) {
+    elements.promptLibraryStatus.textContent = error.message || String(error);
+    elements.promptLibraryStatus.className = "status error";
+  } finally {
+    elements.promptLibraryResetCampaigns.disabled = false;
+  }
 }
 
 function setStatus(message, type = "") {
@@ -6770,6 +6793,7 @@ elements.promptLibraryCampaign?.addEventListener("change", () => {
 });
 elements.promptLibraryEditor?.addEventListener("submit", savePromptLibraryTemplate);
 elements.promptLibraryReset?.addEventListener("click", resetPromptLibraryTemplate);
+elements.promptLibraryResetCampaigns?.addEventListener("click", resetAllCampaignPromptOverrides);
 elements.promptLibraryPreview?.addEventListener("click", () => { promptLibraryPreviewVisible = !promptLibraryPreviewVisible; void renderPromptLibraryPreview(); });
 elements.promptLibraryContent?.addEventListener("input", () => { renderPromptLibraryDirtyState(); schedulePromptLibraryPreview(); });
 elements.promptLibraryDiscard?.addEventListener("click", () => {

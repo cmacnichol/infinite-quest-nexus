@@ -49,6 +49,14 @@ function snapshotWithRepairIdentity(protocolIdentity: string) {
 }
 
 describe("Prompt Library catalog", () => {
+  it("accepts 64,000-character Story Writer overrides but retains other prompt limits", () => {
+    for (const scope of ["application", "campaign"] as const) {
+      const input = { key: "story_system", scope, ...(scope === "campaign" ? { campaignId: "11111111-1111-4111-8111-111111111111" } : {}) };
+      expect(promptTemplateOverrideSchema.safeParse({ ...input, content: "a".repeat(64_000) }).success).toBe(true);
+      expect(promptTemplateOverrideSchema.safeParse({ ...input, content: "a".repeat(64_001) }).success).toBe(false);
+    }
+    expect(promptTemplateOverrideSchema.safeParse({ key: "world_generation", scope: "application", content: "a".repeat(16_001) }).success).toBe(false);
+  });
   it.each(["source_extraction", "source_extraction_recovery"] as const)("uses evidence IDs in the %s prompt", (key) => {
     expect(PROMPT_TEMPLATE_CATALOG[key].defaultContent).toContain("evidenceId");
     expect(PROMPT_TEMPLATE_CATALOG[key].defaultContent).not.toContain("coordinates");

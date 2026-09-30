@@ -379,6 +379,7 @@ export type SavePromptOverrideCommand = PromptScope & Readonly<{
 
 export type ResetPromptOverrideCommand = PromptScope & Readonly<{
   key: PromptCatalogKey;
+  allCampaigns?: boolean;
 }>;
 
 export type CostCategory = "story" | "image" | "memory";

@@ -790,9 +790,12 @@ export async function buildServer({
   }));
   app.delete("/api/v1/prompt-library/overrides", async (request) => {
     const body = z.object({
-      key: promptTemplateKeySchema,
+      key: z.union([promptTemplateKeySchema, continuityPromptTemplateKeySchema]),
       scope: z.enum(["application", "campaign"]),
-      campaignId: z.uuid().optional()
+      campaignId: z.uuid().optional(),
+      allCampaigns: z.boolean().optional()
+    }).refine(value => !value.allCampaigns || (value.scope === "application" && !value.campaignId), {
+      message: "Resetting all campaigns requires application scope without a campaign ID."
     }).parse(request.body);
     return {
       library: await providers.resetPromptOverride(
@@ -800,6 +803,7 @@ export async function buildServer({
         {
           key: body.key,
           scope: body.scope,
+          ...(body.allCampaigns === undefined ? {} : { allCampaigns: body.allCampaigns }),
           ...(body.campaignId === undefined ? {} : { campaignId: body.campaignId })
         }
       )
@@ -808,7 +812,7 @@ export async function buildServer({
   app.post("/api/v1/prompt-library/preview", async (request) => {
     const body = z.object({
       key: z.union([promptTemplateKeySchema, continuityPromptTemplateKeySchema]),
-      content: z.string().trim().min(1).max(16_000),
+      content: z.string().trim().min(1).max(64_000),
       campaignId: z.uuid().optional()
     }).parse(request.body);
     return providers.previewPrompt(await initialOwnerId(pool), {
