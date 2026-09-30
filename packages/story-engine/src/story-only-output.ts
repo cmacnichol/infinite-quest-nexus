@@ -45,10 +45,14 @@ function protectedBase(value: Record<string, unknown>): StoryParseResult {
   return parseStoryOutput(JSON.stringify({ ...value, ...placeholderChoices }));
 }
 
-export function parseStoryOnlyOutput(content: string): StoryOnlyParseResult {
+export function parseStoryOnlyOutput(content: string, options: { validateOriginalChoices?: boolean } = {}): StoryOnlyParseResult {
   const complete = parseStoryOutput(content);
   if (complete.ok) {
-    const reasons = choiceReasons(complete.story as unknown as Record<string, unknown>);
+    // Saved repair checkpoints must still recognize the original count defect,
+    // even when today's provider parser can normalize that response.
+    const reasons = choiceReasons(options.validateOriginalChoices
+      ? extractJsonObject(content) as Record<string, unknown>
+      : complete.story as unknown as Record<string, unknown>);
     return reasons.length ? { ok: false, kind: "choices", base: omitChoices(complete.story), reasons } : complete;
   }
   let raw: unknown;

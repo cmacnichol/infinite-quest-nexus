@@ -31,6 +31,29 @@ function story(overrides: Record<string, unknown> = {}) {
 }
 
 describe("story output integrity", () => {
+  it("keeps the first four valid provider choices without changing other fields or raw output", () => {
+    const original = JSON.parse(story());
+    const raw = JSON.stringify({ ...original, choices: [...original.choices, "Study the doorway.", "Return home."] });
+    const result = parseStoryOutput(raw);
+    expect(result).toMatchObject({ ok: true, story: original });
+    expect(JSON.parse(raw).choices).toHaveLength(6);
+  });
+
+  it.each([null, "", "x".repeat(2001), "Roll a d20."])("does not hide an invalid surplus choice (%s)", (extra) => {
+    const original = JSON.parse(story());
+    expect(parseStoryOutput(story({ choices: [...original.choices, extra] })).ok).toBe(false);
+  });
+
+  it.each([
+    { narration: "Roll a d20." },
+    { canonical_facts: "invalid" },
+    { custom_action_suggestion: "" },
+    { scratchpad: undefined }
+  ])("does not bypass other validation when trimming choices (%j)", (invalid) => {
+    const original = JSON.parse(story());
+    expect(parseStoryOutput(story({ ...invalid, choices: [...original.choices, "Study the doorway."] })).ok).toBe(false);
+  });
+
   it("accepts a complete fiction-only story object", () => {
     const result = parseStoryOutput(`\`\`\`json\n${story()}\n\`\`\``);
     expect(result.ok).toBe(true);

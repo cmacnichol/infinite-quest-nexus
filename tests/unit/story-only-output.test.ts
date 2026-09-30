@@ -13,6 +13,23 @@ const fields = {
 };
 
 describe("story-only output", () => {
+  it("accepts surplus valid choices while preserving the first four and protected story", () => {
+    expect(parseStoryOnlyOutput(JSON.stringify({ ...base, ...fields, choices: [...fields.choices, "Leave."] })))
+      .toMatchObject({ ok: true, story: { ...base, ...fields } });
+  });
+
+  it("preserves the original choice-count defect when validating an older repair checkpoint", () => {
+    expect(parseStoryOnlyOutput(JSON.stringify({ ...base, ...fields, choices: [...fields.choices, "Leave."] }),
+      { validateOriginalChoices: true }))
+      .toMatchObject({ ok: false, kind: "choices", base, reasons: ["count"] });
+  });
+
+  it("still rejects duplicate retained choices after surplus-choice normalization", () => {
+    expect(parseStoryOnlyOutput(JSON.stringify({
+      ...base, ...fields, choices: ["Wait.", " WAIT. ", "Listen.", "Look around.", "Leave."]
+    }))).toMatchObject({ ok: false, kind: "choices", reasons: expect.arrayContaining(["duplicate"]) });
+  });
+
   it("classifies normalized duplicate choices while preserving a valid non-choice base", () => {
     const parsed = parseStoryOnlyOutput(JSON.stringify({
       ...base, choices: ["Wait.", " WAIT. ", "Listen.", "Look around."],
