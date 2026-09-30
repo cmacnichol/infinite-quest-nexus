@@ -94,6 +94,40 @@ integration("Prompt Library persistence", () => {
     )).rejects.toThrow();
   });
 
+  it("resets only the selected prompt across owned campaigns and keeps application defaults", async () => withTransaction(pool, async (client) => {
+    const repository = createPromptRepository(client);
+    const application = { ownerUserId, scope: "application" as const };
+    const campaign = { ownerUserId, scope: "campaign" as const, campaignId };
+    await repository.savePromptOverride({ ...application, key: "story_system", content: "a".repeat(64_000) });
+    await repository.savePromptOverride({ ...campaign, key: "story_system", content: "Campaign writer." });
+    await repository.savePromptOverride({ ...campaign, key: "illustration_refinement", content: "Keep this illustration override." });
+    const otherOwner = (await client.query<{ id: string }>("INSERT INTO users(display_name) VALUES ('Reset isolation') RETURNING id")).rows[0]!.id;
+    const makeCampaign = async (owner: string) => {
+      const world = (await client.query<{ id: string }>("INSERT INTO worlds(owner_user_id,title) VALUES($1,'Reset fixture') RETURNING id", [owner])).rows[0]!.id;
+      const version = (await client.query<{ id: string }>("INSERT INTO world_versions(world_id,owner_user_id,version_number,content) VALUES($1,$2,1,'{}') RETURNING id", [world, owner])).rows[0]!.id;
+      return (await client.query<{ id: string }>("INSERT INTO campaigns(owner_user_id,world_version_id,title) VALUES($1,$2,'Reset fixture') RETURNING id", [owner, version])).rows[0]!.id;
+    };
+    const secondCampaign = { ...campaign, campaignId: await makeCampaign(ownerUserId) };
+    const foreignCampaign = { ownerUserId: otherOwner, scope: "campaign" as const, campaignId: await makeCampaign(otherOwner) };
+    await repository.savePromptOverride({ ...secondCampaign, key: "story_system", content: "Second campaign writer." });
+    await repository.savePromptOverride({ ...foreignCampaign, key: "story_system", content: "Foreign campaign writer." });
+    await repository.savePromptOverride({ ownerUserId: otherOwner, scope: "application", key: "story_system", content: "Other owner default." });
+    const frozen = (await repository.loadPromptSnapshot(campaign)).snapshot;
+    await repository.resetPromptOverride({ ...application, key: "story_system", allCampaigns: true });
+    const snapshot = (await repository.loadPromptSnapshot(campaign)).snapshot;
+    expect(snapshot.story_system).toMatchObject({ source: "application", content: "a".repeat(64_000) });
+    expect((await repository.loadPromptSnapshot(secondCampaign)).snapshot.story_system).toEqual(snapshot.story_system);
+    expect((await repository.loadPromptSnapshot(foreignCampaign)).snapshot.story_system.content).toBe("Foreign campaign writer.");
+    await expect(repository.resetPromptOverride({ ...campaign, key: "story_system", allCampaigns: true })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(repository.resetPromptOverride({ ...application, key: "world_generation", allCampaigns: true })).rejects.toMatchObject({ statusCode: 400 });
+    expect(snapshot.illustration_refinement.content).toBe("Keep this illustration override.");
+    expect(frozen.story_system.content).toBe("Campaign writer.");
+    expect((await repository.loadPromptSnapshot({ ownerUserId: otherOwner, scope: "application" })).snapshot.story_system.content).toBe("Other owner default.");
+    await repository.resetPromptOverride({ ...application, key: "story_system", allCampaigns: true });
+    await repository.resetPromptOverride({ ...application, key: "story_system" });
+    expect((await repository.loadPromptSnapshot(campaign)).snapshot.story_system.source).toBe("shipped");
+  }));
+
   it("captures campaign-over-application review and repair overrides as a strict v2 pair", async () => {
     await pool.query(`INSERT INTO prompt_template_overrides(owner_user_id,campaign_id,prompt_key,content) VALUES
       ($1,NULL,'story_continuity_review','Application review.'),

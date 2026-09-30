@@ -436,11 +436,12 @@ export function createProviderApplicationAdapter(composition: ProviderApiComposi
       key: PromptCatalogKey;
       scope: "application" | "campaign";
       campaignId?: string;
+      allCampaigns?: boolean;
     }>) {
       const scope = input.scope === "campaign"
         ? { ownerUserId, scope: "campaign" as const, campaignId: input.campaignId! }
         : { ownerUserId, scope: "application" as const };
-      return composition.application.resetPromptOverride({ ...scope, key: input.key });
+      return composition.application.resetPromptOverride({ ...scope, key: input.key, ...(input.allCampaigns === undefined ? {} : { allCampaigns: input.allCampaigns }) });
     }
   });
 }

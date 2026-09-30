@@ -312,7 +312,7 @@ const generatedWorldCharacterSeedRequirements = `Return exactly 3 or 4 distinct 
 Keep every seed compact; complete character profiles are generated separately.`;
 
 export const PROMPT_TEMPLATE_CATALOG: Record<PromptTemplateKey, LegacyPromptTemplateDefinition> = {
-  story_system: { key: "story_system", title: "Story writer", category: "Story Engine", description: "Produces the validated next-turn story object.", campaignOverrideAllowed: true, maxLength: 16000, variables: [], defaultContent: STORY_SYSTEM_PROMPT },
+  story_system: { key: "story_system", title: "Story writer", category: "Story Engine", description: "Produces the validated next-turn story object.", campaignOverrideAllowed: true, maxLength: 64_000, variables: [], defaultContent: STORY_SYSTEM_PROMPT },
   story_recovery_output_limit: { key: "story_recovery_output_limit", title: "Story recovery: output limit", category: "Story Engine", description: "Recovers a truncated story response.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["minWords", "maxWords"], defaultContent: "Return one complete replacement JSON object from the same supported fictional events. Do not continue the fragment. The {{minWords}}-{{maxWords}} narration range is a soft pacing goal: preserve the requested scope when supported, but end early rather than adding unsupported facts or shortening a complete valid turn merely to fit a compact range. Keep continuity fields concise and close every field." + "\n\n" + STORY_PROSE_GUIDANCE },
   story_recovery_mechanics: { key: "story_recovery_mechanics", title: "Story recovery: fiction boundary", category: "Story Engine", description: "Rewrites narration that leaks mechanics.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["details"], defaultContent: "Rewrite the rejected response as one complete JSON object. Preserve only the supported fictional outcome, required player-input beats, and valid continuity.{{details}} Remove mechanics language without adding new material events, canon facts, characters, locations, motives, time jumps, or plot developments. Length is a soft pacing goal; prefer a concise complete turn to padding." + "\n\n" + STORY_PROSE_GUIDANCE },
   story_recovery_schema: { key: "story_recovery_schema", title: "Story recovery: schema", category: "Story Engine", description: "Repairs invalid story JSON.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["errors"], defaultContent: "Return one syntactically valid, schema-complete replacement JSON object for the same supported turn.{{errors}} Preserve valid narration and continuity when possible. Do not add new material events or canon merely to make the replacement longer. tracker_updates must be an array of JSON objects such as [{\"name\":\"fictional tracker name\",\"value\":\"new fictional value\"}], or [] when unchanged; never return tracker strings. Length is a soft pacing goal; finish once the supported turn is complete." + "\n\n" + STORY_PROSE_GUIDANCE },
@@ -359,7 +359,7 @@ export const promptTemplateOverrideSchema = z.object({
   key: z.union([promptTemplateKeySchema, continuityPromptTemplateKeySchema]),
   scope: z.enum(["application", "campaign"]),
   campaignId: z.uuid().optional(),
-  content: z.string().min(1).max(16_000).refine((content) => content.trim().length > 0, {
+  content: z.string().min(1).max(64_000).refine((content) => content.trim().length > 0, {
     message: "Prompt content cannot be blank."
   }),
   compatibilityAcknowledgement: promptCompatibilityAcknowledgementSchema.optional()

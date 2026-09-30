@@ -440,6 +440,25 @@ export function createPromptRepository(database: DatabaseClient, previewOptions:
       return listPromptLibrary(command);
     },
     async resetPromptOverride(command) {
+      if (command.allCampaigns) {
+        const definition = activeDefinition(command.key);
+        if (command.scope !== "application" || !definition.campaignOverrideAllowed) {
+          throw Object.assign(new Error("Select an application prompt that supports campaign overrides."), { statusCode: 400 });
+        }
+        // One statement keeps deletion and continuation invalidation atomic.
+        await database.query(
+          `WITH removed AS (
+             DELETE FROM prompt_template_overrides
+              WHERE owner_user_id=$1 AND campaign_id IS NOT NULL AND prompt_key=$2
+              RETURNING campaign_id
+           )
+           UPDATE model_chains SET active=false,updated_at=now()
+            WHERE owner_user_id=$1 AND active AND $3::boolean
+              AND campaign_id IN (SELECT campaign_id FROM removed)`,
+          [command.ownerUserId, command.key, RUNTIME_KEYS.includes(command.key as PromptTemplateKey)]
+        );
+        return listPromptLibrary(command);
+      }
       const campaignId = command.scope === "campaign" ? command.campaignId : null;
       const value = promptTemplateOverrideSchema.parse({
         key: command.key,
