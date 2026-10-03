@@ -2,6 +2,10 @@ import { expect, test } from "@playwright/test";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const absentTargetCases = [
+  { name: "missing", id: "10000000-0000-4000-8000-000000009999", expected: "not available in this library" },
+  { name: "invalid", id: "not-a-valid-uuid", expected: "valid" }
+] as const;
 
 async function navigateFromSetupMenu(page: import("@playwright/test").Page, destinationId: string): Promise<void> {
   const setup = page.locator("#navSetup");
@@ -71,6 +75,52 @@ test("direct_hash_selects_correct_workspace", async ({ page }) => {
   await expect(page.locator("#prompt-library")).toBeVisible();
   await expect(page.locator("#campaigns")).toBeHidden();
 });
+
+for (const target of absentTargetCases) {
+  test(`pending_world_detail_keeps_${target.name}_world_link_absence_visible`, async ({ page }) => {
+    const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 0 });
+    const world = fixture.worlds[0]!;
+    const api = await installLegacyUiFixture(page, fixture, { delays: { [`GET /api/v1/worlds/${world.id}`]: 10_000 } });
+    await page.goto(`${origin}/nexus/index.html#world-library`);
+    await page.locator(`#worldManagementCarousel [data-world-id="${world.id}"]`).click();
+    await expect(page.locator("#worldStatus")).toContainText("Loading selected world");
+
+    await page.evaluate(id => { window.location.hash = `#world-library?worldId=${encodeURIComponent(id)}`; }, target.id);
+    await expect(page.locator("#worldStatus")).toContainText(target.expected);
+    api.releaseDelayedRoute();
+    await expect(page.locator("#worldEditorTitle")).toHaveText(String(world.title));
+    await expect(page.locator(`#worldManagementCarousel [data-world-id="${world.id}"]`)).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("#worldStatus")).toContainText(target.expected);
+    await expect(page).toHaveURL(new RegExp(`#world-library\\?worldId=${encodeURIComponent(target.id)}$`, "u"));
+    expect(api.writes).toEqual([]);
+    if (target.name === "missing") {
+      await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/missing-world-after-stale-response.png", fullPage: false });
+    }
+  });
+
+  test(`pending_campaign_world_detail_keeps_${target.name}_campaign_link_absence_visible`, async ({ page }) => {
+    const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+    const campaign = fixture.campaigns[0]!;
+    const api = await installLegacyUiFixture(page, fixture, { delays: { [`GET /api/v1/worlds/${campaign.worldId}`]: 10_000 } });
+    await page.goto(`${origin}/nexus/index.html#campaigns`);
+    await page.locator(`#campaignList [data-campaign-id="${campaign.id}"]`).click();
+    await expect(page.locator("#memoryTitle")).toHaveText(String(campaign.title));
+
+    await page.evaluate(id => { window.location.hash = `#campaigns?campaignId=${encodeURIComponent(id)}`; }, target.id);
+    await expect(page.locator("#campaignStatusMessage")).toContainText(target.expected);
+    api.releaseDelayedRoute();
+    await expect(page.locator("#campaignWorldVersion option")).toHaveCount(1);
+    await expect(page.locator("#memoryTitle")).toHaveText(String(campaign.title));
+    await expect(page.locator(`#campaignList [data-campaign-id="${campaign.id}"]`)).toHaveClass(/active/u);
+    await expect(page.locator("#campaignStatusMessage")).toBeVisible();
+    await expect(page.locator("#campaignStatusMessage")).toContainText(target.expected);
+    await expect(page).toHaveURL(new RegExp(`#campaigns\\?campaignId=${encodeURIComponent(target.id)}$`, "u"));
+    expect(api.writes).toEqual([]);
+    if (target.name === "missing") {
+      await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/missing-campaign-after-stale-response.png", fullPage: false });
+    }
+  });
+}
 
 test("dirty_back_navigation_stays", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });

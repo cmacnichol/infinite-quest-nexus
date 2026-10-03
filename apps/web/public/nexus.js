@@ -650,6 +650,7 @@ const MANAGEMENT_HISTORY_STATE_KEY = "__infiniteQuestNexusManagement";
 const MANAGEMENT_ROUTE_NAMES = new Set(["#dashboard", "#world-library", "#campaigns", "#providers", "#prompt-library", "#data-transfer", "#imports"]);
 const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 let managementNavigationIntent = 0;
+let managementSelectionErrorIntent = null;
 let acceptedManagementHash = window.location.hash || "#dashboard";
 let acceptedManagementRoute = null;
 let acceptedManagementHistoryIndex = Number.NaN;
@@ -718,12 +719,19 @@ function managementSelectionHash(view, kind, id) {
 }
 
 function managementSelectionError(route, message) {
+  managementSelectionErrorIntent = managementNavigationIntent;
   if (route.view === "worlds") {
     elements.worldStatus.textContent = message;
     elements.worldStatus.className = "status error";
   } else if (route.view === "campaigns") {
-    campaignMessage(message, "error");
+    elements.campaignStatusMessage.textContent = message;
+    elements.campaignStatusMessage.className = "status error";
   }
+}
+
+function managementSelectionErrorIsCurrent(view) {
+  return managementSelectionErrorIntent === managementNavigationIntent
+    && acceptedManagementRoute?.view === view;
 }
 
 async function applyExplicitManagementSelection(route, intent) {
@@ -876,6 +884,7 @@ async function acceptManagementRoute(hash, { source = "link", focus = true, dest
   }
   if (intent !== managementNavigationIntent || acceptedManagementRoute !== previousRoute || acceptedManagementHash !== previousHash) return false;
 
+  managementSelectionErrorIntent = null;
   if (source === "link") {
     if (hash !== previousHash) {
       acceptedManagementHistoryIndex = previousIndex + 1;
@@ -2386,11 +2395,13 @@ function scrollCarousel(element, direction) {
 }
 
 function worldMessage(message, type = "") {
+  if (managementSelectionErrorIsCurrent("worlds")) return;
   elements.worldStatus.textContent = message;
   elements.worldStatus.className = `status ${type}`.trim();
 }
 
 function campaignMessage(message, type = "") {
+  if (managementSelectionErrorIsCurrent("campaigns")) return;
   elements.campaignStatusMessage.textContent = message;
   elements.campaignStatusMessage.className = `status ${type}`.trim();
   elements.campaignStatusMessage.classList.remove("hidden");
@@ -4567,8 +4578,10 @@ async function selectCampaign(campaign, { explicit = true } = {}) {
   elements.campaignWorldVersion.value = campaign.worldVersionId;
   setCampaignSettingsPanel(activeCampaignSettingsPanel);
   elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
-  if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
-  else elements.campaignStatusMessage.classList.add("hidden");
+  if (!managementSelectionErrorIsCurrent("campaigns")) {
+    if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
+    else elements.campaignStatusMessage.classList.add("hidden");
+  }
   const metrics = await refreshCampaignMemoryMetrics();
   if (selectionRequest !== campaignSelectionRequest) return;
   await refreshCampaignCostSummary();

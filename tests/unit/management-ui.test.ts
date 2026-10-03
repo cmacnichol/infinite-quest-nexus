@@ -57,6 +57,9 @@ describe("Nexus management UI contracts", () => {
     const worldBId = "11111111-1111-4111-8111-111111111112";
     const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
     const managementSelectionHash = managementFunctionWithBindings<(view: string, kind: string, id: string) => string>("managementSelectionHash", { UUID_ROUTE_PATTERN });
+    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
+      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
+    });
     const api = vi.fn(async (path: string) => {
       if (path.endsWith("/state")) return { activeTurnNumber: 1, revision: 2 };
       if (path === `/api/v1/worlds/${worldAId}`) return oldWorld;
@@ -66,6 +69,7 @@ describe("Nexus management UI contracts", () => {
       elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
       UUID_ROUTE_PATTERN,
       managementSelectionHash,
+      managementSelectionErrorIsCurrent,
       canLeaveCampaignEditor: async () => true,
       campaignSettingsSnapshot: () => ({}),
       campaignEditGuard: { reset: () => undefined },
@@ -172,6 +176,9 @@ describe("Nexus management UI contracts", () => {
   it("keeps campaign feedback visible when a non-Overview panel is active", () => {
     const { document } = parseHTML(managementHtml);
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const managementSelectionErrorIsCurrent = managementFunctionWithBindings<(view: string) => boolean>("managementSelectionErrorIsCurrent", {
+      managementSelectionErrorIntent: null, managementNavigationIntent: 0, acceptedManagementRoute: null
+    });
     const functions = managementFunctions<{
       setCampaignSettingsPanel: (panelId: string) => void;
       campaignMessage: (message: string, type?: string) => void;
@@ -179,6 +186,7 @@ describe("Nexus management UI contracts", () => {
       elements,
       document,
       window: { matchMedia: () => ({ matches: false }) },
+      managementSelectionErrorIsCurrent,
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"]
     });
 

@@ -21,6 +21,8 @@ const worldB = {
   latestVersionId: "22222222-2222-4222-8222-222222222221",
   latestPreview: { genre: "Fantasy", tone: "Bright", premise: "Beta premise", firstAction: "Enter the grove." }
 };
+const worldCId = "33333333-3333-4333-8333-333333333333";
+const worldCVersionId = "33333333-3333-4333-8333-333333333331";
 const worldDetails = new Map<string, Record<string, unknown>>();
 const apiEvents: Array<{ method: string; path: string; status: number; body: string | null; response: unknown }> = [];
 const detailGates = new Map<string, Promise<void>>();
@@ -85,8 +87,8 @@ async function fixtureRoute(route: Route) {
   }
   else if (path === "/worlds" && request.method() === "POST") {
     const input = JSON.parse(request.postData() || "{}");
-    const id = "world-c";
-    const created = fullWorld({ ...worldB, id, title: input.title, latestVersionId: "", latestVersionNumber: null, status: "draft" });
+    const id = worldCId;
+    const created = fullWorld({ ...worldB, id, title: input.title, latestVersionId: worldCVersionId, latestVersionNumber: null, status: "draft" });
     created.versions = [];
     created.latestVersionId = null;
     created.latestVersionNumber = null;
@@ -150,8 +152,8 @@ async function fixtureRoute(route: Route) {
     body = { versionNumber: 3 };
   } else if (parts[0] === "worlds" && parts[1] === "11111111-1111-4111-8111-111111111111" && parts[2] === "fork" && request.method() === "POST") {
     const input = JSON.parse(request.postData() || "{}");
-    const id = "world-c";
-    const fork = fullWorld({ ...worldB, id, title: input.title, latestVersionId: "", latestVersionNumber: null, status: "draft" });
+    const id = worldCId;
+    const fork = fullWorld({ ...worldB, id, title: input.title, latestVersionId: worldCVersionId, latestVersionNumber: null, status: "draft" });
     fork.versions = [];
     fork.latestVersionId = null;
     fork.latestVersionNumber = null;
@@ -169,8 +171,8 @@ async function fixtureRoute(route: Route) {
   } else if (path === "/imports/world" && request.method() === "POST") {
     const gate = worldImportGates.shift();
     if (gate) await gate;
-    const id = "world-c";
-    const imported = fullWorld({ ...worldB, id, title: "World Gamma", latestVersionId: "", latestVersionNumber: null, status: "draft" });
+    const id = worldCId;
+    const imported = fullWorld({ ...worldB, id, title: "World Gamma", latestVersionId: worldCVersionId, latestVersionNumber: null, status: "draft" });
     imported.versions = [];
     imported.latestVersionId = null;
     imported.latestVersionNumber = null;
@@ -493,7 +495,7 @@ test("creating_a_world_selects_its_returned_draft_instead_of_the_previous_world"
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Gamma");
   const createRequest = apiEvents.find((event) => event.method === "POST" && event.path === "/worlds");
   expect(JSON.parse(createRequest?.body || "{}").content.world.title).toBe("World Gamma");
-  await expect(page.locator('#worldManagementCarousel [data-world-id="world-c"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(`#worldManagementCarousel [data-world-id="${worldCId}"]`)).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]')).toHaveAttribute("aria-pressed", "false");
   await page.screenshot({ path: resolve(evidenceDirectory, "create-selects-returned-world.png") });
 });
@@ -508,7 +510,7 @@ test("forking_a_world_selects_its_returned_draft", async ({ page }) => {
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Gamma Fork");
   const forkRequest = apiEvents.find((event) => event.method === "POST" && event.path === "/worlds/11111111-1111-4111-8111-111111111111/fork");
   expect(JSON.parse(forkRequest?.body || "{}")).toMatchObject({ title: "World Gamma Fork", sourceWorldVersionId: "11111111-1111-4111-8111-111111111121" });
-  await expect(page.locator('#worldManagementCarousel [data-world-id="world-c"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(`#worldManagementCarousel [data-world-id="${worldCId}"]`)).toHaveAttribute("aria-pressed", "true");
   await page.screenshot({ path: resolve(evidenceDirectory, "fork-selects-returned-world.png") });
 });
 
@@ -529,7 +531,7 @@ test("portable_world_import_selects_its_returned_world", async ({ page }) => {
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Gamma");
   const importRequest = apiEvents.find((event) => event.method === "POST" && event.path === "/imports/world");
   expect(JSON.parse(importRequest?.body || "{}")).toMatchObject({ sourceName: "portable.world.json", worldExport: { format: "infinite-quest-world", title: "World Gamma" } });
-  await expect(page.locator('#worldManagementCarousel [data-world-id="world-c"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(`#worldManagementCarousel [data-world-id="${worldCId}"]`)).toHaveAttribute("aria-pressed", "true");
   await page.screenshot({ path: resolve(evidenceDirectory, "portable-import-selects-returned-world.png") });
 });
 
@@ -600,7 +602,7 @@ test("a_stayed_import_result_does_not_become_the_world_selected_by_a_later_refre
   await expect(page.locator("#worldTitle")).toHaveValue("Unsaved Alpha edit");
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
   await expect(page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]')).toHaveAttribute("aria-pressed", "true");
-  expect(apiEvents.some((event) => event.method === "GET" && event.path === "/worlds/world-c")).toBe(false);
+  expect(apiEvents.some((event) => event.method === "GET" && event.path === `/worlds/${worldCId}`)).toBe(false);
   expect(apiEvents.some((event) => ["PUT", "PATCH", "DELETE"].includes(event.method))).toBe(false);
 
   await page.locator("#cancelWorldAuthor").click();
@@ -608,7 +610,7 @@ test("a_stayed_import_result_does_not_become_the_world_selected_by_a_later_refre
   await page.locator('#discardChangesDialog button[value="discard"]').click();
   await expect(page.locator("#worldAuthorDialog")).toBeHidden();
   const worldListsBeforeRefresh = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
-  const worldADetailPattern = new RegExp(`^/worlds/(?:${worldA.id}|world-c)$`, "u");
+  const worldADetailPattern = new RegExp(`^/worlds/(?:${worldA.id}|${worldCId})$`, "u");
   const worldDetailReadsBeforeRefresh = apiEvents.filter((event) => event.method === "GET" && worldADetailPattern.test(event.path)).length;
   await page.locator("#refreshWorlds").click();
   await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(worldListsBeforeRefresh);
@@ -616,7 +618,7 @@ test("a_stayed_import_result_does_not_become_the_world_selected_by_a_later_refre
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
   await expect(page.locator('#worldManagementCarousel [data-world-id="11111111-1111-4111-8111-111111111111"]')).toHaveAttribute("aria-pressed", "true");
-  expect(apiEvents.some((event) => event.method === "GET" && event.path === "/worlds/world-c")).toBe(false);
+  expect(apiEvents.some((event) => event.method === "GET" && event.path === `/worlds/${worldCId}`)).toBe(false);
   expect(apiEvents.some((event) => ["PUT", "PATCH", "DELETE"].includes(event.method))).toBe(false);
   await page.screenshot({ path: resolve(evidenceDirectory, "import-result-dirty-stay-refresh-keeps-alpha.png") });
 });
