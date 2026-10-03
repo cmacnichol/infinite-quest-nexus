@@ -8,13 +8,28 @@ import {
   createDocumentVisibilitySource,
   createNoopSessionPort,
   createNexusApiClient,
+  createNexusHttpClient,
+  createReaderHistoryApi,
+  createIndexedDbReaderPositionDatabase,
+  createReaderPositionStore,
   createPendingSubmissionStore,
   createFailedTurnPromptStore,
   createIndexedDbDraftDatabase,
   createStoryActionDraftStore
 } from "@infinite-quest/client-web";
 import { createGenerationWorkflow, type Clock, type DelayScheduler, type GenerationWorkflow, type IdFactory, type PendingSubmissionStore, type SessionPort } from "@infinite-quest/client-core";
-import type { DraftDatabasePort, EventSourceFactory, FailedTurnPromptStore, NexusApiClient, StoryActionDraftStore, StoryMemoryApi } from "@infinite-quest/client-web";
+import type {
+  DraftDatabasePort,
+  EventSourceFactory,
+  FailedTurnPromptStore,
+  NexusApiClient,
+  ReaderHistoryApi,
+  ReaderPositionDatabasePort,
+  ReaderPositionStore,
+  StoryActionDraftStore,
+  StoryMemoryApi,
+  NexusHttpClientOptions
+} from "@infinite-quest/client-web";
 import { createLegacyIllustrationApi, type LegacyIllustrationApi } from "./legacy-illustration-api.js";
 
 export interface StoryPlayerComposition {
@@ -25,6 +40,8 @@ export interface StoryPlayerComposition {
   readonly idFactory: IdFactory;
   readonly illustrations: LegacyIllustrationApi;
   readonly pendingSubmissions: PendingSubmissionStore;
+  readonly readerHistory: ReaderHistoryApi;
+  readonly readerPositions: ReaderPositionStore;
   readonly failedTurnPrompts: FailedTurnPromptStore;
   readonly session: SessionPort;
   readonly storyMemory: StoryMemoryApi;
@@ -36,6 +53,7 @@ export interface StoryPlayerEnvironment {
   readonly document: Document;
   readonly storage: Storage;
   readonly draftDatabase?: DraftDatabasePort;
+  readonly readerPositionDatabase?: ReaderPositionDatabasePort;
   readonly eventSourceFactory: EventSourceFactory | null;
   readonly random: () => number;
 }
@@ -54,6 +72,9 @@ export interface StoryPlayerCompositionFactories {
   readonly createWorkflow: typeof createGenerationWorkflow;
   readonly createIllustrations: typeof createLegacyIllustrationApi;
   readonly createStoryMemory: typeof createStoryMemoryApi;
+  readonly createReaderHistory: (options: NexusHttpClientOptions) => ReaderHistoryApi;
+  readonly createReaderPositionDatabase: typeof createIndexedDbReaderPositionDatabase;
+  readonly createReaderPositions: typeof createReaderPositionStore;
 }
 
 const defaultFactories: StoryPlayerCompositionFactories = {
@@ -69,7 +90,10 @@ const defaultFactories: StoryPlayerCompositionFactories = {
   createSource: createBrowserGenerationSource,
   createWorkflow: createGenerationWorkflow,
   createIllustrations: createLegacyIllustrationApi,
-  createStoryMemory: createStoryMemoryApi
+  createStoryMemory: createStoryMemoryApi,
+  createReaderHistory: (options) => createReaderHistoryApi(createNexusHttpClient(options)),
+  createReaderPositionDatabase: createIndexedDbReaderPositionDatabase,
+  createReaderPositions: createReaderPositionStore
 };
 
 function browserEnvironment(): StoryPlayerEnvironment {
@@ -98,7 +122,10 @@ export function createStoryPlayerComposition(
     () => new Date(clock.now()),
     () => idFactory.create()
   );
+  const readerPositionDatabase = environment.readerPositionDatabase ?? factories.createReaderPositionDatabase();
+  const readerPositions = factories.createReaderPositions(readerPositionDatabase, () => new Date(clock.now()));
   const api = factories.createApi({ basePath: "/api/v1", session });
+  const readerHistory = factories.createReaderHistory({ basePath: "/api/v1", session });
   const pendingSubmissions = factories.createPendingSubmissions(environment.storage);
   const failedTurnPrompts = createFailedTurnPromptStore(environment.storage);
   const source = factories.createSource({
@@ -126,6 +153,8 @@ export function createStoryPlayerComposition(
     idFactory,
     illustrations: factories.createIllustrations({ basePath: "/api/v1", session }),
     pendingSubmissions,
+    readerHistory,
+    readerPositions,
     failedTurnPrompts,
     session,
     storyMemory: factories.createStoryMemory({ basePath: "/api/v1", session }),

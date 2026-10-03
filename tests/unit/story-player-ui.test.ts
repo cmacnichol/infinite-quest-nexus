@@ -2774,7 +2774,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
     expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
     expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');
-    expect(storyScript).toContain('const previousDisabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);');
+    expect(storyScript).toContain('const previousDisabled = generationLocked || turnCount === 0 || Boolean(state.readerPinnedTurn) || (curr <= 0 && !state.historyNextCursor);');
     expect(storyScript).toContain('const nextDisabled = generationLocked || turnCount === 0 || isLatest;');
     expect(storyScript).toContain('if (btnReaderJumpLatest) {');
     expect(storyScript).toContain('btnReaderJumpLatest.disabled = generationLocked || turnCount === 0 || isLatest;');

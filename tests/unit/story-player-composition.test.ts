@@ -19,6 +19,9 @@ describe("Story Player composition bootstrap", () => {
     const workflow = { submit: vi.fn(), resume: vi.fn() };
     const illustrations = { config: vi.fn() };
     const storyMemory = { get: vi.fn(), update: vi.fn() };
+    const readerHistory = { getTurn: vi.fn(), searchHistory: vi.fn() };
+    const readerPositionDatabase = { read: vi.fn(), write: vi.fn() };
+    const readerPositions = { read: vi.fn(), write: vi.fn() };
     const factories = {
       createSession: vi.fn(() => session),
       createClock: vi.fn(() => clock),
@@ -32,13 +35,17 @@ describe("Story Player composition bootstrap", () => {
       createSource: vi.fn(() => source),
       createWorkflow: vi.fn(() => workflow),
       createIllustrations: vi.fn(() => illustrations),
-      createStoryMemory: vi.fn(() => storyMemory)
+      createStoryMemory: vi.fn(() => storyMemory),
+      createReaderHistory: vi.fn(() => readerHistory),
+      createReaderPositionDatabase: vi.fn(),
+      createReaderPositions: vi.fn(() => readerPositions)
     };
 
     const composition = createStoryPlayerComposition({
       document: {} as Document,
       storage: {} as Storage,
       draftDatabase,
+      readerPositionDatabase,
       eventSourceFactory: null,
       random: () => 0.5
     }, factories as never);
@@ -62,8 +69,11 @@ describe("Story Player composition bootstrap", () => {
     expect(factories.createActionDrafts).toHaveBeenCalledWith(draftDatabase, expect.any(Function), expect.any(Function));
     expect(factories.createIllustrations).toHaveBeenCalledWith({ basePath: "/api/v1", session });
     expect(factories.createStoryMemory).toHaveBeenCalledWith({ basePath: "/api/v1", session });
-    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, actionDrafts, api, workflow, illustrations, storyMemory });
-    Object.entries(factories).filter(([name]) => name !== "createDraftDatabase")
+    expect(factories.createReaderHistory).toHaveBeenCalledWith({ basePath: "/api/v1", session });
+    expect(factories.createReaderPositionDatabase).not.toHaveBeenCalled();
+    expect(factories.createReaderPositions).toHaveBeenCalledWith(readerPositionDatabase, expect.any(Function));
+    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, actionDrafts, api, workflow, illustrations, storyMemory, readerHistory, readerPositions });
+    Object.entries(factories).filter(([name]) => !["createDraftDatabase", "createReaderPositionDatabase"].includes(name))
       .forEach(([, factory]) => expect(factory).toHaveBeenCalledOnce());
   });
 

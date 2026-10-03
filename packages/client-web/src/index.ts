@@ -112,3 +112,15 @@ export type {
   WriteResult
 } from "./storage/story-action-drafts.js";
 export * from "./reader-history-api.js";
+export {
+  createIndexedDbReaderPositionDatabase,
+  createReaderPositionStore
+} from "./storage/reader-positions.js";
+export type {
+  ReaderPosition,
+  ReaderPositionDatabasePort,
+  ReaderPositionInput,
+  ReaderPositionScope,
+  ReaderPositionStore,
+  ReaderPositionWriteResult
+} from "./storage/reader-positions.js";

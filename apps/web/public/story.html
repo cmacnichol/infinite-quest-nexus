@@ -89,6 +89,11 @@
           <button id="btnReaderHistory" class="small ghost" type="button" aria-label="History" title="Open turn history">History</button>
           <button id="btnReaderJumpLatest" class="small ghost" type="button" aria-label="Jump to latest" title="Jump to the latest turn">Latest</button>
         </nav>
+        <div id="readerResumePrompt" class="reader-resume-prompt hidden" role="group" aria-label="Saved reading position" hidden>
+          <span id="readerResumeMessage"></span>
+          <button id="btnResumeReading" class="small primary" type="button">Resume reading</button>
+        </div>
+        <p id="readerPositionNotice" class="reader-position-notice" role="status" aria-live="polite" hidden></p>
 
         <section id="storyLoadRecovery" class="story-load-recovery hidden" role="alert" aria-live="assertive" aria-labelledby="storyLoadRecoveryTitle">
           <h2 id="storyLoadRecoveryTitle"></h2>

@@ -161,6 +161,16 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .reader-turn-count { min-width: 112px; text-align: center; color: var(--muted); font-size: .9rem; font-weight: 700; }
 .story-reader-toolbar button { min-height: 40px; }
+.reader-resume-prompt, .reader-position-notice {
+  width: min(100%, 72ch);
+  margin: 8px auto;
+  padding: 10px 14px;
+  border: 1px solid var(--border, #39404a);
+  border-radius: 10px;
+  background: var(--panel, #171b22);
+}
+.reader-resume-prompt { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.reader-position-notice { color: var(--muted, #a9b1bd); }
 .story-reader-toolbar button:focus-visible, .story-more button:focus-visible { position: relative; z-index: 1; outline: 3px solid var(--gold); outline-offset: 2px; }
 .story-more { padding-top: 2px; }
 .story-more > summary, .previous-action-disclosure > summary { width: fit-content; min-height: 38px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 11px; color: var(--muted); cursor: pointer; }

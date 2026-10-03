@@ -97,6 +97,13 @@ let rejectInitialization;
 let campaignLoadSequence = 0;
 let campaignStartupReconciliation = null;
 let storyLoadRetryPromise = null;
+let readerPositionInteractionEpoch = 0;
+let readerPositionLoadEpoch = 0;
+let readerPositionChoicePending = false;
+let readerPositionRestoreEpoch = 0;
+let readerPositionWriteTimer = null;
+let readerPositionWriteQueue = Promise.resolve();
+
 const initialization = new Promise((resolve, reject) => {
   resolveInitialization = resolve;
   rejectInitialization = reject;
@@ -104,6 +111,8 @@ const initialization = new Promise((resolve, reject) => {
 
 const apiClient = composition.api;
 const illustrationApi = composition.illustrations;
+const readerHistoryApi = composition.readerHistory;
+const readerPositionStore = composition.readerPositions;
 const castPanel = composition.cast ? createLegacyCastPanel({ api: composition.cast,
   campaignId: () => state.campaignId, generationActive: () => responseGenerationIsActive(),
   openProtagonist: () => { void openEditCharacterProfile(); },
@@ -163,6 +172,8 @@ const state = {
   illustrationConfig: null,
   illustrationSegments: [],
   illustrationError: null,
+  readerPinnedTurn: null,
+  readerResumePosition: null,
   imagePollEpoch: 0,
   illustrationVariantIndexes: new Map(),
   illustrationSegmentActivity: new Map(),
@@ -229,6 +240,316 @@ function storyTurnWindowIsCurrent(campaignId, epoch, cursor) {
   return state.campaignId === campaignId
     && storyTurnWindowEpoch === epoch
     && state.historyNextCursor === cursor;
+}
+
+function readerPositionScope() {
+  const userId = state.user?.id;
+  const campaignId = state.campaignId;
+  if (typeof userId !== "string" || typeof campaignId !== "string") return null;
+  return { userId, campaignId };
+}
+
+function showReaderResumePrompt(position) {
+  const prompt = $("readerResumePrompt");
+  const message = $("readerResumeMessage");
+  if (!prompt || !message) return;
+  message.textContent = `Resume at Turn ${position.turnNumber}.`;
+  prompt.hidden = false;
+  prompt.classList.remove("hidden");
+}
+
+function hideReaderResumePrompt() {
+  const prompt = $("readerResumePrompt");
+  if (!prompt) return;
+  prompt.hidden = true;
+  prompt.classList.add("hidden");
+}
+
+function readerPositionWorkflowOwnsScene() {
+  const recoveryPanel = $("generationRecoveryPanel");
+  return Boolean(state.pendingGeneration)
+    || Boolean(state.generationRecovery)
+    || Boolean(state.generationReview?.summary)
+    || Boolean(state.generationRecoveryKind)
+    || state.generationDisplayActive
+    || Boolean(recoveryPanel && !recoveryPanel.classList.contains("hidden"));
+}
+
+function syncReaderResumePrompt() {
+  const position = state.readerResumePosition;
+  if (!readerPositionWorkflowOwnsScene()
+    && position && Number(position.turnNumber) !== currentViewTurnNumber()) showReaderResumePrompt(position);
+  else hideReaderResumePrompt();
+}
+
+function showReaderPositionNotice(text) {
+  const notice = $("readerPositionNotice");
+  if (!notice) return;
+  notice.textContent = text;
+  notice.hidden = !text;
+}
+
+function readerLoadIsCurrent(campaignId, userId, loadSequence, positionLoadEpoch, interactionEpoch) {
+  return readerScopeIsCurrent(campaignId, userId, loadSequence, positionLoadEpoch)
+    && readerPositionInteractionEpoch === interactionEpoch;
+}
+
+function readerScopeIsCurrent(campaignId, userId, loadSequence, positionLoadEpoch) {
+  return state.campaignId === campaignId
+    && state.user?.id === userId
+    && campaignLoadSequence === loadSequence
+    && readerPositionLoadEpoch === positionLoadEpoch;
+}
+
+async function offerSavedReaderPosition(campaignId, loadSequence, interactionEpoch) {
+  const scope = readerPositionScope();
+  if (!scope || scope.campaignId !== campaignId) {
+    readerPositionChoicePending = false;
+    return;
+  }
+  const positionLoadEpoch = ++readerPositionLoadEpoch;
+  readerPositionChoicePending = true;
+  try {
+    const position = await readerPositionStore.read(scope);
+    if (!readerScopeIsCurrent(campaignId, scope.userId, loadSequence, positionLoadEpoch)) return;
+    if (!position) {
+      readerPositionChoicePending = false;
+      return;
+    }
+    if (readerPositionInteractionEpoch !== interactionEpoch) {
+      readerPositionChoicePending = false;
+      syncReaderResumePrompt();
+      return;
+    }
+    state.readerResumePosition = position;
+    if (readerPositionWorkflowOwnsScene()) {
+      readerPositionChoicePending = false;
+      showReaderPositionNotice("Saved reading position is available after generation or recovery is resolved.");
+      return;
+    }
+    const loadedTurn = state.turns.find((turn) => Number(turn.turnNumber) === position.turnNumber);
+    if (loadedTurn && (loadedTurn.id || loadedTurn.turnId) !== position.turnId) {
+      fallBackFromReaderPosition("That saved turn has been replaced. Showing the latest accepted turn.");
+      return;
+    }
+    if (position.turnNumber > latestTurnNumber(state.turns)) {
+      fallBackFromReaderPosition("That saved turn is no longer available. Showing the latest accepted turn.");
+      return;
+    }
+    await restoreSavedReaderPosition(position, scope, loadSequence, positionLoadEpoch, interactionEpoch);
+  } catch {
+    // Reader-position storage is optional and must never block campaign loading.
+    if (readerScopeIsCurrent(campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+      readerPositionChoicePending = false;
+    }
+  }
+}
+
+function fallBackFromReaderPosition(message) {
+  state.readerPinnedTurn = null;
+  state.readerResumePosition = null;
+  state.viewTurnNumber = null;
+  readerPositionChoicePending = false;
+  hideReaderResumePrompt();
+  showReaderPositionNotice(message);
+  renderAllScenes();
+  updateStatusBar();
+  scheduleReaderPositionSave();
+}
+
+async function resumeSavedReaderPosition() {
+  const position = state.readerResumePosition;
+  const scope = readerPositionScope();
+  if (!position || !scope) return;
+  const loadSequence = campaignLoadSequence;
+  const positionLoadEpoch = readerPositionLoadEpoch;
+  const interactionEpoch = readerPositionInteractionEpoch;
+  readerPositionChoicePending = true;
+  await restoreSavedReaderPosition(position, scope, loadSequence, positionLoadEpoch, interactionEpoch);
+}
+
+async function restoreSavedReaderPosition(position, scope, loadSequence, positionLoadEpoch, interactionEpoch) {
+  const restoreEpoch = ++readerPositionRestoreEpoch;
+  const turnWindowEpoch = storyTurnWindowEpoch;
+  const isCurrent = () => readerPositionRestoreEpoch === restoreEpoch
+    && readerLoadIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch, interactionEpoch)
+    && storyTurnWindowEpoch === turnWindowEpoch
+    && !readerPositionWorkflowOwnsScene();
+  if (readerPositionWorkflowOwnsScene()) {
+    readerPositionChoicePending = false;
+    showReaderPositionNotice("Saved reading position is available after generation or recovery is resolved.");
+    return;
+  }
+  showReaderPositionNotice("");
+  const resumeButton = $("btnResumeReading");
+  if (resumeButton) resumeButton.disabled = true;
+  try {
+    let turn = state.turns.find((item) => Number(item.turnNumber) === position.turnNumber) || null;
+    if (turn && (turn.id || turn.turnId) !== position.turnId) {
+      fallBackFromReaderPosition("That saved turn has been replaced. Showing the latest accepted turn.");
+      return;
+    }
+    if (!turn) {
+      const response = await readerHistoryApi.getTurn(scope.campaignId, position.turnNumber);
+      if (!isCurrent()) {
+        if (readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+          readerPositionChoicePending = false;
+          syncReaderResumePrompt();
+        }
+        return;
+      }
+      if (response.campaignId !== scope.campaignId
+        || Number(response.turn.turnNumber) !== position.turnNumber
+        || response.turn.id !== position.turnId) {
+        fallBackFromReaderPosition("That saved turn is no longer available. Showing the latest accepted turn.");
+        return;
+      }
+      turn = response.turn;
+    }
+    if (!isCurrent()) {
+      if (readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+        readerPositionChoicePending = false;
+        syncReaderResumePrompt();
+      }
+      return;
+    }
+    const currentTurn = state.turns.find((item) => Number(item.turnNumber) === position.turnNumber);
+    if (currentTurn && (currentTurn.id || currentTurn.turnId) !== position.turnId) {
+      fallBackFromReaderPosition("That saved turn has been replaced. Showing the latest accepted turn.");
+      return;
+    }
+    if (document.fonts?.ready) await document.fonts.ready;
+    const acceptedTurnAfterLayout = state.turns.find((item) => Number(item.turnNumber) === position.turnNumber);
+    if (acceptedTurnAfterLayout && (acceptedTurnAfterLayout.id || acceptedTurnAfterLayout.turnId) !== position.turnId) {
+      readerPositionChoicePending = false;
+      syncReaderResumePrompt();
+      return;
+    }
+    if (!isCurrent()) {
+      if (readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+        readerPositionChoicePending = false;
+        syncReaderResumePrompt();
+      }
+      return;
+    }
+    state.readerPinnedTurn = currentTurn ? null : turn;
+    state.viewTurnNumber = position.turnNumber === latestTurnNumber(state.turns) ? null : position.turnNumber;
+    hideReaderResumePrompt();
+    renderAllScenes({ autoScroll: false });
+    updateStatusBar();
+    readerPositionChoicePending = false;
+    restoreReaderSceneOffset(position.turnNumber, position.offsetRatio);
+    showReaderPositionNotice(`Resumed reading at Turn ${position.turnNumber}. Use Jump to latest to catch up.`);
+    scheduleReaderPositionSave();
+  } catch {
+    if (isCurrent()) fallBackFromReaderPosition("That saved turn could not be opened. Showing the latest accepted turn.");
+  } finally {
+    if (resumeButton && readerPositionRestoreEpoch === restoreEpoch
+      && readerScopeIsCurrent(scope.campaignId, scope.userId, loadSequence, positionLoadEpoch)) {
+      resumeButton.disabled = false;
+    }
+  }
+}
+
+function readerStickyInset() {
+  const headerHeight = document.querySelector(".universal-nav")?.getBoundingClientRect?.().height || 0;
+  const toolbar = document.querySelector("[data-story-reader-toolbar]");
+  const toolbarBottom = toolbar?.getBoundingClientRect?.().bottom || 0;
+  return Math.max(headerHeight, toolbarBottom);
+}
+
+function readerPositionScene() {
+  if (readerPositionWorkflowOwnsScene()) return null;
+  if (!state.user?.settings?.continuousReading) {
+    const number = currentViewTurnNumber();
+    return document.getElementById(`scene-${number}`);
+  }
+  const readingLine = readerStickyInset() + 4;
+  return [...document.querySelectorAll("[id^='scene-']")]
+    .find((scene) => scene.getBoundingClientRect().bottom > readingLine) || null;
+}
+
+function captureReaderPosition() {
+  const scope = readerPositionScope();
+  const scene = readerPositionScene();
+  if (!scope || !scene || readerPositionChoicePending) return null;
+  const turnNumber = Number(scene.dataset.turnNumber);
+  const turn = state.readerPinnedTurn && Number(state.readerPinnedTurn.turnNumber) === turnNumber
+    ? state.readerPinnedTurn
+    : state.turns.find((item) => Number(item.turnNumber) === turnNumber);
+  const turnId = turn?.id || turn?.turnId;
+  if (!turnId || !Number.isInteger(turnNumber) || turnNumber < 1) return null;
+  const inset = readerStickyInset();
+  const documentTop = scene.getBoundingClientRect().top + window.scrollY;
+  const availableScroll = Math.max(0, scene.getBoundingClientRect().height - (window.innerHeight - inset));
+  const offsetRatio = availableScroll === 0
+    ? 0
+    : Math.max(0, Math.min(1, (window.scrollY + inset - documentTop) / availableScroll));
+  return {
+    scope,
+    interactionEpoch: readerPositionInteractionEpoch,
+    turnWindowEpoch: storyTurnWindowEpoch,
+    position: { turnId, turnNumber, offsetRatio }
+  };
+}
+
+function persistReaderPosition() {
+  const sample = captureReaderPosition();
+  if (!sample) return;
+  readerPositionWriteQueue = readerPositionWriteQueue
+    .then(async () => {
+      if (state.campaignId !== sample.scope.campaignId || state.user?.id !== sample.scope.userId
+        || readerPositionInteractionEpoch !== sample.interactionEpoch
+        || storyTurnWindowEpoch !== sample.turnWindowEpoch
+        || readerPositionWorkflowOwnsScene()) return;
+      const result = await readerPositionStore.write(sample.scope, sample.position);
+      if (result === "saved" && state.campaignId === sample.scope.campaignId && state.user?.id === sample.scope.userId
+        && readerPositionInteractionEpoch === sample.interactionEpoch
+        && storyTurnWindowEpoch === sample.turnWindowEpoch
+        && !readerPositionWorkflowOwnsScene()) {
+        state.readerResumePosition = {
+          schemaVersion: 1,
+          ...sample.position,
+          updatedAt: new Date().toISOString()
+        };
+        syncReaderResumePrompt();
+      }
+    })
+    .then(() => undefined, () => undefined);
+}
+
+function scheduleReaderPositionSave() {
+  if (readerPositionWriteTimer !== null) clearTimeout(readerPositionWriteTimer);
+  readerPositionWriteTimer = setTimeout(() => {
+    readerPositionWriteTimer = null;
+    persistReaderPosition();
+  }, 250);
+}
+
+function flushReaderPositionSave() {
+  if (readerPositionWriteTimer !== null) {
+    clearTimeout(readerPositionWriteTimer);
+    readerPositionWriteTimer = null;
+  }
+  persistReaderPosition();
+}
+
+function noteReaderPositionIntent(event) {
+  if (!event.isTrusted) return;
+  if (event.target instanceof Element && event.target.closest("#btnResumeReading")) return;
+  readerPositionInteractionEpoch += 1;
+  if (readerPositionChoicePending) readerPositionChoicePending = false;
+
+}
+
+function restoreReaderSceneOffset(turnNumber, offsetRatio) {
+  const scene = document.getElementById(`scene-${turnNumber}`);
+  if (!scene) return;
+  const inset = readerStickyInset();
+  const rect = scene.getBoundingClientRect();
+  const availableScroll = Math.max(0, rect.height - (window.innerHeight - inset));
+  const top = rect.top + window.scrollY + Math.max(0, Math.min(1, offsetRatio)) * availableScroll - inset;
+  window.scrollTo({ top: Math.max(0, top), behavior: "auto" });
 }
 
 function modalFormSnapshot(dialog) {
@@ -446,7 +767,7 @@ function syncInputState() {
 
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
-  const previousDisabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);
+  const previousDisabled = generationLocked || turnCount === 0 || Boolean(state.readerPinnedTurn) || (curr <= 0 && !state.historyNextCursor);
   const nextDisabled = generationLocked || turnCount === 0 || isLatest;
   if (btnPrev) {
     btnPrev.disabled = previousDisabled;
@@ -526,6 +847,14 @@ async function checkOnboarding() {
 async function loadCampaign(campaignId, options = {}) {
   const loadSequence = ++campaignLoadSequence;
   const loadEpoch = ++storyTurnWindowEpoch;
+  const positionInteractionEpoch = readerPositionInteractionEpoch;
+
+  readerPositionLoadEpoch += 1;
+  readerPositionChoicePending = true;
+  state.readerPinnedTurn = null;
+  state.readerResumePosition = null;
+  hideReaderResumePrompt();
+  showReaderPositionNotice("");
   if (state.campaignId !== campaignId) {
     state.retainedAppendDraft = null;
     state.illustrationConfig = null;
@@ -602,6 +931,7 @@ async function loadCampaign(campaignId, options = {}) {
     recordActivity("system", "Campaign loaded", `${state.turns.length} turns loaded for "${name}".`);
     state.campaignLoaded = true;
     setStorySyncStatus("Story synced");
+    void offerSavedReaderPosition(campaignId, loadSequence, positionInteractionEpoch);
     if (!state.pendingGeneration && (state.generationRecovery?.status === "recoverable" || state.generationRecovery?.status === "failed")) {
       const guidance = generationRecoveryGuidance(state.generationRecovery.diagnostic);
       const presentation = generationDiagnosticPresentation(state.generationRecovery.diagnostic);
@@ -1149,13 +1479,21 @@ function renderAllScenes(options = {}) {
 
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (isContinuous) {
-    for (let i = 0; i < state.turns.length; i++) {
-      container.appendChild(renderScene(state.turns[i], i));
+    const pinnedIsInWindow = state.readerPinnedTurn
+      && state.turns.some((turn) => (turn.id || turn.turnId) === (state.readerPinnedTurn?.id || state.readerPinnedTurn?.turnId));
+    const visibleTurns = state.readerPinnedTurn && !pinnedIsInWindow
+      ? [...state.turns, state.readerPinnedTurn].sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber))
+      : state.turns;
+    for (let i = 0; i < visibleTurns.length; i++) {
+      container.appendChild(renderScene(visibleTurns[i], i));
     }
   } else {
     const targetIndex = viewedTurnIndex();
     if (state.turns[targetIndex]) {
       container.appendChild(renderScene(state.turns[targetIndex], targetIndex));
+    } else if (state.readerPinnedTurn
+      && Number(state.readerPinnedTurn.turnNumber) === currentViewTurnNumber()) {
+      container.appendChild(renderScene(state.readerPinnedTurn, -1));
     }
   }
 
@@ -1188,6 +1526,7 @@ function scrollToView() {
 }
 
 function scrollSceneIntoView(scene) {
+
   const header = document.querySelector(".universal-nav");
   const toolbar = document.querySelector("[data-story-reader-toolbar]");
   const headerHeight = header?.getBoundingClientRect?.().height;
@@ -2765,6 +3104,7 @@ function updateStatusBar() {
     readerTurnCount.textContent = total > 0 ? `Turn ${currentViewTurnNumber()} of ${total}` : "No turns yet";
   }
   syncInputState();
+  syncReaderResumePrompt();
 }
 
 // ── History Navigation ────────────────────────────────────────
@@ -2772,8 +3112,13 @@ function navigateToTurn(turnNumber) {
   const latest = latestTurnNumber(state.turns);
   const target = turnNumber === null ? latest : Number(turnNumber);
   if (!target || turnIndexForNumber(state.turns, target) < 0) return;
+  readerPositionInteractionEpoch += 1;
+  readerPositionChoicePending = false;
+  state.readerPinnedTurn = null;
+  hideReaderResumePrompt();
   clearResponseEditSession();
   state.viewTurnNumber = target === latest ? null : target;
+  syncReaderResumePrompt();
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (!isContinuous) {
     renderAllScenes();
@@ -2782,6 +3127,7 @@ function navigateToTurn(turnNumber) {
   }
   updateStatusBar();
   scrollToView();
+  scheduleReaderPositionSave();
 }
 
 async function loadOlderTurnPage() {
@@ -2816,6 +3162,7 @@ async function loadOlderTurnPage() {
 async function goToPrevious() {
   const curr = viewedTurnIndex();
   if (state.busy || state.turns.length === 0) return;
+  if (state.readerPinnedTurn) return;
   if (curr <= 0) {
     if (!await loadOlderTurnPage()) return;
     const viewedIndex = viewedTurnIndex();
@@ -2829,6 +3176,7 @@ function goToNext() {
   const curr = viewedTurnIndex();
   const isLatest = isViewingLatestTurn();
   if (state.busy || state.turns.length === 0 || isLatest) return;
+  if (state.readerPinnedTurn) return navigateToTurn(null);
   if (curr < state.turns.length - 1) navigateToTurn(state.turns[curr + 1]?.turnNumber ?? null);
   else navigateToTurn(null);
 }
@@ -4142,12 +4490,16 @@ async function init() {
 // ── Boot Sequence ─────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("beforeunload", (event) => {
+    flushReaderPositionSave();
     if (!actionDraftNeedsNavigationGuard()) return;
     event.preventDefault();
     event.returnValue = "";
     void flushActionDraftWrites();
   });
-  window.addEventListener("pagehide", () => { void flushActionDraftWrites(); });
+  window.addEventListener("pagehide", () => {
+    void flushActionDraftWrites();
+    flushReaderPositionSave();
+  });
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element)) return;
     const anchor = event.target.closest("a[href]");
@@ -4216,6 +4568,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnReaderHistory) btnReaderHistory.addEventListener("click", openTurnHistoryModal);
   const btnReaderJumpLatest = $("btnReaderJumpLatest");
   if (btnReaderJumpLatest) btnReaderJumpLatest.addEventListener("click", () => navigateToTurn(null));
+  const btnResumeReading = $("btnResumeReading");
+  if (btnResumeReading) btnResumeReading.addEventListener("click", () => { void resumeSavedReaderPosition(); });
   const btnUndo = $("btnUndo");
   if (btnUndo) btnUndo.addEventListener("click", undoLatest);
   const btnRetry = $("btnRetry");
@@ -4493,9 +4847,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // A manual scroll means the reader has chosen their own position. Streaming
   // updates must not recapture the viewport until they explicitly resume.
+  document.addEventListener("wheel", noteReaderPositionIntent, { capture: true, passive: true });
+  document.addEventListener("touchmove", noteReaderPositionIntent, { capture: true, passive: true });
+
   window.addEventListener("wheel", pauseStreamingAutoFollow, { passive: true });
   window.addEventListener("touchmove", pauseStreamingAutoFollow, { passive: true });
   window.addEventListener("scroll", () => {
+
+    scheduleReaderPositionSave();
     if (!state.streamingAutoFollow || !$("streamingPreviewCard")) return;
     if (state.streamingExpectedScrollY === null || Math.abs(window.scrollY - state.streamingExpectedScrollY) > 1) {
       pauseStreamingAutoFollow();
@@ -4505,6 +4864,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const target = e.target;
     if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
     if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) {
+      noteReaderPositionIntent(e);
       pauseStreamingAutoFollow();
     }
   });
