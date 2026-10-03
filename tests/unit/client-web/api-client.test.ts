@@ -82,7 +82,7 @@ describe("createNexusApiClient", () => {
     const generation: GenerationApiPort = client.generation;
 
     expect(generation).toBe(client.generation);
-    expect(Object.keys(client).sort()).toEqual(["campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
+    expect(Object.keys(client).sort()).toEqual(["activity", "campaigns", "generation", "illustrations", "meta", "providers", "session", "worlds"]);
     expect(Object.keys(client.worlds).sort()).toEqual(["create", "list", "playableCharacters"]);
     expect(Object.keys(client.campaigns).sort()).toEqual([
       "branch", "correctTurnNarration", "create", "getCharacterProfile", "getTurnCorrection", "inspectState", "list", "readableExport", "rewind", "state", "turns", "updateCharacterProfile", "updateState"

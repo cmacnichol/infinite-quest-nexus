@@ -37,6 +37,8 @@ Compose credentials may come from an ignored local environment/secrets file with
 
 ## Deployment and Operations
 
+Provider failure evidence uses the additive nullable physical-attempt diagnostic column. Back up first; deploy the migration, compatible API/workers, then frontend. Retain the column and captured rows on rollback. Validate a naturally occurring failure or an explicitly authorized copied-campaign canary; implementation does not authorize deployment or paid probing. Follow the [provider failure diagnostics runbook](./provider-failure-diagnostics.md) for scoped read-only queries and request-ID correlation.
+
 Swarm services must define health checks, resource expectations, restart behavior, and conservative rolling-update and rollback policies. API and worker replicas must coordinate through the database or an explicitly introduced durable queue; do not rely on process-local locks or memory for correctness.
 
 Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.
@@ -314,3 +316,7 @@ Image retries remain independent of story generation in every deployment mode. E
 Do not enable a continuity-review execution policy or its automatic fallback until deterministic workflow, real-PostgreSQL, browser, and authorized live-review canary evidence are separately recorded. Start with copied-campaign canaries and verify the frozen preset/model identity, response contract, budget, evidence identity, verdict, candidate preservation, accepted-state commit, next-turn replay, cost, and latency.
 
 An executable, read-only schema probe imported the exact baseline `900df97` reader and the current reader. It confirmed that both accept an equivalent historical v1 checkpoint without changing its serialized value, while the baseline rejects a valid v2 technical-failure checkpoint that the current reader accepts. Do not roll back workers while any active job can read a version 2 continuity checkpoint. First pause intake, let compatible workers drain or explicitly pause affected jobs, verify no compatible-worker leases remain, and retain the candidate plus review-attempt ledger. Then deploy the rollback binary. Roll back the policy for new jobs only; never rewrite frozen routes, checkpoints, candidates, or accepted turns.
+
+## Persistent Story activity history
+
+The [activity history runbook](activity-history.md) documents additive rollout/rollback, retention, publication health, quarantine and cache coverage. See [acceptance evidence](../review/legacy-activity-verification.md) for the composed PostgreSQL/API/provider workflow, portability checks, browser screenshots and separately reported limitations.

@@ -211,6 +211,7 @@ function createRun(
             partialNarration: null,
             errorCode: recovery.errorCode,
             errorMessage: recovery.errorMessage,
+            failureDiagnostic: recovery.failureDiagnostic,
             diagnostic: recovery.diagnostic ?? null,
             resultTurnId: recovery.resultTurnId,
             review: recovery.review

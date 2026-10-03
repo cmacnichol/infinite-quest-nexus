@@ -1,3 +1,4 @@
+import { captureSegmentActivity } from "../../../packages/database/src/illustration-activity.js";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { logger } from "../../../packages/logger/src/index.js";
@@ -246,12 +247,13 @@ async function attachMatch(client: DatabaseClient, job: ResolutionRow, assetId: 
        DO UPDATE SET asset_id = EXCLUDED.asset_id, image_job_id = NULL, created_at = now()`,
       [job.segment_id, job.owner_user_id, assetId]
     );
-    await client.query(
+    const segmentChanged = await client.query(
       `UPDATE turn_illustration_segments
           SET status = 'completed', updated_at = now()
-        WHERE id = $1 AND owner_user_id = $2`,
+        WHERE id = $1 AND owner_user_id = $2 AND status <> 'completed' RETURNING id`,
       [job.segment_id, job.owner_user_id]
     );
+    if (segmentChanged.rows[0]) await captureSegmentActivity(client, job.segment_id, job.owner_user_id, "illustration_segment.completed");
     await client.query(
       `UPDATE turn_illustration_sets sets
           SET status = CASE WHEN NOT EXISTS (
@@ -298,18 +300,19 @@ async function markResolutionFailure(pool: DatabasePool, job: ResolutionRow, wor
           SET status = $3, reason_code = $4, lease_owner = NULL, lease_expires_at = NULL,
               next_attempt_at = now() + (LEAST(attempts, 6)::text || ' minutes')::interval,
               updated_at = now(), completed_at = CASE WHEN $3 = 'failed' THEN now() ELSE NULL END
-        WHERE id = $1 AND lease_owner = $2 AND status = 'matching'
+        WHERE id = $1 AND lease_owner = $2 AND status = 'matching' AND lease_expires_at > clock_timestamp()
         RETURNING id`,
       [job.id, workerId, terminal ? "failed" : "recoverable", String(details.code || details.message || "matcher_failed").slice(0, 200)]
     );
     if (!failed.rows[0]) return;
     if (job.segment_id) {
-      await client.query(
+      const segmentChanged = await client.query(
         `UPDATE turn_illustration_segments
             SET status = $3, updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2`,
+          WHERE id = $1 AND owner_user_id = $2 AND status IS DISTINCT FROM $3 RETURNING id`,
         [job.segment_id, job.owner_user_id, terminal ? "failed" : "queued"]
       );
+      if (terminal && segmentChanged.rows[0]) await captureSegmentActivity(client, job.segment_id, job.owner_user_id, "illustration_segment.failed");
       await client.query(
         `UPDATE turn_illustration_sets
             SET status = CASE
@@ -342,6 +345,8 @@ export async function runIllustrationResolutionJob(
       if (!await lockActiveProvisionalParent(client, job)) {
         return { kind: "stale" as const, candidateCount: 0, selectedAssetId: null, selectedScore: null, threshold: THRESHOLDS[job.confidence_profile] };
       }
+      const liveClaim = await client.query("SELECT id FROM illustration_resolution_jobs WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND attempts=$4 AND status='matching' AND lease_expires_at > clock_timestamp() FOR UPDATE", [job.id, job.owner_user_id, workerId, job.attempts]);
+      if (!liveClaim.rows[0]) return { kind: "stale" as const, candidateCount: 0, selectedAssetId: null, selectedScore: null, threshold: THRESHOLDS[job.confidence_profile] };
       const context = await resolutionContext(client, job);
       const result = await candidates(client, job, context);
       const scored = result.rows
@@ -370,34 +375,37 @@ export async function runIllustrationResolutionJob(
         if (!await attachMatch(client, job, best.candidate.asset_id)) {
           return { kind: "stale" as const, candidateCount: scored.length, selectedAssetId: null, selectedScore: null, threshold };
         }
-        await client.query(
+        const changed = await client.query(
           `UPDATE illustration_resolution_jobs
               SET status = 'completed', selected_asset_id = $3, selected_score = $4,
                   matching_algorithm_version = $5, resolved_threshold = $6, reason_code = 'matched',
                   query_context_snapshot = $7, lease_owner = NULL, lease_expires_at = NULL,
                   completed_at = now(), updated_at = now()
-            WHERE id = $1 AND lease_owner = $2`,
+            WHERE id = $1 AND lease_owner = $2 AND status = 'matching' AND lease_expires_at > clock_timestamp() RETURNING id`,
           [job.id, workerId, best.candidate.asset_id, best.score, MATCH_ALGORITHM_VERSION, threshold, JSON.stringify(snapshot)]
         );
+        if (!changed.rows[0]) throw Object.assign(new Error("Illustration resolution claim expired."), { code: "lease_lost" });
         return { kind: "matched" as const, candidateCount: scored.length, selectedAssetId: best.candidate.asset_id, selectedScore: best.score, threshold };
       }
       if (job.source_policy === "library_only") {
-        await client.query(
+        const changed = await client.query(
           `UPDATE illustration_resolution_jobs
               SET status = 'no_match', selected_asset_id = NULL, selected_score = NULL,
                   matching_algorithm_version = $3, resolved_threshold = $4, reason_code = 'below_threshold',
                   query_context_snapshot = $5, lease_owner = NULL, lease_expires_at = NULL,
                   completed_at = now(), updated_at = now()
-            WHERE id = $1 AND lease_owner = $2`,
+            WHERE id = $1 AND lease_owner = $2 AND status = 'matching' AND lease_expires_at > clock_timestamp() RETURNING id`,
           [job.id, workerId, MATCH_ALGORITHM_VERSION, threshold, JSON.stringify(snapshot)]
         );
+        if (!changed.rows[0]) throw Object.assign(new Error("Illustration resolution claim expired."), { code: "lease_lost" });
         if (job.segment_id) {
-          await client.query(
+          const segmentChanged = await client.query(
             `UPDATE turn_illustration_segments
                 SET status = 'failed', updated_at = now()
-              WHERE id = $1 AND owner_user_id = $2`,
+              WHERE id = $1 AND owner_user_id = $2 AND status <> 'failed' RETURNING id`,
             [job.segment_id, job.owner_user_id]
           );
+          if (segmentChanged.rows[0]) await captureSegmentActivity(client, job.segment_id, job.owner_user_id, "illustration_segment.failed");
           await client.query(
             `UPDATE turn_illustration_sets
                 SET status = CASE WHEN EXISTS (
@@ -411,27 +419,34 @@ export async function runIllustrationResolutionJob(
         }
         return { kind: "no_match" as const, candidateCount: scored.length, selectedAssetId: null, selectedScore: best?.score ?? null, threshold };
       }
-      await client.query(
+      const changed = await client.query(
         `UPDATE illustration_resolution_jobs
             SET matching_algorithm_version = $3, resolved_threshold = $4, reason_code = 'generation_required',
                 query_context_snapshot = $5, updated_at = now()
-          WHERE id = $1 AND lease_owner = $2`,
+          WHERE id = $1 AND lease_owner = $2 AND status = 'matching' AND lease_expires_at > clock_timestamp() RETURNING id`,
         [job.id, workerId, MATCH_ALGORITHM_VERSION, threshold, JSON.stringify(snapshot)]
       );
+      if (!changed.rows[0]) throw Object.assign(new Error("Illustration resolution claim expired."), { code: "lease_lost" });
       return { kind: "generate" as const, candidateCount: scored.length, selectedAssetId: null, selectedScore: best?.score ?? null, threshold };
     });
     if (outcome.kind === "generate") {
-      const imageJob = job.segment_id
-        ? await enqueueSegmentProviderImage(pool, job.segment_id, providers)
-        : await enqueueIllustration(pool, job.turn_id!, { replace: false }, providers);
-      if (!imageJob) return true;
-      await pool.query(
-        `UPDATE illustration_resolution_jobs
-            SET status = 'generation_queued', image_job_id = $3, reason_code = 'generation_queued',
-                lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-          WHERE id = $1 AND lease_owner = $2`,
-        [job.id, workerId, imageJob.id]
-      );
+      await withTransaction(pool, async (client) => {
+        if (!await lockActiveProvisionalParent(client, job)) return;
+        const liveClaim = await client.query("SELECT id FROM illustration_resolution_jobs WHERE id=$1 AND owner_user_id=$2 AND lease_owner=$3 AND attempts=$4 AND status='matching' AND lease_expires_at > clock_timestamp() FOR UPDATE", [job.id, job.owner_user_id, workerId, job.attempts]);
+        if (!liveClaim.rows[0]) return;
+        const imageJob = job.segment_id
+          ? await enqueueSegmentProviderImage(client, job.segment_id, providers)
+          : await enqueueIllustration(client, job.turn_id!, { replace: false }, providers);
+        if (!imageJob) return;
+        const changed = await client.query(
+          `UPDATE illustration_resolution_jobs
+              SET status = 'generation_queued', image_job_id = $3, reason_code = 'generation_queued',
+                  lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+            WHERE id = $1 AND lease_owner = $2 AND status = 'matching' AND lease_expires_at > clock_timestamp() RETURNING id`,
+          [job.id, workerId, imageJob.id]
+        );
+        if (!changed.rows[0]) throw Object.assign(new Error("Illustration resolution claim expired."), { code: "lease_lost" });
+      });
     }
     logger.info({
       event: "illustration_resolution_completed",

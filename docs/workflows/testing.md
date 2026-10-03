@@ -307,3 +307,7 @@ changing the frozen public payload contracts.
 The [continuity evaluator runbook](../runbooks/story-continuity-evaluation.md) covers the deterministic PostgreSQL authority-to-provider matrix and explicitly authorized live copied-campaign runs. Record release applicability and absent evidence in the [release-readiness report](../review/story-memory-release-readiness-2026-09-16.md); synthetic-provider tests do not establish live model quality.
 
 Generation-review changes also require `tests/integration/story-continuity-review.integration.test.ts` with the PostgreSQL integration configuration. Its deterministic SSE fixture must cover a complete streamed candidate, the review decision, and the subsequent commit or restart. Record provider-call counts separately for primary generation, review, and repair. When a Keep decision is involved, verify the saved candidate hash and exact accepted payload, then verify the next turn receives accepted fiction but no private review finding or foreign-campaign canary. Illustration enqueue failures must leave the accepted turn intact.
+
+## Persistent Story activity history
+
+The [activity history runbook](../runbooks/activity-history.md) documents additive rollout/rollback, retention, publication health, quarantine and cache coverage. See [acceptance evidence](../review/legacy-activity-verification.md) for the composed PostgreSQL/API/provider workflow, portability checks, browser screenshots and separately reported limitations.

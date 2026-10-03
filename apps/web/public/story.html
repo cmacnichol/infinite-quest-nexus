@@ -435,18 +435,27 @@
       <div class="dialog-header">
         <div>
           <h3>Activity Log</h3>
-          <p class="mini">Recent actions, provider calls, parsing decisions, and results. Stored only in memory and cleared when this page reloads.</p>
+          <p class="mini">Campaign activity is saved for 30 days. Events from this browser are labeled separately.</p>
         </div>
         <button id="btnCloseActivityLog" class="small ghost" type="button" aria-label="Close activity log">✕</button>
       </div>
       <div class="activity-log-toolbar">
+        <label>Filter activity<select id="activityLogFilter"><option value="all">All</option><option value="errors">Errors and warnings</option><option value="generation">Generation</option><option value="illustrations">Illustrations</option><option value="browser">This browser</option></select></label>
+        <label>Search loaded activity<input id="activityLogSearch" type="search" maxlength="200" placeholder="Job, turn or diagnostic code"></label>
+        <button id="btnActivityRefresh" type="button">Refresh history</button>
         <button id="btnCopyActivityLog" type="button">Copy Diagnostics</button>
-        <button id="btnClearActivityLog" type="button">Clear Log</button>
+        <button id="btnDownloadActivityLog" type="button">Download diagnostics</button>
+        <button id="btnClearActivityLog" type="button">Hide previous activity</button>
       </div>
+      <p id="activityLogNotices" class="mini"></p>
+      <p id="activityLogStatus" class="mini" role="status" aria-live="polite"></p>
       <div class="dialog-scroll">
-        <div id="activityLogList" class="activity-log-list" role="log" aria-live="polite"></div>
+        <div id="activityLogEmpty" class="activity-log-empty"></div>
+        <div id="activityLogList" class="activity-log-list"></div>
       </div>
       <div class="row wrap dialog-actions">
+        <button id="btnActivityOlder" type="button">Load older activity</button>
+        <button id="btnActivityLatest" type="button" hidden>Return to latest</button>
         <button id="btnActivityLogDone" class="primary" type="button">Done</button>
       </div>
     </div>

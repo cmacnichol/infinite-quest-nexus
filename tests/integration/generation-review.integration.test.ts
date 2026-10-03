@@ -209,6 +209,7 @@ integration("PostgreSQL generation review persistence", () => {
     await expect(commandsAfterPause.decideReview({ ownerUserId, jobId: fixture.queued.id }, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });
     await expect(pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL", [fixture.imported.campaignId]))
       .resolves.toMatchObject({ rows: [{ count: 2 }] });
+    expect((await pool.query("SELECT snapshot->>'kind' AS kind FROM activity_event_outbox WHERE source_id=$1 ORDER BY activity_revision,ordinal", [fixture.queued.id])).rows.map(row => row.kind)).toEqual(["generation.queued", "generation.claimed", "generation.review_required"]);
     await expect(commandsAfterPause.discard({ ownerUserId, jobId: fixture.queued.id })).resolves.toMatchObject({ status: "discarded" });
     await expect(commandsAfterPause.retry({ ownerUserId, jobId: fixture.queued.id })).rejects.toMatchObject({
       kind: "invalid_state", details: { reason: "retry_source_state", generationStatus: "discarded" }
@@ -289,6 +290,11 @@ integration("PostgreSQL generation review persistence", () => {
     const results = await Promise.allSettled([repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" }), repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "retry" })]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
     const winner = results.find((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof repository.decideReview>>> => result.status === "fulfilled")!.value;
+    expect((await pool.query("SELECT snapshot->>'kind' AS kind,activity_revision::text AS revision FROM activity_event_outbox WHERE source_id=$1 ORDER BY activity_revision,ordinal", [fixture.queued.id])).rows).toEqual([
+      { kind: "generation.queued", revision: "1" }, { kind: "generation.claimed", revision: "2" }, { kind: "generation.review_required", revision: "3" },
+      { kind: "generation.review_decided", revision: "4" }, { kind: "generation.retry_queued", revision: "4" }
+    ]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE campaign_id=$1", [fixture.imported.campaignId])).rows[0].count).toBe(2);
     const decision = "retry" as const;
     await expect(repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision })).resolves.toEqual(winner);
     await expect(repository.decideReview(scope, { reviewId: fixture.checkpoint.reviewId, revision: 1, decision: "keep" })).rejects.toMatchObject({ kind: "conflict" });

@@ -1,3 +1,4 @@
+import { projectProviderFailureEvidence } from "../../../packages/contracts/src/provider-failure.js";
 import { bindManifestToProducingRequest, validatedChoiceRequestHashes, continuityReviewCheckpointSchema, reviewBindingHash, type ContinuityReviewCheckpoint } from "../../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { nextContinuityReviewAction } from "../../../packages/application/src/memory/continuity-review-attempt-policy.js";
 import { estimateContinuityReviewPlanningTokens, prepareContinuityRepair, prepareContinuityReview, validatePreparedContinuityReviewResult, continuityReviewUnavailableReason, ContinuityReviewAttemptError } from "./story-continuity-review-adapter.js";
@@ -760,21 +761,36 @@ function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): stri
   return /^[a-z][a-z0-9_]{0,63}$/.test(normalized) ? normalized : fallback;
 }
 
+function safeLogProviderIdentity(value: unknown): string | null {
+  return typeof value === "string" && /^[a-zA-Z0-9_-]{1,256}$/.test(value) ? value : null;
+}
+
 function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: string, responseContractDiagnostic: string | null = null): GenerationFailureDiagnostic {
   const transport = providerTransportErrorDetails(error);
-  const code = preparedRouteTerminalError(error)?.reason === "deadline" ? "provider_request_timeout" : responseContractDiagnostic
+  const routeError = preparedRouteTerminalError(error);
+  const providerFailure = projectProviderFailureEvidence(routeError?.providerFailure ?? preparedResponseContractError(error)?.providerFailure);
+  const routeReason = routeError?.reason;
+  const routeCode = routeReason === "rate_limit" ? "provider_rate_limited"
+    : routeReason === "authentication" ? "provider_authentication_failed"
+    : routeReason === "provider_unavailable" ? "provider_route_unavailable"
+    : routeReason === "model_unavailable" ? "provider_model_unavailable"
+    : routeReason === "refusal" ? "provider_refusal"
+    : routeReason === "schema_invalid" ? "provider_schema_invalid"
+    : routeReason === "deadline" ? "provider_request_timeout" : null;
+  const code = responseContractDiagnostic ?? routeCode
     ?? (transport
     ? (transport.timedOut ? "provider_request_timeout" : "provider_transport_error")
     : safeLogErrorCode(errorCodeFrom(error) || "generation_failed", "generation_failed"));
   const category = code === "provider_request_timeout" ? "provider_timeout"
     : code === "provider_transport_error" ? "provider_transport"
+    : code === "provider_rate_limited" || code === "provider_authentication_failed" || code === "provider_route_unavailable" || code === "provider_model_unavailable" ? "provider_rejection"
     : code === "mechanics_leak" ? "mechanics"
     : code === "scene_coverage" ? "continuity"
     : code === "invalid_schema" || code === "invalid_json" || code === "provider_schema_invalid" || code === "provider_schema_unsupported" || code === "provider_refusal" ? "format"
     : code === "output_limit" ? "output_incomplete"
     : code === "stale_campaign" ? "authority"
     : "unknown";
-  const supportedCode = code === "provider_request_timeout" || code === "provider_transport_error"
+  const supportedCode = code === "provider_rate_limited" || code === "provider_authentication_failed" || code === "provider_model_unavailable" || code === "provider_request_timeout" || code === "provider_transport_error"
     || code === "mechanics_leak" || code === "scene_coverage" || code === "invalid_schema"
     || code === "invalid_json" || code === "output_limit" || code === "stale_campaign"
     || code === "provider_schema_invalid" || code === "provider_schema_unsupported" || code === "provider_route_unavailable" || code === "provider_refusal"
@@ -785,7 +801,8 @@ function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: stri
     code: supportedCode === "invalid_json" ? "invalid_schema" : supportedCode,
     phase,
     attemptNumber,
-    occurredAt: new Date().toISOString()
+    occurredAt: new Date().toISOString(),
+    ...(providerFailure ? { providerFailure } : {})
   } as GenerationFailureDiagnostic;
 }
 
@@ -4952,6 +4969,7 @@ async function executeLoadedGeneration(
       ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
       : errorCodeFrom(error) || "generation_failed");
     const code = safeLogErrorCode(rawCode, "generation_failed");
+    const failureDiagnostic = failureDiagnosticFor(error, job.attempts, activePhase, responseContractDiagnostic);
     const failed = await repository.markFailed({
       ...scope,
       // V2 prepared-contract diagnostics are finite, user-actionable contract
@@ -4960,16 +4978,31 @@ async function executeLoadedGeneration(
       errorCode: responseContractDiagnostic ?? PUBLIC_GENERATION_FAILURE_CODE,
       errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
       recoveryMetadata: transportError ? { transportError } : {},
-      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, activePhase, responseContractDiagnostic)
+      lastFailureDiagnostic: failureDiagnostic
     });
     if (failed) {
       logger.error({
         event: "turn_generation_failed",
         ...generationLogContext(job, workerId),
         errorCode: code,
+        failureReason: failureDiagnostic.code,
         errorType: diagnosticErrorName(error),
         durationMs: Date.now() - generationStartedAt,
-        transportTimedOut: Boolean(transportError?.timedOut)
+        transportTimedOut: Boolean(transportError?.timedOut),
+        ...(failureDiagnostic.providerFailure ? {
+          physicalAttemptId: safeLogProviderIdentity(preparedRouteTerminalError(error)?.attemptId),
+          providerResponseId: safeLogProviderIdentity(preparedRouteTerminalError(error)?.providerResponseId ?? preparedResponseContractError(error)?.responseId),
+          providerFailureSource: failureDiagnostic.providerFailure.source,
+          providerFailureHttpStatus: failureDiagnostic.providerFailure.httpStatus,
+          providerFailureUpstreamStatus: failureDiagnostic.providerFailure.upstreamStatus,
+          providerFailureReason: failureDiagnostic.providerFailure.reason,
+          providerFailureLimitSource: failureDiagnostic.providerFailure.limitSource,
+          providerFailureUpstreamCode: failureDiagnostic.providerFailure.upstreamCode,
+          providerFailureRetryAfterMs: failureDiagnostic.providerFailure.retryAfterMs,
+          providerFailureSuccessfulResponseStarted: failureDiagnostic.providerFailure.successfulResponseStarted,
+          providerFailureEmittedOutput: failureDiagnostic.providerFailure.emittedOutput,
+          providerFailureMetadataStatus: failureDiagnostic.providerFailure.metadataStatus
+        } : {})
       });
     }
     if (job.streaming_segments_state?.provisionalSetId) {
