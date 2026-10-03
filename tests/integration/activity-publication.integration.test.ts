@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { captureActivity, createPostgresActivityRepository, encodeActivityCursor } from "../../packages/database/src/activity-repository.js";
-import { createDatabasePool, withTransaction, type DatabasePool } from "../../packages/database/src/pool.js";
+import { createDatabasePool, withTransaction, type DatabasePool, type DatabaseClient } from "../../packages/database/src/pool.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { dropTestDatabaseWhenIdle } from "./database-test-helpers.js";
 import type { ActivityEventDraft, ActivityScope } from "../../packages/contracts/src/activity.js";
@@ -81,25 +81,34 @@ integration("durable activity publication", () => {
       return wrapped;
     }) as DatabasePool["connect"];
     const first = createPostgresActivityMaintenanceRepository(intercepted).publishBatch(100);
-    await ready;
     const repository = createPostgresActivityMaintenanceRepository(pool);
-    expect(await repository.publishBatch(100)).toEqual({ published: 0, quarantined: 0 });
-    release(); await first;
+    try {
+      await Promise.race([ready, first]);
+      expect(await repository.publishBatch(100)).toEqual({ published: 0, quarantined: 0 });
+    } finally { release(); await first; }
     const anchor = await createPostgresActivityRepository(pool).list(scope);
     expect(anchor.events[0]!.eventId).toBe(value.eventId);
-    const a = await pool.connect(), b = await pool.connect();
-    const early = draft(), late = draft();
-    await a.query("BEGIN"); await b.query("BEGIN");
-    // Existing campaign metadata avoids a first-capture metadata uniqueness wait.
-    await captureActivity(a, { scope, sourceId: early.jobId!, revision: "1", draft: early });
-    await captureActivity(b, { scope, sourceId: late.jobId!, revision: "1", draft: late });
-    await b.query("COMMIT"); b.release();
-    await repository.publishBatch(100);
-    const page = await createPostgresActivityRepository(pool).list(scope, { after: anchor.nextAfter });
-    expect(page.events.map(event => event.eventId)).toEqual([late.eventId]);
-    await a.query("COMMIT"); a.release();
-    await repository.publishBatch(100);
-    expect((await createPostgresActivityRepository(pool).list(scope, { after: page.nextAfter })).events.map(event => event.eventId)).toEqual([early.eventId]);
+    const a = await pool.connect();
+    let b: DatabaseClient | undefined;
+    try {
+      b = await pool.connect();
+      const early = draft(), late = draft();
+      await a.query("BEGIN"); await b.query("BEGIN");
+      // Existing campaign metadata avoids a first-capture metadata uniqueness wait.
+      await captureActivity(a, { scope, sourceId: early.jobId!, revision: "1", draft: early });
+      await captureActivity(b, { scope, sourceId: late.jobId!, revision: "1", draft: late });
+      await b.query("COMMIT");
+      await repository.publishBatch(100);
+      const page = await createPostgresActivityRepository(pool).list(scope, { after: anchor.nextAfter });
+      expect(page.events.map(event => event.eventId)).toEqual([late.eventId]);
+      await a.query("COMMIT");
+      await repository.publishBatch(100);
+      expect((await createPostgresActivityRepository(pool).list(scope, { after: page.nextAfter })).events.map(event => event.eventId)).toEqual([early.eventId]);
+    } finally {
+      await Promise.allSettled([a.query("ROLLBACK"), b?.query("ROLLBACK")]);
+      a.release();
+      b?.release();
+    }
   });  it("publisherCrashDoesNotLoseOrDuplicate and quarantine does not poison valid rows", async () => {
     const corrupt = await capture();
     await pool.query("UPDATE activity_event_outbox SET snapshot=snapshot || '{\"private\":\"CANARY\"}'::jsonb WHERE event_id=$1", [corrupt.eventId]);

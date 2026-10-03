@@ -1,6 +1,6 @@
 import { logger } from "../../logger/src/index.js";
 import { activityEventDraftSchema, activityEventSchema } from "../../contracts/src/activity.js";
-import type { ActivityMaintenanceRepository } from "./activity-repository.js";
+import type { ActivityMaintenanceRepository } from "../../application/src/activity.js";
 import type { DatabasePool } from "./pool.js";
 
 // Shared across replicas; acquired before the first sequence is allocated.

@@ -12,10 +12,7 @@ export interface ActivityCapture {
 export interface ActivityReadRepository {
   list(scope: ActivityScope, query?: unknown): Promise<ActivityPage>;
 }
-export interface ActivityMaintenanceRepository {
-  publishBatch(limit: number): Promise<{ published: number; quarantined: number }>;
-  pruneBatch(limit: number): Promise<number>;
-}
+export type { ActivityMaintenanceRepository } from "../../application/src/activity.js";
 export class ActivityRepositoryError extends Error {
   constructor(public readonly code: "not_found" | "invalid_cursor" | "invalid_snapshot") { super(code); }
 }
