@@ -2404,14 +2404,23 @@ integration("durable Story Engine integration", () => {
     const infoSpy = vi.spyOn(logger, "info");
     const warnSpy = vi.spyOn(logger, "warn");
     const errorSpy = vi.spyOn(logger, "error");
-    const originalQuery = pool.query.bind(pool) as (...args: any[]) => Promise<any>;
-    const querySpy = vi.spyOn(pool, "query");
-    querySpy.mockImplementation((async (...args: any[]) => {
-      const statement = String(args[0]);
-      if (statement.includes("UPDATE generation_jobs SET status = 'failed'")) {
-        return { rows: [], rowCount: 0 };
-      }
-      return originalQuery(...args);
+    const originalConnect = pool.connect.bind(pool);
+    let unmatchedTransitions = 0;
+    const connectSpy = vi.spyOn(pool, "connect").mockImplementation((async (...connectArgs: any[]) => {
+      // pg Pool.query uses callback connect; preserve it while intercepting transaction clients only.
+      if (connectArgs.length) return (originalConnect as (...args: any[]) => any)(...connectArgs);
+      const client = await originalConnect();
+      const originalQuery = client.query.bind(client) as (...args: any[]) => Promise<any>;
+      const wrapped = Object.create(client);
+      wrapped.query = async (...args: any[]) => {
+        if (String(args[0]).includes("UPDATE generation_jobs SET status = 'failed'")) {
+          unmatchedTransitions++;
+          return { rows: [], rowCount: 0 };
+        }
+        return originalQuery(...args);
+      };
+      wrapped.release = () => client.release();
+      return wrapped;
     }) as any);
     try {
       replies.push({ content: validStory("The provider cost write fails after a valid response.") });
@@ -2445,9 +2454,10 @@ integration("durable Story Engine integration", () => {
         expect.objectContaining({ event: "turn_generation_failed" })
       ]));
       expect(JSON.stringify(events)).not.toContain(unsafeCode);
-      expect(job.id).toEqual(expect.any(String));
+      expect(unmatchedTransitions).toBe(1);
+      expect((await pool.query("SELECT count(*) FROM activity_event_outbox WHERE source_id=$1 AND snapshot->>'kind'='generation.failed'", [job.id])).rows[0].count).toBe("0");
     } finally {
-      querySpy.mockRestore();
+      connectSpy.mockRestore();
       infoSpy.mockRestore();
       warnSpy.mockRestore();
       errorSpy.mockRestore();

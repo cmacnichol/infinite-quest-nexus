@@ -691,7 +691,7 @@ integration("generation job notification delivery", () => {
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics", "0115_story_activity"
         ]);
       await expect(migrationPool.query<{ trigger_name: string | null; function_name: string | null }>(
          `SELECT (

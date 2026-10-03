@@ -1152,7 +1152,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("cancels an active generation", async () => {
-    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const ownerUserId = "00000000-0000-4000-8000-000000000001";
     const jobId = "99999999-9999-4999-8999-999999999999";
     const cancelledJob = {
       id: jobId,
@@ -1163,12 +1163,27 @@ describe("API server security and CORS headers", () => {
     };
     const transactionControls: string[] = [];
     const mockClient = {
-      query: async (query: string) => {
+      query: async (queryInput: string, params: unknown[] = []) => {
+        const query = queryInput.replaceAll(/\s+/g, " ").trim();
         if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") {
           transactionControls.push(query);
           return { rows: [] };
         }
-        if (query.includes("UPDATE generation_jobs")) return { rows: [cancelledJob] };
+        if (query.startsWith("UPDATE generation_jobs SET status = 'cancelled'")) return { rows: [cancelledJob] };
+        if (query.startsWith("UPDATE generation_jobs SET activity_revision = activity_revision + 1")) {
+          expect(params).toEqual([jobId, ownerUserId]);
+          return { rows: [{ campaign_id: cancelledJob.campaignId, status: "cancelled", activity_revision: "1",
+            attempts: 1, expected_turn_number: 3, result_turn_id: null, error_code: null, occurred_at: new Date() }] };
+        }
+        if (query.startsWith("INSERT INTO activity_event_outbox(")) {
+          expect(params.slice(1, 3)).toEqual([ownerUserId, cancelledJob.campaignId]);
+          expect(JSON.parse(String(params[8]))).toMatchObject({ kind: "generation.cancelled", status: "cancelled", jobId });
+          return { rows: [{ event_id: params[0] }] };
+        }
+        if (query.startsWith("INSERT INTO campaign_activity_history(owner_user_id,campaign_id,captured_since)")) {
+          expect(params.slice(0, 2)).toEqual([ownerUserId, cancelledJob.campaignId]);
+          return { rows: [] };
+        }
         if (query.includes("UPDATE image_jobs")) return { rows: [] };
         if (query.includes("DELETE FROM asset_references")) return { rows: [] };
         if (query.includes("DELETE FROM turn_illustration_segment_assets")) return { rows: [] };

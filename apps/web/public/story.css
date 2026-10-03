@@ -478,10 +478,10 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
 .activity-log-list { display: grid; gap: 8px; }
 .activity-log-empty { padding: 24px; text-align: center; }
 
-.activity-log-entry { border: 1px solid rgba(255,255,255,.12); border-left: 4px solid rgba(130,190,255,.7); border-radius: 12px; background: rgba(255,255,255,.035); overflow: hidden; }
-.activity-log-entry.warn { border-left-color: var(--gold2); }
-.activity-log-entry.error { border-left-color: #ff6b7d; }
-.activity-log-entry.success { border-left-color: #69df9a; }
+.activity-log-entry { border: 1px solid rgba(255,255,255,.12); border-radius: 12px; background: rgba(255,255,255,.035); overflow: hidden; }
+.activity-log-entry.warning { border-color: var(--gold2); }
+.activity-log-entry.error { border-color: #ff6b7d; }
+.activity-log-entry.success { border-color: #69df9a; }
 .activity-log-entry summary { cursor: pointer; list-style: none; display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 10px 12px; }
 .activity-log-entry summary::-webkit-details-marker { display: none; }
 .activity-log-time, .activity-log-category, .activity-log-operation { color: var(--dim); font-size: .78rem; }
@@ -607,3 +607,23 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
 .cast-match-controls input, .cast-match-controls select { width: 100%; min-width: 0; box-sizing: border-box; }
 .cast-match-controls button, .cast-dialog blockquote { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 480px) { .cast-dialog { padding: 16px; } .cast-toolbar label { width: 100%; } }
+
+#activityLogDialog .activity-log-entry summary { display: block; line-height: 1.5; }
+#activityLogDialog .activity-log-details label { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+#activityLogDialog input[type="checkbox"] { width: auto; }
+#activityLogDialog .activity-log-events { display: grid; gap: 16px; margin-bottom: 12px; }
+#activityLogDialog .activity-log-toolbar label { flex: 1 1 180px; }
+#activityLogDialog .activity-log-entry summary:focus-visible { outline: 2px solid var(--gold2); outline-offset: -3px; }
+#activityLogDialog [hidden] { display: none; }
+@media (max-width: 600px) {
+  #activityLogDialog .activity-log-toolbar { gap: 8px; }
+  #activityLogDialog .activity-log-toolbar label { flex-basis: 100%; min-width: 0; }
+  #activityLogDialog .dialog-actions { align-items: stretch; }
+}
+
+#activityLogDialog .world-gen-card { display: flex; flex-direction: column; max-height: calc(100dvh - 40px); }
+#activityLogDialog .world-gen-card > :not(.dialog-scroll) { flex-shrink: 0; }
+#activityLogDialog .dialog-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+#activityLogDialog .dialog-actions { margin-top: 12px; }
+#activityLogDialog .mini { margin: 4px 0; }
+#activityLogDialog .activity-log-toolbar { margin: 8px 0; }

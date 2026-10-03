@@ -98,3 +98,7 @@ export type {
   HttpMethod
 } from "./errors.js";
 export * from "./campaign-cast-editor.js";
+
+export * from "./activity/types.js";
+export * from "./activity/cache.js";
+export { createActivityController } from "./activity/controller.js";

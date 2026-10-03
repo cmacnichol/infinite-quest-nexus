@@ -34,6 +34,9 @@ describe("System Archive portability registry", () => {
 
   it("classifies durable System Archive transfer state as operational", () => {
     expect(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS).toMatchObject({
+      activity_event_outbox: "operational",
+      story_activity_events: "operational",
+      campaign_activity_history: "operational",
       generation_jobs: "operational",
       authoring_jobs: "operational",
       illustration_prompt_jobs: "operational",
@@ -42,6 +45,11 @@ describe("System Archive portability registry", () => {
       system_archive_uploads: "operational",
       system_archive_upload_chunks: "operational"
     });
+  });
+
+  it("preserves the separate legacy portable ledger and excludes segment activity revisions", () => {
+    expect(SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS.activity_events).toBe("portable_authority");
+    expect(SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS.turn_illustration_segments.activity_revision).toBe("operational_excluded");
   });
 
   it("maintains a source-column decision for every portable source table", () => {
