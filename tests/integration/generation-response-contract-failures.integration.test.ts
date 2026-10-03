@@ -34,7 +34,11 @@ const credentialSecret = "response-contract-failure-fixture-secret";
 const model = "response-contract-failure-model";
 const fallbackModels = ["response-contract-route-a", "response-contract-route-b"] as const;
 const digest = "f".repeat(64);
-const verificationNow = Date.parse("2026-09-18T12:00:00.000Z");
+// Historical v1 preflight supplies wall-clock time, so fixture evidence must
+// remain valid at dispatch as well as under the injected composition clock.
+const verificationNow = Date.now();
+const verificationVerifiedAt = new Date(verificationNow - 24 * 60 * 60_000).toISOString();
+const verificationExpiresAt = new Date(verificationNow + 24 * 60 * 60_000).toISOString();
 const canary = "PRIVATE_PROVIDER_FAILURE_CANARY";
 const partialJson = `{\"narration\":\"Mira reaches the observatory.\",\"scratchpad\":\"${canary}`;
 const successfulRpgAssessment = JSON.stringify({ stat_id: "insight", difficulty_modifier: 0, rationale: "The archive must be studied carefully.", favorable_outcome: "Mira recognizes the lantern's old signal.", setback_outcome: "Dust obscures the archive's first clue." });
@@ -291,7 +295,7 @@ integration("response-contract provider failures", () => {
       routeConfigHash: capabilityRouteConfigHash({ textResponseFormatPolicy: "required", ...(streaming ? { streaming: true } : {}) }),
       adapterProtocol: "text-schema-adapter-v1" as const, operation,
       schemaHash: getProviderOutputSchema(operation).schemaHash, streaming: verifiedStreaming,
-      verifiedAt: "2026-09-01T00:00:00.000Z", expiresAt: "2026-09-30T00:00:00.000Z", providerRoutingSlugs: ["verified-route"], nativeOpenTrackerObjects: true
+      verifiedAt: verificationVerifiedAt, expiresAt: verificationExpiresAt, providerRoutingSlugs: ["verified-route"], nativeOpenTrackerObjects: true
     }));
   }
 
@@ -304,7 +308,7 @@ integration("response-contract provider failures", () => {
       routeConfigHash: capabilityRouteConfigHash({ textResponseFormatPolicy: "required", ...(streaming ? { streaming: true } : {}) }),
       adapterProtocol: "text-schema-adapter-v2" as const, operation,
       schemaHash: getProviderOutputSchemaV2(operation).schemaHash, streaming: false,
-      verifiedAt: "2026-09-01T00:00:00.000Z", expiresAt: "2026-09-30T00:00:00.000Z", providerRoutingSlugs: providerType === "openrouter" ? ["verified-route"] : [], nativeOpenTrackerObjects: true
+      verifiedAt: verificationVerifiedAt, expiresAt: verificationExpiresAt, providerRoutingSlugs: providerType === "openrouter" ? ["verified-route"] : [], nativeOpenTrackerObjects: true
     }));
     return streaming ? [...base, { ...base[0]!, streaming: true }] : base;
   }

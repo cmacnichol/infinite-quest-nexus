@@ -27,7 +27,11 @@ const credentialSecret = "strict-operation-contract-fixture-secret";
 const digest = "d".repeat(64);
 const model = "strict-operation-model";
 const configuration = { textResponseFormatPolicy: "required" };
-const verificationNow = Date.parse("2026-09-18T12:00:00.000Z");
+// Historical v1 preflight supplies wall-clock time, so fixture evidence must
+// remain valid at dispatch as well as under the injected composition clock.
+const verificationNow = Date.now();
+const verificationVerifiedAt = new Date(verificationNow - 24 * 60 * 60_000).toISOString();
+const verificationExpiresAt = new Date(verificationNow + 24 * 60 * 60_000).toISOString();
 
 function story(choices = ["Wait.", "Wait.", "Listen.", "Leave."]) {
   return JSON.stringify({ narration: "Mira waits at the observatory.", choices, custom_action_suggestion: "Study the lantern.", scratchpad: "private fixture", tracker_updates: [], image_prompt: "Fixture relay.", continuity_summary: "Mira waits at the observatory.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] });
@@ -118,7 +122,7 @@ integration("strict response-contract operation workflow", () => {
       version: 1 as const, providerType: "openrouter" as const, endpointIdentity, model,
       routeConfigHash: capabilityRouteConfigHash(configuration), adapterProtocol: "text-schema-adapter-v1" as const,
       operation, schemaHash: getProviderOutputSchema(operation).schemaHash, streaming: false,
-      verifiedAt: "2026-09-01T00:00:00.000Z", expiresAt: "2026-09-30T00:00:00.000Z",
+      verifiedAt: verificationVerifiedAt, expiresAt: verificationExpiresAt,
       providerRoutingSlugs: ["strict-route"], nativeOpenTrackerObjects: true
     }));
   }
