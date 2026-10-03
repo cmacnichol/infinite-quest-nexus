@@ -1,6 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════
    Infinite Quest — Story Player
    ═══════════════════════════════════════════════════════════════ */
+import { createStoryActivityView, safeActivityDiagnostic } from "./story-activity.js";
 import { branchCampaignFromTurn } from "./story-routing.js";
 import {
   appendExpectedTurnNumber,
@@ -145,11 +146,7 @@ const state = {
   illustrationError: null,
   imagePollEpoch: 0,
   illustrationVariantIndexes: new Map(),
-  illustrationSegmentActivity: new Map(),
   imagePollTimer: null,
-  imageJobActivity: new Map(),
-  imageActivityInitialized: false,
-  activityLog: [],
   toastTimer: null,
   streamingAutoFollow: true,
   streamingExpectedScrollY: null,
@@ -177,6 +174,7 @@ let discardModalTarget = null;
 let discardModalAction = null;
 let completeHistoryLoad = null;
 let storyTurnWindowEpoch = 0;
+let activityActivationEpoch = 0;
 let nextEditStateSessionId = 0;
 let nextCharacterProfileEditSessionId = 0;
 let characterProfileEditRequestToken = 0;
@@ -402,40 +400,44 @@ function syncInputState() {
 }
 
 // ── Activity Log ──────────────────────────────────────────────
-function recordActivity(category, title, detail) {
-  state.activityLog.push({
-    ts: new Date().toISOString(),
-    category: category || "system",
-    title: title || "",
-    detail: detail || ""
-  });
-}
-
-function renderActivityLog() {
-  const list = $("activityLogList");
-  if (!list) return;
-  if (state.activityLog.length === 0) {
-    list.innerHTML = `<div class="activity-log-empty">No activity recorded this session.</div>`;
-    return;
+const activity = composition.activity;
+const activityView = activity ? createStoryActivityView({ controller: activity, document,
+  copyText: composition.copyText, download: composition.downloadDiagnostics,
+  openDialog: openManagedModal,
+  refreshIdentity: async () => { if (state.campaignId) await loadCampaign(state.campaignId, { autoScroll: false }); },
+  openRecovery: async () => {
+    const campaignId = state.campaignId;
+    if (!campaignId) return;
+    if (!await loadCampaign(campaignId, { autoScroll: false })) throw new Error("Recovery unavailable");
+    $("generationRecoveryPanel")?.scrollIntoView({ block: "center" });
   }
-  list.innerHTML = state.activityLog.map((entry, i) => {
-    const cls = entry.category === "error" ? "error" : entry.category === "success" ? "success" : "";
-    return `<details class="activity-log-entry ${cls}">
-      <summary>
-        <span class="activity-log-time">${entry.ts.slice(11, 19)}</span>
-        <span class="activity-log-category">${escapeHtml(entry.category)}</span>
-        <span class="activity-log-title">${escapeHtml(entry.title)}</span>
-        <span class="activity-log-operation">#${i + 1}</span>
-      </summary>
-      <div class="activity-log-details"><pre>${escapeHtml(entry.detail)}</pre></div>
-    </details>`;
-  }).reverse().join("");
+}) : null;
+const observedEpisodes = new Set();
+function activityScope() { return { campaignId: state.campaignId, epoch: activityActivationEpoch }; }
+function activityScopeCurrent(captured) { return captured.campaignId === state.campaignId && captured.epoch === activityActivationEpoch; }
+function observeActivity(kind, error = null, options = {}, captured = activityScope()) {
+  if (!activity || !activityScopeCurrent(captured)) return;
+  const scope = activity.getState().scope;
+  if (!scope || scope.campaignId !== captured.campaignId) return;
+  const diagnostic = options.success ? null : safeActivityDiagnostic(error, options.code || "request_failed", options.route);
+  const key = `${captured.epoch}:${kind}:${options.jobId || ""}:${diagnostic?.code || ""}:${diagnostic?.httpStatus || ""}`;
+  if (options.dedupe && observedEpisodes.has(key)) return;
+  if (options.dedupe) observedEpisodes.add(key);
+  void activity.recordObservation({ version: 1, observationId: composition.idFactory.create(), observedAt: new Date(composition.clock.now()).toISOString(),
+    campaignId: scope.campaignId, kind, severity: options.severity || (options.success ? "info" : "error"),
+    jobId: options.jobId || null, generationJobId: kind === "browser.illustration_command_failed" ? options.generationJobId || null : options.jobId || null, segmentId: options.segmentId || null, turnId: options.turnId || null, diagnostic });
 }
-
-function copyActivityDiagnostics() {
-  const text = state.activityLog.map(e => `[${e.ts}] [${e.category}] ${e.title}\n${e.detail}`).join("\n\n");
-  navigator.clipboard.writeText(text).then(() => toast("Diagnostics copied to clipboard."));
+// Pre-session notices never create a persisted/exported owner or campaign log.
+function endActivityEpisode(kind, captured = activityScope(), jobId = "") {
+  const prefix = `${captured.epoch}:${kind}:${jobId}:`;
+  for (const key of observedEpisodes) if (key.startsWith(prefix)) observedEpisodes.delete(key);
 }
+function sessionActivityNotice() {
+  const status = $("activityLogStatus");
+  if (status) status.textContent = activity?.getState().scope ? "Provider information could not be loaded." : "Session or provider information is unavailable. Identity verification is required for campaign history.";
+}
+window.addEventListener("online", () => { if (state.campaignId && !activity?.getState().scope) void loadCampaign(state.campaignId, { autoScroll: false }); });
+window.addEventListener("pagehide", () => { activityView?.dispose(); composition.disposeActivity?.(); });
 
 // ── Onboarding ────────────────────────────────────────────────
 async function checkOnboarding() {
@@ -448,13 +450,17 @@ async function checkOnboarding() {
       openManagedModal(dlg);
     }
   } catch (err) {
-    recordActivity("error", "Failed to load providers", err.message);
+    sessionActivityNotice();
   }
 }
 
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
-  const loadEpoch = ++storyTurnWindowEpoch;
+  activity?.close();
+  activity?.setJobActive(false);
+  observedEpisodes.clear();
+  ++storyTurnWindowEpoch;
+  const loadEpoch = ++activityActivationEpoch;
   if (state.campaignId !== campaignId) {
     state.retainedAppendDraft = null;
     state.illustrationConfig = null;
@@ -471,9 +477,15 @@ async function loadCampaign(campaignId, options = {}) {
   setTurnHistoryLoadStatus("");
   showBusy("Loading campaign…");
   try {
+    if (activity) {
+      const currentSession = await apiClient.session.get();
+      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+      state.user = currentSession.user;
+      void activity.open({ apiBase: composition.activityApiBase, ownerUserId: currentSession.user.id, campaignId });
+    }
     const syncData = await apiClient.generation.syncStatus(campaignId);
     const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
-    if (state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch) return;
+    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
 
     setTurnHistoryLoadStatus("");
     state.campaign = syncData.campaign || syncData;
@@ -486,17 +498,25 @@ async function loadCampaign(campaignId, options = {}) {
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
     void loadStoryMemorySettings(campaignId, storyTurnWindowEpoch);
-    state.runtimeState = await apiClient.campaigns.state(campaignId);
+    const runtimeState = await apiClient.campaigns.state(campaignId);
+    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+    state.runtimeState = runtimeState;
     markEditStateStaleForCurrentRuntimeState(state.runtimeState);
     try {
-      state.illustrationConfig = await illustrationApi.config(campaignId);
+      const config = await illustrationApi.config(campaignId);
+      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
       const segmentData = await illustrationApi.segments(campaignId);
+      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+      state.illustrationConfig = config;
       state.illustrationSegments = segmentData.segments || [];
       state.illustrationError = null;
     } catch (error) {
+      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
+      observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, { campaignId, epoch: loadEpoch });
       state.illustrationError = illustrationLoadError(error);
     }
 
+    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
     // Set title
     const titleEl = $("storyTitle");
     const name = state.campaign.title || state.world?.title || "Untitled Campaign";
@@ -513,12 +533,13 @@ async function loadCampaign(campaignId, options = {}) {
         }
       }
     }
+    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return;
     renderAllScenes({ autoScroll: options.autoScroll });
     updateStatusBar();
 
     renderTurnInput();
 
-    recordActivity("system", "Campaign loaded", `${state.turns.length} turns loaded for "${name}".`);
+    observeActivity("browser.campaign_load", null, { success: true }, { campaignId, epoch: loadEpoch });
     state.campaignLoaded = true;
     if (!state.pendingGeneration && (state.generationRecovery?.status === "recoverable" || state.generationRecovery?.status === "failed")) {
       const guidance = generationRecoveryGuidance(state.generationRecovery.diagnostic);
@@ -531,6 +552,7 @@ async function loadCampaign(campaignId, options = {}) {
         presentation
       );
       await loadGenerationReview();
+      if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch || !state.generationRecovery) return;
       showGenerationRecovery(
         state.generationRecovery.id,
         state.generationReview?.summary ? "This turn needs your review" : (guidance?.message || "This durable generation needs your direction."),
@@ -542,11 +564,13 @@ async function loadCampaign(campaignId, options = {}) {
     }
     return true;
   } catch (err) {
+    if (state.campaignId !== campaignId || activityActivationEpoch !== loadEpoch) return false;
+    if ([401, 403, 404].includes(err.statusCode)) activity?.close();
     toast(`Error loading campaign: ${err.message}`);
-    recordActivity("error", "Campaign load failed", err.message);
+    observeActivity("browser.campaign_load", err, { route: "/api/v1/campaigns/:campaignId" }, { campaignId, epoch: loadEpoch });
     return false;
   } finally {
-    hideBusy();
+    if (state.campaignId === campaignId && activityActivationEpoch === loadEpoch) hideBusy();
   }
 }
 
@@ -1369,6 +1393,7 @@ function captureHydratedAppendDraft(syncData) {
 }
 
 async function runGeneration(action, options = {}) {
+  const submissionScope = activityScope();
   if (!state.campaignLoaded) return;
   const submissionCampaignId = state.campaignId;
   showBusy("Queueing turn with the Story Engine…");
@@ -1376,6 +1401,7 @@ async function runGeneration(action, options = {}) {
   const progressEl = $("generationProgress");
   if (progressEl) progressEl.classList.remove("hidden");
   let completeButLoading = false;
+  let submissionAccepted = false;
 
   try {
     const operationKind = options.operationKind || "append";
@@ -1398,7 +1424,8 @@ async function runGeneration(action, options = {}) {
         recentTurns: 8
       }
     };
-    recordActivity("generation", "Generation queued", `Action: "${action}"`);
+
+    void activity?.refresh();
     beginGenerationDisplay(action);
     const request = {
       action: submission.action,
@@ -1422,13 +1449,14 @@ async function runGeneration(action, options = {}) {
       const conflict = await resumeActiveGenerationConflict(error, submissionCampaignId, composition.workflow);
       if (!conflict) throw error;
       toast(conflict.message);
-      recordActivity("system", "Attached to active generation", `jobId=${conflict.pendingGeneration.id || "unknown"}`);
+      void activity?.refresh();
       run = conflict.run;
       attachedConflict = true;
       conflictPendingGeneration = conflict.pendingGeneration;
     }
-    if (state.campaignId !== submissionCampaignId
+    if (!activityScopeCurrent(submissionScope) || state.campaignId !== submissionCampaignId
       || (operationKind === "append" && appendExpectedTurnNumber(state.campaign) !== expectedTurnNumber)) return;
+    submissionAccepted = true;
     resetStoryLengthOverrideControls();
     options.onAttached?.();
     state.generationRun = run;
@@ -1452,13 +1480,13 @@ async function runGeneration(action, options = {}) {
     if (err.name === "AbortError") {
       if (!state.cancellationConfirmed) {
         toast("Generation cancelled.");
-        recordActivity("system", "Generation cancelled");
+        void activity?.refresh();
       }
       state.cancellationConfirmed = false;
     } else {
       const preserved = options.operationKind === "replace_latest" ? " The original turn was preserved." : "";
       toast(`Generation failed: ${err.message}${preserved}`);
-      recordActivity("error", "Generation failed", err.message);
+      if (!submissionAccepted) observeActivity("browser.submission_failed", err, { route: "/api/v1/campaigns/:campaignId/generations" }, submissionScope);
     }
   } finally {
     if (!completeButLoading) clearStreamingPreview();
@@ -1574,6 +1602,7 @@ function commitGenerationDisplay(removeStreamingPreview = true) {
 }
 
 async function cancelActiveGeneration() {
+  const observationScope = activityScope();
   await cancelGeneration({
     state,
     getCancelButton: () => $("streamingPreviewCard")?.querySelector('[data-action="cancel-generation"]'),
@@ -1585,7 +1614,7 @@ async function cancelActiveGeneration() {
     restoreGenerationDisplay,
     abortLocalMonitoring: () => state.abortController?.abort(),
     reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
-    recordActivity,
+    recordObservation: (error, jobId, campaignId) => observeActivity("browser.recovery_command_failed", error, { jobId, route: "/api/v1/generation-jobs/:jobId/cancel" }, observationScope),
     toast,
     showBusy
   });
@@ -1695,6 +1724,7 @@ function hideGenerationRecovery() {
 }
 
 async function loadGenerationReview() {
+  const observationScope = activityScope();
   const recovery = state.generationRecovery;
   const summary = recovery?.review;
   if (!summary || !state.campaignId) return;
@@ -1718,23 +1748,27 @@ async function loadGenerationReview() {
     if (!stillCurrent()) return;
     state.generationReview = { summary, detail };
     generationReviewLoadedKey = reviewKey;
-  } catch {
+  } catch (error) {
     if (!stillCurrent()) return;
+    observeActivity("browser.recovery_command_failed", error, { jobId, route: "/api/v1/generation-jobs/:jobId/review" }, observationScope);
     state.generationReview = { summary, detail: null };
     generationReviewLoadedKey = reviewKey;
   }
 }
 
 async function decideGenerationReview(decision) {
+  const observationScope = activityScope();
   const summary = state.generationReview?.summary;
   if (!summary || state.generationReviewSubmitting) return;
   state.generationReviewSubmitting = true; state.generationReviewError = null;
   showGenerationRecovery(state.generationRecovery?.id || state.pendingGeneration?.id, "This turn needs your review");
   try {
     const run = state.generationRun || await composition.workflow.resume(state.campaignId);
+    if (!activityScopeCurrent(observationScope)) return;
     if (!run) throw new Error("The saved review is unavailable.");
     state.generationRun = run;
     const current = await run.getReview();
+    if (!activityScopeCurrent(observationScope)) return;
     const stillCurrent = current.reviewId === summary.reviewId
       && current.revision === summary.revision
       && current.state === "pending";
@@ -1762,10 +1796,13 @@ async function decideGenerationReview(decision) {
       return;
     }
     await run.decideReview(request);
+    if (!activityScopeCurrent(observationScope)) return;
     // A live review remains on the existing stream. A rehydrated review has no
     // watcher, so reload only in that case to read its later durable state.
     if (!state.abortController) await loadCampaign(state.campaignId, { autoScroll: false });
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
+    observeActivity("browser.recovery_command_failed", error, { route: "/api/v1/generation-jobs/:jobId/review-decision" }, observationScope);
     state.generationReviewError = "Your decision could not be saved. The turn remains unchanged.";
     // A stale review decision is commonly caused by another open tab resolving
     // the same durable job. Re-read the authoritative campaign before showing
@@ -1774,8 +1811,10 @@ async function decideGenerationReview(decision) {
       await loadCampaign(state.campaignId, { autoScroll: false }).catch(() => undefined);
     }
   } finally {
-    state.generationReviewSubmitting = false;
-    if (state.generationRecovery) showGenerationRecovery(state.generationRecovery.id, "This turn needs your review");
+    if (activityScopeCurrent(observationScope)) {
+      state.generationReviewSubmitting = false;
+      if (state.generationRecovery) showGenerationRecovery(state.generationRecovery.id, "This turn needs your review");
+    }
   }
 }
 
@@ -1796,6 +1835,7 @@ function resetGenerationStateForCampaignLoad() {
 }
 
 async function monitorRecoveryJob(retryFirst) {
+  const observationScope = activityScope();
   const panel = $("generationRecoveryPanel");
   const jobId = panel?.dataset.jobId || state.pendingGeneration?.id;
   if (!jobId || state.busy) return;
@@ -1803,33 +1843,39 @@ async function monitorRecoveryJob(retryFirst) {
   showBusy(retryFirst ? "Retrying durable generation…" : "Resuming generation monitoring…");
   try {
     const run = state.generationRun || await composition.workflow.resume(state.campaignId);
+    if (!activityScopeCurrent(observationScope)) return;
     if (!run) throw new Error("No durable generation is available to resume.");
     state.generationRun = run;
     beginGenerationDisplay(state.pendingGeneration?.action || "");
     await observeGenerationRun(run, state.pendingGeneration?.action || "", retryFirst);
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
     restoreGenerationDisplay();
     if (error.name === "AbortError") {
       toast("Generation cancelled.");
-      recordActivity("system", "Generation cancelled");
+      void activity?.refresh();
     } else {
+      observeActivity("browser.recovery_command_failed", error, { route: "/api/v1/generation-jobs/:jobId/retry" }, observationScope);
       toast(`Generation recovery failed: ${error.message}`);
     }
   } finally {
-    hideBusy();
+    if (activityScopeCurrent(observationScope)) hideBusy();
   }
 }
 
 async function discardRecoveryJob() {
+  const observationScope = activityScope();
   const panel = $("generationRecoveryPanel");
   const jobId = panel?.dataset.jobId || state.pendingGeneration?.id;
   if (!jobId || state.busy) return;
   showBusy("Discarding generation job…");
   try {
     const run = state.generationRun || await composition.workflow.resume(state.campaignId);
+    if (!activityScopeCurrent(observationScope)) return;
     if (!run) throw new Error("No active generation run is available to discard.");
     state.generationRun = run;
     await run.discardGeneration();
+    if (!activityScopeCurrent(observationScope)) return;
     clearPendingSubmission();
     state.pendingGeneration = null;
     hideGenerationRecovery();
@@ -1837,22 +1883,28 @@ async function discardRecoveryJob() {
     restoreRetainedAppendDraft();
     toast("Generation job discarded. The accepted turn was preserved.");
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
+    observeActivity("browser.recovery_command_failed", error, { route: "/api/v1/generation-jobs/:jobId/discard" }, observationScope);
     toast(`Could not discard generation: ${error.message}`);
   } finally {
-    hideBusy();
+    if (activityScopeCurrent(observationScope)) hideBusy();
   }
 }
 
 async function retryCompletedGenerationResult() {
+  const observationScope = activityScope();
   if (!state.generationRun || state.busy) return;
   showBusy("Loading the accepted turn…");
   try {
     await fetchCompletedGenerationResult(state.generationRun, {
       onCompleted: async (result) => {
+        if (!activityScopeCurrent(observationScope)) return;
         hideGenerationRecovery();
         await finalizeCompletedGeneration(result);
       },
       onResultUnavailable: (jobId) => {
+        if (!activityScopeCurrent(observationScope)) return;
+        observeActivity("browser.result_unavailable", null, { code: "result_unavailable", jobId }, observationScope);
         showGenerationRecovery(
           jobId,
           "The turn completed, but its result is still temporarily unavailable. Retry loading it.",
@@ -1861,17 +1913,22 @@ async function retryCompletedGenerationResult() {
       }
     });
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
+    observeActivity("browser.result_unavailable", error, { code: "result_unavailable" }, observationScope);
     showGenerationRecovery(
       state.generationRun.jobId,
       `The accepted turn could not be loaded: ${error.message}`,
       "result"
     );
   } finally {
-    hideBusy();
+    if (activityScopeCurrent(observationScope)) hideBusy();
   }
 }
 
 async function finalizeCompletedGeneration(result) {
+  if (result.campaignId && result.campaignId !== state.campaignId) return;
+  activity?.setJobActive(false);
+  void activity?.refresh();
   const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;
   const viewport = preserveViewport
     ? { left: window.scrollX, top: window.scrollY }
@@ -1886,7 +1943,6 @@ async function finalizeCompletedGeneration(result) {
   // accepted turn replaces the streamed preview.
   hideGenerationRecovery();
   commitGenerationDisplay(false);
-  recordActivity("success", "Turn generated", `Turn ${result.turnNumber || ""} completed.`);
   if (!replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport)) {
     clearStreamingPreview();
     await loadCampaign(state.campaignId, { autoScroll: !preserveViewport });
@@ -1932,24 +1988,36 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
 }
 
 async function reconcileCompletedGeneration(result) {
+  const reconciliationScope = activityScope();
+  const campaignId = result.campaignId || reconciliationScope.campaignId;
+  const current = () => campaignId === state.campaignId && reconciliationScope.epoch === activityActivationEpoch;
   try {
-    const syncData = await apiClient.generation.syncStatus(state.campaignId);
+    const syncData = await apiClient.generation.syncStatus(campaignId);
+    if (!current()) return;
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
-    state.runtimeState = await apiClient.campaigns.state(state.campaignId);
+    const runtimeState = await apiClient.campaigns.state(campaignId);
+    if (!current()) return;
+    state.runtimeState = runtimeState;
     markEditStateStaleForCurrentRuntimeState(state.runtimeState);
     try {
-      state.illustrationConfig = await illustrationApi.config(state.campaignId);
-      const segmentData = await illustrationApi.segments(state.campaignId);
+      const config = await illustrationApi.config(campaignId);
+      if (!current()) return;
+      const segmentData = await illustrationApi.segments(campaignId);
+      if (!current()) return;
+      state.illustrationConfig = config;
       state.illustrationSegments = segmentData.segments || [];
       state.illustrationError = null;
     } catch (error) {
+      if (!current()) return;
+      observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, reconciliationScope);
       state.illustrationError = illustrationLoadError(error);
     }
 
+    if (!current()) return;
     const titleEl = $("storyTitle");
     const name = state.campaign.title || state.world?.title || "Untitled Campaign";
     if (titleEl) titleEl.textContent = name;
@@ -1958,11 +2026,15 @@ async function reconcileCompletedGeneration(result) {
     updateStatusBar();
     renderTurnInput();
   } catch (error) {
-    recordActivity("error", "Completed turn reconciliation failed", error.message);
+    observeActivity("browser.result_unavailable", error, { code: "result_unavailable" }, reconciliationScope);
   }
 }
 
 async function observeGenerationRun(run, action, retryFirst = false) {
+  const monitorScope = activityScope();
+  const currentMonitor = () => monitorScope.epoch === activityActivationEpoch && monitorScope.campaignId === state.campaignId;
+  let monitoringDegraded = false;
+  activity?.setJobActive(true);
   state.generationJobId = run.jobId;
   if (!state.generationDisplayActive) beginGenerationDisplay(action);
   else renderStreamingPreview("", action || state.generationDisplayAction);
@@ -1972,6 +2044,10 @@ async function observeGenerationRun(run, action, retryFirst = false) {
   let lastSnapshot = null;
   await observeGenerationRunEvents(run, retryFirst, state, (events) => presentGenerationEvents(events, {
     onStatus: (snapshot) => {
+      if (monitorScope.epoch !== activityActivationEpoch || monitorScope.campaignId !== state.campaignId) return;
+      if (monitoringDegraded) { endActivityEpisode("browser.monitoring_degraded", monitorScope, run.jobId); monitoringDegraded = false; observeActivity("browser.monitoring_restored", null, { success: true, jobId: run.jobId }, monitorScope); }
+      if (["completed", "failed", "recoverable", "cancelled", "discarded"].includes(snapshot.status)) activity?.setJobActive(false);
+      void activity?.refresh();
       lastSnapshot = snapshot;
       updateGenerationProgress(snapshot);
       if (snapshot.review?.state === "decided" || snapshot.status === "completed") {
@@ -1991,30 +2067,34 @@ async function observeGenerationRun(run, action, retryFirst = false) {
         });
       }
     },
-    onNarration: (text) => renderStreamingPreview(text, action || state.generationDisplayAction),
-    onDegraded: (reason, failures) => recordActivity("system", "Generation monitoring degraded", `${reason} (${failures})`),
-    onDetached: () => recordActivity("system", "Generation monitoring detached", `jobId=${run.jobId}`),
+    onNarration: (text) => { if (currentMonitor()) renderStreamingPreview(text, action || state.generationDisplayAction); },
+    onDegraded: () => { monitoringDegraded = true; observeActivity("browser.monitoring_degraded", null, { code: "monitoring_degraded", severity: "warning", jobId: run.jobId, dedupe: true }, monitorScope); },
+    onDetached: () => observeActivity("browser.monitoring_detached", null, { code: "monitoring_degraded", severity: "warning", jobId: run.jobId, dedupe: true }, monitorScope),
     onResultUnavailable: (jobId, error) => {
+      if (!currentMonitor()) return;
       showGenerationRecovery(
         jobId,
         "The turn completed, but its result is temporarily unavailable. Retry loading it.",
         "result"
       );
       renderTurnInput();
-      recordActivity("system", "Completed turn result unavailable", error.message);
+      observeActivity("browser.result_unavailable", error, { code: "result_unavailable", jobId }, monitorScope);
       resultUnavailable = true;
     },
-    onCompleted: finalizeCompletedGeneration,
+    onCompleted: (result) => currentMonitor() ? finalizeCompletedGeneration(result) : undefined,
     onCancelled: async () => {
+      if (!currentMonitor()) return;
       terminalError = await reconcileRemoteGenerationCancellation({
         state,
         clearPendingSubmission,
         restoreGenerationDisplay,
         reloadCampaign: (campaignId) => loadCampaign(campaignId, { autoScroll: false }),
+        recordObservation: (error, jobId) => observeActivity("browser.recovery_command_failed", error, { jobId }, monitorScope),
         toast
       });
     },
     onTerminalFailure: (error, outcome) => {
+      if (!currentMonitor()) return;
       clearPendingSubmission();
       state.pendingGeneration = null;
       if (lastSnapshot) state.generationRecovery = lastSnapshot;
@@ -2099,7 +2179,7 @@ async function resumePendingGeneration() {
       state.generationRun = run;
       state.pendingGeneration = { id: run.jobId };
       showBusy("Resuming pending generation…");
-      recordActivity("system", "Resuming pending generation", `jobId=${run.jobId}`);
+      void activity?.refresh();
       beginGenerationDisplay(state.pendingGeneration.action || "");
       const progressEl = $("generationProgress");
       if (progressEl) progressEl.classList.remove("hidden");
@@ -2152,6 +2232,7 @@ function navigateToTurn(turnNumber) {
 }
 
 async function loadOlderTurnPage() {
+  const observationScope = activityScope();
   if (!state.historyNextCursor || state.busy) return false;
   const campaignId = state.campaignId;
   const epoch = storyTurnWindowEpoch;
@@ -2173,7 +2254,7 @@ async function loadOlderTurnPage() {
   } catch (error) {
     if (!storyTurnWindowIsCurrent(campaignId, epoch, requestedCursor)) return false;
     toast(`Unable to load older turns: ${error.message}`);
-    recordActivity("error", "Older turn page failed", error.message);
+    observeActivity("browser.history_page_failed", error, { route: "/api/v1/campaigns/:campaignId/turns" }, observationScope);
     return false;
   } finally {
     hideBusy();
@@ -2201,6 +2282,7 @@ function goToNext() {
 }
 
 async function undoLatest() {
+  const observationScope = activityScope();
   const isLatest = isViewingLatestTurn();
   if (state.busy || state.turns.length === 0 || !isLatest) return;
   if (!confirm("Undo the last turn? This rewinds the campaign and cannot be reversed.")) return;
@@ -2208,14 +2290,16 @@ async function undoLatest() {
   try {
     const targetTurnNumber = undoTargetTurnNumber(state.campaign);
     await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber });
-    recordActivity("system", "Turn undone", `Rewound to turn ${targetTurnNumber}.`);
+    if (!activityScopeCurrent(observationScope)) return;
+    observeActivity("browser.undo_result", null, { success: true }, observationScope);
     await loadCampaign(state.campaignId);
     toast("Last turn removed.");
   } catch (err) {
+    if (!activityScopeCurrent(observationScope)) return;
     toast(`Undo failed: ${err.message}`);
-    recordActivity("error", "Undo failed", err.message);
+    observeActivity("browser.undo_result", err, {}, observationScope);
   } finally {
-    hideBusy();
+    if (activityScopeCurrent(observationScope)) hideBusy();
   }
 }
 
@@ -2296,14 +2380,17 @@ function illustrationLoadError(error) {
 }
 
 async function refreshIllustrations() {
+  const observationScope = activityScope();
   const campaignId = state.campaignId;
   try {
     const config = await illustrationApi.config(campaignId);
-    if (state.campaignId !== campaignId) return;
+    if (!activityScopeCurrent(observationScope)) return;
     state.illustrationConfig = config;
     await pollImageJobs();
   } catch (error) {
-    if (state.campaignId !== campaignId) return;
+    if (!activityScopeCurrent(observationScope)) return;
+    if (!activityScopeCurrent(observationScope)) return;
+    observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, observationScope);
     state.illustrationError = illustrationLoadError(error);
     renderStoryIllustration();
   }
@@ -2313,6 +2400,7 @@ function pollImageJobs() {
   if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
   if (!state.campaignId) return;
   const campaignId = state.campaignId;
+  const observationScope = activityScope();
   const epoch = ++state.imagePollEpoch;
   let failures = 0;
   const current = () => state.campaignId === campaignId && state.imagePollEpoch === epoch;
@@ -2330,27 +2418,28 @@ function pollImageJobs() {
       const segmentData = await illustrationApi.segments(campaignId);
       if (!current()) return;
       failures = 0;
+      endActivityEpisode("browser.illustration_command_failed", observationScope);
       state.illustrationError = null;
       const segments = segmentData.segments || [];
       let anyPending = false;
       state.illustrationSegments = segments;
       renderStoryIllustration();
       for (const job of jobs) {
-        recordImageJobActivity(job, { suppress: !state.imageActivityInitialized });
         renderSceneImageJob(job);
         if (["queued", "generating", "provider_pending", "downloading"].includes(job.status)) anyPending = true;
       }
       for (const segment of segments) {
-        recordIllustrationSegmentActivity(segment, { suppress: !state.imageActivityInitialized });
         if (["queued", "refining", "generating"].includes(segment.status)
           || ["queued", "refining", "recoverable"].includes(segment.promptJobStatus)) anyPending = true;
       }
-      state.imageActivityInitialized = true;
+      activity?.setJobActive(state.generationDisplayActive || Boolean(state.pendingGeneration) || anyPending);
+      void activity?.refresh();
       if (anyPending) {
         state.imagePollTimer = setTimeout(poll, IMAGE_POLL_MS);
       }
     } catch (error) {
       if (!current()) return;
+      observeActivity("browser.illustration_command_failed", error, { severity: "warning", dedupe: true }, observationScope);
       state.illustrationError = illustrationLoadError(error);
       renderStoryIllustration();
       if (error?.name !== "ApiContractError" && ++failures < 3) {
@@ -2361,74 +2450,6 @@ function pollImageJobs() {
   return poll();
 }
 
-function recordIllustrationSegmentActivity(segment, options = {}) {
-  if (!segment?.id) return;
-  const signature = [
-    segment.status || "",
-    segment.promptJobStatus || "",
-    segment.promptSource || "",
-    segment.imageJobStatus || "",
-    segment.variants?.length || 0
-  ].join(":");
-  if (state.illustrationSegmentActivity.get(segment.id) === signature) return;
-  state.illustrationSegmentActivity.set(segment.id, signature);
-  if (options.suppress) return;
-  const turnIndex = state.turns.findIndex((turn) => (turn.id || turn.turnId) === segment.turnId);
-  const turn = state.turns[turnIndex];
-  const detail = turn
-    ? `turn=${turn.turnNumber} · segment=${segment.ordinal + 1} · prompt=${segment.promptSource || "direct"} · status=${segment.status}`
-    : `turnId=${segment.turnId || "unknown"} · segment=${segment.ordinal + 1} · prompt=${segment.promptSource || "direct"} · status=${segment.status}`;
-  if (segment.promptJobStatus === "refining") {
-    recordActivity("image", "Refining segment illustration prompt", detail);
-  } else if (segment.promptSource === "ai_fallback") {
-    recordActivity("image", "Segment prompt used direct fallback", detail);
-  } else if (segment.status === "completed") {
-    recordActivity("success", "Illustration segment completed", `${detail} · variants=${segment.variants?.length || 0}`);
-  } else if (segment.status === "failed" || segment.status === "recoverable") {
-    recordActivity("error", "Illustration segment failed", `${detail} · ${segment.errorMessage || ""}`);
-  }
-}
-
-function recordImageJobActivity(job, options = {}) {
-  if (!job?.id) return;
-  const progress = Number(job.providerProgress);
-  const progressBucket = Number.isFinite(progress) ? Math.floor(Math.max(0, Math.min(100, progress)) / 10) * 10 : null;
-  const signature = [
-    job.status || "",
-    job.providerStatus || "",
-    progressBucket ?? "",
-    job.providerQueuePosition ?? "",
-    job.errorCode || "",
-    job.assetId || job.assetUrl || ""
-  ].join(":");
-  if (state.imageJobActivity.get(job.id) === signature) return;
-  state.imageJobActivity.set(job.id, signature);
-  if (options.suppress) return;
-
-  const turnIndex = state.turns.findIndex((turn) => (turn.id || turn.turnId) === job.turnId);
-  const turn = state.turns[turnIndex];
-  const turnDetail = turn ? `turn=${turn.turnNumber}` : `turnId=${job.turnId || "unknown"}`;
-  const detail = [
-    turnDetail,
-    `jobId=${job.id}`,
-    `status=${job.status || "queued"}`,
-    job.providerStatus ? `providerStatus=${job.providerStatus}` : "",
-    Number.isFinite(progress) ? `progress=${Math.round(progress)}%` : "",
-    Number.isInteger(job.providerQueuePosition) ? `queue=${job.providerQueuePosition}` : "",
-    job.requestedModel ? `model=${job.requestedModel}` : "",
-    job.errorMessage ? `error=${job.errorMessage}` : ""
-  ].filter(Boolean).join(" · ");
-
-  if (job.status === "completed") {
-    recordActivity("success", "Illustration generated", detail);
-  } else if (["recoverable", "failed", "cancelled", "expired"].includes(job.status)) {
-    recordActivity("error", "Illustration generation failed", detail);
-  } else if (job.status === "queued") {
-    recordActivity("image", "Illustration generation queued", detail);
-  } else {
-    recordActivity("image", "Illustration generation progress", detail);
-  }
-}
 
 function imageJobStatusText(job) {
   const stage = String(job.providerStatus || job.status || "queued").replaceAll("_", " ");
@@ -2510,13 +2531,14 @@ function renderSceneImageJob(job) {
     retry.className = "small ghost";
     retry.textContent = "Retry illustration";
     retry.addEventListener("click", async () => {
+      const observationScope = activityScope();
       retry.disabled = true;
       try {
-        const queued = await illustrationApi.retryImageJob(job.id);
-        recordImageJobActivity(queued);
+        await illustrationApi.retryImageJob(job.id);
         renderSceneImageJob(queued);
         pollImageJobs();
       } catch (error) {
+        observeActivity("browser.illustration_command_failed", error, { jobId: job.id }, observationScope);
         toast(`Illustration retry failed: ${error.message}`);
         retry.disabled = false;
       }
@@ -2570,20 +2592,22 @@ function openSegmentImagePromptEditor(segmentId, variantIndex) {
 }
 
 async function regenerateSegmentImage(segmentId, variantIndex, prompt) {
+  const observationScope = activityScope();
   const { segment, variant } = segmentVariant(segmentId, variantIndex);
   const effectivePrompt = String(prompt || variant?.prompt || segment?.resolvedPrompt || segment?.directPrompt || "").trim();
   if (!segment || !effectivePrompt) return toast("This segment does not have a valid illustration prompt.");
   try {
     showBusy(`Queueing segment ${segment.ordinal + 1}, image ${variantIndex + 1}…`);
-    const queued = await illustrationApi.regenerateSegmentImage(segmentId, { prompt: effectivePrompt, variantIndex });
-    recordImageJobActivity(queued);
+    await illustrationApi.regenerateSegmentImage(segmentId, { prompt: effectivePrompt, variantIndex });
+    if (!activityScopeCurrent(observationScope)) return;
     pollImageJobs();
     toast(`Segment ${segment.ordinal + 1}, image ${variantIndex + 1} queued.`);
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
     toast(`Could not regenerate this image: ${error.message}`);
-    recordActivity("error", "Segment illustration regeneration failed", error.message);
+    observeActivity("browser.illustration_command_failed", error, { segmentId, route: "/api/v1/illustration-segments/:segmentId/images" }, observationScope);
   } finally {
-    hideBusy();
+    if (activityScopeCurrent(observationScope)) hideBusy();
   }
 }
 
@@ -2614,25 +2638,27 @@ function whySegmentImage(segmentId, variantIndex) {
 }
 
 async function generateTurnSegments(turnId, mode = "missing") {
+  const observationScope = activityScope();
   if (!turnId || state.busy) return;
   showBusy(mode === "rebuild" ? "Rebuilding illustration segments…" : "Creating illustration segments…");
   try {
-    const result = await illustrationApi.generateTurnSegments(turnId, {
+    await illustrationApi.generateTurnSegments(turnId, {
       mode,
       idempotencyKey: composition.idFactory.create()
     });
     const segmentData = await illustrationApi.segments(state.campaignId);
+    if (!activityScopeCurrent(observationScope)) return;
     state.illustrationSegments = segmentData.segments || [];
     renderAllScenes({ autoScroll: false });
     pollImageJobs();
-    recordActivity("image", mode === "rebuild" ? "Turn illustration segments rebuilt" : "Turn illustration segments queued",
-      `turnId=${turnId} · segments=${result.segmentCount || 0}`);
+    void activity?.refresh();
     toast(mode === "rebuild" ? "Turn illustration segments rebuilt." : "Turn illustrations queued.");
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
     toast(`Could not queue turn illustrations: ${error.message}`);
-    recordActivity("error", "Turn illustration segmentation failed", error.message);
+    observeActivity("browser.illustration_command_failed", error, { route: "/api/v1/turns/:turnId/illustrations" }, observationScope);
   } finally {
-    hideBusy();
+    if (activityScopeCurrent(observationScope)) hideBusy();
   }
 }
 
@@ -2646,6 +2672,7 @@ function showMessage(title, message) {
 }
 
 async function whyIllustration(turnId) {
+  const observationScope = activityScope();
   try {
     const resolution = await illustrationApi.resolution(turnId);
     const candidate = resolution.candidates?.[0];
@@ -2657,13 +2684,17 @@ async function whyIllustration(turnId) {
     ].filter(Boolean).join("\n");
     showMessage("Why this image?", details);
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
+    observeActivity("browser.illustration_command_failed", error, { turnId }, observationScope);
     toast(error.message || "No automatic match evidence is available for this image.");
   }
 }
 
 async function pollIllustrationResolution(turnId) {
+  const observationScope = activityScope();
   for (let attempt = 0; attempt < 120; attempt += 1) {
     const resolution = await illustrationApi.resolution(turnId);
+    if (!activityScopeCurrent(observationScope)) return;
     if (resolution.status === "completed" && resolution.selectedAssetId) {
       updateSceneImage(turnId, `/api/v1/assets/${resolution.selectedAssetId}`, true);
       toast("Selected another library match.");
@@ -2671,18 +2702,24 @@ async function pollIllustrationResolution(turnId) {
     }
     if (resolution.status === "no_match") return toast("No other library image met the confidence threshold.");
     if (resolution.status === "generation_queued") { pollImageJobs(); return; }
-    if (resolution.status === "failed") return toast(`Image matching failed: ${resolution.reasonCode || "unknown error"}.`);
+    if (resolution.status === "failed") {
+      observeActivity("browser.illustration_command_failed", null, { code: "image_failed", turnId }, observationScope);
+      return toast(`Image matching failed: ${resolution.reasonCode || "unknown error"}.`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   toast("Image matching is still running.");
 }
 
 async function findAnotherLibraryMatch(turnId) {
+  const observationScope = activityScope();
   try {
     await illustrationApi.rematch(turnId);
     toast("Searching for another retained match.");
-    void pollIllustrationResolution(turnId);
+    void pollIllustrationResolution(turnId).catch(error => observeActivity("browser.illustration_command_failed", error, { turnId }, observationScope));
   } catch (error) {
+    if (!activityScopeCurrent(observationScope)) return;
+    observeActivity("browser.illustration_command_failed", error, { turnId }, observationScope);
     toast(error.message || "This image was not selected by automatic library matching.");
   }
 }
@@ -2852,11 +2889,7 @@ function renderRpgStatsInEditState() {
     : `<p class="dim mini">No RPG stats configured for this campaign.</p>`;
 }
 
-function openActivityLog() {
-  renderActivityLog();
-  const d = $("activityLogDialog");
-  openManagedModal(d);
-}
+function openActivityLog() { activityView?.open(); }
 
 const STORY_MEMORY_LEVELS = new Set(["off", "standard", "enhanced", "max"]);
 
@@ -3441,7 +3474,7 @@ async function init() {
       state.user = sessionRes.user;
     }
   } catch (err) {
-    recordActivity("error", "Session profile unavailable", err.message);
+    sessionActivityNotice();
   }
   const match = window.location.pathname.match(/\/story\/([^/]+)/);
   if (match) {
@@ -3453,7 +3486,7 @@ async function init() {
     localStorage.removeItem("infiniteQuestLastCampaignId");
     await checkOnboarding();
     updateStatusBar();
-    recordActivity("system", "Empty Story page opened", "Choose a world from the Nexus dashboard to begin a campaign.");
+    sessionActivityNotice();
     return;
   }
   await checkOnboarding();
@@ -3798,22 +3831,6 @@ document.addEventListener("DOMContentLoaded", () => {
       pauseStreamingAutoFollow();
     }
   });
-
-  // Activity log
-  function openActivityLog() {
-    const dlg = $("activityLogDialog");
-    if (!dlg) return;
-    renderActivityLog();
-    openManagedModal(dlg);
-  }
-  const btnCloseActivityLog = $("btnCloseActivityLog");
-  if (btnCloseActivityLog) btnCloseActivityLog.addEventListener("click", () => { const d = $("activityLogDialog"); if (d && d.close) d.close(); });
-  const btnCopyDiagnostics = $("btnCopyDiagnostics") || $("btnCopyActivityLog");
-  if (btnCopyDiagnostics) btnCopyDiagnostics.addEventListener("click", copyActivityDiagnostics);
-  const btnClearActivityLog = $("btnClearActivityLog");
-  if (btnClearActivityLog) btnClearActivityLog.addEventListener("click", () => { state.activityLog = []; renderActivityLog(); toast("Activity log cleared."); });
-  const btnActivityLogDone = $("btnActivityLogDone");
-  if (btnActivityLogDone) btnActivityLogDone.addEventListener("click", () => { const d = $("activityLogDialog"); if (d && d.close) d.close(); });
 
   // Message Popup / Getting Started / Recovery
   const btnMessagePopupClose = $("btnMessagePopupClose");

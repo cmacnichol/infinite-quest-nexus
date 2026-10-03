@@ -496,7 +496,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("implements clean URL loading from /story/:campaignId without requiring sessionStorage", () => {
     expect(storyScript).toContain('const match = window.location.pathname.match(/\\/story\\/([^/]+)/);');
     expect(storyScript).toContain('state.campaignId = decodeURIComponent(match[1]);');
-    expect(storyScript).toContain('recordActivity("system", "Empty Story page opened"');
+    expect(storyScript).toContain("sessionActivityNotice();");
     expect(storyScript).not.toContain('window.location.href = "/nexus/#campaigns";');
     expect(storyScript).toContain('await loadCampaign(state.campaignId);');
   });
@@ -938,7 +938,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       restoreGenerationDisplay: () => { events.push("restore-display"); },
       abortLocalMonitoring: () => { events.push("abort-monitoring"); },
       reloadCampaign: async (campaignId: string) => { events.push(`reload:${campaignId}`); },
-      recordActivity: () => { events.push("record"); },
+      recordObservation: () => { events.push("observation"); },
       toast: () => { events.push("toast"); },
       showBusy: () => { events.push("busy"); }
     });
@@ -950,7 +950,6 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       "abort-monitoring",
       "restore-display",
       "reload:campaign-1",
-      "record",
       "toast"
     ]);
     expect(state.pendingGeneration).toBeNull();
@@ -979,7 +978,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       restoreGenerationDisplay: () => { events.push("restore-display"); },
       abortLocalMonitoring: () => { events.push("abort-monitoring"); },
       reloadCampaign: async () => { events.push("reload"); },
-      recordActivity: () => { events.push("record"); },
+      recordObservation: () => { events.push("observation"); },
       toast: (message: string) => { events.push(message); },
       showBusy: () => { events.push("busy"); }
     });
@@ -988,7 +987,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(button.textContent).toBe("Cancel generation");
     expect(state.pendingGeneration).toBe(pendingGeneration);
     expect(state.generationDisplayActive).toBe(true);
-    expect(events).toEqual(["busy", "Could not cancel generation: Still generating"]);
+    expect(events).toEqual(["busy", "observation", "Could not cancel generation: Still generating"]);
   });
 
   it("reloads authoritative state when remote monitoring reports cancellation", async () => {
@@ -1077,7 +1076,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain("function restoreViewportAfterRender(viewport)");
     expect(storyScript).toContain("window.requestAnimationFrame(() => {");
     expect(storyScript).toContain('window.scrollTo({ ...viewport, behavior: "auto" });');
-    expect(storyScript).toContain('onCompleted: finalizeCompletedGeneration');
+    expect(storyScript).toContain('onCompleted: (result) => currentMonitor() ? finalizeCompletedGeneration(result) : undefined');
     expect(storyScript).toContain('await finalizeCompletedGeneration(result);');
   });
 
@@ -1226,10 +1225,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   it("manages the enabled illustration rail, prompt editing, polling, and generation activity", () => {
     expect(storyScript).toContain('function pollImageJobs()');
     expect(storyScript).toContain('function renderSceneImageJob(job)');
-    expect(storyScript).toContain('function recordImageJobActivity(job, options = {})');
-    expect(storyScript).toContain('recordActivity("success", "Illustration generated"');
-    expect(storyScript).toContain('recordActivity("error", "Illustration generation failed"');
-    expect(storyScript).toContain('recordActivity("image", "Illustration generation progress"');
+    expect(storyScript).not.toContain("function recordImageJobActivity");
+    expect(storyScript).toContain("void activity?.refresh();");
+    expect(storyScript).toContain('observeActivity("browser.illustration_command_failed"');
+    expect(storyScript).not.toContain("recordActivity(");
     expect(storyScript).toContain('["queued", "generating", "provider_pending", "downloading"]');
     expect(storyScript).toContain('aria-label", `Illustration generation progress');
     expect(storyScript).toContain('illustrationApi.imageJobs(campaignId)');
@@ -2710,10 +2709,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
 
   it("provides toast notifications, activity logging, and onboarding verification", () => {
     expect(storyScript).toContain('function toast(msg, duration)');
-    expect(storyScript).toContain('function recordActivity(category, title, detail)');
-    expect(storyScript).toContain('function copyActivityDiagnostics()');
+    expect(storyScript).toContain("function observeActivity(");
+    expect(storyScript).toContain("createStoryActivityView");
     expect(storyScript).toContain('async function checkOnboarding()');
-    expect(storyScript).toContain('const btnCopyDiagnostics = $("btnCopyDiagnostics") || $("btnCopyActivityLog");');
+    expect(storyHtml).toContain('id="btnDownloadActivityLog"');
   });
 
   it("styles the Story Player with dark fantasy tokens, responsive rules, and animations", () => {
