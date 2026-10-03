@@ -80,6 +80,7 @@ function closeDialog(dialog: HTMLDialogElement, returnFocusTo?: HTMLElement): Ed
 interface NativeCancelBinding {
   getOptions: () => NativeDismissalOptions;
   generation: number;
+  active: boolean;
   dispose: () => void;
 }
 
@@ -97,20 +98,25 @@ export function bindEditDialogDismissal(dialog: HTMLDialogElement, getOptions: (
   const binding: NativeCancelBinding = {
     getOptions,
     generation: 1,
+    active: true,
     dispose: () => {
+      if (!binding.active) return;
+      binding.active = false;
+      binding.generation += 1;
       dialog.removeEventListener("cancel", onCancel);
       if (nativeCancelBindings.get(dialog) === binding) nativeCancelBindings.delete(dialog);
     }
   };
   const onCancel = (event: Event) => {
     event.preventDefault();
+    if (!binding.active) return;
     try {
       const generation = binding.generation;
       const options = binding.getOptions();
       void requestEditDismissal({
         ...options,
         dialog,
-        isCurrent: () => binding.generation === generation && (options.isCurrent?.() ?? true)
+        isCurrent: () => binding.active && binding.generation === generation && (options.isCurrent?.() ?? true)
       });
     } catch {
       // If policy construction fails, the native cancel remains prevented and the dialog stays open.

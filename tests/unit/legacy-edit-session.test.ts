@@ -164,4 +164,59 @@ describe("legacy edit session", () => {
     expect(dialog.open).toBe(true);
     dispose();
   });
+
+  it("a disposed native confirmation cannot discard after the dialog is rebound", async () => {
+    const dialog = dialogFixture();
+    let resolveOldDecision!: (decision: "save" | "discard" | "stay") => void;
+    const oldConfirm = vi.fn(() => new Promise<"save" | "discard" | "stay">((resolve) => { resolveOldDecision = resolve; }));
+    const oldSave = vi.fn();
+    const oldDiscard = vi.fn();
+    const oldDispose = bindEditDialogDismissal(dialog, () => ({
+      isDirty: () => true,
+      isBusy: () => false,
+      confirm: oldConfirm,
+      save: oldSave,
+      discard: oldDiscard
+    }));
+    const oldCancel = new Event("cancel", { cancelable: true });
+    dialog.dispatchEvent(oldCancel);
+    await vi.waitFor(() => expect(oldConfirm).toHaveBeenCalledTimes(1));
+    expect(oldCancel.defaultPrevented).toBe(true);
+
+    oldDispose();
+    const newConfirm = vi.fn().mockResolvedValue("stay" as const);
+    const newSave = vi.fn();
+    const newDiscard = vi.fn();
+    const newDispose = bindEditDialogDismissal(dialog, () => ({
+      isDirty: () => true,
+      isBusy: () => false,
+      confirm: newConfirm,
+      save: newSave,
+      discard: newDiscard
+    }));
+    const serializedRequest = requestEditDismissal({
+      dialog,
+      isDirty: () => true,
+      isBusy: () => false,
+      confirm: newConfirm,
+      save: newSave,
+      discard: newDiscard
+    });
+
+    resolveOldDecision("discard");
+    await expect(serializedRequest).resolves.toBe("stayed");
+    expect(oldDiscard).not.toHaveBeenCalled();
+    expect(oldSave).not.toHaveBeenCalled();
+    expect(newDiscard).not.toHaveBeenCalled();
+    expect(dialog.open).toBe(true);
+    expect(dialog.close).not.toHaveBeenCalled();
+
+    const newCancel = new Event("cancel", { cancelable: true });
+    dialog.dispatchEvent(newCancel);
+    await vi.waitFor(() => expect(newConfirm).toHaveBeenCalledTimes(1));
+    expect(newCancel.defaultPrevented).toBe(true);
+    expect(dialog.open).toBe(true);
+    expect(dialog.close).not.toHaveBeenCalled();
+    newDispose();
+  });
 });
