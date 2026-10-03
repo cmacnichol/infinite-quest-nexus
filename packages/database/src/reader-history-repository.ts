@@ -1,9 +1,12 @@
+import { z } from "zod";
 import { turnSummarySchema } from "../../contracts/src/client-api.js";
+import { readerHistoryItemSchema } from "../../contracts/src/reader-history.js";
 import { parseStoredChronicleRetrievalAudit } from "../../contracts/src/memory.js";
-import type { ReaderHistoryRepositoryPort } from "../../application/src/reader-history/index.js";
+import type { ReaderHistoryRepositoryPort, ReaderHistorySearchOptions, ReaderHistoryScope } from "../../application/src/reader-history/index.js";
+import { sha256 } from "../../domain/src/text.js";
 import { formatNarrationParagraphs } from "../../story-engine/src/narration-formatting.js";
 import type { CampaignTurnReportedCostReader } from "./campaign-state-repository.js";
-import type { DatabasePool } from "./pool.js";
+import type { DatabaseClient, DatabasePool } from "./pool.js";
 
 export type ReaderHistoryRepositoryCollaborators = Readonly<{
   turnReportedCosts: CampaignTurnReportedCostReader;
@@ -23,6 +26,103 @@ type EffectiveTurnRow = Readonly<{
   acceptedAt: Date | string;
   storedChronicleRetrieval: unknown;
 }>;
+
+type ReaderHistorySummaryRow = Readonly<{
+  id: string;
+  turnNumber: number;
+  acceptedAt: Date | string;
+  excerpt: string;
+}>;
+
+const historyCursorSchema = z.object({
+  schemaVersion: z.literal(1),
+  campaignId: z.uuid(),
+  queryFingerprint: z.string().regex(/^[0-9a-f]{64}$/u),
+  historyVersion: z.string().min(1),
+  turnNumber: z.number().int().positive(),
+  id: z.uuid()
+});
+
+function queryFingerprint(q: string): string {
+  return sha256(q.toLowerCase());
+}
+
+function encodeHistoryCursor(value: z.output<typeof historyCursorSchema>): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function decodeHistoryCursor(
+  value: string,
+  campaignId: string,
+  fingerprint: string,
+  historyVersion: string
+) {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw Object.assign(new Error("The history cursor is malformed."), { statusCode: 400 });
+  }
+  const cursor = historyCursorSchema.safeParse(decoded);
+  if (!cursor.success || cursor.data.campaignId !== campaignId || cursor.data.queryFingerprint !== fingerprint) {
+    throw Object.assign(new Error("The history cursor is invalid for this campaign or query."), { statusCode: 400 });
+  }
+  if (cursor.data.historyVersion !== historyVersion) {
+    throw Object.assign(new Error("The campaign history changed; reload before requesting older summaries."), {
+      statusCode: 409,
+      details: { code: "reader_history_changed" }
+    });
+  }
+  return cursor.data;
+}
+
+async function currentHistoryVersion(client: DatabaseClient, scope: ReaderHistoryScope): Promise<string> {
+  const result = await client.query<{ historyVersion: string }>(
+    `SELECT COUNT(*)::integer::text || ':' || COALESCE(MAX(turn_number), 0)::text || ':' || COALESCE((
+              SELECT latest_turn.id::text
+                FROM turns latest_turn
+               WHERE latest_turn.owner_user_id = $1 AND latest_turn.campaign_id = $2
+               ORDER BY latest_turn.turn_number DESC, latest_turn.id DESC
+               LIMIT 1
+            ), '') || ':' || COALESCE((
+              SELECT COUNT(*)::text || ':' || COALESCE(MAX(correction.revision), 0)::text
+                FROM turn_narration_corrections correction
+               WHERE correction.owner_user_id = $1 AND correction.campaign_id = $2
+            ), '0:0') AS "historyVersion"
+       FROM turns history_turn
+      WHERE history_turn.owner_user_id = $1 AND history_turn.campaign_id = $2`,
+    [scope.ownerUserId, scope.campaignId]
+  );
+  return result.rows[0]?.historyVersion || "0:0:";
+}
+
+async function withReaderHistorySnapshot<T>(pool: DatabasePool, read: (client: DatabaseClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const value = await read(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function escapeLikeQuery(q: string): string {
+  return q.replace(/[\\%_]/gu, "\\$&");
+}
+
+function boundExcerpt(value: string): string {
+  let excerpt = "";
+  for (const character of value) {
+    if (excerpt.length + character.length > 240) break;
+    excerpt += character;
+  }
+  return excerpt;
+}
 
 export function createPostgresReaderHistoryRepository(
   pool: DatabasePool,
@@ -66,6 +166,58 @@ export function createPostgresReaderHistoryRepository(
         narration: formatNarrationParagraphs(turn.narration),
         chronicleRetrieval: parseStoredChronicleRetrievalAudit(storedChronicleRetrieval),
         reportedCost: costs.get(turn.id) ?? null
+      });
+    },
+    async searchHistory(scope, options: ReaderHistorySearchOptions) {
+      return withReaderHistorySnapshot(pool, async (client) => {
+        const historyVersion = await currentHistoryVersion(client, scope);
+        const fingerprint = queryFingerprint(options.q);
+        const cursor = options.before === undefined
+          ? null
+          : decodeHistoryCursor(options.before, scope.campaignId, fingerprint, historyVersion);
+        const result = await client.query<ReaderHistorySummaryRow>(
+          `WITH effective_history AS MATERIALIZED (
+             SELECT turn_id, owner_user_id, campaign_id, turn_number, effective_narration
+               FROM effective_turn_narrations
+              WHERE owner_user_id = $1 AND campaign_id = $2
+           )
+           SELECT effective.turn_id AS id,
+                  effective.turn_number AS "turnNumber",
+                  turn_row.accepted_at AS "acceptedAt",
+                  LEFT(effective.effective_narration, 240) AS excerpt
+             FROM effective_history effective
+             JOIN turns turn_row
+               ON turn_row.id = effective.turn_id
+              AND turn_row.campaign_id = effective.campaign_id
+              AND turn_row.owner_user_id = effective.owner_user_id
+            WHERE ($3::text = '' OR effective.effective_narration ILIKE '%' || $3 || '%' ESCAPE E'\\\\'
+                   OR turn_row.action ILIKE '%' || $3 || '%' ESCAPE E'\\\\')
+              AND ($4::integer IS NULL OR (effective.turn_number, effective.turn_id) < ($4, $5::uuid))
+            ORDER BY effective.turn_number DESC, effective.turn_id DESC
+            LIMIT $6`,
+          [scope.ownerUserId, scope.campaignId, escapeLikeQuery(options.q), cursor?.turnNumber ?? null, cursor?.id ?? null, options.limit + 1]
+        );
+        const hasMore = result.rows.length > options.limit;
+        const selected = result.rows.slice(0, options.limit);
+        const items = selected.map((row) => readerHistoryItemSchema.parse({
+          ...row,
+          excerpt: boundExcerpt(row.excerpt),
+          acceptedAt: row.acceptedAt instanceof Date ? row.acceptedAt.toISOString() : new Date(row.acceptedAt).toISOString()
+        }));
+        const last = selected.at(-1);
+        return {
+          items,
+          nextCursor: hasMore && last
+            ? encodeHistoryCursor({
+                schemaVersion: 1,
+                campaignId: scope.campaignId,
+                queryFingerprint: fingerprint,
+                historyVersion,
+                turnNumber: last.turnNumber,
+                id: last.id
+              })
+            : null
+        };
       });
     }
   };

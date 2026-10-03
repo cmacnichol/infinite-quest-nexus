@@ -1,4 +1,4 @@
-import { readerTurnNumberSchema } from "@infinite-quest/contracts";
+import { readerHistoryRequestSchema, readerTurnNumberSchema } from "@infinite-quest/contracts";
 import type { ReaderHistoryApplication, ReaderHistoryApplicationDependencies, ReaderHistoryScope } from "./ports.js";
 
 function requireScope(scope: ReaderHistoryScope): void {
@@ -15,6 +15,11 @@ export function createReaderHistoryApplication(
       requireScope(scope);
       const parsedTurnNumber = readerTurnNumberSchema.parse(turnNumber);
       return dependencies.turns.getEffectiveTurn(scope, parsedTurnNumber);
+    },
+    async searchHistory(scope, options) {
+      requireScope(scope);
+      const parsedOptions = readerHistoryRequestSchema.parse(options);
+      return dependencies.turns.searchHistory(scope, parsedOptions);
     }
   };
 }

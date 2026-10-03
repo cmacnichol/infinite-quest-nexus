@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReaderHistoryApplication } from "../../packages/application/src/reader-history/index.js";
-import { readerTurnNumberSchema } from "../../packages/contracts/src/reader-history.js";
+import { readerHistoryRequestSchema, readerTurnNumberSchema } from "../../packages/contracts/src/reader-history.js";
 import type { TurnSummary } from "../../packages/contracts/src/client-api.js";
 import { createReaderHistoryApi } from "../../packages/client-web/src/reader-history-api.js";
 import type { NexusHttpClient } from "../../packages/client-web/src/http-client.js";
@@ -113,5 +113,36 @@ describe("reader history browser API", () => {
 
     expect(() => api.getTurn(campaignId, 0)).toThrow();
     expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe("campaign reader history contract", () => {
+  it("trims search text and applies the bounded default page size", () => {
+    expect(readerHistoryRequestSchema.parse({ q: "  gate  " })).toEqual({ q: "gate", limit: 50 });
+  });
+
+  it("rejects search text over 200 characters and limits outside 1 through 50", () => {
+    for (const request of [
+      { q: "x".repeat(201) },
+      { limit: 0 },
+      { limit: 51 },
+      { limit: 1.5 }
+    ]) {
+      expect(readerHistoryRequestSchema.safeParse(request).success).toBe(false);
+    }
+  });
+
+  it("requests campaign-wide summaries with the cursor and abort signal", async () => {
+    const request = vi.fn().mockResolvedValue({ campaignId, items: [], nextCursor: null });
+    const api = createReaderHistoryApi({ request } as unknown as NexusHttpClient);
+    const signal = new AbortController().signal;
+
+    await api.searchHistory(campaignId, { q: " gate ", before: "opaque", limit: 7 }, signal);
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      method: "GET",
+      path: `/campaigns/${campaignId}/reader/history?q=gate&before=opaque&limit=7`,
+      signal
+    }));
   });
 });
