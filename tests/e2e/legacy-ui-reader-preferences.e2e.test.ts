@@ -87,12 +87,30 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
     const input = story.querySelector<HTMLTextAreaElement>("#freeAction")!;
     const choiceHint = story.querySelector<HTMLElement>(".choice-mode-hint");
     const style = (element: Element) => getComputedStyle(element);
-    const channels = (value: string) => {
-      const hex = value.trim().match(/^#([a-f\d]{3}|[a-f\d]{6})$/iu)?.[1];
-      return hex
-        ? (hex.length === 3 ? [...hex].map((channel) => Number.parseInt(channel + channel, 16)) : hex.match(/../gu)!.map((channel) => Number.parseInt(channel, 16)))
-        : value.match(/[\d.]+/gu)?.slice(0, 3).map(Number) ?? [];
+    const parseColor = (value: string): [number, number, number, number] => {
+      const source = value.trim();
+      const hex = source.match(/^#([a-f\d]{3}|[a-f\d]{6})$/iu)?.[1];
+      if (hex) {
+        const rgb = hex.length === 3
+          ? [...hex].map((channel) => Number.parseInt(channel + channel, 16))
+          : hex.match(/../gu)!.map((channel) => Number.parseInt(channel, 16));
+        return [rgb[0]!, rgb[1]!, rgb[2]!, 1];
+      }
+      const srgb = source.match(/^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+))?\)$/iu);
+      if (srgb) return [Number(srgb[1]) * 255, Number(srgb[2]) * 255, Number(srgb[3]) * 255, Number(srgb[4] ?? 1)];
+      const rgb = source.match(/^rgba?\((.*)\)$/iu);
+      if (rgb) {
+        const [channelsText, alphaText] = rgb[1]!.split("/");
+        const channels = channelsText!.split(/[\s,]+/u).filter(Boolean).map(Number);
+        const alpha = alphaText === undefined ? channels[3] ?? 1 : Number(alphaText.trim());
+        if (channels.length >= 3 && [...channels.slice(0, 3), alpha].every(Number.isFinite)) {
+          return [channels[0]!, channels[1]!, channels[2]!, alpha];
+        }
+      }
+      if (source === "transparent") return [0, 0, 0, 0];
+      throw new Error(`Unsupported computed color format for reader contrast proof: ${source}`);
     };
+    const channels = (value: string) => parseColor(value).slice(0, 3);
     const luminance = (value: string) => channels(value).map((channel) => {
       const normalized = channel / 255;
       return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
@@ -103,17 +121,6 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
       return Number(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)).toFixed(2));
     };
     const areaSurface = style(area).backgroundColor;
-    const parseColor = (value: string): [number, number, number, number] => {
-      const hex = value.trim().match(/^#([a-f\d]{3}|[a-f\d]{6})$/iu)?.[1];
-      if (hex) {
-        const rgb = hex.length === 3
-          ? [...hex].map((channel) => Number.parseInt(channel + channel, 16))
-          : hex.match(/../gu)!.map((channel) => Number.parseInt(channel, 16));
-        return [rgb[0]!, rgb[1]!, rgb[2]!, 1];
-      }
-      const components = value.match(/[\d.]+/gu)?.map(Number) ?? [];
-      return [components[0] ?? 0, components[1] ?? 0, components[2] ?? 0, components[3] ?? 1];
-    };
     const composite = (foreground: [number, number, number, number], background: [number, number, number, number]) => {
       const alpha = foreground[3];
       return [0, 1, 2].map((index) => foreground[index]! * alpha + background[index]! * (1 - alpha)) as [number, number, number];
@@ -126,8 +133,13 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
         current = current.parentElement;
       }
       let background = parseColor(style(story).getPropertyValue("--reader-surface").trim());
-      for (const ancestor of ancestors.reverse()) background = [...composite(parseColor(style(ancestor).backgroundColor), background), 1];
-      return `rgb(${background[0]}, ${background[1]}, ${background[2]})`;
+      const backgroundLayers: string[] = [];
+      for (const ancestor of ancestors.reverse()) {
+        const rawBackground = style(ancestor).backgroundColor;
+        backgroundLayers.push(`${ancestor.tagName.toLowerCase()}${(ancestor as HTMLElement).className ? `.${String((ancestor as HTMLElement).className).trim().replace(/\s+/gu, ".")}` : ""}: ${rawBackground}`);
+        background = [...composite(parseColor(rawBackground), background), 1];
+      }
+      return { color: `rgb(${background[0]}, ${background[1]}, ${background[2]})`, layers: backgroundLayers };
     };
     const readerTextSelectors: Record<string, string> = {
       storyTitle: "#storyTitle",
@@ -142,15 +154,36 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
       turnLengthLabel: ".turn-length-override"
     };
     const readerTextContrast: Record<string, number> = {};
-    const readerTextColors: Record<string, { foreground: string; background: string }> = {};
+    const readerTextColors: Record<string, { foreground: string; background: string; backgroundLayers: string }> = {};
     for (const [name, selector] of Object.entries(readerTextSelectors)) {
       const element = story.querySelector(selector);
       if (element) {
         const background = effectiveBackground(element);
-        readerTextContrast[name] = ratio(style(element).color, background);
-        readerTextColors[name] = { foreground: style(element).color, background };
+        readerTextContrast[name] = ratio(style(element).color, background.color);
+        readerTextColors[name] = { foreground: style(element).color, background: background.color, backgroundLayers: background.layers.join(" | ") };
       }
     }
+    const syntheticMiniDim = document.createElement("p");
+    syntheticMiniDim.className = "mini dim";
+    syntheticMiniDim.textContent = "Synthetic Story supporting text";
+    const syntheticReplacementBanner = document.createElement("div");
+    syntheticReplacementBanner.className = "replacement-pending-banner";
+    syntheticReplacementBanner.innerHTML = "<strong>Replacement in progress</strong><span>Synthetic Story warning detail</span>";
+    area.append(syntheticMiniDim, syntheticReplacementBanner);
+    const sceneTextSelectors: Record<string, Element> = {
+      sceneTurnMetadata: area.querySelector(".scene .turn-meta > .pill")!,
+      syntheticStoryMiniDim: syntheticMiniDim,
+      syntheticReplacementWarningDetail: syntheticReplacementBanner.querySelector("span")!
+    };
+    const sceneTextContrast: Record<string, number> = {};
+    const sceneTextColors: Record<string, { foreground: string; background: string; backgroundLayers: string }> = {};
+    for (const [name, element] of Object.entries(sceneTextSelectors)) {
+      const background = effectiveBackground(element);
+      sceneTextContrast[name] = ratio(style(element).color, background.color);
+      sceneTextColors[name] = { foreground: style(element).color, background: background.color, backgroundLayers: background.layers.join(" | ") };
+    }
+    syntheticMiniDim.remove();
+    syntheticReplacementBanner.remove();
     const controlContrast = ratio(style(actionButton).color, style(actionButton).backgroundColor);
     const wasDisabled = actionButton.disabled;
     actionButton.disabled = true;
@@ -172,6 +205,8 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
       choiceHintContrast: choiceHint ? ratio(style(choiceHint).color, style(choiceHint.parentElement ?? area).backgroundColor) : Number.NaN,
       readerTextContrast,
       readerTextColors,
+      sceneTextContrast,
+      sceneTextColors,
       hovered,
       globalTextToken: style(document.documentElement).getPropertyValue("--text").trim()
     };
@@ -448,4 +483,10 @@ test("saved reader themes keep real focus, hover, contrast, and viewport behavio
   }
 
   await writeFile(resolve(evidenceDirectory, "reader-actual-theme-metrics.json"), `${JSON.stringify(themeMetrics, null, 2)}\n`);
+  for (const [theme, metrics] of Object.entries(themeMetrics)) {
+    const sceneTextContrast = metrics.sceneTextContrast as Record<string, number>;
+    for (const [label, contrast] of Object.entries(sceneTextContrast)) {
+      expect(contrast, `${theme} ${label} actual or representative Story contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+  }
 });

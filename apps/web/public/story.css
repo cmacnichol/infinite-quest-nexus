@@ -198,6 +198,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 #storyContainer .input-action label,
 #storyContainer .story-area .turn-input-guidance,
 #storyContainer .story-area .turn-length-override { color: var(--reader-muted); }
+#storyContainer .story-area .turn-meta > .pill,
+#storyContainer .story-area .mini,
+#storyContainer .story-area .dim,
+#storyContainer .story-area .replacement-pending-banner span { color: var(--reader-muted); }
 #storyContainer .story-area input,
 #storyContainer .story-area select,
 #storyContainer .story-area textarea,
