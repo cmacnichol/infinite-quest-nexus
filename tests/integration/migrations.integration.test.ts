@@ -137,7 +137,7 @@ integration("standard database migration runner", () => {
       );
 
       await expect(migrateDatabase(isolatedPool, resolve("database/migrations")))
-        .resolves.toEqual(["0101_durable_campaign_physical_attempt_costs", "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit"]);
+        .resolves.toEqual(["0101_durable_campaign_physical_attempt_costs", "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics"]);
       expect((await isolatedPool.query<{ local_call_id: string; amount: string; category: string }>(
         `SELECT local_call_id::text,amount::text,category FROM provider_cost_events
           WHERE owner_user_id=$1 AND campaign_id=$2 ORDER BY category,amount`, [ownerUserId, campaign.id]
@@ -215,7 +215,7 @@ integration("standard database migration runner", () => {
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
           "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity",
-          "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit"
+          "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics"
         ]);
       const acknowledgement = await isolatedPool.query<{ compatibility_protocol_identity: string }>(
         "SELECT compatibility_protocol_identity FROM prompt_template_overrides WHERE owner_user_id=$1 AND prompt_key='story_system'",
@@ -1916,7 +1916,7 @@ END;
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics"
       ]);
 
       const scrubbed = await isolatedPool.query<{ technical_metadata: Record<string, unknown> }>(
@@ -2925,7 +2925,7 @@ END;
           "0099_worker_text_plan_protocol_fences",
           "0100_prepared_text_physical_attempts",
           "0101_durable_campaign_physical_attempt_costs",
-          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit"
+          "0102_campaign_cast", "0103_campaign_cast_lifecycle", "0104_campaign_cast_discovery", "0105_campaign_cast_discovery_candidates", "0106_cast_discovery_physical_attempts", "0107_campaign_cast_coverage", "0108_campaign_cast_discovery_retry", "0109_text_provider_capacity", "0110_campaign_cast_backfill", "0111_campaign_cast_scan_jobs", "0112_continuity_review_opt_in", "0113_story_writer_prompt_limit", "0114_provider_failure_diagnostics"
       ]);
 
       // The additive nullable generation-policy column is present after the upgrade;

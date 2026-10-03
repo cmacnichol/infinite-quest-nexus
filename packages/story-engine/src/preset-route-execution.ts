@@ -1,4 +1,5 @@
 import type { TextRouteCandidate } from "../../contracts/src/text-execution-plan.js";
+import type { ProviderFailureEvidenceV1 } from "../../contracts/src/provider-failure.js";
 import type { ReportedProviderCost } from "./providers.js";
 
 export type LogicalReservation =
@@ -26,6 +27,7 @@ export type PhysicalAttemptRecord = Readonly<{
   candidate: TextRouteCandidate;
   request: PreparedPhysicalRequest;
   responseStarted?: boolean;
+  failureDiagnostic?: ProviderFailureEvidenceV1 | null;
   providerResponseId?: string | null;
   returnedModel?: string | null;
   returnedProviderRoute?: string | null;
@@ -81,9 +83,11 @@ export type PhysicalAttemptRepository = Readonly<{
   complete(reservation: LogicalReservation, attemptId: string, completion: Readonly<({
     outcome: "succeeded";
     failureReason?: never;
+    failureDiagnostic?: never;
   } | {
     outcome: "failed";
     failureReason: PresetRouteFailureReason;
+    failureDiagnostic?: ProviderFailureEvidenceV1 | null;
   }) & {
     providerResponseId: string | null;
     returnedModel: string | null;
