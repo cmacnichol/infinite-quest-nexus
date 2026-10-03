@@ -430,7 +430,8 @@ describe("createIllustrationWorkerStateMachine", () => {
       model: null
     });
 
-    const familyStatements = statements.filter(({ text }) => text.includes("illustration_resolution_jobs"));
+    const familyStatements = statements.filter(({ text }) => text.includes("illustration_resolution_jobs") && !text.startsWith("SELECT status") && !text.startsWith("SELECT segment_id"));
+    expect(statements.some(({ text }) => text.startsWith("SELECT status") && text.includes("owner_user_id=$2 FOR UPDATE"))).toBe(true);
     expect(familyStatements).toHaveLength(6);
     const promptClaim = statements.find(({ text }) => text.includes("UPDATE illustration_prompt_jobs jobs"));
     const resolutionClaim = familyStatements[0];

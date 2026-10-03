@@ -1,3 +1,4 @@
+import { captureImageActivity, captureSegmentActivity } from "./illustration-activity.js";
 import { randomUUID } from "node:crypto";
 import { ACTIVITY_DIAGNOSTIC_MESSAGES, type ActivityEventDraft } from "../../contracts/src/activity.js";
 import { projectGenerationFailureDiagnostic, type GenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
@@ -39,16 +40,6 @@ export async function captureGenerationActivity(client: DatabaseClient, jobId: s
 
 /** Cancellation snapshots remain independent of later source/asset deletion. */
 export async function captureCancelledIllustrationActivity(client: DatabaseClient, source: "image" | "illustration_segment", sourceId: string, ownerUserId: string): Promise<void> {
-  const table = source === "image" ? "image_jobs" : "turn_illustration_segments";
-  const result = await client.query<{ campaign_id: string; generation_job_id: string | null; turn_id: string | null; activity_revision: string; occurred_at: Date }>(
-    `UPDATE ${table} SET activity_revision = activity_revision + 1 WHERE id = $1 AND owner_user_id = $2
-      RETURNING campaign_id, generation_job_id, turn_id, activity_revision::text, updated_at AS occurred_at`, [sourceId, ownerUserId]);
-  const row = result.rows[0];
-  if (!row) throw new Error("Cancelled illustration source disappeared.");
-  const common = { version: 1 as const, eventId: randomUUID(), occurredAt: row.occurred_at.toISOString(), campaignId: row.campaign_id,
-    generationJobId: row.generation_job_id, turnId: row.turn_id, turnNumber: null, attemptNumber: null, diagnostic: null };
-  const draft: ActivityEventDraft = source === "image"
-    ? { ...common, source, kind: "image.cancelled", status: "cancelled", severity: "info", jobId: sourceId, segmentId: null }
-    : { ...common, source, kind: "illustration_segment.failed", status: "failed", severity: "error", jobId: null, segmentId: sourceId };
-  await captureActivity(client, { scope: { ownerUserId, campaignId: row.campaign_id }, sourceId, revision: row.activity_revision, draft });
+  if (source === "image") await captureImageActivity(client, sourceId, ownerUserId, "image.cancelled");
+  else await captureSegmentActivity(client, sourceId, ownerUserId, "illustration_segment.failed");
 }
