@@ -98,3 +98,5 @@ export type {
   HttpMethod
 } from "./errors.js";
 export * from "./campaign-cast-editor.js";
+export { createEditSession } from "./edit-session.js";
+export type { EditSession } from "./edit-session.js";

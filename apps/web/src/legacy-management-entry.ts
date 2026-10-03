@@ -23,3 +23,4 @@ export type {
   ProviderPresetListOptions,
   ProviderPresetsApi
 } from "@infinite-quest/client-web";
+export { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-session.js";
