@@ -18,8 +18,7 @@ import type {
   DurableFilesystemRecoveryClaim,
   DurableFilesystemRecoveryRecord,
   DurableFilesystemTransactionContext,
-  PrivateStorageDescriptor,
-  ReservedFilesystemOperation
+  PrivateStorageDescriptor
 } from "../../../packages/application/src/assets/private-storage-lifecycle.js";
 import type { PrivateFilesystemRecoveryOutcome } from "../../../packages/application/src/assets/private-filesystem-recovery.js";
 import {

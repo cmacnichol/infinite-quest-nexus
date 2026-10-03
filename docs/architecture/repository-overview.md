@@ -62,7 +62,6 @@ Infinite Quest Nexus is a server-backed application packaged for both local Dock
 The repository contains the legacy self-contained client for reference only:
 
 - `index.html`: legacy self-contained Infinite Quest application, kept for reference only and no longer kept in parity with the new application (`apps/web`).
-- `demo_version.html`: smaller demonstration variant.
 
 As the service is scaffolded, prefer this organization:
 

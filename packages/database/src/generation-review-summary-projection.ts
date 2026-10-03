@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { generationReviewSummarySchema, generationReviewTransportSchema, generationReviewV1SummarySchema, type GenerationReviewSummary, type GenerationReviewTransport } from "../../contracts/src/generation-review.js";
+import { generationReviewSummarySchema, generationReviewTransportSchema, generationReviewV1SummarySchema, type GenerationReviewTransport } from "../../contracts/src/generation-review.js";
 import { canKeepGenerationCandidate } from "../../application/src/generation/review-policy.js";
 
 const generationReviewSummaryEvidenceV1Schema = generationReviewV1SummarySchema.omit({ canKeep: true, canRetry: true }).extend({

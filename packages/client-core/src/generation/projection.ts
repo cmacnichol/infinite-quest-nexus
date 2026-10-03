@@ -7,7 +7,6 @@ import {
   type GenerationResult,
   type GenerationStreamSnapshot,
   type SafeGenerationDiagnostic,
-  type GenerationResponseFormatProjection,
   type TurnSummary
 } from "@infinite-quest/contracts";
 import { ApiContractError, NexusApiError } from "../errors.js";

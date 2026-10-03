@@ -41,7 +41,6 @@ import {
   type PrivatePortableExportBuilderPort,
   type PortableJsonValue,
   type PrivatePortableAssetChildPlan,
-  type PrivatePortableFamilyMutationPort,
   type PrivatePortableFamilyPreviewPort,
   type PrivatePortableFamilyTargetPlan
 } from "../../../packages/application/src/imports/private-portable-composition.js";
@@ -991,15 +990,6 @@ function legacyCompanionLookupKeys(value: string): readonly string[] {
   const name = value.split("/").pop()?.split("?")[0];
   const stem = name?.split(".")[0];
   return [...new Set([value, uuid, name, stem].filter((key): key is string => Boolean(key)))];
-}
-
-function isLegacyExternalImageUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value.trim());
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
 }
 
 function isLegacyAbsoluteCompanionKey(value: string): boolean {

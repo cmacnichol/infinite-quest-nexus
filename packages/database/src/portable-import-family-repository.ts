@@ -908,13 +908,6 @@ export function createPostgresPortableImportAuthorityRepository(
   });
 }
 
-function portableRecord(value: PortableJsonValue | undefined): Readonly<Record<string, PortableJsonValue>> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("portable_import_payload_invalid");
-  }
-  return value as Readonly<Record<string, PortableJsonValue>>;
-}
-
 function portableString(value: PortableJsonValue | undefined, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }

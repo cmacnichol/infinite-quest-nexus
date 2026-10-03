@@ -1,9 +1,7 @@
-import type { AuthoringWorldApplyPort, AuthoringTransaction } from "../../application/src/authoring/ports.js";
+import type { AuthoringWorldApplyPort } from "../../application/src/authoring/ports.js";
 import { AuthoringRepositoryError } from "../../application/src/authoring/types.js";
-import type { OwnerScope } from "../../application/src/generation/types.js";
 import type { WorldCampaignCommandContext } from "../../application/src/world-campaign/types.js";
 import type { PlayableCharacter, WorldContent } from "../../contracts/src/world-library.js";
-import type { AuthoringTarget } from "../../contracts/src/authoring.js";
 import { worldContentSchema } from "../../contracts/src/world-library.js";
 import { createPostgresWorldRepository } from "./world-repository.js";
 import { worldCampaignDatabaseClient } from "./world-campaign-transaction.js";
