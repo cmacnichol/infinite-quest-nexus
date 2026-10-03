@@ -90,6 +90,7 @@ let actionDraftSaveQueue = Promise.resolve();
 let actionDraftNavigationTarget = null;
 let actionDraftCurrentScopeKey = null;
 let actionDraftSessionEpoch = 0;
+let actionDraftSubmissionNonce = 0;
 
 let resolveInitialization;
 let rejectInitialization;
@@ -1320,7 +1321,7 @@ async function writeActionDraftGeneration(snapshot, editGeneration, expectedRevi
     actionDraftPersistedRevision = result.currentRevision;
     actionDraftPersistedGeneration = editGeneration;
     actionDraftSaveFailed = false;
-    actionDraftClearPending = false;
+    if (actionDraftLocalGeneration === editGeneration) actionDraftClearPending = false;
     actionDraftCurrentScopeKey = actionDraftScopeKey(record.scope);
     if (actionDraftCurrent && actionDraftLocalGeneration === editGeneration) {
       actionDraftCurrent = { ...snapshot };
@@ -1353,19 +1354,21 @@ async function drainActionDraftWrites() {
       return false;
     }
     if (actionDraftClearPending) {
-      if (!actionDraftPersistedRevision) {
+      const expectedRevision = actionDraftPersistedRevision;
+      if (!expectedRevision) {
         actionDraftPersistedGeneration = editGeneration;
         actionDraftClearPending = false;
         actionDraftCurrent = null;
         updateActionDraftStatus();
         continue;
       }
-      const removal = await composition.actionDrafts.removeIfRevision(scope, actionDraftPersistedRevision);
+      const removal = await composition.actionDrafts.removeIfRevision(scope, expectedRevision);
       if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
       if (removal.outcome === "removed" || removal.outcome === "absent") {
-        actionDraftPersistedRevision = null;
+        const stillOwnsAcknowledgedRevision = actionDraftPersistedRevision === expectedRevision;
+        if (stillOwnsAcknowledgedRevision) actionDraftPersistedRevision = null;
         actionDraftClearPending = false;
-        if (actionDraftLocalGeneration === editGeneration) {
+        if (stillOwnsAcknowledgedRevision && actionDraftLocalGeneration === editGeneration) {
           actionDraftPersistedGeneration = editGeneration;
           actionDraftCurrent = null;
           actionDraftConflict = null;
@@ -1453,32 +1456,33 @@ async function restoreActionDraftForCampaign(campaignId, loadSequence) {
     if (actionDraftLocalGeneration === startingGeneration) updateActionDraftStatus();
     return;
   }
-  actionDraftPersistedRevision = draft.draftRevision;
-  if (state.pendingGeneration || state.generationRecovery) {
-    const authoritativeAction = state.pendingGeneration?.action || state.generationRecovery?.action || state.retainedAppendDraft?.action;
-    if (authoritativeAction && draft.text === authoritativeAction && draft.baseTurnNumber + 1 === Number(state.pendingGeneration?.expectedTurnNumber || state.generationRecovery?.expectedTurnNumber)) {
-      actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
-      actionDraftPersistedGeneration = actionDraftLocalGeneration;
-      actionDraftSubmitted = {
-        campaignId, editGeneration: actionDraftLocalGeneration, persistedRevision: draft.draftRevision,
-        scopeKey, sessionEpoch
-      };
-    }
+  if (actionDraftLocalGeneration !== startingGeneration) {
     updateActionDraftStatus();
     return;
   }
-  if (actionDraftLocalGeneration !== startingGeneration || $("freeAction")?.value) {
+  actionDraftPersistedRevision = draft.draftRevision;
+  if (state.pendingGeneration || state.generationRecovery) {
+    actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
+    actionDraftPersistedGeneration = actionDraftLocalGeneration;
+    updateActionDraftStatus();
+    return;
+  }
+  if (actionDraftLocalGeneration !== startingGeneration) {
     updateActionDraftStatus();
     return;
   }
   actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
   actionDraftPersistedGeneration = actionDraftLocalGeneration;
+  const input = $("freeAction");
+  if (input?.value.trim() && input.value.trim() !== draft.text.trim()) {
+    presentActionDraftConflict(draft, "base", "Another action is in the input. Restore this saved draft or discard it.");
+    return;
+  }
   if (!isActionDraftBaseCurrent(draft)) {
     presentActionDraftConflict(draft, "base", "The story has moved on since this action draft was saved. Restore it or discard it.");
     return;
   }
-  const input = $("freeAction");
-  if (input) input.value = draft.text;
+  if (input && !input.value) input.value = draft.text;
   setTurnInputMode(draft.inputMode, { refreshPlaceholder: true });
   resetChoiceSelectionFromDraft(draft.text);
   updateTurnInputCharacterCount();
@@ -1487,23 +1491,29 @@ async function restoreActionDraftForCampaign(campaignId, loadSequence) {
 
 async function captureSubmittedActionDraft(action, details) {
   const input = $("freeAction");
-  if (!details.actionDraftEligible || details.operationKind === "replace_latest" || !input || input.value.trim() !== action) return false;
+  if (!details.actionDraftEligible || details.operationKind === "replace_latest" || !input || input.value.trim() !== action) return null;
   const campaignId = state.campaignId;
   const editGeneration = actionDraftLocalGeneration;
   const sessionEpoch = actionDraftSessionEpoch;
   const scopeKey = actionDraftCurrentScopeKey;
+  const intentNonce = ++actionDraftSubmissionNonce;
+  const operationKind = details.operationKind || "append";
+  const expectedTurnNumber = appendExpectedTurnNumber(state.campaign);
   const saved = await flushActionDraftWrites();
-  if (!saved || campaignId !== state.campaignId || sessionEpoch !== actionDraftSessionEpoch
+  if (!saved || intentNonce !== actionDraftSubmissionNonce || campaignId !== state.campaignId || sessionEpoch !== actionDraftSessionEpoch
     || scopeKey !== actionDraftCurrentScopeKey || editGeneration !== actionDraftLocalGeneration
     || actionDraftPersistedGeneration !== editGeneration || !actionDraftPersistedRevision
-    || actionDraftCurrent?.text.trim() !== action) return false;
-  actionDraftSubmitted = { campaignId, editGeneration, persistedRevision: actionDraftPersistedRevision, scopeKey, sessionEpoch };
-  return true;
+    || actionDraftCurrent?.text.trim() !== action) return null;
+  return { intentNonce, campaignId, editGeneration, persistedRevision: actionDraftPersistedRevision, scopeKey, sessionEpoch, action, operationKind, expectedTurnNumber };
 }
 
 async function clearAcceptedActionDraft(result) {
   const submitted = actionDraftSubmitted;
-  if (!submitted || submitted.campaignId !== result.campaignId
+  if (!submitted || submitted.jobId !== result.id || submitted.action !== result.action
+    || submitted.operationKind !== "append"
+    || (result.operationKind && submitted.operationKind !== result.operationKind)
+    || submitted.expectedTurnNumber !== Number(result.expectedTurnNumber)
+    || submitted.campaignId !== result.campaignId
     || submitted.sessionEpoch !== actionDraftSessionEpoch
     || submitted.scopeKey !== actionDraftCurrentScopeKey
     || submitted.editGeneration !== actionDraftLocalGeneration
@@ -1514,10 +1524,13 @@ async function clearAcceptedActionDraft(result) {
   const removal = await composition.actionDrafts.removeIfRevision(scope, submitted.persistedRevision);
   if (submitted.sessionEpoch !== actionDraftSessionEpoch || submitted.scopeKey !== actionDraftCurrentScopeKey) return;
   if (removal.outcome === "removed" || removal.outcome === "absent") {
-    const unchanged = submitted.editGeneration === actionDraftLocalGeneration
-      && submitted.persistedRevision === actionDraftPersistedRevision;
+    const stillOwnsAcknowledgedRevision = submitted.persistedRevision === actionDraftPersistedRevision;
+    if (!stillOwnsAcknowledgedRevision) {
+      updateActionDraftStatus();
+      return;
+    }
     actionDraftPersistedRevision = null;
-    if (!unchanged) {
+    if (submitted.editGeneration !== actionDraftLocalGeneration) {
       actionDraftPersistedGeneration = -1;
       updateActionDraftStatus();
       return;
@@ -1543,9 +1556,16 @@ async function reconcileActionDraftConflict(choice) {
   if (!scope) return false;
   const scopeKey = actionDraftScopeKey(scope);
   const sessionEpoch = actionDraftSessionEpoch;
+  const editGeneration = actionDraftLocalGeneration;
   if (choice === "restore" && conflict.draft) {
     const draft = await composition.actionDrafts.read(scope);
     if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    if (actionDraftConflict !== conflict || actionDraftLocalGeneration !== editGeneration) {
+      if (actionDraftConflict === null && actionDraftLocalGeneration !== editGeneration) {
+        presentActionDraftConflict(draft, "revision", "A newer local edit was made while restoring. Choose which version to keep.");
+      }
+      return false;
+    }
     if (!draft || draft.draftRevision !== conflict.draft.draftRevision) {
       presentActionDraftConflict(draft, "revision", "This action draft changed in another tab. Choose which version to keep.");
       return false;
@@ -1566,12 +1586,15 @@ async function reconcileActionDraftConflict(choice) {
   }
   if (choice === "keep") {
     const remote = await composition.actionDrafts.read(scope);
-    if (!remote || sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey
+      || actionDraftConflict !== conflict || actionDraftLocalGeneration !== editGeneration) return false;
     const snapshot = actionDraftCurrent;
     if (!snapshot) return false;
     actionDraftConflict = null;
-    const result = await writeActionDraftGeneration(snapshot, actionDraftLocalGeneration, remote.draftRevision, scope);
-    if (result.outcome === "saved") {
+    actionDraftPersistedRevision = remote?.draftRevision ?? null;
+    actionDraftPersistedGeneration = -1;
+    const result = await flushActionDraftWrites();
+    if (result) {
       updateActionDraftConflict();
       return true;
     }
@@ -1810,11 +1833,16 @@ async function submitResolvedTurn(action, details) {
     state.retainedAppendDraft = { campaignId: state.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
   }
   const freeAction = $("freeAction");
-  const submittedDraftSaved = await captureSubmittedActionDraft(action, details);
-  if (freeAction && submittedDraftSaved) freeAction.value = "";
-  if (submittedDraftSaved) resetChoiceSelectionFromDraft("");
+  const submittedDraft = await captureSubmittedActionDraft(action, details);
+  const canClearSubmittedInput = submittedDraft
+    && freeAction?.value.trim() === action
+    && submittedDraft.editGeneration === actionDraftLocalGeneration
+    && submittedDraft.sessionEpoch === actionDraftSessionEpoch
+    && submittedDraft.scopeKey === actionDraftCurrentScopeKey;
+  if (freeAction && canClearSubmittedInput) freeAction.value = "";
+  if (canClearSubmittedInput) resetChoiceSelectionFromDraft("");
   updateTurnInputCharacterCount();
-  await runGeneration(action, details);
+  await runGeneration(action, { ...details, actionDraftSubmissionCandidate: canClearSubmittedInput ? submittedDraft : null });
 }
 
 async function submitAction(actionText, options = {}) {
@@ -1942,6 +1970,23 @@ async function runGeneration(action, options = {}) {
     }
     if (state.campaignId !== submissionCampaignId
       || (operationKind === "append" && appendExpectedTurnNumber(state.campaign) !== expectedTurnNumber)) return;
+    const actionDraftCandidate = options.actionDraftSubmissionCandidate;
+    if (actionDraftCandidate && !attachedConflict
+      && actionDraftCandidate.intentNonce === actionDraftSubmissionNonce
+      && actionDraftCandidate.campaignId === submissionCampaignId
+      && actionDraftCandidate.sessionEpoch === actionDraftSessionEpoch
+      && actionDraftCandidate.scopeKey === actionDraftCurrentScopeKey
+      && actionDraftCandidate.action === submission.action
+      && actionDraftCandidate.operationKind === operationKind
+      && actionDraftCandidate.expectedTurnNumber === expectedTurnNumber) {
+      actionDraftSubmitted = {
+        ...actionDraftCandidate,
+        jobId: run.jobId,
+        action: submission.action,
+        operationKind,
+        expectedTurnNumber
+      };
+    }
     resetStoryLengthOverrideControls();
     options.onAttached?.();
     state.generationRun = run;
@@ -2385,7 +2430,7 @@ async function retryCompletedGenerationResult() {
 }
 
 async function finalizeCompletedGeneration(result) {
-  void clearAcceptedActionDraft(result);
+  await clearAcceptedActionDraft(result);
   if (state.campaignId === result.campaignId) setStorySyncStatus("Story syncing");
   const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;
   const viewport = preserveViewport
@@ -2408,7 +2453,8 @@ async function finalizeCompletedGeneration(result) {
     restoreViewportAfterRender(viewport);
     return;
   }
-  void reconcileCompletedGeneration(result);
+  await reconcileCompletedGeneration(result);
+  await restoreActionDraftForCampaign(result.campaignId, campaignLoadSequence);
 
   restoreViewportAfterRender(viewport);
 
@@ -2463,6 +2509,7 @@ async function reconcileCompletedGeneration(result) {
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
+    state.generationRecovery = syncData.generationRecovery || null;
     syncTurnInputModeFromCampaign();
     state.runtimeState = await apiClient.campaigns.state(campaignId);
     if (!isCurrent()) return;

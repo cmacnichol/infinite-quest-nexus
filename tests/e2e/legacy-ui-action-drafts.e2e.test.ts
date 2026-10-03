@@ -1,41 +1,142 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { mkdir, readFile } from "node:fs/promises";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
-import { generationJobSnapshotSchema, generationResultSchema } from "../../packages/contracts/src/index.js";
+import { campaignSyncStatusSchema, generationJobSnapshotSchema, generationResultSchema } from "../../packages/contracts/src/index.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const campaignId = "11111111-1111-4111-8111-111111111111";
 const userId = "66666666-6666-4666-8666-666666666666";
 const otherUserId = "77777777-7777-4777-8777-777777777777";
 const jobId = "55555555-5555-4555-8555-555555555555";
+const activeJobId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const replacementJobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const resultTurnId = "88888888-8888-4888-8888-888888888888";
+const replacementResultTurnId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const timestamp = "2026-10-03T12:00:00.000Z";
 const databaseName = "infiniteQuest-reader-local-v1";
 const storeName = "actionDrafts";
 const screenshotDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/screenshots/T08";
+const fix1EvidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T08-fix1";
 
 interface HarnessOptions {
   readonly ownerId?: string;
   readonly campaign?: string;
   readonly pending?: boolean;
+  readonly opening?: boolean;
+  readonly pendingAction?: string;
   readonly failed?: boolean;
+  readonly appendOutcome?: "failed" | "completed";
+  readonly activeConflict?: boolean;
   readonly holdCompletion?: boolean;
+  readonly holdDraftTransactions?: boolean;
   readonly storageFailure?: "unavailable" | "quota";
 }
 
 interface Harness {
   readonly payloads: ReturnType<typeof quietLeafApiPayloads>;
   readonly writes: Array<{ path: string; body: Record<string, unknown> }>;
+  readonly syncSnapshots: unknown[];
   readonly errors: string[];
   readonly releaseCompletion: () => void;
 }
 
+declare global {
+  interface Window {
+    __actionDraftTestGate?: {
+      arm(): void;
+      waitUntilHeld(): Promise<void>;
+      release(): void;
+    };
+  }
+}
+
+async function armDraftTransactionGate(page: Page) {
+  await page.evaluate(() => window.__actionDraftTestGate?.arm());
+}
+
+async function waitForDraftTransactionGate(page: Page) {
+  await page.evaluate(() => window.__actionDraftTestGate?.waitUntilHeld());
+}
+
+async function releaseDraftTransactionGate(page: Page) {
+  await page.evaluate(() => window.__actionDraftTestGate?.release());
+}
+
 async function installHarness(page: Page, options: HarnessOptions = {}): Promise<Harness> {
-  const payloads = quietLeafApiPayloads({ turnControlStyle: "flexible_action" });
+  const fixturePayloads = quietLeafApiPayloads({ turnControlStyle: "flexible_action" });
+  const acceptedTurnTemplate = fixturePayloads.turns.turns.at(-1)!;
+  const payloads: Harness["payloads"] = options.opening ? {
+    ...fixturePayloads,
+    campaigns: {
+      ...fixturePayloads.campaigns,
+      campaigns: fixturePayloads.campaigns.campaigns.map(campaign => ({ ...campaign, activeTurnNumber: 0 }))
+    },
+    syncStatus: {
+      ...fixturePayloads.syncStatus,
+      activeTurnNumber: 0,
+      campaign: { ...fixturePayloads.syncStatus.campaign, activeTurnNumber: 0 },
+      turns: { ...fixturePayloads.syncStatus.turns, nextCursor: null, turns: [] }
+    },
+    turns: { ...fixturePayloads.turns, nextCursor: null, turns: [] }
+  } as Harness["payloads"] : fixturePayloads;
+  const syncTurns = payloads.syncStatus.turns ?? { nextCursor: null, turns: [] };
   const writes: Harness["writes"] = [];
+  const syncSnapshots: Harness["syncSnapshots"] = [];
   const errors: string[] = [];
+  let openingJobStarted = false;
+  let replacementJobStarted = false;
+  let activeConflictReturned = false;
+  let appendFailed = false;
+  let acceptedGeneration: { id: string; expectedTurnNumber: number; resultTurnId: string; action: string; operationKind: "append" | "replace_latest" } | null = null;
   let releaseCompletion!: () => void;
   const completionReleased = new Promise<void>(resolve => { releaseCompletion = resolve; });
+  if (options.holdDraftTransactions) {
+    await page.addInitScript(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(IDBTransaction.prototype, "oncomplete");
+      if (!descriptor?.set || !descriptor.get) return;
+      const originalGetAll = IDBObjectStore.prototype.getAll;
+      let armed = false;
+      let gatedTransaction: IDBTransaction | null = null;
+      let observedResolve: (() => void) | null = null;
+      let releaseResolve: (() => void) | null = null;
+      let observed = Promise.resolve();
+      let released = Promise.resolve();
+      window.__actionDraftTestGate = {
+        arm() {
+          armed = true;
+          gatedTransaction = null;
+          observed = new Promise(resolve => { observedResolve = resolve; });
+          released = new Promise(resolve => { releaseResolve = resolve; });
+        },
+        waitUntilHeld() { return observed; },
+        release() { releaseResolve?.(); releaseResolve = null; }
+      };
+      IDBObjectStore.prototype.getAll = function (this: IDBObjectStore, ...args: Parameters<IDBObjectStore["getAll"]>) {
+        const request = originalGetAll.apply(this, args);
+        if (armed && this.name === "actionDrafts") {
+          armed = false;
+          gatedTransaction = this.transaction;
+        }
+        return request;
+      };
+      Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
+        configurable: true,
+        enumerable: descriptor.enumerable ?? false,
+        get() { return descriptor.get?.call(this); },
+        set(handler: ((this: IDBTransaction, event: Event) => unknown) | null) {
+          descriptor.set?.call(this, function (this: IDBTransaction, event: Event) {
+            if (this === gatedTransaction) {
+              gatedTransaction = null;
+              observedResolve?.();
+              void released.then(() => handler?.call(this, event));
+              return;
+            }
+            handler?.call(this, event);
+          });
+        }
+      });
+    });
+  }
   if (options.storageFailure === "unavailable") {
     await page.addInitScript(() => Object.defineProperty(window, "indexedDB", { configurable: true, value: undefined }));
   } else if (options.storageFailure === "quota") {
@@ -63,20 +164,41 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     if (request.method() === "GET" && path === "/api/v1/campaigns") return respond(payloads.campaigns);
     if (request.method() === "GET" && path === "/api/v1/worlds") return respond(payloads.worlds);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/sync-status`) {
-      return respond({
+      const pending = !acceptedGeneration && Boolean(options.pending || openingJobStarted || activeConflictReturned);
+      const acceptedTurn = acceptedGeneration ? {
+        ...acceptedTurnTemplate,
+        id: acceptedGeneration.resultTurnId,
+        turnNumber: acceptedGeneration.expectedTurnNumber,
+        action: acceptedGeneration.action,
+        narration: "Accepted synthetic narration.",
+        acceptedAt: timestamp
+      } : null;
+      const projectedTurns = acceptedTurn ? [
+        ...syncTurns.turns.filter(turn => Number(turn.turnNumber) < acceptedTurn.turnNumber),
+        acceptedTurn
+      ].sort((left, right) => left.turnNumber - right.turnNumber) : syncTurns.turns;
+      const activeTurnNumber = acceptedGeneration?.operationKind === "append"
+        ? acceptedGeneration.expectedTurnNumber
+        : payloads.syncStatus.activeTurnNumber;
+      const snapshot = {
         ...payloads.syncStatus,
-        campaign: { ...payloads.syncStatus.campaign, id: options.campaign ?? campaignId },
-        activeTurnNumber: payloads.syncStatus.activeTurnNumber,
-        pendingGeneration: options.pending ? {
-          id: jobId, status: "generating", action: "Authoritative pending action.", expectedTurnNumber: 2,
+        campaign: { ...payloads.syncStatus.campaign, id: options.campaign ?? campaignId, activeTurnNumber },
+        activeTurnNumber,
+        turns: { ...payloads.syncStatus.turns, turns: projectedTurns },
+        pendingGeneration: pending ? {
+          id: options.activeConflict ? activeJobId : jobId, status: "generating",
+          action: options.pendingAction ?? (options.opening ? "Survey the empty platform." : "Authoritative pending action."),
+          expectedTurnNumber: options.opening ? 1 : 2,
           createdAt: timestamp, updatedAt: timestamp, operationKind: "append", replacementTurnId: null
         } : null,
-        generationRecovery: options.failed ? {
+        generationRecovery: !acceptedGeneration && (options.failed || appendFailed) ? {
           id: jobId, status: "failed", operationKind: "append", replacementTurnId: null,
-          expectedTurnNumber: 2, attempts: 1, errorCode: "generation_failed", errorMessage: "Generation failed.",
-          diagnostic: null, resultTurnId: null, review: null
+          expectedTurnNumber: 2, attempts: 1, errorCode: "generation_failed", errorMessage: "Generation could not be completed.",
+          diagnostic: null, resultTurnId: null
         } : null
-      });
+      };
+      syncSnapshots.push(snapshot);
+      return respond(campaignSyncStatusSchema.parse(snapshot));
     }
     if (request.method() === "GET" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/turns`) return respond(payloads.turns);
     if (request.method() === "GET" && (path === `/api/v1/campaigns/${options.campaign ?? campaignId}/state` || path === `/api/v1/campaigns/${options.campaign ?? campaignId}/state/inspection`)) return respond(payloads.runtimeState);
@@ -85,27 +207,67 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
     if (request.method() === "GET" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/illustration-config`) return respond(payloads.illustrationConfig);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/illustration-segments`) return respond(payloads.illustrationSegments);
     if (request.method() === "GET" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/image-jobs`) return respond({ jobs: [] });
+    if (request.method() === "POST" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/generations/retry-latest`) {
+      replacementJobStarted = true;
+      writes.push({ path, body: request.postDataJSON() as Record<string, unknown> });
+      return respond({ id: replacementJobId, status: "queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "44444444-4444-4444-8444-444444444444" }, 202);
+    }
     if (request.method() === "POST" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/generations`) {
       writes.push({ path, body: request.postDataJSON() as Record<string, unknown> });
+      if (options.activeConflict) {
+        activeConflictReturned = true;
+        return respond({
+          error: "GenerationConflictError", message: "A generation is already active.", correlationId: "fixture-correlation",
+          details: { code: "active_generation_exists", pendingGeneration: {
+            id: activeJobId, status: "generating", action: "Another tab's action.", expectedTurnNumber: 2,
+            createdAt: timestamp, updatedAt: timestamp, operationKind: "append", replacementTurnId: null
+          } }
+        }, 409);
+      }
+      if (options.appendOutcome === "failed") appendFailed = true;
+      if (options.opening) openingJobStarted = true;
       return respond({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }, 202);
     }
-    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}/stream`) {
+    const currentJob = replacementJobStarted ? replacementJobId : options.activeConflict ? activeJobId : jobId;
+    const acceptedOperation = replacementJobStarted ? "replace_latest" : "append";
+    const acceptedExpectedTurn = replacementJobStarted ? 1 : options.opening ? 1 : 2;
+    const acceptedAction = replacementJobStarted
+      ? "Replacement action."
+      : options.activeConflict
+        ? "Another tab's action."
+        : options.pendingAction ?? (options.opening ? "Survey the empty platform." : "A submitted action.");
+    const acceptedResultTurn = replacementJobStarted ? replacementResultTurnId : resultTurnId;
+    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${currentJob}/stream`) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
     }
-    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}`) {
+    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${currentJob}`) {
       if (options.holdCompletion) await completionReleased;
+      if (!(options.appendOutcome === "failed" && !replacementJobStarted)) {
+        acceptedGeneration = {
+          id: currentJob,
+          expectedTurnNumber: acceptedExpectedTurn,
+          resultTurnId: acceptedResultTurn,
+          action: acceptedAction,
+          operationKind: acceptedOperation
+        };
+      }
       return respond(generationJobSnapshotSchema.parse({
-        id: jobId, campaignId: options.campaign ?? campaignId, expectedTurnNumber: 2, action: "A submitted action.",
-        requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: "append",
-        replacementTurnId: null, attempts: 1, resultTurnId, errorCode: null, errorMessage: null,
-        createdAt: timestamp, updatedAt: timestamp, partialNarration: null, status: "completed"
+        id: currentJob, campaignId: options.campaign ?? campaignId, expectedTurnNumber: acceptedExpectedTurn, action: acceptedAction,
+        requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: acceptedOperation,
+        replacementTurnId: replacementJobStarted ? "44444444-4444-4444-8444-444444444444" : null,
+        attempts: 1, resultTurnId: options.appendOutcome === "failed" && !replacementJobStarted ? null : acceptedResultTurn,
+        errorCode: options.appendOutcome === "failed" && !replacementJobStarted ? "generation_failed" : null,
+        errorMessage: options.appendOutcome === "failed" && !replacementJobStarted ? "Generation could not be completed." : null,
+        createdAt: timestamp, updatedAt: timestamp, partialNarration: null,
+        status: options.appendOutcome === "failed" && !replacementJobStarted ? "failed" : "completed"
       }));
     }
-    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${jobId}/result`) return respond(generationResultSchema.parse({
-      id: jobId, campaignId: options.campaign ?? campaignId, expectedTurnNumber: 2, action: "A submitted action.",
-      requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: "append",
-      replacementTurnId: null, attempts: 1, resultTurnId, errorCode: null, errorMessage: null,
-      createdAt: timestamp, updatedAt: timestamp, status: "completed", turnNumber: 2, inputMode: "action",
+    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${currentJob}/result`) return respond(generationResultSchema.parse({
+      id: currentJob, campaignId: options.campaign ?? campaignId, expectedTurnNumber: acceptedExpectedTurn, action: acceptedAction,
+      requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: acceptedOperation,
+      replacementTurnId: replacementJobStarted ? "44444444-4444-4444-8444-444444444444" : null,
+      attempts: 1, resultTurnId: acceptedResultTurn, errorCode: null, errorMessage: null,
+      createdAt: timestamp, updatedAt: timestamp, status: "completed", turnNumber: acceptedExpectedTurn, inputMode: "action",
       narration: "Accepted synthetic narration.", choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
       acceptedAt: timestamp, chronicleRetrieval: null, modelMetadata: null, mechanics: null, stateSnapshot: {}, reportedCost: null
     }));
@@ -114,7 +276,7 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
   });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
   await page.route(`**/story/${options.campaign ?? campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
-  return { payloads, writes, errors, releaseCompletion };
+  return { payloads, writes, syncSnapshots, errors, releaseCompletion };
 }
 
 async function gotoStory(page: Page, harness: Harness, campaign = campaignId) {
@@ -123,7 +285,7 @@ async function gotoStory(page: Page, harness: Harness, campaign = campaignId) {
   await expect(page.locator("#freeAction")).toBeVisible();
 }
 
-async function seedDraft(page: Page, draft: { text: string; inputMode?: "action" | "scene"; baseTurnId?: string | null; baseTurnNumber?: number }, scope = { userId, campaignId }) {
+async function seedDraft(page: Page, draft: { text: string; inputMode?: "action" | "scene"; baseTurnId?: string | null; baseTurnNumber?: number; draftRevision?: string }, scope = { userId, campaignId }) {
   await page.goto(`${origin}/nexus/`);
   await page.evaluate(async ({ scope, draft }) => {
     const database = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -137,9 +299,9 @@ async function seedDraft(page: Page, draft: { text: string; inputMode?: "action"
       transaction.objectStore("actionDrafts").put({
         storageKey: `draft:${scope.userId}:${scope.campaignId}`,
         value: JSON.stringify({ schemaVersion: 1, ...scope, draft: {
-          schemaVersion: 1, draftRevision: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", text: draft.text,
+          schemaVersion: 1, draftRevision: draft.draftRevision ?? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", text: draft.text,
           inputMode: draft.inputMode ?? "action", baseTurnId: draft.baseTurnId === undefined ? "44444444-4444-4444-8444-444444444444" : draft.baseTurnId,
-          baseTurnNumber: draft.baseTurnNumber ?? 1, updatedAt: "2026-10-03T12:00:00.000Z"
+          baseTurnNumber: draft.baseTurnNumber ?? 1, updatedAt: new Date().toISOString()
         } })
       });
       transaction.oncomplete = () => resolve();
@@ -256,6 +418,168 @@ test("acceptance_clears_matching_not_newer_draft", async ({ page }) => {
   expect(harness.writes).toHaveLength(1);
 });
 
+test("active_job_completion_preserves_unowned_local_draft", async ({ page }) => {
+  const harness = await installHarness(page, { activeConflict: true });
+  await gotoStory(page, harness);
+  await page.locator("#freeAction").fill("My ordinary action.");
+  await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  const submitted = await readDraft(page) as { text: string; draftRevision: string };
+  await page.locator("#btnTakeAction").click();
+  await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await mkdir(fix1EvidenceDirectory, { recursive: true });
+  await page.screenshot({ path: `${fix1EvidenceDirectory}/active-conflict-preserves-local-draft.png`, fullPage: true });
+  await expect.poll(() => readDraft(page)).toMatchObject(submitted);
+  await expect(page.locator("#freeAction")).toHaveValue("My ordinary action.");
+  expect(harness.writes[0]?.body.action).toBe("My ordinary action.");
+  expect(harness.writes[0]?.path).toMatch(/\/generations$/u);
+});
+
+test("same_text_ordinary_revision_survives_pending_opening_reload", async ({ page, context }) => {
+  const harness = await installHarness(page, { opening: true, holdCompletion: true });
+  await gotoStory(page, harness);
+  await page.locator("#btnMessagePopupClose").click();
+  await expect.poll(() => harness.writes.length).toBe(1);
+  const otherTab = await context.newPage();
+  await seedDraft(otherTab, {
+    text: "Survey the empty platform.", baseTurnId: null, baseTurnNumber: 0,
+    draftRevision: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  });
+  const ordinary = await readDraft(otherTab) as { text: string; draftRevision: string };
+  await page.reload();
+  await expect(page.locator("#freeAction")).toBeVisible();
+  harness.releaseCompletion();
+  await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await expect(page.locator("#restoreActionDraft")).toBeVisible();
+  await mkdir(fix1EvidenceDirectory, { recursive: true });
+  await page.screenshot({ path: `${fix1EvidenceDirectory}/opening-preserves-same-text-draft-after-acceptance.png`, fullPage: true });
+  await page.locator("#restoreActionDraft").click();
+  await expect(page.locator("#freeAction")).toHaveValue(ordinary.text);
+  await expect.poll(() => readDraft(otherTab)).toMatchObject(ordinary);
+  expect(harness.writes).toHaveLength(1);
+});
+
+test("failed_append_followed_by_replacement_preserves_ordinary_draft", async ({ page }) => {
+  const harness = await installHarness(page, { appendOutcome: "failed" });
+  await gotoStory(page, harness);
+  await page.locator("#freeAction").fill("My ordinary action.");
+  await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  const submitted = await readDraft(page) as { text: string; draftRevision: string };
+  await page.locator("#btnTakeAction").click();
+  await expect.poll(() => harness.writes.length).toBe(1);
+  await expect(page.locator("#toast")).toContainText("Generation failed:");
+  await page.reload();
+  expect(harness.errors, harness.errors.join("\n")).toEqual([]);
+  await expect(page.locator("#storySyncStatus")).toHaveText("Story synced");
+  expect((harness.syncSnapshots.at(-1) as { generationRecovery?: unknown })?.generationRecovery).not.toBeNull();
+  await expect(page.locator("#generationRecoveryPanel")).toBeVisible();
+  await expect(page.locator("#freeAction")).toHaveValue("My ordinary action.");
+  await page.locator("#btnRetry").click();
+  await expect(page.locator("#retryPromptDialog")).toBeVisible();
+  await page.locator("#retryPromptEditor").fill("Replacement action.");
+  await page.locator("#btnRetryPromptSubmit").click();
+  await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await page.locator("#restoreActionDraft").click();
+  await expect(page.locator("#freeAction")).toHaveValue("My ordinary action.");
+  await expect.poll(() => readDraft(page)).toMatchObject(submitted);
+  expect(harness.writes.map(write => write.path)).toEqual([
+    `/api/v1/campaigns/${campaignId}/generations`,
+    `/api/v1/campaigns/${campaignId}/generations/retry-latest`
+  ]);
+});
+
+test("keep_this_draft_retries_after_remote_delete", async ({ page, context }) => {
+  const first = await installHarness(page);
+  await gotoStory(page, first);
+  await page.locator("#freeAction").fill("Initial draft.");
+  await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  const otherTab = await context.newPage();
+  const second = await installHarness(otherTab);
+  await gotoStory(otherTab, second);
+  await expect(otherTab.locator("#freeAction")).toHaveValue("Initial draft.");
+  await otherTab.locator("#btnClearTurnInput").click();
+  await expect.poll(() => readDraft(otherTab)).toBeNull();
+  await page.locator("#freeAction").fill("Keep my new local edit.");
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await expect(page.locator("#keepActionDraft")).toBeVisible();
+  await page.locator("#keepActionDraft").click();
+  await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  await expect.poll(() => readDraft(page)).toMatchObject({ text: "Keep my new local edit." });
+});
+
+test("keep_does_not_overwrite_revision_inserted_after_reconciliation_read", async ({ page, context }) => {
+  const first = await installHarness(page, { holdDraftTransactions: true });
+  await gotoStory(page, first);
+  await page.locator("#freeAction").fill("Initial draft.");
+  await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  const otherTab = await context.newPage();
+  const second = await installHarness(otherTab);
+  await gotoStory(otherTab, second);
+  await otherTab.locator("#btnClearTurnInput").click();
+  await expect.poll(() => readDraft(otherTab)).toBeNull();
+  await page.locator("#freeAction").fill("Keep my local version.");
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await armDraftTransactionGate(page);
+  await page.locator("#keepActionDraft").click();
+  await waitForDraftTransactionGate(page);
+  await seedDraft(otherTab, {
+    text: "Concurrent foreign version.", draftRevision: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+  });
+  await releaseDraftTransactionGate(page);
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await expect.poll(() => readDraft(otherTab)).toMatchObject({
+    text: "Concurrent foreign version.", draftRevision: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+  });
+  await expect(page.locator("#freeAction")).toHaveValue("Keep my local version.");
+});
+
+test("delayed_restore_does_not_replace_typing", async ({ page }) => {
+  const harness = await installHarness(page, { holdDraftTransactions: true });
+  await seedDraft(page, { text: "Remote saved edit.", baseTurnId: null, baseTurnNumber: 0 });
+  await gotoStory(page, harness);
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await armDraftTransactionGate(page);
+  await page.locator("#restoreActionDraft").click();
+  await waitForDraftTransactionGate(page);
+  await page.locator("#freeAction").fill("Typed while restore waited.");
+  await releaseDraftTransactionGate(page);
+  await mkdir(fix1EvidenceDirectory, { recursive: true });
+  await page.screenshot({ path: `${fix1EvidenceDirectory}/delayed-restore-preserves-typing.png`, fullPage: true });
+  await expect(page.locator("#freeAction")).toHaveValue("Typed while restore waited.");
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+});
+
+test("delayed_write_clear_removes_own_revision_and_preserves_foreign_revision", async ({ page, context }) => {
+  const harness = await installHarness(page, { holdDraftTransactions: true });
+  await gotoStory(page, harness);
+  await expect(page.locator("#storySyncStatus")).toHaveText("Story synced");
+  await expect(page.locator("#freeAction")).toBeEnabled();
+  await armDraftTransactionGate(page);
+  await page.locator("#freeAction").fill("Clear this after its write commits.");
+  await waitForDraftTransactionGate(page);
+  await page.locator("#btnClearTurnInput").click();
+  await releaseDraftTransactionGate(page);
+  await expect(page.locator("#autosaveStatus")).toHaveText("No draft");
+  await expect.poll(() => readDraft(page)).toBeNull();
+
+  const foreignPage = await context.newPage();
+  await gotoStory(foreignPage, await installHarness(foreignPage));
+  await armDraftTransactionGate(page);
+  await page.locator("#freeAction").fill("Clear while a foreign write races.");
+  await waitForDraftTransactionGate(page);
+  await page.locator("#btnClearTurnInput").click();
+  await seedDraft(foreignPage, {
+    text: "Foreign revision to preserve.", draftRevision: "ffffffff-ffff-4fff-8fff-ffffffffffff"
+  });
+  await releaseDraftTransactionGate(page);
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await expect.poll(() => readDraft(foreignPage)).toMatchObject({
+    text: "Foreign revision to preserve.", draftRevision: "ffffffff-ffff-4fff-8fff-ffffffffffff"
+  });
+});
+
 test("retyped_same_text_new_revision_survives_acceptance", async ({ page }) => {
   const harness = await installHarness(page, { holdCompletion: true });
   await gotoStory(page, harness);
@@ -304,7 +628,7 @@ test("second_tab_edits_survive_first_tab_acceptance", async ({ page, context }) 
 });
 
 test("newer_draft_survives_recovery_reconciliation", async ({ page }) => {
-  const harness = await installHarness(page, { failed: true });
+  const harness = await installHarness(page, { pending: true, pendingAction: "Stale saved action.", holdCompletion: true });
   await seedDraft(page, { text: "Stale saved action." });
   await gotoStory(page, harness);
   const laterTab = await page.context().newPage();
@@ -315,16 +639,30 @@ test("newer_draft_survives_recovery_reconciliation", async ({ page }) => {
   await expect(laterTab.locator("#autosaveStatus")).toHaveText("Draft saved");
   await expect.poll(() => readDraft(laterTab)).toMatchObject({ text: "Fresh local action." });
   await expect(page.locator("#freeAction")).toHaveValue("");
+  harness.releaseCompletion();
+  await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  await expect(page.locator("#actionDraftConflict")).toBeVisible();
+  await page.locator("#restoreActionDraft").click();
+  await expect(page.locator("#freeAction")).toHaveValue("Fresh local action.");
+  await mkdir(fix1EvidenceDirectory, { recursive: true });
+  await page.screenshot({ path: `${fix1EvidenceDirectory}/recovery-restores-newer-local-draft.png`, fullPage: true });
+  await expect.poll(() => readDraft(laterTab)).toMatchObject({ text: "Fresh local action.", draftRevision: expect.any(String) });
   expect(harness.writes).toEqual([]);
 });
 
 test("app_navigation_awaits_transaction_commit", async ({ page }) => {
-  const harness = await installHarness(page);
+  const harness = await installHarness(page, { holdDraftTransactions: true });
   await gotoStory(page, harness);
+  await expect(page.locator("#storySyncStatus")).toHaveText("Story synced");
+  await expect(page.locator("#freeAction")).toBeEnabled();
+  await armDraftTransactionGate(page);
   await page.locator("#freeAction").fill("Save before leaving.");
   await page.locator("#btnNexusDashboard").click();
-  await expect(page).toHaveURL(`${origin}/nexus/`);
+  await waitForDraftTransactionGate(page);
+  await expect(page).toHaveURL(new RegExp(`/story/${campaignId}$`));
   await expect.poll(() => readDraft(page)).toMatchObject({ text: "Save before leaving." });
+  await releaseDraftTransactionGate(page);
+  await expect(page).toHaveURL(`${origin}/nexus/`);
 });
 
 test("browser_close_warns_without_claiming_async_completion", async ({ page }) => {
@@ -353,11 +691,15 @@ test("changed_base_requires_restore_choice", async ({ page }) => {
 });
 
 test("explicit_clear_removes_local_draft", async ({ page }) => {
-  const harness = await installHarness(page);
+  const harness = await installHarness(page, { holdDraftTransactions: true });
   await gotoStory(page, harness);
+  await expect(page.locator("#storySyncStatus")).toHaveText("Story synced");
+  await expect(page.locator("#freeAction")).toBeEnabled();
+  await armDraftTransactionGate(page);
   await page.locator("#freeAction").fill("Remove this local action.");
-  await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  await waitForDraftTransactionGate(page);
   await page.locator("#btnClearTurnInput").click();
+  await releaseDraftTransactionGate(page);
   await expect(page.locator("#autosaveStatus")).toHaveText("No draft");
   await expect.poll(() => readDraft(page)).toBeNull();
   expect(harness.writes).toEqual([]);
