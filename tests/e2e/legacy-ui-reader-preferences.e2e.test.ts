@@ -69,6 +69,11 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
       focusBorderContrast: ratio(style.outlineColor, background)
     };
   });
+  const storyActionsSummary = page.locator("#storyContainer .input-action .story-more > summary");
+  await storyActionsSummary.focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(storyActionsSummary).toBeFocused();
   await page.locator("#btnTakeAction").hover();
   await page.waitForTimeout(200);
   const appearance = await page.evaluate(() => {
@@ -151,7 +156,8 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
       turnTypeLockMessage: "#turnInputModeLock",
       actionInputHelp: "#turnInputHelp",
       actionInputCount: "#turnInputCount",
-      turnLengthLabel: ".turn-length-override"
+      turnLengthLabel: ".turn-length-override",
+      storyActionsDisclosureSummary: ".input-action .story-more > summary"
     };
     const readerTextContrast: Record<string, number> = {};
     const readerTextColors: Record<string, { foreground: string; background: string; backgroundLayers: string }> = {};
@@ -169,11 +175,21 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
     const syntheticReplacementBanner = document.createElement("div");
     syntheticReplacementBanner.className = "replacement-pending-banner";
     syntheticReplacementBanner.innerHTML = "<strong>Replacement in progress</strong><span>Synthetic Story warning detail</span>";
-    area.append(syntheticMiniDim, syntheticReplacementBanner);
+    const syntheticIllustrationHeading = document.createElement("div");
+    syntheticIllustrationHeading.className = "story-illustration-heading";
+    const syntheticIllustrationLabel = document.createElement("span");
+    syntheticIllustrationLabel.textContent = "Illustration";
+    const syntheticIllustrationPill = document.createElement("span");
+    syntheticIllustrationPill.className = "pill";
+    syntheticIllustrationPill.textContent = "Turn 3";
+    syntheticIllustrationHeading.append(syntheticIllustrationLabel, syntheticIllustrationPill);
+    area.append(syntheticMiniDim, syntheticReplacementBanner, syntheticIllustrationHeading);
     const sceneTextSelectors: Record<string, Element> = {
       sceneTurnMetadata: area.querySelector(".scene .turn-meta > .pill")!,
       syntheticStoryMiniDim: syntheticMiniDim,
-      syntheticReplacementWarningDetail: syntheticReplacementBanner.querySelector("span")!
+      syntheticReplacementWarningDetail: syntheticReplacementBanner.querySelector("span")!,
+      syntheticIllustrationHeading: syntheticIllustrationLabel,
+      syntheticIllustrationTurnPill: syntheticIllustrationPill
     };
     const sceneTextContrast: Record<string, number> = {};
     const sceneTextColors: Record<string, { foreground: string; background: string; backgroundLayers: string }> = {};
@@ -182,8 +198,25 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
       sceneTextContrast[name] = ratio(style(element).color, background.color);
       sceneTextColors[name] = { foreground: style(element).color, background: background.color, backgroundLayers: background.layers.join(" | ") };
     }
+    const storyActionsSummary = story.querySelector<HTMLElement>(".input-action .story-more > summary")!;
+    const storyActionsSummaryBackground = effectiveBackground(storyActionsSummary);
+    const storyActionsSummaryStyle = style(storyActionsSummary);
+    const storyActionsSummaryFocus = {
+      keyboardFocusVisible: storyActionsSummary.matches(":focus-visible"),
+      textContrast: ratio(storyActionsSummaryStyle.color, storyActionsSummaryBackground.color),
+      borderContrast: ratio(storyActionsSummaryStyle.borderTopColor, storyActionsSummaryBackground.color),
+      outlineStyle: storyActionsSummaryStyle.outlineStyle,
+      outlineWidth: Number.parseFloat(storyActionsSummaryStyle.outlineWidth),
+      outlineColor: storyActionsSummaryStyle.outlineColor,
+      outlineContrast: ratio(storyActionsSummaryStyle.outlineColor, storyActionsSummaryBackground.color),
+      textColor: storyActionsSummaryStyle.color,
+      borderColor: storyActionsSummaryStyle.borderTopColor,
+      background: storyActionsSummaryBackground.color,
+      backgroundLayers: storyActionsSummaryBackground.layers.join(" | ")
+    };
     syntheticMiniDim.remove();
     syntheticReplacementBanner.remove();
+    syntheticIllustrationHeading.remove();
     const controlContrast = ratio(style(actionButton).color, style(actionButton).backgroundColor);
     const wasDisabled = actionButton.disabled;
     actionButton.disabled = true;
@@ -207,6 +240,7 @@ async function readActualThemeInteractionMetrics(page: Page): Promise<Record<str
       readerTextColors,
       sceneTextContrast,
       sceneTextColors,
+      storyActionsSummaryFocus,
       hovered,
       globalTextToken: style(document.documentElement).getPropertyValue("--text").trim()
     };
@@ -449,11 +483,9 @@ test("saved reader themes keep real focus, hover, contrast, and viewport behavio
       "turnTypeLockMessage",
       "actionInputHelp",
       "actionInputCount",
-      "turnLengthLabel"
+      "turnLengthLabel",
+      "storyActionsDisclosureSummary"
     ]);
-    for (const [label, contrast] of Object.entries(readerTextContrast)) {
-      expect(contrast, `${theme} ${label} actual text contrast`).toBeGreaterThanOrEqual(4.5);
-    }
     expect(metrics.keyboardFocusVisible, `${theme} keyboard focus is actually visible`).toBe(true);
     expect(metrics.keyboardFocusWithinReaderToolbar).toBe(true);
     expect(metrics.focusOutlineStyle).not.toBe("none");
@@ -488,5 +520,16 @@ test("saved reader themes keep real focus, hover, contrast, and viewport behavio
     for (const [label, contrast] of Object.entries(sceneTextContrast)) {
       expect(contrast, `${theme} ${label} actual or representative Story contrast`).toBeGreaterThanOrEqual(4.5);
     }
+    const readerTextContrast = metrics.readerTextContrast as Record<string, number>;
+    for (const [label, contrast] of Object.entries(readerTextContrast)) {
+      expect(contrast, `${theme} ${label} actual text contrast`).toBeGreaterThanOrEqual(4.5);
+    }
+    const storyActionsSummaryFocus = metrics.storyActionsSummaryFocus as Record<string, ThemeMetricValue>;
+    expect(storyActionsSummaryFocus.keyboardFocusVisible, `${theme} Story actions disclosure is keyboard focused`).toBe(true);
+    expect(storyActionsSummaryFocus.textContrast, `${theme} Story actions disclosure text contrast`).toBeGreaterThanOrEqual(4.5);
+    expect(storyActionsSummaryFocus.borderContrast, `${theme} Story actions disclosure border contrast`).toBeGreaterThanOrEqual(3);
+    expect(storyActionsSummaryFocus.outlineStyle).not.toBe("none");
+    expect(storyActionsSummaryFocus.outlineWidth).toBeGreaterThanOrEqual(2);
+    expect(storyActionsSummaryFocus.outlineContrast, `${theme} Story actions disclosure focus contrast`).toBeGreaterThanOrEqual(3);
   }
 });

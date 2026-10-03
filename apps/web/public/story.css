@@ -198,7 +198,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 #storyContainer .input-action label,
 #storyContainer .story-area .turn-input-guidance,
 #storyContainer .story-area .turn-length-override { color: var(--reader-muted); }
-#storyContainer .story-area .turn-meta > .pill,
+#storyContainer .story-area .pill,
+#storyContainer .story-area .story-illustration-heading,
 #storyContainer .story-area .mini,
 #storyContainer .story-area .dim,
 #storyContainer .story-area .replacement-pending-banner span { color: var(--reader-muted); }
@@ -259,6 +260,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 #storyContainer .story-area a { color: var(--reader-link); }
 #storyContainer .input-action { color: var(--reader-muted); background: var(--reader-surface); border-color: var(--reader-border); }
+#storyContainer .input-action .story-more > summary { color: var(--reader-muted); border-color: var(--reader-border); }
+#storyContainer .input-action .story-more > summary:focus-visible { outline-color: var(--reader-focus); }
 #storyContainer .input-action label,
 #storyContainer .input-action .turn-input-guidance { color: var(--reader-muted); }
 #storyContainer .story-area .action-tag,
