@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 import type { Dispatcher } from "undici";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -84,8 +85,8 @@ describe("provider transport destination security", () => {
     let receivedHost = "";
     const server = createServer((request, response) => {
       receivedHost = String(request.headers.host || "");
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end("{}");
+      response.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip" });
+      response.end(gzipSync('{"models":["test-model"]}'));
     });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -106,10 +107,48 @@ describe("provider transport destination security", () => {
     };
     const transport = createProviderTransport({ policy });
     try {
-      await expect(transport.fetch(profile, "model discovery", url, {}))
-        .resolves.toMatchObject({ status: 200 });
+      const response = await transport.fetch(profile, "model discovery", url, {});
+      expect(response).toBeInstanceOf(Response);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ models: ["test-model"] });
       expect(receivedHost).toBe(`provider.test:${address.port}`);
     } finally {
+      await transport.close();
+      server.close();
+      await once(server, "close");
+    }
+  });
+
+  it("streams native response chunks and aborts an unfinished provider response", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write('data: {"text":"A lantern glows."}\n\n');
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected a local TCP address.");
+    const transport = createProviderTransport({
+      policy: {
+        approve: async (url) => ({
+          url, origin: url.origin, address: "127.0.0.1", family: 4,
+          port: address.port, servername: url.hostname
+        })
+      }
+    });
+    const controller = new AbortController();
+    try {
+      const response = await transport.fetch(profile, "story generation", `http://provider.test:${address.port}/stream`, {
+        signal: controller.signal
+      });
+      const reader = response.body!.getReader();
+      const chunk = await reader.read();
+      expect(new TextDecoder().decode(chunk.value)).toBe('data: {"text":"A lantern glows."}\n\n');
+      const pending = reader.read();
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      controller.abort();
       await transport.close();
       server.close();
       await once(server, "close");

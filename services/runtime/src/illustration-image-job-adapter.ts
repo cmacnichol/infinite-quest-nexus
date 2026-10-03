@@ -10,7 +10,7 @@ import type {
   IllustrationWorkerPorts
 } from "../../../packages/application/src/index.js";
 import type { PrivateIllustrationAssetPublicationCoordinator } from "../../../packages/application/src/illustration/private-illustration-asset-publication.js";
-import { Agent } from "undici";
+import { Agent, Dispatcher1Wrapper } from "undici";
 import type { DatabaseClient, DatabasePool } from "../../../packages/database/src/pool.js";
 import { initialOwnerId, withTransaction } from "../../../packages/database/src/pool.js";
 import { sha256 } from "../../../packages/domain/src/text.js";
@@ -609,14 +609,14 @@ export async function downloadArtifact(
     if (!(["https:", "http:"] as string[]).includes(url.protocol)) {
       throw Object.assign(new Error("Provider artifact URL used an unsupported protocol."), { code: "invalid_artifact_url", permanent: true });
     }
-    let dispatcher: Agent | undefined;
+    let dispatcher: Dispatcher1Wrapper | undefined;
     try {
       let requestUrl = url.toString();
       if (policy) {
         try {
           const destination = await policy.approve(url, "image artifact download");
           requestUrl = destination.url.toString();
-          dispatcher = new Agent({ connect: pinnedConnectOptions(destination) });
+          dispatcher = new Dispatcher1Wrapper(new Agent({ connect: pinnedConnectOptions(destination) }));
         } catch (error) {
           if (error instanceof ProviderDestinationNotAllowedError) throw privateArtifactHostError();
           throw error;
