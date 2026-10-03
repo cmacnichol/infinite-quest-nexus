@@ -96,6 +96,20 @@ integration("physical provider failure evidence", () => {
     expect(stored).not.toContain("secret");
   });
 
+  it("reconstructs schema-valid fallback evidence when timezone normalization expands the year", async () => {
+    const f = await fixture();
+    const invalid = { ...evidence, observedAt: "9999-12-31T23:59:59-01:00" };
+    const startedAt = Date.now();
+    const result = await f.repository.complete(f.reservation, f.id, { ...completion, failureDiagnostic: invalid });
+    expect(result).toMatchObject({ status: "completed", failureDiagnostic: {
+      reason: "rate_limit", httpStatus: 429, metadataStatus: "malformed", retryAt: null
+    } });
+    expect(Date.parse(result!.failureDiagnostic!.observedAt)).toBeGreaterThanOrEqual(startedAt);
+    expect(Date.parse(result!.failureDiagnostic!.observedAt)).toBeLessThanOrEqual(Date.now());
+    expect(await f.repository.reserve(f.input)).toEqual(result);
+    expect((await pool.query("SELECT outcome,failure_reason FROM prepared_text_physical_attempts WHERE id=$1", [f.id])).rows[0])
+      .toEqual({ outcome: "failed", failure_reason: "rate_limit" });
+  });
   it("enforces object/version/UTF-8 byte size constraints in PostgreSQL", async () => {
     const f = await fixture();
     for (const value of [[], {}, { version: 2 }, { version: 1, raw: "é".repeat(2500) }]) {

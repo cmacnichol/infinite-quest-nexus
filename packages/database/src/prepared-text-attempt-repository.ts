@@ -139,7 +139,7 @@ function safeFailureDiagnostic(completion: Parameters<PhysicalAttemptRepository[
   const status = (value: unknown) => Number.isInteger(value) && Number(value) >= 100 && Number(value) <= 599 ? Number(value) : null;
   const observedAt = typeof source.observedAt === "string" && /^\d{4}-\d{2}-\d{2}T/u.test(source.observedAt)
     && Number.isFinite(Date.parse(source.observedAt)) ? new Date(source.observedAt).toISOString() : new Date().toISOString();
-  return {
+  const fallback: ProviderFailureEvidenceV1 = {
     version: 1, source: source.source === "http_error" || source.source === "sse_error" ? source.source : "transport_error",
     observedAt, httpStatus: status(source.httpStatus), upstreamStatus: status(source.upstreamStatus),
     reason: completion.failureReason, limitSource: "unknown", upstreamCode: null, providerName: null,
@@ -148,6 +148,8 @@ function safeFailureDiagnostic(completion: Parameters<PhysicalAttemptRepository[
     emittedOutput: completion.emittedOutput || source.emittedOutput === true,
     metadataStatus: oversized ? "oversized" : "malformed"
   };
+  return projectProviderFailureEvidence(fallback)
+    ?? projectProviderFailureEvidence({ ...fallback, observedAt: new Date().toISOString() });
 }
 
 /** Caller holds the discovery job lock from hasLiveReservation; count all logical retries. */

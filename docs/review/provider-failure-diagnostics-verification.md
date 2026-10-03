@@ -19,7 +19,7 @@ Placement deviation approved by the controller: reuse `generation-response-contr
 - Official OpenRouter limits documentation supplies no numeric reset-header units. Numeric reset values remain null rather than guessed. Typed upstream metadata/provider_code can support source; raw provider codes/messages/remedy_hint/raw fields are not persisted.
 - Strict persisted contract and tolerant optional public projection remain distinct. Derived retryAt and UTF-8 bounds are independently enforced. Malformed arrays/objects cannot coerce to source enums or survive fallback reconstruction.
 - Optimized SQL public projections from main are preserved. Existing failure/read paths are reused; malformed optional evidence does not invalidate the whole snapshot. Automatic retries, new fallback routes, provider settings, prompts and historical backfill remain excluded.
-- Task 3 minor remains for final review: expanded-year normalization of a malformed fallback timestamp can produce evidence rejected by the reader. It was outside the composed observed-failure path and is not claimed fixed here.
+- Final review minor resolved: fallback reconstruction passes the shared schema, using a safe current timestamp when timezone normalization expands the year. Real PostgreSQL completion/read coverage preserves original failure and readable evidence. Explicit Retry ledger assertions prove append adds exactly one accepted turn; replacement changes only its target and preserves prior turns and accepted count.
 
 ## Commands and results
 
@@ -67,6 +67,68 @@ Initial check failed on client-core Date use and build was consequently not run.
 Final `corepack pnpm check` and `corepack pnpm build` passed, exit 0; process nested pnpm reported 12.4.1. Build retains the existing Vite chunk-size warning. Expected logs include synthetic rejection/provider-cap evidence, security-route request/error logs, Node localstorage-file and NO_COLOR/FORCE_COLOR notices, and Windows Git CRLF normalization notices. These are not failures.
 
 Final sequential full-unit gate with the pinned PATH: 368 files passed; 4818 tests passed, 44 platform skips, zero failures. The 44 existing skips require Linux/POSIX permissions or secure generated archive filesystem staging unavailable on Windows. The earlier additional five skips were the failed web-build suite setup and all five passed in this final run. `git diff --check` passed. Local link check: 27 Markdown targets across seven changed documents resolve. Complete owned diff was self-reviewed; no unrelated product changes or secret artifacts were added.
+
+## Self-contained reproduction after scratch cleanup
+
+Historical commands above describe the completed runs. This PowerShell recipe replaces the ignored wrapper/config and pnpm shim. Run from the repository with dependencies installed and Docker available. It creates a unique, loopback-only disposable database with trust authentication, retains per-file isolation and removes only its own resources. It never reads the earlier scratch URL. The final fix used the existing wrapper; this replacement recipe has been reviewed but has not been executed as another database run.
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$taskRoot = (Get-Location).Path
+$taskId = [Guid]::NewGuid().ToString('N')
+$taskContainer = "iq-provider-review-$taskId"
+$taskConfig = Join-Path $taskRoot "vitest.provider-review-$taskId.config.ts"
+$taskBin = Join-Path ([IO.Path]::GetTempPath()) "iq-provider-review-$taskId"
+$taskPreviousPath = $env:PATH
+$taskPreviousDatabase = $env:TEST_DATABASE_URL
+try {
+  New-Item -ItemType Directory -Path $taskBin | Out-Null
+  Set-Content -LiteralPath (Join-Path $taskBin 'pnpm.cmd') -Value '@corepack pnpm %*'
+  $env:PATH = "$taskBin;$taskPreviousPath"
+  corepack pnpm exec pnpm --version # must print 12.4.1, pinned by package.json
+  if ($LASTEXITCODE -ne 0) { throw 'Pinned pnpm unavailable' }
+  @'
+import { defineConfig } from "vitest/config";
+export default defineConfig({ test: {
+  include: ["tests/integration/**/*.test.ts"],
+  setupFiles: ["tests/integration/setup-isolated-database.ts"],
+  testTimeout: 30000, hookTimeout: 30000, fileParallelism: false,
+  sequence: { hooks: "stack" }
+} });
+'@ | Set-Content -LiteralPath $taskConfig
+  docker run --detach --name $taskContainer --publish 127.0.0.1::5432 `
+    --env POSTGRES_HOST_AUTH_METHOD=trust --env POSTGRES_DB=infinitequest `
+    pgvector/pgvector:0.8.6-pg18-trixie | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Disposable database creation failed' }
+  $taskReady = $false
+  for ($taskAttempt = 0; $taskAttempt -lt 30; $taskAttempt++) {
+    docker exec $taskContainer pg_isready -U postgres -d infinitequest *> $null
+    if ($LASTEXITCODE -eq 0) { $taskReady = $true; break }
+    Start-Sleep -Seconds 1
+  }
+  if (!$taskReady) { throw 'Disposable database did not become ready' }
+  $taskPort = (docker port $taskContainer 5432/tcp).Split(':')[-1]
+  $env:TEST_DATABASE_URL = "postgresql://postgres@127.0.0.1:$taskPort/infinitequest"
+  corepack pnpm exec vitest run --config $taskConfig `
+    tests/integration/provider-failure-diagnostics.integration.test.ts `
+    tests/integration/generation-response-contract-failures.integration.test.ts
+  if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL suites failed' }
+  corepack pnpm check
+  if ($LASTEXITCODE -ne 0) { throw 'Repository/type checks failed' }
+  git diff --check
+  if ($LASTEXITCODE -ne 0) { throw 'Diff check failed' }
+} finally {
+  $env:PATH = $taskPreviousPath
+  $env:TEST_DATABASE_URL = $taskPreviousDatabase
+  docker rm --force $taskContainer *> $null # exact unique container only
+  if (Test-Path -LiteralPath $taskConfig) { Remove-Item -LiteralPath $taskConfig }
+  $taskShim = Join-Path $taskBin 'pnpm.cmd'
+  if (Test-Path -LiteralPath $taskShim) { Remove-Item -LiteralPath $taskShim }
+  if (Test-Path -LiteralPath $taskBin) { Remove-Item -LiteralPath $taskBin } # empty; no recursive deletion
+}
+```
+
+Final review fix verification: the expanded-year repository regression first failed with null diagnostic evidence (seven passed, one failed). After shared-schema fallback validation and full-ledger retry assertions, both affected PostgreSQL files passed: 69 tests, zero failures/skips. Pinned `corepack pnpm check` passed. No broad unit/build rerun was needed for these narrow changes; the earlier full gate and accepted platform/live-provider/CI limitations remain as recorded.
 
 ## Browser evidence
 

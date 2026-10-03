@@ -1052,11 +1052,14 @@ integration("response-contract provider failures", () => {
   }, 60_000);
 
   it.each(["append", "replace_latest"] as const)("provider failure composes durable %s evidence and explicit Retry without authority mutation", async (operation) => {
-    scenario = operation === "append" ? "route_rate_limit" : "success";
+    scenario = "success";
     const value = await fixture("required", false, true, "fallback");
-    let job = value.job;
+    await executeOnce(value);
+    let job = await value.application.enqueueAppend({ ownerUserId, campaignId: value.campaignId },
+      { ...value.request, idempotencyKey: randomUUID() });
+    ownedJobIds.push(job.id);
     if (operation === "replace_latest") {
-      await executeOnce(value);
+      await executeJob(value, job);
       const current = (await pool.query("SELECT active_turn_number FROM campaigns WHERE id=$1", [value.campaignId])).rows[0]!.active_turn_number;
       job = await value.application.enqueueReplacement({ ownerUserId, campaignId: value.campaignId }, generationRetryLatestRequestSchema.parse({
         action: "Open the observatory archive.", providerProfileId: value.providerId,
@@ -1067,7 +1070,12 @@ integration("response-contract provider failures", () => {
       requestBodies.length = 0;
       scenario = "route_rate_limit";
     }
+    requestBodies.length = 0;
+    scenario = "route_rate_limit";
     const before = await authority(value.campaignId);
+    const target = operation === "replace_latest"
+      ? before.ledger.find((turn: { turn_number: number }) => turn.turn_number === Math.max(...before.ledger.map((turn: { turn_number: number }) => turn.turn_number)))
+      : null;
     const costsBefore = await createProviderCostRepository(pool).getCampaignCostSummary({ ownerUserId, campaignId: value.campaignId });
     const repository = await executeJob(value, job);
     const readAttempts = () => pool.query(`SELECT id,reservation_key,logical_reservation,outcome,provider_response_id,response_started_at,
@@ -1103,7 +1111,16 @@ integration("response-contract provider failures", () => {
     expect(requestBodies).toHaveLength(2);
     expect(JSON.parse(requestBodies[1]!)).toEqual(JSON.parse(requestBodies[0]!));
     expect(await value.application.getJob({ ownerUserId, jobId: job.id })).toMatchObject({ status: "completed", resultTurnId: expect.any(String) });
-    expect((await pool.query("SELECT count(*)::int AS count FROM turns WHERE id=(SELECT result_turn_id FROM generation_jobs WHERE id=$1)", [job.id])).rows[0]!.count).toBe(1);
+    const completed = await value.application.getJob({ ownerUserId, jobId: job.id });
+    const after = await authority(value.campaignId);
+    const unchanged = before.ledger.filter((turn: { id: string }) => turn.id !== target?.id);
+    expect(unchanged.length).toBeGreaterThan(0);
+    expect(after.accepted).toBe(before.accepted + (operation === "append" ? 1 : 0));
+    expect(after.ledger.filter((turn: { id: string }) => turn.id !== completed.resultTurnId)).toEqual(unchanged);
+    expect(after.ledger.filter((turn: { id: string }) => turn.id === completed.resultTurnId)).toEqual([
+      expect.objectContaining({ turn_number: target?.turn_number ?? Math.max(...before.ledger.map((turn: { turn_number: number }) => turn.turn_number)) + 1 })
+    ]);
+    if (target) expect(after.ledger.some((turn: { id: string }) => turn.id === target.id)).toBe(false);
     expect(await repository.claimNext({ workerId: "no-duplicate-commit", leaseSeconds: 30 })).toBeNull();
     expect(requestBodies).toHaveLength(2);
   }, 60_000);

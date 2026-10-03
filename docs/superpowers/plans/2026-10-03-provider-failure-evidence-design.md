@@ -1,7 +1,7 @@
 # Provider failure evidence and safe retry guidance design
 
 Date: 2026-10-03
-Status: Implementation authorized by the subsequent user request and completed; Tasks 1–5 reviewed and Task 6 selected verification passed. Final branch review and operator rollout remain separate. Platform skips and the deferred minor are recorded in the [verification report](../../review/provider-failure-diagnostics-verification.md).
+Status: Implementation authorized by the subsequent user request and completed; Tasks 1–5 reviewed and Task 6 selected verification passed. Final branch review and operator rollout remain separate. Platform skips and resolved final review minors are recorded in the [verification report](../../review/provider-failure-diagnostics-verification.md).
 Planning baseline: `30a884a1` (Error Diagnostic). Implementation rebased onto `origin/main` `66a0deeb`; preserve the original diagnosis dates below.
 
 ## Problem and evidence
