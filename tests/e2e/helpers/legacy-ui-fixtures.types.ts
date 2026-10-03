@@ -25,6 +25,9 @@ export interface LegacyUiRequestRecord {
   readonly requestBytes: number;
   responseBytes: number;
   readonly startedAt: number;
+  readonly configuredDelayMs: number;
+  delayReleasedAt?: number;
+  delayReleaseKind?: "explicit" | "timeout";
   finishedAt?: number;
   status?: number;
 }

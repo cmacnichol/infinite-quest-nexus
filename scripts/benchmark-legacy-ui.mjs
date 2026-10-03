@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { chromium } from "@playwright/test";
@@ -43,6 +44,46 @@ async function waitForRequestsToSettle(requests) {
     await sleep(50);
   }
   throw new Error("Mock API requests did not settle within five seconds.");
+}
+
+async function waitForPendingRequest(requests, path) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const request = requests.find(candidate => candidate.path === path && candidate.finishedAt === undefined);
+    if (request) return request;
+    await sleep(5);
+  }
+  throw new Error(`Expected delayed mock request was not observed: ${path}`);
+}
+
+async function waitForHistoryCards(page, requests, instrumentation, campaignId, count) {
+  const endpoint = `/api/v1/campaigns/${campaignId}/turns`;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await page.locator("#turnHistoryModalList .history-card").count() === count) return;
+    const pending = requests.find(request => request.path === endpoint && request.finishedAt === undefined);
+    if (pending) {
+      if (pending.configuredDelayMs !== 20) throw new Error(`Unexpected configured history delay: ${JSON.stringify(pending)}`);
+      instrumentation.releaseDelayedRoute();
+    }
+    await sleep(5);
+  }
+  throw new Error(`History did not render ${count} cards within ten seconds.`);
+}
+
+async function waitForAssetReads(pendingReads, failures) {
+  while (pendingReads.size > 0) await Promise.all([...pendingReads]);
+  if (failures.length) throw new Error(`Static response-body collection failed: ${JSON.stringify(failures)}`);
+}
+
+async function collectDocumentLongTasks(page, phase, phases) {
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const durationsMs = await page.evaluate(() => {
+    const entries = [...(window.__legacyUiLongTasks ?? [])];
+    window.__legacyUiLongTasks = [];
+    return entries;
+  });
+  phases[phase].push(...durationsMs);
 }
 
 function percentile(values, percentileValue) {
@@ -93,15 +134,24 @@ try {
     });
     const runtimeErrors = [];
     const externalRequests = [];
-    const staticAssetBytes = [];
-    const longTasks = [];
+    const staticAssetEvidence = [];
+    const pendingAssetReads = new Set();
+    const assetReadFailures = [];
+    const longTasksByPhase = { dashboard: [], story: [], history: [], warmReload: [] };
+    let assetPhase = "dashboard";
     page.on("pageerror", error => runtimeErrors.push(error.message));
     page.on("request", request => {
       if (request.url().startsWith("http") && new URL(request.url()).origin !== origin) externalRequests.push(request.url());
     });
-    page.on("response", async response => {
+    page.on("response", response => {
       if (response.url().startsWith(`${origin}/`) && !new URL(response.url()).pathname.startsWith("/api/")) {
-        try { staticAssetBytes.push((await response.body()).byteLength); } catch { /* Navigation responses can end before body collection. */ }
+        const evidence = { phase: assetPhase, path: new URL(response.url()).pathname, resourceType: response.request().resourceType(), bytes: null };
+        const pending = response.body().then(body => { evidence.bytes = body.byteLength; }).catch(error => {
+          assetReadFailures.push({ path: evidence.path, message: error instanceof Error ? error.message : String(error) });
+        });
+        staticAssetEvidence.push(evidence);
+        pendingAssetReads.add(pending);
+        void pending.finally(() => pendingAssetReads.delete(pending));
       }
     });
     await page.addInitScript(() => {
@@ -114,30 +164,43 @@ try {
         } catch { /* Long task entries are optional in Chromium builds. */ }
       }
     });
-    const storyHtml = (await (await import("node:fs/promises")).readFile(path.join(repoRoot, "apps/web/public/story.html"), "utf8"))
+    const storyHtml = (await readFile(path.join(repoRoot, "apps/web/public/story.html"), "utf8"))
       .replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
     await page.route(`**/story/${fixture.campaignId}`, route => route.fulfill({ contentType: "text/html", body: storyHtml }));
 
     await page.goto(`${origin}/nexus/index.html`);
+    const nativeLongTaskSupported = await page.evaluate(() => PerformanceObserver.supportedEntryTypes.includes("longtask"));
     await page.locator("#dashboardWorlds").getByText("Fixture World 1", { exact: true }).waitFor({ state: "visible" });
+    await waitForAssetReads(pendingAssetReads, assetReadFailures);
     const dashboardDomNodes = await page.locator("body *").count();
-    const staticBytesAfterDashboard = staticAssetBytes.reduce((sum, bytes) => sum + bytes, 0);
+    const dashboardAssetEvidenceCount = staticAssetEvidence.length;
+    await collectDocumentLongTasks(page, "dashboard", longTasksByPhase);
+    assetPhase = "story";
     await page.goto(`${origin}/story/${fixture.campaignId}`);
     await page.waitForFunction(() => document.querySelector("#storyTitle")?.textContent === "Fixture Campaign 1"
       && document.querySelector("#turnPill")?.textContent === "Turn 317"
       && document.querySelector("#busyPill")?.textContent === "Ready");
     await waitForRequestsToSettle(instrumentation.requests);
+    await waitForAssetReads(pendingAssetReads, assetReadFailures);
     const storyDomNodes = await page.locator("body *").count();
-    const staticBytesCold = staticAssetBytes.reduce((sum, bytes) => sum + bytes, 0) - staticBytesAfterDashboard;
+    const coldAssetEvidenceCount = staticAssetEvidence.length;
+    const dashboardAssetBytes = staticAssetEvidence.slice(0, dashboardAssetEvidenceCount).reduce((sum, entry) => sum + (entry.bytes ?? 0), 0);
+    const coldAssetBytes = staticAssetEvidence.slice(dashboardAssetEvidenceCount, coldAssetEvidenceCount).reduce((sum, entry) => sum + (entry.bytes ?? 0), dashboardAssetBytes);
+    await collectDocumentLongTasks(page, "story", longTasksByPhase);
     const started = performance.now();
     const historyClick = page.locator("#turnPill").click();
     await page.locator("#turnHistoryDialog").waitFor({ state: "visible" });
-    instrumentation.releaseDelayedRoute();
-    await historyClick;
-    await page.waitForFunction(() => document.querySelectorAll("#turnHistoryModalList .history-card").length === 317);
-    await waitForRequestsToSettle(instrumentation.requests);
+    const delayedTurnRequest = await waitForPendingRequest(instrumentation.requests, `/api/v1/campaigns/${fixture.campaignId}/turns`);
+    if (delayedTurnRequest.configuredDelayMs !== 20 || delayedTurnRequest.finishedAt !== undefined) {
+      throw new Error(`Configured delay was not held: ${JSON.stringify(delayedTurnRequest)}`);
+    }
+    await waitForHistoryCards(page, instrumentation.requests, instrumentation, fixture.campaignId, 317);
     const historyOpenMs = performance.now() - started;
+    await historyClick;
     const historyDomNodes = await page.locator("body *").count();
+    await collectDocumentLongTasks(page, "history", longTasksByPhase);
+    await waitForRequestsToSettle(instrumentation.requests);
+    await waitForAssetReads(pendingAssetReads, assetReadFailures);
     const navigationStarted = performance.now();
     await page.locator("#turnHistoryModalList .history-card").first().click();
     await page.locator("#btnTurnHistoryJump").click();
@@ -147,9 +210,14 @@ try {
     await waitForRequestsToSettle(instrumentation.requests);
     const requestCount = instrumentation.requests.length;
     const apiResponseBytes = instrumentation.requests.reduce((sum, request) => sum + request.responseBytes, 0);
+    const beforeWarmReloadAssetEvidenceCount = staticAssetEvidence.length;
+    assetPhase = "warmReload";
     await page.reload();
-    const warmAssetBytes = staticAssetBytes.reduce((sum, bytes) => sum + bytes, 0) - staticBytesAfterDashboard - staticBytesCold;
-    longTasks.push(...await page.evaluate(() => window.__legacyUiLongTasks ?? []));
+    await page.waitForFunction(() => document.querySelector("#storyTitle")?.textContent === "Fixture Campaign 1"
+      && document.querySelector("#busyPill")?.textContent === "Ready");
+    await waitForAssetReads(pendingAssetReads, assetReadFailures);
+    const warmAssetBytes = staticAssetEvidence.slice(beforeWarmReloadAssetEvidenceCount).reduce((sum, entry) => sum + (entry.bytes ?? 0), 0);
+    await collectDocumentLongTasks(page, "warmReload", longTasksByPhase);
     const record = {
       historyOpenMs,
       historyNavigationMs,
@@ -158,15 +226,23 @@ try {
       historyDomNodes,
       requestCount,
       apiResponseBytes,
-      coldAssetBytes: staticBytesAfterDashboard + staticBytesCold,
+      coldAssetBytes,
       warmAssetBytes,
       writeCount: instrumentation.writes.length,
-      longTasks,
+      nativeLongTaskSupported,
+      longTasksByPhase,
       delayedTurnRequestCount: delayedTurnRequests.length,
+      delayedRouteEvidence: delayedTurnRequests.map(request => ({ method: request.method, path: request.path, configuredDelayMs: request.configuredDelayMs, delayReleaseKind: request.delayReleaseKind, releasedAfterMs: request.delayReleasedAt === undefined ? null : request.delayReleasedAt - request.startedAt })),
+      requestEvidence: instrumentation.requests.map(request => ({ method: request.method, path: request.path, requestBytes: request.requestBytes, responseBytes: request.responseBytes, status: request.status })),
+      assetEvidence: staticAssetEvidence,
+      assetReadFailures,
       runtimeErrors,
       externalRequests
     };
-    if (record.writeCount || runtimeErrors.length || externalRequests.length || delayedTurnRequests.length === 0) {
+    if (record.writeCount || runtimeErrors.length || externalRequests.length || delayedTurnRequests.length === 0
+      || delayedTurnRequests.some(request => request.configuredDelayMs !== 20)
+      || !delayedTurnRequests.some(request => request.delayReleaseKind === "explicit")
+      || assetReadFailures.length || staticAssetEvidence.some(asset => asset.bytes === null)) {
       throw new Error(`Synthetic browser sample failed its guard: ${JSON.stringify(record)}`);
     }
     if (index >= warmups) samples.push(record);
@@ -174,7 +250,8 @@ try {
   }
 
   const commit = await gitValue(["rev-parse", "HEAD"]);
-  const dirty = (await gitValue(["status", "--porcelain"])).length > 0;
+  const dirtyOutput = await gitValue(["status", "--porcelain"]);
+  const dirty = dirtyOutput === "unknown" ? null : dirtyOutput.length > 0;
   const report = {
     generatedAt: new Date().toISOString(),
     commit,
@@ -194,11 +271,21 @@ try {
       story: summarize(samples.map(sample => sample.storyDomNodes)),
       history: summarize(samples.map(sample => sample.historyDomNodes))
     },
-    longTasks: { observed: samples.flatMap(sample => sample.longTasks).length, durationsMs: samples.flatMap(sample => sample.longTasks) },
+    longTasksByPhase: Object.fromEntries(Object.keys(samples[0].longTasksByPhase).map(phase => [phase, {
+      nativeObserverSupported: samples.every(sample => sample.nativeLongTaskSupported),
+      observed: samples.every(sample => sample.nativeLongTaskSupported)
+        ? samples.flatMap(sample => sample.longTasksByPhase[phase]).length
+        : null,
+      durationsMs: samples.every(sample => sample.nativeLongTaskSupported)
+        ? samples.flatMap(sample => sample.longTasksByPhase[phase])
+        : null
+    }])),
     zeroWrites: samples.every(sample => sample.writeCount === 0),
     noExternalRequests: samples.every(sample => sample.externalRequests.length === 0),
     noRuntimeErrors: samples.every(sample => sample.runtimeErrors.length === 0),
-    delayedRouteObservedEverySample: samples.every(sample => sample.delayedTurnRequestCount > 0),
+    delayedRouteHeldAndExplicitlyReleasedDuringHistoryEverySample: samples.every(sample => sample.delayedRouteEvidence.some(route => route.configuredDelayMs === 20 && route.delayReleaseKind === "explicit")),
+    assetBodyReadFailures: samples.reduce((sum, sample) => sum + sample.assetReadFailures.length, 0),
+    sampleResults: samples,
     timingNote: "Browser timing is recorded evidence for this local Vite/mock-route profile, not an absolute assertion or PostgreSQL/provider measurement."
   };
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

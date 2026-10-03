@@ -204,12 +204,15 @@ export async function installLegacyUiFixture(
     const method = request.method();
     const path = url.pathname;
     const requestBody = request.postData() ?? "";
+    const key = `${method} ${path}`;
+    const configuredDelayMs = options.delays?.[key] ?? options.delays?.[path] ?? 0;
     const record: LegacyUiRequestRecord = {
       method,
       path,
       requestBytes: Buffer.byteLength(requestBody),
       responseBytes: 0,
-      startedAt: performance.now()
+      startedAt: performance.now(),
+      configuredDelayMs
     };
     requests.push(record);
     if (method !== "GET" && method !== "HEAD") {
@@ -218,16 +221,20 @@ export async function installLegacyUiFixture(
       writes.push({ method, path, body });
     }
 
-    const key = `${method} ${path}`;
-    const delayMs = options.delays?.[key] ?? options.delays?.[path] ?? 0;
-    if (delayMs > 0) {
+    if (configuredDelayMs > 0) {
       await new Promise<void>(resolve => {
         let released = false;
-        const release = () => {
-          if (!released) { released = true; clearTimeout(timer); resolve(); }
+        const release = (kind: "explicit" | "timeout") => {
+          if (!released) {
+            released = true;
+            record.delayReleasedAt = performance.now();
+            record.delayReleaseKind = kind;
+            clearTimeout(timer);
+            resolve();
+          }
         };
-        const timer = setTimeout(release, delayMs);
-        pendingDelays.push(release);
+        const timer = setTimeout(() => release("timeout"), configuredDelayMs);
+        pendingDelays.push(() => release("explicit"));
       });
     }
 
