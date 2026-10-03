@@ -39,7 +39,7 @@ function selectionHarness({
   ];
   const implementation = Function(
     ...names,
-    `let selectedWorld = initialWorld; let worldSelectionId = ""; let worldSelectionEpoch = 0; let worldCoverJobPollSequence = 0;\n${source.join("\n")}\nreturn { selectWorld, isCurrentWorldSelection, get state() { return { selectedWorld, worldSelectionId, worldSelectionEpoch }; } };`
+    `let selectedWorld = initialWorld; let worldSelectionId = ""; let worldSelectionEpoch = 0; let worldSelectionIntentEpoch = 0; let worldCoverJobPollSequence = 0;\n${source.join("\n")}\nreturn { selectWorld, isCurrentWorldSelection, get state() { return { selectedWorld, worldSelectionId, worldSelectionEpoch }; } };`
   )(
     elements,
     api,
@@ -81,6 +81,33 @@ function deferred<T>() {
 
 function world(id: string, title: string) {
   return { id, title, status: "active", draftRevision: 1, versions: [], campaigns: [] };
+}
+
+function coverMonitorHarness(api: () => Promise<Record<string, unknown>>, initialWorld: Record<string, unknown>) {
+  const invalidated: string[] = [];
+  const invalidateDashboardWorldDetails = vi.fn((worldId: string) => invalidated.push(worldId));
+  const renderWorldCoverJobStatus = vi.fn();
+  const renderDashboardWorlds = vi.fn();
+  const renderManagementWorlds = vi.fn();
+  const source = functionSources(["monitorWorldCoverJobWithSequence"]);
+  const implementation = Function(
+    "api", "invalidateDashboardWorldDetails", "renderWorldCoverJobStatus", "worlds", "renderDashboardWorlds", "renderManagementWorlds", "imageJobDelay", "initialWorld",
+    `let selectedWorld = initialWorld; let worldCoverJobPollSequence = 1;\n${source.join("\n")}\nreturn { monitorWorldCoverJobWithSequence, setSelection(world, sequence) { selectedWorld = world; worldCoverJobPollSequence = sequence; }, get selectedWorld() { return selectedWorld; } };`
+  )(
+    api,
+    invalidateDashboardWorldDetails,
+    renderWorldCoverJobStatus,
+    [initialWorld],
+    renderDashboardWorlds,
+    renderManagementWorlds,
+    async () => undefined,
+    initialWorld
+  ) as {
+    monitorWorldCoverJobWithSequence(jobId: string, worldId: string, sequence: number): Promise<Record<string, unknown> | null>;
+    setSelection(world: Record<string, unknown>, sequence: number): void;
+    selectedWorld: Record<string, unknown>;
+  };
+  return { implementation, invalidated, renderWorldCoverJobStatus, renderDashboardWorlds, renderManagementWorlds };
 }
 
 describe("legacy world navigation", () => {
@@ -147,5 +174,34 @@ describe("legacy world navigation", () => {
     expect(implementation.isDashboardWorldDetailRequestCurrent("world-a", oldRequest)).toBe(false);
     expect(details.has("world-a")).toBe(false);
     expect(details.get("world-b")).toEqual({ title: "Current Beta" });
+  });
+
+  it("invalidates a completed stale cover job's captured world without mutating the newer selection", async () => {
+    const pendingJob = deferred<Record<string, unknown>>();
+    const api = vi.fn(() => pendingJob.promise);
+    const worldA = { ...world("world-a", "World Alpha"), imageUrl: "old-cover" };
+    const worldB = { ...world("world-b", "World Beta"), imageUrl: "beta-cover" };
+    const { implementation, invalidated, renderWorldCoverJobStatus, renderDashboardWorlds, renderManagementWorlds } = coverMonitorHarness(api, worldA);
+
+    const monitoring = implementation.monitorWorldCoverJobWithSequence("cover-job-a", "world-a", 1);
+    implementation.setSelection(worldB, 2);
+    const completedJob = { id: "cover-job-a", status: "completed", assetUrl: "new-cover" };
+    pendingJob.resolve(completedJob);
+
+    await expect(monitoring).resolves.toEqual(completedJob);
+    expect(invalidated).toEqual(["world-a"]);
+    expect(implementation.selectedWorld).toEqual(worldB);
+    expect(renderWorldCoverJobStatus).not.toHaveBeenCalled();
+    expect(renderDashboardWorlds).not.toHaveBeenCalled();
+    expect(renderManagementWorlds).not.toHaveBeenCalled();
+  });
+
+  it("does not invalidate a world cache when its cover job fails", async () => {
+    const worldA = world("world-a", "World Alpha");
+    const api = vi.fn(async () => ({ status: "failed", errorMessage: "Synthetic cover failure" }));
+    const { implementation, invalidated } = coverMonitorHarness(api, worldA);
+
+    await expect(implementation.monitorWorldCoverJobWithSequence("cover-job-a", "world-a", 1)).rejects.toThrow("Synthetic cover failure");
+    expect(invalidated).toEqual([]);
   });
 });

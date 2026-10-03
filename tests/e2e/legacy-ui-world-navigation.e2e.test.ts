@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T05");
+const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T05-fix1");
 const worldA = {
   id: "world-a",
   title: "World Alpha",
@@ -26,6 +26,9 @@ const apiEvents: Array<{ method: string; path: string; status: number; body: str
 const detailGates = new Map<string, Promise<void>>();
 const detailFailures = new Set<string>();
 const versionGates = new Map<string, Promise<void>>();
+const worldListGates: Array<Promise<void>> = [];
+const worldPatchGates = new Map<string, Promise<void>>();
+const coverJobGates = new Map<string, Promise<void>>();
 
 function fullWorld(summary: typeof worldA) {
   const versionId = summary.id === "world-a" ? "world-a-v1" : "world-b-v1";
@@ -65,7 +68,11 @@ async function fixtureRoute(route: Route) {
   if (path === "/meta") body = {};
   else if (path === "/session") body = { user: { id: "owner-synthetic", displayName: "Synthetic owner", settings: { autoSubmitTurnChoices: true, continuousReading: false } } };
   else if (path === "/providers") body = { providers: [] };
-  else if (path === "/worlds" && request.method() === "GET") body = { worlds: summaries() };
+  else if (path === "/worlds" && request.method() === "GET") {
+    body = { worlds: summaries() };
+    const gate = worldListGates.shift();
+    if (gate) await gate;
+  }
   else if (path === "/campaigns" && request.method() === "GET") body = { campaigns: [] };
   else if (parts[0] === "worlds" && parts.length === 2 && request.method() === "GET") {
     const worldId = parts[1]!;
@@ -82,9 +89,22 @@ async function fixtureRoute(route: Route) {
     const gate = versionGates.get(versionId);
     if (gate) await gate;
     body = { characters: [{ id: `${versionId}-character`, name: `${versionId} character`, rpgStatCount: 1, defaultTriggerCount: 1 }], readiness: { ready: true, issues: [] } };
-  } else if (parts[0] === "worlds" && parts.length === 3 && parts[2] === "cover-job") body = null;
+  } else if (parts[0] === "worlds" && parts.length === 3 && parts[2] === "cover-job") {
+    body = parts[1] === "world-a" && coverJobGates.has("cover-job-a")
+      ? { id: "cover-job-a", status: "generating" }
+      : null;
+  } else if (parts[0] === "image-jobs" && parts[1] === "cover-job-a" && request.method() === "GET") {
+    const gate = coverJobGates.get("cover-job-a");
+    if (gate) await gate;
+    const detail = worldDetails.get("world-a");
+    if (detail) detail.imageUrl = "https://images.test/world-a-new-cover.png";
+    body = { id: "cover-job-a", status: "completed", assetUrl: "https://images.test/world-a-new-cover.png" };
+  }
   else if (parts[0] === "worlds" && parts.length === 2 && request.method() === "PATCH") {
     const worldId = parts[1]!;
+    const gate = worldPatchGates.get(worldId);
+    if (gate) worldPatchGates.delete(worldId);
+    if (gate) await gate;
     const detail = worldDetails.get(worldId);
     if (detail) detail.status = JSON.parse(request.postData() || "{}").status;
     body = detail ?? {};
@@ -136,6 +156,9 @@ test.beforeEach(() => {
   detailGates.clear();
   detailFailures.clear();
   versionGates.clear();
+  worldListGates.length = 0;
+  worldPatchGates.clear();
+  coverJobGates.clear();
   worldDetails.clear();
   worldDetails.set(worldA.id, fullWorld(worldA));
   worldDetails.set(worldB.id, fullWorld(worldB));
@@ -151,6 +174,100 @@ test("edit_details_selects_the_world_that_was_clicked", async ({ page }) => {
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
   await expect(page.locator("#worldSelectionPanel")).toBeVisible();
   await page.screenshot({ path: resolve(evidenceDirectory, "edit-details-selects-clicked-world.png") });
+});
+
+test("a_delayed_details_navigation_list_cannot_reselect_its_obsolete_world", async ({ page }) => {
+  let releaseWorldList!: () => void;
+  const worldListGate = new Promise<void>((resolve) => { releaseWorldList = resolve; });
+  await openWorldManagement(page, "dashboard");
+  await page.locator('#dashboardWorlds [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldDetailsTitle")).toHaveText("World Alpha");
+  const listCountBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
+  worldListGates.push(worldListGate);
+  const delayedListRequest = page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/worlds");
+  await page.locator("#editWorldDetails").click();
+  await delayedListRequest;
+  await page.locator('#worldManagementCarousel [data-world-id="world-b"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  releaseWorldList();
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(listCountBefore);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-b"]')).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: resolve(evidenceDirectory, "delayed-navigation-list-keeps-current-world.png") });
+});
+
+test("a_delayed_post_archive_list_refresh_preserves_a_newer_world_selection", async ({ page }) => {
+  let releaseWorldList!: () => void;
+  let releaseWorldB!: () => void;
+  const worldListGate = new Promise<void>((resolve) => { releaseWorldList = resolve; });
+  const worldBGate = new Promise<void>((resolve) => { releaseWorldB = resolve; });
+  await openWorldManagement(page);
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  const listCountBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
+  const aDetailGetsBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-a").length;
+  const bDetailGetsBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length;
+  worldListGates.push(worldListGate);
+  detailGates.set("world-b", worldBGate);
+  const delayedListRequest = page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/worlds");
+  await page.locator("#worldSelectionPanel details summary").click();
+  await page.locator("#archiveWorld").click();
+  await delayedListRequest;
+  const worldBRequest = page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/worlds/world-b");
+  await page.locator('#worldManagementCarousel [data-world-id="world-b"]').click();
+  await worldBRequest;
+  releaseWorldList();
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(listCountBefore);
+  await page.evaluate(() => new Promise<void>((resolve) => setTimeout(() => requestAnimationFrame(() => resolve()), 0)));
+  expect(apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-a").length).toBe(aDetailGetsBefore);
+  releaseWorldB();
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length).toBeGreaterThan(bDetailGetsBefore);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-b"]')).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: resolve(evidenceDirectory, "delayed-post-archive-list-keeps-current-world.png") });
+});
+
+test("a_delayed_archive_write_and_list_refresh_follow_an_inflight_world_selection", async ({ page }) => {
+  let releasePatch!: () => void;
+  let releaseWorldList!: () => void;
+  let releaseWorldB!: () => void;
+  const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+  const worldListGate = new Promise<void>((resolve) => { releaseWorldList = resolve; });
+  const worldBGate = new Promise<void>((resolve) => { releaseWorldB = resolve; });
+  await openWorldManagement(page);
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  const aDetailGetsBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-a").length;
+  const bDetailGetsBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length;
+  worldPatchGates.set("world-a", patchGate);
+  worldListGates.push(worldListGate);
+  const archiveRequest = page.waitForRequest((request) => request.method() === "PATCH" && new URL(request.url()).pathname === "/api/v1/worlds/world-a");
+  const delayedListRequest = page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/worlds");
+  await page.locator("#worldSelectionPanel details summary").click();
+  await page.locator("#archiveWorld").click();
+  await archiveRequest;
+  detailGates.set("world-b", worldBGate);
+  const worldBRequest = page.waitForRequest((request) => request.method() === "GET" && new URL(request.url()).pathname === "/api/v1/worlds/world-b");
+  await page.locator('#worldManagementCarousel [data-world-id="world-b"]').click();
+  await worldBRequest;
+  releasePatch();
+  await expect.poll(() => apiEvents.some((event) => event.method === "PATCH" && event.path === "/worlds/world-a" && event.status === 200)).toBe(true);
+  const listCountBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
+  await delayedListRequest;
+  releaseWorldList();
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(listCountBefore);
+  await page.evaluate(() => new Promise<void>((resolve) => setTimeout(() => requestAnimationFrame(() => resolve()), 0)));
+  expect(apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-a").length).toBe(aDetailGetsBefore);
+  const bCompletedBeforeRelease = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length;
+  releaseWorldB();
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length).toBeGreaterThan(bCompletedBeforeRelease);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-b"]')).toHaveAttribute("aria-pressed", "true");
+  expect(apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length).toBeGreaterThan(bDetailGetsBefore);
+  await page.screenshot({ path: resolve(evidenceDirectory, "delayed-archive-write-keeps-inflight-world-selection.png") });
 });
 
 test("a_delayed_old_world_response_cannot_replace_the_new_selection", async ({ page }) => {
@@ -283,4 +400,38 @@ test("a_detail_hydration_started_before_a_cover_write_cannot_repopulate_the_stal
   await page.locator('#dashboardWorlds [data-world-id="world-a"]').click();
   await expect(page.locator("#worldDetailsMedia")).not.toHaveCSS("background-image", /world-a-cover/u);
   await page.screenshot({ path: resolve(evidenceDirectory, "stale-detail-hydration-after-cover-removal.png") });
+});
+
+test("a_late_completed_cover_job_invalidates_its_world_cache_without_touching_the_current_world", async ({ page }) => {
+  let releaseCoverJob!: () => void;
+  const coverJobGate = new Promise<void>((resolve) => { releaseCoverJob = resolve; });
+  coverJobGates.set("cover-job-a", coverJobGate);
+  await openWorldManagement(page, "dashboard");
+  await page.locator('#dashboardWorlds [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldDetailsTitle")).toHaveText("World Alpha");
+  await page.locator("#closeWorldDetails").click();
+  await page.evaluate(() => { window.location.hash = "#world-library"; });
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').waitFor({ state: "visible" });
+  const coverJobRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/v1/image-jobs/cover-job-a");
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await coverJobRequest;
+  await page.locator('#worldManagementCarousel [data-world-id="world-b"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  const bDetailGetsBefore = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length;
+  releaseCoverJob();
+  await expect.poll(() => apiEvents.some((event) => event.method === "GET" && event.path === "/image-jobs/cover-job-a" && (event.response as { status?: string }).status === "completed")).toBe(true);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-b"]')).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() => { window.location.hash = "#dashboard"; });
+  await page.locator('#dashboardWorlds [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldDetailsTitle")).toHaveText("World Alpha");
+  await expect(page.locator("#worldDetailsMedia")).toHaveCSS("background-image", /world-a-new-cover/u);
+  const bDetailGetsAfter = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds/world-b").length;
+  expect(bDetailGetsAfter).toBe(bDetailGetsBefore);
+  await page.locator("#closeWorldDetails").click();
+  await page.locator('#dashboardWorlds [data-world-id="world-b"]').click();
+  await expect(page.locator("#worldDetailsTitle")).toHaveText("World Beta");
+  await expect(page.locator("#worldDetailsMedia")).toHaveCSS("background-image", /world-b-cover/u);
+  await page.screenshot({ path: resolve(evidenceDirectory, "late-cover-job-invalidates-only-captured-world.png") });
 });

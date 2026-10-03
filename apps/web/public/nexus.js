@@ -111,6 +111,7 @@ let selectedCampaignIsExplicit = false;
 let selectedWorld = null;
 let worldSelectionId = "";
 let worldSelectionEpoch = 0;
+let worldSelectionIntentEpoch = 0;
 let managementWorldFilter = "all";
 let worldAuthorMode = "create";
 let worldAuthorWorkingContent = null;
@@ -2044,10 +2045,12 @@ async function openWorldDetails(worldId) {
 
 async function openWorldManagement(worldId) {
   if (!worldId) return;
+  const selectionIntentEpoch = ++worldSelectionIntentEpoch;
+  worldSelectionId = worldId;
   dashboardWorldDetailsSelectionEpoch += 1;
   elements.worldDetailsDialog.close();
   if (window.location.hash !== "#world-library") window.location.hash = "#world-library";
-  await loadWorlds(worldId);
+  await loadWorlds(worldId, { selectionIntentEpoch });
 }
 
 async function openQuickCampaign() {
@@ -2577,11 +2580,13 @@ function renderManagementWorlds() {
 }
 
 async function loadWorlds(preselectId = "", selectionOptions = {}) {
+  const selectionIntentEpoch = selectionOptions.selectionIntentEpoch ?? worldSelectionIntentEpoch;
   ({ worlds } = await api("/api/v1/worlds"));
   renderDashboardWorlds();
   renderManagementWorlds();
   void hydrateDashboardWorlds();
   void loadDashboardStats();
+  if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
   if (!worlds.length) {
     worldSelectionId = "";
     worldSelectionEpoch += 1;
@@ -2594,8 +2599,8 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
     elements.worldCampaignReadiness.textContent = "Create a world before checking campaign readiness.";
     return;
   }
-  const targetId = preselectId || selectedWorld?.id;
-  if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId, selectionOptions);
+  const targetId = worldSelectionId || preselectId || selectedWorld?.id;
+  if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId, { ...selectionOptions, selectionIntentEpoch });
   else if (selectedWorld && !worlds.some((world) => world.id === selectedWorld.id)) {
     worldSelectionId = "";
     worldSelectionEpoch += 1;
@@ -2610,6 +2615,8 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
 }
 
 async function selectWorld(worldId, selectionOptions = {}) {
+  const selectionIntentEpoch = selectionOptions.selectionIntentEpoch ?? ++worldSelectionIntentEpoch;
+  if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
   const committedAuthorRefresh = selectionOptions.committedAuthorSession
     && editDialogSessions.get(elements.worldAuthorDialog) === selectionOptions.committedAuthorSession
     && worldAuthorBusy;
@@ -2617,6 +2624,7 @@ async function selectWorld(worldId, selectionOptions = {}) {
     const dismissal = await dismissEditDialog(elements.worldAuthorDialog);
     if (dismissal !== "dismissed" || elements.worldAuthorDialog.open) return;
   }
+  if (selectionIntentEpoch !== worldSelectionIntentEpoch) return;
   const selectionEpoch = ++worldSelectionEpoch;
   worldSelectionId = worldId;
   const coverPollSequence = ++worldCoverJobPollSequence;
@@ -2864,17 +2872,18 @@ async function monitorWorldCoverJobWithSequence(jobId, worldId, sequence) {
   for (let poll = 0; poll < 1200; poll += 1) {
     if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return null;
     const job = await api(`/api/v1/image-jobs/${jobId}`);
-    if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return null;
     if (job.status === "completed") {
+      invalidateDashboardWorldDetails(worldId);
+      if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return job;
       renderWorldCoverJobStatus(job);
       selectedWorld.imageUrl = job.assetUrl;
       const cached = worlds.find((world) => world.id === worldId);
       if (cached) cached.imageUrl = job.assetUrl;
-      invalidateDashboardWorldDetails(worldId);
       renderDashboardWorlds();
       renderManagementWorlds();
       return job;
     }
+    if (selectedWorld?.id !== worldId || sequence !== worldCoverJobPollSequence) return null;
     if (["failed", "recoverable", "cancelled", "expired"].includes(job.status)) {
       throw new Error(job.errorMessage || "World cover generation did not complete.");
     }
