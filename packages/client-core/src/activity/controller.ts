@@ -9,13 +9,15 @@ export function createActivityController(deps: ActivityControllerDependencies) {
   let timer = deps.createAbortController();
   let queue = Promise.resolve();
   let refreshPromise: Promise<void> | null = null;
+  let pendingScope: ActivityCacheScope | null = null;
+  let activationPromise: Promise<void> | null = null;
   let failures = 0;
   let dialogOpen = false;
   let jobActive = false;
   let fallback = false;
   let memory = createMemoryActivityCache(deps.clock);
   const listeners = new Set<(state: ActivityViewState) => void>();
-  const initial = (): ActivityViewState => ({ scope: null, snapshot: emptyActivitySnapshot(), events: [], observations: [], syncing: false, cached: false, delayed: false, incomplete: false, storageUnavailable: false, unsupported: false, identityRequired: true, gap: null });
+  const initial = (): ActivityViewState => ({ scope: null, snapshot: emptyActivitySnapshot(), events: [], observations: [], syncing: false, cached: false, delayed: false, incomplete: false, storageUnavailable: false, unsupported: false, identityRequired: true, activationPending: false, gap: null });
   let state = initial();
   const current = (token: number) => !disposed && token === epoch && !abort.signal.aborted;
   const available = () => deps.visibility.current() && deps.connectivity.current();
@@ -50,7 +52,7 @@ export function createActivityController(deps: ActivityControllerDependencies) {
   function close() {
     const previousScope = state.scope;
     epoch++; abort.abort(); timer.abort(); abort = deps.createAbortController();
-    queue = Promise.resolve(); refreshPromise = null; failures = 0;
+    queue = Promise.resolve(); refreshPromise = null; activationPromise = null; pendingScope = null; failures = 0;
     state = initial(); emit();
     if (previousScope) void (fallback ? memory : deps.cache).setActive?.(previousScope, false).catch(() => {});
   }
@@ -79,17 +81,18 @@ export function createActivityController(deps: ActivityControllerDependencies) {
       if (!signal.aborted && current(token) && available()) void refresh();
     }).catch(() => {});
   }
-  async function fetchPages(scope: ActivityCacheScope, token: number, older: boolean) {
+  async function fetchPages(scope: ActivityCacheScope, token: number, older: boolean, latest = false) {
     let drainMore = false;
     let readOlder = older;
+    let readLatest = latest;
     state = { ...state, syncing: true, unsupported: false }; emit();
     try {
       // Read within the same serialized lane as local writes and cross-tab invalidations.
       await reread(scope, token);
       for (let count = 0; count < 10 && current(token) && available(); count++) {
         const snapshot = state.snapshot;
-        const direction = readOlder ? "before" : snapshot.nextAfter ? "after" : "initial";
-        const cursor = readOlder ? snapshot.nextBefore : snapshot.nextAfter;
+        const direction = readOlder ? "before" : readLatest ? "initial" : snapshot.nextAfter ? "after" : "initial";
+        const cursor = readLatest ? null : readOlder ? snapshot.nextBefore : snapshot.nextAfter;
         if (readOlder && (!snapshot.hasOlder || !cursor)) break;
         const query = { limit: 100, ...(cursor ? direction === "before" ? { before: cursor } : { after: cursor } : {}) };
         const response = await deps.api.list(scope.campaignId, query, abort.signal);
@@ -103,9 +106,9 @@ export function createActivityController(deps: ActivityControllerDependencies) {
           state = { ...state, gap: rollback ? "restore" : "retention" };
           await reread(scope, token); invalidate(scope);
           // A bounded restart also covers a reset encountered during an older-page read.
-          drainMore = true; readOlder = false; continue;
+          drainMore = true; readOlder = false; readLatest = false; continue;
         }
-        await cacheOperation(cache => cache.merge(scope, { page, direction, expectedCursor: cursor, syncedAt: deps.clock.now() }));
+        await cacheOperation(cache => cache.merge(scope, { page, direction, expectedCursor: readLatest ? snapshot.nextAfter : cursor, replaceWindow: readLatest, syncedAt: deps.clock.now() }));
         if (!current(token)) return;
         await reread(scope, token); invalidate(scope);
         failures = 0; state = { ...state, delayed: page.coverage.pendingPublication, cached: false, unsupported: false };
@@ -121,7 +124,8 @@ export function createActivityController(deps: ActivityControllerDependencies) {
   }
   function refresh(): Promise<void> {
     if (refreshPromise) return refreshPromise;
-    if (!state.scope || !available() || disposed) return Promise.resolve();
+    if (!state.scope) return activatePending();
+    if (!available() || disposed) return Promise.resolve();
     timer.abort();
     const scope = state.scope; const token = epoch;
     const run = serialize(token, () => fetchPages(scope, token, false));
@@ -129,17 +133,49 @@ export function createActivityController(deps: ActivityControllerDependencies) {
     void run.finally(() => { if (refreshPromise === run) refreshPromise = null; });
     return run;
   }
-  async function open(scope: ActivityCacheScope) {
-    close(); if (disposed) return;
+  function returnToLatest(): Promise<void> {
+    const scope = state.scope; const token = epoch;
+    if (!scope || !available() || disposed) return Promise.resolve();
+    timer.abort();
+    return serialize(token, () => fetchPages(scope, token, false, true));
+  }
+  function activatePending(): Promise<void> {
+    if (activationPromise) return activationPromise;
+    const scope = pendingScope; const token = epoch;
+    if (!scope || disposed || !deps.connectivity.current()) return Promise.resolve();
+    const run = (async () => {
+      let verified = false;
+      try { verified = await deps.verifyAccess(scope, abort.signal); }
+      catch (error) {
+        if (!current(token)) return;
+        const status = error && typeof error === "object" && "statusCode" in error ? error.statusCode : undefined;
+        if (status === 401 || status === 403 || status === 404) {
+          pendingScope = null; state = { ...state, activationPending: false }; emit();
+        }
+        // A transport failure retains only an unverified target, never cached identity or data.
+        return;
+      }
+      if (!current(token) || pendingScope !== scope) return;
+      if (!verified) { pendingScope = null; state = { ...state, activationPending: false }; emit(); return; }
+      if (!deps.connectivity.current()) return;
+      pendingScope = null;
+      state = { ...state, scope, identityRequired: false, activationPending: false };
+      await serialize(token, async () => { await cacheOperation(async cache => { await cache.setActive?.(scope, true); }); if (current(token)) await reread(scope, token); });
+      if (current(token)) {
+        if (state.snapshot.browsingOlder) await returnToLatest();
+        else await refresh();
+      }
+    })();
+    activationPromise = run;
+    void run.finally(() => { if (activationPromise === run) activationPromise = null; });
+    return run;
+  }
+  function open(scope: ActivityCacheScope): Promise<void> {
+    close(); if (disposed) return Promise.resolve();
     activityScopeKey(scope);
-    const token = epoch;
-    if (!deps.connectivity.current()) return;
-    let verified = false;
-    try { verified = await deps.verifyAccess(scope, abort.signal); } catch { /* Cold offline or unknown identity does not unlock a cache. */ }
-    if (!current(token) || !verified) return;
-    state = { ...state, scope: { ...scope }, identityRequired: false };
-    await serialize(token, async () => { await cacheOperation(async cache => { await cache.setActive?.(scope, true); }); if (current(token)) await reread(scope, token); });
-    if (current(token)) await refresh();
+    pendingScope = { ...scope };
+    state = { ...state, activationPending: true }; emit();
+    return activatePending();
   }
   async function write(operation: (scope: ActivityCacheScope) => Promise<void>) {
     if (!state.scope || disposed) return;
@@ -152,7 +188,7 @@ export function createActivityController(deps: ActivityControllerDependencies) {
     if (scope && activityScopeKey(scope) === key) void serialize(token, () => reread(scope, token)).catch(() => {});
   })];
   return {
-    open, close, refresh,
+    open, close, refresh, returnToLatest,
     loadOlder: () => { const scope = state.scope; return scope && available() && !state.unsupported ? serialize(epoch, () => fetchPages(scope, epoch, true)) : Promise.resolve(); },
     recordObservation: (observation: ActivityObservationInput) => write(scope => cacheOperation(cache => cache.merge(scope, { observation }))),
     hidePrevious: () => write(scope => cacheOperation(cache => cache.setHiddenThrough(scope, { server: state.snapshot.events.reduce((high, entry) => BigInt(entry.sequence) > BigInt(high) ? entry.sequence : high, state.snapshot.anchorSequence), browser: state.snapshot.localSequence }))),

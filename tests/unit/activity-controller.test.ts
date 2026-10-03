@@ -123,3 +123,75 @@ it("an injected cache failure preserves hidden view and local sequence in the me
   await f.controller.recordObservation(observation(2));
   expect(f.state().events).toEqual([]);expect(f.state().observations.map(entry=>entry.sequence)).toEqual(["2"]);expect(f.state().storageUnavailable).toBe(true);f.controller.dispose();
 });
+
+describe("review regressions: activity navigation and offline activation", () => {
+  it("returns to latest after older browsing evicts recent records, without future publications", async () => {
+    const f = setup();
+    await f.cache.merge(scope, { events: Array.from({ length: 1000 }, (_, i) => event(i + 101)), page: page([event(1100), event(101)], true), direction: "initial", expectedCursor: null });
+    f.list.mockImplementation(async (_id, query) => {
+      if (query.after) return { ...page([], false, "1100"), nextAfter: "after:1100" };
+      const end = query.before ? Number(query.before.slice(7)) - 1 : 1100;
+      const start = Math.max(1, end - 99);
+      return page(Array.from({ length: end - start + 1 }, (_, i) => event(i + start)), start > 1, "1100");
+    });
+    await f.controller.open(scope);
+    await f.controller.recordObservation(observation(1));
+    await f.controller.loadOlder();
+    expect(f.state().events.some(entry => entry.sequence === "1100")).toBe(false);
+    expect(f.state().snapshot.browsingOlder).toBe(true);
+    await f.controller.returnToLatest();
+    expect(f.state().events).toHaveLength(100);
+    expect(f.state().events[0]?.sequence).toBe("1100");
+    expect(f.state().snapshot).toMatchObject({ nextAfter: "after:1100", nextBefore: "before:1001", hasOlder: true, browsingOlder: false });
+    expect(f.state().observations).toHaveLength(1);
+    for (let i = 0; i < 10; i++) await f.controller.loadOlder();
+    expect(f.state().events.some(entry => entry.sequence === "1100")).toBe(false);
+    await f.controller.open(scope);
+    expect(f.state().events[0]?.sequence).toBe("1100");
+    expect(f.state().snapshot.browsingOlder).toBe(false);
+    f.controller.dispose();
+  });
+  it("reconnects a cold offline activation only after current verification, before any cache read", async () => {
+    let online = false; let changed = () => {};
+    const f = setup(undefined, { connectivity: { current: () => online, subscribe: listener => { changed = listener; return () => {}; } } });
+    await f.cache.merge(scope, { events: [event(1)] });
+    const read = vi.spyOn(f.cache, "read");
+    let finish!: (value: boolean) => void;
+    f.verifyAccess.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    await f.controller.open(scope);
+    expect(f.state().scope).toBeNull(); expect(read).not.toHaveBeenCalled(); expect(f.verifyAccess).not.toHaveBeenCalled();
+    online = true; changed();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(f.verifyAccess).toHaveBeenCalledOnce(); expect(read).not.toHaveBeenCalled(); expect(f.state().events).toEqual([]);
+    finish(true); await f.controller.refresh();
+    expect(f.state().scope).toEqual(scope); expect(f.state().events).toHaveLength(1); expect(f.state().identityRequired).toBe(false);
+    f.controller.dispose();
+  });
+  it.each(["close", "dispose"] as const)("%s revokes a pending offline activation", async action => {
+    let online = false; let changed = () => {};
+    const f = setup(undefined, { connectivity: { current: () => online, subscribe: listener => { changed = listener; return () => {}; } } });
+    await f.controller.open(scope); f.controller[action](); online = true; changed(); await f.controller.refresh();
+    expect(f.verifyAccess).not.toHaveBeenCalled(); expect(f.state().scope).toBeNull(); expect(f.state().events).toEqual([]);
+    f.controller.dispose();
+  });
+  it("switching owners invalidates a reconnect verification already in flight", async () => {
+    let online = false; let changed = () => {};
+    const f = setup(undefined, { connectivity: { current: () => online, subscribe: listener => { changed = listener; return () => {}; } } });
+    let finish!: (value: boolean) => void;
+    f.verifyAccess.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await f.controller.open(scope); online = true; changed(); await new Promise(resolve => setTimeout(resolve, 0));
+    const other = { ...scope, ownerUserId: "33333333-3333-4333-8333-333333333333" };
+    await f.controller.open(other); finish(true); await new Promise(resolve => setTimeout(resolve, 0));
+    expect(f.state().scope).toEqual(other); f.controller.dispose();
+  });
+  it("retries verification lost during activation on reconnect, but never retries explicit denial", async () => {
+    let online = true; let changed = () => {};
+    const f = setup(undefined, { connectivity: { current: () => online, subscribe: listener => { changed = listener; return () => {}; } } });
+    f.verifyAccess.mockImplementationOnce(async () => { online = false; throw new Error("transport"); });
+    await f.controller.open(scope); expect(f.state().events).toEqual([]);
+    online = true; changed(); await f.controller.refresh(); expect(f.state().scope).toEqual(scope);
+    f.verifyAccess.mockResolvedValue(false); await f.controller.open(scope);
+    const calls = f.verifyAccess.mock.calls.length; changed(); await f.controller.refresh();
+    expect(f.verifyAccess).toHaveBeenCalledTimes(calls); expect(f.state().scope).toBeNull(); f.controller.dispose();
+  });
+});

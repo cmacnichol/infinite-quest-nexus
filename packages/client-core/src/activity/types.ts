@@ -16,6 +16,7 @@ export interface ActivityCacheSnapshot {
   hiddenThrough: ActivityViewWatermark | null;
   lastSuccessfulSync: number | null;
   hasOlder: boolean;
+  browsingOlder: boolean;
   lastUsed: number;
 }
 export interface ActivityCacheUpdate {
@@ -26,6 +27,8 @@ export interface ActivityCacheUpdate {
   expectedCursor?: string | null;
   syncedAt?: number;
   resetServer?: boolean;
+  /** Replace only the bounded server window with a freshly fetched newest page. */
+  replaceWindow?: boolean;
 }
 export interface ActivityCache {
   read(scope: ActivityCacheScope): Promise<ActivityCacheSnapshot>;
@@ -65,5 +68,6 @@ export interface ActivityViewState {
   storageUnavailable: boolean;
   unsupported: boolean;
   identityRequired: boolean;
+  activationPending: boolean;
   gap: "retention" | "restore" | null;
 }

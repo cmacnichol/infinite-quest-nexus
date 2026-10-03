@@ -87,3 +87,15 @@ it("expires seven-day-old observations even when their timestamp omits fractiona
   await cache.merge(scope,{observation:{...observation(1),observedAt:new Date(now).toISOString().replace(".000Z","Z")}});
   time+=7*86400000;expect((await cache.read(scope)).observations).toEqual([]);
 });
+
+it("replacing a browsing window preserves observations and hide watermarks atomically", async () => {
+  const cache = createMemoryActivityCache({ now: () => now, isoAt: value => new Date(value).toISOString() });
+  await cache.merge(scope, { events: Array.from({ length: 1000 }, (_, i) => event(i + 101)), page: page([event(1100)], true), direction: "initial", expectedCursor: null, observation: observation(1) });
+  await cache.setHiddenThrough(scope, { server: "500", browser: "0" });
+  await cache.merge(scope, { page: page([event(1)], false, "1100"), direction: "before", expectedCursor: "before:1100" });
+  await cache.merge(scope, { page: page([event(1100)], true), direction: "initial", expectedCursor: "after:1100", replaceWindow: true });
+  const snapshot = await cache.read(scope);
+  expect(snapshot.events.map(entry => entry.sequence)).toEqual(["1100"]);
+  expect(snapshot).toMatchObject({ browsingOlder: false, hiddenThrough: { server: "500", browser: "0" }, localSequence: "1", hasOlder: true });
+  expect(snapshot.observations).toHaveLength(1);
+});

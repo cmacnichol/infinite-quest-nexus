@@ -6,7 +6,7 @@ export function activityScopeKey(scope: ActivityCacheScope): string {
   return JSON.stringify([scope.apiBase.replace(/\/+$/u, ""), scope.ownerUserId, scope.campaignId]);
 }
 export function emptyActivitySnapshot(now = 0): ActivityCacheSnapshot {
-  return { version: 1, events: [], observations: [], coverage: null, nextAfter: null, nextBefore: null, anchorSequence: "0", localSequence: "0", hiddenThrough: null, lastSuccessfulSync: null, hasOlder: false, lastUsed: now };
+  return { version: 1, events: [], observations: [], coverage: null, nextAfter: null, nextBefore: null, anchorSequence: "0", localSequence: "0", hiddenThrough: null, lastSuccessfulSync: null, hasOlder: false, browsingOlder: false, lastUsed: now };
 }
 function afterIso(value: string, cutoff: string): boolean {
   const seconds = value.slice(0, 19); const cutoffSeconds = cutoff.slice(0, 19);
@@ -29,10 +29,11 @@ export function sanitizeActivitySnapshot(raw: unknown, scope: ActivityCacheScope
     if (value.version !== 1 || !cursor(value.nextAfter) || !cursor(value.nextBefore) || typeof value.hasOlder !== "boolean" || !Number.isFinite(value.lastUsed) || !(value.lastSuccessfulSync === null || Number.isFinite(value.lastSuccessfulSync))) throw new Error("Invalid metadata");
     const snapshot: ActivityCacheSnapshot = {
       version: 1, events: [], observations: [], coverage: value.coverage === null ? null : activityCoverageSchema.parse(value.coverage), nextAfter: value.nextAfter, nextBefore: value.nextBefore,
-      anchorSequence: activitySequenceSchema.parse(value.anchorSequence), localSequence: activitySequenceSchema.parse(value.localSequence), hiddenThrough: validateActivityWatermark(value.hiddenThrough), lastSuccessfulSync: value.lastSuccessfulSync, hasOlder: value.hasOlder, lastUsed: now
+      anchorSequence: activitySequenceSchema.parse(value.anchorSequence), localSequence: activitySequenceSchema.parse(value.localSequence), hiddenThrough: validateActivityWatermark(value.hiddenThrough), lastSuccessfulSync: value.lastSuccessfulSync, hasOlder: value.hasOlder, browsingOlder: value.browsingOlder === true, lastUsed: now
     };
     const cutoff = clock.isoAt(now - 7 * 86400000);
     snapshot.events = (Array.isArray(value.events) ? value.events : []).flatMap(entry => { const parsed = activityEventSchema.safeParse(entry); return parsed.success && parsed.data.campaignId === scope.campaignId ? [parsed.data] : []; }).sort(compare).slice(0, 1000);
+    if (value.browsingOlder === undefined && snapshot.events.length && BigInt(snapshot.anchorSequence) > BigInt(snapshot.events[0]!.sequence)) snapshot.browsingOlder = true;
     snapshot.observations = (Array.isArray(value.observations) ? value.observations : []).flatMap(entry => { const parsed = browserActivityObservationSchema.safeParse(entry); return parsed.success && parsed.data.campaignId === scope.campaignId && afterIso(parsed.data.observedAt, cutoff) ? [parsed.data] : []; }).sort(compare).slice(0, 200);
     // A corrupt event means saved cursor coverage is no longer trustworthy.
     if (snapshot.events.length < Math.min(1000, Array.isArray(value.events) ? value.events.length : 0)) {
@@ -44,11 +45,12 @@ export function sanitizeActivitySnapshot(raw: unknown, scope: ActivityCacheScope
 }
 export function mergeActivitySnapshot(current: ActivityCacheSnapshot, scope: ActivityCacheScope, update: ActivityCacheUpdate, clock: ActivityClock): ActivityCacheSnapshot {
   const snapshot = sanitizeActivitySnapshot(current, scope, clock);
-  if (update.resetServer) Object.assign(snapshot, { events: [], coverage: null, nextAfter: null, nextBefore: null, anchorSequence: "0", hasOlder: false, hiddenThrough: snapshot.hiddenThrough && { ...snapshot.hiddenThrough, server: "0" } });
+  if (update.resetServer) Object.assign(snapshot, { events: [], coverage: null, nextAfter: null, nextBefore: null, anchorSequence: "0", hasOlder: false, browsingOlder: false, hiddenThrough: snapshot.hiddenThrough && { ...snapshot.hiddenThrough, server: "0" } });
   const page = update.page ? activityPageSchema.parse(update.page) : undefined;
   const entries = [...(update.events ?? []), ...(page?.events ?? [])].map(entry => activityEventSchema.parse(entry));
   if (entries.some(entry => entry.campaignId !== scope.campaignId)) throw new Error("Activity scope mismatch");
   if (page && update.expectedCursor !== undefined && update.expectedCursor !== (update.direction === "before" ? snapshot.nextBefore : snapshot.nextAfter)) return snapshot;
+  if (page && update.replaceWindow && update.direction === "initial") snapshot.events = [];
   const events = new Map(snapshot.events.map(entry => [entry.eventId, entry]));
   for (const entry of entries) if (!events.has(entry.eventId)) events.set(entry.eventId, entry);
   const ordered = [...events.values()].sort(compare);
@@ -61,6 +63,8 @@ export function mergeActivitySnapshot(current: ActivityCacheSnapshot, scope: Act
     if (afterIso(observation.observedAt, clock.isoAt(clock.now() - 7 * 86400000))) snapshot.observations = [observation, ...snapshot.observations].slice(0, 200);
   }
   if (page) {
+    if (update.direction === "before") snapshot.browsingOlder = true;
+    else if (update.direction === "initial") snapshot.browsingOlder = false;
     snapshot.coverage = snapshot.coverage && BigInt(snapshot.coverage.latestPublishedSequence) > BigInt(page.coverage.latestPublishedSequence) ? snapshot.coverage : page.coverage; snapshot.lastSuccessfulSync = update.syncedAt ?? clock.now();
     if (update.direction !== "before") {
       snapshot.nextAfter = page.nextAfter;

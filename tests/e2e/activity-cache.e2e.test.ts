@@ -68,3 +68,53 @@ test("native pruning bounds records and scopes while preserving a scope active i
   const counts=await second.evaluate(()=>new Promise<{scopes:number;events:number;observations:number}>((resolve,reject)=>{const request=indexedDB.open("activity-limits",1);request.onsuccess=()=>{const db=request.result;const tx=db.transaction(["scopes","events","observations"]);const scopes=tx.objectStore("scopes").count();const events=tx.objectStore("events").count();const observations=tx.objectStore("observations").count();tx.oncomplete=()=>{db.close();resolve({scopes:scopes.result,events:events.result,observations:observations.result});};tx.onabort=()=>reject();};}));
   expect(counts).toEqual({scopes:10,events:1009,observations:200});
 });
+
+test("return-to-latest and reopen recover evicted recent history from an unchanged server", async ({ page }) => {
+  await visit(page, "activity-latest");
+  const installApi = () => {
+    const h = window.activity;
+    h.api.list = async (_id, query) => {
+      if (query.after) return { ...h.page([], false, "1100"), nextAfter: "after:1100" };
+      const end = query.before ? Number(query.before.slice(7)) - 1 : 1100;
+      const start = Math.max(1, end - 99);
+      return h.page(Array.from({ length: end - start + 1 }, (_, i) => h.event(i + start)), start > 1, "1100");
+    };
+  };
+  await page.evaluate(installApi);
+  await page.evaluate(async () => {
+    const h = window.activity;
+    await h.cache.merge(h.scope, { events: Array.from({ length: 1000 }, (_, i) => h.event(i + 101)), page: h.page([h.event(1100), h.event(101)], true), direction: "initial", expectedCursor: null });
+    await h.controller.open(h.scope); await h.controller.loadOlder();
+  });
+  expect(await page.evaluate(() => window.activity.controller.getState().events.some(entry => entry.sequence === "1100"))).toBe(false);
+  expect(await page.evaluate(() => window.activity.controller.getState().snapshot.browsingOlder)).toBe(true);
+  await page.evaluate(() => window.activity.controller.returnToLatest());
+  expect(await page.evaluate(() => window.activity.controller.getState().events.map(entry => entry.sequence))).toHaveLength(100);
+  expect(await page.evaluate(() => window.activity.controller.getState().events[0]?.sequence)).toBe("1100");
+  await page.evaluate(async () => { for (let i = 0; i < 10; i++) await window.activity.controller.loadOlder(); });
+  expect(await page.evaluate(() => window.activity.controller.getState().events.some(entry => entry.sequence === "1100"))).toBe(false);
+  await page.reload(); await page.waitForFunction(() => Boolean(window.activity)); await page.evaluate(installApi);
+  await page.evaluate(() => window.activity.controller.open(window.activity.scope));
+  expect(await page.evaluate(() => window.activity.controller.getState().events[0]?.sequence)).toBe("1100");
+  expect(await page.evaluate(() => window.activity.controller.getState().snapshot)).toMatchObject({ browsingOlder: false, hasOlder: true, nextBefore: "before:1001", nextAfter: "after:1100" });
+});
+
+test("native reconnect verifies a cold offline target before opening its IndexedDB cache", async ({ context, page }) => {
+  await visit(page, "activity-offline");
+  await page.evaluate(async () => {
+    const h = window.activity;
+    await h.cache.merge(h.scope, { events: [h.event(1)] });
+    h.access.verify = async () => { h.trace.push("verify"); return true; };
+    const read = h.cache.read;
+    h.cache.read = async scope => { h.trace.push("cache"); return read(scope); };
+    h.api.list = async () => h.page([h.event(1)]);
+  });
+  await context.setOffline(true);
+  await page.evaluate(() => window.activity.controller.open(window.activity.scope));
+  expect(await page.evaluate(() => window.activity.trace)).toEqual([]);
+  expect(await page.evaluate(() => window.activity.controller.getState())).toMatchObject({ scope: null, identityRequired: true, activationPending: true, events: [] });
+  await context.setOffline(false);
+  await expect.poll(() => page.evaluate(() => window.activity.controller.getState().events.length)).toBe(1);
+  expect((await page.evaluate(() => window.activity.trace)).slice(0, 2)).toEqual(["verify", "cache"]);
+  expect(await page.evaluate(() => window.activity.controller.getState())).toMatchObject({ identityRequired: false, activationPending: false });
+});
