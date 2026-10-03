@@ -324,6 +324,78 @@ integration("PostgreSQL exact reader turn lookup", () => {
     }
   });
 
+  it("continues a matching query without duplicates and rejects cursors after correction-only changes", async () => {
+    const imported = await createCampaignFixture();
+    const inserted = await pool.query<{ id: string; turnNumber: number; narration: string }>(
+      `INSERT INTO turns (owner_user_id, campaign_id, turn_number, action, narration)
+       VALUES ($1,$2,100,'Inspect the archive','Pagination marker older original prose'),
+              ($1,$2,101,'Inspect the tower','Pagination marker newer original prose'),
+              ($1,$2,102,'Walk away','Unrelated newest prose')
+       RETURNING id, turn_number AS "turnNumber", narration`,
+      [ownerUserId, imported.campaignId]
+    );
+    const older = inserted.rows.find(({ turnNumber }) => turnNumber === 100)!;
+    const newer = inserted.rows.find(({ turnNumber }) => turnNumber === 101)!;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = databaseUrl!;
+    let config: RuntimeConfig;
+    try {
+      config = { ...loadRuntimeConfig(), systemArchiveEnabled: false };
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+    const app = await buildServer(inertStorageServerOptions({ pool, config, providers: inertProviders }));
+    try {
+      const base = `/api/v1/campaigns/${imported.campaignId}/reader/history?q=pagination%20marker&limit=1`;
+      const first = await app.inject({ method: "GET", url: base });
+      expect(first.statusCode).toBe(200);
+      expect(first.json().items.map(({ id }: { id: string }) => id)).toEqual([newer.id]);
+      const cursor = first.json().nextCursor;
+      expect(cursor).toEqual(expect.any(String));
+      expect(cursor.length).toBeGreaterThan(0);
+      const next = await app.inject({ method: "GET", url: `${base}&before=${encodeURIComponent(cursor)}` });
+      expect(next.statusCode).toBe(200);
+      expect(next.json().items.map(({ id }: { id: string }) => id)).toEqual([older.id]);
+      expect(next.json().items[0].turnNumber).toBe(100);
+      expect(next.json().nextCursor).toBeNull();
+      expect(new Set([...first.json().items, ...next.json().items].map(({ id }: { id: string }) => id)).size).toBe(2);
+
+      const before = await pool.query<{ count: string; maximum: number }>(
+        'SELECT COUNT(*)::text AS count, MAX(turn_number) AS maximum FROM turns WHERE owner_user_id=$1 AND campaign_id=$2',
+        [ownerUserId, imported.campaignId]
+      );
+      const correctedNarration = "Pagination marker corrected prose after the revision.";
+      await pool.query(
+        `INSERT INTO turn_narration_corrections (
+           owner_user_id,campaign_id,turn_id,revision,narration,previous_effective_narration_hash,source,created_by_user_id
+         ) VALUES ($1,$2,$3,1,$4,$5,'administrative',$1)`,
+        [ownerUserId, imported.campaignId, older.id, correctedNarration, sha256(older.narration)]
+      );
+      const after = await pool.query<{ count: string; maximum: number }>(
+        'SELECT COUNT(*)::text AS count, MAX(turn_number) AS maximum FROM turns WHERE owner_user_id=$1 AND campaign_id=$2',
+        [ownerUserId, imported.campaignId]
+      );
+      expect(after.rows).toEqual(before.rows);
+      const stale = await app.inject({ method: "GET", url: `${base}&before=${encodeURIComponent(cursor)}` });
+      expect(stale.statusCode).toBe(409);
+      const refreshed = await app.inject({ method: "GET", url: base });
+      expect(refreshed.statusCode).toBe(200);
+      expect(refreshed.json().nextCursor).toEqual(expect.any(String));
+      expect(refreshed.json().nextCursor).not.toBe(cursor);
+      const correctedPage = await app.inject({ method: "GET", url: `${base}&before=${encodeURIComponent(refreshed.json().nextCursor)}` });
+      expect(correctedPage.statusCode).toBe(200);
+      expect(correctedPage.json().items).toEqual([expect.objectContaining({ id: older.id, excerpt: correctedNarration })]);
+      expect(correctedPage.json().nextCursor).toBeNull();
+      const authoritative = await pool.query<{ narration: string }>(
+        'SELECT narration FROM turns WHERE id=$1 AND owner_user_id=$2 AND campaign_id=$3',
+        [older.id, ownerUserId, imported.campaignId]
+      );
+      expect(authoritative.rows[0]?.narration).toBe(older.narration);
+    } finally {
+      await app.close();
+    }
+  });
   it("never returns an accepted turn identity from another campaign", async () => {
     const first = await createCampaignFixture();
     const second = await createCampaignFixture();
