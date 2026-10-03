@@ -176,6 +176,7 @@ describe("optional provider failure compatibility", () => {
 });
 
 describe("provider failure presentation", () => {
+  const time = { parseTimestamp: (value: string) => Date.parse(value), formatTimestamp: () => "October 3, 2026, 11:00:15 AM" };
   const evidence = { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null,
     reason: "rate_limit", limitSource: "unknown", retryAfterMs: 15000, retryAt: "2026-10-03T15:00:15.000Z" };
   it.each([
@@ -186,17 +187,17 @@ describe("provider failure presentation", () => {
     ["upstream_provider_shared_pool", "An upstream provider reported a rate limit."],
     ["unknown", "The provider did not identify which limit was reached."]
   ])("presents fixed source copy for %s", (limitSource, message) => {
-    expect(generationProviderFailurePresentation({ ...evidence, limitSource }, Date.parse("2026-10-03T15:00:00Z")))
-      .toEqual({ details: [message, `Provider suggested retry time: ${new Date(evidence.retryAt).toLocaleString()}.`], retryAt: evidence.retryAt });
+    expect(generationProviderFailurePresentation({ ...evidence, limitSource }, Date.parse("2026-10-03T15:00:00Z"), time))
+      .toEqual({ details: [message, "Provider suggested retry time: October 3, 2026, 11:00:15 AM."], retryAt: evidence.retryAt });
   });
   it("presents elapsed time without changing retry authority", () => {
-    expect(generationProviderFailurePresentation(evidence, Date.parse(evidence.retryAt)))
+    expect(generationProviderFailurePresentation(evidence, Date.parse(evidence.retryAt), time))
       .toEqual({ details: ["The provider did not identify which limit was reached.", "The suggested wait has elapsed; you can retry."], retryAt: evidence.retryAt });
   });
   it("omits absent timing and unsupported evidence", () => {
-    expect(generationProviderFailurePresentation({ ...evidence, retryAt: null, retryAfterMs: null }, 0))
+    expect(generationProviderFailurePresentation({ ...evidence, retryAt: null, retryAfterMs: null }, 0, time))
       .toEqual({ details: ["The provider did not identify which limit was reached."], retryAt: null });
     for (const invalid of [null, {}, { ...evidence, version: 2 }, { ...evidence, retryAt: "<script>private</script>" }])
-      expect(generationProviderFailurePresentation(invalid, 0)).toBeNull();
+      expect(generationProviderFailurePresentation(invalid, 0, time)).toBeNull();
   });
 });

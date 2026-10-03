@@ -291,7 +291,10 @@ export function generationResponseFormatPresentation(value: unknown): Generation
 }
 
 /** Advisory copy only; a browser clock never changes generation authority. */
-export function generationProviderFailurePresentation(value: unknown, nowMs: number): { details: readonly string[]; retryAt: string | null } | null {
+export function generationProviderFailurePresentation(value: unknown, nowMs: number, time: {
+  parseTimestamp(value: string): number;
+  formatTimestamp(value: string): string;
+}): { details: readonly string[]; retryAt: string | null } | null {
   const parsed = providerFailureProjectionSchema.safeParse(value);
   if (!parsed.success) return null;
   const failure = parsed.data;
@@ -304,9 +307,9 @@ export function generationProviderFailurePresentation(value: unknown, nowMs: num
         : "OpenRouter reported a platform limit.");
   }
   if (failure.retryAt !== null) {
-    details.push(Date.parse(failure.retryAt) <= nowMs
+    details.push(time.parseTimestamp(failure.retryAt) <= nowMs
       ? "The suggested wait has elapsed; you can retry."
-      : `Provider suggested retry time: ${new Date(failure.retryAt).toLocaleString()}.`);
+      : `Provider suggested retry time: ${time.formatTimestamp(failure.retryAt)}.`);
   }
   return { details, retryAt: failure.retryAt };
 }
