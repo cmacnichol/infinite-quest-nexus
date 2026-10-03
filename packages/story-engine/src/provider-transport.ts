@@ -1,6 +1,6 @@
 import type { LookupFunction } from "node:net";
 import type { Dispatcher } from "undici";
-import { Agent } from "undici";
+import { Agent, Dispatcher1Wrapper } from "undici";
 import {
   ProviderDestinationNotAllowedError,
   type ApprovedProviderDestination,
@@ -56,13 +56,14 @@ export function pinnedConnectOptions(destination: ApprovedProviderDestination): 
   };
 }
 
-function pinnedAgent(destination: ApprovedProviderDestination): Agent {
-  return new Agent({
+function pinnedAgent(destination: ApprovedProviderDestination): Dispatcher {
+  // Node's native fetch may still use the legacy dispatcher callback contract.
+  return new Dispatcher1Wrapper(new Agent({
     headersTimeout: MAX_REQUEST_TIMEOUT_MS,
     bodyTimeout: MAX_REQUEST_TIMEOUT_MS,
     connectTimeout: MAX_REQUEST_TIMEOUT_MS,
     connect: pinnedConnectOptions(destination)
-  });
+  }));
 }
 
 function dispatcherKey(destination: ApprovedProviderDestination): string {
