@@ -26,3 +26,4 @@ export * from "./world-share-repository.js";
 export * from "./authoring-job-repository.js";
 export * from "./authoring-world-apply-adapter.js";
 export * from "./readable-campaign-export-repository.js";
+export * from "./activity-repository.js";
