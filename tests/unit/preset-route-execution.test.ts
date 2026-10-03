@@ -4,6 +4,7 @@ import { createSharedTextProviderCapacity } from "../../services/runtime/src/tex
 import {
   PreparedRouteTerminalError,
   executePresetRoutes,
+  classifyPresetRouteFailure,
   parseRetryAfterMilliseconds,
   shouldAdvancePresetRoute,
   type PhysicalAttemptRepository
@@ -68,7 +69,80 @@ const planProvenance = {
   preset: { slug: "story-preset", versionId: "preset-v1", configHash: "b".repeat(64) }
 } as const;
 
+const rejectedEvidence = {
+  version: 1 as const, source: "http_error" as const, observedAt: "2026-10-03T12:00:00.000Z",
+  httpStatus: 429, upstreamStatus: null, reason: "rate_limit" as const, limitSource: "unknown" as const,
+  upstreamCode: null, providerName: null, retryAfterMs: 0, retryAt: "2026-10-03T12:00:00.000Z",
+  rateLimit: null, successfulResponseStarted: false, emittedOutput: false, metadataStatus: "absent" as const
+};
+
 describe("preset route execution", () => {
+  it.each(["rejected-id", null])("advances a definitive rejected HTTP 429 with response ID %s", async (responseId) => {
+    const repository = attempts();
+    const complete = vi.spyOn(repository, "complete");
+    const invoke = vi.fn().mockRejectedValueOnce(Object.assign(new Error("PRIVATE"), {
+      statusCode: 429, responseId, providerFailure: rejectedEvidence
+    })).mockResolvedValueOnce({ responseId: "success", returnedModel: "model-b" });
+    await expect(executePresetRoutes({ candidates, planProvenance, logicalReservation: storyReservation, attempts: repository,
+      prepareCandidate: () => ({ body: "{}", payloadHash: "hash" }), invoke, totalDeadlineMs: 1000
+    })).resolves.toMatchObject({ candidateOrdinal: 1 });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(complete.mock.calls[0]?.[2]).toMatchObject({ outcome: "failed", failureDiagnostic: rejectedEvidence, providerResponseId: responseId });
+  });
+
+  it.each([
+    { statusCode: 429, responseId: "legacy-id" },
+    { statusCode: 429 },
+    { code: "provider_transport_error" },
+    { providerFailure: { ...rejectedEvidence, source: "transport_error" } },
+    { providerFailure: { ...rejectedEvidence, source: "sse_error", httpStatus: 200 } },
+    { statusCode: 429, providerFailure: { ...rejectedEvidence, source: "sse_error", httpStatus: 200, successfulResponseStarted: true } }
+  ])("keeps started or unknown outcomes terminal: %j", async (fields) => {
+    const invoke = vi.fn().mockRejectedValue(Object.assign(new Error("PRIVATE"), fields));
+    await expect(executePresetRoutes({ candidates, planProvenance, logicalReservation: storyReservation, attempts: attempts(),
+      prepareCandidate: () => ({ body: "{}", payloadHash: "hash" }), invoke, totalDeadlineMs: 1000
+    })).rejects.toBeInstanceOf(PreparedRouteTerminalError);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(classifyPresetRouteFailure(fields).responseStarted).toBe(true);
+  });
+
+  it("retains Retry-After from evidence before eligible historical candidate dispatch", async () => {
+    const providerFailure = { ...rejectedEvidence, retryAfterMs: 1000, retryAt: "2026-10-03T12:00:01.000Z" };
+    const invoke = vi.fn().mockRejectedValueOnce({ providerFailure }).mockResolvedValueOnce({ responseId: "success", returnedModel: "model-b" });
+    const sleep = vi.fn(async () => undefined);
+    await executePresetRoutes({ candidates, planProvenance, logicalReservation: storyReservation, attempts: attempts(),
+      prepareCandidate: () => ({ body: "{}", payloadHash: "hash" }), invoke, sleep, totalDeadlineMs: 5000 });
+    expect(sleep).toHaveBeenCalledWith(1000, expect.any(AbortSignal));
+    expect(invoke.mock.calls.map(([request]) => request.candidateOrdinal)).toEqual([0, 1]);
+  });
+
+  it("keeps a single remote preset terminal with Retry-After and retains bounded evidence", async () => {
+    const providerFailure = { ...rejectedEvidence, retryAfterMs: 1000, retryAt: "2026-10-03T12:00:01.000Z", secret: "PRIVATE" };
+    const invoke = vi.fn().mockRejectedValue(Object.assign(new Error("PRIVATE"), { statusCode: 429, responseId: "rejected-id", providerFailure }));
+    const sleep = vi.fn();
+    const error = await executePresetRoutes({ candidates: [{ ...candidates[0]!, modelId: "@preset/story-preset" }],
+      planProvenance, logicalReservation: storyReservation, attempts: attempts(),
+      prepareCandidate: () => ({ body: "{}", payloadHash: "hash" }), invoke, sleep, totalDeadlineMs: 5000
+    }).catch((error: unknown) => error);
+    expect(error).toMatchObject({ attemptId: "attempt-0", providerResponseId: "rejected-id", providerFailure: { retryAfterMs: 1000 } });
+    expect((error as any).providerFailure).not.toHaveProperty("secret");
+    expect(invoke).toHaveBeenCalledTimes(1); expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("preserves callback start/output monotonically against rejected error evidence", async () => {
+    const repository = attempts(); const complete = vi.spyOn(repository, "complete");
+    const invoke = vi.fn(async ({ onResponseStart, onOutput }) => {
+      await onResponseStart({ providerResponseId: "started" }); await onOutput("partial");
+      throw Object.assign(new Error("PRIVATE"), { statusCode: 429, providerFailure: rejectedEvidence });
+    });
+    const error = await executePresetRoutes({ candidates, planProvenance, logicalReservation: storyReservation, attempts: repository,
+      prepareCandidate: () => ({ body: "{}", payloadHash: "hash" }), invoke, totalDeadlineMs: 1000
+    }).catch((error: unknown) => error);
+    expect(error).toMatchObject({ providerFailure: { successfulResponseStarted: true, emittedOutput: true } });
+    expect(complete.mock.calls[0]?.[2]).toMatchObject({ failureDiagnostic: { successfulResponseStarted: true, emittedOutput: true } });
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])("preserves capacity deadline versus caller cancellation (cancel=%s)", async (cancel) => {
     const capacity = createSharedTextProviderCapacity({ tryAcquire: async () => "lease", release: async () => {} }, 1);
     const repository = attempts();
@@ -104,7 +178,7 @@ describe("preset route execution", () => {
   });
   it("uses candidates in frozen order and advances only after a safe pre-output rate limit", async () => {
     const invoke = vi.fn()
-      .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { routeFailureReason: "rate_limit", retryAfterMs: 0 }))
+      .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { providerFailure: rejectedEvidence, routeFailureReason: "rate_limit", retryAfterMs: 0 }))
       .mockResolvedValueOnce({ content: "ok", responseId: "response-b", returnedModel: "model-b", returnedProviderRoute: "b", usage: null, reportedCost: null });
 
     const result = await executePresetRoutes({
@@ -206,7 +280,7 @@ describe("preset route execution", () => {
   });
 
   it("bounds Retry-After by the total deadline", async () => {
-    const invoke = vi.fn().mockRejectedValue(Object.assign(new Error("rate limited"), { routeFailureReason: "rate_limit", retryAfterMs: 2_000 }));
+    const invoke = vi.fn().mockRejectedValue(Object.assign(new Error("rate limited"), { providerFailure: rejectedEvidence, routeFailureReason: "rate_limit", retryAfterMs: 2_000 }));
     await expect(executePresetRoutes({
       candidates, planProvenance, logicalReservation: storyReservation, attempts: attempts(),
       prepareCandidate: (_candidate, index) => ({ body: "{}", payloadHash: `hash-${index}` }), invoke,
@@ -248,7 +322,7 @@ describe("preset route execution", () => {
     const error = await executePresetRoutes({
       candidates, planProvenance, logicalReservation: storyReservation, attempts: attempts(),
       prepareCandidate: (_candidate, index) => ({ body: "{}", payloadHash: `hash-${index}` }),
-      invoke: async () => { throw Object.assign(new Error("rate limited"), { routeFailureReason: "rate_limit", retryAfterMs: 10 }); },
+      invoke: async () => { throw Object.assign(new Error("rate limited"), { providerFailure: rejectedEvidence, routeFailureReason: "rate_limit", retryAfterMs: 10 }); },
       totalDeadlineMs: 1_000, signal: controller.signal,
       sleep: async (_milliseconds, signal) => {
         controller.abort(new Error("stop"));

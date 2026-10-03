@@ -1347,6 +1347,14 @@ describe("generation executor adapter", () => {
     ["deadline", "provider_request_timeout", "provider_timeout"],
     ["unknown", "generation_failed", "unknown"]
   ] as const)("preserves wrapped route failure %s without leaking private errors", async (reason, code, category) => {
+    const responseIdentity = reason === "unknown" ? "https://PRIVATE_PROVIDER_CANARY/token?secret=credential" : "rejected-id";
+    const providerFailure = {
+      version: 1 as const, source: "http_error" as const, observedAt: "2026-10-03T12:00:00.000Z",
+      httpStatus: 429, upstreamStatus: null, reason, limitSource: "unknown" as const,
+      upstreamCode: null, providerName: null, retryAfterMs: null, retryAt: null,
+      rateLimit: null, successfulResponseStarted: false, emittedOutput: false, metadataStatus: "absent" as const
+    };
+    const failedLogs = vi.spyOn(logger, "error").mockImplementation(() => undefined);
     const job = completeGenerationExecutionPayload();
     const repository = {
       loadExecutionPayload: vi.fn(async () => job), renewLease: vi.fn(async () => true), markGenerating: vi.fn(async () => true),
@@ -1359,7 +1367,7 @@ describe("generation executor adapter", () => {
       id: claim.providerProfileId, name: "Validation phase provider", providerRole: "text" as const, providerType: "openai_compatible" as const,
       model: "test-model", contextWindowTokens: 16_000, maxOutputTokens: 2_000, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
       execute: vi.fn(async () => { throw new Error("PRIVATE_PROVIDER_CANARY", { cause:
-        new PreparedRouteTerminalError("prepared_route_terminal", reason, "PRIVATE_PROVIDER_CANARY") }); })
+        Object.assign(new PreparedRouteTerminalError("prepared_route_terminal", reason, "PRIVATE_PROVIDER_CANARY", "physical-id"), { providerFailure, providerResponseId: responseIdentity }) }); })
     };
     const collaborators = {
       memory: { loadGenerationContext: vi.fn(async () => ({ authority: {}, candidates: [], baseIdentity: job.generation_base_identity, chronicleRetrieval: DEDICATED_CHUNKED_AUDIT })) },
@@ -1371,8 +1379,12 @@ describe("generation executor adapter", () => {
       .execute({ workerId: "validation-phase", leaseSeconds: 30, claim })).resolves.toBe(true);
 
     expect(repository.markFailed).toHaveBeenCalledWith(expect.objectContaining({
-      lastFailureDiagnostic: expect.objectContaining({ category, code, phase: "story_generation", attemptNumber: 1 })
+      lastFailureDiagnostic: expect.objectContaining({ category, code, phase: "story_generation", attemptNumber: 1, providerFailure })
     }));
+    expect(failedLogs).toHaveBeenCalledWith(expect.objectContaining({ physicalAttemptId: "physical-id", providerResponseId: reason === "unknown" ? null : responseIdentity,
+      providerFailureSource: "http_error", providerFailureHttpStatus: 429, providerFailureSuccessfulResponseStarted: false }));
+    expect(JSON.stringify(failedLogs.mock.calls)).not.toContain("PRIVATE_PROVIDER_CANARY");
+    failedLogs.mockRestore();
     expect(repository.commitAcceptedTurn).not.toHaveBeenCalled();
     expect(JSON.stringify(vi.mocked(repository.markFailed).mock.calls)).not.toContain("PRIVATE_PROVIDER_CANARY");
   });
