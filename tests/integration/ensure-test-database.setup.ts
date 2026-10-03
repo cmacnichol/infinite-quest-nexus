@@ -11,8 +11,8 @@ function validateTestDatabaseUrl(databaseUrl: string): string {
     throw new Error("INFINITEQUEST_TEST_DATABASE_URL must be a valid loopback PostgreSQL test database URL.");
   }
 
-  const hostname = parsed.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
-  const isLoopback = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  const hostname = parsed.hostname.toLowerCase();
+  const isLoopback = hostname === "localhost" || hostname === "127.0.0.1";
   let databaseName: string;
   try {
     databaseName = decodeURIComponent(parsed.pathname.slice(1));

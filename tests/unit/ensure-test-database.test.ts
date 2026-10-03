@@ -188,7 +188,6 @@ describe("ensureTestDatabase", () => {
   it.each([
     "postgresql://user:secret@localhost/infinitequest_test",
     "postgres://user:secret@127.0.0.1:55432/infinitequest_test",
-    "postgresql://user:secret@[::1]:55432/infinitequest_test",
     "postgresql://user:secret@localhost/infinitequest_test_worker_2"
   ])("publishes an explicitly configured loopback test database without provisioning: %s", async (databaseUrl) => {
     const ensure = vi.fn(async () => {
@@ -206,6 +205,7 @@ describe("ensureTestDatabase", () => {
     ["non-PostgreSQL scheme", "mysql://user:secret@localhost/infinitequest_test"],
     ["remote hostname", "postgresql://user:secret@db.example.test/infinitequest_test"],
     ["remote IPv4 address", "postgresql://user:secret@192.168.1.4/infinitequest_test"],
+    ["IPv6 loopback URL", "postgresql://user:secret@[::1]:55432/infinitequest_test"],
     ["non-test database", "postgresql://user:secret@localhost/infinitequest"],
     ["empty database suffix", "postgresql://user:secret@localhost/infinitequest_test_"],
     ["unsafe host override", "postgresql://user:secret@localhost/infinitequest_test?host=remote.example"],
