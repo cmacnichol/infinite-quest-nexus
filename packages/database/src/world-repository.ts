@@ -965,14 +965,8 @@ export function createPostgresWorldRepository(): PostgresWorldRepository {
         active_cover_jobs: Number(counts?.active_cover_jobs ?? 0)
       });
       if (blockers.length > 0) return failure("deletion_blocked", { worldId: scope.worldId, blockers });
-      await client.query(
-        `DELETE FROM imports
-          WHERE owner_user_id = $2
-            AND (world_id = $1 OR world_version_id IN (
-              SELECT id FROM world_versions WHERE world_id = $1 AND owner_user_id = $2
-            ))`,
-        [scope.worldId, scope.ownerUserId]
-      );
+      // Preserve import audit records referenced by durable portable operations.
+      // The owner-scoped foreign keys clear their world/version provenance on deletion.
       await client.query(
         `UPDATE worlds SET forked_from_world_id = NULL, forked_from_world_version_id = NULL, updated_at = now()
           WHERE owner_user_id = $2 AND (

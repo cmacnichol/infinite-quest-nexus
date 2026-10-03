@@ -62,6 +62,7 @@ import { workerMemoryApplication } from "../helpers/memory-applications.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl ? describe : describe.skip;
+let latestMigrationName = "";
 const sha256 = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const privatePreparedAttemptSentinel = "PRIVATE_PREPARED_TEXT_ATTEMPT_BODY_MUST_NOT_EXPORT";
 const illustrationIdentity = (segmentId: string, variantIndex: number): string => {
@@ -145,7 +146,7 @@ function importReport(input: Readonly<{
       sourceApplication: "0.1.0",
       sourceMigration: input.sourceMigration ?? "0095_story_memory_capability_enrollment",
       destinationApplication: "0.1.0",
-      destinationMigration: input.destinationMigration ?? "0109_text_provider_capacity",
+      destinationMigration: input.destinationMigration ?? latestMigrationName,
     },
     sourceOwnerCount: 1,
     ownerMapping: {
@@ -299,6 +300,10 @@ integration("deterministic owner-wide System Archive export", () => {
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 4);
     await migrateDatabase(pool, resolve("database/migrations"));
+    const migration = await pool.query<{ name: string }>(
+      "SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1",
+    );
+    latestMigrationName = migration.rows[0]!.name;
     ownerUserId = await initialOwnerId(pool);
     archiveRoot = await mkdtemp(join(tmpdir(), "infinitequest-system-archives-"));
     assetRoot = join(archiveRoot, "source-assets");
@@ -825,7 +830,7 @@ integration("deterministic owner-wide System Archive export", () => {
     );
     expect(manifest).toMatchObject({
       sourceApplication: "0.1.0",
-      sourceMigration: "0109_text_provider_capacity",
+      sourceMigration: latestMigrationName,
       sourceInstallationId: ownerUserId,
       sourceOwnerCount: 1,
       sourceOwner: {
@@ -1249,7 +1254,7 @@ integration("deterministic owner-wide System Archive export", () => {
     expect(preview).toMatchObject({
       formatVersion: 2,
       sourceApplication: "0.1.0",
-      sourceMigration: "0109_text_provider_capacity",
+      sourceMigration: latestMigrationName,
       archiveFingerprint: exported.result.artifact.contentFingerprint,
       sourceOwnerCount: 1,
       assetCount: 4,
@@ -1277,7 +1282,7 @@ integration("deterministic owner-wide System Archive export", () => {
       }));
       const destination = {
         initialOwnerId: ownerUserId,
-        latestMigration: "0109_text_provider_capacity",
+        latestMigration: latestMigrationName,
         authoritativeCountsHash: sha256("empty-authority"),
         activeJobsHash: sha256("no-active-work"),
         checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1311,9 +1316,9 @@ integration("deterministic owner-wide System Archive export", () => {
         versions: {
           archiveFormat: 2,
           sourceApplication: "0.1.0",
-          sourceMigration: "0109_text_provider_capacity",
+          sourceMigration: latestMigrationName,
           destinationApplication: "0.1.0",
-          destinationMigration: "0109_text_provider_capacity",
+          destinationMigration: latestMigrationName,
         },
         archiveFingerprint: exported.result.artifact.contentFingerprint,
         destinationEmpty: true,
@@ -1346,7 +1351,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0109_text_provider_capacity",
+            latestMigration: latestMigrationName,
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1387,7 +1392,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0109_text_provider_capacity",
+            latestMigration: latestMigrationName,
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1424,7 +1429,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0109_text_provider_capacity",
+            latestMigration: latestMigrationName,
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -1476,7 +1481,7 @@ integration("deterministic owner-wide System Archive export", () => {
         imports: {
           destinationFingerprint: vi.fn(async () => ({
             initialOwnerId: ownerUserId,
-            latestMigration: "0109_text_provider_capacity",
+            latestMigration: latestMigrationName,
             authoritativeCountsHash: sha256("empty-authority"),
             activeJobsHash: sha256("no-active-work"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4139,7 +4144,7 @@ integration("deterministic owner-wide System Archive export", () => {
         archiveFingerprint: exported.contentFingerprint,
         destination: {
           initialOwnerId: ownerUserId,
-          latestMigration: "0109_text_provider_capacity",
+          latestMigration: latestMigrationName,
           authoritativeCountsHash: sha256("empty-authority"),
           activeJobsHash: sha256("ignored-active-import"),
           checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4629,7 +4634,7 @@ integration("deterministic owner-wide System Archive export", () => {
           archiveFingerprint: sha256("expired-preview"),
           destinationFingerprint: {
             initialOwnerId: ownerUserId,
-            latestMigration: "0109_text_provider_capacity",
+            latestMigration: latestMigrationName,
             authoritativeCountsHash: sha256("authority"),
             activeJobsHash: sha256("jobs"),
             checkedAt: "2026-08-25T12:00:00.000Z",
@@ -4685,7 +4690,7 @@ integration("deterministic owner-wide System Archive export", () => {
     });
     const destination = {
       initialOwnerId: ownerUserId,
-      latestMigration: "0109_text_provider_capacity",
+      latestMigration: latestMigrationName,
       authoritativeCountsHash: sha256("empty-authority"),
       activeJobsHash: sha256("ignored-import"),
       checkedAt: "2026-08-25T12:00:00.000Z",

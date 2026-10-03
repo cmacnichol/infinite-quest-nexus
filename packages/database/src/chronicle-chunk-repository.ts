@@ -7,7 +7,6 @@ import type {
   ChronicleChunkJobStatePort,
   ChronicleChunkLeaseScope,
   ChronicleChunkParentPort,
-  MemoryTransactionContext
 } from "../../application/src/memory/index.js";
 import type { ChronicleTransactionEmbeddingPort } from "./chronicle-repository.js";
 import {
@@ -132,12 +131,6 @@ function reportedCostContext(
 
 function invalid(message: string): Error & { statusCode: number } {
   return Object.assign(new Error(message), { statusCode: 400 });
-}
-
-function transactionClient(database: MemoryTransactionContext): DatabaseClient {
-  const client = database as Partial<DatabaseClient>;
-  if (!client || typeof client.query !== "function") throw invalid("A caller-owned Chronicle transaction is required.");
-  return client as DatabaseClient;
 }
 
 function nonNegativeInteger(value: unknown): number {

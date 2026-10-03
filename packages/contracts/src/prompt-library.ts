@@ -299,18 +299,6 @@ Every character must follow this JSON shape; keep every listed key even when its
 Type rules are mandatory: profile, identity, story, and appearance must be JSON objects, never strings, arrays, or null. identity.aliases, appearance.distinguishingFeatures, rpg_statistics, and default_triggers must be JSON arrays, never strings, objects, or null. All profile text values must be JSON strings, and array items must use their required object or string shape. rpg_statistics items use {"name":"stat name","value":50,"note":"what it represents"}; value is an integer from 1 through 99. default_triggers items use {"name":"tracker name","value":"initial fictional value","rules":"when and how it changes"}. Use an empty string or empty array when a value is unknown; never omit a required key, use null, or replace an object or array with prose.
 Keep prose compact enough to close the JSON object.`;
 
-const generatedWorldCharacterSeedRequirements = `Return exactly 3 or 4 distinct character_seeds. Every seed must have a unique, non-empty id and name and follow this JSON shape:
-"character_seeds":[
-  {
-    "id":"short unique seed id",
-    "name":"character name",
-    "role":"short story role",
-    "concept":"compact identity and dramatic concept",
-    "narrative_hook":"compact reason this character belongs in the world"
-  }
-]
-Keep every seed compact; complete character profiles are generated separately.`;
-
 export const PROMPT_TEMPLATE_CATALOG: Record<PromptTemplateKey, LegacyPromptTemplateDefinition> = {
   story_system: { key: "story_system", title: "Story writer", category: "Story Engine", description: "Produces the validated next-turn story object.", campaignOverrideAllowed: true, maxLength: 64_000, variables: [], defaultContent: STORY_SYSTEM_PROMPT },
   story_recovery_output_limit: { key: "story_recovery_output_limit", title: "Story recovery: output limit", category: "Story Engine", description: "Recovers a truncated story response.", campaignOverrideAllowed: true, maxLength: 4000, variables: ["minWords", "maxWords"], defaultContent: "Return one complete replacement JSON object from the same supported fictional events. Do not continue the fragment. The {{minWords}}-{{maxWords}} narration range is a soft pacing goal: preserve the requested scope when supported, but end early rather than adding unsupported facts or shortening a complete valid turn merely to fit a compact range. Keep continuity fields concise and close every field." + "\n\n" + STORY_PROSE_GUIDANCE },

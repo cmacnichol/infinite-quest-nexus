@@ -1,3 +1,4 @@
+import { captureImageActivity, captureSegmentActivity } from "../../../packages/database/src/illustration-activity.js";
 import {
   DEFAULT_ILLUSTRATION_REFINEMENT_PROMPT,
   type IllustrationConfig,
@@ -6,7 +7,6 @@ import {
 } from "../../../packages/contracts/src/generation.js";
 import type {
   IllustrationImageExecutionResult,
-  IllustrationImageProviderPort,
   IllustrationWorkerPorts
 } from "../../../packages/application/src/index.js";
 import type { PrivateIllustrationAssetPublicationCoordinator } from "../../../packages/application/src/illustration/private-illustration-asset-publication.js";
@@ -224,6 +224,10 @@ export async function setIllustrationConfig(pool: DatabasePool, campaignId: stri
   return publicConfig(loadOrNotFound(result, "Campaign"));
 }
 
+function isDatabasePool(database: DatabasePool | DatabaseClient): database is DatabasePool {
+  return typeof (database as DatabasePool).totalCount === "number";
+}
+
 export async function insertImageJob(
   client: DatabaseClient | DatabasePool,
   values: {
@@ -238,7 +242,8 @@ export async function insertImageJob(
     prompt: string;
     config: ReturnType<typeof publicConfig>;
   }
-) {
+): Promise<ImageJobRow | null> {
+  if (isDatabasePool(client)) return withTransaction(client, transaction => insertImageJob(transaction, values));
   const prompt = values.prompt.trim();
   if (!prompt || containsMechanicsLanguage(prompt)) return null;
   const jobId = crypto.randomUUID();
@@ -265,6 +270,7 @@ export async function insertImageJob(
       values.config.aspectRatio, values.config.quality, values.config.outputFormat, values.config.maxAttempts,
       values.targetVariantIndex ?? null, values.generationJobId ?? null]
   );
+  if (result.rows[0]) await captureImageActivity(client, result.rows[0].id, values.ownerUserId, "image.queued");
   return result.rows[0] || null;
 }
 
@@ -372,13 +378,13 @@ export async function enqueueAcceptedTurnIllustration(
 }
 
 export async function enqueueIllustration(
-  pool: DatabasePool,
+  pool: DatabasePool | DatabaseClient,
   turnId: string,
   request: IllustrationRequest,
   providers: IllustrationProviderCollaborators,
 ) {
   const ownerUserId = await initialOwnerId(pool);
-  return withTransaction(pool, async (client) => {
+  const work = async (client: DatabaseClient) => {
     const turnResult = await client.query<{
       campaign_id: string;
       image_prompt: string;
@@ -435,7 +441,8 @@ export async function enqueueIllustration(
     const job = await insertImageJob(client, { ownerUserId, campaignId: turn.campaign_id, turnId, prompt, config });
     if (!job) throw Object.assign(new Error("The accepted turn does not contain a safe fiction-only image prompt."), { statusCode: 409 });
     return { ...publicJob(job), duplicate: false };
-  });
+  };
+  return isDatabasePool(pool) ? withTransaction(pool, work) : work(pool);
 }
 
 export async function getImageJob(pool: DatabasePool, jobId: string) {
@@ -473,51 +480,54 @@ export async function listCampaignImageJobs(pool: DatabasePool, campaignId: stri
 
 export async function retryImageJob(pool: DatabasePool, jobId: string) {
   const ownerUserId = await initialOwnerId(pool);
-  const existing = await pool.query(
-    "SELECT id FROM image_jobs WHERE id = $1 AND owner_user_id = $2",
-    [jobId, ownerUserId]
-  );
-  loadOrNotFound(existing, "Image job");
-  const result = await pool.query<ImageJobRow>(
-    `UPDATE image_jobs SET status = 'queued', attempts = 0, next_attempt_at = now(), lease_owner = NULL,
-       lease_expires_at = NULL, generation_revision = generation_revision + 1,
-       remote_job_id = NULL, provider_status = NULL, provider_progress = NULL,
-       submitted_at = NULL, last_polled_at = NULL, next_poll_at = NULL, generation_deadline = NULL,
-       provider_result_metadata = '{}'::jsonb, response_metadata = '{}'::jsonb,
-       provider_request_metadata = jsonb_build_object(
-         'idempotencyKey', id::text || ':' || (generation_revision + 1)::text,
-         'requestedModel', requested_model,
-         'targetType', target_type,
-         'segmentId', segment_id,
-         'targetVariantIndex', provider_request_metadata->'targetVariantIndex'
-       ),
-       error_code = NULL, error_message = NULL, completed_at = NULL, updated_at = now()
-      WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed', 'expired', 'cancelled')
-      RETURNING ${jobColumns}`,
-    [jobId, ownerUserId]
-  );
-  if (!result.rows[0]) throw Object.assign(new Error("Only terminal unsuccessful image jobs can be retried."), { statusCode: 409 });
-  if (result.rows[0].segment_id) {
-    await pool.query(
-      `UPDATE turn_illustration_segments SET status = 'generating', updated_at = now()
-        WHERE id = $1 AND owner_user_id = $2`,
-      [result.rows[0].segment_id, ownerUserId]
+  return withTransaction(pool, async (client) => {
+    const existing = await client.query(
+      "SELECT id FROM image_jobs WHERE id = $1 AND owner_user_id = $2",
+      [jobId, ownerUserId]
     );
-  }
-  await pool.query(
-    `UPDATE illustration_resolution_jobs
-        SET status = 'generation_queued', reason_code = 'generation_retried', completed_at = NULL, updated_at = now()
-      WHERE image_job_id = $1 AND owner_user_id = $2`,
-    [jobId, ownerUserId]
-  );
-  return publicJob(result.rows[0]);
+    loadOrNotFound(existing, "Image job");
+    const result = await client.query<ImageJobRow>(
+      `UPDATE image_jobs SET status = 'queued', attempts = 0, next_attempt_at = now(), lease_owner = NULL,
+         lease_expires_at = NULL, generation_revision = generation_revision + 1,
+         remote_job_id = NULL, provider_status = NULL, provider_progress = NULL,
+         submitted_at = NULL, last_polled_at = NULL, next_poll_at = NULL, generation_deadline = NULL,
+         provider_result_metadata = '{}'::jsonb, response_metadata = '{}'::jsonb,
+         provider_request_metadata = jsonb_build_object(
+           'idempotencyKey', id::text || ':' || (generation_revision + 1)::text,
+           'requestedModel', requested_model,
+           'targetType', target_type,
+           'segmentId', segment_id,
+           'targetVariantIndex', provider_request_metadata->'targetVariantIndex'
+         ),
+         error_code = NULL, error_message = NULL, completed_at = NULL, updated_at = now()
+        WHERE id = $1 AND owner_user_id = $2 AND status IN ('recoverable', 'failed', 'expired', 'cancelled')
+        RETURNING ${jobColumns}`,
+      [jobId, ownerUserId]
+    );
+    if (!result.rows[0]) throw Object.assign(new Error("Only terminal unsuccessful image jobs can be retried."), { statusCode: 409 });
+    if (result.rows[0].segment_id) {
+      await client.query(
+        `UPDATE turn_illustration_segments SET status = 'generating', updated_at = now()
+          WHERE id = $1 AND owner_user_id = $2`,
+        [result.rows[0].segment_id, ownerUserId]
+      );
+    }
+    await client.query(
+      `UPDATE illustration_resolution_jobs
+          SET status = 'generation_queued', reason_code = 'generation_retried', completed_at = NULL, updated_at = now()
+        WHERE image_job_id = $1 AND owner_user_id = $2`,
+      [jobId, ownerUserId]
+    );
+    await captureImageActivity(client, jobId, ownerUserId, "image.retry_queued");
+    return publicJob(result.rows[0]);
+  });
 }
 
 async function claimImageJob(pool: DatabasePool, workerId: string, leaseSeconds: number): Promise<ImageJobRow | null> {
   return withTransaction(pool, async (client) => {
-    const result = await client.query<ImageJobRow>(
+    const result = await client.query<ImageJobRow & { previous_status: string; previous_remote_job_id: string | null }>(
       `WITH candidate AS (
-         SELECT id FROM image_jobs
+         SELECT id, status AS previous_status, remote_job_id AS previous_remote_job_id FROM image_jobs
           WHERE (status = 'queued' AND next_attempt_at <= now())
              OR (status = 'provider_pending' AND next_poll_at <= now())
              OR (status IN ('generating', 'downloading') AND lease_expires_at < now())
@@ -525,10 +535,12 @@ async function claimImageJob(pool: DatabasePool, workerId: string, leaseSeconds:
        )
        UPDATE image_jobs j SET status = 'generating', attempts = attempts + CASE WHEN remote_job_id IS NULL THEN 1 ELSE 0 END, lease_owner = $1,
          lease_expires_at = now() + ($2::text || ' seconds')::interval, updated_at = now()
-       FROM candidate WHERE j.id = candidate.id RETURNING j.*`,
+       FROM candidate WHERE j.id = candidate.id RETURNING j.*, candidate.previous_status, candidate.previous_remote_job_id`,
       [workerId, leaseSeconds]
     );
-    return result.rows[0] || null;
+    const row = result.rows[0];
+    if (row && row.previous_status === "queued" && !row.previous_remote_job_id) await captureImageActivity(client, row.id, row.owner_user_id, "image.generating");
+    return row || null;
   });
 }
 
@@ -656,27 +668,30 @@ async function requeueRemoteImageJob(
   message: string
 ): Promise<void> {
   const retryDelayMs = Math.min(Math.max(job.attempts, 1), 5) * 15_000;
-  await pool.query(
-    `UPDATE image_jobs SET status = 'queued', attempts = attempts,
-       generation_revision = generation_revision + 1,
-       remote_job_id = NULL, provider_status = 'retrying', provider_progress = NULL,
-       provider_queue_position = NULL, provider_eta_at = NULL, submitted_at = NULL,
-       last_polled_at = NULL, next_poll_at = NULL, generation_deadline = NULL,
-       next_attempt_at = now() + ($6::text || ' milliseconds')::interval,
-       provider_result_metadata = '{}'::jsonb,
-       provider_request_metadata = jsonb_build_object(
-         'idempotencyKey', id::text || ':' || (generation_revision + 1)::text,
-         'requestedModel', requested_model,
-         'targetType', target_type,
-         'segmentId', segment_id,
-         'targetVariantIndex', provider_request_metadata->'targetVariantIndex'
-       ),
-       error_code = $3, error_message = $4,
-       lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-     WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $5
-       AND status IN ('generating','provider_pending','downloading')`,
-    [job.id, job.owner_user_id, code, message.slice(0, 4000), workerId, retryDelayMs]
-  );
+  await withTransaction(pool, async (client) => {
+    const changed = await client.query(
+      `UPDATE image_jobs SET status = 'queued', attempts = attempts,
+         generation_revision = generation_revision + 1,
+         remote_job_id = NULL, provider_status = 'retrying', provider_progress = NULL,
+         provider_queue_position = NULL, provider_eta_at = NULL, submitted_at = NULL,
+         last_polled_at = NULL, next_poll_at = NULL, generation_deadline = NULL,
+         next_attempt_at = now() + ($6::text || ' milliseconds')::interval,
+         provider_result_metadata = '{}'::jsonb,
+         provider_request_metadata = jsonb_build_object(
+           'idempotencyKey', id::text || ':' || (generation_revision + 1)::text,
+           'requestedModel', requested_model,
+           'targetType', target_type,
+           'segmentId', segment_id,
+           'targetVariantIndex', provider_request_metadata->'targetVariantIndex'
+         ),
+         error_code = $3, error_message = $4,
+         lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $5
+         AND status IN ('generating','provider_pending','downloading') AND lease_expires_at > clock_timestamp() RETURNING id`,
+      [job.id, job.owner_user_id, code, message.slice(0, 4000), workerId, retryDelayMs]
+    );
+    if (changed.rows[0]) await captureImageActivity(client, job.id, job.owner_user_id, "image.retry_queued");
+  });
   logger.warn({
     event: "image_provider_remote_retry", imageJobId: job.id, providerType: job.provider_type,
     remoteJobId: job.remote_job_id, errorCode: code, nextGenerationRevision: job.generation_revision + 1
@@ -796,35 +811,39 @@ async function runImageJobThroughPorts(
     const retryDelayMs = Number.isFinite(requestedRetryDelay)
       ? Math.min(300_000, Math.max(1_000, Math.round(requestedRetryDelay)))
       : fallbackRetryDelay;
-    const persistedFailure = await pool.query<{ id: string }>(
-      `UPDATE image_jobs SET status = $3, next_attempt_at = CASE WHEN $3 = 'queued'
-           THEN now() + ($7::text || ' milliseconds')::interval ELSE next_attempt_at END,
-         next_poll_at = CASE WHEN $3 = 'provider_pending'
-           THEN now() + ($7::text || ' milliseconds')::interval ELSE next_poll_at END,
-         error_code = $4, error_message = $5, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6
-         AND status IN ('generating','provider_pending','downloading')
-       RETURNING id`,
-      [job.id, job.owner_user_id, nextStatus, code,
-        (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId, retryDelayMs]
-    );
-    if (!persistedFailure.rows[0]) return true;
-    if (job.segment_id && ["recoverable", "failed", "expired"].includes(nextStatus)) {
-      await pool.query(
-        `UPDATE turn_illustration_segments
-            SET status = $3, updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2`,
-        [job.segment_id, job.owner_user_id, nextStatus === "recoverable" ? "recoverable" : "failed"]
+    await withTransaction(pool, async (client) => {
+      const persistedFailure = await client.query<{ id: string }>(
+        `UPDATE image_jobs SET status = $3, next_attempt_at = CASE WHEN $3 = 'queued'
+             THEN now() + ($7::text || ' milliseconds')::interval ELSE next_attempt_at END,
+           next_poll_at = CASE WHEN $3 = 'provider_pending'
+             THEN now() + ($7::text || ' milliseconds')::interval ELSE next_poll_at END,
+           error_code = $4, error_message = $5, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $6
+           AND status IN ('generating','provider_pending','downloading') AND lease_expires_at > clock_timestamp()
+         RETURNING id`,
+        [job.id, job.owner_user_id, nextStatus, code,
+          (error instanceof Error ? error.message : String(error)).slice(0, 4000), workerId, retryDelayMs]
       );
-    }
-    if (["failed", "expired"].includes(nextStatus)) {
-      await pool.query(
-        `UPDATE illustration_resolution_jobs
-            SET status = 'failed', reason_code = $3, completed_at = now(), updated_at = now()
-          WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
-        [job.id, job.owner_user_id, `generation_${code}`.slice(0, 200)]
-      );
-    }
+      if (!persistedFailure.rows[0]) return;
+      if (nextStatus !== "provider_pending" || !job.remote_job_id) await captureImageActivity(client, job.id, job.owner_user_id, nextStatus === "queued" ? "image.retry_queued" : `image.${nextStatus}`, code);
+      if (job.segment_id && ["recoverable", "failed", "expired"].includes(nextStatus)) {
+        const segmentChanged = await client.query(
+          `UPDATE turn_illustration_segments
+              SET status = $3, updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND status IS DISTINCT FROM $3 RETURNING id`,
+          [job.segment_id, job.owner_user_id, nextStatus === "recoverable" ? "recoverable" : "failed"]
+        );
+        if (segmentChanged.rows[0]) await captureSegmentActivity(client, job.segment_id, job.owner_user_id, "illustration_segment.failed");
+      }
+      if (["failed", "expired"].includes(nextStatus)) {
+        await client.query(
+          `UPDATE illustration_resolution_jobs
+              SET status = 'failed', reason_code = $3, completed_at = now(), updated_at = now()
+            WHERE image_job_id = $1 AND owner_user_id = $2 AND status = 'generation_queued'`,
+          [job.id, job.owner_user_id, `generation_${code}`.slice(0, 200)]
+        );
+      }
+    });
   }
   return true;
 }
@@ -840,24 +859,27 @@ async function persistPendingPortImageJob(
   result: Extract<IllustrationImageExecutionResult, { status: "pending" }>,
 ): Promise<void> {
   const pollAfterMs = portPollAfterMs(result);
-  const persisted = await pool.query<{ id: string }>(
-    `UPDATE image_jobs SET status = 'provider_pending', remote_job_id = COALESCE(remote_job_id, $3), provider_status = $4,
-       provider_progress = $5, provider_queue_position = $6,
-       provider_eta_at = CASE WHEN $7::double precision IS NULL THEN NULL ELSE now() + ($7::text || ' seconds')::interval END,
-       submitted_at = CASE WHEN remote_job_id IS NULL THEN COALESCE(submitted_at, now()) ELSE submitted_at END,
-       last_polled_at = CASE WHEN remote_job_id IS NULL THEN last_polled_at ELSE now() END,
-       next_poll_at = now() + ($8::text || ' milliseconds')::interval,
-       generation_deadline = COALESCE(generation_deadline, now() + ($9::text || ' milliseconds')::interval),
-       provider_result_metadata = $10, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-     WHERE id = $1 AND lease_owner = $2
-       AND status IN ('generating','provider_pending','downloading')
-     RETURNING id`,
-    [job.id, workerId, result.remoteJobId, pendingProviderStatus(result.metadata), result.progress, result.queuePosition,
-      result.etaSeconds, pollAfterMs, result.generationTimeoutMs, JSON.stringify(result.metadata)]
-  );
-  if (!persisted.rows[0]) {
-    throw Object.assign(new Error("Image job lease was lost before provider state was persisted."), { code: "lease_lost" });
-  }
+  await withTransaction(pool, async (client) => {
+    const persisted = await client.query<{ id: string }>(
+      `UPDATE image_jobs SET status = 'provider_pending', remote_job_id = COALESCE(remote_job_id, $3), provider_status = $4,
+         provider_progress = $5, provider_queue_position = $6,
+         provider_eta_at = CASE WHEN $7::double precision IS NULL THEN NULL ELSE now() + ($7::text || ' seconds')::interval END,
+         submitted_at = CASE WHEN remote_job_id IS NULL THEN COALESCE(submitted_at, now()) ELSE submitted_at END,
+         last_polled_at = CASE WHEN remote_job_id IS NULL THEN last_polled_at ELSE now() END,
+         next_poll_at = now() + ($8::text || ' milliseconds')::interval,
+         generation_deadline = COALESCE(generation_deadline, now() + ($9::text || ' milliseconds')::interval),
+         provider_result_metadata = $10, lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1 AND lease_owner = $2 AND owner_user_id = $11
+         AND status IN ('generating','provider_pending','downloading') AND lease_expires_at > clock_timestamp()
+       RETURNING id`,
+      [job.id, workerId, result.remoteJobId, pendingProviderStatus(result.metadata), result.progress, result.queuePosition,
+        result.etaSeconds, pollAfterMs, result.generationTimeoutMs, JSON.stringify(result.metadata), job.owner_user_id]
+    );
+    if (!persisted.rows[0]) {
+      throw Object.assign(new Error("Image job lease was lost before provider state was persisted."), { code: "lease_lost" });
+    }
+    if (!job.remote_job_id) await captureImageActivity(client, job.id, job.owner_user_id, "image.provider_pending");
+  });
   logger.info({
     event: job.remote_job_id ? "image_provider_status" : "image_provider_submitted",
     imageJobId: job.id,
@@ -868,15 +890,4 @@ async function persistPendingPortImageJob(
     queuePosition: result.queuePosition,
     etaSeconds: result.etaSeconds
   });
-}
-
-function withoutTemporaryUrls(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
-  const sanitize = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(sanitize);
-    if (!value || typeof value !== "object") return value;
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !/(?:url|uri|authorization|token|secret)/i.test(key))
-      .map(([key, nested]) => [key, sanitize(nested)]));
-  };
-  return sanitize(metadata || {}) as Record<string, unknown>;
 }

@@ -963,3 +963,21 @@ describe("campaign store generation projection", () => {
     });
   });
 });
+
+describe("campaign provider evidence copying", () => {
+  it("copies nested evidence from reloads and live snapshots", () => {
+    const controller = createCampaignStore();
+    const providerFailure = { version: 1 as const, source: "http_error" as const, httpStatus: 429, upstreamStatus: null,
+      reason: "rate_limit" as const, limitSource: "unknown" as const, retryAfterMs: null, retryAt: null };
+    const failureDiagnostic = { code: "provider_rate_limited" as const, message: "The provider rate limit was reached. Wait before retrying.", providerFailure };
+    controller.load(sync({ generationRecovery: { id: jobId, status: "failed", expectedTurnNumber: 3, attempts: 1,
+      operationKind: "append", replacementTurnId: null, resultTurnId: null, errorCode: "generation_failed",
+      errorMessage: "Generation could not be completed.", failureDiagnostic } }));
+    expect(controller.store.get().generation?.hydratedGeneration?.failureDiagnostic?.providerFailure).toEqual(providerFailure);
+    expect(controller.store.get().generation?.hydratedGeneration?.failureDiagnostic?.providerFailure).not.toBe(providerFailure);
+    const session = controller.attachGeneration(run());
+    session.apply({ type: "status", snapshot: snapshot({ status: "failed", failureDiagnostic }) });
+    expect(controller.store.get().generation?.snapshot?.failureDiagnostic?.providerFailure).toEqual(providerFailure);
+    expect(controller.store.get().generation?.snapshot?.failureDiagnostic?.providerFailure).not.toBe(providerFailure);
+  });
+});

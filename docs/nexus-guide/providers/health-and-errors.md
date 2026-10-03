@@ -22,3 +22,5 @@ Safe diagnostics can include provider type, endpoint origin, model, phase, timeo
 Sogni authentication failures, invalid requests, unsupported filter or output settings, and rejected artifacts are deterministic and require configuration changes. Rate limits, provider conflicts, request timeouts, and provider outages may be retried. When Sogni returns `Retry-After`, Nexus uses it within bounded retry limits.
 
 Docker Desktop may reach a host LM Studio endpoint through `host.docker.internal`. Swarm workers require stable private-network DNS reachable from every eligible node.
+
+Story failures can show a confirmed platform or upstream limiter and a provider-suggested retry time. Unknown metadata identifies neither limiter. The suggested wait is advisory; Retry remains an explicit action and an elapsed wait does not establish provider health. Failed Story presets do not automatically resend. The same safe guidance appears live and after reload. Operators can correlate existing request IDs using the [provider failure diagnostics runbook](../../runbooks/provider-failure-diagnostics.md).

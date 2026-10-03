@@ -16,7 +16,7 @@ import {
   turnInputModeSchema,
   turnInputModeSourceSchema
 } from "./generation.js";
-import { generationReviewSummarySchema, generationReviewTransportSchema } from "./generation-review.js";
+import { generationFailureDiagnosticProjectionSchema, generationReviewSummarySchema, generationReviewTransportSchema } from "./generation-review.js";
 export { generationReviewDecisionRequestSchema, generationReviewDetailSchema } from "./generation-review.js";
 import { safeGenerationDiagnosticSchema } from "./story-prompt.js";
 import { apiTimestampSchema } from "./http.js";
@@ -27,7 +27,6 @@ import { campaignCharacterProfileSchema, campaignCreateSchema, playableCharacter
 import { campaignTurnControlStyleSchema } from "./campaign-generation-policy.js";
 import { safeProviderProfileViewSchema } from "./provider-profile-view.js";
 
-const operationKindSchema = generationJobStatusSchema.shape.operationKind;
 const generationStatusSchema = generationJobStatusSchema.shape.status;
 const nullableObjectSchema = z.record(z.string(), z.unknown()).nullable();
 
@@ -237,6 +236,7 @@ const generationRecoveryBaseSchema = z.object({
   errorCode: z.literal(PUBLIC_GENERATION_FAILURE_CODE).nullable(),
   errorMessage: z.literal(PUBLIC_GENERATION_FAILURE_MESSAGE).nullable(),
   diagnostic: safeGenerationDiagnosticSchema.nullable().optional().catch(null),
+  failureDiagnostic: generationFailureDiagnosticProjectionSchema.nullable().optional().catch(null),
   resultTurnId: z.uuid().nullable(),
   review: generationReviewTransportSchema.optional(),
   responseFormat: generationResponseFormatProjectionSchema.optional()

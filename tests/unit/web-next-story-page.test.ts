@@ -207,6 +207,7 @@ function composition(options: {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -1031,6 +1032,86 @@ describe("Story Player page shell", () => {
 
     expect(page.document.querySelector<HTMLTextAreaElement>("[data-story-draft]")?.value)
       .toBe("Return the lantern to its keeper.");
+    mounted.dispose();
+  });
+
+  it.each([
+    ["openrouter_platform", "OpenRouter reported a platform limit.", "2026-10-03T15:00:15.000Z"],
+    ["upstream_provider", "An upstream provider reported a rate limit.", "2026-10-03T14:59:45.000Z"],
+    ["unknown", "The provider did not identify which limit was reached.", null]
+  ] as const)("shows safe %s guidance and leaves Retry/Discard usable", async (limitSource, message, retryAt) => {
+    vi.useFakeTimers();
+    const now = Date.parse("2026-10-03T15:00:00.000Z");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const page = fixture();
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1]), generationRecovery: {
+      id: "55555555-5555-4555-8555-555555555555", status: "failed", expectedTurnNumber: 2, attempts: 1,
+      errorCode: "generation_failed", errorMessage: "Generation could not be completed.", resultTurnId: null,
+      operationKind: "append", replacementTurnId: null,
+      failureDiagnostic: { code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying.",
+        providerFailure: { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null, reason: "rate_limit", limitSource,
+          retryAfterMs: retryAt ? 15000 : null, retryAt } },
+      diagnostic: { code: "context_evidence_omitted", operation: "story_generation", action: "adjust_context" }
+    } });
+    const syncStatus = vi.fn().mockResolvedValue(loaded);
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus }));
+    await settle();
+    const recovery = page.document.querySelector("[data-story-recovery]")!;
+    expect(recovery.textContent).toContain(message);
+    expect(recovery.textContent!.indexOf(message)).toBeLessThan(recovery.textContent!.indexOf("Some optional story evidence"));
+    if (retryAt) expect(recovery.textContent).toContain(Date.parse(retryAt) > now
+      ? `Provider suggested retry time: ${new Date(retryAt).toLocaleString()}.`
+      : "The suggested wait has elapsed; you can retry.");
+    else expect(recovery.textContent).not.toContain("Provider suggested retry time:");
+    for (const action of ["retry-generation", "discard-generation"]) {
+      expect(recovery.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.disabled).toBe(false);
+    }
+    const before = syncStatus.mock.calls.length;
+    clock.mockReturnValue(now + 60000);
+    await vi.advanceTimersByTimeAsync(60000);
+    await settle();
+    expect(syncStatus).toHaveBeenCalledTimes(before);
+    mounted.dispose();
+  });
+
+  it("shows provider guidance from the latest live failure and safely ignores malformed optional evidence", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-03T15:00:00.000Z"));
+    const page = fixture();
+    const campaignStore = createCampaignStore();
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1]) });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ campaignStore, syncStatus: vi.fn().mockResolvedValue(loaded) }));
+    await settle();
+    const jobId = "55555555-5555-4555-8555-555555555555";
+    const session = campaignStore.attachGeneration({ campaignId, jobId, operationKind: "append", replacementTurnId: null } as never);
+    const failure = { id: jobId, campaignId, status: "failed", expectedTurnNumber: 2, attempts: 1, action: "Open the gate",
+      operationKind: "append", replacementTurnId: null, partialNarration: null, resultTurnId: null,
+      errorCode: "generation_failed", errorMessage: "Generation could not be completed.",
+      failureDiagnostic: { code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying.",
+        providerFailure: { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null, reason: "rate_limit",
+          limitSource: "upstream_provider", retryAfterMs: null, retryAt: null } } };
+    session.apply({ type: "status", snapshot: failure as never });
+    session.apply({ type: "settled", outcome: "failed", error: new Error("Generation could not be completed.") });
+    expect(page.document.querySelector("[data-story-recovery]")?.textContent).toContain("An upstream provider reported a rate limit.");
+    session.apply({ type: "status", snapshot: { ...failure, failureDiagnostic: { ...failure.failureDiagnostic,
+      providerFailure: { version: 9, retryAt: "<script>PRIVATE_HTML_CANARY</script>" } } } as never });
+    session.apply({ type: "settled", outcome: "failed", error: new Error("Generation could not be completed.") });
+    expect(page.document.querySelector("[data-story-recovery]")?.textContent).toContain("The provider rate limit was reached. Wait before retrying.");
+    expect(page.root.textContent).not.toContain("PRIVATE_HTML_CANARY");
+    expect(page.root.querySelector("script")).toBeNull();
+    mounted.dispose();
+  });
+
+  it("displays the specific failure after reloading a failed generation", async () => {
+    const page = fixture();
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1]), generationRecovery: {
+      id: "55555555-5555-4555-8555-555555555555", status: "failed", expectedTurnNumber: 2, attempts: 1,
+      errorCode: "generation_failed", errorMessage: "Generation could not be completed.", resultTurnId: null,
+      operationKind: "append", replacementTurnId: null,
+      failureDiagnostic: { code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying." }
+    } });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
+    await settle();
+    expect(page.document.querySelector("[data-story-recovery]")?.textContent).toContain("The provider rate limit was reached. Wait before retrying.");
     mounted.dispose();
   });
 

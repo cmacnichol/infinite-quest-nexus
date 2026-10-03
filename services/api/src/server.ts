@@ -142,6 +142,8 @@ import {
   isSanitizedSystemArchiveServerError,
   registerSystemArchiveRoutes,
 } from "./system-archive-routes.js";
+import { createActivityComposition } from "../../runtime/src/activity-composition.js";
+import { registerActivityRoutes } from "./activity-routes.js";
 import { registerArchiveRoutes } from "./archive-routes.js";
 import { registerCampaignCastRoutes } from "./campaign-cast-routes.js";
 import type { CampaignCastApplication } from "../../../packages/application/src/campaign-cast/index.js";
@@ -622,6 +624,10 @@ export async function buildServer({
       },
     });
   }
+  await app.register(registerActivityRoutes, {
+    activityReader: createActivityComposition(pool).reader,
+    resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) })
+  });
   await app.register(registerArchiveRoutes, {
     pool,
     config,

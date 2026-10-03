@@ -13,7 +13,6 @@ import type {
   DurableFilesystemRecoveryClaim,
   DurableFilesystemRecoveryRecord,
   DurableFilesystemRecoveryRequest,
-  DurableFilesystemReserveRequest,
   DurableFilesystemReserveResult,
   DurableFilesystemScope,
   DurableFilesystemTransactionContext,
@@ -362,13 +361,6 @@ function claimIdentityClassification(
   if (row.lease_id !== claim.leaseId
     || row.lease_owner !== claim.leaseOwner
     || row.lease_expires_at.toISOString() !== claim.leaseExpiresAt) return "lease_lost";
-  return "valid";
-}
-
-function claimClassification(row: OperationRow, claim: DurableFilesystemRecoveryClaim): "valid" | "stale" | "lease_lost" {
-  const identity = claimIdentityClassification(row, claim);
-  if (identity !== "valid") return identity;
-  if (row.lease_expires_at.getTime() <= Date.now()) return "lease_lost";
   return "valid";
 }
 

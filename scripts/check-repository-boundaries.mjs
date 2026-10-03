@@ -62,7 +62,6 @@ const historicalRuntimeReference = /\blegacyIndex(?:Path|Cache)?\b|\bLEGACY_INDE
 const browserNetworkAllowlist = new Map([
   ["apps/web/public/image-library-browser.js", new Set(["fetch(path,"])],
   ["apps/web/public/nexus.js", new Set(["fetch(path,"])],
-  ["apps/web/public/story.js", new Set(["fetch(url,"])]
 ]);
 
 function normalizedText(file) {

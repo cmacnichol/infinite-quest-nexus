@@ -1,3 +1,4 @@
+import type { ProviderFailureEvidenceV1 } from "../../contracts/src/provider-failure.js";
 import {
   preparedResponseContractSchema,
   preparedResponseContractV2Schema,
@@ -14,6 +15,7 @@ export { type PreparedResponseContract, type PreparedResponseContractV2, type Re
 
 /** Private transport evidence for durable recovery; the message never contains provider text. */
 export class PreparedResponseContractError extends Error {
+  readonly providerFailure?: ProviderFailureEvidenceV1;
   readonly preparedRequest: Readonly<{ body: string; payloadHash: string }>;
   readonly responseId: string | null;
   readonly returnedModel: string | null;
@@ -26,11 +28,14 @@ export class PreparedResponseContractError extends Error {
   constructor(error: unknown, preparedRequest: Readonly<{ body: string; payloadHash: string }>, details: {
     responseId?: string | null; returnedModel?: string | null; returnedProviderRoute?: string | null;
     partialContent?: string; diagnosticCode?: ResponseFormatDiagnosticCode | null;
+    providerFailure?: ProviderFailureEvidenceV1;
     observedUsage?: Readonly<{ inputTokens?: number; outputTokens?: number; totalTokens?: number }> | null;
     observedReportedCost?: Readonly<{ amount: string; currency: string }> | null;
   } = {}) {
     super("The provider response could not be used for the prepared response contract.");
     this.name = "PreparedResponseContractError";
+    const providerFailure = details.providerFailure ?? (error as { providerFailure?: ProviderFailureEvidenceV1 } | null)?.providerFailure;
+    if (providerFailure) this.providerFailure = providerFailure;
     Object.assign(this, error && typeof error === "object" ? {
       code: (error as any).code, statusCode: (error as any).statusCode, retryAfterMs: (error as any).retryAfterMs,
       transport: (error as any).transport, cause: error

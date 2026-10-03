@@ -5,7 +5,6 @@ import {
   GenerationWorkflowProtocolError,
   type GenerationEvent,
   type GenerationRun,
-  type GenerationSubmissionInput,
   type GenerationWorkflow,
   type GenerationWorkflowDependencies
 } from "./types.js";
@@ -212,6 +211,7 @@ function createRun(
             partialNarration: null,
             errorCode: recovery.errorCode,
             errorMessage: recovery.errorMessage,
+            failureDiagnostic: recovery.failureDiagnostic,
             diagnostic: recovery.diagnostic ?? null,
             resultTurnId: recovery.resultTurnId,
             review: recovery.review
