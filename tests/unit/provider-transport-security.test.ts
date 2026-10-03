@@ -142,8 +142,14 @@ describe("provider transport destination security", () => {
         signal: controller.signal
       });
       const reader = response.body!.getReader();
-      const chunk = await reader.read();
-      expect(new TextDecoder().decode(chunk.value)).toBe('data: {"text":"A lantern glows."}\n\n');
+      const decoder = new TextDecoder();
+      let event = "";
+      while (!event.endsWith("\n\n")) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        event += decoder.decode(chunk.value, { stream: true });
+      }
+      expect(event).toBe('data: {"text":"A lantern glows."}\n\n');
       const pending = reader.read();
       controller.abort();
       await expect(pending).rejects.toMatchObject({ name: "AbortError" });
