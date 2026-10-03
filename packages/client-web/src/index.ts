@@ -98,3 +98,16 @@ export function createNoopSessionPort(): SessionPort {
   return noOpSessionPort;
 }
 export * from "./campaign-cast-api.js";
+export {
+  createIndexedDbDraftDatabase,
+  createStoryActionDraftStore
+} from "./storage/story-action-drafts.js";
+export type {
+  ClearResult,
+  Draft,
+  DraftDatabasePort,
+  DraftDatabaseTransaction,
+  DraftScope,
+  StoryActionDraftStore,
+  WriteResult
+} from "./storage/story-action-drafts.js";
