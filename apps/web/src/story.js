@@ -440,13 +440,32 @@ function syncInputState() {
 
   const btnPrev = $("btnPrev");
   const btnNext = $("btnNext");
+  const btnReaderJumpLatest = $("btnReaderJumpLatest");
   const btnUndo = $("btnUndo");
   const btnRetry = $("btnRetry");
 
   const lastTurnHasAction = turnCount > 0 && Boolean(state.turns[turnCount - 1] && state.turns[turnCount - 1].action);
 
-  if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);
-  if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;
+  const previousDisabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);
+  const nextDisabled = generationLocked || turnCount === 0 || isLatest;
+  if (btnPrev) {
+    btnPrev.disabled = previousDisabled;
+    btnPrev.title = generationLocked ? "Turn navigation is unavailable while generation is active."
+      : turnCount === 0 ? "There are no accepted turns yet."
+        : previousDisabled ? "You are at the earliest available turn." : "Previous turn";
+  }
+  if (btnNext) {
+    btnNext.disabled = nextDisabled;
+    btnNext.title = generationLocked ? "Turn navigation is unavailable while generation is active."
+      : turnCount === 0 ? "There are no accepted turns yet."
+        : isLatest ? "You are already at the latest turn." : "Next turn";
+  }
+  if (btnReaderJumpLatest) {
+    btnReaderJumpLatest.disabled = generationLocked || turnCount === 0 || isLatest;
+    btnReaderJumpLatest.title = generationLocked ? "Turn navigation is unavailable while generation is active."
+      : turnCount === 0 ? "There are no accepted turns yet."
+        : isLatest ? "You are already at the latest turn." : "Jump to the latest turn";
+  }
   if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;
   if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;
   syncResponseEditorControls();
@@ -732,7 +751,10 @@ function renderScene(turn, index) {
       : "";
 
     narrationHtml += `<div class="turn-meta">
-      <div class="action-tag">➜ ${escapeHtml(turn.action)}</div>
+      <details class="previous-action-disclosure">
+        <summary>Previous action · Turn ${escapeHtml(turn.turnNumber)}</summary>
+        <div class="action-tag">➜ ${escapeHtml(turn.action)}</div>
+      </details>
       <span class="pill">Turn ${turn.turnNumber}</span>
       ${reportedCostHtml}
     </div>`;
@@ -1750,7 +1772,15 @@ function renderChoices(choices, customSuggestion, ownerKey) {
       const btn = document.createElement("button");
       btn.className = "choice";
       btn.type = "button";
-      btn.textContent = text;
+      const choiceModeLabel = state.user?.settings?.autoSubmitTurnChoices === false ? "Add to draft" : "Choose and continue";
+      const choiceCopy = document.createElement("span");
+      choiceCopy.className = "choice-copy";
+      choiceCopy.textContent = text;
+      const choiceModeHint = document.createElement("span");
+      choiceModeHint.className = "choice-mode-hint";
+      choiceModeHint.textContent = choiceModeLabel;
+      btn.append(choiceCopy, choiceModeHint);
+      btn.setAttribute("aria-label", `${text}. ${choiceModeLabel}`);
       btn.dataset.choiceIndex = String(choiceIndex);
       btn.setAttribute("aria-pressed", "false");
       btn.addEventListener("click", () => {
@@ -2707,6 +2737,11 @@ function updateStatusBar() {
     viewPill.textContent = isLatest
       ? "Viewing Latest Turn"
       : `Viewing turn ${currentViewTurnNumber()}`;
+  }
+  const readerTurnCount = $("readerTurnCount");
+  if (readerTurnCount) {
+    const total = Math.max(Number(state.campaign?.activeTurnNumber || 0), latestTurnNumber(state.turns));
+    readerTurnCount.textContent = total > 0 ? `Turn ${currentViewTurnNumber()} of ${total}` : "No turns yet";
   }
   syncInputState();
 }
@@ -4156,6 +4191,10 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnPrev) btnPrev.addEventListener("click", goToPrevious);
   const btnNext = $("btnNext");
   if (btnNext) btnNext.addEventListener("click", goToNext);
+  const btnReaderHistory = $("btnReaderHistory");
+  if (btnReaderHistory) btnReaderHistory.addEventListener("click", openTurnHistoryModal);
+  const btnReaderJumpLatest = $("btnReaderJumpLatest");
+  if (btnReaderJumpLatest) btnReaderJumpLatest.addEventListener("click", () => navigateToTurn(null));
   const btnUndo = $("btnUndo");
   if (btnUndo) btnUndo.addEventListener("click", undoLatest);
   const btnRetry = $("btnRetry");

@@ -82,6 +82,14 @@
           </div>
         </div>
 
+        <nav class="story-reader-toolbar" data-story-reader-toolbar aria-label="Story reading navigation">
+          <button id="btnPrev" class="small ghost" type="button" aria-label="Previous turn" title="Previous turn">← Previous</button>
+          <span id="readerTurnCount" class="reader-turn-count" data-reader-turn-count aria-live="polite">No turns yet</span>
+          <button id="btnNext" class="small ghost" type="button" aria-label="Next turn" title="Next turn">Next →</button>
+          <button id="btnReaderHistory" class="small ghost" type="button" aria-label="History" title="Open turn history">History</button>
+          <button id="btnReaderJumpLatest" class="small ghost" type="button" aria-label="Jump to latest" title="Jump to the latest turn">Latest</button>
+        </nav>
+
         <section id="storyLoadRecovery" class="story-load-recovery hidden" role="alert" aria-live="assertive" aria-labelledby="storyLoadRecoveryTitle">
           <h2 id="storyLoadRecoveryTitle"></h2>
           <p id="storyLoadRecoveryMessage"></p>
@@ -138,11 +146,15 @@
           </section>
           <div class="row wrap">
             <button id="btnTakeAction" class="primary">➜ Continue story</button>
-            <button id="btnPrev">← Previous turn</button>
-            <button id="btnNext">Next turn →</button>
-            <button id="btnUndo">Undo latest</button>
-            <button id="btnRetry">Retry latest generation</button>
           </div>
+
+          <details class="story-more" data-story-more>
+            <summary>More story actions</summary>
+            <div class="row wrap story-more-actions">
+              <button id="btnUndo">Undo latest</button>
+              <button id="btnRetry">Retry latest generation</button>
+            </div>
+          </details>
 
           <div id="generationProgress" class="generation-progress hidden" role="status" aria-live="polite">
             <p>Generating...</p>

@@ -2641,7 +2641,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('aria-controls="storyExportMenu">Export</button>');
     expect(storyHtml).toContain('aria-controls="storyAboutMenu">About</button>');
     expect(storyHtml).toContain('class="nav-section-divider"');
-    expect(storyHtml).not.toContain('<summary>');
+    const universalNavigation = parseHTML(storyHtml).document.querySelector(".universal-nav");
+    expect(universalNavigation).not.toBeNull();
+    expect(universalNavigation?.querySelector("summary")).toBeNull();
     expect(storyHtml).not.toContain('id="btnMenu"');
     expect(storyHtml).not.toContain('☰ Menu');
     expect(storyCss).toContain("@import url('navigation.css');");
@@ -2681,8 +2683,12 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('const storyInputLocked = generationLocked || !isLatest;');
     expect(storyScript).toContain('if (btnAction) btnAction.disabled = storyInputLocked;');
     expect(storyScript).not.toContain('inputAction.style.pointerEvents = "none";');
-    expect(storyScript).toContain('if (btnPrev) btnPrev.disabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);');
-    expect(storyScript).toContain('if (btnNext) btnNext.disabled = generationLocked || turnCount === 0 || isLatest;');
+    expect(storyScript).toContain('const previousDisabled = generationLocked || turnCount === 0 || (curr <= 0 && !state.historyNextCursor);');
+    expect(storyScript).toContain('const nextDisabled = generationLocked || turnCount === 0 || isLatest;');
+    expect(storyScript).toContain('if (btnReaderJumpLatest) {');
+    expect(storyScript).toContain('btnReaderJumpLatest.disabled = generationLocked || turnCount === 0 || isLatest;');
+    expect(storyScript).toContain('previousDisabled ? "You are at the earliest available turn."');
+    expect(storyScript).toContain('isLatest ? "You are already at the latest turn."');
     expect(storyScript).toContain('if (btnUndo) btnUndo.disabled = generationLocked || turnCount === 0 || !isLatest;');
     expect(storyScript).toContain('if (btnRetry) btnRetry.disabled = generationLocked || turnCount === 0 || !isLatest || !lastTurnHasAction;');
   });

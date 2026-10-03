@@ -140,9 +140,33 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .ghost { background: transparent; }
 .small { min-height: 34px; padding: 7px 10px; border-radius: 11px; font-size: .87rem; }
 
-.story-shell { min-height: 690px; display: grid; grid-template-rows: auto 1fr auto; }
+.story-shell { min-height: 690px; display: grid; grid-template-rows: auto auto 1fr auto; overflow: clip; }
 .story-top { padding: 18px 20px; border-bottom: 1px solid var(--border); background: linear-gradient(90deg, rgba(201,156,255,.09), rgba(241,194,50,.06)); }
 .story-top h2 { margin: 0 0 7px; font-size: clamp(1.2rem, 2vw, 2rem); color: #f0d8ff; font-family: Georgia, "Times New Roman", serif; }
+
+.story-reader-toolbar {
+  position: sticky;
+  top: 64px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .18);
+  backdrop-filter: blur(12px);
+}
+.reader-turn-count { min-width: 112px; text-align: center; color: var(--muted); font-size: .9rem; font-weight: 700; }
+.story-reader-toolbar button { min-height: 40px; }
+.story-reader-toolbar button:focus-visible, .story-more button:focus-visible { position: relative; z-index: 1; outline: 3px solid var(--gold); outline-offset: 2px; }
+.story-more { padding-top: 2px; }
+.story-more > summary, .previous-action-disclosure > summary { width: fit-content; min-height: 38px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 11px; color: var(--muted); cursor: pointer; }
+.story-more > summary:focus-visible, .previous-action-disclosure > summary:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+.story-more-actions { padding-top: 9px; }
+.previous-action-disclosure { display: grid; justify-items: start; gap: 8px; }
 
 .statusbar { display: flex; gap: 10px; flex-wrap: wrap; color: var(--dim); font-size: .88rem; }
 .pill { display: inline-flex; gap: 7px; align-items: center; padding: 5px 9px; border-radius: 999px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: var(--muted); font-size: .82rem; }
@@ -224,7 +248,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 
 .choices { display: grid; gap: 10px; }
-.choice { justify-content: flex-start; text-align: left; line-height: 1.38; width: 100%; padding: 12px 14px; border-radius: 16px; color: #f6ecff; background: rgba(201,156,255,.075); border-color: rgba(201,156,255,.22); }
+.choice { display: flex; justify-content: flex-start; align-items: flex-start; gap: 10px; text-align: left; line-height: 1.38; width: 100%; padding: 12px 14px; border-radius: 16px; color: #f6ecff; background: rgba(201,156,255,.075); border-color: rgba(201,156,255,.22); }
+.choice-copy { min-width: 0; flex: 1; }
+.choice-mode-hint { flex: 0 0 auto; color: var(--gold2); font-size: .78rem; font-weight: 800; }
 .choice::before { content: "➜"; color: var(--accent); font-weight: 900; }
 .choice[aria-pressed="true"] { border-color: rgba(201,156,255,.72); background: rgba(201,156,255,.2); box-shadow: inset 0 0 0 1px rgba(201,156,255,.2); }
 .choice[aria-pressed="true"]::before { content: "✓"; }
@@ -244,6 +270,14 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .generation-recovery { display: grid; gap: 9px; padding: 12px 14px; border: 1px solid rgba(241,194,50,.4); border-radius: 14px; background: rgba(241,194,50,.08); color: #fff4c5; }
 .generation-recovery p { margin: 0; line-height: 1.45; }
 .generation-recovery-details { display: grid; gap: 4px; margin: 0; padding-left: 20px; color: var(--dim); font-size: .86rem; line-height: 1.4; }
+
+@media (max-width: 620px) {
+  .story-reader-toolbar { top: 54px; gap: 5px; padding: 8px 6px; }
+  .story-reader-toolbar button { min-height: 42px; padding-inline: 8px; }
+  .reader-turn-count { min-width: 88px; font-size: .8rem; }
+  .choice { flex-wrap: wrap; }
+  .choice-mode-hint { margin-left: 22px; }
+}
 
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 0; }
 .tab { min-height: 34px; padding: 7px 10px; border-radius: 999px; font-size: .86rem; }
