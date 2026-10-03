@@ -1007,8 +1007,13 @@
       </div>
       <div class="world-fields tab-content active" id="world-author-overview" data-tab-group="world-author">
         <label>Title<input id="worldTitle" required maxlength="200"></label>
-        <label>Genre<input id="worldGenre" maxlength="2000"></label>
-        <label>Tone<input id="worldTone" maxlength="2000"></label>
+        <details id="worldGenreToneDisclosure" class="author-advanced-disclosure">
+          <summary>Genre and tone (optional)</summary>
+          <div class="world-fields author-disclosure-fields">
+            <label>Genre<input id="worldGenre" maxlength="2000"></label>
+            <label>Tone<input id="worldTone" maxlength="2000"></label>
+          </div>
+        </details>
       </div>
       <div class="world-fields tab-content" id="world-author-lore" data-tab-group="world-author">
         <label class="wide-field">Premise<textarea id="worldPremise" rows="3" maxlength="200000"></textarea></label>
@@ -1069,34 +1074,16 @@
         <div>
           <p class="eyebrow">World Library</p>
           <h2 id="characterDialogTitle">Add character</h2>
-          <p id="characterDialogDescription">Create a playable character for this world draft.</p>
+          <p id="characterDialogDescription">Playable character · Create a character for this world draft.</p>
         </div>
       </div>
-      <details id="characterGenerator" class="character-generator hidden">
-        <summary>Generate with default text model</summary>
-        <div class="character-generator-fields">
-          <label>Character concept or prompt
-            <textarea id="characterGeneratorPrompt" rows="3" maxlength="10000" placeholder="Describe the role, personality, background, appearance, and place in this world."></textarea>
-          </label>
-          <button id="generateCharacter" class="button secondary" type="button">Generate character</button>
-        </div>
-        <p class="field-note">Generation fills this form only. Review and save the result to change the draft.</p>
-      </details>
       <div class="character-core-fields">
+        <p id="characterPlayableContext" class="field-note character-playable-context">Playable character · This character is part of the world's playable roster.</p>
         <label title="The character's canonical name. This name is used in campaign context and image references.">Character name<input id="characterName" required maxlength="200" autocomplete="off" placeholder="e.g., Mira Vale"></label>
-        <label title="Original free-form guidance retained as read-only source material. Use AI organization to sort supported details into the fields below.">Legacy source guidance
-          <textarea id="characterGuidance" rows="6" maxlength="200000" readonly placeholder="Older general guidance is retained here as source material."></textarea>
-        </label>
-      </div>
-      <div class="button-row character-organization-row">
-        <button id="organizeCharacterProfile" class="button secondary" type="button" title="Uses the current profile, legacy guidance, and world lore, background, and canon to propose evidence-backed field assignments. Nothing is saved until you review and save it.">Organize profile with AI…</button>
-        <span id="organizeCharacterProfileProgress" class="organize-profile-progress hidden" role="status" aria-live="polite" aria-label="Organizing character profile">
-          <span class="organize-profile-spinner" aria-hidden="true"></span>Organizing…
-        </span>
       </div>
       <div id="characterStatus" class="status hidden" role="status" aria-live="polite"></div>
       <fieldset class="character-profile-section">
-        <legend>Identity</legend>
+        <legend>Fiction profile · identity</legend>
         <div class="character-profile-grid">
           <label title="Other names, titles, or nicknames used for this character. Separate aliases with commas.">Aliases<input id="characterAliases" maxlength="4000" placeholder="e.g., The Fox, Lantern Bearer"></label>
           <label title="The pronouns used when referring to this character.">Pronouns<input id="characterPronouns" maxlength="2000" placeholder="e.g., she/her"></label>
@@ -1117,7 +1104,9 @@
           <label title="Other story-relevant guidance that does not fit a more specific story field.">Other guidance<textarea id="characterOtherGuidance" placeholder="e.g., Never knowingly abandons a traveler"></textarea></label>
         </div>
       </fieldset>
-      <fieldset class="character-profile-section">
+      <details id="characterAppearance" class="author-advanced-disclosure character-advanced-disclosure">
+        <summary>Appearance (optional, fiction only)</summary>
+        <fieldset class="character-profile-section">
         <legend>Visual identity</legend>
         <div class="character-profile-grid">
           <label title="Species, ancestry, lineage, or other biological or cultural origin when stated.">Ancestry or species<input id="characterAncestryOrSpecies" maxlength="2000" placeholder="e.g., Human"></label>
@@ -1133,23 +1122,45 @@
           <label title="Visible carried gear, jewelry, tools, weapons, or signature accessories.">Equipment and accessories<textarea id="characterEquipmentAndAccessories" placeholder="e.g., Brass lantern and a worn map case"></textarea></label>
           <label title="Any remaining stable visual details not covered by the fields above.">Other visual details<textarea id="characterOtherVisualDetails" placeholder="e.g., Smells faintly of cedar smoke"></textarea></label>
         </div>
-      </fieldset>
-      <fieldset class="character-profile-section">
+        </fieldset>
+      </details>
+      <details id="characterMechanics" class="author-advanced-disclosure character-advanced-disclosure">
+        <summary>Mechanics (optional, kept separate from fiction)</summary>
+        <div id="characterMechanicsFields">
+          <fieldset class="character-collection">
+            <legend title="Optional game-mechanics values for this character. These are kept separate from story and visual profile details.">RPG statistics</legend>
+            <div id="characterStats" class="character-row-list"></div>
+            <button id="addCharacterStat" class="button secondary compact-button" type="button" title="Add an RPG statistic. Mechanics are never copied into story or visual profile fields.">+ Add statistic</button>
+          </fieldset>
+          <fieldset class="character-collection">
+            <legend title="Optional campaign-state values that can change during play. These are not character story or appearance facts.">Starting trackers</legend>
+            <div id="characterTrackers" class="character-row-list"></div>
+            <button id="addCharacterTracker" class="button secondary compact-button" type="button" title="Add a starting campaign tracker. Its rules remain outside the character profile.">+ Add tracker</button>
+          </fieldset>
+        </div>
+      </details>
+      <details id="characterImportedGuidance" class="author-advanced-disclosure character-advanced-disclosure">
+        <summary>Imported and legacy guidance (optional)</summary>
+        <label title="Original free-form guidance retained as read-only source material. Use AI organization to sort supported details into the fields below.">Imported source guidance
+          <textarea id="characterGuidance" rows="4" maxlength="200000" readonly placeholder="Older general guidance is retained here as source material."></textarea>
+        </label>
+        <fieldset class="character-profile-section">
         <legend>Other notes</legend>
         <label title="Source material that does not yet fit a targeted field. It remains available for later review or AI organization.">Unclassified notes<textarea id="characterUnclassifiedNotes" rows="4" placeholder="e.g., The old road recognizes her voice, but no one knows why"></textarea></label>
-      </fieldset>
-      <div id="characterMechanicsFields">
-        <fieldset class="character-collection">
-          <legend title="Optional game-mechanics values for this character. These are kept separate from story and visual profile details.">RPG statistics</legend>
-          <div id="characterStats" class="character-row-list"></div>
-          <button id="addCharacterStat" class="button secondary compact-button" type="button" title="Add an RPG statistic. Mechanics are never copied into story or visual profile fields.">+ Add statistic</button>
         </fieldset>
-        <fieldset class="character-collection">
-          <legend title="Optional campaign-state values that can change during play. These are not character story or appearance facts.">Starting trackers</legend>
-          <div id="characterTrackers" class="character-row-list"></div>
-          <button id="addCharacterTracker" class="button secondary compact-button" type="button" title="Add a starting campaign tracker. Its rules remain outside the character profile.">+ Add tracker</button>
-        </fieldset>
-      </div>
+        <button id="organizeCharacterProfile" class="button secondary" type="button" title="Manually asks AI to propose evidence-backed field assignments from the current profile, legacy guidance, and world lore. Nothing changes until you review and apply proposals.">Organize profile with AI… (manual)</button>
+        <details id="characterGenerator" class="character-generator hidden">
+          <summary>Generate character with default text model (manual)</summary>
+          <div class="character-generator-fields">
+            <label>Character concept or prompt<textarea id="characterGeneratorPrompt" rows="3" maxlength="10000" placeholder="Describe the role, personality, background, appearance, and place in this world."></textarea></label>
+            <button id="generateCharacter" class="button secondary" type="button">Generate character</button>
+          </div>
+          <p class="field-note">Generation only fills this form. Review and apply it; save the parent world draft to persist changes.</p>
+        </details>
+        <span id="organizeCharacterProfileProgress" class="organize-profile-progress hidden" role="status" aria-live="polite" aria-label="Organizing character profile">
+          <span class="organize-profile-spinner" aria-hidden="true"></span>Organizing…
+        </span>
+      </details>
       <div class="button-row character-dialog-actions">
         <button id="deleteCharacter" class="button danger" type="button">Delete character</button>
         <span class="character-action-spacer"></span>

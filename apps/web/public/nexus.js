@@ -549,6 +549,16 @@ function installClickAwayModalDismissal() {
     if (elements.discardChangesDialog.returnValue === "discard" && discardModalTarget?.open) discardModalTarget.close();
     discardModalTarget = null;
   });
+  elements.worldForm.querySelectorAll("details > summary").forEach((summary) => {
+    summary.addEventListener("click", (event) => {
+      if (worldAuthorBusy) event.preventDefault();
+    });
+  });
+  elements.characterDialog.querySelectorAll("details > summary").forEach((summary) => {
+    summary.addEventListener("click", (event) => {
+      if (characterModalBusy) event.preventDefault();
+    });
+  });
 }
 
 installClickAwayModalDismissal();
@@ -2324,9 +2334,13 @@ function setProfileValue(profile, path, value) {
 }
 
 function profileFromForm() {
-  const profile = emptyCharacterProfile();
+  const sourceProfile = characterModalWorkingCharacter?.profile;
+  const profile = sourceProfile && typeof sourceProfile === "object"
+    ? copyJsonValue(sourceProfile)
+    : emptyCharacterProfile();
   for (const [path, id] of Object.entries(CHARACTER_PROFILE_FIELDS)) {
     const raw = elements[id].value.trim();
+    if (sourceProfile && !raw && profileValue(sourceProfile, path) === undefined) continue;
     const value = path === "identity.aliases"
       ? raw.split(",").map((entry) => entry.trim()).filter(Boolean)
       : path === "appearance.distinguishingFeatures"
@@ -2346,6 +2360,7 @@ function profileHasGuidance(profile) {
 
 function populateCharacterForm(character, readOnly = false) {
   characterModalWorkingCharacter = copyJsonValue(character);
+  elements.characterDialog.querySelectorAll(".character-advanced-disclosure").forEach((disclosure) => { disclosure.open = false; });
   elements.characterName.value = String(character.name || "");
   elements.characterGuidance.value = String(character.characterText || "");
   const profile = character.profile || emptyCharacterProfile();
@@ -2376,6 +2391,10 @@ function setCharacterModalControls(readOnly, busy = false) {
   elements.characterDialog.querySelectorAll(".character-edit-row input, .character-row-remove").forEach((control) => {
     control.disabled = readOnly || busy;
   });
+  elements.characterDialog.querySelectorAll("details > summary").forEach((summary) => {
+    summary.setAttribute("aria-disabled", String(busy));
+    summary.tabIndex = busy ? -1 : 0;
+  });
   elements.characterGeneratorPrompt.disabled = busy || characterModalScope === "campaign";
   elements.saveCharacter.disabled = readOnly || busy;
   elements.deleteCharacter.disabled = readOnly || busy;
@@ -2404,6 +2423,7 @@ function openCharacterDialog(characterId = "") {
   }
   editingCharacterId = character?.id || "";
   characterModalScope = "world";
+  elements.characterPlayableContext.textContent = "Playable character · This character is part of the world's playable roster.";
   characterProfileOrganizationResult = null;
   characterProfileOrganizationApplied = false;
   const initial = character || { id: "", name: "", characterText: "", rpgStats: [], defaultTriggers: [], source: { type: "world-library-editor" } };
@@ -2434,12 +2454,20 @@ function characterRowsFromForm(kind, characterId) {
     const values = Object.fromEntries([...editor.querySelectorAll("[data-character-field]")].map((input) => [input.dataset.characterField, input.value.trim()]));
     const hasContent = Object.values(values).some(Boolean);
     if (!hasContent) continue;
-    if (!values.name) throw new Error(`${isStat ? "Every statistic" : "Every tracker"} with content needs a name.`);
+    if (!values.name) {
+      const error = new Error(`${isStat ? "Every statistic" : "Every tracker"} with content needs a name.`);
+      error.control = editor.querySelector('[data-character-field="name"]');
+      throw error;
+    }
     const original = characterRowOriginals.get(editor) || {};
     const id = String(original.id || opaqueCharacterId());
     if (isStat) {
       const numeric = values.value === "" ? 50 : Number(values.value);
-      if (!Number.isInteger(numeric) || numeric < 1 || numeric > 99) throw new Error(`The value for “${values.name}” must be a whole number from 1 to 99.`);
+      if (!Number.isInteger(numeric) || numeric < 1 || numeric > 99) {
+        const error = new Error(`The value for “${values.name}” must be a whole number from 1 to 99.`);
+        error.control = editor.querySelector('[data-character-field="value"]');
+        throw error;
+      }
       result.push({ ...original, id, name: values.name, value: numeric, note: values.note || "" });
     } else {
       result.push({
@@ -2861,13 +2889,19 @@ function setWorldAuthorSaveControlsBusy(session, busy) {
     if (!session || editDialogSessions.get(elements.worldAuthorDialog) !== session || !elements.worldAuthorDialog.open) return null;
     const controls = [...elements.worldForm.querySelectorAll("input, select, textarea, button")];
     const disclosureStates = [...elements.worldForm.querySelectorAll("details")].map((details) => [details, details.open]);
+    const summaryStates = [...elements.worldForm.querySelectorAll("details > summary")].map((summary) => [summary, summary.getAttribute("aria-disabled"), summary.tabIndex]);
     const snapshot = {
       session,
       controls: controls.map((control) => [control, control.disabled]),
       disclosureStates,
+      summaryStates,
       focusTarget: document.activeElement instanceof HTMLElement ? document.activeElement : null
     };
     for (const control of controls) control.disabled = true;
+    for (const [summary] of summaryStates) {
+      summary.setAttribute("aria-disabled", "true");
+      summary.tabIndex = -1;
+    }
     elements.worldAuthorDialog.setAttribute("aria-busy", "true");
     elements.worldAuthorStatus.focus();
     return snapshot;
@@ -2880,12 +2914,19 @@ function setWorldAuthorSaveControlsBusy(session, busy) {
   for (const [disclosure, open] of snapshot.disclosureStates) {
     if (disclosure.isConnected) disclosure.open = open;
   }
+  for (const [summary, ariaDisabled, tabIndex] of snapshot.summaryStates) {
+    if (!summary.isConnected) continue;
+    if (ariaDisabled === null) summary.removeAttribute("aria-disabled");
+    else summary.setAttribute("aria-disabled", ariaDisabled);
+    summary.tabIndex = tabIndex;
+  }
   elements.worldAuthorDialog.removeAttribute("aria-busy");
   if (elements.worldAuthorDialog.open && snapshot.focusTarget?.isConnected && !snapshot.focusTarget.disabled) snapshot.focusTarget.focus();
 }
 
 function populateWorldAuthorForm(content) {
   worldAuthorWorkingContent = copyJsonValue(content || emptyWorldContent());
+  elements.worldGenreToneDisclosure.open = false;
   const overview = worldAuthorWorkingContent.world || {};
   elements.worldTitle.value = overview.title || "";
   elements.worldGenre.value = overview.genre || "";
@@ -3355,6 +3396,13 @@ async function organizeCharacterProfile() {
     character = characterFromForm();
   } catch (error) {
     setCharacterStatus(error.message || String(error), "error");
+    const control = error.control;
+    if (control instanceof HTMLElement) {
+      const disclosure = control.closest("details");
+      if (disclosure) disclosure.open = true;
+      control.focus();
+      if (control.willValidate && !control.validity.valid) control.reportValidity();
+    }
     return;
   }
   const campaignScope = characterModalScope === "campaign";
@@ -3416,6 +3464,7 @@ async function openCampaignCharacterDialog() {
       defaultTriggers: result.defaultTriggers || [],
       source: { type: "campaign-character-profile" }
     });
+    elements.characterPlayableContext.textContent = "Campaign character profile · This editable campaign copy does not change its immutable world version.";
     elements.characterDialog.querySelector(".eyebrow").textContent = "Campaign";
     elements.characterDialogTitle.textContent = "Edit campaign character profile";
     elements.characterDialogDescription.textContent = "This editable campaign copy can diverge without changing its immutable world-version snapshot.";
@@ -3442,6 +3491,13 @@ async function saveCharacterFromModal(event) {
     character = characterFromForm();
   } catch (error) {
     setCharacterStatus(error.message || String(error), "error");
+    const control = error.control;
+    if (control instanceof HTMLElement) {
+      const disclosure = control.closest("details");
+      if (disclosure) disclosure.open = true;
+      control.focus();
+      if (control.willValidate && !control.validity.valid) control.reportValidity();
+    }
     return;
   }
   if (characterModalScope === "campaign") {

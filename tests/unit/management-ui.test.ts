@@ -527,7 +527,7 @@ describe("Nexus management UI contracts", () => {
 
   it("explains every structured character field and the AI organizer on hover", () => {
     expect(managementHtml).toContain('id="organizeCharacterProfile"');
-    expect(managementHtml).toContain("Uses the current profile, legacy guidance, and world lore, background, and canon");
+    expect(managementHtml).toContain("Manually asks AI to propose evidence-backed field assignments from the current profile, legacy guidance, and world lore");
     for (const fieldId of [
       "characterName", "characterGuidance", "characterAliases", "characterPronouns",
       "characterRole", "characterBackground", "characterPersonality", "characterMotivations",
@@ -577,7 +577,7 @@ describe("Nexus management UI contracts", () => {
 
   it("places character organization status above the profile fields", () => {
     const statusIndex = managementHtml.indexOf('id="characterStatus"');
-    expect(statusIndex).toBeGreaterThan(managementHtml.indexOf('id="organizeCharacterProfile"'));
+    expect(statusIndex).toBeGreaterThan(managementHtml.indexOf('id="characterDialogDescription"'));
     expect(statusIndex).toBeLessThan(managementHtml.indexOf('id="characterAliases"'));
   });
 
@@ -856,7 +856,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="characterGenerator" class="character-generator hidden"');
     expect(managementHtml).toContain('id="characterGeneratorPrompt"');
     expect(managementHtml).toContain('id="generateCharacter"');
-    expect(managementHtml).toContain("Generation fills this form only. Review and save the result to change the draft.");
+    expect(managementHtml).toContain("Generation only fills this form. Review and apply it; save the parent world draft to persist changes.");
     expect(managementCss).toContain(".character-dialog-modal");
     expect(managementCss).toContain(".character-edit-row");
     expect(managementCss).toContain(".character-roster-card:hover");
@@ -870,6 +870,29 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("if (!name) throw new Error(\"Enter a character name.\");");
     expect(managementScript).toContain("if (!profileHasGuidance(profile) && !characterText)");
     expect(managementScript).toContain("must be a whole number from 1 to 99");
+  });
+
+  it("groups optional authoring fields without removing their serialized controls", () => {
+    const characterDialog = managementDocument.querySelector("#characterDialog")!;
+    const appearance = characterDialog.querySelector("#characterAppearance")!;
+    const mechanics = characterDialog.querySelector("#characterMechanics")!;
+    const imported = characterDialog.querySelector("#characterImportedGuidance")!;
+    expect(appearance.querySelector("#characterClothing")).not.toBeNull();
+    expect(mechanics.querySelector("#characterStats")).not.toBeNull();
+    expect(mechanics.querySelector("#characterTrackers")).not.toBeNull();
+    expect(imported.querySelector("#characterGuidance")?.hasAttribute("readonly")).toBe(true);
+    expect(imported.querySelector("#characterUnclassifiedNotes")).not.toBeNull();
+    expect(imported.querySelector("#organizeCharacterProfile")?.textContent).toContain("manual");
+    expect(characterDialog.querySelector(".character-playable-context")?.textContent).toContain("Playable character");
+    expect(managementDocument.querySelector("#world-author-overview #worldTitle")).not.toBeNull();
+    expect(managementDocument.querySelector("#worldGenreToneDisclosure #worldGenre")).not.toBeNull();
+    expect(managementDocument.querySelector("#worldGenreToneDisclosure #worldTone")).not.toBeNull();
+    const ids = [...managementDocument.querySelectorAll("[id]")].map((element) => element.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(managementScript).toContain("const profile = sourceProfile && typeof sourceProfile === \"object\"");
+    expect(managementScript).toContain("error.control = editor.querySelector('[data-character-field=\"value\"]')");
+    expect(managementScript).toContain("if (disclosure) disclosure.open = true;");
+    expect(managementScript).toContain("if (worldAuthorBusy) event.preventDefault();");
   });
 
   it("offers character generation only through an available default text model and never auto-saves it", () => {

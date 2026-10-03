@@ -163,6 +163,11 @@ textarea { resize: vertical; }
 .world-editor-heading h3 { margin: 0 0 5px; color: var(--gold); }
 .world-editor-heading label, .world-fields label, .campaign-controls label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .world-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.author-advanced-disclosure { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: color-mix(in srgb, var(--panel) 92%, var(--line)); }
+.author-advanced-disclosure > summary { cursor: pointer; color: var(--text); font-weight: 700; }
+.author-advanced-disclosure > summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
+.author-advanced-disclosure > summary[aria-disabled="true"] { cursor: default; }
+.author-disclosure-fields { margin: 12px 0 2px; }
 .world-cover-editor { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: #10152280; }
 .world-cover-preview { width: min(240px, 100%); aspect-ratio: 2 / 3; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
 .quick-create-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
@@ -500,6 +505,9 @@ button.dashboard-card { width: 100%; padding: 0; cursor: pointer; font: inherit;
 .character-generator-fields label, .character-core-fields label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .character-generator .field-note { display: block; margin: 8px 0 0; }
 .character-core-fields { display: grid; gap: 12px; }
+.character-playable-context { margin: 0; }
+.character-advanced-disclosure { margin: 2px 0; }
+.character-advanced-disclosure > fieldset, .character-advanced-disclosure > label { margin-top: 12px; }
 .character-collection { margin: 0; }
 .character-row-list { display: grid; gap: 8px; margin-bottom: 10px; }
 .character-edit-row { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(110px, .45fr) minmax(180px, 1.4fr) auto; gap: 8px; align-items: end; }
