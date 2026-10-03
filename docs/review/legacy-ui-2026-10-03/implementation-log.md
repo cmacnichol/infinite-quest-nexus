@@ -24,7 +24,6 @@ The user authorized implementation of the [audited plan](../../superpowers/plans
 | T09 | Sticky reader navigation, contextual choice wording and visible scene openings | Sol accepted at ca51fed4 after measured header/toolbar offsets and a settled-scroll regression. 8 browser cases cover desktop, narrow and wrapped layouts; 96 unique associated units and current types/build/boundaries passed. Manual generation viewport restoration is preserved. |
 | T17 | Guided world draft steps, scoped readiness and protected pending Save | Sol accepted at 80a4efa3 after preventing new worlds from displaying a previous world's assessment. Independent immutable browser: 17 passed (11 readiness plus 6 dismissal). Partial drafts remain saveable, published readiness names its world/version, and creation preserves existing campaign pins. |
 | I03 | Nexus management fixtures aligned with current snapshot and selection guards | Sol accepted at 8bb98b6a after immutable 83-test rerun with zero failures, skips or errors. Source-slice guards prevent vacuous assertions; original behavior checks remain. No product change. |
-
 | I04 | Matching-query history continuation and correction-only cursor integration coverage | Sol accepted at 31bf4c47. Independent real PostgreSQL: 4 passed, zero skipped; strict focused types passed. No runtime change; original accepted narration and accepted count remain unchanged by the correction overlay. |
 
 T01 commits: `f87113ff`, `7524e48b`, `63ea4f60`. I01 commits: `550b9b9e`, `2c48deb0`.
