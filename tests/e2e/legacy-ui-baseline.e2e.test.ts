@@ -1,11 +1,13 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 declare global {
   interface Window {
     __legacyUiLongTasks?: number[];
+    __legacyUiLifecycleLongTasks?: Array<{ durationMs: number; startTime: number }>;
+    __legacyUiInducedLongTaskStartedAt?: number;
     __legacyUiNativeLongTaskSupported?: boolean;
     __legacyUiDelayedResult?: { status: number; body: unknown };
   }
@@ -185,32 +187,53 @@ test("route instrumentation holds delays, applies method-specific failures, and 
   expect(writeRequest.status).toBe(200);
 });
 
-test("long-task measurements are collected before each document is replaced", async ({ page }) => {
+test("long-task measurements are collected before each document is replaced", async ({ page }, testInfo) => {
   await page.addInitScript(() => {
-    window.__legacyUiLongTasks = [];
+    window.__legacyUiLifecycleLongTasks = [];
     if ("PerformanceObserver" in window) {
       new PerformanceObserver(list => {
-        for (const entry of list.getEntries()) window.__legacyUiLongTasks?.push(entry.duration);
+        for (const entry of list.getEntries()) {
+          window.__legacyUiLifecycleLongTasks?.push({ durationMs: entry.duration, startTime: entry.startTime });
+        }
       }).observe({ type: "longtask", buffered: true });
     }
   });
-  const collected: Array<{ phase: string; durationMs: number }> = [];
+  const collected: Array<{ phase: string; durationMs: number; startTime: number | null }> = [];
   const syntheticFallbackPhases: string[] = [];
+  const nativeSupportByPhase: Record<string, boolean> = {};
   const collectBeforeReplacement = async (phase: string) => {
-    const { durations, nativeSupported } = await page.evaluate(async () => {
-      const startedAt = performance.now();
-      while (performance.now() - startedAt < 70) { /* Induce one measurable browser long task. */ }
-      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const result = [...(window.__legacyUiLongTasks ?? [])];
-      window.__legacyUiLongTasks = [];
-      const nativeSupported = PerformanceObserver.supportedEntryTypes.includes("longtask");
-      return { durations: result, nativeSupported };
-    });
-    if (durations.length === 0) {
-      syntheticFallbackPhases.push(phase);
-      durations.push(71);
+    const nativeSupported = await page.evaluate(() => "PerformanceObserver" in window
+      && PerformanceObserver.supportedEntryTypes.includes("longtask"));
+    nativeSupportByPhase[phase] = nativeSupported;
+    await page.evaluate(() => { window.__legacyUiLifecycleLongTasks = []; });
+    await page.evaluate(() => new Promise<void>(resolve => {
+      setTimeout(() => {
+        window.__legacyUiInducedLongTaskStartedAt = performance.now();
+        const startedAt = performance.now();
+        while (performance.now() - startedAt < 70) { /* Induce one measurable timer-task long task. */ }
+        resolve();
+      }, 0);
+    }));
+    const inducedStartedAt = await page.evaluate(() => window.__legacyUiInducedLongTaskStartedAt ?? null);
+    if (nativeSupported) {
+      expect(inducedStartedAt).not.toBeNull();
+      const taskStartedAt = inducedStartedAt ?? 0;
+      await page.waitForFunction(startedAt => window.__legacyUiLifecycleLongTasks?.some(entry => entry.durationMs >= 50
+        && entry.startTime >= startedAt && entry.startTime <= startedAt + 20) ?? false, taskStartedAt, { timeout: 2_000 });
     }
-    collected.push(...durations.map(durationMs => ({ phase, durationMs })));
+    const durations = await page.evaluate(() => {
+      const result = [...(window.__legacyUiLifecycleLongTasks ?? [])];
+      window.__legacyUiLifecycleLongTasks = [];
+      return result;
+    });
+    if (!nativeSupported) {
+      syntheticFallbackPhases.push(phase);
+      durations.push({ durationMs: 71, startTime: -1 });
+    } else {
+      const taskStartedAt = inducedStartedAt ?? 0;
+      expect(durations.some(entry => entry.durationMs >= 50 && entry.startTime >= taskStartedAt && entry.startTime <= taskStartedAt + 20)).toBe(true);
+    }
+    collected.push(...durations.map(entry => ({ phase, durationMs: entry.durationMs, startTime: entry.startTime < 0 ? null : entry.startTime })));
   };
 
   await page.goto(`${origin}/nexus/index.html`);
@@ -220,11 +243,14 @@ test("long-task measurements are collected before each document is replaced", as
   await collectBeforeReplacement("second-document");
   expect(collected.map(entry => entry.phase)).toEqual(expect.arrayContaining(["dashboard", "second-document"]));
   expect(collected.every(entry => entry.durationMs >= 50)).toBe(true);
+  expect(syntheticFallbackPhases.every(phase => nativeSupportByPhase[phase] === false)).toBe(true);
   const lifecycleEvidence = {
-    source: "induced long tasks observed natively when delivered; deterministic synthetic samples verify per-document collection when a minimal page emits none",
-    nativeLongTaskSupported: await page.evaluate(() => PerformanceObserver.supportedEntryTypes.includes("longtask")),
+    source: "bounded native observer polling after an induced task when supported; deterministic synthetic entries only for unsupported documents",
+    nativeSupportByPhase,
     syntheticFallbackPhases,
     entries: collected
   };
-  await test.info().attach("long-task-lifecycle.json", { body: JSON.stringify(lifecycleEvidence, null, 2), contentType: "application/json" });
+  const lifecyclePath = testInfo.outputPath("long-task-lifecycle.json");
+  await writeFile(lifecyclePath, JSON.stringify(lifecycleEvidence, null, 2));
+  await testInfo.attach("long-task-lifecycle.json", { path: lifecyclePath, contentType: "application/json" });
 });
