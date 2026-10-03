@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { generationRequestSchema } from "../../packages/contracts/src/generation.js";
+import { ACTIVITY_DIAGNOSTIC_MESSAGES } from "../../packages/contracts/src/activity.js";
 import { storyImportRequestSchema } from "../../packages/contracts/src/imports.js";
 import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { createPostgresGenerationCommandRepository } from "../../packages/database/src/generation-repository.js";
@@ -128,6 +129,24 @@ integration("Persistent generation activity", () => {
     expect(snapshot.diagnostic).toEqual({ code: "provider_transport_error", message: "The provider connection failed." });
     expect(JSON.stringify(snapshot)).not.toContain("PRIVATE-");
     expect(snapshot.diagnostic.code).not.toBe("provider_request_timeout");
+  });
+  it.each(["provider_rate_limited", "provider_authentication_failed", "provider_request_timeout", "provider_transport_error"] as const)("preserves the current %s diagnostic when the executor persists a generic failure code", async (code) => {
+    const imported = await campaign(), queued = await queue(imported.campaignId, "Inspect.");
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    await execution.claimNext({ workerId: "executor-shape", leaseSeconds: 30 });
+    const scope = { ownerUserId, jobId: queued.id, workerId: "executor-shape" };
+    // Matches the real executor catch: generic durable code and CURRENT typed diagnostic.
+    expect(await execution.markFailed({ ...scope, errorCode: "generation_failed", errorMessage: "The generation could not be completed.", recoveryMetadata: {},
+      lastFailureDiagnostic: { version: 1, category: "unknown", code, phase: "generating", attemptNumber: 1, occurredAt: new Date().toISOString() }
+    })).toBe(true);
+    let snapshot = (await pool.query("SELECT snapshot FROM activity_event_outbox WHERE source_id=$1 ORDER BY activity_revision DESC LIMIT 1", [queued.id])).rows[0].snapshot;
+    expect(snapshot.diagnostic).toEqual({ code, message: ACTIVITY_DIAGNOSTIC_MESSAGES[code] });
+    await commands().retry({ ownerUserId, jobId: queued.id });
+    await execution.claimNext({ workerId: "executor-shape", leaseSeconds: 30 });
+    expect(await execution.markFailed({ ...scope, errorCode: "generation_failed", errorMessage: "PRIVATE-ERROR-CANARY", recoveryMetadata: {} })).toBe(true);
+    snapshot = (await pool.query("SELECT snapshot FROM activity_event_outbox WHERE source_id=$1 ORDER BY activity_revision DESC LIMIT 1", [queued.id])).rows[0].snapshot;
+    expect(snapshot.diagnostic).toEqual({ code: "generation_failed", message: ACTIVITY_DIAGNOSTIC_MESSAGES.generation_failed });
+    expect(JSON.stringify(snapshot)).not.toContain("PRIVATE-");
   });
   it("staleWorkerCapturesNothing and foreign owners cannot capture", async () => {
     const imported = await campaign(), queued = await queue(imported.campaignId, "Inspect.");

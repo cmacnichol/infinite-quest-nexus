@@ -2474,7 +2474,7 @@ export function createPostgresGenerationExecutionRepository(
           [input.jobId, input.ownerUserId, input.workerId, input.errorCode,
             input.errorMessage, json(input.recoveryMetadata), input.lastFailureDiagnostic ? json(input.lastFailureDiagnostic) : null]
         );
-        if (changed(result)) await captureGenerationActivity(client, input.jobId, input.ownerUserId, ["generation.failed"]);
+        if (changed(result)) await captureGenerationActivity(client, input.jobId, input.ownerUserId, ["generation.failed"], input.lastFailureDiagnostic);
         return changed(result);
       });
     }

@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { ACTIVITY_DIAGNOSTIC_MESSAGES, type ActivityEventDraft } from "../../contracts/src/activity.js";
-import { projectGenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
+import { projectGenerationFailureDiagnostic, type GenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
 import { captureActivity } from "./activity-repository.js";
 import type { DatabaseClient } from "./pool.js";
 
 type GenerationKind = Extract<ActivityEventDraft, { source: "generation" }>["kind"];
 
 /** Call only after a successful authoritative mutation, on its transaction client. */
-export async function captureGenerationActivity(client: DatabaseClient, jobId: string, ownerUserId: string, kinds: readonly GenerationKind[]): Promise<void> {
+export async function captureGenerationActivity(client: DatabaseClient, jobId: string, ownerUserId: string, kinds: readonly GenerationKind[], currentFailureDiagnostic?: GenerationFailureDiagnostic): Promise<void> {
   const result = await client.query<{
     campaign_id: string; status: Extract<ActivityEventDraft, { source: "generation" }>["status"];
     activity_revision: string; attempts: number; expected_turn_number: number; result_turn_id: string | null;
@@ -18,8 +18,8 @@ export async function captureGenerationActivity(client: DatabaseClient, jobId: s
         error_code, updated_at AS occurred_at`, [jobId, ownerUserId]);
   const row = result.rows[0];
   if (!row) throw new Error("Activity source disappeared in its mutation transaction.");
-  // Project the current mutation's code only. Saved failures may describe an earlier attempt.
-  const failure = projectGenerationFailureDiagnostic({ version: 1, category: "unknown", code: row.error_code,
+  // Only this invocation may supply structured cause evidence; stored failures may describe an earlier attempt.
+  const failure = projectGenerationFailureDiagnostic(currentFailureDiagnostic) ?? projectGenerationFailureDiagnostic({ version: 1, category: "unknown", code: row.error_code,
     phase: "activity", attemptNumber: row.attempts, occurredAt: row.occurred_at.toISOString() })
     ?? { code: "generation_failed" as const, message: ACTIVITY_DIAGNOSTIC_MESSAGES.generation_failed! };
   for (const [ordinal, kind] of kinds.entries()) {
