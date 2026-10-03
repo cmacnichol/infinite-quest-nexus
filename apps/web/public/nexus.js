@@ -2046,7 +2046,6 @@ async function openWorldDetails(worldId) {
 async function openWorldManagement(worldId) {
   if (!worldId) return;
   const selectionIntentEpoch = ++worldSelectionIntentEpoch;
-  worldSelectionId = worldId;
   dashboardWorldDetailsSelectionEpoch += 1;
   elements.worldDetailsDialog.close();
   if (window.location.hash !== "#world-library") window.location.hash = "#world-library";
@@ -2618,7 +2617,6 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
 
 async function loadWorldResult(worldId, selectionIntentEpoch, selectionOptions = {}) {
   invalidateDashboardWorldDetails(worldId);
-  if (selectionIntentEpoch === worldSelectionIntentEpoch) worldSelectionId = worldId;
   await loadWorlds(worldId, { ...selectionOptions, selectionIntentEpoch, preferRequestedWorld: true });
 }
 

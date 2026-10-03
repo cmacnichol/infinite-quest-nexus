@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T05-fix2");
+const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T05-fix3");
 const worldA = {
   id: "world-a",
   title: "World Alpha",
@@ -561,4 +561,59 @@ test("a_later_world_selection_wins_over_a_delayed_portable_import_result", async
   await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
   await expect(page.locator('#worldManagementCarousel [data-world-id="world-b"]')).toHaveAttribute("aria-pressed", "true");
   await page.screenshot({ path: resolve(evidenceDirectory, "delayed-import-result-respects-later-selection.png") });
+});
+
+test("a_stayed_import_result_does_not_become_the_world_selected_by_a_later_refresh", async ({ page }) => {
+  let releaseImport!: () => void;
+  const importGate = new Promise<void>((resolve) => { releaseImport = resolve; });
+  worldImportGates.push(importGate);
+  await openWorldManagement(page);
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await page.evaluate(() => { window.location.hash = "#imports"; });
+  await expect(page.locator("#imports")).toBeVisible();
+  await page.locator("#storyFile").setInputFiles({
+    name: "portable.world.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ format: "infinite-quest-world", formatVersion: 1, title: "World Gamma", content: {} }))
+  });
+  await expect(page.locator("#importStory")).toBeEnabled();
+  const importRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/imports/world");
+  await page.locator("#importStory").click();
+  await importRequest;
+  await page.evaluate(() => { window.location.hash = "#world-library"; });
+  await expect(page.locator("#world-library")).toBeVisible();
+  await page.locator("#editWorldDraft").click();
+  await expect(page.locator("#worldAuthorDialog")).toBeVisible();
+  await page.locator("#worldTitle").fill("Unsaved Alpha edit");
+  const listsBeforeRelease = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
+  releaseImport();
+  await expect.poll(() => apiEvents.some((event) => event.method === "POST" && event.path === "/imports/world" && event.status === 200)).toBe(true);
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(listsBeforeRelease);
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await page.screenshot({ path: resolve(evidenceDirectory, "import-result-dirty-stay-before-refresh.png") });
+  await page.locator('#discardChangesDialog button[value="keep"]').click();
+  await expect(page.locator("#worldAuthorDialog")).toBeVisible();
+  await expect(page.locator("#worldTitle")).toHaveValue("Unsaved Alpha edit");
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-a"]')).toHaveAttribute("aria-pressed", "true");
+  expect(apiEvents.some((event) => event.method === "GET" && event.path === "/worlds/world-c")).toBe(false);
+  expect(apiEvents.some((event) => ["PUT", "PATCH", "DELETE"].includes(event.method))).toBe(false);
+
+  await page.locator("#cancelWorldAuthor").click();
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await page.locator('#discardChangesDialog button[value="discard"]').click();
+  await expect(page.locator("#worldAuthorDialog")).toBeHidden();
+  const worldListsBeforeRefresh = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
+  const worldDetailReadsBeforeRefresh = apiEvents.filter((event) => event.method === "GET" && /^\/worlds\/world-[ac]$/u.test(event.path)).length;
+  await page.locator("#refreshWorlds").click();
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(worldListsBeforeRefresh);
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && /^\/worlds\/world-[ac]$/u.test(event.path)).length).toBeGreaterThan(worldDetailReadsBeforeRefresh);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-a"]')).toHaveAttribute("aria-pressed", "true");
+  expect(apiEvents.some((event) => event.method === "GET" && event.path === "/worlds/world-c")).toBe(false);
+  expect(apiEvents.some((event) => ["PUT", "PATCH", "DELETE"].includes(event.method))).toBe(false);
+  await page.screenshot({ path: resolve(evidenceDirectory, "import-result-dirty-stay-refresh-keeps-alpha.png") });
 });
