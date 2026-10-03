@@ -1,3 +1,4 @@
+import { projectGenerationFailureDiagnostic } from "../../contracts/src/generation-review.js";
 import {
   campaignBranchSchema,
   campaignRewindSchema,
@@ -1566,6 +1567,7 @@ type CampaignSyncRow = {
   recoveryReviewSummary: unknown;
   recoveryResponseFormat: unknown;
   recoveryErrorCode: string | null;
+  recoveryFailureDiagnostic: unknown;
   recoveryResultIsRecent: boolean | null;
   latestTurnId: string | null;
   latestTurnNumber: number | null;
@@ -1612,6 +1614,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
                  recovery."recoveryReviewSummary" AS "recoveryReviewSummary",
                  recovery."responseFormat" AS "recoveryResponseFormat",
                  recovery.error_code AS "recoveryErrorCode",
+                 recovery."failureDiagnostic" AS "recoveryFailureDiagnostic",
                 latest_turn.id AS "latestTurnId", latest_turn.turn_number AS "latestTurnNumber",
                 (recovery.result_turn_id IS NOT NULL AND EXISTS (
                   SELECT 1 FROM (
@@ -1656,6 +1659,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
               )
               SELECT id, status, operation_kind, expected_turn_number, attempts, error_code,
                      result_turn_id, replacement_turn_id, recovery_metadata,
+                     expanded_private->'lastFailureDiagnostic' AS "failureDiagnostic",
                      ${generationReviewSummaryProjection("expanded_private")} AS "recoveryReviewSummary",
                      ${generationResponseFormatProjection("expanded_private")} AS "responseFormat"
                 FROM expanded_job
@@ -1756,6 +1760,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
           attempts: row.recoveryAttempts,
           ...publicGenerationError(row.recoveryStatus),
           diagnostic: projectSafeGenerationDiagnostic(objectValue(row.recoveryMetadata).diagnostic),
+          failureDiagnostic: projectGenerationFailureDiagnostic(row.recoveryFailureDiagnostic),
            review: publicGenerationReview(row.recoveryReviewSummary, row.recoveryStatus),
            responseFormat: projectGenerationResponseFormat({ ...(typeof row.recoveryResponseFormat === "object" && row.recoveryResponseFormat !== null ? row.recoveryResponseFormat as Record<string, unknown> : {}), errorCode: row.recoveryErrorCode }),
           resultTurnId: row.recoveryResultTurnId

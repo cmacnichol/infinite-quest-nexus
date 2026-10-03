@@ -1,3 +1,4 @@
+import { copySnapshot } from "../../../packages/client-core/src/generation/projection.js";
 import { describe, expect, it } from "vitest";
 import type { GenerationStreamSnapshot } from "../../../packages/contracts/src/index.js";
 import { createGenerationMachine } from "../../../packages/client-core/src/generation/machine.js";
@@ -24,6 +25,19 @@ function snapshot(overrides: Partial<GenerationStreamSnapshot> = {}): Generation
 }
 
 describe("generation machine", () => {
+  it("retains failure reasons in copied snapshots and observes diagnostic updates", () => {
+    const machine = createGenerationMachine();
+    const failed = snapshot({ status: "failed", errorCode: "generation_failed", errorMessage: "Generation could not be completed." });
+    machine.observe(failed);
+    const failureDiagnostic = { code: "provider_rate_limited" as const, message: "The provider rate limit was reached. Wait before retrying." };
+    for (const operation of [{ operationKind: "append" as const, replacementTurnId: null },
+      { operationKind: "replace_latest" as const, replacementTurnId: "33333333-3333-4333-8333-333333333333" }]) {
+      const copied = copySnapshot(snapshot({ ...operation, failureDiagnostic }));
+      expect(copied.failureDiagnostic).toEqual(failureDiagnostic);
+      expect(copied.failureDiagnostic).not.toBe(failureDiagnostic);
+    }
+    expect(machine.observe({ ...failed, failureDiagnostic })).toMatchObject({ kind: "accepted", snapshot: { failureDiagnostic } });
+  });
   it("reconciles a review receipt through the same-attempt queue and rejects a delayed pending review", () => {
     const machine = createGenerationMachine();
     const pending = snapshot({

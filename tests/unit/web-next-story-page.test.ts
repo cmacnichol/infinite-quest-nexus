@@ -1034,6 +1034,20 @@ describe("Story Player page shell", () => {
     mounted.dispose();
   });
 
+  it("displays the specific failure after reloading a failed generation", async () => {
+    const page = fixture();
+    const loaded = sync({ campaign: { ...sync().campaign, activeTurnNumber: 1 }, activeTurnNumber: 1, turns: turnWindow([1]), generationRecovery: {
+      id: "55555555-5555-4555-8555-555555555555", status: "failed", expectedTurnNumber: 2, attempts: 1,
+      errorCode: "generation_failed", errorMessage: "Generation could not be completed.", resultTurnId: null,
+      operationKind: "append", replacementTurnId: null,
+      failureDiagnostic: { code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying." }
+    } });
+    const mounted = mountStoryPlayerPage(page.root, { campaignId, turnNumber: 1 }, composition({ syncStatus: vi.fn().mockResolvedValue(loaded) }));
+    await settle();
+    expect(page.document.querySelector("[data-story-recovery]")?.textContent).toContain("The provider rate limit was reached. Wait before retrying.");
+    mounted.dispose();
+  });
+
   it("restores a retained scene prompt as an action when the current campaign policy no longer permits scenes", async () => {
     const page = fixture();
     const loaded = sync({

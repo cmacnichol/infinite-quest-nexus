@@ -53,6 +53,8 @@ integration("play-loop read performance", () => {
       const canary = "PRIVATE_SYNC_OVERSIZED_CANARY";
       const evidence = canary + randomBytes(8 * 1024 * 1024).toString("base64");
       const source = {
+        lastFailureDiagnostic: { version: 1, category: "provider_rejection", code: "provider_rate_limited",
+          phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T14:14:35.000Z" },
         queuedResponsePolicy: { version: 1, policy: "auto", model: "projection-model" },
         generationReview: { version: 1, reviewId: randomUUID(), revision: 1, state: "pending", stage: "continuity", candidateScope: "final",
           reasons: ["review_unavailable"], eligibility: { complete: true, structurallyValid: true, mechanicsClean: true, authorityValid: true, stageComplete: true, retryAvailable: true },
@@ -90,7 +92,12 @@ integration("play-loop read performance", () => {
           expect(JSON.stringify(actual)).not.toContain(canary);
           expect(Buffer.byteLength(JSON.stringify(actual))).toBeLessThan(32_768);
           expect(actual.syncToken).toBe(expected.syncToken);
-          if (status === "recoverable") expect(JSON.stringify(actual)).toContain(source.generationReview.reviewId);
+          if (status === "recoverable") {
+            expect(JSON.stringify(actual)).toContain(source.generationReview.reviewId);
+            expect(actual.projection.generationRecovery).toMatchObject({ failureDiagnostic: {
+              code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying."
+            } });
+          }
           expect(await client.query("SELECT md5(orchestration_private::text) AS hash FROM generation_jobs WHERE id=$1", [job.rows[0]!.id])).toEqual(hash);
         }
         await expect(runPostgresWorldCampaignCommandWithClient(client, (transaction) =>

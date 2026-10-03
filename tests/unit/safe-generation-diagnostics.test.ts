@@ -17,6 +17,18 @@ describe("safe public generation diagnostics", () => {
     })).toEqual({ code: "empty_output", message: "The provider returned no usable output." });
     expect(projectGenerationFailureDiagnostic({ code: "private_provider_token", message: privateMessage })).toBeNull();
   });
+  it("preserves rate limits through the public failure and recovery contracts", () => {
+    const failureDiagnostic = projectGenerationFailureDiagnostic({
+      version: 1, category: "provider_rejection", code: "provider_rate_limited", phase: "story_generation",
+      attemptNumber: 1, occurredAt: "2026-10-03T14:14:35.000Z", message: "PRIVATE_PROVIDER_CANARY"
+    });
+    expect(failureDiagnostic).toEqual({ code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying." });
+    const recovery = generationRecoverySchema.parse({ id: "55555555-5555-4555-8555-555555555555", status: "failed",
+      expectedTurnNumber: 2, attempts: 1, operationKind: "append", replacementTurnId: null, resultTurnId: null,
+      errorCode: "generation_failed", errorMessage: "Generation could not be completed.", failureDiagnostic });
+    expect(recovery.failureDiagnostic).toEqual(failureDiagnostic);
+    expect(JSON.stringify(recovery)).not.toContain("PRIVATE_PROVIDER_CANARY");
+  });
   it("uses server review eligibility ahead of an older discard-and-reenqueue diagnostic", () => {
     const presentation = generationReviewPresentation({
       version: 1, reviewId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", revision: 1, state: "pending",

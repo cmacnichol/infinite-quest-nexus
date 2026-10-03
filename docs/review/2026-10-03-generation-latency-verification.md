@@ -166,3 +166,21 @@ database run, not a verification of the shared bootstrap.
 Reverting the two production changes restores previous SQL/shadow execution.
 Saved settings and private evidence need no rollback transformation. Provider
 inference duration is outside this change.
+
+## Merge-conflict verification (2026-10-03)
+
+Merged `main` at `30a884a1230b80cf844879c027a380a374b849ac`, preserving its safe
+provider-failure diagnostic projection alongside the selected-row JSON expansion.
+The recovery lane reads `lastFailureDiagnostic` from `expanded_private` and keeps
+the existing safe diagnostic projector. The existing oversized sync case now
+asserts a non-null rate-limit reason; no test case was added.
+
+Independent Standards and Spec reviews found no actionable issues. Post-resolution
+verification passed 4,738 unit tests (44 existing platform skips), 65 PostgreSQL
+tests in six focused files, repository checks, build, and whitespace checks.
+The existing mocked browser case passed reload, safe rate-limit guidance, and
+explicit retry at desktop/mobile sizes. It required the environment-only
+`NODE_OPTIONS=--import tsx` loader to resolve workspace TypeScript imports;
+tracked browser infrastructure is unchanged. Captures and logs remain in ignored
+`tmp/generation-latency/`. The earlier full PostgreSQL figures above describe the
+pre-merge publication run; this resolution received focused PostgreSQL checks.
