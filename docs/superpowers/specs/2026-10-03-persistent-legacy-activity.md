@@ -1,5 +1,7 @@
 # Persistent Legacy Story Activity Feed Design
 
+Implementation status: later user instructions authorized execution with subagents. The historical planning-only statements below describe the original planning handoff. See [tracked acceptance evidence](../../review/legacy-activity-verification.md) for the implemented result and verification limits.
+
 Date: 2026-10-03
 Status: Proposed implementation design; no product code implemented.
 Baseline: `30a884a1230b80cf844879c027a380a374b849ac`.

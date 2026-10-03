@@ -1,5 +1,7 @@
 # Persistent Legacy Story Activity Feed Implementation Plan
 
+Implementation status: later user instructions authorized execution with subagents. The historical planning-only statements below describe the original planning handoff. See [tracked acceptance evidence](../../review/legacy-activity-verification.md) for the implemented result and verification limits.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. The current request is planning only; this document does not authorize product implementation.
 
 **Goal:** Deliver durable campaign activity with a bounded browser cache, useful safe errors, and reliable reload/reconnect behavior in the legacy Story player.
