@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { providerFailureEvidenceSchema, providerFailureProjectionSchema, projectProviderFailure, projectProviderFailureEvidence } from "./provider-failure.js";
 import { continuityReviewSchema } from "./story-continuity-review.js";
 
 /** Safe provider metadata only; raw output and provider-private references never enter this record. */
@@ -96,12 +97,14 @@ export const generationFailureDiagnosticSchema = z.strictObject({
   code: z.enum(["provider_rate_limited", "provider_authentication_failed", "provider_route_unavailable", "provider_model_unavailable", "provider_refusal", "provider_schema_invalid", "provider_schema_unsupported", "invalid_schema", "mechanics_leak", "scene_coverage", "provider_request_timeout", "provider_transport_error", "empty_output", "output_limit", "stale_campaign", "generation_failed"]),
   phase: z.string().trim().min(1).max(80),
   attemptNumber: z.number().int().min(0),
-  occurredAt: z.iso.datetime()
+  occurredAt: z.iso.datetime(),
+  providerFailure: providerFailureEvidenceSchema.optional().catch(undefined)
 });
 
 export const generationFailureDiagnosticProjectionSchema = z.strictObject({
   code: z.enum(["provider_rate_limited", "provider_authentication_failed", "provider_route_unavailable", "provider_model_unavailable", "provider_refusal", "provider_schema_invalid", "provider_schema_unsupported", "provider_request_timeout", "provider_transport_error", "empty_output", "output_limit", "generation_failed"]),
-  message: z.string().trim().min(1).max(160)
+  message: z.string().trim().min(1).max(160),
+  providerFailure: providerFailureProjectionSchema.optional().catch(undefined)
 });
 
 const publicFailureDiagnosticMessages = {
@@ -122,17 +125,20 @@ const publicFailureDiagnosticMessages = {
 /** Projects a durable private failure category to a fixed public vocabulary. */
 export function projectGenerationFailureDiagnostic(value: unknown): GenerationFailureDiagnosticProjection | null {
   const source = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+  const evidence = projectProviderFailureEvidence(source.providerFailure);
   const parsed = generationFailureDiagnosticSchema.safeParse({
     version: source.version,
     category: source.category,
     code: source.code,
     phase: source.phase,
     attemptNumber: source.attemptNumber,
-    occurredAt: source.occurredAt
+    occurredAt: source.occurredAt,
+    ...(evidence ? { providerFailure: evidence } : {})
   });
   if (!parsed.success || !(parsed.data.code in publicFailureDiagnosticMessages)) return null;
   const code = parsed.data.code as keyof typeof publicFailureDiagnosticMessages;
-  return { code, message: publicFailureDiagnosticMessages[code] };
+  const providerFailure = projectProviderFailure(parsed.data.providerFailure);
+  return { code, message: publicFailureDiagnosticMessages[code], ...(providerFailure ? { providerFailure } : {}) };
 }
 
 export const generationReviewV1SummarySchema = z.strictObject({

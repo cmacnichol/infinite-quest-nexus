@@ -164,3 +164,13 @@ describe("safe public generation diagnostics", () => {
     ]));
   });
 });
+
+describe("optional provider failure compatibility", () => {
+  it("preserves the fixed public failure when nested evidence is malformed or unknown", () => {
+    for (const providerFailure of [{ version: 2, raw: "PRIVATE_CANARY" }, { version: 1, source: "bad" }]) {
+      expect(projectGenerationFailureDiagnostic({ version: 1, category: "provider_timeout", code: "provider_request_timeout",
+        phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T14:00:00.000Z", providerFailure }))
+        .toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
+    }
+  });
+});

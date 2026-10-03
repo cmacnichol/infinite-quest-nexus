@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   generationJobSnapshotSchema,
+  generationFailureDiagnosticProjectionSchema,
   generationReviewDecisionRequestSchema,
   generationReviewReasonCodeSchema,
   projectGenerationValidationIssues,
@@ -333,5 +334,13 @@ describe("generation review contracts", () => {
       resumeDependencies: { generationContext: {}, producingProviderResult: {}, stageState: {}, frozenCommitInputs: {}, replacementTarget: null },
       story: { narration: "Mira waits at the quay.", choices: ["Wait", "Look", "Listen", "Leave"], custom_action_suggestion: "Wait", scratchpad: "Mira waits.", tracker_updates: [], image_prompt: "A quiet quay.", continuity_summary: "Mira waits at the quay.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }
     }).success).toBe(false);
+  });
+});
+
+describe("provider failure public transport compatibility", () => {
+  it("drops malformed nested evidence without dropping the enclosing snapshot failure", () => {
+    const result = generationFailureDiagnosticProjectionSchema.parse({ code: "provider_request_timeout",
+      message: "The provider request timed out.", providerFailure: { version: 99, raw: "PRIVATE_CANARY" } });
+    expect(result).toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
   });
 });
