@@ -184,3 +184,18 @@ explicit retry at desktop/mobile sizes. It required the environment-only
 tracked browser infrastructure is unchanged. Captures and logs remain in ignored
 `tmp/generation-latency/`. The earlier full PostgreSQL figures above describe the
 pre-merge publication run; this resolution received focused PostgreSQL checks.
+
+## CI contract repair (2026-10-03)
+
+GitHub run `37131502103` failed the gameplay fixture's exact sync payload sizes.
+The merged safe failure diagnostic adds `,"failureDiagnostic":null` (25 bytes)
+to each recovery response. Local reproduction confirmed exactly 19,778 and
+3,579 bytes against stale expectations of 19,753 and 3,554. The existing case
+now asserts the null diagnostic in both responses and expects the current exact
+sizes, retaining bounded history, isolation, and unchanged-response checks.
+No production code or test case was added.
+
+Focused disposable PostgreSQL verification passed 43 tests across gameplay,
+read-performance, and campaign-authority files, with one existing Windows
+secure-filesystem skip. Independent Standards and Spec reviews found no
+actionable issues. GitHub CI will verify the Linux-only case and full suite.
