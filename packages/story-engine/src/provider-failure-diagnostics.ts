@@ -35,7 +35,7 @@ export function captureProviderFailure(input: {
   else if (input.source === "transport_error") reason = "ambiguous_transport";
   const limit = counter(input.headers?.get("x-ratelimit-limit") ?? null);
   const remaining = counter(input.headers?.get("x-ratelimit-remaining") ?? null);
-  let limitSource: ProviderFailureEvidenceV1["limitSource"] = sources.has(String(metadata.limit_source)) ? metadata.limit_source as ProviderFailureEvidenceV1["limitSource"] : "unknown";
+  let limitSource: ProviderFailureEvidenceV1["limitSource"] = typeof metadata.limit_source === "string" && sources.has(metadata.limit_source) ? metadata.limit_source as ProviderFailureEvidenceV1["limitSource"] : "unknown";
   if (limitSource === "unknown" && upstreamCode) {
     if (input.isOpenRouter && upstreamCode === "insufficient_credits") limitSource = "openrouter_credits";
     else if (input.isOpenRouter && ["in_flight_budget_exhausted", "weight_exceeds_budget"].includes(upstreamCode)) limitSource = "openrouter_in_flight_budget";
@@ -64,5 +64,11 @@ export function captureProviderFailure(input: {
   };
   const parsed = providerFailureEvidenceSchema.safeParse(evidence);
   if (parsed.success) return parsed.data;
-  return { ...evidence, upstreamCode: null, providerName: null, rateLimit: null, retryAfterMs: null, retryAt: null, metadataStatus: "oversized" };
+  // Reconstruct and validate the minimal record; never spread rejected evidence.
+  return providerFailureEvidenceSchema.parse({
+    version: 1, source: input.source, observedAt: input.observedAt.toISOString(), httpStatus: status(input.httpStatus),
+    upstreamStatus, reason, limitSource: "unknown", upstreamCode: null, providerName: null,
+    rateLimit: null, retryAfterMs: null, retryAt: null, metadataStatus: "oversized",
+    successfulResponseStarted: input.successfulResponseStarted, emittedOutput: input.emittedOutput
+  });
 }

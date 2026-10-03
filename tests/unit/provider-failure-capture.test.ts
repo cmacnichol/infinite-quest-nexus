@@ -4,6 +4,8 @@ import { createProviderTransport } from "../../packages/story-engine/src/provide
 import { captureProviderFailure } from "../../packages/story-engine/src/provider-failure-diagnostics.js";
 import { MAX_PROVIDER_JSON_RESPONSE_BYTES } from "../../packages/story-engine/src/provider-response.js";
 import type { Dispatcher } from "undici";
+import { providerFailureEvidenceSchema } from "../../packages/contracts/src/provider-failure.js";
+import { logger } from "../../packages/logger/src/index.js";
 const now = new Date("2026-10-03T12:00:00.000Z");
 const profile: TextProviderProfile = { providerType: "openrouter", baseUrl: "https://openrouter.ai/api/v1", model: "@preset/test", contextWindowTokens: 32768, maxOutputTokens: 1024, temperature: 0.5 };
 const contract = { version: 1, mode: "json_object", operation: "story", streaming: false, forbidFormatFallback: true } as const;
@@ -18,7 +20,7 @@ async function failure(response: Response, streaming = false, baseUrl = profile.
   expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toMatchObject({ model: "@preset/test", response_format: { type: "json_object" } });
   return error;
 }
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 describe("safe provider failure capture", () => {
   it.each(["0", "2", "Sat, 03 Oct 2026 12:00:02 GMT"])("parses retry %s using observation time", value => {
     expect(captureProviderFailure({ ...input, headers: new Headers({ "retry-after": value }) })).toMatchObject({ retryAfterMs: value === "0" ? 0 : 2000, retryAt: value === "0" ? now.toISOString() : "2026-10-03T12:00:02.000Z" });
@@ -40,6 +42,11 @@ describe("safe provider failure capture", () => {
     const evidence = captureProviderFailure({ ...input, body: { error: { code: "PRIVATE", metadata: { provider_name: "Unknown", raw: "PRIVATE" } } } });
     expect(evidence).toMatchObject({ metadataStatus: "unrecognized", providerName: null, upstreamCode: null });
     expect(JSON.stringify(evidence)).not.toContain("PRIVATE");
+  });
+  it.each([["upstream_provider"], { value: "upstream_provider" }])("rejects malformed limit source %j and returns schema-valid evidence", limit_source => {
+    const evidence = captureProviderFailure({ ...input, body: { error: { metadata: { limit_source } } } });
+    expect(evidence.limitSource).toBe("unknown");
+    expect(providerFailureEvidenceSchema.safeParse(evidence).success).toBe(true);
   });
   it("captures HTTP 429 identity, metadata, and retry through prepared wrapping", async () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
@@ -67,10 +74,12 @@ describe("safe provider failure capture", () => {
     if (output) expect(error.observedUsage).toMatchObject({ inputTokens: 3, outputTokens: 2 });
   });
   it("preserves stream interruption evidence", async () => {
+    const logged = vi.spyOn(logger, "error").mockImplementation(() => undefined);
     let reads = 0;
     const stream = new ReadableStream({ pull(controller) { if (reads++ === 0) controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')); else controller.error(new Error("socket terminated")); } });
     const error = await failure(new Response(stream, { headers: { "content-type": "text/event-stream" } }), true);
     expect(error.providerFailure).toMatchObject({ source: "transport_error", httpStatus: 200, successfulResponseStarted: true, emittedOutput: true });
     expect(error.partialContent).toBe("partial");
+    expect(logged).toHaveBeenCalledWith(expect.objectContaining({ event: "provider_transport_error" }));
   });
 });
