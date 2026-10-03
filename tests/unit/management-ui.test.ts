@@ -806,7 +806,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("function renderPlayableCharacterRoster(characters = [])");
     expect(managementScript).toContain("playableCharactersFromContent(worldAuthorWorkingContent)");
     expect(managementScript).not.toContain("Legacy/default character");
-    expect(managementScript).toContain("async function loadWorldVersionPlayableCharacters()");
+    expect(managementScript).toMatch(/async function loadWorldVersionPlayableCharacters\(selection = \{\}\)/);
     expect(managementScript).toContain('/playable-characters`');
     expect(managementScript).toContain("selectedCharacterId");
     expect(managementScript).toContain("const characterCount = Array.isArray(preview.characters) ? preview.characters.length : 0;");
@@ -877,7 +877,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("let playableCharacterLoadSequence = 0;");
     expect(managementScript).toContain("let worldVersionCampaignReady = false;");
     expect(managementScript).not.toContain("worldCharacterLoadSequence");
-    expect(managementScript).toContain("sequence !== playableCharacterLoadSequence || worldVersionId !== selectedWorldVersionId()");
+    expect(managementScript).toContain("sequence === playableCharacterLoadSequence");
+    expect(managementScript).toContain("worldVersionId === selectedWorldVersionId()");
+    expect(managementScript).toContain("isCurrentWorldSelection(worldId, selectionEpoch)");
     expect(managementScript).toContain('worldVersionCampaignReady = hasReadinessAssessment ? response.readiness.ready : worldVersionCharacters.length > 0;');
     expect(managementScript).toContain('String(firstReadinessIssue?.message || "").trim()');
     expect(managementScript).toContain("function updateCampaignCreationAvailability()");
@@ -1289,12 +1291,21 @@ describe("Nexus management UI contracts", () => {
 
   it("uses one world authoring modal and defers durable covers until the draft is saved", () => {
     expect(managementHtml.match(/id="worldAuthorDialog"/g)).toHaveLength(1);
+    expect(managementHtml).toContain('id="worldAuthorSteps"');
+    expect(managementHtml).toContain('data-world-author-step="review"');
+    expect(managementHtml).toContain('id="worldAuthorPublishedReadiness"');
+    expect(managementHtml).toContain('id="worldAuthorStatus" class="status" role="status" aria-live="polite" tabindex="-1"');
+    expect(managementScript).toContain("function renderWorldAuthorChecklist()");
+    expect(managementScript).toContain("Lore fields are optional guidance.");
+    expect(managementScript).toContain("function setWorldAuthorSaveControlsBusy(session, busy)");
+    expect(managementScript).toContain("Retry server assessment");
+    expect(managementScript).toContain("current draft changes have not been assessed");
     expect(managementHtml).not.toContain('id="newWorldTitle"');
     expect(managementHtml).not.toContain('id="newWorldGenerateCover"');
     expect(managementHtml).toContain('id="worldCoverPreview"');
     expect(managementHtml).toContain('id="worldCoverPrompt"');
     expect(managementHtml).toContain('id="worldCoverLibraryMode"');
-    expect(managementScript).toContain("async function applyWorldCoverChoice(worldId)");
+    expect(managementScript).toMatch(/async function applyWorldCoverChoice\(worldId, selectionIntentEpoch\)/);
     expect(managementScript).toContain("async function monitorWorldCoverJob(jobId, worldId)");
     expect(managementScript).toContain("async function resumeWorldCoverJob(worldId, sequence)");
     expect(managementScript).toContain('/api/v1/worlds/${worldId}/cover-job');

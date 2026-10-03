@@ -117,6 +117,12 @@ let worldAuthorMode = "create";
 let worldAuthorWorkingContent = null;
 let worldAuthorSelectedCover = null;
 let worldAuthorBusy = false;
+let worldAuthorActiveStep = "basics";
+let worldAuthorBusyControlSnapshot = null;
+let worldVersionReadiness = null;
+let worldVersionReadinessError = "";
+let worldVersionReadinessCheckedId = "";
+let worldVersionReadinessLoading = false;
 let providerSaveBusy = false;
 const editDialogSessions = new WeakMap();
 const editDialogBindingDisposers = new WeakMap();
@@ -2387,7 +2393,7 @@ function updateWorldAuthorCharacters(characters) {
 }
 
 function openCharacterDialog(characterId = "") {
-  if (!elements.worldAuthorDialog.open || !worldAuthorWorkingContent) return;
+  if (worldAuthorBusy || !elements.worldAuthorDialog.open || !worldAuthorWorkingContent) return;
   const readOnly = false;
   const character = characterId
     ? playableCharactersFromContent(worldAuthorWorkingContent).find((item) => item.id === characterId)
@@ -2702,6 +2708,177 @@ function setWorldAuthorStatus(message = "", type = "") {
   elements.worldAuthorStatus.className = `status ${type}`.trim();
 }
 
+const WORLD_AUTHOR_STEPS = Object.freeze([
+  { id: "basics", panel: "world-author-overview", next: "lore", nextLabel: "Continue to Lore" },
+  { id: "lore", panel: "world-author-lore", next: "character", nextLabel: "Continue to Playable character" },
+  { id: "character", panel: "world-author-mechanics", next: "review", nextLabel: "Continue to Review" },
+  { id: "review", panel: "world-author-review", next: "basics", nextLabel: "Back to Basics" }
+]);
+const WORLD_CHARACTER_READINESS_ISSUES = new Set([
+  "no-playable-characters",
+  "missing-character-id",
+  "duplicate-character-id",
+  "missing-character-name",
+  "missing-character-text"
+]);
+
+function worldAuthorStep(id) {
+  return WORLD_AUTHOR_STEPS.find((step) => step.id === id) || WORLD_AUTHOR_STEPS[0];
+}
+
+function setWorldAuthorStep(id) {
+  if (worldAuthorBusy) return;
+  const step = worldAuthorStep(id);
+  worldAuthorActiveStep = step.id;
+  for (const button of elements.worldAuthorSteps.querySelectorAll("[data-world-author-step]")) {
+    const active = button.dataset.worldAuthorStep === step.id;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  }
+  for (const panel of elements.worldAuthorDialog.querySelectorAll('.tab-content[data-tab-group="world-author"]')) {
+    panel.classList.toggle("active", panel.id === step.panel);
+  }
+  renderWorldAuthorChecklist();
+}
+
+function renderWorldAuthorChecklist() {
+  if (!elements.worldAuthorBasicsStatus) return;
+  const titleReady = Boolean(elements.worldTitle.value.trim());
+  const loreReady = [elements.worldPremise.value, elements.worldBackground.value, elements.worldFirstAction.value]
+    .some((value) => value.trim());
+  const characters = playableCharactersFromContent(worldAuthorWorkingContent || {});
+  const basicsStatus = titleReady ? "Title added" : "Title required before saving";
+  const loreStatus = loreReady ? "Author guidance added (optional)" : "Optional author guidance";
+  const characterStatus = characters.length
+    ? `${characters.length} playable character${characters.length === 1 ? "" : "s"} in this draft`
+    : "Add at least one playable character for a campaign-ready published version. Draft saving is still available.";
+  elements.worldAuthorBasicsStatus.textContent = basicsStatus;
+  elements.worldAuthorLoreStatus.textContent = loreStatus;
+  elements.worldAuthorCharacterStatus.textContent = characterStatus;
+  elements.worldAuthorBasicsStatus.parentElement.dataset.stepState = titleReady ? "complete" : "incomplete";
+  elements.worldAuthorLoreStatus.parentElement.dataset.stepState = loreReady ? "complete" : "optional";
+  elements.worldAuthorCharacterStatus.parentElement.dataset.stepState = characters.length ? "complete" : "incomplete";
+  for (const button of elements.worldAuthorSteps.querySelectorAll("[data-world-author-step]")) {
+    const stepId = button.dataset.worldAuthorStep;
+    const ready = stepId === "basics" ? titleReady : stepId === "lore" ? loreReady : stepId === "character" ? characters.length > 0 : titleReady && characters.length > 0;
+    button.dataset.stepState = ready ? "complete" : "incomplete";
+    button.setAttribute("aria-label", `${button.textContent.trim()}${stepId === "lore" ? ", optional" : ready ? ", guidance complete" : ", guidance incomplete"}`);
+  }
+  const step = worldAuthorStep(worldAuthorActiveStep);
+  elements.worldAuthorStepGuidance.textContent = step.id === "basics"
+    ? titleReady ? "Title added. Genre and tone remain optional author guidance." : "Add the required title. Genre and tone are optional author guidance."
+    : step.id === "lore"
+      ? "Lore fields are optional guidance. Save this draft whenever you are ready."
+      : step.id === "character"
+        ? "A published version needs a complete playable character before a campaign can start. This checklist is guidance, not server validation."
+        : "Review the current draft guidance and the separate server assessment for its published version.";
+  elements.worldAuthorNextStep.textContent = step.nextLabel;
+  renderWorldAuthorPublishedReadiness();
+}
+
+function renderWorldAuthorPublishedReadiness() {
+  const container = elements.worldAuthorPublishedReadiness;
+  if (!container) return;
+  container.replaceChildren();
+  const versionId = selectedWorldVersionId();
+  const version = selectedWorld?.versions?.find((candidate) => candidate.id === versionId);
+  if (!versionId || !version) {
+    container.className = "status world-author-published-readiness";
+    container.textContent = "No published version is available for assessment. The current draft has not been assessed.";
+    return;
+  }
+  const label = `published version ${version.versionNumber}`;
+  const message = document.createElement("p");
+  message.className = "world-author-readiness-summary";
+  if (worldVersionReadinessLoading && worldVersionReadinessCheckedId === versionId) {
+    message.textContent = `Checking server readiness for ${label}… The current draft has not been assessed.`;
+    container.className = "status world-author-published-readiness";
+    container.append(message);
+    return;
+  }
+  if (worldVersionReadinessError && worldVersionReadinessCheckedId === versionId) {
+    container.className = "status error world-author-published-readiness";
+    message.textContent = `Server readiness for ${label} could not be checked. This is unknown, not campaign-ready; the current draft has not been assessed. ${worldVersionReadinessError}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "button secondary compact-button";
+    retry.textContent = "Retry server assessment";
+    retry.disabled = worldAuthorBusy || worldVersionReadinessLoading;
+    retry.addEventListener("click", () => {
+      if (worldAuthorBusy || worldVersionReadinessLoading) return;
+      void loadWorldVersionPlayableCharacters({ worldId: selectedWorld?.id || "", selectionEpoch: worldSelectionEpoch });
+    });
+    container.append(message, retry);
+    return;
+  }
+  if (!worldVersionReadiness || worldVersionReadiness.worldVersionId !== versionId) {
+    container.className = "status world-author-published-readiness";
+    message.textContent = `No server assessment is available for ${label}. The current draft has not been assessed.`;
+    container.append(message);
+    return;
+  }
+  container.className = `status ${worldVersionReadiness.ready ? "success" : "error"} world-author-published-readiness`;
+  message.textContent = `Server assessment for ${label}: ${worldVersionReadiness.ready ? "Campaign-ready" : "Not campaign-ready"}. This assessment applies to this immutable version only; current draft changes have not been assessed.`;
+  container.append(message);
+  const issues = Array.isArray(worldVersionReadiness.issues) ? worldVersionReadiness.issues : [];
+  if (!issues.length) return;
+  const list = document.createElement("ul");
+  list.className = "world-author-readiness-issues";
+  for (const issue of issues) {
+    const item = document.createElement("li");
+    const text = document.createElement("span");
+    text.textContent = typeof issue === "string" ? issue : String(issue?.message || "The server reported a readiness issue.");
+    item.append(text);
+    if (issue && typeof issue === "object" && WORLD_CHARACTER_READINESS_ISSUES.has(String(issue.code || ""))) {
+      const characterId = String(issue.characterId || "");
+      const character = playableCharactersFromContent(worldAuthorWorkingContent || {}).find((candidate) => candidate.id === characterId);
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "button secondary compact-button";
+      action.textContent = character ? `Open character editor for ${character.name}` : "Open playable character editor";
+      action.disabled = worldAuthorBusy;
+      action.addEventListener("click", () => {
+        if (worldAuthorBusy) return;
+        setWorldAuthorStep("character");
+        if (character) openCharacterDialog(character.id);
+        else elements.addPlayableCharacter.focus();
+      });
+      item.append(action);
+    }
+    list.append(item);
+  }
+  container.append(list);
+}
+
+function setWorldAuthorSaveControlsBusy(session, busy) {
+  if (busy) {
+    if (!session || editDialogSessions.get(elements.worldAuthorDialog) !== session || !elements.worldAuthorDialog.open) return null;
+    const controls = [...elements.worldForm.querySelectorAll("input, select, textarea, button")];
+    const disclosureStates = [...elements.worldForm.querySelectorAll("details")].map((details) => [details, details.open]);
+    const snapshot = {
+      session,
+      controls: controls.map((control) => [control, control.disabled]),
+      disclosureStates,
+      focusTarget: document.activeElement instanceof HTMLElement ? document.activeElement : null
+    };
+    for (const control of controls) control.disabled = true;
+    elements.worldAuthorDialog.setAttribute("aria-busy", "true");
+    elements.worldAuthorStatus.focus();
+    return snapshot;
+  }
+  const snapshot = worldAuthorBusyControlSnapshot;
+  if (!snapshot || snapshot.session !== session || editDialogSessions.get(elements.worldAuthorDialog) !== session) return;
+  for (const [control, disabled] of snapshot.controls) {
+    if (control.isConnected) control.disabled = disabled;
+  }
+  for (const [disclosure, open] of snapshot.disclosureStates) {
+    if (disclosure.isConnected) disclosure.open = open;
+  }
+  elements.worldAuthorDialog.removeAttribute("aria-busy");
+  if (elements.worldAuthorDialog.open && snapshot.focusTarget?.isConnected && !snapshot.focusTarget.disabled) snapshot.focusTarget.focus();
+}
+
 function populateWorldAuthorForm(content) {
   worldAuthorWorkingContent = copyJsonValue(content || emptyWorldContent());
   const overview = worldAuthorWorkingContent.world || {};
@@ -2714,6 +2891,7 @@ function populateWorldAuthorForm(content) {
   elements.worldRules.value = overview.rules || "";
   elements.worldCharacterRevision.value = "0";
   renderPlayableCharacterRoster(playableCharactersFromContent(worldAuthorWorkingContent));
+  renderWorldAuthorChecklist();
 }
 
 function resetWorldCoverAuthoring() {
@@ -2749,7 +2927,10 @@ function openWorldAuthor(mode) {
   elements.worldGeneratorAvailability.innerHTML = textAvailable
     ? "Generation uses the configured default text provider."
     : 'Configure a default text provider in <a href="#providers">Provider Setup</a> to enable generation.';
+  elements.worldAuthorDialog.removeAttribute("aria-busy");
+  worldAuthorBusyControlSnapshot = null;
   populateWorldAuthorForm(mode === "create" ? emptyWorldContent() : selectedWorld.draftContent);
+  setWorldAuthorStep("basics");
   resetWorldCoverAuthoring();
   setWorldAuthorStatus(mode === "create" ? "Enter a title manually or generate a complete world from a concept." : "Review your changes before saving this draft.");
   openEditDialog(elements.worldAuthorDialog);
@@ -2998,11 +3179,10 @@ async function saveWorldDraft(event) {
     return;
   }
   worldAuthorBusy = true;
-  elements.saveWorldDraft.disabled = true;
-  elements.cancelWorldAuthor.disabled = true;
   const mode = worldAuthorMode;
   const selectionIntentEpoch = mode === "create" ? ++worldSelectionIntentEpoch : worldSelectionIntentEpoch;
   const committedAuthorSession = editDialogSessions.get(elements.worldAuthorDialog);
+  worldAuthorBusyControlSnapshot = setWorldAuthorSaveControlsBusy(committedAuthorSession, true);
   const expectedRevision = selectedWorld?.draftRevision;
   const content = worldContentFromForm();
   setWorldAuthorStatus(mode === "create" ? "Creating authoritative world draft…" : "Saving world draft…");
@@ -3025,6 +3205,11 @@ async function saveWorldDraft(event) {
       invalidateDashboardWorldDetails(worldId);
       await loadWorlds(worldId, { committedAuthorSession, selectionIntentEpoch });
     }
+    if (worldAuthorBusyControlSnapshot?.session === committedAuthorSession) {
+      setWorldAuthorSaveControlsBusy(committedAuthorSession, false);
+      worldAuthorBusyControlSnapshot = null;
+    }
+    worldAuthorBusy = false;
     elements.worldAuthorDialog.close("saved");
     let coverMessage = "";
     try {
@@ -3041,6 +3226,11 @@ async function saveWorldDraft(event) {
     );
   } catch (error) {
     if (mode === "create" && authoritativeCreateCompleted) {
+      if (worldAuthorBusyControlSnapshot?.session === committedAuthorSession) {
+        setWorldAuthorSaveControlsBusy(committedAuthorSession, false);
+        worldAuthorBusyControlSnapshot = null;
+      }
+      worldAuthorBusy = false;
       elements.worldAuthorDialog.close("saved");
       worldMessage(`World created, but the management library could not reload it: ${error.message || String(error)} Refresh worlds before trying again.`, "error");
       return;
@@ -3049,14 +3239,20 @@ async function saveWorldDraft(event) {
       ? "The world draft changed while this modal was open. Your entries are still here; close and reload the world before saving."
       : error.message || String(error), "error");
   } finally {
-    worldAuthorBusy = false;
-    elements.saveWorldDraft.disabled = false;
-    elements.cancelWorldAuthor.disabled = false;
+    if (worldAuthorBusyControlSnapshot?.session === committedAuthorSession
+      && editDialogSessions.get(elements.worldAuthorDialog) === committedAuthorSession) {
+      setWorldAuthorSaveControlsBusy(committedAuthorSession, false);
+      worldAuthorBusyControlSnapshot = null;
+    }
+    if (editDialogSessions.get(elements.worldAuthorDialog) === committedAuthorSession) {
+      worldAuthorBusy = false;
+      if (elements.worldAuthorDialog.open) renderWorldAuthorChecklist();
+    }
   }
 }
 
 async function generateCharacterFromPrompt() {
-  if (!worldAuthorWorkingContent || characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || !worldAuthorWorkingContent || characterModalBusy) return;
   const prompt = elements.characterGeneratorPrompt.value.trim();
   if (!prompt) {
     setCharacterStatus("Describe the character you want the default text model to create.", "error");
@@ -3148,7 +3344,7 @@ function renderCharacterProfileReview(result) {
 }
 
 async function organizeCharacterProfile() {
-  if (characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy) return;
   let character;
   try {
     character = characterFromForm();
@@ -3181,7 +3377,7 @@ async function organizeCharacterProfile() {
 }
 
 function applyCharacterProfileReview() {
-  if (!characterProfileOrganizationResult) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || !characterProfileOrganizationResult) return;
   let appliedCount = 0;
   for (const checkbox of elements.characterProfileReviewList.querySelectorAll("[data-profile-path]:checked")) {
     const path = checkbox.dataset.profilePath;
@@ -3235,7 +3431,7 @@ async function openCampaignCharacterDialog() {
 
 async function saveCharacterFromModal(event) {
   event.preventDefault();
-  if (characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || characterModalBusy) return;
   let character;
   try {
     character = characterFromForm();
@@ -3290,7 +3486,7 @@ async function saveCharacterFromModal(event) {
 }
 
 async function deleteCharacterFromModal() {
-  if (!worldAuthorWorkingContent || !editingCharacterId || characterModalBusy) return;
+  if ((worldAuthorBusy && characterModalScope === "world") || !worldAuthorWorkingContent || !editingCharacterId || characterModalBusy) return;
   const name = elements.characterName.value.trim() || "this character";
   if (!window.confirm(`Delete “${name}” from the current draft? Published versions and existing campaigns remain unchanged. Removing the last character makes this world unavailable for new campaigns until another character is added and published.`)) return;
   const roster = playableCharactersFromContent(worldAuthorWorkingContent).filter((item) => item.id !== editingCharacterId);
@@ -3414,6 +3610,13 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
   const worldId = selection.worldId || selectedWorld?.id || "";
   const selectionEpoch = selection.selectionEpoch ?? worldSelectionEpoch;
   const worldVersionId = selectedWorldVersionId();
+  if (elements.worldAuthorDialog.open && worldVersionId) {
+    worldVersionReadinessCheckedId = worldVersionId;
+    worldVersionReadinessLoading = true;
+    worldVersionReadinessError = "";
+    worldVersionReadiness = null;
+    renderWorldAuthorPublishedReadiness();
+  }
   const isCurrent = () => sequence === playableCharacterLoadSequence
     && isCurrentWorldSelection(worldId, selectionEpoch)
     && selectedWorld?.id === worldId
@@ -3434,6 +3637,11 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
     worldVersionCharacters = Array.isArray(response.characters) ? response.characters : [];
     const hasReadinessAssessment = response.readiness && typeof response.readiness.ready === "boolean";
     worldVersionCampaignReady = hasReadinessAssessment ? response.readiness.ready : worldVersionCharacters.length > 0;
+    worldVersionReadiness = hasReadinessAssessment ? { worldVersionId, ready: response.readiness.ready, issues: Array.isArray(response.readiness.issues) ? response.readiness.issues : [] } : null;
+    worldVersionReadinessCheckedId = worldVersionId;
+    worldVersionReadinessError = hasReadinessAssessment ? "" : "The server did not return a readiness assessment.";
+    worldVersionReadinessLoading = false;
+    renderWorldAuthorPublishedReadiness();
     const firstReadinessIssue = Array.isArray(response.readiness?.issues) ? response.readiness.issues[0] : null;
     const firstReadinessIssueMessage = typeof firstReadinessIssue === "string"
       ? firstReadinessIssue
@@ -3462,6 +3670,11 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
     updateCampaignCreationAvailability();
   } catch (error) {
     if (!isCurrent()) return;
+    worldVersionReadinessCheckedId = worldVersionId;
+    worldVersionReadinessLoading = false;
+    worldVersionReadiness = null;
+    worldVersionReadinessError = error.message || String(error);
+    renderWorldAuthorPublishedReadiness();
     worldVersionCharacters = [];
     worldVersionCampaignReady = false;
     elements.newCampaignCharacter.replaceChildren(new Option("Characters unavailable", ""));
@@ -7041,6 +7254,17 @@ elements.managementWorldPrev.addEventListener("click", () => scrollCarousel(elem
 elements.managementWorldNext.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, 1));
 elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
+elements.worldAuthorNextStep.addEventListener("click", () => {
+  const step = worldAuthorStep(worldAuthorActiveStep);
+  setWorldAuthorStep(step.next);
+});
+for (const control of [elements.worldTitle, elements.worldGenre, elements.worldTone, elements.worldPremise, elements.worldBackground, elements.worldFirstAction, elements.worldRules]) {
+  control.addEventListener("input", renderWorldAuthorChecklist);
+  control.addEventListener("change", renderWorldAuthorChecklist);
+}
+elements.worldForm.addEventListener("click", (event) => {
+  if (worldAuthorBusy && event.target instanceof Element && event.target.closest("summary")) event.preventDefault();
+}, true);
 elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());
 elements.characterForm.addEventListener("submit", saveCharacterFromModal);
 elements.cancelCharacter.addEventListener("click", () => dismissEditDialog(elements.characterDialog));
@@ -7171,6 +7395,10 @@ document.addEventListener("click", (event) => {
 document.querySelectorAll(".tab-button").forEach(button => {
   button.addEventListener("click", () => {
     const group = button.closest(".world-tabs").dataset.tabGroup;
+    if (group === "world-author") {
+      setWorldAuthorStep(button.dataset.worldAuthorStep);
+      return;
+    }
     const target = button.dataset.tabTarget;
     // Un-highlight all tabs in this group
     document.querySelectorAll(`.world-tabs[data-tab-group="${group}"] .tab-button`).forEach(btn => btn.classList.remove("active"));

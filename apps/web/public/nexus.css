@@ -641,3 +641,25 @@ legend { padding: 0 8px; color: var(--purple); font-size: .8rem; font-weight: 80
 
 .campaign-review-settings > label { display:flex; align-items:center; gap:8px; }
 .campaign-review-settings input[type="checkbox"] { width:18px; height:18px; margin:0; }
+
+/* World authoring readiness flow */
+.world-author-dialog form { position: relative; }
+.world-author-review { grid-template-columns: minmax(0, 1fr); align-content: start; gap: 10px; }
+.world-author-steps { position: sticky; top: 0; z-index: 4; flex-wrap: nowrap; overflow-x: auto; margin: 0; padding: 8px 0; background: var(--panel); }
+.world-author-steps .tab-button { flex: 0 0 auto; white-space: nowrap; }
+.world-author-steps .tab-button[data-step-state="complete"]::after { content: " · Ready"; color: var(--green, #75d8a6); font-size: .72em; }
+.world-author-step-guidance { position: sticky; top: 48px; z-index: 3; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0 12px; background: var(--panel); }
+.world-author-step-guidance p { margin: 0; color: var(--muted); font-size: .82rem; }
+.world-author-checklist { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.world-author-checklist li { display: grid; grid-template-columns: minmax(120px, .4fr) minmax(0, 1fr); gap: 12px; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.world-author-checklist li span { color: var(--muted); font-size: .82rem; font-weight: 750; }
+.world-author-checklist li strong { font-size: .84rem; font-weight: 650; }
+.world-author-checklist li[data-step-state="complete"] strong { color: var(--green, #75d8a6); }
+.world-author-published-readiness { margin-top: 12px; }
+.world-author-readiness-issues { margin: 8px 0 0; padding-left: 20px; }
+.world-author-readiness-issues li { margin: 6px 0; }
+.world-author-readiness-issues button { margin-left: 8px; }
+@media (max-width: 620px) {
+  .world-author-step-guidance { align-items: flex-start; flex-direction: column; }
+  .world-author-checklist li { grid-template-columns: 1fr; gap: 5px; }
+}

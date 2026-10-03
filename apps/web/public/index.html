@@ -995,10 +995,15 @@
         </div>
         <p id="worldGeneratorAvailability" class="field-note"></p>
       </details>
-      <div class="world-tabs" data-tab-group="world-author">
-        <button type="button" class="tab-button active" data-tab-target="world-author-overview">Overview</button>
-        <button type="button" class="tab-button" data-tab-target="world-author-lore">Lore</button>
-        <button type="button" class="tab-button" data-tab-target="world-author-mechanics">Mechanics &amp; Characters</button>
+      <nav id="worldAuthorSteps" class="world-tabs world-author-steps" data-tab-group="world-author" aria-label="World draft steps">
+        <button type="button" class="tab-button active" data-world-author-step="basics" data-tab-target="world-author-overview" aria-current="step">Basics</button>
+        <button type="button" class="tab-button" data-world-author-step="lore" data-tab-target="world-author-lore">Lore</button>
+        <button type="button" class="tab-button" data-world-author-step="character" data-tab-target="world-author-mechanics">Playable character</button>
+        <button type="button" class="tab-button" data-world-author-step="review" data-tab-target="world-author-review">Review</button>
+      </nav>
+      <div class="world-author-step-guidance">
+        <p id="worldAuthorStepGuidance" role="status" aria-live="polite">Add a required title. Genre and tone are optional author guidance.</p>
+        <button id="worldAuthorNextStep" class="button secondary compact-button" type="button">Continue to Lore</button>
       </div>
       <div class="world-fields tab-content active" id="world-author-overview" data-tab-group="world-author">
         <label>Title<input id="worldTitle" required maxlength="200"></label>
@@ -1022,6 +1027,17 @@
           <input id="worldCharacterRevision" type="hidden" value="0">
         </div>
       </div>
+      <section id="world-author-review" class="world-fields tab-content world-author-review" data-tab-group="world-author" aria-labelledby="worldAuthorReviewTitle">
+        <h3 id="worldAuthorReviewTitle">Review this draft</h3>
+        <p class="field-note">The checklist guides your authoring. It does not replace server validation. You can save a partial draft at any step.</p>
+        <ul class="world-author-checklist">
+          <li><span>Basics</span><strong id="worldAuthorBasicsStatus">Add a title</strong></li>
+          <li><span>Lore</span><strong id="worldAuthorLoreStatus">Optional</strong></li>
+          <li><span>Playable character</span><strong id="worldAuthorCharacterStatus">Add at least one playable character for a campaign-ready published version.</strong></li>
+        </ul>
+        <p class="field-note">Saving updates the editable draft. Publishing creates a new immutable version. Existing campaigns remain on their current version. Creating a campaign is a separate action.</p>
+        <div id="worldAuthorPublishedReadiness" class="status world-author-published-readiness" role="status" aria-live="polite">No published version has been assessed yet.</div>
+      </section>
       <details id="worldCoverOptions" class="world-cover-editor">
         <summary>Cover artwork (optional)</summary>
         <div class="world-cover-option-fields">
@@ -1038,7 +1054,7 @@
           <input id="worldCoverAssetId" type="hidden">
         </div>
       </details>
-      <div id="worldAuthorStatus" class="status" role="status" aria-live="polite"></div>
+      <div id="worldAuthorStatus" class="status" role="status" aria-live="polite" tabindex="-1"></div>
       <div class="button-row character-dialog-actions">
         <button id="cancelWorldAuthor" class="button secondary" type="button">Cancel</button>
         <span class="character-action-spacer"></span>
