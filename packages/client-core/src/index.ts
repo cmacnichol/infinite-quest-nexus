@@ -51,7 +51,7 @@ export { isExactStoryResponseFormatCapability } from "./providers/story-response
 export type { OverrideIntent, ResponseFormatPolicy, SelectionEditorEvent, SelectionEditorInput, SelectionEditorPatch, SelectionEditorState } from "./providers/selection-editor.js";
 export { createGenerationWorkflow } from "./generation/workflow.js";
 export { GenerationWorkflowProtocolError } from "./generation/types.js";
-export { generationDiagnosticPresentation, generationRecoveryGuidance, generationResponseFormatPresentation, generationReviewPresentation, generationReviewTechnicalDiagnosticMessage } from "./generation/projection.js";
+export { generationProviderFailurePresentation, generationDiagnosticPresentation, generationRecoveryGuidance, generationResponseFormatPresentation, generationReviewPresentation, generationReviewTechnicalDiagnosticMessage } from "./generation/projection.js";
 export type { GenerationDiagnosticPresentation, GenerationRecoveryGuidance, GenerationResponseFormatPresentation, GenerationReviewPresentation } from "./generation/projection.js";
 export { formatChronicleRetrievalAudit } from "./chronicle-retrieval-audit.js";
 export type { ChronicleRetrievalAuditPresentation } from "./chronicle-retrieval-audit.js";
@@ -98,3 +98,7 @@ export type {
   HttpMethod
 } from "./errors.js";
 export * from "./campaign-cast-editor.js";
+
+export * from "./activity/types.js";
+export * from "./activity/cache.js";
+export { createActivityController } from "./activity/controller.js";

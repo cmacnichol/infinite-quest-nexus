@@ -75,3 +75,44 @@ describe("campaign state mechanics projection", () => {
     expect(turnSelects[1]).toContain("mechanics_private");
   });
 });
+
+describe("campaign reload provider failure evidence", () => {
+  it("changes the sync token for safe evidence changes while ignoring private canaries", async () => {
+    const providerFailure = { version: 1, source: "http_error", observedAt: "2026-10-03T15:00:00.000Z",
+      httpStatus: 429, upstreamStatus: null, reason: "rate_limit", limitSource: "unknown", upstreamCode: null,
+      providerName: null, retryAfterMs: null, retryAt: null, rateLimit: null, successfulResponseStarted: false,
+      emittedOutput: false, metadataStatus: "absent" };
+    const failureDiagnostic = { version: 1, category: "provider_rejection", code: "provider_rate_limited",
+      phase: "story_generation", attemptNumber: 1, occurredAt: providerFailure.observedAt, providerFailure };
+    const row = {
+      id: scope.campaignId, title: "Campaign", activeTurnNumber: 1,
+      worldVersionId: "00000000-0000-4000-8000-000000000003", storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32000, turnControlStyle: "flexible_action", updatedAt: "2026-10-03T15:00:00.000Z",
+      selectedCharacterId: null, characterSnapshot: null, characterProfile: null, characterProfileRevision: 0,
+      status: "active", worldId: "00000000-0000-4000-8000-000000000004", worldTitle: "World", worldVersionNumber: 1,
+      worldContent: {}, legacySettings: {}, trackers: [], rpgStats: [], eventTriggers: [],
+      recoveryId: "00000000-0000-4000-8000-000000000005", recoveryStatus: "failed", recoveryExpectedTurnNumber: 2,
+      recoveryAttempts: 1, recoveryOperationKind: "append", recoveryReplacementTurnId: null, recoveryResultTurnId: null,
+      recoveryResultIsRecent: false, recoveryErrorCode: "generation_failed", recoveryMetadata: {},
+      recoveryFailureDiagnostic: failureDiagnostic
+    };
+    const query = vi.fn(async (sql: string, params: unknown[]) => {
+      expect(sql).toContain("WHERE c.id = $1 AND c.owner_user_id = $2");
+      expect(sql).toContain("expanded_private->'lastFailureDiagnostic'");
+      expect(params).toEqual([scope.campaignId, scope.ownerUserId]);
+      return { rows: [row] };
+    });
+    const adapters = createPostgresCampaignAuthorityAdapters({} as never, { memory: {} as never, turnPages: {} as never });
+    const client = { query, release: () => undefined } as unknown as DatabaseClient;
+    const read = () => runPostgresWorldCampaignCommandWithClient(client, (transaction) => adapters.sync.readCampaignSyncSnapshot(transaction, scope));
+    const original = await read();
+    providerFailure.limitSource = "upstream_provider";
+    const updated = await read();
+    expect(updated.syncToken).not.toBe(original.syncToken);
+    expect(updated.projection.generationRecovery?.failureDiagnostic?.providerFailure?.limitSource).toBe("upstream_provider");
+    Object.assign(providerFailure, { providerName: "PRIVATE_PROVIDER_CANARY", raw: "PRIVATE_RAW_CANARY" });
+    const privateChanged = await read();
+    expect(privateChanged.syncToken).toBe(updated.syncToken);
+    expect(JSON.stringify(privateChanged.projection)).not.toContain("PRIVATE_");
+  });
+});

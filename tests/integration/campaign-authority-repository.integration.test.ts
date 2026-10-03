@@ -1,3 +1,4 @@
+import { createPostgresGenerationExecutionRepository } from "../../packages/database/src/generation-execution-repository.js";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -1895,6 +1896,47 @@ integration("PostgreSQL campaign sync adapters", () => {
     });
   });
 
+  it("persists and reloads a safe rate-limit reason without changing accepted campaign state", async () => {
+    const imported = await createCampaignFixture();
+    const adapters = createAdapters();
+    const providerId = await createProviderFixture();
+    const scope = { ownerUserId, campaignId: imported.campaignId };
+    const read = () => adapters.transaction.read(transaction => adapters.sync.readCampaignSyncSnapshot(transaction, scope));
+    const before = await read();
+    const job = await pool.query<{ id: string }>(`INSERT INTO generation_jobs
+      (owner_user_id, campaign_id, provider_profile_id, idempotency_key, expected_turn_number, action, status)
+      VALUES ($1,$2,$3,$4,3,'Open the observatory.','queued') RETURNING id`,
+      [ownerUserId, imported.campaignId, providerId, crypto.randomUUID()]);
+    const repository = createPostgresGenerationExecutionRepository(pool);
+    const claim = await repository.claimNext({ workerId: "failure-diagnostic", leaseSeconds: 30 });
+    expect(claim?.jobId).toBe(job.rows[0]!.id);
+    const diagnostic = { version: 1 as const, category: "provider_rejection" as const, code: "provider_rate_limited" as const,
+      phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T14:14:35.000Z",
+      providerFailure: { version: 1 as const, source: "http_error" as const, observedAt: "2026-10-03T14:14:35.000Z",
+        httpStatus: 429, upstreamStatus: null, reason: "rate_limit" as const, limitSource: "upstream_provider" as const,
+        upstreamCode: "rate_limit_exceeded" as const, providerName: "private-provider", retryAfterMs: 2000,
+        retryAt: "2026-10-03T14:14:37.000Z", rateLimit: { limit: 10, remaining: 0, resetAt: null },
+        successfulResponseStarted: false, emittedOutput: false, metadataStatus: "recognized" as const } };
+    await expect(repository.markFailed({ jobId: claim!.jobId, ownerUserId, workerId: "failure-diagnostic",
+      errorCode: "generation_failed", errorMessage: "Generation could not be completed.", recoveryMetadata: {}, lastFailureDiagnostic: diagnostic
+    })).resolves.toBe(true);
+    const stored = await pool.query("SELECT orchestration_private->'lastFailureDiagnostic' AS diagnostic, result_turn_id FROM generation_jobs WHERE id=$1", [claim!.jobId]);
+    expect(stored.rows[0]).toEqual({ diagnostic, result_turn_id: null });
+    const after = await read();
+    expect(after.projection.generationRecovery).toMatchObject({ status: "failed", failureDiagnostic: {
+      code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying.",
+      providerFailure: { httpStatus: 429, limitSource: "upstream_provider", retryAfterMs: 2000, retryAt: "2026-10-03T14:14:37.000Z" }
+    } });
+    expect(JSON.stringify(after.projection.generationRecovery)).not.toContain("private-provider");
+    expect(JSON.stringify(after.projection.generationRecovery)).not.toContain("rateLimit");
+    const sibling = await createCampaignFixture();
+    expect((await adapters.transaction.read(transaction => adapters.sync.readCampaignSyncSnapshot(transaction,
+      { ownerUserId, campaignId: sibling.campaignId }))).projection.generationRecovery).toBeNull();
+    expect(after.projection.campaign).toEqual(before.projection.campaign);
+    await expect(adapters.transaction.read(transaction => adapters.sync.readCampaignSyncSnapshot(transaction,
+      { ...scope, ownerUserId: crypto.randomUUID() }))).rejects.toBeDefined();
+  });
+
   it("returns raw-Date sync sources and delegates changed windows to the bounded reader", async () => {
     const imported = await createCampaignFixture();
     const adapters = createAdapters();
@@ -2031,6 +2073,7 @@ integration("PostgreSQL campaign sync adapters", () => {
       errorCode: null,
       errorMessage: null,
       diagnostic: null,
+      failureDiagnostic: null,
       review: undefined,
       responseFormat: {
         version: 1,

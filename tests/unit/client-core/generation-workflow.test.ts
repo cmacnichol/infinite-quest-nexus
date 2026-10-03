@@ -1043,3 +1043,20 @@ describe("generation workflow", () => {
     expect(pending.value?.jobId).toBe(jobId);
   });
 });
+
+describe("provider failure workflow propagation", () => {
+  it("retains nested evidence on a live failure without initiating advisory retries", async () => {
+    const providerFailure = { version: 1 as const, source: "http_error" as const, httpStatus: 429, upstreamStatus: null,
+      reason: "rate_limit" as const, limitSource: "upstream_provider" as const, retryAfterMs: 15000, retryAt: "2026-10-03T15:00:15.000Z" };
+    const failureDiagnostic = { code: "provider_rate_limited" as const,
+      message: "The provider rate limit was reached. Wait before retrying.", providerFailure };
+    const client = api({ retry: async () => { client.retries += 1; return actionResponse("queued"); } });
+    const source = sourceFromSessions([[{ kind: "snapshot", snapshot: snapshot({ status: "failed", failureDiagnostic }) }]]);
+    const workflow = createGenerationWorkflow({ api: client, source, clock: { now: () => Date.parse(providerFailure.retryAt) + 60000 }, pendingSubmissions: store() });
+    const run = await workflow.submit(campaignId, submission());
+    const events = await collect(run.watch(signal()));
+    expect(events).toContainEqual(expect.objectContaining({ type: "status", snapshot: expect.objectContaining({ failureDiagnostic }) }));
+    expect(client.retries).toBe(0);
+    expect(source.calls).toBe(1);
+  });
+});
