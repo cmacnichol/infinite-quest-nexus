@@ -13,7 +13,7 @@ it("rejectsPrivatePayloads", () => {
   expect(activityDiagnosticSchema.safeParse({ code: "generation_failed", message: "PRIVATE" }).success).toBe(false);
 });
 
-it("validates boundaries and rejects oversized serialized events", () => {
+it("validates metadata boundaries and rejects oversized unknown payloads", () => {
   expect(activityEventSchema.safeParse({ ...event, sequence: "9223372036854775808" }).success).toBe(false);
   expect(activityEventSchema.safeParse({ ...event, sequence: "01" }).success).toBe(false);
   expect(activityEventSchema.safeParse({ ...event, diagnostic: { code: "generation_failed", message: "The generation could not be completed.", correlationId: "a".repeat(129) } }).success).toBe(false);

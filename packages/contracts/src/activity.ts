@@ -25,7 +25,9 @@ export const activityDiagnosticSchema = z.strictObject({
   correlationId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u).optional(),
   httpStatus: z.number().int().min(100).max(599).optional(),
   providerProfileId: z.uuid().optional(),
-  modelId: z.string().min(1).max(200).regex(/^[A-Za-z0-9._:/@+-]+$/u).optional(),
+  modelId: z.string().min(1).max(200).regex(/^[A-Za-z0-9._:/@+-]+$/u)
+    .refine(value => !/^(?:[a-z][a-z0-9+.-]*:\/\/|(?:https?|wss?|ftp|file|data|javascript):|\/\/)/iu.test(value), "Model identifiers cannot be provider URLs")
+    .optional(),
   durationMs: z.number().finite().nonnegative().optional(),
   method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
   routeTemplate: activityRouteTemplateSchema.optional(),
@@ -69,7 +71,3 @@ export type ActivityEvent = z.infer<typeof activityEventSchema>;
 export type BrowserActivityObservation = z.infer<typeof browserActivityObservationSchema>;
 export type ActivityPage = z.infer<typeof activityPageSchema>;
 export type ActivityPageQuery = z.infer<typeof activityPageQuerySchema>;
-
-
-
-
