@@ -5,6 +5,7 @@ import { createPostgresPreparedTextAttemptRepository } from "../../packages/data
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import { createDatabasePool, initialOwnerId, type DatabasePool } from "../../packages/database/src/pool.js";
 import { executePresetRoutes, type LogicalReservation } from "../../packages/story-engine/src/preset-route-execution.js";
+import { captureProviderFailure } from "../../packages/story-engine/src/provider-failure-diagnostics.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 const candidates = [
@@ -53,7 +54,9 @@ integration("durable preset physical attempts", () => {
     const firstScope = { kind: "direct", ownerUserId, requestScopeId: crypto.randomUUID(), invocationId: crypto.randomUUID(), operation: "initial" } as const;
     const secondScope = { ...firstScope, requestScopeId: crypto.randomUUID() };
     const invoke = vi.fn()
-      .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { statusCode: 429, retryAfterMs: 0 }))
+      .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { statusCode: 429, retryAfterMs: 0,
+        providerFailure: captureProviderFailure({ source: "http_error", httpStatus: 429, headers: new Headers({ "retry-after": "0" }),
+          body: null, bodyStatus: "absent", observedAt: new Date("2026-10-03T12:00:00Z"), knownProviderNames: [], successfulResponseStarted: false, emittedOutput: false }) }))
       .mockResolvedValueOnce({ content: "accepted", responseId: "response-b", returnedModel: "route/model-b", returnedProviderRoute: "route-b", usageReported: false, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, reportedCost: null });
     const execute = (logicalReservation: LogicalReservation, currentInvoke = invoke) => executePresetRoutes({
       candidates, planProvenance, logicalReservation, attempts,

@@ -1,8 +1,8 @@
 # Provider failure evidence and safe retry guidance design
 
 Date: 2026-10-03
-Status: Proposed; implementation is not authorized by the planning request.
-Baseline: `30a884a1` (Error Diagnostic).
+Status: Implementation authorized by the subsequent user request and completed; Tasks 1–5 reviewed and Task 6 selected verification passed. Final branch review and operator rollout remain separate. Platform skips and the deferred minor are recorded in the [verification report](../../review/provider-failure-diagnostics-verification.md).
+Planning baseline: `30a884a1` (Error Diagnostic). Implementation rebased onto `origin/main` `66a0deeb`; preserve the original diagnosis dates below.
 
 ## Problem and evidence
 
@@ -48,7 +48,7 @@ The upstream-code allowlist initially contains `rate_limit_exceeded`, `provider_
 
 Read exact recognized values from `error.code`, `error.type`, and `error.metadata` fields `error_type`, `reason`, `limit_source`, `provider_code`, `provider_error_code`, `provider_name`, and `is_byok`. BYOK is only supporting evidence for source classification, not a public account detail. Recognize platform headers and explicit source metadata; never infer upstream ownership from HTTP 429 alone. Unknown vendor forms stay unknown. Do not persist `error.message`, `metadata.raw`, `remedy_hint`, headers wholesale, URLs, credentials, prompts, or raw response bodies. Add new vocabulary only with provider documentation and sanitized fixtures.
 
-Parse Retry-After seconds and HTTP-date. Reject negative, nonfinite, overflow, or >24h values instead of shortening them. Retain zero as valid. Parse X-RateLimit-Reset only with documented units (OpenRouter's supported timestamp form must be pinned in a fixture); unsupported forms remain null. Do not guess units from digit count. Cap the serialized evidence at 4096 UTF-8 bytes; on overflow retain minimal known status/source/reason and mark oversized.
+Parse Retry-After seconds and HTTP-date. Reject negative, nonfinite, overflow, or >24h values instead of shortening them. Retain zero as valid. Parse X-RateLimit-Reset only with documented units; OpenRouter's documentation supplies no numeric reset units, so those forms remain null and are pinned as unsupported in fixtures. Do not guess units from digit count. Cap the serialized evidence at 4096 UTF-8 bytes; on overflow retain minimal known status/source/reason and mark oversized.
 
 ## Storage and propagation
 
@@ -73,6 +73,8 @@ Keep the current fixed rate-limit message. Add fixed text identifying the confir
 When retryAt is available, show 'Provider suggested retry time: <localized date/time>.' After that time, say 'The suggested wait has elapsed; you can retry.' Do not claim the provider is healthy. Preserve existing Retry/Discard eligibility; no background request, automatic retry, or clock-based state mutation. New optional details also apply to the latest failure received live and after reload.
 
 Emit bounded structured operator fields on the existing job-correlated failure log: physical attempt ID, response ID, source, statuses, reason, limitSource, recognized upstreamCode, retryAfterMs, successfulResponseStarted, emittedOutput, metadataStatus. Query the database when more detail is needed; never emit a raw error body.
+
+Composed verification exposed a preexisting explicit Retry interruption gate after definitive HTTP rejection. The subsequent implementation ruling permits re-arming the saved primary reservation only within explicit Retry, using completed current invocation/physical evidence and matching owner/job/body/hash/claim proofs, non-2xx HTTP, no successful start and no output. A new logical identity creates a new immutable physical row. Ambiguous/SSE/post-output/stale evidence retains the existing gate. This correction adds no automatic dispatch policy. Presentation receives injected time parsing/formatting from the browser to preserve the pure client-core boundary.
 
 ## Rollout and success criteria
 

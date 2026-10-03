@@ -393,7 +393,12 @@ integration("response-contract provider failures", () => {
   }
 
   async function authority(campaignId: string) {
-    return (await pool.query(`SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS accepted, (SELECT to_jsonb(cs) FROM campaign_state cs WHERE cs.campaign_id=$1) AS state, (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts, (SELECT count(*)::int FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [campaignId])).rows[0];
+    return (await pool.query(`SELECT (SELECT count(*)::int FROM turns WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS accepted,
+      (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM turns t WHERE campaign_id=$1 AND accepted_at IS NOT NULL) AS ledger,
+      (SELECT to_jsonb(cs) FROM campaign_state cs WHERE cs.campaign_id=$1) AS state,
+      (SELECT count(*)::int FROM campaign_canonical_facts WHERE campaign_id=$1) AS facts,
+      (SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) FROM chronicle_memories m WHERE campaign_id=$1) AS memories,
+      (SELECT count(*)::int FROM chronicle_jobs WHERE campaign_id=$1) AS chronicle`, [campaignId])).rows[0];
   }
 
   async function executeJob(value: Awaited<ReturnType<typeof fixture>>, job: { id: string }, expectedExecution = true) {
