@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+const legacyOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const webNextOrigin = `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}`;
 const NOW = "2026-08-25T12:00:00.000Z";
 const OWNER_A = "11111111-1111-4111-8111-111111111111";
 const OWNER_B = "22222222-2222-4222-8222-222222222222";
@@ -349,7 +351,7 @@ async function installRecoveryFenceApi(
 const surfaces = [
   {
     name: "replacement",
-    url: "http://127.0.0.1:43174/app/data-transfer",
+    url: `${webNextOrigin}/app/data-transfer`,
     file: "#system-archive-file",
     preview: '[data-system-preview="ready"]',
     commit: '[data-action="commit-system-import"]',
@@ -363,7 +365,7 @@ const surfaces = [
   },
   {
     name: "legacy Nexus",
-    url: "http://127.0.0.1:43173/nexus/index.html#data-transfer",
+    url: `${legacyOrigin}/nexus/index.html#data-transfer`,
     file: "#systemArchiveFile",
     preview: '#systemImportPreview[data-system-preview="ready"]',
     commit: "#commitSystemImport",
@@ -726,7 +728,7 @@ for (const surface of surfaces) {
 
 test("legacy #imports deep link opens the unified Data Transfer view", async ({ page }) => {
   await installDataTransferApi(page, false);
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#imports");
+  await page.goto(`${legacyOrigin}/nexus/index.html#imports`);
   await expect(page.locator("body")).toHaveAttribute("data-management-view", "data-transfer");
   await expect(page.locator("#imports")).toBeVisible();
   await expect(page.locator("#navDataTransfer")).toHaveClass(/active/);

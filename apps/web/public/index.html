@@ -57,6 +57,7 @@
         <a class="button accent dashboard-story-link" href="/story" id="dashboardStoryLink">Continue latest story <span aria-hidden="true">→</span></a>
       </div>
 
+      <div id="dashboardWorkflowStatus" class="status error hidden" role="status" aria-live="polite" aria-atomic="true"></div>
       <section class="dashboard-stats" aria-labelledby="dashboardStatsTitle">
         <div class="stats-heading">
           <div><p class="eyebrow">Nexus at a glance</p><h2 id="dashboardStatsTitle">Your living library</h2></div>
@@ -531,7 +532,7 @@
         <article><span aria-hidden="true">01</span><h3>System Archive</h3><p>Export or restore the Current Owner's complete portable library and every retained original image.</p></article>
         <article><span aria-hidden="true">02</span><h3>World &amp; Campaign Archives</h3><p>Keep using targeted JSON and Campaign Archive exports where you manage their source.</p><div><a href="#world-library">World Management</a><a href="#campaigns">Campaign Management</a></div></article>
         <article><span aria-hidden="true">03</span><h3>Legacy &amp; External Imports</h3><p>Import legacy stories, Infinite Worlds, CYOA JSON, text, and existing portable backups below.</p><a href="#imports">Open import tools</a></article>
-        <article><span aria-hidden="true">04</span><h3>Readable Story Exports</h3><p>Create Markdown, HTML, or PDF reading copies from Campaign Management.</p><a href="#campaigns">Open campaign exports</a></article>
+        <article><span aria-hidden="true">04</span><h3>Readable Story Exports</h3><p>Open Markdown, HTML, or PDF reading copies from the selected campaign’s Story export menu. This opens the Story; it does not download a file.</p><a id="readingStoryExportLink" href="#campaigns">Choose a campaign to open its Story exports</a></article>
       </div>
     </section>
 

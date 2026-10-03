@@ -109,6 +109,7 @@ let worlds = [];
 let campaigns = [];
 let campaignsLoaded = false;
 let campaignsLoadError = false;
+const dashboardWorkflowErrors = new Map();
 let selectedCampaignIsExplicit = false;
 let selectedWorld = null;
 let worldSelectionId = "";
@@ -629,6 +630,13 @@ function updateStoryViewLink() {
     : null;
   const hasResumeTarget = Boolean(resumeCampaign);
   const storyHref = hasResumeTarget ? `/story/${encodeURIComponent(resumeCampaign.id)}` : "/nexus/#campaigns";
+  if (elements.readingStoryExportLink) {
+    elements.readingStoryExportLink.href = storyHref;
+    elements.readingStoryExportLink.textContent = hasResumeTarget
+      ? `Open ${resumeCampaign.title} Story exports`
+      : "Choose a campaign to open its Story exports";
+    elements.readingStoryExportLink.setAttribute("aria-disabled", String(!hasResumeTarget));
+  }
   const label = hasResumeTarget
     ? "Continue latest story "
     : campaignsLoadError
@@ -725,9 +733,12 @@ function managementSelectionError(route, message) {
   if (route.view === "worlds") {
     elements.worldStatus.textContent = message;
     elements.worldStatus.className = "status error";
+    addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
   } else if (route.view === "campaigns") {
     elements.campaignStatusMessage.textContent = message;
     elements.campaignStatusMessage.className = "status error";
+    elements.campaignStatusMessage.classList.remove("hidden");
+    addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
   }
 }
 
@@ -2402,11 +2413,14 @@ function worldMessage(message, type = "") {
     if (type === "error") {
       elements.worldStatus.textContent = `${message} ${managementSelectionErrorMessage}`;
       elements.worldStatus.className = "status error";
+      addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
     }
     return;
   }
   elements.worldStatus.textContent = message;
   elements.worldStatus.className = `status ${type}`.trim();
+  if (type === "error") addWorkflowRetry(elements.worldStatus, "workflowRetryWorlds", "Retry world list", () => retryWorldWorkflowRead());
+  else elements.worldStatus.querySelector("#workflowRetryWorlds")?.remove();
 }
 
 function campaignMessage(message, type = "") {
@@ -2415,12 +2429,87 @@ function campaignMessage(message, type = "") {
       elements.campaignStatusMessage.textContent = `${message} ${managementSelectionErrorMessage}`;
       elements.campaignStatusMessage.className = "status error";
       elements.campaignStatusMessage.classList.remove("hidden");
+      addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
     }
     return;
   }
   elements.campaignStatusMessage.textContent = message;
   elements.campaignStatusMessage.className = `status ${type}`.trim();
   elements.campaignStatusMessage.classList.remove("hidden");
+  if (type === "error") addWorkflowRetry(elements.campaignStatusMessage, "workflowRetryCampaigns", "Retry campaign list", () => retryCampaignWorkflowRead());
+  else elements.campaignStatusMessage.querySelector("#workflowRetryCampaigns")?.remove();
+}
+
+function addWorkflowRetry(host, id, label, retry) {
+  host.querySelector(`#${id}`)?.remove();
+  host.querySelector(".workflow-retry-feedback")?.remove();
+  const button = document.createElement("button");
+  button.id = id;
+  button.className = "button secondary";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", async () => {
+    host.querySelector(".workflow-retry-feedback")?.remove();
+    button.disabled = true;
+    button.textContent = "Retrying…";
+    try {
+      await retry();
+      host.querySelector(".workflow-retry-feedback")?.remove();
+    } catch (error) {
+      if (!host.isConnected || !button.isConnected || !host.contains(button)) return;
+      const feedback = document.createElement("span");
+      feedback.className = "workflow-retry-feedback";
+      feedback.setAttribute("role", "status");
+      feedback.textContent = safeWorkflowFailure("Retry failed. You can try again.", error);
+      host.insertBefore(feedback, button);
+    } finally {
+      if (!button.isConnected) return;
+      button.disabled = false;
+      button.textContent = label;
+    }
+  });
+  host.append(document.createTextNode(" "), button);
+}
+
+async function retryWorldWorkflowRead() {
+  await loadWorlds();
+  await applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+}
+
+async function retryCampaignWorkflowRead() {
+  await loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true });
+  await applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+}
+
+function safeWorkflowFailure(label, error) {
+  const correlationId = typeof error?.correlationId === "string" && /^[a-z0-9-]{1,80}$/iu.test(error.correlationId)
+    ? ` Reference: ${error.correlationId}.`
+    : "";
+  return `${label}${correlationId}`;
+}
+
+function renderDashboardWorkflowErrors() {
+  const host = elements.dashboardWorkflowStatus;
+  if (!host) return;
+  host.replaceChildren();
+  for (const [key, entry] of dashboardWorkflowErrors) {
+    const item = document.createElement("div");
+    item.dataset.workflow = key;
+    item.append(document.createTextNode(entry.message));
+    addWorkflowRetry(item, `workflowDashboardRetry${key[0].toUpperCase()}${key.slice(1)}`, `Retry ${key}`, entry.retry);
+    host.append(item);
+  }
+  host.classList.toggle("hidden", dashboardWorkflowErrors.size === 0);
+}
+
+function reportDashboardWorkflowError(key, message, retry) {
+  dashboardWorkflowErrors.set(key, { message, retry });
+  renderDashboardWorkflowErrors();
+}
+
+function clearDashboardWorkflowError(key) {
+  dashboardWorkflowErrors.delete(key);
+  renderDashboardWorkflowErrors();
 }
 
 function requestTypedDelete(title, message, details = []) {
@@ -2901,6 +2990,7 @@ function renderManagementWorlds() {
 async function loadWorlds(preselectId = "", selectionOptions = {}) {
   const selectionIntentEpoch = selectionOptions.selectionIntentEpoch ?? worldSelectionIntentEpoch;
   ({ worlds } = await api("/api/v1/worlds"));
+  clearDashboardWorkflowError("worlds");
   renderDashboardWorlds();
   renderManagementWorlds();
   void hydrateDashboardWorlds();
@@ -2994,7 +3084,7 @@ async function selectWorld(worldId, selectionOptions = {}) {
     void resumeWorldCoverJob(worldId, coverPollSequence);
   } catch (error) {
     if (!isCurrentWorldSelection(worldId, selectionEpoch)) return;
-    worldMessage(error.message || String(error), "error");
+    worldMessage(safeWorkflowFailure("The selected world could not be loaded.", error), "error");
   }
 }
 
@@ -4490,6 +4580,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
     }
     throw error;
   }
+  clearDashboardWorkflowError("campaigns");
   campaignsLoaded = true;
   campaignsLoadError = false;
   const rememberedCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
@@ -4532,7 +4623,8 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
     });
     elements.campaignList.append(button);
   }
-  const target = campaigns.find((campaign) => campaign.id === preselectId) || (selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
+  const target = campaigns.find((campaign) => campaign.id === preselectId)
+    || (!explicitPreselect && selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
   if (target) {
     const preservesExplicitSelection = selectedCampaignIsExplicit && selectedCampaign?.id === target.id;
     await selectCampaign(target, { explicit: explicitPreselect || preservesExplicitSelection });
@@ -5190,6 +5282,8 @@ function syncIllustrationProviderAvailability(restoreSavedState = false) {
 function providerMessage(message, type = "") {
   elements.providerStatus.textContent = message;
   elements.providerStatus.className = `status ${type}`.trim();
+  if (type === "error") addWorkflowRetry(elements.providerStatus, "workflowRetryProviders", "Retry provider profiles", () => loadProviders());
+  else elements.providerStatus.querySelector("#workflowRetryProviders")?.remove();
 }
 
 function providerTypeLabel(providerType) {
@@ -5918,6 +6012,7 @@ function beginProviderEdit(provider) {
 
 async function loadProviders(preselectId = "") {
   ({ providers } = await api("/api/v1/providers"));
+  clearDashboardWorkflowError("providers");
   renderProviderProfiles();
   updateCharacterGeneratorAvailability();
   const currentImportProviderId = elements.providerSelect.value;
@@ -7787,7 +7882,7 @@ elements.managementWorldFilters.addEventListener("click", (event) => {
 });
 elements.managementWorldPrev.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, -1));
 elements.managementWorldNext.addEventListener("click", () => scrollCarousel(elements.worldManagementCarousel, 1));
-elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(error.message || String(error), "error")));
+elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error) => worldMessage(safeWorkflowFailure("Worlds could not be refreshed.", error), "error")));
 elements.worldForm.addEventListener("submit", saveWorldDraft);
 elements.worldAuthorNextStep.addEventListener("click", () => {
   const step = worldAuthorStep(worldAuthorActiveStep);
@@ -7878,7 +7973,7 @@ elements.revokeWorldShare.addEventListener("click", revokeSelectedWorldShare);
 elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);
 elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
-elements.refreshCampaigns.addEventListener("click", () => loadCampaigns("", { focusNoSelection: true }).catch((error) => setStatus(error.message, "error")));
+elements.refreshCampaigns.addEventListener("click", () => loadCampaigns(selectedCampaign?.id || "", { focusNoSelection: true }).catch((error) => campaignMessage(safeWorkflowFailure("Campaigns could not be refreshed.", error), "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
 for (const control of [elements.campaignTitle, elements.campaignStatus, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens]) {
   control.addEventListener("input", () => renderCampaignSaveFeedback(campaignEditGuard.isDirty(campaignSettingsSnapshot()) ? "unsaved" : "saved"));
@@ -8103,15 +8198,21 @@ async function saveNexusUserProfile(event) {
 
 detectBrowserStory();
 loadSessionPreferences().catch(() => undefined);
-loadProviders().catch((error) => providerMessage(error.message || String(error), "error"));
+loadProviders().catch((error) => {
+  const message = safeWorkflowFailure("Provider profiles could not be loaded.", error);
+  providerMessage(message, "error");
+  reportDashboardWorkflowError("providers", message, () => loadProviders());
+});
 void loadWorlds().then(() => {
   initialWorldListReady = true;
   return applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
 }).catch((error) => {
   initialWorldListReady = true;
   const route = acceptedManagementRoute;
-  if (route?.selection?.kind === "world") managementSelectionError(route, `Worlds could not be loaded to resolve this link. ${error.message || String(error)}`);
-  else worldMessage(error.message || String(error), "error");
+  const message = safeWorkflowFailure("Worlds could not be loaded.", error);
+  if (route?.selection?.kind === "world") managementSelectionError(route, `Worlds could not be loaded to resolve this link. ${message}`);
+  worldMessage(message, "error");
+  reportDashboardWorkflowError("worlds", message, () => loadWorlds());
 });
 const initialCampaignId = acceptedManagementRoute?.selection?.kind === "campaign" ? acceptedManagementRoute.selection.id : "";
 void loadCampaigns(initialCampaignId, { explicitPreselect: Boolean(initialCampaignId) }).then(() => {
@@ -8120,6 +8221,8 @@ void loadCampaigns(initialCampaignId, { explicitPreselect: Boolean(initialCampai
 }).catch((error) => {
   initialCampaignListReady = true;
   const route = acceptedManagementRoute;
-  if (route?.selection?.kind === "campaign") managementSelectionError(route, `Campaigns could not be loaded to resolve this link. ${error.message || String(error)}`);
-  else setStatus(error.message || String(error), "error");
+  const message = safeWorkflowFailure("Campaigns could not be loaded.", error);
+  if (route?.selection?.kind === "campaign") managementSelectionError(route, `Campaigns could not be loaded to resolve this link. ${message}`);
+  campaignMessage(message, "error");
+  reportDashboardWorkflowError("campaigns", message, () => loadCampaigns("", { focusNoSelection: true }));
 });
