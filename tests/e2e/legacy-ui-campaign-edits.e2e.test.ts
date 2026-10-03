@@ -43,7 +43,7 @@ async function fixtureRoute(route: Route, controls: { patchGate?: Promise<void>;
     status = controls.patchStatus ?? 200;
     if (status >= 400) body = { message: "Synthetic save failure" };
     else {
-      const id = path.split("/")[2];
+      const id = path.slice("/campaigns/".length);
       body = { ...campaignRecords.get(id), ...input, id, imageProviderProfileId: null, updatedAt: "2026-10-03T12:00:00Z" };
       campaignRecords.set(id, body as typeof campaignA);
     }
