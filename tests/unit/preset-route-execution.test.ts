@@ -77,6 +77,12 @@ const rejectedEvidence = {
 };
 
 describe("preset route execution", () => {
+  it("retains precise schema classification when upstream evidence has unknown reason", () => {
+    const providerFailure = { ...rejectedEvidence, httpStatus: 400, reason: "unknown", retryAfterMs: null, retryAt: null };
+    expect(classifyPresetRouteFailure({ diagnosticCode: "provider_schema_invalid", providerFailure })).toMatchObject({
+      reason: "schema_invalid", providerFailure: { reason: "unknown", httpStatus: 400 }, responseStarted: false
+    });
+  });
   it.each(["rejected-id", null])("advances a definitive rejected HTTP 429 with response ID %s", async (responseId) => {
     const repository = attempts();
     const complete = vi.spyOn(repository, "complete");

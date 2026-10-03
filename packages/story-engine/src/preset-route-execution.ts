@@ -197,7 +197,8 @@ export function classifyPresetRouteFailure(error: unknown): Readonly<PresetRoute
 }> {
   const source = error && typeof error === "object" ? error as RouteFailureCarrier & { statusCode?: unknown; code?: unknown; name?: unknown } : {};
   const providerFailure = safeProviderFailure(source.providerFailure);
-  const suppliedReason = source.routeFailureReason ?? source.reason ?? providerFailure?.reason;
+  const suppliedReason = source.routeFailureReason ?? source.reason
+    ?? (providerFailure?.reason === "unknown" ? undefined : providerFailure?.reason);
   const supplied = typeof suppliedReason === "string" && [
     "rate_limit", "provider_unavailable", "model_unavailable", "authentication", "schema_invalid", "refusal",
     "cancelled", "deadline", "ambiguous_transport", "invalid_identity", "unknown"

@@ -4,7 +4,8 @@ import type {
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../contracts/src/index.js";
-import { readQueuedResponsePolicyVersioned, type QueuedResponsePolicyVersioned } from "../../contracts/src/generation-response-contract.js";
+import { readQueuedResponsePolicyVersioned, readResponseContractInvocationAuditVersioned, type QueuedResponsePolicyVersioned } from "../../contracts/src/generation-response-contract.js";
+import { providerFailureEvidenceSchema } from "../../contracts/src/provider-failure.js";
 import { continuityReviewExecutionSnapshotHash, continuityReviewExecutionSnapshotSchema, type ContinuityReviewExecutionSnapshot } from "../../contracts/src/continuity-review-execution.js";
 import {
   GenerationApplicationError,
@@ -1102,6 +1103,37 @@ export function createPostgresGenerationCommandRepository(
         if (!protocolCompatible) {
           throw new GenerationApplicationError("conflict", { reason: "retry_protocol_incompatible" });
         }
+        // Only an explicit Retry can re-arm a definitively rejected primary.
+        // Unknown dispatched work retains the existing interrupted-output gate.
+        const primary = job.orchestrationPrivate.primaryReservation as Record<string, unknown> | undefined;
+        const logical = job.orchestrationPrivate.logicalAttempt as { id?: unknown } | undefined;
+        let retryPrimary: Record<string, unknown> | null = null;
+        if (job.generationStatus === "failed" && (primary?.status === "reserved" || primary?.status === "dispatched")
+          && primary.attempt === job.attempts && typeof primary.requestBody === "string"
+          && primary.requestPayloadHash === sha256(primary.requestBody)
+          && !job.orchestrationPrivate.primaryResult && Array.isArray(job.orchestrationPrivate.responseContractInvocations)) {
+          for (const value of job.orchestrationPrivate.responseContractInvocations) {
+            let invocation;
+            try { invocation = readResponseContractInvocationAuditVersioned(value); } catch { continue; }
+            if (invocation.logicalAttemptId !== logical?.id || invocation.operation !== "story_generation"
+              || invocation.status !== "completed" || invocation.requestPayloadHash !== primary.requestPayloadHash
+              || !invocation.response?.physicalAttemptId) continue;
+            const physical = await client.query<{ failure_diagnostic: unknown }>(
+              `SELECT failure_diagnostic FROM prepared_text_physical_attempts
+                WHERE id=$1 AND owner_user_id=$2 AND logical_kind='story'
+                  AND logical_reservation->>'generationJobId'=$3 AND logical_reservation->>'invocationId'=$4
+                  AND request_payload_hash=$5 AND request_body=$6 AND status='completed' AND outcome='failed'
+                  AND response_started_at IS NULL AND emitted_output=false`,
+              [invocation.response.physicalAttemptId, scope.ownerUserId, scope.jobId, invocation.id,
+                primary.requestPayloadHash, primary.requestBody]
+            );
+            const evidence = providerFailureEvidenceSchema.safeParse(physical.rows[0]?.failure_diagnostic);
+            if (evidence.success && evidence.data.source === "http_error" && evidence.data.httpStatus !== null
+              && evidence.data.httpStatus >= 400 && !evidence.data.successfulResponseStarted && !evidence.data.emittedOutput) {
+              retryPrimary = { ...primary, status: "reserved", attempt: job.attempts! + 1 };
+            }
+          }
+        }
         const updated = await client.query<MutationRow>(
           `UPDATE generation_jobs
               SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
@@ -1110,9 +1142,10 @@ export function createPostgresGenerationCommandRepository(
                     'logicalAttempt', jsonb_build_object('version', 1, 'id', gen_random_uuid()::text,
                       'semanticRepairsConsumed', 0, 'reviewsConsumed', 0, 'automaticRepairsConsumed', 0,
                       'choiceRepairsConsumed', 0, 'eventCoverageRepairsConsumed', 0))
+                    || CASE WHEN $3::jsonb IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('primaryReservation',$3::jsonb) END
             WHERE id = $1 AND owner_user_id = $2
             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
-          [scope.jobId, scope.ownerUserId]
+          [scope.jobId, scope.ownerUserId, retryPrimary === null ? null : json(retryPrimary)]
         );
         const row = updated.rows[0]!;
         return {
