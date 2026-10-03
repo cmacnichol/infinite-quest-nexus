@@ -60,13 +60,14 @@ function recoveryFixture() {
   };
 }
 
-async function installRecoveryApi(page: Page, options: { operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; responseFormat?: Record<string, unknown>; review?: Record<string, unknown>; streamLoss?: boolean; profileConflict?: boolean } = {}) {
+async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { code: string; message: string }; operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; responseFormat?: Record<string, unknown>; review?: Record<string, unknown>; streamLoss?: boolean; profileConflict?: boolean } = {}) {
   const payloads = recoveryFixture();
   const requests: string[] = [];
   const writes: Array<{ path: string; body: Record<string, unknown> }> = [];
   const recovery = payloads.syncStatus.generationRecovery as any;
   recovery.operationKind = options.operation ?? "append";
   recovery.replacementTurnId = options.operation === "replace_latest" ? payloads.turns.turns[0]!.id : null;
+  if (options.failureDiagnostic) { recovery.status = "failed"; recovery.failureDiagnostic = options.failureDiagnostic; }
   if (options.incompatible) recovery.diagnostic = { code: "prompt_protocol_upgrade_required", operation: "story_generation", action: "discard_and_reenqueue" };
   if (options.legacyDiagnostic) delete recovery.diagnostic;
   if (options.diagnostic) recovery.diagnostic = options.diagnostic;
@@ -147,6 +148,28 @@ async function installRecoveryApi(page: Page, options: { operation?: "append" | 
   });
   return { ...payloads, requests, writes };
 }
+
+test("web-next Story displays a rate-limit reason after reload and permits explicit retry", async ({ page }) => {
+  const payloads = await installRecoveryApi(page, { failureDiagnostic: {
+    code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying."
+  } });
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${webNextOrigin}/app/story/${payloads.campaignId}`);
+  const recovery = page.locator("[data-story-recovery]");
+  await expect(recovery).toContainText("The provider rate limit was reached. Wait before retrying.");
+  await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
+  await page.reload();
+  await expect(recovery).toContainText("The provider rate limit was reached. Wait before retrying.");
+  await mkdir("docs/review/assets/provider-failure-diagnostics", { recursive: true });
+  await page.screenshot({ path: "docs/review/assets/provider-failure-diagnostics/desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "docs/review/assets/provider-failure-diagnostics/mobile.png", fullPage: true });
+  await recovery.getByRole("button", { name: "Retry generation", exact: true }).click();
+  await expect.poll(() => payloads.requests.some(request => request === `POST /api/v1/generation-jobs/${generationId}/retry`)).toBe(true);
+  expect(errors).toEqual([]);
+});
 
 test("web-next Story renders only safe recovery guidance and recovery actions", async ({ page }) => {
   const payloads = await installRecoveryApi(page);

@@ -195,6 +195,10 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
     section.append(element(document, "h2", undefined, failed ? "Story generation needs attention" : "Story generation in progress"));
     section.append(element(document, "p", undefined, failed ? "Try again when the text provider is ready." : "The accepted story remains unchanged until completion."));
   }
+  const failureDiagnostic = generation.snapshot?.failureDiagnostic ?? generation.hydratedGeneration?.failureDiagnostic;
+  if (failed && failureDiagnostic && reviewView === null) {
+    section.append(element(document, "p", "story-recovery-diagnostic", failureDiagnostic.message));
+  }
   const diagnostic = generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic;
   if (diagnostic && reviewView === null) {
     const presentation = generationDiagnosticPresentation(diagnostic);

@@ -762,19 +762,28 @@ function safeLogErrorCode(value: unknown, fallback = "unclassified_error"): stri
 
 function failureDiagnosticFor(error: unknown, attemptNumber: number, phase: string, responseContractDiagnostic: string | null = null): GenerationFailureDiagnostic {
   const transport = providerTransportErrorDetails(error);
-  const code = preparedRouteTerminalError(error)?.reason === "deadline" ? "provider_request_timeout" : responseContractDiagnostic
+  const routeReason = preparedRouteTerminalError(error)?.reason;
+  const routeCode = routeReason === "rate_limit" ? "provider_rate_limited"
+    : routeReason === "authentication" ? "provider_authentication_failed"
+    : routeReason === "provider_unavailable" ? "provider_route_unavailable"
+    : routeReason === "model_unavailable" ? "provider_model_unavailable"
+    : routeReason === "refusal" ? "provider_refusal"
+    : routeReason === "schema_invalid" ? "provider_schema_invalid"
+    : routeReason === "deadline" ? "provider_request_timeout" : null;
+  const code = responseContractDiagnostic ?? routeCode
     ?? (transport
     ? (transport.timedOut ? "provider_request_timeout" : "provider_transport_error")
     : safeLogErrorCode(errorCodeFrom(error) || "generation_failed", "generation_failed"));
   const category = code === "provider_request_timeout" ? "provider_timeout"
     : code === "provider_transport_error" ? "provider_transport"
+    : code === "provider_rate_limited" || code === "provider_authentication_failed" || code === "provider_route_unavailable" || code === "provider_model_unavailable" ? "provider_rejection"
     : code === "mechanics_leak" ? "mechanics"
     : code === "scene_coverage" ? "continuity"
     : code === "invalid_schema" || code === "invalid_json" || code === "provider_schema_invalid" || code === "provider_schema_unsupported" || code === "provider_refusal" ? "format"
     : code === "output_limit" ? "output_incomplete"
     : code === "stale_campaign" ? "authority"
     : "unknown";
-  const supportedCode = code === "provider_request_timeout" || code === "provider_transport_error"
+  const supportedCode = code === "provider_rate_limited" || code === "provider_authentication_failed" || code === "provider_model_unavailable" || code === "provider_request_timeout" || code === "provider_transport_error"
     || code === "mechanics_leak" || code === "scene_coverage" || code === "invalid_schema"
     || code === "invalid_json" || code === "output_limit" || code === "stale_campaign"
     || code === "provider_schema_invalid" || code === "provider_schema_unsupported" || code === "provider_route_unavailable" || code === "provider_refusal"
@@ -4952,6 +4961,7 @@ async function executeLoadedGeneration(
       ? (transportError.timedOut ? "provider_request_timeout" : "provider_transport_error")
       : errorCodeFrom(error) || "generation_failed");
     const code = safeLogErrorCode(rawCode, "generation_failed");
+    const failureDiagnostic = failureDiagnosticFor(error, job.attempts, activePhase, responseContractDiagnostic);
     const failed = await repository.markFailed({
       ...scope,
       // V2 prepared-contract diagnostics are finite, user-actionable contract
@@ -4960,13 +4970,14 @@ async function executeLoadedGeneration(
       errorCode: responseContractDiagnostic ?? PUBLIC_GENERATION_FAILURE_CODE,
       errorMessage: PUBLIC_GENERATION_FAILURE_MESSAGE,
       recoveryMetadata: transportError ? { transportError } : {},
-      lastFailureDiagnostic: failureDiagnosticFor(error, job.attempts, activePhase, responseContractDiagnostic)
+      lastFailureDiagnostic: failureDiagnostic
     });
     if (failed) {
       logger.error({
         event: "turn_generation_failed",
         ...generationLogContext(job, workerId),
         errorCode: code,
+        failureReason: failureDiagnostic.code,
         errorType: diagnosticErrorName(error),
         durationMs: Date.now() - generationStartedAt,
         transportTimedOut: Boolean(transportError?.timedOut)
