@@ -423,7 +423,7 @@ function observeActivity(kind, error = null, options = {}, captured = activitySc
   const key = `${captured.epoch}:${kind}:${options.jobId || ""}:${diagnostic?.code || ""}:${diagnostic?.httpStatus || ""}`;
   if (options.dedupe && observedEpisodes.has(key)) return;
   if (options.dedupe) observedEpisodes.add(key);
-  void activity.recordObservation({ version: 1, observationId: composition.idFactory.create(), observedAt: new Date(composition.clock.now()).toISOString(),
+  return activity.recordObservation({ version: 1, observationId: composition.idFactory.create(), observedAt: new Date(composition.clock.now()).toISOString(),
     campaignId: scope.campaignId, kind, severity: options.severity || (options.success ? "info" : "error"),
     jobId: options.jobId || null, generationJobId: kind === "browser.illustration_command_failed" ? options.generationJobId || null : options.jobId || null, segmentId: options.segmentId || null, turnId: options.turnId || null, diagnostic });
 }
@@ -436,8 +436,27 @@ function sessionActivityNotice() {
   const status = $("activityLogStatus");
   if (status) status.textContent = activity?.getState().scope ? "Provider information could not be loaded." : "Session or provider information is unavailable. Identity verification is required for campaign history.";
 }
-window.addEventListener("online", () => { if (state.campaignId && !activity?.getState().scope) void loadCampaign(state.campaignId, { autoScroll: false }); });
-window.addEventListener("pagehide", () => { activityView?.dispose(); composition.disposeActivity?.(); });
+let activitySuspended = false;
+let activityDestroyed = false;
+window.addEventListener("online", () => { if (!activitySuspended && !activityDestroyed && state.campaignId && !activity?.getState().scope) void loadCampaign(state.campaignId, { autoScroll: false }); });
+window.addEventListener("pagehide", event => {
+  if (event.persisted) {
+    activitySuspended = true;
+    ++activityActivationEpoch;
+    observedEpisodes.clear();
+    activity?.close();
+    return;
+  }
+  activityDestroyed = true;
+  activityView?.dispose();
+  composition.disposeActivity?.();
+});
+window.addEventListener("pageshow", event => {
+  if (!event.persisted || !activitySuspended || activityDestroyed) return;
+  activitySuspended = false;
+  // Revalidate session and campaign access before exposing the retained cache.
+  if (state.campaignId) void loadCampaign(state.campaignId, { autoScroll: false });
+});
 
 // ── Onboarding ────────────────────────────────────────────────
 async function checkOnboarding() {
@@ -2300,8 +2319,9 @@ async function undoLatest() {
     const targetTurnNumber = undoTargetTurnNumber(state.campaign);
     await apiClient.campaigns.rewind(state.campaignId, { targetTurnNumber });
     if (!activityScopeCurrent(observationScope)) return;
-    observeActivity("browser.undo_result", null, { success: true }, observationScope);
-    await loadCampaign(state.campaignId);
+    await observeActivity("browser.undo_result", null, { success: true }, observationScope);
+    if (!activityScopeCurrent(observationScope)) return;
+    await loadCampaign(observationScope.campaignId);
     toast("Last turn removed.");
   } catch (err) {
     if (!activityScopeCurrent(observationScope)) return;

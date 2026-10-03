@@ -22,7 +22,7 @@ async function install(page: Page, options: { storageDenied?: boolean; review?: 
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error" && !/Failed to load resource|net::ERR_INTERNET_DISCONNECTED/u.test(message.text())) errors.push(message.text()); });
   let events = [event(3), event(2, { kind: "generation.retry_queued", status: "queued", attemptNumber: 2, severity: "info", diagnostic: null })];
-  let offlineFeed = false; let offlineApi = false; let unsupported = false; let malformed = false; let deny = false; let sessions = 0; let syncs = 0; let hold = options.delaySession ?? false; let delayedActivity: Route | null = null; let holdActivity = false; let resetNext = false; let holdConfig = false; let delayedConfig: Route | null = null;
+  let offlineFeed = false; let offlineApi = false; let unsupported = false; let malformed = false; let deny = false; let sessions = 0; let syncs = 0; let activityReads = 0; let hold = options.delaySession ?? false; let delayedActivity: Route | null = null; let holdActivity = false; let resetNext = false; let holdConfig = false; let delayedConfig: Route | null = null;
   let releaseSession!: () => void; let sessionGate = new Promise<void>(resolve => { releaseSession = resolve; });
   if (options.storageDenied) await page.addInitScript(() => { Object.defineProperty(window, "indexedDB", { get() { throw new DOMException("Denied", "SecurityError"); } }); });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
@@ -45,6 +45,7 @@ async function install(page: Page, options: { storageDenied?: boolean; review?: 
       return send(route, { ...fixture.syncStatus, campaign: { ...fixture.syncStatus.campaign, id: selected, title: selected === campaignB ? "Second campaign" : "Fixture Story" }, generationRecovery: options.review ? recovery : null, turns: { ...fixture.turns, campaignId: selected } });
     }
     if (path.endsWith("/activity")) {
+      activityReads++;
       if (holdActivity && path.includes(campaignId)) { delayedActivity = route; return; }
       if (unsupported) return send(route, { error: "not_found" }, 404);
       if (malformed) return send(route, { private: "PRIVATE_CANARY" });
@@ -68,7 +69,7 @@ async function install(page: Page, options: { storageDenied?: boolean; review?: 
     if (path.endsWith("/review")) return send(route, { error: "Review unavailable PRIVATE_CANARY" }, 503);
     return send(route, { error: "No fixture" }, 404);
   });
-  return { errors, writes, holdConfig: () => { holdConfig = true; }, delayedConfig: () => delayedConfig, releaseConfig: async () => { holdConfig = false; if (delayedConfig) await send(delayedConfig, { error: "PRIVATE_CANARY" }, 503); }, reset: () => { resetNext = true; }, offlineApi: (value: boolean) => { offlineApi = value; }, events: (value: ActivityEvent[]) => { events = value; }, offline: (value: boolean) => { offlineFeed = value; }, unsupported: (value = true) => { unsupported = value; }, malformed: () => { malformed = true; }, deny: () => { deny = true; }, sessions: () => sessions, syncs: () => syncs, holdSession: () => { hold = true; sessionGate = new Promise<void>(resolve => { releaseSession = resolve; }); }, releaseSession: () => { hold = false; releaseSession(); }, holdActivity: () => { holdActivity = true; }, delayed: () => delayedActivity, releaseActivity: async () => { holdActivity = false; if (delayedActivity) await send(delayedActivity, pageOf([event(99, { diagnostic: { code: "request_failed", message: ACTIVITY_DIAGNOSTIC_MESSAGES.request_failed, correlationId: "late:A" } })])); } };
+  return { errors, writes, activityReads: () => activityReads, holdConfig: () => { holdConfig = true; }, delayedConfig: () => delayedConfig, releaseConfig: async () => { holdConfig = false; if (delayedConfig) await send(delayedConfig, { error: "PRIVATE_CANARY" }, 503); }, reset: () => { resetNext = true; }, offlineApi: (value: boolean) => { offlineApi = value; }, events: (value: ActivityEvent[]) => { events = value; }, offline: (value: boolean) => { offlineFeed = value; }, unsupported: (value = true) => { unsupported = value; }, malformed: () => { malformed = true; }, deny: () => { deny = true; }, sessions: () => sessions, syncs: () => syncs, holdSession: () => { hold = true; sessionGate = new Promise<void>(resolve => { releaseSession = resolve; }); }, releaseSession: () => { hold = false; releaseSession(); }, holdActivity: () => { holdActivity = true; }, delayed: () => delayedActivity, releaseActivity: async () => { holdActivity = false; if (delayedActivity) await send(delayedActivity, pageOf([event(99, { diagnostic: { code: "request_failed", message: ACTIVITY_DIAGNOSTIC_MESSAGES.request_failed, correlationId: "late:A" } })])); } };
 }
 async function open(page: Page) {
   await page.goto(`${origin}/story/${campaignId}`); await expect(page).toHaveTitle("Fixture Story — Infinite Quest");
@@ -271,4 +272,61 @@ test("successful illustration retry renders queued job and resumes polling witho
   expect(await page.evaluate(() => (window as any).__retryCalls)).toBe(1);
   expect(await page.evaluate(() => (window as any).__activity.getState().observations.some((entry: any) => entry.kind === "browser.illustration_command_failed"))).toBe(false);
   await expect(page.locator("body")).not.toContainText("Illustration retry failed"); expect(api.errors).toEqual([]);
+});
+
+test("successful Undo persists exactly one safe observation through campaign reload and document reload", async ({ page }) => {
+  const api = await install(page); await open(page);
+  await page.route("**/api/v1/campaigns/*/rewind", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ campaignId, activeTurnNumber: 0, discardedTurnCount: 1, stateSnapshot: {} }) }));
+  page.on("dialog", dialog => dialog.accept());
+  await page.keyboard.press("Escape");
+  const before = api.syncs();
+  await page.locator("#btnUndo").click();
+  await expect.poll(() => api.syncs()).toBeGreaterThan(before);
+  await expect.poll(() => page.evaluate(() => (window as any).__activity.getState().observations.filter((entry: any) => entry.kind === "browser.undo_result").length)).toBe(1);
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => (window as any).__activity?.getState().observations.filter((entry: any) => entry.kind === "browser.undo_result").length)).toBe(1);
+  const entries = await page.evaluate(() => (window as any).__activity.getState().observations.filter((entry: any) => entry.kind === "browser.undo_result"));
+  expect(entries[0]).toMatchObject({ campaignId, severity: "info", diagnostic: null });
+  expect(JSON.stringify(entries)).not.toContain("PRIVATE_CANARY"); expect(api.errors).toEqual([]);
+});
+
+test("persisted lifecycle revalidates before cache display across cycles and permanently cleans up", async ({ page }) => {
+  const api = await install(page); await open(page);
+  for (let cycle = 0; cycle < 2; cycle++) {
+    api.holdSession(); const sessions = api.sessions();
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })));
+    await expect(page.locator("#activityLogList .activity-log-entry")).toHaveCount(0);
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await expect.poll(() => api.sessions()).toBeGreaterThan(sessions);
+    await expect(page.locator("#activityLogList .activity-log-entry")).toHaveCount(0);
+    api.releaseSession(); await expect(page.locator("#activityLogList")).toContainText("Generation");
+    await expect.poll(() => page.evaluate(() => (window as any).__activity.getState().syncing)).toBe(false);
+    const before = api.activityReads(); await refresh(page);
+    await expect.poll(() => page.evaluate(() => (window as any).__activity.getState().syncing)).toBe(false);
+    expect(api.activityReads()).toBe(before + 1);
+  }
+  api.deny();
+  await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })); window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); });
+  await expect(page.locator("#activityLogList .activity-log-entry")).toHaveCount(0);
+  await expect(page.locator("#activityLogNotices")).toContainText("Identity and campaign access");
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
+  const sessions = api.sessions();
+  await page.evaluate(async id => { window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); await (window as any).__activity.open({ apiBase: location.origin, ownerUserId: id, campaignId: id }); await (window as any).__activity.refresh(); }, campaignId);
+  expect(api.sessions()).toBe(sessions);
+  expect(await page.evaluate(() => (window as any).__activity.getState().scope)).toBeNull(); expect(api.errors).toEqual([]);
+});
+
+test("native Back restores Activity when Chromium admits the document to BFCache", async ({ page }) => {
+  const api = await install(page); await open(page);
+  await page.evaluate(() => {
+    (window as any).__bfcacheMarker = true;
+    window.addEventListener("pageshow", event => { (window as any).__nativePersisted = event.persisted; });
+  });
+  await page.route(`${origin}/bfcache-away`, route => route.fulfill({ contentType: "text/html", body: "<html><title>Away</title><body>Away</body></html>" }));
+  await page.goto(`${origin}/bfcache-away`); await page.goBack();
+  const admitted = await page.evaluate(() => Boolean((window as any).__bfcacheMarker && (window as any).__nativePersisted));
+  test.skip(!admitted, "Chromium did not admit this routed automation document to BFCache; persisted lifecycle is separately simulated.");
+  await expect(page.locator("#activityLogList")).toContainText("Generation");
+  const before = api.activityReads(); await refresh(page);
+  await expect.poll(() => api.activityReads()).toBeGreaterThan(before); expect(api.errors).toEqual([]);
 });

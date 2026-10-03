@@ -53,4 +53,3 @@ export function activityPresentation(event: ActivityEvent | BrowserActivityObser
   }
   return { title, message, recovery: event.kind === "generation.review_required" ? "View current review and recovery options." : ["generation.failed", "generation.recoverable", "image.failed", "image.recoverable"].includes(event.kind) ? "View current recovery options." : null, fields };
 }
-

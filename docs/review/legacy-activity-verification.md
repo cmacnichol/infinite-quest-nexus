@@ -47,3 +47,14 @@ Task 8 viewed all six sanitized screenshots at their stated viewport sizes. Task
 | Cache reconnect | [desktop](assets/legacy-activity/cache-reconnect-1440.png) | [mobile](assets/legacy-activity/cache-reconnect-390.png) |
 
 Local Markdown links and the complete scoped diff were checked; `git diff --check` passed. No secrets or private campaign records were included in these artifacts.
+
+
+## Final review lifecycle fixes
+
+The final review found successful Undo scheduling its browser observation immediately before campaign reload invalidated that queued write, plus permanent Activity disposal on persisted pagehide. Undo now awaits exactly one authorized safe observation before the intentional same-campaign reload and checks its original activation again after persistence. Persisted pagehide clears the displayed scope and invalidates stale callbacks without disposing native adapters or the view; persisted pageshow reloads the current campaign through fresh session and campaign-access verification. Permanent pagehide still disposes everything. The committed extra blank line in the domain presentation file was removed.
+
+Production browser regressions first reproduced missing Undo observations and the permanently disposed persisted page. Final Chromium/native IndexedDB run: 31 passed, 1 skipped, zero failures (32.3 seconds), covering successful rewind through both campaign and document reload, exactly one safe Undo observation, two persisted suspension/restore cycles, held fresh session before cache display, restore access denial, one Activity read per refresh and permanent cleanup after the cycles. Native Back navigation was attempted, but Chromium did not admit the routed automation document to BFCache; that conditional test is explicitly skipped. Persisted lifecycle coverage is simulated with native PageTransitionEvent in the rendered production module, not proof of native BFCache admission.
+
+Final focused unit coverage: 7 files, 156 passed, zero skips/failures (3.11 seconds). Full root check and both production web builds passed; incumbent unresolved-runtime-font and large-chunk build advisories remain. No layout or stylesheet changed: the six previously viewed viewport screenshots remain valid, and only known timestamp churn from this rerun was restored. Backend/database suites were not repeated for these browser lifecycle changes. Existing live-provider, deployment, sustained-load, Windows secure ZIP and restoration limits remain; the unrelated intermittent cast cause is still unconfirmed.
+
+Final full unit rerun: 374 files, 4,821 passed, 44 existing platform/feature skips, zero failures (41.42 seconds). The first rerun had two source-text assertions fail because the edit command converted Story source newlines to CRLF; restoring the original LF bytes resolved both without changing assertions. Final delivery-range whitespace check uses `git diff --check 66a0deeb..HEAD`, including the committed EOF correction.
