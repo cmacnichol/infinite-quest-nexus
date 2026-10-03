@@ -1411,14 +1411,16 @@ integration("PostgreSQL generation command repository", () => {
     expect(statements.filter((statement) => statement === "COMMIT")).toHaveLength(1);
     expect(statements.filter((statement) => statement === "ROLLBACK")).toHaveLength(0);
     expect(statements.filter((statement) => statement.startsWith("SELECT id, status AS \"generationStatus\""))).toHaveLength(1);
-    expect(statements.filter((statement) => statement.startsWith("UPDATE generation_jobs"))).toHaveLength(1);
+    expect(statements.filter((statement) => statement.startsWith("UPDATE generation_jobs"))).toHaveLength(2);
 
     const discardCampaign = await campaign();
     const discardJobId = await directGenerationJob(discardCampaign.campaignId, "failed");
     statements.length = 0;
     await commands.discard({ ownerUserId, jobId: discardJobId });
-    expect(statements).toHaveLength(1);
-    expect(statements.filter((statement) => /^(BEGIN|COMMIT|ROLLBACK)/.test(statement))).toEqual([]);
+    expect(statements.filter((statement) => statement === "BEGIN")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "COMMIT")).toHaveLength(1);
+    expect(statements.filter((statement) => statement === "ROLLBACK")).toHaveLength(0);
+    expect(statements.filter((statement) => statement.startsWith("INSERT INTO activity_event_outbox"))).toHaveLength(1);
     expect(statements.filter((statement) => statement.startsWith("WITH source AS"))).toHaveLength(1);
 
     const replacementCampaign = await campaign();
@@ -1511,6 +1513,14 @@ integration("PostgreSQL generation command repository", () => {
       .resolves.toMatchObject({ rows: [{ asset_id: otherChildren.assetId }] });
     await expect(pool.query<{ id: string }>("SELECT id FROM asset_references WHERE id = $1", [otherChildren.assetReferenceId]))
       .resolves.toMatchObject({ rows: [{ id: otherChildren.assetReferenceId }] });
+    const captured = (await pool.query("SELECT source_id, snapshot->>'kind' AS kind FROM activity_event_outbox WHERE campaign_id=$1 ORDER BY source", [targetCampaign.campaignId])).rows;
+    expect(captured).toEqual(expect.arrayContaining([
+      { source_id: targetJobId, kind: "generation.cancelled" },
+      { source_id: targetChildren.imageId, kind: "image.cancelled" },
+      { source_id: targetChildren.segmentId, kind: "illustration_segment.failed" }
+    ]));
+    expect(captured).toHaveLength(3);
+    expect((await pool.query("SELECT source_id FROM activity_event_outbox WHERE campaign_id=$1", [otherCampaign.campaignId])).rows).toEqual([]);
     await expect(authoritativeCampaignSnapshot(targetCampaign.campaignId)).resolves.toEqual(targetBefore);
     await expect(authoritativeCampaignSnapshot(otherCampaign.campaignId)).resolves.toEqual(otherBefore);
   });

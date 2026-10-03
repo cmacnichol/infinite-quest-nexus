@@ -32,7 +32,6 @@ function record(value: unknown): JsonRecord | null { return value !== null && ty
 function strings(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim()) : typeof value === "string" && Boolean(value.trim()) ? [value.trim()] : []; }
 function text(value: unknown): string | null { return typeof value === "string" && value.trim() ? value.trim() : null; }
 function arrayAt(world: JsonRecord, key: string): unknown[] { const value = world[key]; return Array.isArray(value) ? value : []; }
-function escapePointer(value: string): string { return value.replace(/~/gu, "~0").replace(/\//gu, "~1"); }
 function terms(textValue: string): Set<string> { return new Set(textValue.split(/[^\p{L}\p{N}]+/u).map(normalizeEntityTerm).filter((value) => value.length > 1)); }
 
 type Entity = { sourceId: string; sourcePath: string; identity: string; name: string; aliases: string[]; fiction: Record<string, string>; rank: number; };

@@ -1,3 +1,4 @@
+import { captureGenerationActivity } from "./generation-activity.js";
 import { STORY_CONTEXT_BUDGET_TOKEN_VALUES } from "../../contracts/src/story-settings.js";
 import { applyCastBoundaryChange } from "./campaign-cast-lifecycle.js";
 import { enqueueCastDiscoveryWithClient, type CastDiscoveryExecution } from "./campaign-cast-job-repository.js";
@@ -363,10 +364,6 @@ async function responseContractState(
     const completedFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperation[]) =>
       typeof requestPayloadHash === "string" && entries.some((entry) => entry.status === "completed"
         && entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation));
-    const pendingFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperation[]) => typeof requestPayloadHash === "string" && entries.some((entry) =>
-      entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation)
-        && (entry.status === "reserved" || entry.status === "dispatched")
-    );
     // New-mode checkpoint bodies are replay evidence, never independently
     // trusted snapshots. The ledger also proves the frozen selection/key.
     const primary = value.primaryResult;
@@ -1891,6 +1888,7 @@ async function commitAcceptedTurn(
       code: "generation_cancelled"
     });
   }
+  await captureGenerationActivity(client, job.id, job.owner_user_id, ["generation.completed"]);
   return { turnId };
 }
 
@@ -1921,9 +1919,10 @@ export function createPostgresGenerationExecutionRepository(
           operation_kind: "append" | "replace_latest";
           replacement_turn_id: string | null;
           attempts: number;
+          prior_status: string;
         }>(
           `WITH candidate AS (
-             SELECT id FROM generation_jobs
+             SELECT id, status FROM generation_jobs
               WHERE status IN ('queued','replacement_queued')
                  OR (status IN ('assessing','generating','validating','committing') AND lease_expires_at < now())
               ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
@@ -1932,9 +1931,10 @@ export function createPostgresGenerationExecutionRepository(
                   lease_expires_at = now() + ($2::text || ' seconds')::interval, updated_at = now()
              FROM candidate WHERE j.id = candidate.id
            RETURNING j.id, j.owner_user_id, j.campaign_id, j.provider_profile_id,
-                     j.expected_turn_number, j.operation_kind, j.replacement_turn_id, j.attempts`,
+                     j.expected_turn_number, j.operation_kind, j.replacement_turn_id, j.attempts, candidate.status AS prior_status`,
           [request.workerId, request.leaseSeconds]
         );
+        if (result.rows[0] && result.rows[0].prior_status !== "assessing") await captureGenerationActivity(client, result.rows[0].id, result.rows[0].owner_user_id, ["generation.claimed"]);
         return result.rows[0] ? claimedGeneration(result.rows[0]) : null;
       });
     },
@@ -1986,45 +1986,48 @@ export function createPostgresGenerationExecutionRepository(
           || !hasValidAutomaticRepair(row.orchestration_private?.automaticRepair)
           || !hasValidChoiceRepair(row.orchestration_private?.choiceRepair)
           || !hasValidEventCoverageRepair(row.orchestration_private?.eventCoverageRepair)) {
-        await client.query(
+        const transition = await client.query<{ id: string }>(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
                   error_message = 'Saved generation recovery state is invalid.',
                   recovery_metadata = recovery_metadata || $4::jsonb,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-              AND status = 'assessing' AND lease_expires_at > now()`,
+              AND status = 'assessing' AND lease_expires_at > now() RETURNING id`,
           [row.id, row.owner_user_id, request.workerId, json({ reason: "orchestration_repair_invalid" })]
         );
+        if (transition.rows[0]) await captureGenerationActivity(client, row.id, row.owner_user_id, ["generation.recoverable"]);
         return null;
       }
       if (row.generation_policy !== null && !generationPolicySnapshotSchema.safeParse(row.generation_policy).success) {
-        await client.query(
+        const transition = await client.query<{ id: string }>(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
                   error_message = 'Saved generation policy is invalid.',
                   recovery_metadata = recovery_metadata || $4::jsonb,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-              AND status = 'assessing' AND lease_expires_at > now()`,
+              AND status = 'assessing' AND lease_expires_at > now() RETURNING id`,
           [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_policy_invalid" })]
         );
+        if (transition.rows[0]) await captureGenerationActivity(client, row.id, row.owner_user_id, ["generation.recoverable"]);
         return null;
       }
       let storedBaseIdentity: GenerationBaseIdentity;
       try {
         storedBaseIdentity = readGenerationBaseIdentity(row.generation_base_identity) as GenerationBaseIdentity;
       } catch {
-        await client.query(
+        const transition = await client.query<{ id: string }>(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
                   error_message = 'Saved generation authority is invalid.',
                   recovery_metadata = recovery_metadata || $4::jsonb,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-              AND status = 'assessing' AND lease_expires_at > now()`,
+              AND status = 'assessing' AND lease_expires_at > now() RETURNING id`,
           [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_base_identity_invalid" })]
         );
+        if (transition.rows[0]) await captureGenerationActivity(client, row.id, row.owner_user_id, ["generation.recoverable"]);
         return null;
       }
       let frozenStoryMemoryPolicy: StoryMemoryPolicySnapshot | null;
@@ -2034,16 +2037,17 @@ export function createPostgresGenerationExecutionRepository(
           ? storyMemoryPolicySnapshotSchema.parse(frozenContextOptions.storyMemoryPolicy) : null;
         assertGenerationBaseIdentityRecentWindowCompatibility(storedBaseIdentity, frozenStoryMemoryPolicy);
       } catch {
-        await client.query(
+        const transition = await client.query<{ id: string }>(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
                   error_message = 'Saved generation authority is incompatible with its frozen policy.',
                   recovery_metadata = recovery_metadata || $4::jsonb,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-              AND status = 'assessing' AND lease_expires_at > now()`,
+              AND status = 'assessing' AND lease_expires_at > now() RETURNING id`,
           [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_base_identity_policy_invalid" })]
         );
+        if (transition.rows[0]) await captureGenerationActivity(client, row.id, row.owner_user_id, ["generation.recoverable"]);
         return null;
       }
       let authority: Awaited<ReturnType<typeof resolveGenerationAuthoritySnapshot>>;
@@ -2059,32 +2063,34 @@ export function createPostgresGenerationExecutionRepository(
       } catch (error) {
         const detail = error as { code?: unknown; field?: unknown };
         if (detail.code !== "authoritative_context_invalid") throw error;
-        await client.query(
+        const transition = await client.query<{ id: string }>(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_checkpoint_incompatible',
                   error_message = 'Persisted campaign authority is invalid.',
                   recovery_metadata = recovery_metadata || $4::jsonb,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-              AND status = 'assessing' AND lease_expires_at > now()`,
+              AND status = 'assessing' AND lease_expires_at > now() RETURNING id`,
           [row.id, row.owner_user_id, request.workerId, json({
             reason: "authoritative_context_invalid",
             ...(typeof detail.field === "string" ? { field: detail.field } : {})
           })]
         );
+        if (transition.rows[0]) await captureGenerationActivity(client, row.id, row.owner_user_id, ["generation.recoverable"]);
         return null;
       }
       if (!matchesGenerationBaseIdentity(storedBaseIdentity, authority.baseIdentity)) {
-        await client.query(
+        const transition = await client.query<{ id: string }>(
           `UPDATE generation_jobs
               SET status = 'recoverable', error_code = 'generation_authority_stale',
                   error_message = 'Campaign changed before generation could start.',
                   recovery_metadata = recovery_metadata || $4::jsonb,
                   lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
             WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-              AND status = 'assessing' AND lease_expires_at > now()`,
+              AND status = 'assessing' AND lease_expires_at > now() RETURNING id`,
           [row.id, row.owner_user_id, request.workerId, json({ reason: "generation_authority_stale" })]
         );
+        if (transition.rows[0]) await captureGenerationActivity(client, row.id, row.owner_user_id, ["generation.recoverable"]);
         return null;
       }
       const {
@@ -2114,13 +2120,17 @@ export function createPostgresGenerationExecutionRepository(
     },
 
     async markGenerating(scope) {
-      return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET status = 'generating', updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'assessing'
-            AND lease_expires_at > now()
-          RETURNING id`,
-        [scope.jobId, scope.ownerUserId, scope.workerId]
-      ));
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<{ id: string }>(
+          `UPDATE generation_jobs SET status = 'generating', updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'assessing'
+              AND lease_expires_at > now()
+            RETURNING id`,
+          [scope.jobId, scope.ownerUserId, scope.workerId]
+        );
+        if (changed(result)) await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, ["generation.generating"]);
+        return changed(result);
+      });
     },
 
     async restartAfterSemanticRepair(scope) {
@@ -2328,7 +2338,7 @@ export function createPostgresGenerationExecutionRepository(
             || stableStringify(parsed.originalFindings) !== stableStringify(prior.data.originalFindings)
             || stableStringify(parsed.decisionJournal.slice(0, prior.data.decisionJournal.length)) !== stableStringify(prior.data.decisionJournal)) return false;
       }
-      return changed(await client.query<{ id: string }>(
+      const transition = await client.query<{ id: string }>(
         `UPDATE generation_jobs
             SET status = 'recoverable', orchestration_private = orchestration_private || jsonb_build_object('generationReview', $4::jsonb),
                 error_code = 'generation_review_required', error_message = 'Generation requires review before it can continue.',
@@ -2337,7 +2347,9 @@ export function createPostgresGenerationExecutionRepository(
             AND status IN ('assessing','generating','validating','committing') AND lease_expires_at > now()
           RETURNING id`,
         [scope.jobId, scope.ownerUserId, scope.workerId, json(parsed)]
-      ));
+      );
+      if (changed(transition)) await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, ["generation.review_required"]);
+      return changed(transition);
       });
     },
 
@@ -2396,39 +2408,51 @@ export function createPostgresGenerationExecutionRepository(
     },
 
     async markRecoverable(input) {
-      return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $4,
-           provider_finish_reason = $5, error_code = $6, error_message = $7,
-           recovery_metadata = recovery_metadata || $8::jsonb,
-           lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-           AND status IN ('assessing','generating','validating','committing')
-           AND lease_expires_at > now()
-         RETURNING id`,
-        [input.jobId, input.ownerUserId, input.workerId, input.providerResponseId,
-          input.providerFinishReason, input.errorCode, input.errorMessage,
-          json(input.recoveryMetadata)]
-      ));
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<{ id: string }>(
+          `UPDATE generation_jobs SET status = 'recoverable', provider_response_id = $4,
+             provider_finish_reason = $5, error_code = $6, error_message = $7,
+             recovery_metadata = recovery_metadata || $8::jsonb,
+             lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+             AND status IN ('assessing','generating','validating','committing')
+             AND lease_expires_at > now()
+           RETURNING id`,
+          [input.jobId, input.ownerUserId, input.workerId, input.providerResponseId,
+            input.providerFinishReason, input.errorCode, input.errorMessage,
+            json(input.recoveryMetadata)]
+        );
+        if (changed(result)) await captureGenerationActivity(client, input.jobId, input.ownerUserId, ["generation.recoverable"]);
+        return changed(result);
+      });
     },
 
     async markValidating(scope) {
-      return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET status = 'validating', updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'generating'
-            AND lease_expires_at > now()
-          RETURNING id`,
-        [scope.jobId, scope.ownerUserId, scope.workerId]
-      ));
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<{ id: string }>(
+          `UPDATE generation_jobs SET status = 'validating', updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'generating'
+              AND lease_expires_at > now()
+            RETURNING id`,
+          [scope.jobId, scope.ownerUserId, scope.workerId]
+        );
+        if (changed(result)) await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, ["generation.validating"]);
+        return changed(result);
+      });
     },
 
     async markCommitting(scope) {
-      return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET status = 'committing', updated_at = now()
-          WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'validating'
-            AND lease_expires_at > now()
-          RETURNING id`,
-        [scope.jobId, scope.ownerUserId, scope.workerId]
-      ));
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<{ id: string }>(
+          `UPDATE generation_jobs SET status = 'committing', updated_at = now()
+            WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = 'validating'
+              AND lease_expires_at > now()
+            RETURNING id`,
+          [scope.jobId, scope.ownerUserId, scope.workerId]
+        );
+        if (changed(result)) await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, ["generation.committing"]);
+        return changed(result);
+      });
     },
 
     async commitAcceptedTurn(input) {
@@ -2436,19 +2460,23 @@ export function createPostgresGenerationExecutionRepository(
     },
 
     async markFailed(input) {
-      return changed(await pool.query<{ id: string }>(
-        `UPDATE generation_jobs SET status = 'failed', error_code = $4, error_message = $5,
-           recovery_metadata = recovery_metadata || $6::jsonb,
-           orchestration_private = CASE WHEN $7::jsonb IS NULL THEN orchestration_private
-             ELSE orchestration_private || jsonb_build_object('lastFailureDiagnostic', $7::jsonb) END,
-           lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
-           AND status IN ('assessing','generating','validating','committing')
-           AND lease_expires_at > now()
-         RETURNING id`,
-        [input.jobId, input.ownerUserId, input.workerId, input.errorCode,
-          input.errorMessage, json(input.recoveryMetadata), input.lastFailureDiagnostic ? json(input.lastFailureDiagnostic) : null]
-      ));
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<{ id: string }>(
+          `UPDATE generation_jobs SET status = 'failed', error_code = $4, error_message = $5,
+             recovery_metadata = recovery_metadata || $6::jsonb,
+             orchestration_private = CASE WHEN $7::jsonb IS NULL THEN orchestration_private
+               ELSE orchestration_private || jsonb_build_object('lastFailureDiagnostic', $7::jsonb) END,
+             lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+           WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3
+             AND status IN ('assessing','generating','validating','committing')
+             AND lease_expires_at > now()
+           RETURNING id`,
+          [input.jobId, input.ownerUserId, input.workerId, input.errorCode,
+            input.errorMessage, json(input.recoveryMetadata), input.lastFailureDiagnostic ? json(input.lastFailureDiagnostic) : null]
+        );
+        if (changed(result)) await captureGenerationActivity(client, input.jobId, input.ownerUserId, ["generation.failed"], input.lastFailureDiagnostic);
+        return changed(result);
+      });
     }
   };
 }

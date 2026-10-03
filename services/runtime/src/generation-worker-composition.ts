@@ -23,7 +23,7 @@ import {
   resolveGenerationResponseContracts,
   resolveGenerationResponseContractsV2
 } from "./generation-response-contract.js";
-import type { QueuedResponsePolicyVersioned, FrozenResponseContractsVersioned } from "../../../packages/contracts/src/generation-response-contract.js";
+import type { FrozenResponseContractsVersioned } from "../../../packages/contracts/src/generation-response-contract.js";
 import type { WorkerGenerationProviderCollaborators } from "./provider-application-composition.js";
 import {
   createGenerationExecutor,

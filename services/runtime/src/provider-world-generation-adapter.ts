@@ -341,16 +341,6 @@ export function generatedWorldProviderError(error: unknown): Error {
   });
 }
 
-async function callGeneratedWorldProvider(
-  request: () => Promise<ProviderResult>
-): Promise<ProviderResult> {
-  try {
-    return await request();
-  } catch (error) {
-    throw generatedWorldProviderError(error);
-  }
-}
-
 export function worldGenerationFailureDiagnostic(error: unknown): WorldGenerationFailureDiagnostic {
   const failure = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const rawStatusCode = Number(failure.statusCode);

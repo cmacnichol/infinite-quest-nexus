@@ -12,6 +12,9 @@ export type PortabilityClass = typeof SYSTEM_ARCHIVE_PORTABILITY_CLASSES[number]
 /** Every table created by the current migrations has one deliberate export treatment. */
 export const SYSTEM_ARCHIVE_TABLE_CLASSIFICATIONS = {
   activity_events: "portable_authority",
+  activity_event_outbox: "operational",
+  story_activity_events: "operational",
+  campaign_activity_history: "operational",
   api_admission_buckets: "operational",
   api_admission_leases: "operational",
   authoring_job_stages: "operational",
@@ -338,7 +341,7 @@ export const SYSTEM_ARCHIVE_SOURCE_COLUMN_CLASSIFICATIONS = Object.freeze({
       "prompt_source", "status", "created_at", "updated_at"
     ],
     owner_remapped: ["owner_user_id"],
-    operational_excluded: ["generation_job_id"]
+    operational_excluded: ["generation_job_id", "activity_revision"]
   }),
   turn_illustration_sets: sourceColumns({
     portable_exact: [

@@ -14,7 +14,7 @@ import { resolveEffectiveContextWindowTokens } from "../../../packages/story-eng
 import type { ApiGenerationProviderCollaborators } from "./provider-application-composition.js";
 import { queuedResponseContractPolicy, responseContractInvocationClosure } from "./generation-response-contract.js";
 import { resolveTextExecutionRouteBasis } from "./provider-preset-resolution.js";
-import { STORY_PRESET_ROUTE_PROTOCOL_V2, type TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
+import { STORY_PRESET_ROUTE_PROTOCOL_V2 } from "../../../packages/contracts/src/text-execution-plan.js";
 import { normalizeTextSelection } from "../../../packages/contracts/src/provider-selection.js";
 import { normalizeNewTextResponsePolicy, resolveResponseContractAdmission } from "../../../packages/application/src/providers/response-format.js";
 import { getProviderOutputSchemaV2, selectProviderOutputSchemaV2, type ProviderOutputSchemaV2 } from "../../../packages/contracts/src/provider-output-schema.js";

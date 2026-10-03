@@ -457,7 +457,9 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     const before = await campaignCounts(imported.campaignId);
     const queued = await enqueue(imported.campaignId);
     const oversized = JSON.parse(output(["Enter.", "Enter.", "Wait.", "Speak."])) as Record<string, unknown>;
-    oversized.narration = "🕯️".repeat(2_000);
+    // Keep the initial Story Writer request within the normal provider budget,
+    // then exceed that budget with protected narration only in the repair request.
+    oversized.narration = "🕯️".repeat(20_000);
     const operations: string[] = [];
     const requests: string[] = [];
     const repairTransport = { calls: 0 };
@@ -466,14 +468,16 @@ integration("Story Direction choice repair PostgreSQL workflow", () => {
     expect(claim?.jobId).toBe(queued.id);
     const executor = createGenerationExecutor({ pool, repository, collaborators: collaborators(
       [{ content: JSON.stringify(oversized) }], operations, requests,
-      { contextWindowTokens: 9_000, maxOutputTokens: 4_096 }, repairTransport
+      { contextWindowTokens: 32_768, maxOutputTokens: 4_096 }, repairTransport
     ) });
     await expect(executor.execute({ workerId: "choice-repair-oversized", leaseSeconds: 30, claim: claim! })).resolves.toBe(true);
+    expect(operations).toEqual(["story_generation"]);
+    expect(requests).toHaveLength(1);
     await authorizeReviewRetry(queued.id, "choices");
     const repairClaim = await repository.claimNext({ workerId: "choice-repair-oversized-retry", leaseSeconds: 30 });
     expect(repairClaim?.jobId).toBe(queued.id);
     await expect(createGenerationExecutor({ pool, repository, collaborators: collaborators(
-      [], operations, requests, { contextWindowTokens: 9_000, maxOutputTokens: 4_096 }, repairTransport
+      [], operations, requests, { contextWindowTokens: 32_768, maxOutputTokens: 4_096 }, repairTransport
     ) }).execute({ workerId: "choice-repair-oversized-retry", leaseSeconds: 30, claim: repairClaim! })).resolves.toBe(true);
     expect(operations).toEqual(["story_generation"]);
     expect(requests).toHaveLength(2);

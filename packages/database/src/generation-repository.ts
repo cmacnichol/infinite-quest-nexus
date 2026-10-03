@@ -1,11 +1,12 @@
+import { captureCancelledIllustrationActivity, captureGenerationActivity } from "./generation-activity.js";
 import type {
   GenerationRequest,
-  GenerationReviewDecisionRequest,
   GenerationReviewDetail,
   GenerationResult,
   GenerationRetryLatestRequest
 } from "../../contracts/src/index.js";
-import { readQueuedResponsePolicyVersioned, type QueuedResponsePolicyVersioned } from "../../contracts/src/generation-response-contract.js";
+import { readQueuedResponsePolicyVersioned, readResponseContractInvocationAuditVersioned, type QueuedResponsePolicyVersioned } from "../../contracts/src/generation-response-contract.js";
+import { providerFailureEvidenceSchema } from "../../contracts/src/provider-failure.js";
 import { continuityReviewExecutionSnapshotHash, continuityReviewExecutionSnapshotSchema, type ContinuityReviewExecutionSnapshot } from "../../contracts/src/continuity-review-execution.js";
 import {
   GenerationApplicationError,
@@ -586,6 +587,7 @@ export function createPostgresGenerationCommandRepository(
                 ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );
+          await captureGenerationActivity(client, inserted.rows[0]!.id, scope.ownerUserId, ["generation.queued"]);
           return enqueueResult(inserted.rows[0]!, false);
         } catch (error) {
           if (sqlState(error) === "23505") {
@@ -789,6 +791,7 @@ export function createPostgresGenerationCommandRepository(
                 ...(preparedBasis ? { textExecutionRouteBasis: preparedBasis } : {})
               })]
           );
+          await captureGenerationActivity(client, inserted.rows[0]!.id, scope.ownerUserId, ["generation.queued"]);
           await client.query("RELEASE SAVEPOINT enqueue_replacement_insert");
           return enqueueResult(inserted.rows[0]!, false);
           } catch (error) {
@@ -823,8 +826,19 @@ export function createPostgresGenerationCommandRepository(
     },
 
     async getJob(scope) {
+      // Expand larger stored evidence once, while avoiding an unnecessary copy of small private values.
       const result = await pool.query<JobRow>(
-        `SELECT id, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
+        `WITH expanded_job AS MATERIALIZED (
+           SELECT id, campaign_id, provider_profile_id, expected_turn_number, action, status, attempts,
+                  requested_input_mode, resolved_input_mode, input_mode_source, operation_kind,
+                  replacement_turn_id, base_turn_number, requested_model, provider_response_id,
+                  provider_finish_reason, result_turn_id, error_code, error_message, recovery_metadata,
+                  created_at, updated_at, completed_at, partial_output, generation_policy,
+                  CASE WHEN pg_column_size(orchestration_private) > 2048
+                    THEN orchestration_private || '{}'::jsonb ELSE orchestration_private END AS expanded_private
+             FROM generation_jobs WHERE id = $1 AND owner_user_id = $2
+         )
+         SELECT id, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
                 expected_turn_number AS "expectedTurnNumber", action, status, attempts,
                 requested_input_mode AS "requestedInputMode", resolved_input_mode AS "resolvedInputMode",
                 input_mode_source AS "inputModeSource", operation_kind AS "operationKind",
@@ -832,13 +846,13 @@ export function createPostgresGenerationCommandRepository(
                 requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
-                orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
-                ${continuityReviewTechnicalDiagnosticProjection("orchestration_private")} AS "continuityReviewDiagnostic",
-                ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
-                ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat",
+                expanded_private->'lastFailureDiagnostic' AS "failureDiagnostic",
+                ${continuityReviewTechnicalDiagnosticProjection("expanded_private")} AS "continuityReviewDiagnostic",
+                ${generationReviewSummaryProjection("expanded_private")} AS "reviewSummary",
+                ${generationResponseFormatProjection("expanded_private")} AS "responseFormat",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
                 partial_output AS "partialOutput", generation_policy AS "generationPolicy"
-           FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
+           FROM expanded_job`,
         [scope.jobId, scope.ownerUserId]
       );
       const row = result.rows[0];
@@ -1030,6 +1044,8 @@ export function createPostgresGenerationCommandRepository(
             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
           [scope.jobId, scope.ownerUserId, status, json(next), parsedRequest.decision === "retry"]
         );
+        await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, parsedRequest.decision === "retry"
+          ? ["generation.review_decided", "generation.retry_queued"] : ["generation.review_decided"]);
         return reviewDecisionResult(mutationResult(updated.rows[0]!), true);
       });
     },
@@ -1092,6 +1108,37 @@ export function createPostgresGenerationCommandRepository(
         if (!protocolCompatible) {
           throw new GenerationApplicationError("conflict", { reason: "retry_protocol_incompatible" });
         }
+        // Only an explicit Retry can re-arm a definitively rejected primary.
+        // Unknown dispatched work retains the existing interrupted-output gate.
+        const primary = job.orchestrationPrivate.primaryReservation as Record<string, unknown> | undefined;
+        const logical = job.orchestrationPrivate.logicalAttempt as { id?: unknown } | undefined;
+        let retryPrimary: Record<string, unknown> | null = null;
+        if (job.generationStatus === "failed" && (primary?.status === "reserved" || primary?.status === "dispatched")
+          && primary.attempt === job.attempts && typeof primary.requestBody === "string"
+          && primary.requestPayloadHash === sha256(primary.requestBody)
+          && !job.orchestrationPrivate.primaryResult && Array.isArray(job.orchestrationPrivate.responseContractInvocations)) {
+          for (const value of job.orchestrationPrivate.responseContractInvocations) {
+            let invocation;
+            try { invocation = readResponseContractInvocationAuditVersioned(value); } catch { continue; }
+            if (invocation.logicalAttemptId !== logical?.id || invocation.operation !== "story_generation"
+              || invocation.status !== "completed" || invocation.requestPayloadHash !== primary.requestPayloadHash
+              || !invocation.response?.physicalAttemptId) continue;
+            const physical = await client.query<{ failure_diagnostic: unknown }>(
+              `SELECT failure_diagnostic FROM prepared_text_physical_attempts
+                WHERE id=$1 AND owner_user_id=$2 AND logical_kind='story'
+                  AND logical_reservation->>'generationJobId'=$3 AND logical_reservation->>'invocationId'=$4
+                  AND request_payload_hash=$5 AND request_body=$6 AND status='completed' AND outcome='failed'
+                  AND response_started_at IS NULL AND emitted_output=false`,
+              [invocation.response.physicalAttemptId, scope.ownerUserId, scope.jobId, invocation.id,
+                primary.requestPayloadHash, primary.requestBody]
+            );
+            const evidence = providerFailureEvidenceSchema.safeParse(physical.rows[0]?.failure_diagnostic);
+            if (evidence.success && evidence.data.source === "http_error" && evidence.data.httpStatus !== null
+              && evidence.data.httpStatus >= 400 && !evidence.data.successfulResponseStarted && !evidence.data.emittedOutput) {
+              retryPrimary = { ...primary, status: "reserved", attempt: job.attempts! + 1 };
+            }
+          }
+        }
         const updated = await client.query<MutationRow>(
           `UPDATE generation_jobs
               SET status = CASE WHEN operation_kind = 'replace_latest' THEN 'replacement_queued' ELSE 'queued' END,
@@ -1100,11 +1147,13 @@ export function createPostgresGenerationCommandRepository(
                     'logicalAttempt', jsonb_build_object('version', 1, 'id', gen_random_uuid()::text,
                       'semanticRepairsConsumed', 0, 'reviewsConsumed', 0, 'automaticRepairsConsumed', 0,
                       'choiceRepairsConsumed', 0, 'eventCoverageRepairsConsumed', 0))
+                    || CASE WHEN $3::jsonb IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('primaryReservation',$3::jsonb) END
             WHERE id = $1 AND owner_user_id = $2
             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"`,
-          [scope.jobId, scope.ownerUserId]
+          [scope.jobId, scope.ownerUserId, retryPrimary === null ? null : json(retryPrimary)]
         );
         const row = updated.rows[0]!;
+        await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, ["generation.retry_queued"]);
         return {
           ...mutationResult(row),
           campaignId: job.campaignId!,
@@ -1138,6 +1187,7 @@ export function createPostgresGenerationCommandRepository(
           if (row.status === "cancelled") return { ...mutationResult(row), campaignId: row.campaignId };
           throw new GenerationApplicationError("invalid_state", { reason: "cancel_source_state", generationStatus: row.status });
         }
+        await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, ["generation.cancelled"]);
         const cancelledImages = await client.query<{ id: string }>(
           `UPDATE image_jobs SET status = 'cancelled', asset_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
               completed_at = now(), updated_at = now()
@@ -1146,6 +1196,7 @@ export function createPostgresGenerationCommandRepository(
               AND status IN ('queued', 'generating', 'provider_pending', 'downloading', 'completed') RETURNING id`,
           [job.id, scope.ownerUserId, job.campaignId]
         );
+        for (const image of cancelledImages.rows) await captureCancelledIllustrationActivity(client, "image", image.id, scope.ownerUserId);
         if (cancelledImages.rows.length) {
           await client.query(
             `DELETE FROM turn_illustration_segment_assets
@@ -1168,11 +1219,12 @@ export function createPostgresGenerationCommandRepository(
               AND segments.campaign_id = $3 AND segments.turn_id IS NULL`,
           [job.id, scope.ownerUserId, job.campaignId]
         );
-        await client.query(
+        const failedSegments = await client.query<{ id: string }>(
           `UPDATE turn_illustration_segments SET status = 'failed', updated_at = now()
-            WHERE generation_job_id = $1 AND owner_user_id = $2 AND turn_id IS NULL AND status = 'completed'`,
+            WHERE generation_job_id = $1 AND owner_user_id = $2 AND turn_id IS NULL AND status = 'completed' RETURNING id`,
           [job.id, scope.ownerUserId]
         );
+        for (const segment of failedSegments.rows) await captureCancelledIllustrationActivity(client, "illustration_segment", segment.id, scope.ownerUserId);
         await client.query(
           `UPDATE illustration_prompt_jobs prompts SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
               error_code = 'generation_cancelled', error_message = 'Parent generation was cancelled.', completed_at = now(), updated_at = now()
@@ -1201,22 +1253,25 @@ export function createPostgresGenerationCommandRepository(
     },
 
     async discard(scope) {
-      const result = await pool.query<MutationRow & { generationStatus: JobStatus }>(
-        `WITH source AS (
-           SELECT id, status FROM generation_jobs WHERE id = $1 AND owner_user_id = $2
-         ), updated AS (
-           UPDATE generation_jobs SET status = 'discarded', lease_owner = NULL, lease_expires_at = NULL,
-               partial_output = NULL, updated_at = now()
-             WHERE id IN (SELECT id FROM source) AND status IN ('recoverable', 'failed')
-             RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"
-         ) SELECT updated.id, updated.status, updated."operationKind", updated."replacementTurnId", source.status AS "generationStatus"
-             FROM source LEFT JOIN updated ON updated.id = source.id`,
-        [scope.jobId, scope.ownerUserId]
-      );
-      const row = result.rows[0];
-      if (!row) throw notFound({ jobId: scope.jobId });
-      if (!row.id) throw new GenerationApplicationError("invalid_state", { reason: "discard_source_state", generationStatus: row.generationStatus });
-      return mutationResult(row);
+      return withTransaction(pool, async (client) => {
+        const result = await client.query<MutationRow & { generationStatus: JobStatus }>(
+          `WITH source AS (
+             SELECT id, status FROM generation_jobs WHERE id = $1 AND owner_user_id = $2
+           ), updated AS (
+             UPDATE generation_jobs SET status = 'discarded', lease_owner = NULL, lease_expires_at = NULL,
+                 partial_output = NULL, updated_at = now()
+               WHERE id IN (SELECT id FROM source) AND status IN ('recoverable', 'failed')
+               RETURNING id, status, operation_kind AS "operationKind", replacement_turn_id AS "replacementTurnId"
+           ) SELECT updated.id, updated.status, updated."operationKind", updated."replacementTurnId", source.status AS "generationStatus"
+               FROM source LEFT JOIN updated ON updated.id = source.id`,
+          [scope.jobId, scope.ownerUserId]
+        );
+        const row = result.rows[0];
+        if (!row) throw notFound({ jobId: scope.jobId });
+        if (!row.id) throw new GenerationApplicationError("invalid_state", { reason: "discard_source_state", generationStatus: row.generationStatus });
+        await captureGenerationActivity(client, scope.jobId, scope.ownerUserId, ["generation.discarded"]);
+        return mutationResult(row);
+      });
     }
   };
 }
