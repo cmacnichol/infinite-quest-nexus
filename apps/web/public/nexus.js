@@ -2,6 +2,8 @@ import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
 import {
   createProviderPresetsApi,
   createEditSession,
+  requestEditDismissal,
+  bindEditDialogDismissal,
   createSelectionEditorState,
   resolveResumeCampaign,
   nativePresetSupport,
@@ -112,6 +114,9 @@ let worldAuthorMode = "create";
 let worldAuthorWorkingContent = null;
 let worldAuthorSelectedCover = null;
 let worldAuthorBusy = false;
+let providerSaveBusy = false;
+const editDialogSessions = new WeakMap();
+const editDialogBindingDisposers = new WeakMap();
 let dashboardWorld = null;
 const dashboardWorldDetails = new Map();
 let worldVersionCharacters = [];
@@ -397,8 +402,84 @@ function modalFormSnapshot(dialog) {
     if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
       return `${control.id}:${control.checked}`;
     }
+    if (control instanceof HTMLInputElement && control.type === "password") {
+      return `${control.id}:${Boolean(control.value)}`;
+    }
     return `${control.id}:${control.value}`;
   }).join("\u001f");
+}
+
+function beginEditDialogSession(dialog, returnFocusTo) {
+  const previous = editDialogSessions.get(dialog);
+  const state = {
+    epoch: (previous?.epoch || 0) + 1,
+    returnFocusTo: returnFocusTo || (document.activeElement instanceof HTMLElement ? document.activeElement : undefined),
+    editSession: createEditSession(modalFormSnapshot(dialog), (left, right) => left === right)
+  };
+  editDialogSessions.set(dialog, state);
+  const dispose = bindEditDialogDismissal(dialog, () => ({
+    isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
+    isBusy: () => (dialog === elements.providerDialog && providerSaveBusy)
+      || (dialog === elements.worldAuthorDialog && worldAuthorBusy)
+      || (dialog === elements.characterDialog && characterModalBusy),
+    confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
+    ...(dialog === elements.characterDialog && characterModalScope === "campaign"
+      ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
+      : {}),
+    discard: () => {
+      if (dialog === elements.providerDialog) resetProviderForm();
+      state.editSession.markSaved(modalFormSnapshot(dialog));
+    },
+    returnFocusTo: state.returnFocusTo,
+    isCurrent: () => editDialogSessions.get(dialog) === state
+  }));
+  editDialogBindingDisposers.set(dialog, dispose);
+}
+
+function openEditDialog(dialog, returnFocusTo) {
+  beginEditDialogSession(dialog, returnFocusTo);
+  openManagedModal(dialog);
+}
+
+async function requestStagedEditDecision(allowSave = false) {
+  elements.discardChangesTitle.textContent = "Discard unsaved changes?";
+  elements.discardChangesMessage.textContent = "Your edits have not been saved. Keep editing or discard them and close this window.";
+  elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Keep editing";
+  elements.saveCampaignEditsDecision.hidden = !allowSave;
+  elements.saveCampaignEditsDecision.textContent = "Save changes";
+  elements.discardChangesDialog.returnValue = "";
+  openManagedModal(elements.discardChangesDialog);
+  return new Promise((resolve) => {
+    elements.discardChangesDialog.addEventListener("close", () => {
+      const value = elements.discardChangesDialog.returnValue;
+      resolve(value === "discard" ? "discard" : value === "save" && allowSave ? "save" : "stay");
+    }, { once: true });
+  });
+}
+
+function dismissEditDialog(dialog) {
+  const state = editDialogSessions.get(dialog);
+  if (!state) {
+    dialog.close();
+    return;
+  }
+  void requestEditDismissal({
+    dialog,
+    isDirty: () => state.editSession.isDirty(modalFormSnapshot(dialog)),
+    isBusy: () => (dialog === elements.providerDialog && providerSaveBusy)
+      || (dialog === elements.worldAuthorDialog && worldAuthorBusy)
+      || (dialog === elements.characterDialog && characterModalBusy),
+    confirm: () => requestStagedEditDecision(dialog === elements.characterDialog && characterModalScope === "campaign"),
+    ...(dialog === elements.characterDialog && characterModalScope === "campaign"
+      ? { save: () => saveCharacterFromModal({ preventDefault() {} }) }
+      : {}),
+    discard: () => {
+      if (dialog === elements.providerDialog) resetProviderForm();
+      state.editSession.markSaved(modalFormSnapshot(dialog));
+    },
+    returnFocusTo: state.returnFocusTo,
+    isCurrent: () => editDialogSessions.get(dialog) === state
+  });
 }
 
 function openManagedModal(dialog) {
@@ -418,6 +499,10 @@ function clickedDialogBackdrop(dialog, event) {
 }
 
 function requestModalDismissal(dialog) {
+  if ([elements.providerDialog, elements.worldAuthorDialog, elements.characterDialog].includes(dialog)) {
+    dismissEditDialog(dialog);
+    return;
+  }
   if (dialog === elements.characterDialog && characterModalBusy) return;
   if (dialog === elements.worldAuthorDialog && worldAuthorBusy) return;
   if (dialog.dataset.dismissMode === "cancel") {
@@ -437,7 +522,11 @@ function installClickAwayModalDismissal() {
     dialog.addEventListener("click", (event) => {
       if (dialog.open && clickedDialogBackdrop(dialog, event)) requestModalDismissal(dialog);
     });
-    dialog.addEventListener("close", () => modalBaselines.delete(dialog));
+    dialog.addEventListener("close", () => {
+      modalBaselines.delete(dialog);
+      editDialogBindingDisposers.get(dialog)?.();
+      editDialogSessions.delete(dialog);
+    });
   });
   elements.discardChangesDialog.addEventListener("close", () => {
     if (elements.discardChangesDialog.returnValue === "discard" && discardModalTarget?.open) discardModalTarget.close();
@@ -2274,7 +2363,7 @@ function openCharacterDialog(characterId = "") {
   elements.characterDialogDescription.textContent = character
     ? "Update this character in the world authoring form."
     : "Create a playable character for this world authoring form.";
-  elements.saveCharacter.textContent = character ? "Save changes" : "Add character";
+  elements.saveCharacter.textContent = "Apply to world draft";
   elements.saveCharacter.classList.toggle("hidden", readOnly);
   elements.deleteCharacter.classList.toggle("hidden", !character || readOnly);
   elements.cancelCharacter.textContent = readOnly ? "Close" : "Cancel";
@@ -2282,7 +2371,7 @@ function openCharacterDialog(characterId = "") {
   elements.characterDialog.querySelector(".eyebrow").textContent = "World Library";
   setCharacterStatus();
   setCharacterModalControls(readOnly);
-  openManagedModal(elements.characterDialog);
+  openEditDialog(elements.characterDialog);
   if (!readOnly) elements.characterName.focus();
 }
 
@@ -2576,7 +2665,7 @@ function openWorldAuthor(mode) {
   populateWorldAuthorForm(mode === "create" ? emptyWorldContent() : selectedWorld.draftContent);
   resetWorldCoverAuthoring();
   setWorldAuthorStatus(mode === "create" ? "Enter a title manually or generate a complete world from a concept." : "Review your changes before saving this draft.");
-  openManagedModal(elements.worldAuthorDialog);
+  openEditDialog(elements.worldAuthorDialog);
   elements.worldTitle.focus();
 }
 
@@ -3037,7 +3126,7 @@ async function openCampaignCharacterDialog() {
     elements.cancelCharacter.textContent = "Cancel";
     setCharacterStatus();
     setCharacterModalControls(false);
-    openManagedModal(elements.characterDialog);
+    openEditDialog(elements.characterDialog);
     elements.characterName.focus();
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
@@ -4708,7 +4797,7 @@ function resetProviderForm() {
   elements.providerType.disabled = false;
   elements.providerRole.disabled = false;
   elements.saveProvider.textContent = "Save provider";
-  elements.cancelProviderEdit.classList.add("hidden");
+  elements.cancelProviderEdit.classList.remove("hidden");
   discoveredProfileModels = [];
   elements.providerModelPickerList.replaceChildren();
   elements.providerContextTokens.readOnly = false;
@@ -4916,6 +5005,7 @@ function providerConfigurationFromForm(existingConfig = {}) {
 }
 
 function beginProviderEdit(provider) {
+  const returnFocusTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
   clearResponseFormatCapability();
   editingProviderId = provider.id;
   elements.providerName.value = provider.name;
@@ -4941,8 +5031,8 @@ function beginProviderEdit(provider) {
   responseFormatCapabilityProfile = provider.responseFormatCapability || null;
   elements.providerModelPickerList.replaceChildren();
   initializeProviderSelectionEditor(provider);
+  openEditDialog(elements.providerDialog, returnFocusTo);
   elements.providerName.focus();
-  openManagedModal(elements.providerDialog);
   providerMessage(`Editing ${provider.name}. Leave the API key blank to keep the stored credential.`);
   syncProviderRoleSettings();
   renderResponseFormatCapability(responseFormatCapabilityProfile);
@@ -4980,6 +5070,11 @@ async function loadProviders(preselectId = "") {
 
 async function saveProvider(event) {
   event.preventDefault();
+  if (providerSaveBusy) return;
+  providerSaveBusy = true;
+  const providerControls = [...elements.providerForm.querySelectorAll("input, select, textarea, button")];
+  const disabledBeforeSave = providerControls.map((control) => control.disabled);
+  providerControls.forEach((control) => { control.disabled = true; });
   providerMessage("Saving provider profile…");
   try {
     const existingConfig = editingProviderId ? (providers.find((item) => item.id === editingProviderId)?.configuration || {}) : {};
@@ -5026,6 +5121,9 @@ async function saveProvider(event) {
     if (elements.providerDialog) elements.providerDialog.close();
   } catch (error) {
     providerMessage(error.message || String(error), "error");
+  } finally {
+    providerControls.forEach((control, index) => { control.disabled = disabledBeforeSave[index] ?? false; });
+    providerSaveBusy = false;
   }
 }
 
@@ -6814,7 +6912,7 @@ elements.refreshWorlds.addEventListener("click", () => loadWorlds().catch((error
 elements.worldForm.addEventListener("submit", saveWorldDraft);
 elements.addPlayableCharacter.addEventListener("click", () => openCharacterDialog());
 elements.characterForm.addEventListener("submit", saveCharacterFromModal);
-elements.cancelCharacter.addEventListener("click", () => elements.characterDialog.close());
+elements.cancelCharacter.addEventListener("click", () => dismissEditDialog(elements.characterDialog));
 elements.deleteCharacter.addEventListener("click", deleteCharacterFromModal);
 elements.generateCharacter.addEventListener("click", generateCharacterFromPrompt);
 elements.organizeCharacterProfile.addEventListener("click", organizeCharacterProfile);
@@ -6840,13 +6938,6 @@ elements.characterDialog.addEventListener("close", () => {
   elements.characterStats.replaceChildren();
   elements.characterTrackers.replaceChildren();
   setCharacterStatus();
-});
-elements.characterDialog.addEventListener("cancel", (event) => {
-  if (characterModalBusy) event.preventDefault();
-});
-elements.worldAuthorDialog.addEventListener("cancel", (event) => {
-  event.preventDefault();
-  requestModalDismissal(elements.worldAuthorDialog);
 });
 elements.worldVersionSelect.addEventListener("change", () => {
   updateWorldVersionDeleteAvailability();
@@ -6919,13 +7010,12 @@ elements.reindexEmbeddings.addEventListener("click", reindexSemanticRetrieval);
 if (elements.newProviderButton) {
   elements.newProviderButton.addEventListener("click", () => {
     resetProviderForm();
-    openManagedModal(elements.providerDialog);
+    openEditDialog(elements.providerDialog);
   });
 }
 elements.providerForm.addEventListener("submit", saveProvider);
 elements.cancelProviderEdit.addEventListener("click", () => {
-  resetProviderForm();
-  if (elements.providerDialog) elements.providerDialog.close();
+  if (elements.providerDialog) dismissEditDialog(elements.providerDialog);
 });
 elements.providerDialog.addEventListener("close", abortProviderPresetRequests);
 window.addEventListener("pagehide", abortProviderPresetRequests);

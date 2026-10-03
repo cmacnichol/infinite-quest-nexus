@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const nexusSource = readFileSync("apps/web/public/nexus.js", "utf8");
+const markup = readFileSync("apps/web/public/index.html", "utf8");
 
-describe("legacy provider modal defaults", () => {
+describe("legacy provider and authoring dismissal", () => {
   it("uses the configured remote LM Studio endpoint instead of host.docker.internal", () => {
     expect(nexusSource).not.toContain("host.docker.internal");
     expect(nexusSource).toContain("http://10.11.41.224:1234");
@@ -34,5 +35,30 @@ describe("legacy provider modal defaults", () => {
     expect(nexusSource).toContain("operation.expiresAt");
     expect(nexusSource).toContain("discovered ${advertisedAt}");
     expect(nexusSource).toContain("Mixed schema coverage");
+  });
+
+  it("uses the shared edit dismissal policy for staged provider and authoring dialogs", () => {
+    expect(nexusSource).toContain("bindEditDialogDismissal");
+    expect(nexusSource).toContain("requestEditDismissal");
+    expect(nexusSource).toContain("providerDialog");
+    expect(nexusSource).toContain("worldAuthorDialog");
+    expect(nexusSource).toContain("characterDialog");
+  });
+
+  it("keeps provider credentials out of serialized edit snapshots", () => {
+    expect(nexusSource).toContain("providerApiKey");
+    expect(nexusSource).toMatch(/control instanceof HTMLInputElement && control\.type === "password"\)\s*\{\s*return `\$\{control\.id\}:\$\{Boolean\(control\.value\)\}`;/);
+  });
+
+  it("labels world-scoped character application as a local draft operation", () => {
+    expect(markup).toContain("Apply to world draft");
+    expect(nexusSource).toContain("worldAuthorWorkingContent");
+    expect(nexusSource).toContain("Save the world form to persist this change");
+  });
+
+  it("preserves immediate campaign character profile persistence", () => {
+    expect(nexusSource).toContain("/character-profile");
+    expect(nexusSource).toContain('method: "PUT"');
+    expect(nexusSource).toContain('characterModalScope === "campaign"');
   });
 });
