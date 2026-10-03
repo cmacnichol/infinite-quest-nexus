@@ -1,5 +1,6 @@
 import {
   projectSafeGenerationDiagnostic,
+  providerFailureProjectionSchema,
   generationResponseFormatProjectionSchema,
   generationReviewDetailSchema,
   generationReviewSummarySchema,
@@ -289,6 +290,27 @@ export function generationResponseFormatPresentation(value: unknown): Generation
   };
 }
 
+/** Advisory copy only; a browser clock never changes generation authority. */
+export function generationProviderFailurePresentation(value: unknown, nowMs: number): { details: readonly string[]; retryAt: string | null } | null {
+  const parsed = providerFailureProjectionSchema.safeParse(value);
+  if (!parsed.success) return null;
+  const failure = parsed.data;
+  const details: string[] = [];
+  if (failure.reason === "rate_limit") {
+    details.push(failure.limitSource === "upstream_provider" || failure.limitSource === "upstream_provider_shared_pool"
+      ? "An upstream provider reported a rate limit."
+      : failure.limitSource === "unknown"
+        ? "The provider did not identify which limit was reached."
+        : "OpenRouter reported a platform limit.");
+  }
+  if (failure.retryAt !== null) {
+    details.push(Date.parse(failure.retryAt) <= nowMs
+      ? "The suggested wait has elapsed; you can retry."
+      : `Provider suggested retry time: ${new Date(failure.retryAt).toLocaleString()}.`);
+  }
+  return { details, retryAt: failure.retryAt };
+}
+
 export function copyOperation(value: GenerationOperation): GenerationOperation {
   return value.operationKind === "append"
     ? { operationKind: "append", replacementTurnId: null }
@@ -310,7 +332,7 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         resultTurnId: snapshot.resultTurnId,
         errorCode: snapshot.errorCode,
         errorMessage: snapshot.errorMessage,
-        ...(snapshot.failureDiagnostic === undefined ? {} : { failureDiagnostic: snapshot.failureDiagnostic ? { ...snapshot.failureDiagnostic } : null }),
+        ...(snapshot.failureDiagnostic === undefined ? {} : { failureDiagnostic: snapshot.failureDiagnostic ? copyValue(snapshot.failureDiagnostic) : null }),
         ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
         ...(snapshot.review === undefined ? {} : { review: snapshot.review }),
         ...(snapshot.continuityReviewDiagnostic === undefined ? {} : { continuityReviewDiagnostic: snapshot.continuityReviewDiagnostic }),
@@ -329,7 +351,7 @@ export function copySnapshot(snapshot: GenerationStreamSnapshot): GenerationStre
         resultTurnId: snapshot.resultTurnId,
         errorCode: snapshot.errorCode,
         errorMessage: snapshot.errorMessage,
-        ...(snapshot.failureDiagnostic === undefined ? {} : { failureDiagnostic: snapshot.failureDiagnostic ? { ...snapshot.failureDiagnostic } : null }),
+        ...(snapshot.failureDiagnostic === undefined ? {} : { failureDiagnostic: snapshot.failureDiagnostic ? copyValue(snapshot.failureDiagnostic) : null }),
         ...(snapshot.diagnostic === undefined ? {} : { diagnostic: snapshot.diagnostic }),
         ...(snapshot.review === undefined ? {} : { review: snapshot.review }),
         ...(snapshot.continuityReviewDiagnostic === undefined ? {} : { continuityReviewDiagnostic: snapshot.continuityReviewDiagnostic }),

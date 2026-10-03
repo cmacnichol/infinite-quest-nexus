@@ -2,7 +2,7 @@ import { generationRecoverySchema } from "../../packages/contracts/src/client-ap
 import { describe, expect, it } from "vitest";
 import { projectSafeGenerationContextDiagnostic, projectSafeGenerationDiagnostic, safeGenerationDiagnosticSchema } from "../../packages/contracts/src/story-prompt.js";
 import { projectGenerationFailureDiagnostic } from "../../packages/contracts/src/generation-review.js";
-import { generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation } from "../../packages/client-core/src/generation/projection.js";
+import { generationProviderFailurePresentation, generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation } from "../../packages/client-core/src/generation/projection.js";
 
 describe("safe public generation diagnostics", () => {
   it("projects fixed timeout and empty-output failure messages without private error details", () => {
@@ -172,5 +172,31 @@ describe("optional provider failure compatibility", () => {
         phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T14:00:00.000Z", providerFailure }))
         .toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
     }
+  });
+});
+
+describe("provider failure presentation", () => {
+  const evidence = { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null,
+    reason: "rate_limit", limitSource: "unknown", retryAfterMs: 15000, retryAt: "2026-10-03T15:00:15.000Z" };
+  it.each([
+    ["openrouter_platform", "OpenRouter reported a platform limit."],
+    ["openrouter_key_limit", "OpenRouter reported a platform limit."],
+    ["openrouter_in_flight_budget", "OpenRouter reported a platform limit."],
+    ["upstream_provider", "An upstream provider reported a rate limit."],
+    ["upstream_provider_shared_pool", "An upstream provider reported a rate limit."],
+    ["unknown", "The provider did not identify which limit was reached."]
+  ])("presents fixed source copy for %s", (limitSource, message) => {
+    expect(generationProviderFailurePresentation({ ...evidence, limitSource }, Date.parse("2026-10-03T15:00:00Z")))
+      .toEqual({ details: [message, `Provider suggested retry time: ${new Date(evidence.retryAt).toLocaleString()}.`], retryAt: evidence.retryAt });
+  });
+  it("presents elapsed time without changing retry authority", () => {
+    expect(generationProviderFailurePresentation(evidence, Date.parse(evidence.retryAt)))
+      .toEqual({ details: ["The provider did not identify which limit was reached.", "The suggested wait has elapsed; you can retry."], retryAt: evidence.retryAt });
+  });
+  it("omits absent timing and unsupported evidence", () => {
+    expect(generationProviderFailurePresentation({ ...evidence, retryAt: null, retryAfterMs: null }, 0))
+      .toEqual({ details: ["The provider did not identify which limit was reached."], retryAt: null });
+    for (const invalid of [null, {}, { ...evidence, version: 2 }, { ...evidence, retryAt: "<script>private</script>" }])
+      expect(generationProviderFailurePresentation(invalid, 0)).toBeNull();
   });
 });

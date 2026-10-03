@@ -239,3 +239,36 @@ describe("generation machine", () => {
     }
   );
 });
+
+describe("provider failure snapshot changes", () => {
+  const providerFailure = { version: 1 as const, source: "http_error" as const, httpStatus: 429, upstreamStatus: null,
+    reason: "rate_limit" as const, limitSource: "unknown" as const, retryAfterMs: null, retryAt: null };
+  const failureDiagnostic = { code: "provider_rate_limited" as const,
+    message: "The provider rate limit was reached. Wait before retrying.", providerFailure };
+  it("copies nested evidence for both operation kinds", () => {
+    for (const operation of [{ operationKind: "append" as const, replacementTurnId: null },
+      { operationKind: "replace_latest" as const, replacementTurnId: "33333333-3333-4333-8333-333333333333" }]) {
+      const copied = copySnapshot(snapshot({ ...operation, failureDiagnostic }));
+      expect(copied.failureDiagnostic?.providerFailure).toEqual(providerFailure);
+      expect(copied.failureDiagnostic?.providerFailure).not.toBe(providerFailure);
+    }
+  });
+  it.each([
+    { version: 2 }, { source: "sse_error" }, { httpStatus: 200 }, { upstreamStatus: 429 },
+    { reason: "provider_unavailable" }, { limitSource: "upstream_provider" }, { retryAfterMs: 0 },
+    { retryAt: "2026-10-03T15:00:15.000Z" }
+  ])("observes every evidence field change: %j", (change) => {
+    const machine = createGenerationMachine();
+    machine.observe(snapshot({ status: "failed", failureDiagnostic }));
+    expect(machine.observe(snapshot({ status: "failed", failureDiagnostic: {
+      ...failureDiagnostic, providerFailure: { ...providerFailure, ...change } as never
+    } }))).toMatchObject({ kind: "accepted" });
+  });
+  it("retains its own nested evidence when a caller mutates an observed snapshot", () => {
+    const machine = createGenerationMachine();
+    const input = snapshot({ status: "failed", failureDiagnostic: { ...failureDiagnostic, providerFailure: { ...providerFailure } } });
+    machine.observe(input);
+    input.failureDiagnostic!.providerFailure!.httpStatus = 503;
+    expect(machine.observe(input)).toMatchObject({ kind: "accepted" });
+  });
+});

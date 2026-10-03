@@ -1808,6 +1808,7 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
         recoveryId: generationRecovery?.id ?? null,
         recoveryStatus: generationRecovery?.status ?? null,
         recoveryAttempts: generationRecovery?.attempts ?? null,
+        recoveryFailureDiagnostic: generationRecovery?.failureDiagnostic ?? null,
         recoveryReplacementTurnId: generationRecovery?.replacementTurnId ?? null,
         recoveryReviewId: generationRecovery?.review && "reviewId" in generationRecovery.review ? generationRecovery.review.reviewId : null,
         recoveryReviewRevision: generationRecovery?.review && "revision" in generationRecovery.review ? generationRecovery.review.revision : null,
