@@ -25,6 +25,8 @@ The user authorized implementation of the [audited plan](../../superpowers/plans
 | T17 | Guided world draft steps, scoped readiness and protected pending Save | Sol accepted at 80a4efa3 after preventing new worlds from displaying a previous world's assessment. Independent immutable browser: 17 passed (11 readiness plus 6 dismissal). Partial drafts remain saveable, published readiness names its world/version, and creation preserves existing campaign pins. |
 | I03 | Nexus management fixtures aligned with current snapshot and selection guards | Sol accepted at 8bb98b6a after immutable 83-test rerun with zero failures, skips or errors. Source-slice guards prevent vacuous assertions; original behavior checks remain. No product change. |
 
+| I04 | Matching-query history continuation and correction-only cursor integration coverage | Sol accepted at 31bf4c47. Independent real PostgreSQL: 4 passed, zero skipped; strict focused types passed. No runtime change; original accepted narration and accepted count remain unchanged by the correction overlay. |
+
 T01 commits: `f87113ff`, `7524e48b`, `63ea4f60`. I01 commits: `550b9b9e`, `2c48deb0`.
 
 The [baseline](baseline.md) is a mocked development-server observation, not production latency. Corrected history-open p50/p95: 113.45/168.13 ms, with 18.21% coefficient of variation. Small timing changes require another controlled run before attribution. Native long tasks are captured by document phase; API JSON and static response bytes are measured separately. Screenshots capture history while the dialog is open. Original incorrect summaries were superseded by retained corrected artifacts.
@@ -59,3 +61,6 @@ Remaining plan tasks are in progress or pending; only the rows marked accepted a
 
 - T11 reader positions use an isolated local IndexedDB adapter with scoped record access. Adding unbounded position records to the action-draft adapter would make its full-store reads grow beyond T07 draft limits. This choice preserves bounded draft work without an arbitrary reading-position eviction policy or canonical migration.
 - T18 uses the existing playable-character collection to express playability; no boolean is invented. Optional world Genre/Tone may collapse while the required title stays visible. All mounted fields and serializer values remain intact.
+
+- T18 code at 14da045e has no actionable Sol findings after 26 browser cases, 84 units, focused types and build. Acceptance awaits the coordinator's global boundary check after dependency restoration; it is not counted complete yet.
+- A review snapshot's pnpm invocation automatically installed through shared dependency junctions and rewired the implementation dependencies to snapshot paths. Subsequent worktree checks fail before assertions. Dependency commands are paused, source edits preserved, and a scoped backup plus frozen-lockfile restoration awaits user approval after automatic approval review rejected it under the retained no-reinstall constraint. No repair or workaround has run. Future junctioned snapshots must use verified direct-node tools without invoking pnpm.
