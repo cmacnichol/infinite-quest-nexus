@@ -1,4 +1,4 @@
-import { generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation, generationReviewTechnicalDiagnosticMessage, type CampaignProjection } from "@infinite-quest/client-core";
+import { generationProviderFailurePresentation, generationDiagnosticPresentation, generationResponseFormatPresentation, generationReviewPresentation, generationReviewTechnicalDiagnosticMessage, type CampaignProjection } from "@infinite-quest/client-core";
 import type { AcceptedTurnCorrectionView, CampaignCharacterProfileUpdate, CampaignRuntimeStateResponse, CampaignSummary, MetaResponse, StoryLengthProfile, StoryMemorySettings } from "@infinite-quest/contracts";
 import { storyPlayerPath, type StoryRoute } from "./story-route";
 import type { ReadingWidth, StoryUiState } from "./story-player-model";
@@ -198,6 +198,16 @@ function recovery(document: Document, state: StoryPlayerViewState): HTMLElement 
   const failureDiagnostic = generation.snapshot?.failureDiagnostic ?? generation.hydratedGeneration?.failureDiagnostic;
   if (failed && failureDiagnostic && reviewView === null) {
     section.append(element(document, "p", "story-recovery-diagnostic", failureDiagnostic.message));
+    const providerFailure = generationProviderFailurePresentation(failureDiagnostic.providerFailure, Date.now(), {
+      parseTimestamp: value => Date.parse(value),
+      formatTimestamp: value => new Date(value).toLocaleString()
+    });
+    if (providerFailure?.details.length) {
+      const details = element(document, "ul", "story-recovery-details");
+      details.setAttribute("aria-label", "Provider failure details");
+      for (const detail of providerFailure.details) details.append(element(document, "li", undefined, detail));
+      section.append(details);
+    }
   }
   const diagnostic = generation.snapshot?.diagnostic ?? generation.hydratedGeneration?.diagnostic;
   if (diagnostic && reviewView === null) {

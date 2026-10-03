@@ -37,6 +37,8 @@ Compose credentials may come from an ignored local environment/secrets file with
 
 ## Deployment and Operations
 
+Provider failure evidence uses the additive nullable physical-attempt diagnostic column. Back up first; deploy the migration, compatible API/workers, then frontend. Retain the column and captured rows on rollback. Validate a naturally occurring failure or an explicitly authorized copied-campaign canary; implementation does not authorize deployment or paid probing. Follow the [provider failure diagnostics runbook](./provider-failure-diagnostics.md) for scoped read-only queries and request-ID correlation.
+
 Swarm services must define health checks, resource expectations, restart behavior, and conservative rolling-update and rollback policies. API and worker replicas must coordinate through the database or an explicitly introduced durable queue; do not rely on process-local locks or memory for correctness.
 
 Compose and Swarm must use the same schema migrations, initial-user bootstrap, provider configuration, job semantics, and API contracts. Add deployment smoke tests that start the two-container Compose environment, wait for PostgreSQL and application readiness, verify migrations and initial-user ownership, and exercise one database-backed API operation. Validate the Swarm stack configuration separately even when CI cannot launch a full multi-node swarm.

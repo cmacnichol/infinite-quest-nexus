@@ -1911,7 +1911,12 @@ integration("PostgreSQL campaign sync adapters", () => {
     const claim = await repository.claimNext({ workerId: "failure-diagnostic", leaseSeconds: 30 });
     expect(claim?.jobId).toBe(job.rows[0]!.id);
     const diagnostic = { version: 1 as const, category: "provider_rejection" as const, code: "provider_rate_limited" as const,
-      phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T14:14:35.000Z" };
+      phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T14:14:35.000Z",
+      providerFailure: { version: 1 as const, source: "http_error" as const, observedAt: "2026-10-03T14:14:35.000Z",
+        httpStatus: 429, upstreamStatus: null, reason: "rate_limit" as const, limitSource: "upstream_provider" as const,
+        upstreamCode: "rate_limit_exceeded" as const, providerName: "private-provider", retryAfterMs: 2000,
+        retryAt: "2026-10-03T14:14:37.000Z", rateLimit: { limit: 10, remaining: 0, resetAt: null },
+        successfulResponseStarted: false, emittedOutput: false, metadataStatus: "recognized" as const } };
     await expect(repository.markFailed({ jobId: claim!.jobId, ownerUserId, workerId: "failure-diagnostic",
       errorCode: "generation_failed", errorMessage: "Generation could not be completed.", recoveryMetadata: {}, lastFailureDiagnostic: diagnostic
     })).resolves.toBe(true);
@@ -1919,8 +1924,14 @@ integration("PostgreSQL campaign sync adapters", () => {
     expect(stored.rows[0]).toEqual({ diagnostic, result_turn_id: null });
     const after = await read();
     expect(after.projection.generationRecovery).toMatchObject({ status: "failed", failureDiagnostic: {
-      code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying."
+      code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying.",
+      providerFailure: { httpStatus: 429, limitSource: "upstream_provider", retryAfterMs: 2000, retryAt: "2026-10-03T14:14:37.000Z" }
     } });
+    expect(JSON.stringify(after.projection.generationRecovery)).not.toContain("private-provider");
+    expect(JSON.stringify(after.projection.generationRecovery)).not.toContain("rateLimit");
+    const sibling = await createCampaignFixture();
+    expect((await adapters.transaction.read(transaction => adapters.sync.readCampaignSyncSnapshot(transaction,
+      { ownerUserId, campaignId: sibling.campaignId }))).projection.generationRecovery).toBeNull();
     expect(after.projection.campaign).toEqual(before.projection.campaign);
     await expect(adapters.transaction.read(transaction => adapters.sync.readCampaignSyncSnapshot(transaction,
       { ...scope, ownerUserId: crypto.randomUUID() }))).rejects.toBeDefined();

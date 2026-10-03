@@ -60,7 +60,7 @@ function recoveryFixture() {
   };
 }
 
-async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { code: string; message: string }; operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; responseFormat?: Record<string, unknown>; review?: Record<string, unknown>; streamLoss?: boolean; profileConflict?: boolean } = {}) {
+async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { code: string; message: string; providerFailure?: Record<string, unknown> }; liveFailure?: boolean; operation?: "append" | "replace_latest"; incompatible?: boolean; legacyDiagnostic?: boolean; diagnostic?: unknown; responseFormat?: Record<string, unknown>; review?: Record<string, unknown>; streamLoss?: boolean; profileConflict?: boolean } = {}) {
   const payloads = recoveryFixture();
   const requests: string[] = [];
   const writes: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -96,7 +96,12 @@ async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { c
     if (request.method() === "GET" && path === "/api/v1/session") return respond(payloads.session);
     if (request.method() === "GET" && path === "/api/v1/campaigns") return respond(payloads.campaigns);
     if (request.method() === "GET" && path === "/api/v1/worlds") return respond(payloads.worlds);
-    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/sync-status`) return respond({ ...payloads.syncStatus, generationRecovery: discarded ? null : { ...recovery, attempts: snapshot.attempts } });
+    if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/sync-status`) return respond({ ...payloads.syncStatus,
+      pendingGeneration: options.liveFailure && !requests.some(value => value.endsWith(`/${generationId}/stream`)) ? {
+        id: generationId, status: "generating", action: snapshot.action, expectedTurnNumber: recovery.expectedTurnNumber,
+        createdAt: "2026-10-03T14:14:35.000Z", updatedAt: "2026-10-03T14:14:35.000Z", operationKind: recovery.operationKind, replacementTurnId: recovery.replacementTurnId
+      } : null,
+      generationRecovery: discarded || (options.liveFailure && !requests.some(value => value.endsWith(`/${generationId}/stream`))) ? null : { ...recovery, attempts: snapshot.attempts } });
     if (request.method() === "GET" && path === `/api/v1/campaigns/${payloads.campaignId}/turns`) return respond(payloads.turns);
     if (path === `/api/v1/campaigns/${payloads.campaignId}/state`) {
       if (request.method() === "PATCH") {
@@ -149,25 +154,42 @@ async function installRecoveryApi(page: Page, options: { failureDiagnostic?: { c
   return { ...payloads, requests, writes };
 }
 
-test("web-next Story displays a rate-limit reason after reload and permits explicit retry", async ({ page }) => {
-  const payloads = await installRecoveryApi(page, { failureDiagnostic: {
-    code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying."
+for (const [source, message, retryAt, timing] of [
+  ["upstream_provider", "An upstream provider reported a rate limit.", "2099-10-03T14:14:37.000Z", "Provider suggested retry time:"],
+  ["unknown", "The provider did not identify which limit was reached.", "2020-10-03T14:14:37.000Z", "The suggested wait has elapsed; you can retry."]
+] as const) test(`provider failure web-next Story ${source} live and reload permits explicit retry`, async ({ page }) => {
+  const payloads = await installRecoveryApi(page, { liveFailure: true, failureDiagnostic: {
+    code: "provider_rate_limited", message: "The provider rate limit was reached. Wait before retrying.",
+    providerFailure: { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null, reason: "rate_limit",
+      limitSource: source, retryAfterMs: 2000, retryAt }
   } });
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
+  page.on("console", event => { if (event.type() === "error") errors.push(event.text()); });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${webNextOrigin}/app/story/${payloads.campaignId}`);
   const recovery = page.locator("[data-story-recovery]");
   await expect(recovery).toContainText("The provider rate limit was reached. Wait before retrying.");
+  await expect(recovery).toContainText(message);
+  await expect(recovery).toContainText(timing);
+  expect(payloads.requests.filter(value => value.startsWith("POST "))).toEqual([]);
   await expect(page.locator("body")).not.toContainText(PRIVATE_CANARY);
+  await mkdir("docs/review/assets/provider-failure-diagnostics", { recursive: true });
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-live-desktop.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-live-mobile.png`, fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.reload();
   await expect(recovery).toContainText("The provider rate limit was reached. Wait before retrying.");
-  await mkdir("docs/review/assets/provider-failure-diagnostics", { recursive: true });
-  await page.screenshot({ path: "docs/review/assets/provider-failure-diagnostics/desktop.png", fullPage: true });
+  await expect(recovery).toContainText(message);
+  await expect(recovery).toContainText(timing);
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-reload-desktop.png`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "docs/review/assets/provider-failure-diagnostics/mobile.png", fullPage: true });
+  await expect(recovery.getByRole("button", { name: "Retry generation", exact: true })).toBeVisible();
+  await page.screenshot({ path: `docs/review/assets/provider-failure-diagnostics/${source}-reload-mobile.png`, fullPage: true });
   await recovery.getByRole("button", { name: "Retry generation", exact: true }).click();
   await expect.poll(() => payloads.requests.some(request => request === `POST /api/v1/generation-jobs/${generationId}/retry`)).toBe(true);
+  expect(payloads.requests.filter(request => request === `POST /api/v1/generation-jobs/${generationId}/retry`)).toHaveLength(1);
   expect(errors).toEqual([]);
 });
 

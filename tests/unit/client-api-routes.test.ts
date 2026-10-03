@@ -557,7 +557,8 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
         providerPromptProtocolVersion(RETRY_PROMPT_SNAPSHOT),
         { version: 1, playMode: "legacy", turnControlStyle: "flexible_action" }
       ),
-      generationPolicy: null
+      generationPolicy: null,
+      orchestrationPrivate: {}
     }] };
 
     if (sql.startsWith("WITH source AS ( SELECT id, status, campaign_id AS \"campaignId\"")) return { rows: [{
