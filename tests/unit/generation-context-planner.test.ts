@@ -892,23 +892,53 @@ describe("layered generation context planner", () => {
     expect(result.promptContext.chronicle[0]).toMatchObject({ id: "economical", content });
     expect(result.promptContext.chronicle[0]?.evidenceForm).toBeUndefined();
   });
-  it("falls back to certified excerpt when an economical whole parent loses to protected authority", () => {
+  it("retries an omitted whole parent as a certified excerpt and retains fact deduplication", () => {
     const context = recentContext(); context.recentTurns = [];
+    const fact = { id: "11111111-1111-4111-8111-111111111111", content: "The keeper holds the sealed gate key." };
+    context.authority.currentContinuity.canonicalFacts = [fact];
     const content = `${"Old scenery. ".repeat(90)}The sapphire is hidden. Its hiding place is unknown to Vale. ${"More scenery. ".repeat(90)}`.trim();
-    context.candidates = [{ id: "middle", turnId: "old", ordinal: 1, kind: "turn_fiction", content, tokenEstimate: 900, rank: 1,
-      narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), spans: [{ start: content.indexOf("The sapphire"), end: content.indexOf("The sapphire") + 22 }] } }];
+    context.candidates = [
+      { id: fact.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact", content: fact.content, tokenEstimate: 10, rank: 0 },
+      { id: "middle", turnId: "old", ordinal: 1, kind: "turn_fiction", content, tokenEstimate: 900, rank: 1,
+        narrativeSource: { normalizationVersion: "story-fiction-source-v1", sourceHash: sha256(content), spans: [{ start: content.indexOf("The sapphire"), end: content.indexOf("The sapphire") + 22 }] } }
+    ];
     const policy = storyMemoryPolicySchema.parse({ ...defaultStoryMemoryPolicy("r2"), excerptPolicy: "verified_spans_v1" });
-    const plan = () => planGenerationPromptContext(context, plannerProvider(), "System", "Find sapphire", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", 8000, 7900, undefined, "story_memory", policy);
-    let result = plan();
+    const capturedRequests: { input: string; body: string }[] = [];
+    const serializeRequest = (input: string) => {
+      const body = serializeProviderRequest({ ...plannerProvider() as any, baseUrl: "" }, { systemPrompt: "System", input }).body;
+      capturedRequests.push({ input, body });
+      return body;
+    };
+    const plan = () => planGenerationPromptContext(context, plannerProvider(), "System", "Find sapphire", [],
+      { profile: "brief", minWords: 100, maxWords: 120 }, "action", 8_000, 7_900,
+      undefined, "story_memory", policy, serializeRequest);
+    const initiallyRetained = plan();
+    expect(initiallyRetained.promptContext.chronicle[0]).toMatchObject({ id: "middle", content });
+    let result = initiallyRetained;
+    let retrySummary = "";
     for (let words = 0; words < 4500; words += 20) {
-      context.authority.currentContinuity.continuitySummary = "History ".repeat(words);
+      retrySummary = "History ".repeat(words);
+      context.authority.currentContinuity.continuitySummary = retrySummary;
       try { result = plan(); } catch { break; }
       if (result.promptContext.chronicle[0]?.evidenceForm === "excerpt") break;
     }
+
+    const retryIterationRequests = capturedRequests.filter((request) => request.input.includes(retrySummary));
+    const fullParentRequestIndex = retryIterationRequests.findIndex((request) => request.body.includes(content));
+    const excerptRequestIndex = retryIterationRequests.findIndex((request) => !request.body.includes(content)
+      && request.body.includes("The sapphire is hidden."));
     expect(result.promptContext.chronicle[0]?.evidenceForm).toBe("excerpt");
+    expect(fullParentRequestIndex).toBeGreaterThanOrEqual(0);
+    expect(excerptRequestIndex).toBeGreaterThan(fullParentRequestIndex);
+    expect(retryIterationRequests.at(-1)?.body).toBe(result.contextPlan.serializedRequest);
+    expect(result.promptContext.currentContinuity.canonicalFacts).toEqual([fact]);
+    expect(result.promptContext.chronicle.map((candidate) => candidate.id)).toEqual(["middle"]);
+    expect(result.layerDiagnostics.omitted).toContainEqual({ id: fact.id, reason: "duplicate_source" });
+    expect(result.storyInput.split(fact.content)).toHaveLength(2);
+    expect(result.contextPlan.serializedRequest.split(fact.content)).toHaveLength(2);
     expect(result.storyInput).toContain("The sapphire is hidden.");
   });
-  it("keeps selected fact deduplication through the excerpt retry", () => {
+  it("keeps selected fact deduplication during history-coverage early excerpt selection", () => {
     const context = recentContext(); context.recentTurns = [];
     const protectedFact = { id: "11111111-1111-4111-8111-111111111111", turnNumber: 1, content: "The keeper holds the sealed gate key." };
     const content = `${"Old scenery. ".repeat(200)}The sapphire is hidden. Its hiding place is unknown to Vale. ${"More scenery. ".repeat(200)}`.trim();

@@ -81,7 +81,7 @@ For history-coverage contexts:
 3. Exclude optional canonical-fact candidates only when the same verified fact is actually represented there.
 4. Apply recent/latest-turn deduplication to duplicated narration evidence, not indiscriminately to canonical facts from those turns. A narrative record and an independently useful fact are not interchangeable.
 5. Keep candidate-to-candidate deduplication deterministic.
-6. Ensure the excerpt-retry path uses the same selected-authority fact set; it must not reintroduce real duplicates or reuse premature duplicate exclusions.
+6. Cover the reachable non-history excerpt-retry path with serializer capture: an initially retained whole parent is omitted on the retry pass, then its certified excerpt is packed while selected-authority fact deduplication remains intact. History-coverage v5 keeps its existing early certified-excerpt selection behavior; do not add a post-omission v5 retry, since that packing path does not produce retry omissions.
 
 Scope note: the early filter (`generation-context-planner.ts`, the `candidates` `.filter` after excerpt selection) runs whenever `layered` is true, not only for history coverage. In layered contexts without history coverage, `protectedFactRecords` is empty, but the `baseTurnId` exclusion and `currentContinuity.canonicalFacts` dedupe still apply. Gate changes from steps 1–4 on `historyCoverage`, or cover the layered non-history case with its own test proving the same defect.
 
@@ -93,7 +93,7 @@ Preserve non-history protocol behavior except where a new test proves the same s
 - [ ] Add `does not discard an omitted canonical fact solely because its turn is recent`: cover latest-turn and selected-predecessor sources, keeping real narration duplicates suppressed.
 - [ ] Add cases for empty selected fact set, all facts fitting, no Chronicle candidates, stable ordering, and a non-history frozen policy.
 - [ ] Run the focused planner test and confirm the new recall assertion fails on the baseline because the older candidate disappears. A fixture setup failure is not the expected red result.
-- [ ] Implement selection-aware filtering in the planner, including the excerpt retry path.
+- [ ] Implement selection-aware filtering in the planner. Verify the reachable non-history excerpt retry with captured serialized requests; separately label history-coverage v5 coverage as early excerpt selection, without introducing a new v5 retry behavior.
 - [ ] Assert `duplicate_source` applies only to a fact represented elsewhere; budget omissions retain `context_limit` or `request_limit`. Final manifest and sent-ID extraction must agree with the wire payload.
 - [ ] Run the focused tests and existing planner boundary suites. Confirm no quota or unrelated serialization changes.
 - [ ] Review the scoped diff and commit as `Fix Chronicle fact deduplication after context selection`.
