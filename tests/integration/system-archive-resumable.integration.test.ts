@@ -88,14 +88,14 @@ async function emptySystemArchive(ownerUserId: string): Promise<Buffer> {
   return zip.generateAsync({ type: "nodebuffer" });
 }
 
-function safePreviewProjection(ownerUserId: string, archiveFingerprint: string) {
+function safePreviewProjection(ownerUserId: string, archiveFingerprint: string, destinationMigration: string) {
   return {
     versions: {
       archiveFormat: 1 as const,
       sourceApplication: "0.1.0",
       sourceMigration: "0079_resumable_system_archive_uploads",
       destinationApplication: "0.1.0",
-      destinationMigration: "0106_cast_discovery_physical_attempts"
+      destinationMigration
     },
     sourceOwnerCount: 1 as const,
     archiveFingerprint,
@@ -127,11 +127,16 @@ integration("durable System Archive jobs and resumable uploads", () => {
   let pool: DatabasePool;
   let owner: OwnerScope;
   let foreignOwner: OwnerScope | undefined;
+  let latestMigrationName = "";
 
   beforeAll(async () => {
     pool = createDatabasePool(databaseUrl!, 8);
     await migrateDatabase(pool, resolve("database/migrations"));
     owner = { ownerUserId: await initialOwnerId(pool) };
+    const migration = await pool.query<{ name: string }>(
+      "SELECT name FROM schema_migrations ORDER BY name DESC LIMIT 1",
+    );
+    latestMigrationName = migration.rows[0]!.name;
   });
 
   afterAll(async () => {
@@ -205,7 +210,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     const destination = await imports.destinationFingerprint(owner, { ignoreUploadId: upload.id });
     expect(destination.destinationEmpty).toBe(true);
     const archiveFingerprint = hash("validated-system-archive");
-    const projection = safePreviewProjection(owner.ownerUserId, archiveFingerprint);
+    const projection = safePreviewProjection(owner.ownerUserId, archiveFingerprint, destination.latestMigration);
     await expect(imports.createPreview(owner, {
       uploadId: upload.id,
       archiveFingerprint,
@@ -301,7 +306,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
       uploadId: upload.id,
       archiveFingerprint,
       destination,
-      projection: safePreviewProjection(owner.ownerUserId, archiveFingerprint)
+      projection: safePreviewProjection(owner.ownerUserId, archiveFingerprint, destination.latestMigration)
     });
     const persisted = await pool.query<{
       upload_expires_at: Date;
@@ -328,7 +333,7 @@ integration("durable System Archive jobs and resumable uploads", () => {
     const clean = await imports.destinationFingerprint(owner, {});
     expect(clean).toMatchObject({
       initialOwnerId: owner.ownerUserId,
-      latestMigration: "0106_cast_discovery_physical_attempts",
+      latestMigration: latestMigrationName,
       destinationEmpty: true
     });
 
@@ -499,7 +504,11 @@ integration("durable System Archive jobs and resumable uploads", () => {
       uploadId: upload.id,
       archiveFingerprint: hash("expiry-preview-archive"),
       destination,
-      projection: safePreviewProjection(owner.ownerUserId, hash("expiry-preview-archive"))
+      projection: safePreviewProjection(
+        owner.ownerUserId,
+        hash("expiry-preview-archive"),
+        destination.latestMigration
+      )
     })).rejects.toMatchObject({ statusCode: 404 });
     await expect(pool.query(
       "SELECT id FROM system_archive_jobs WHERE kind='import' AND status='previewed'"
