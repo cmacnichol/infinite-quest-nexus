@@ -61,4 +61,11 @@ describe("legacy provider and authoring dismissal", () => {
     expect(nexusSource).toContain('method: "PUT"');
     expect(nexusSource).toContain('characterModalScope === "campaign"');
   });
+
+  it("sets the shared Save decision's rendered display state for each prompt owner", () => {
+    expect(nexusSource).toContain('elements.saveCampaignEditsDecision.style.display = visible ? "" : "none"');
+    expect(nexusSource).toContain("setCampaignSaveDecisionVisible(allowSave)");
+    expect(nexusSource).toContain("setCampaignSaveDecisionVisible(true)");
+    expect(nexusSource).toContain("setCampaignSaveDecisionVisible(false)");
+  });
 });

@@ -5,7 +5,7 @@ import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T04");
+const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T04-fix1");
 const fixture = quietLeafApiPayloads();
 
 function response(body: unknown, status = 200) {
@@ -64,6 +64,7 @@ test("provider Escape, Cancel, and backdrop share guarded dismissal and failed s
   await page.locator("#providerName").fill("Synthetic unsaved profile");
   await page.keyboard.press("Escape");
   await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await expect(page.locator("#saveCampaignEditsDecision")).toBeHidden();
   await page.screenshot({ path: resolve(evidenceDirectory, "provider-dismissal-decision.png") });
   await page.locator('#discardChangesDialog button[value="keep"]').click();
   await expect(page.locator("#providerDialog")).toBeVisible();
@@ -132,6 +133,7 @@ test("nested world character Cancel preserves parent edits and Apply changes onl
   await page.screenshot({ path: resolve(evidenceDirectory, "world-draft-after-character-apply.png") });
   await page.locator("#cancelWorldAuthor").click();
   await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await expect(page.locator("#saveCampaignEditsDecision")).toBeHidden();
   expect(writes).toEqual([]);
 });
 
@@ -157,6 +159,7 @@ test("applying a child character alone dirties an existing world draft and saves
 
   await page.locator("#cancelWorldAuthor").click();
   await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await expect(page.locator("#saveCampaignEditsDecision")).toBeHidden();
   await page.locator('#discardChangesDialog button[value="keep"]').click();
   await expect(page.locator("#worldTitle")).toHaveValue("Fixture World 1");
   await page.locator("#saveWorldDraft").click();
@@ -200,7 +203,10 @@ test("campaign character Save keeps its immediate server-authoritative meaning w
   await page.locator("#characterName").fill("Synthetic campaign character");
   await page.locator("#characterRole").fill("Synthetic role");
   const saveRequest = page.waitForRequest(request => request.method() === "PUT" && new URL(request.url()).pathname === path);
-  await page.locator("#saveCharacter").click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await expect(page.locator("#saveCampaignEditsDecision")).toBeVisible();
+  await page.locator("#saveCampaignEditsDecision").click();
   await saveRequest;
   await page.keyboard.press("Escape");
   await expect(page.locator("#characterDialog")).toBeVisible();
@@ -208,4 +214,43 @@ test("campaign character Save keeps its immediate server-authoritative meaning w
   instrumentation.releaseDelayedRoute();
   await expect(page.locator("#characterDialog")).toBeHidden();
   expect(instrumentation.writes.filter(write => write.path === path)).toHaveLength(1);
+});
+
+test("provider and world dismissal hide Save, then campaign metadata Save remains available", async ({ page }) => {
+  const fixtureCampaigns = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  const instrumentation = await installLegacyUiFixture(page, fixtureCampaigns);
+  mkdirSync(evidenceDirectory, { recursive: true });
+  await page.goto(`${origin}/nexus/index.html#providers`);
+
+  await page.locator("#newProviderButton").click();
+  await page.locator("#providerName").fill("Synthetic provider profile");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await expect(page.locator("#saveCampaignEditsDecision")).toBeHidden();
+  await page.locator('#discardChangesDialog button[value="discard"]').click();
+
+  await page.locator("#navSetup").click();
+  await page.locator("#navWorlds").click();
+  await page.locator("#newWorld").click();
+  await page.locator("#worldTitle").fill("Synthetic staged world");
+  await page.locator("#cancelWorldAuthor").click();
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await expect(page.locator("#saveCampaignEditsDecision")).toBeHidden();
+  await page.locator('#discardChangesDialog button[value="discard"]').click();
+
+  await page.locator("#navSetup").click();
+  await page.locator("#navCampaigns").click();
+  const firstCampaign = fixtureCampaigns.campaigns[0];
+  const nextCampaign = fixtureCampaigns.campaigns[1];
+  if (!firstCampaign || !nextCampaign) throw new Error("Two synthetic campaigns are required for the cross-flow check.");
+  await page.locator(`#campaignList [data-campaign-id="${firstCampaign.id}"]`).click();
+  await expect(page.locator("#campaignTitle")).toHaveValue("Fixture Campaign 1");
+  await page.locator("#campaignTitle").fill("Synthetic campaign change");
+  await page.locator(`#campaignList [data-campaign-id="${nextCampaign.id}"]`).click();
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await expect(page.locator("#saveCampaignEditsDecision")).toBeVisible();
+  await page.screenshot({ path: resolve(evidenceDirectory, "campaign-metadata-save-after-staged-dismissal.png") });
+  await page.locator("#saveCampaignEditsDecision").click();
+  await expect(page.locator("#campaignTitle")).toHaveValue("Fixture Campaign 2");
+  expect(instrumentation.writes.filter(write => write.method === "PATCH" && write.path.endsWith(`/${firstCampaign.id}`))).toHaveLength(1);
 });

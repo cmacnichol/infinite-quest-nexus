@@ -445,16 +445,22 @@ async function requestStagedEditDecision(allowSave = false) {
   elements.discardChangesTitle.textContent = "Discard unsaved changes?";
   elements.discardChangesMessage.textContent = "Your edits have not been saved. Keep editing or discard them and close this window.";
   elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Keep editing";
-  elements.saveCampaignEditsDecision.hidden = !allowSave;
+  setCampaignSaveDecisionVisible(allowSave);
   elements.saveCampaignEditsDecision.textContent = "Save changes";
   elements.discardChangesDialog.returnValue = "";
   openManagedModal(elements.discardChangesDialog);
   return new Promise((resolve) => {
     elements.discardChangesDialog.addEventListener("close", () => {
       const value = elements.discardChangesDialog.returnValue;
+      setCampaignSaveDecisionVisible(false);
       resolve(value === "discard" ? "discard" : value === "save" && allowSave ? "save" : "stay");
     }, { once: true });
   });
+}
+
+function setCampaignSaveDecisionVisible(visible) {
+  elements.saveCampaignEditsDecision.hidden = !visible;
+  elements.saveCampaignEditsDecision.style.display = visible ? "" : "none";
 }
 
 function dismissEditDialog(dialog) {
@@ -3832,15 +3838,15 @@ function restoreCampaignSettings() {
 function confirmCampaignEditDisposition() {
   if (campaignLeavePromptOpen) return campaignLeavePrompt;
   campaignLeavePromptOpen = true;
-elements.discardChangesTitle.textContent = "Campaign settings have changed";
+  elements.discardChangesTitle.textContent = "Campaign settings have changed";
   elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Stay";
   elements.discardChangesMessage.textContent = "Save these settings before leaving, discard the edits, or stay here and keep editing.";
-  elements.saveCampaignEditsDecision.hidden = false;
+  setCampaignSaveDecisionVisible(true);
   elements.discardChangesDialog.returnValue = "";
   openManagedModal(elements.discardChangesDialog);
   campaignLeavePrompt = new Promise((resolve) => {
     elements.discardChangesDialog.addEventListener("close", () => {
-      elements.saveCampaignEditsDecision.hidden = true;
+      setCampaignSaveDecisionVisible(false);
       campaignLeavePromptOpen = false;
       campaignLeavePrompt = null;
       resolve(elements.discardChangesDialog.returnValue === "save" ? "save" : elements.discardChangesDialog.returnValue === "discard" ? "discard" : "stay");
