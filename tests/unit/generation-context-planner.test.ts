@@ -11,8 +11,14 @@ import { sha256 } from "../../packages/domain/src/index.js";
 import { bindManifestToProducingRequest } from "../../packages/application/src/memory/continuity-review-checkpoint.js";
 import { castGenerationSnapshotFingerprint } from "../../packages/contracts/src/campaign-cast-context.js";
 import { sentCanonicalFactIds } from "../../services/runtime/src/generation-executor-adapter.js";
-import { historyCoverageDiagnosticsSchema } from "../../packages/application/src/memory/generation-context.js";
-  function plannerContext(characterAuthority: unknown, version: "legacy" | "v3" = "v3") {
+import { historyCoverageDiagnosticsSchema, type GenerationContextCandidate } from "../../packages/application/src/memory/generation-context.js";
+import type { MemoryGenerationAuthorityContext } from "../../packages/application/src/index.js";
+  function plannerContext(
+    characterAuthority: unknown,
+    version: "legacy" | "v3" = "v3",
+    canonicalFacts: MemoryGenerationAuthorityContext["authority"]["currentContinuity"]["canonicalFacts"] = [],
+    candidates: readonly GenerationContextCandidate[] = []
+  ): MemoryGenerationAuthorityContext {
     const baseIdentity = version === "v3"
       ? { version: "generation-base-v3", operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null, characterProfileRevision: 1, characterProfileFingerprint: "b".repeat(64) }
       : { operationKind: "append", expectedTurnNumber: 1, baseTurnNumber: 0, campaignActiveTurnNumber: 0, campaignStateRevision: 1, stateEditRevision: null, narrationCorrectionRevision: null, baseTurnId: null, stateFingerprint: "a".repeat(64), narrationFingerprint: null };
@@ -20,10 +26,10 @@ import { historyCoverageDiagnosticsSchema } from "../../packages/application/src
       authority: {
         rules: ["World rule."], worldCanon: { title: "World" }, selectedCharacterId: "mira",
         ...(version === "v3" ? { characterAuthority } : {}),
-        currentContinuity: { continuitySummary: "", scratchpad: "", canonicalFacts: [], openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] },
+        currentContinuity: { continuitySummary: "", scratchpad: "", canonicalFacts, openThreads: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] },
         scratchpad: "", openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [], latestTurn: null
-      }, candidates: [], baseIdentity
-    } as never;
+      }, candidates, baseIdentity
+    } as MemoryGenerationAuthorityContext;
   }
 
   function plannerProvider() {
@@ -164,7 +170,7 @@ describe("layered generation context planner", () => {
       "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
       HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
 
-    expect(result.promptContext.protectedFacts.some((fact: { id: string }) => fact.id === olderFact.id)).toBe(false);
+    expect(result.promptContext.protectedFacts?.some((fact) => fact.id === olderFact.id)).toBe(false);
     expect(result.promptContext.chronicle.some((candidate: { id: string }) => candidate.id === olderFact.id)).toBe(true);
     expect(result.storyInput.split(olderFact.content)).toHaveLength(2);
     expect(result.layerDiagnostics.omitted).toContainEqual({ id: `protected-fact:${olderFact.id}`, reason: "context_limit" });
@@ -208,7 +214,7 @@ describe("layered generation context planner", () => {
       "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
       HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
 
-    expect(result.promptContext.protectedFacts.map((entry: { id: string }) => entry.id)).toEqual([fact.id]);
+    expect(result.promptContext.protectedFacts?.map((entry) => entry.id)).toEqual([fact.id]);
     expect(result.promptContext.chronicle).toEqual([]);
     expect(result.storyInput.split(fact.content)).toHaveLength(2);
     expect(result.layerDiagnostics.omitted).toContainEqual({ id: fact.id, reason: "duplicate_source" });
@@ -301,7 +307,7 @@ describe("layered generation context planner", () => {
       "attempt", "story_memory", defaultStoryMemoryPolicy("r2"), undefined, undefined, undefined,
       HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
 
-    expect(result.promptContext.protectedFacts.some((entry: { id: string }) => entry.id === fact.id)).toBe(false);
+    expect(result.promptContext.protectedFacts?.some((entry) => entry.id === fact.id)).toBe(false);
     expect(result.promptContext.chronicle.map((candidate: { id: string }) => candidate.id)).toEqual([fact.id]);
     expect(result.storyInput).not.toContain(`Duplicate ${factSource.label} narration.`);
   });
@@ -323,9 +329,9 @@ describe("layered generation context planner", () => {
       .toEqual(firstPlan.promptContext.chronicle.map((candidate: { id: string }) => candidate.id));
     expect(firstPlan.promptContext.chronicle.map((candidate: { id: string }) => candidate.id)).toEqual([second.id, first.id]);
 
-    const legacy = plannerContext(null);
-    legacy.authority.currentContinuity.canonicalFacts = [{ id: first.id, content: first.content }];
-    legacy.candidates = [{ ...context.candidates[1] }];
+    const legacy = plannerContext(null, "v3", [{ id: first.id, content: first.content }], [{
+      id: first.id, turnId: "fact-turn-1", ordinal: 1, kind: "canonical_fact", content: first.content, tokenEstimate: 5, rank: 1
+    }]);
     const legacyPlan = planGenerationPromptContext(legacy, plannerProvider(), "System", "Continue", [],
       { profile: "brief", minWords: 100, maxWords: 120 }, "scene", 32_000, 31_900,
       "attempt", "story_memory", defaultStoryMemoryPolicy("r2"));

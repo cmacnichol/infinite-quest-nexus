@@ -208,7 +208,7 @@ integration("prompt-memory remediation composed workflow", () => {
     const storyRequests = providerRequests.filter(hasAuthoritativeContext);
     expect(storyRequests).toHaveLength(1);
     const writerRequest = storyRequests[0];
-    expect(writerRequest).toBeDefined();
+    if (!writerRequest) throw new Error("Expected one writer request with authoritative context.");
     const factPaths: string[] = [];
     const collectFactPaths = (value: unknown, path: string): void => {
       if (typeof value === "string") {

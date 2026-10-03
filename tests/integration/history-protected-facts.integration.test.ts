@@ -12,6 +12,7 @@ import { generationEvidenceManifestSchema } from "../../packages/application/src
 
 import { planGenerationPromptContext } from "../../services/runtime/src/generation-context-planner.js";
 import { serializeProviderRequest } from "../../packages/story-engine/src/index.js";
+import type { RuntimeTextExecution } from "../../services/runtime/src/provider-credential-transport-adapter.js";
 
 const integration = process.env.TEST_DATABASE_URL ? describe.sequential : describe.skip;
 
@@ -69,9 +70,10 @@ integration("verified protected-fact authority", () => {
     const authority = await withTransaction(pool, (client) => loadPostgresChronicleGenerationAuthorityContext(client, {
       ...scopeWithProtocol, expectedBaseIdentity: frozen.baseIdentity
     }));
-    const provider = { id: "v5-protected-facts-writer", name: "V5 protected facts writer", providerRole: "text" as const,
+    const provider: RuntimeTextExecution & { baseUrl: string } = { id: "v5-protected-facts-writer", name: "V5 protected facts writer", providerRole: "text",
       providerType: "openai_compatible" as const, model: "deterministic-test", baseUrl: "http://fixture.invalid/v1",
-      contextWindowTokens: 32_000, maxOutputTokens: 512, temperature: 0, requestTimeoutMs: 1_000, configuration: {} };
+      contextWindowTokens: 32_000, maxOutputTokens: 512, temperature: 0, requestTimeoutMs: 1_000, configuration: {},
+      execute: async () => { throw new Error("The generation-context planner must not execute the text provider."); } };
     const plan = (context: typeof authority) => planGenerationPromptContext(context, provider, "System", "Continue the story.", [],
       { profile: "brief", minWords: 100, maxWords: 120 }, "action", 32_000, 31_488,
       "77777777-7777-4777-8777-777777777777", "story_memory", policy, undefined, undefined, undefined,
@@ -130,7 +132,7 @@ integration("verified protected-fact authority", () => {
 
     const composed = await planV5Request(scope, 4, "Recall the old harbor gate and tell me why it was opened.");
     expect(composed.authority.authority.storyLedger).toBeDefined();
-    expect(composed.authority.authority.protectedFacts.some((fact) => fact.id === old.id)).toBe(false);
+    expect(composed.authority.authority.protectedFacts?.some((fact) => fact.id === old.id)).toBe(false);
     expect(composed.retrieved.candidates.some((candidate) => candidate.id === old.id)).toBe(false);
     expect(composed.requestBody).not.toContain(old.content);
     expect(composed.manifest.entries.some((entry) => entry.canonicalFactId === old.id)).toBe(false);
