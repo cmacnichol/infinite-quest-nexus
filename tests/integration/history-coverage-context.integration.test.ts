@@ -419,6 +419,9 @@ integration("history coverage intent authority", () => {
         const metered = { query: async (...args: any[]) => { retrievalQueries++; const result = await (retrievalClient.query as any)(...args); retrievalRows += result.rows?.length ?? 0; return result; } };
         retrieved = await loadPostgresChronicleGenerationCandidatesContext(metered as never, { ...scope, retrievalBudgetTokens: safeRetrievalBudget }, authority, dependencies, reservation, { useSavepoints: false });
       } finally { retrievalClient.release(); }
+      expect(retrieved!.chronicleRetrieval).toMatchObject({
+        effectiveImplementation: "chunked_hybrid", effectiveMode: "semantic_hybrid", fallbackCode: null
+      });
       const retrievalMs = performance.now() - retrievalStartedAt;
       const finalStartedAt = performance.now();
       const planned = planGenerationPromptContext(retrieved!, writer, "Write a scene.", "Continue.", [], { profile: "brief", minWords: 100, maxWords: 120 }, "action", configuredBudget, writerInputLimit, "77777777-7777-4777-8777-777777777777", "story_memory", policy, undefined, reviewerEstimator, reviewerInputLimit, HISTORY_STORY_MEMORY_CONTEXT_POLICY_VERSION);
