@@ -74,7 +74,7 @@ export function createPostgresActivityRepository(pool: DatabasePool): ActivityRe
         const rows = reset ? [] : (await client.query<{ event_id: string; sequence: string; published_at: Date; occurred_at: Date; source: string; kind: string; severity: string; job_id: string | null; generation_job_id: string | null; segment_id: string | null; turn_id: string | null; snapshot: unknown }>(
           `SELECT event_id,sequence::text,published_at,occurred_at,source,kind,severity,job_id,generation_job_id,segment_id,turn_id,snapshot FROM story_activity_events WHERE owner_user_id=$1 AND campaign_id=$2
            ${cursor ? `AND sequence ${direction === "after" ? ">" : "<"} $3::bigint` : ""}
-           ORDER BY sequence ${direction === "after" ? "ASC" : "DESC"} LIMIT $${cursor ? 4 : 3}`, cursor ? [scope.ownerUserId, scope.campaignId, cursor.sequence, query.limit + 1] : [scope.ownerUserId, scope.campaignId, query.limit + 1])).rows;
+           ORDER BY story_activity_events.sequence ${direction === "after" ? "ASC" : "DESC"} LIMIT $${cursor ? 4 : 3}`, cursor ? [scope.ownerUserId, scope.campaignId, cursor.sequence, query.limit + 1] : [scope.ownerUserId, scope.campaignId, query.limit + 1])).rows;
         const events = rows.slice(0, query.limit).map(row => {
           const draft = activityEventDraftSchema.safeParse(row.snapshot);
           if (!draft.success || draft.data.eventId !== row.event_id || draft.data.campaignId !== scope.campaignId

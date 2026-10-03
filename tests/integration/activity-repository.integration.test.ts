@@ -123,6 +123,21 @@ integration("scoped activity repository", () => {
     await expect(repository.list(local, { limit: 201 })).rejects.toThrow();
     await expect(repository.list(local, { before: first.nextBefore, after: first.nextAfter })).rejects.toThrow();
   });
+  it.each([0n, 9999999999999995n])("orders digit-width crossings numerically for initial, before and after pages (%s)", async offset => {
+    const local = { ...scope, campaignId: await campaign() };
+    // Existing fixtures use small global sequences; reserve a unique range for the small case.
+    const base = offset === 0n ? 9990n : offset;
+    await publish(local, 12, base);
+    const repository = createPostgresActivityRepository(pool);
+    const first = await repository.list(local, { limit: 4 });
+    expect(first.events.map(event => event.sequence)).toEqual([12n, 11n, 10n, 9n].map(value => String(base + value)));
+    const older = await repository.list(local, { before: first.nextBefore, limit: 4 });
+    expect(older.events.map(event => event.sequence)).toEqual([8n, 7n, 6n, 5n].map(value => String(base + value)));
+    const after = await repository.list(local, { after: encodeActivityCursor(local.campaignId, "after", String(base + 8n)), limit: 4 });
+    expect(after.events.map(event => event.sequence)).toEqual([9n, 10n, 11n, 12n].map(value => String(base + value)));
+    expect((await repository.list(local, { after: after.nextAfter })).events).toEqual([]);
+    expect(after.nextAfter).toBe(encodeActivityCursor(local.campaignId, "after", String(base + 12n)));
+  });
   it("resets retention gaps and future cursors without losing high-water", async () => {
     const local = { ...scope, campaignId: await campaign() };
     await publish(local, 2, 100n);
