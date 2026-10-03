@@ -1,0 +1,31 @@
+# Legacy UI implementation record
+
+Implementation branch: `codex/legacy-ui-usability`, isolated managed worktree `legacy-ui-usability-implementation/InfiniteQuest`.
+
+The user authorized implementation of the [audited plan](../../superpowers/plans/legacy-ui-2026-10-03/implementation-plan.md), using Luna implementers and Sol or Astra verification. The [design specification](../../superpowers/plans/legacy-ui-2026-10-03/design-spec.md) and [audit packet](../../superpowers/plans/legacy-ui-2026-10-03/audit-packet.md) remain the design and audit references. Planning-only language in those archived documents no longer limits authorized local implementation and verification. Publication, production deployment, and billable live-provider calls remain outside the request.
+
+## Accepted work
+
+| Task | Result | Review and verification |
+| --- | --- | --- |
+| T01 | Deterministic synthetic UI fixtures, configurable route instrumentation, baseline screenshots and repeatable browser benchmark | Sol accepted after two scoped correction rounds. Six existing suites: 111 passed; baseline browser: 4 passed; native long-task lifecycle: 1 passed; 5 warmups/30 samples retained. No product behavior changed. |
+| I01 | Optional isolated loopback PostgreSQL root URL for integration tests | Sol accepted after rejecting unsupported IPv6 URL literals. 22 focused unit tests, TypeScript and diff checks passed. Standard-config real PostgreSQL read-performance suite: 2 passed, with migrations and per-file isolation. Shared credentials and volumes unchanged. |
+
+T01 commits: `f87113ff`, `7524e48b`, `63ea4f60`. I01 commits: `550b9b9e`, `2c48deb0`.
+
+The [baseline](baseline.md) is a mocked development-server observation, not production latency. Corrected history-open p50/p95: 113.45/168.13 ms, with 18.21% coefficient of variation. Small timing changes require another controlled run before attribution. Native long tasks are captured by document phase; API JSON and static response bytes are measured separately. Screenshots capture history while the dialog is open. Original incorrect summaries were superseded by retained corrected artifacts.
+
+## Implementation decisions and reasons
+
+- Shared-file product changes are serialized. Disjoint foundational files may be implemented concurrently, and Git commits are coordinated. This avoids interleaving edits to the large legacy Nexus and Story modules while retaining parallel work where ownership is clear.
+- Related tests and focused checks run for each task; complete suites run at the final integration gate and justified intermediate boundaries. Repeating broad suites without a concrete concern would add cost without distinct evidence.
+- I01 uses an explicit `INFINITEQUEST_TEST_DATABASE_URL`, validated as PostgreSQL on `localhost` or `127.0.0.1` with a test-only database name. The existing shared provisioner remains the default. The per-file `TEST_DATABASE_URL` handoff is deliberately not an override. An existing shared-volume credential mismatch prevented assertions, so an owned disposable instance was necessary. IPv6 is rejected because the installed driver preserves brackets into its socket host.
+- T02 browser proof uses a synthetic native-dialog harness before production wiring in T03/T04. Fake DOM tests cannot prove native Escape cancellation or focus restoration. An additive synchronous cancel binding prevents default closure and delegates to the same asynchronous dismissal policy; it must support disposal and avoid duplicate listeners.
+- T07 gains an additive `readExpiryNotice(scope): Promise<boolean>` because its specified `read` result cannot disclose retention expiry. Notice metadata contains no expired prose, remains user/campaign scoped, expires after 30 days, and is capped at 50 globally. Only informational notice metadata can drop oldest entries; unexpired drafts cannot be silently evicted. Protection of the active write target during pruning does not grant indefinite retention.
+- T06 pure resume policy belongs in client-core, with exports through both legacy browser entries. Its initial file list omitted that boundary, so ownership was expanded before assignment. Resume precedence remains unchanged from the audited specification.
+
+## Evidence and remaining gates
+
+Raw task logs, review packages, screenshots, benchmark samples and the execution ledger are retained locally under the ignored `.superpowers/sdd/legacy-ui-2026-10-03/` task workspace. They contain synthetic fixtures; private test credentials are separately ignored and must never be printed or committed. Committed review documents summarize the evidence and decisions.
+
+T02–T35 remain in progress or pending. T28 requires a post-optimization evidence decision and separate audited projection addendum before code; an evidence-backed deferral is valid. T32 requires operational review before acceptance, without deployment. Final acceptance requires relevant complete unit/integration/browser/build checks, screenshots, performance comparisons, and a fresh Astra whole-branch review. No feature completion is claimed by this interim record.
