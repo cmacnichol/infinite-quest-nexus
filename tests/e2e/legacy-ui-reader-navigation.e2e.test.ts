@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 
 const evidence = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T09";
+const fix1Evidence = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T09-fix1";
+const fix1EvidenceRun = process.env.T09_FIX1_EVIDENCE_RUN ?? "local";
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 
 async function openReader(page: Page, autoSubmitTurnChoices: boolean) {
@@ -21,6 +23,54 @@ async function loadStoryDocument(page: Page, campaignId: string) {
     .replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
   await page.route(`${origin}/story/${campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(`${origin}/story/${campaignId}`);
+}
+
+async function expectSelectedSceneBelowReaderToolbar(page: Page, turnNumber: number) {
+  const settledAnchor = await page.waitForFunction(async (selectedTurn) => {
+    const measure = () => {
+      const toolbar = document.querySelector("[data-story-reader-toolbar]");
+      const scene = document.querySelector(`#scene-${selectedTurn}`);
+      const summary = document.querySelector(`#scene-${selectedTurn} .previous-action-disclosure summary`);
+      if (!toolbar || !(scene instanceof HTMLElement) || !summary) return null;
+      const sceneTop = scene.getBoundingClientRect().top;
+      const toolbarBottom = toolbar.getBoundingClientRect().bottom;
+      return {
+        gap: summary.getBoundingClientRect().top - toolbarBottom,
+        sceneTop,
+        targetTop: Number.parseFloat(getComputedStyle(scene).scrollMarginTop),
+        toolbarBottom,
+        scrollY: window.scrollY
+      };
+    };
+
+    let previous = measure();
+    if (!previous) return null;
+    let stableFrames = 0;
+    for (let frame = 0; frame < 180; frame += 1) {
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      const current = measure();
+      if (!current) return null;
+      const aligned = Math.abs(current.sceneTop - current.targetTop) <= 3;
+      const unobscured = current.gap >= 8;
+      const stable = Math.abs(current.sceneTop - previous.sceneTop) <= 0.5
+        && Math.abs(current.toolbarBottom - previous.toolbarBottom) <= 0.5
+        && Math.abs(current.scrollY - previous.scrollY) <= 0.5;
+      stableFrames = aligned && unobscured && stable ? stableFrames + 1 : 0;
+      if (stableFrames >= 4) return current;
+      previous = current;
+    }
+    return null;
+  }, turnNumber, { timeout: 8_000 });
+
+  const geometry = await settledAnchor.jsonValue() as {
+    gap: number;
+    sceneTop: number;
+    targetTop: number;
+    toolbarBottom: number;
+    scrollY: number;
+  };
+  expect(geometry.gap).toBeGreaterThanOrEqual(8);
+  expect(Math.abs(geometry.sceneTop - geometry.targetTop)).toBeLessThanOrEqual(3);
 }
 
 test("previous_next_do_not_submit", async ({ page }) => {
@@ -163,4 +213,39 @@ test("long_scene_reader_toolbar_stays_available_without_scrolling_to_composer", 
   const headerBounds = await page.locator(".universal-nav").boundingBox();
   expect(toolbarBounds?.y).toBeGreaterThanOrEqual((headerBounds?.height ?? 0) - 1);
   await page.screenshot({ path: `${evidence}/long-scene-reader-1280x800.png`, fullPage: false });
+});
+
+test("settled_navigation_keeps_each_long_scene_anchor_below_both_sticky_layers", async ({ page }) => {
+  const { api, fixture } = await openReader(page, false);
+  for (const turn of fixture.turns) {
+    turn.narration = Array.from({ length: 36 }, (_, index) => `Paragraph ${index + 1}: ${"The station clock moved while the rain softened against the roof. ".repeat(5)}`).join("\n\n");
+  }
+  await loadStoryDocument(page, fixture.campaignId);
+  const action = page.locator("#freeAction");
+  await action.fill("Keep this draft while moving between long scenes.");
+
+  for (const viewport of [{ width: 1280, height: 800 }, { width: 640, height: 400 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    const toolbar = page.locator("[data-story-reader-toolbar]");
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight / 2));
+    await toolbar.getByRole("button", { name: "Previous turn" }).click();
+    await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText("Turn 5 of 6");
+    await expectSelectedSceneBelowReaderToolbar(page, 5);
+
+    await toolbar.getByRole("button", { name: "Next turn" }).click();
+    await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText("Turn 6 of 6");
+    await expectSelectedSceneBelowReaderToolbar(page, 6);
+
+    await toolbar.getByRole("button", { name: "Previous turn" }).click();
+    await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText("Turn 5 of 6");
+    await expectSelectedSceneBelowReaderToolbar(page, 5);
+
+    await toolbar.getByRole("button", { name: "Jump to latest" }).click();
+    await expect(toolbar.locator("[data-reader-turn-count]")).toHaveText("Turn 6 of 6");
+    await expectSelectedSceneBelowReaderToolbar(page, 6);
+    await page.screenshot({ path: `${fix1Evidence}/long-scene-anchor-${fix1EvidenceRun}-${viewport.width}x${viewport.height}.png`, fullPage: false });
+  }
+
+  await expect(action).toHaveValue("Keep this draft while moving between long scenes.");
+  expect(api.writes.filter(write => write.method === "POST")).toEqual([]);
 });

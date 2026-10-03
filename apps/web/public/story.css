@@ -193,7 +193,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .action-tag { color: var(--gold2); background: rgba(241,194,50,.08); border: 1px solid rgba(241,194,50,.22); border-radius: 13px; padding: 9px 11px; line-height: 1.35; }
 .action-tag-event { border-color: rgba(116,228,255,.3); color: var(--accent2); }
 
-.scene { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
+.scene { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; scroll-margin-top: 135px; }
 
 .narration { font-size: 1.03rem; line-height: 1.68; color: #fff; }
 .narration p { margin: 0 0 1em; }

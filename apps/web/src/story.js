@@ -1170,21 +1170,39 @@ function scrollToView() {
   const isContinuous = Boolean(state.user?.settings?.continuousReading);
   if (isContinuous) {
     const target = $(`scene-${currentViewTurnNumber()}`);
-    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (target) scrollSceneIntoView(target);
     return;
   }
   if (isLatest) {
     const last = container.lastElementChild;
-    if (last) last.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (last) scrollSceneIntoView(last);
   } else {
     const target = $(`scene-${currentViewTurnNumber()}`);
     if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      scrollSceneIntoView(target);
     } else if (!isContinuous) {
       const first = container.firstElementChild;
-      if (first) first.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (first) scrollSceneIntoView(first);
     }
   }
+}
+
+function scrollSceneIntoView(scene) {
+  const header = document.querySelector(".universal-nav");
+  const toolbar = document.querySelector("[data-story-reader-toolbar]");
+  const headerHeight = header?.getBoundingClientRect?.().height;
+  const toolbarHeight = toolbar?.getBoundingClientRect?.().height;
+  const stickyTop = toolbar && typeof document.defaultView?.getComputedStyle === "function"
+    ? Number.parseFloat(document.defaultView.getComputedStyle(toolbar).top)
+    : Number.NaN;
+
+  if (Number.isFinite(headerHeight) && headerHeight > 0
+    && Number.isFinite(toolbarHeight) && toolbarHeight > 0
+    && Number.isFinite(stickyTop) && stickyTop >= 0
+    && scene?.style) {
+    scene.style.scrollMarginTop = `${Math.ceil(Math.max(headerHeight, stickyTop) + toolbarHeight + 12)}px`;
+  }
+  scene.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // ── Player Input ──────────────────────────────────────────────
@@ -2518,7 +2536,10 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   state.streamingExpectedScrollY = null;
   renderStoryIllustration();
   renderTurnInput();
-  if (!preserveViewport) $("scene-" + completedTurn.turnNumber)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (!preserveViewport) {
+    const acceptedScene = $("scene-" + completedTurn.turnNumber);
+    if (acceptedScene) scrollSceneIntoView(acceptedScene);
+  }
   return true;
 }
 
