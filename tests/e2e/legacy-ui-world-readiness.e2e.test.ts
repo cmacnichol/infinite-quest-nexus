@@ -225,12 +225,37 @@ test("published readiness stays attached to its immutable version, separate from
   await page.locator("#worldTitle").fill("Aster Vale working draft");
   await page.locator('[data-world-author-step="review"]').click();
   await expect(page.locator("#worldAuthorCharacterStatus")).toContainText("at least one playable character");
+  await expect(page.locator("#worldAuthorPublishedReadiness")).toContainText("Aster Vale");
   await expect(page.locator("#worldAuthorPublishedReadiness")).toContainText("published version 1");
   await expect(page.locator("#worldAuthorPublishedReadiness")).toContainText("Campaign-ready");
   await expect(page.locator("#worldAuthorPublishedReadiness")).toContainText("immutable version only");
   await page.locator("#worldAuthorPublishedReadiness").scrollIntoViewIfNeeded();
   await expect(page.locator("#worldAuthorPublishedReadiness")).toBeInViewport();
   await page.screenshot({ path: resolve(evidenceDirectory, "published-readiness-scoped-to-version.png") });
+  expect(api.writes).toEqual([]);
+});
+
+test("a new world does not inherit readiness from the previously selected published world", async ({ page }) => {
+  const fixture = publishedWorld();
+  const api = await installWorldApi(page, { initialWorld: fixture, assessment: { ready: true, issues: [] } });
+  await openExistingWorld(page, fixture);
+  await page.locator("#cancelWorldAuthor").click();
+  await expect(page.locator("#worldAuthorDialog")).toBeHidden();
+  await page.locator("#newWorld").click();
+  await page.locator("#worldTitle").fill("A wholly new world");
+  await page.locator('[data-world-author-step="review"]').click();
+
+  const readiness = page.locator("#worldAuthorPublishedReadiness");
+  const fixEvidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T17-fix1");
+  mkdirSync(fixEvidenceDirectory, { recursive: true });
+  await readiness.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: resolve(fixEvidenceDirectory, "new-world-no-inherited-readiness.png") });
+  await expect(readiness).toContainText("No published version is available");
+  await expect(readiness).toContainText("current draft has not been assessed");
+  await expect(readiness).not.toContainText("Aster Vale");
+  await expect(readiness).not.toContainText("Campaign-ready");
+  await expect(page.locator("#worldAuthorLoreStatus")).toContainText("Optional");
+  await expect(page.locator("#saveWorldDraft")).toBeEnabled();
   expect(api.writes).toEqual([]);
 });
 

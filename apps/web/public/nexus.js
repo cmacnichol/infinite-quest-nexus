@@ -2781,6 +2781,11 @@ function renderWorldAuthorPublishedReadiness() {
   const container = elements.worldAuthorPublishedReadiness;
   if (!container) return;
   container.replaceChildren();
+  if (worldAuthorMode === "create") {
+    container.className = "status world-author-published-readiness";
+    container.textContent = "No published version is available for this new world. The current draft has not been assessed.";
+    return;
+  }
   const versionId = selectedWorldVersionId();
   const version = selectedWorld?.versions?.find((candidate) => candidate.id === versionId);
   if (!versionId || !version) {
@@ -2788,7 +2793,7 @@ function renderWorldAuthorPublishedReadiness() {
     container.textContent = "No published version is available for assessment. The current draft has not been assessed.";
     return;
   }
-  const label = `published version ${version.versionNumber}`;
+  const label = `${selectedWorld?.title || "Selected world"}, published version ${version.versionNumber}`;
   const message = document.createElement("p");
   message.className = "world-author-readiness-summary";
   if (worldVersionReadinessLoading && worldVersionReadinessCheckedId === versionId) {
