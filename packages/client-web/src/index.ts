@@ -99,3 +99,6 @@ export function createNoopSessionPort(): SessionPort {
 }
 export * from "./campaign-cast-api.js";
 export { createActivityApi, type ActivityApi } from "./activity-api.js";
+
+export { createIndexedDbActivityCache, type IndexedDbActivityCacheOptions } from "./activity/indexeddb-cache.js";
+export { canonicalActivityApiBase, createActivityVisibilitySource, createActivityConnectivitySource, createActivityTabNotifications } from "./activity/platform.js";
