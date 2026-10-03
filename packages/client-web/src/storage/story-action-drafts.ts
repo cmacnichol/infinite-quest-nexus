@@ -167,7 +167,6 @@ function storeJson(transaction: DraftDatabaseTransaction, key: string, value: un
 function pruneExpired(
   transaction: DraftDatabaseTransaction,
   now: Date,
-  userId: string,
   protectedKey?: string
 ): void {
   const nowMs = now.getTime();
@@ -176,7 +175,6 @@ function pruneExpired(
 
   for (const [key, raw] of transaction.entries()) {
     if (key.startsWith(DRAFT_PREFIX)) {
-      if (!key.startsWith(`${DRAFT_PREFIX}${userId}:`)) continue;
       const decoded = decodeDraft(raw);
       if (decoded.kind === "corrupt") {
         transaction.delete(key);
@@ -250,7 +248,7 @@ export function createStoryActionDraftStore(
       const parsed = parsedScope.data;
       try {
         return await database.transaction((transaction) => {
-          pruneExpired(transaction, currentTime, parsed.userId);
+          pruneExpired(transaction, currentTime);
           const key = draftKey(parsed);
           const raw = transaction.get(key);
           const decoded = decodeDraft(raw);
@@ -297,7 +295,7 @@ export function createStoryActionDraftStore(
       };
       try {
         return await database.transaction((transaction): WriteResult => {
-          pruneExpired(transaction, currentTime, parsed.userId, targetKey);
+          pruneExpired(transaction, currentTime, targetKey);
           const existingRaw = transaction.get(targetKey);
           const existing = decodeDraft(existingRaw);
           if (existing.kind === "unknown") return { outcome: "conflict" };
@@ -308,13 +306,14 @@ export function createStoryActionDraftStore(
               ? { outcome: "conflict" }
               : { outcome: "conflict", currentRevision: current.draftRevision };
           }
+          if (current !== null && current.draftRevision === revision) {
+            return { outcome: "conflict", currentRevision: current.draftRevision };
+          }
           if (current === null) {
             const currentDraftCount = transaction.entries().reduce((count, [key, raw]) => {
-              if (!key.startsWith(`${DRAFT_PREFIX}${parsed.userId}:`)) return count;
+              if (!key.startsWith(DRAFT_PREFIX)) return count;
               const decoded = decodeDraft(raw);
-              if (decoded.kind === "unknown") return count + 1;
-              if (decoded.kind !== "valid" || decoded.record.userId !== parsed.userId) return count;
-              return count + 1;
+              return decoded.kind === "unknown" || decoded.kind === "valid" ? count + 1 : count;
             }, 0);
             if (currentDraftCount >= DRAFT_LIMIT) return { outcome: "capacity" };
           }
@@ -334,7 +333,7 @@ export function createStoryActionDraftStore(
       const key = draftKey(parsed);
       try {
         return await database.transaction((transaction): ClearResult => {
-          pruneExpired(transaction, currentTime, parsed.userId, key);
+          pruneExpired(transaction, currentTime, key);
           const raw = transaction.get(key);
           if (raw === undefined) return { outcome: "absent" };
           const decoded = decodeDraft(raw);
@@ -359,7 +358,7 @@ export function createStoryActionDraftStore(
       const parsed = parsedScope.data;
       try {
         return await database.transaction((transaction) => {
-          pruneExpired(transaction, currentTime, parsed.userId);
+          pruneExpired(transaction, currentTime);
           const decoded = decodeNotice(transaction.get(noticeKey(parsed)));
           return decoded.kind === "valid" && decoded.notice.userId === parsed.userId
             && decoded.notice.campaignId === parsed.campaignId && !isNoticeExpired(decoded.notice, currentTime.getTime());

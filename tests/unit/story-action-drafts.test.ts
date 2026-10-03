@@ -151,6 +151,32 @@ describe("story action draft storage", () => {
     expect((await store.read(scope()))?.text).toBe("Keep me");
   });
 
+  it("prunes expired drafts across users and records a scoped notice", async () => {
+    const old = new Date(nowMs - 31 * DAY_MS).toISOString();
+    const expiredScope = scope(USER_B, CAMPAIGN_B);
+    await seedDraft(expiredScope, { ...input("expired other user prose", old), updatedAt: old });
+
+    expect(await store.read(scope(USER_A, CAMPAIGN_A))).toBeNull();
+
+    const remaining = await database.transaction((transaction) => transaction.get(`draft:${USER_B}:${CAMPAIGN_B}`));
+    expect(remaining).toBeUndefined();
+    expect(await store.readExpiryNotice(expiredScope)).toBe(true);
+  });
+
+  it("rejects a generated revision that duplicates the current revision", async () => {
+    const repeatedRevision = "30000000-0000-4000-8000-000000000001";
+    const duplicateStore = createStoryActionDraftStore(database, () => new Date(nowMs), () => repeatedRevision);
+    const first = await duplicateStore.write(scope(), input("Retyped identical action"), { expectedRevision: null });
+    if (first.outcome !== "saved") throw new Error("Initial save failed.");
+
+    const second = await duplicateStore.write(scope(), input("Retyped identical action"), { expectedRevision: first.currentRevision });
+
+    expect(second).toEqual({ outcome: "conflict", currentRevision: first.currentRevision });
+    expect(await duplicateStore.read(scope())).toMatchObject({
+      draftRevision: first.currentRevision,
+      text: "Retyped identical action"
+    });
+  });
   it("prunes expired prose and exposes a scoped expiry notice without the expired text", async () => {
     const old = new Date(nowMs - 31 * DAY_MS).toISOString();
     await seedDraft(scope(), { ...input("expired secret prose", old), updatedAt: old });
@@ -178,12 +204,12 @@ describe("story action draft storage", () => {
     expect(await store.readExpiryNotice(protectedScope)).toBe(false);
     expect(await store.readExpiryNotice(expiredOtherScope)).toBe(true);
   });
-  it("does not evict unexpired drafts when the per-user capacity is full", async () => {
+  it("does not evict unexpired drafts when the global capacity is full across users", async () => {
     for (let index = 0; index < 50; index += 1) {
       const campaignId = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
       expect((await store.write(scope(USER_A, campaignId), input(`draft ${index}`), { expectedRevision: null })).outcome).toBe("saved");
     }
-    const result = await store.write(scope(USER_A, "00000000-0000-4000-8000-000000000051"), input("must remain unsaved"), { expectedRevision: null });
+    const result = await store.write(scope(USER_B, CAMPAIGN_B), input("must remain unsaved"), { expectedRevision: null });
 
     expect(result).toEqual({ outcome: "capacity" });
     expect(await store.read(scope(USER_A, "00000000-0000-4000-8000-000000000001"))).not.toBeNull();
