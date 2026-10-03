@@ -20,6 +20,7 @@ The user authorized implementation of the [audited plan](../../superpowers/plans
 | T14 | Bounded literal campaign-history search with snapshot-bound cursors | Sol accepted at d44cef6f. 9 units and 3 real PostgreSQL cases passed; current production types passed. Single warm EXPLAIN samples are query observations, with no route p95 or production speedup claim. |
 | T19 | Shared pure campaign creation draft and preference defaults | Sol accepted at 19410b3c; 11 unit tests and scoped type/boundary checks passed. Existing action-only and flexible modes are preserved. Actual Basic/Advanced preservation proof belongs to T20. |
 | I01 | Optional isolated loopback PostgreSQL root URL for integration tests | Sol accepted after rejecting unsupported IPv6 URL literals. 22 focused unit tests, TypeScript and diff checks passed. Standard-config real PostgreSQL read-performance suite: 2 passed, with migrations and per-file isolation. Shared credentials and volumes unchanged. |
+| I02 | Story test fixtures aligned with persistent recovery and asynchronous draft completion | Sol accepted at fa2eb616 after immutable 96-test rerun with zero errors and coverage review. Focused 10 passed; reported root TypeScript passed. A prior 96-assertion run with one unhandled teardown error remains failed evidence. No product change. |
 
 T01 commits: `f87113ff`, `7524e48b`, `63ea4f60`. I01 commits: `550b9b9e`, `2c48deb0`.
 
@@ -49,3 +50,6 @@ Remaining plan tasks are in progress or pending; only the rows marked accepted a
 - T14 current production compilation supersedes an earlier TS2379 failure, whose raw log is preserved. Its 2,002-turn PostgreSQL fixture has refreshed statistics; EXPLAIN excludes the separate history-version query and does not establish route latency, cold IO or production concurrency.
 
 - T03 test fixture typing was corrected separately at cb5ccdec and independently accepted by Sol. Strict targeted compilation passed; this is separate from the final combined project checks. T04 direct type/syntax logs without recorded exit status are implementer-reported, while browser/unit summaries, rendered screenshots and immutable whitespace were independently inspected.
+
+- T09 and T17 candidates are under scoped correction, not accepted. Sol reproduced obscured reader anchors and a new-world form displaying another world's published readiness. The full management unit file currently has 73 passed, 10 failed and one unhandled extracted-helper error; I03 is diagnosing associated fixtures, without assuming every failure is a product defect. Final acceptance requires the full relevant suites with zero unhandled errors.
+- Reviewer immutable snapshots live under ignored .superpowers/. Repository-root Vitest invocations exclude that directory so copied suites do not inflate coverage counts; original failed and intermediate evidence is retained.
