@@ -98,3 +98,4 @@ export function createNoopSessionPort(): SessionPort {
   return noOpSessionPort;
 }
 export * from "./campaign-cast-api.js";
+export { createActivityApi, type ActivityApi } from "./activity-api.js";
