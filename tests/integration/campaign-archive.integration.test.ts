@@ -391,6 +391,9 @@ integration("campaign archive export", () => {
       process.off("warning", recordWarning);
     }
     expect(warnings).toEqual([]);
+    for (const key of ["storyActivityEvents", "activityEventOutbox", "campaignActivityHistory", "story_activity_events", "activity_event_outbox", "campaign_activity_history"]) {
+      expect(snapshot).not.toHaveProperty(key);
+    }
     expect(snapshot).not.toHaveProperty("chunks");
     expect(snapshot).not.toHaveProperty("chunkJobs");
     expect(snapshot).not.toHaveProperty("retrievalRuns");
