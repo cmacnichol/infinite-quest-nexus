@@ -36,6 +36,8 @@ interface Harness {
   readonly payloads: ReturnType<typeof quietLeafApiPayloads>;
   readonly writes: Array<{ path: string; body: Record<string, unknown> }>;
   readonly syncSnapshots: unknown[];
+  readonly jobSnapshots: unknown[];
+  readonly resultSnapshots: unknown[];
   readonly errors: string[];
   readonly releaseCompletion: () => void;
 }
@@ -82,11 +84,14 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
   const syncTurns = payloads.syncStatus.turns ?? { nextCursor: null, turns: [] };
   const writes: Harness["writes"] = [];
   const syncSnapshots: Harness["syncSnapshots"] = [];
+  const jobSnapshots: Harness["jobSnapshots"] = [];
+  const resultSnapshots: Harness["resultSnapshots"] = [];
   const errors: string[] = [];
   let openingJobStarted = false;
   let replacementJobStarted = false;
   let activeConflictReturned = false;
   let appendFailed = false;
+  let ordinaryAppend: { action: string; campaignId: string; expectedTurnNumber: number; idempotencyKey: string } | null = null;
   let acceptedGeneration: { id: string; expectedTurnNumber: number; resultTurnId: string; action: string; operationKind: "append" | "replace_latest" } | null = null;
   let releaseCompletion!: () => void;
   const completionReleased = new Promise<void>(resolve => { releaseCompletion = resolve; });
@@ -213,7 +218,8 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
       return respond({ id: replacementJobId, status: "queued", duplicate: false, operationKind: "replace_latest", replacementTurnId: "44444444-4444-4444-8444-444444444444" }, 202);
     }
     if (request.method() === "POST" && path === `/api/v1/campaigns/${options.campaign ?? campaignId}/generations`) {
-      writes.push({ path, body: request.postDataJSON() as Record<string, unknown> });
+      const body = request.postDataJSON() as Record<string, unknown>;
+      writes.push({ path, body });
       if (options.activeConflict) {
         activeConflictReturned = true;
         return respond({
@@ -224,18 +230,32 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
           } }
         }, 409);
       }
+      ordinaryAppend = {
+        action: String(body.action),
+        campaignId: options.campaign ?? campaignId,
+        expectedTurnNumber: Number(payloads.syncStatus.activeTurnNumber) + 1,
+        idempotencyKey: String(body.idempotencyKey)
+      };
       if (options.appendOutcome === "failed") appendFailed = true;
       if (options.opening) openingJobStarted = true;
       return respond({ id: jobId, status: "queued", duplicate: false, operationKind: "append", replacementTurnId: null }, 202);
     }
     const currentJob = replacementJobStarted ? replacementJobId : options.activeConflict ? activeJobId : jobId;
     const acceptedOperation = replacementJobStarted ? "replace_latest" : "append";
-    const acceptedExpectedTurn = replacementJobStarted ? 1 : options.opening ? 1 : 2;
+    const acceptedExpectedTurn = replacementJobStarted
+      ? 1
+      : options.opening
+        ? 1
+        : ordinaryAppend?.expectedTurnNumber ?? 2;
     const acceptedAction = replacementJobStarted
       ? "Replacement action."
       : options.activeConflict
         ? "Another tab's action."
-        : options.pendingAction ?? (options.opening ? "Survey the empty platform." : "A submitted action.");
+        : options.pendingAction ?? (options.pending
+          ? "Authoritative pending action."
+          : options.opening
+            ? "Survey the empty platform."
+            : ordinaryAppend?.action ?? "A submitted action.");
     const acceptedResultTurn = replacementJobStarted ? replacementResultTurnId : resultTurnId;
     if (request.method() === "GET" && path === `/api/v1/generation-jobs/${currentJob}/stream`) {
       return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
@@ -251,7 +271,7 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
           operationKind: acceptedOperation
         };
       }
-      return respond(generationJobSnapshotSchema.parse({
+      const jobSnapshot = generationJobSnapshotSchema.parse({
         id: currentJob, campaignId: options.campaign ?? campaignId, expectedTurnNumber: acceptedExpectedTurn, action: acceptedAction,
         requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: acceptedOperation,
         replacementTurnId: replacementJobStarted ? "44444444-4444-4444-8444-444444444444" : null,
@@ -260,23 +280,55 @@ async function installHarness(page: Page, options: HarnessOptions = {}): Promise
         errorMessage: options.appendOutcome === "failed" && !replacementJobStarted ? "Generation could not be completed." : null,
         createdAt: timestamp, updatedAt: timestamp, partialNarration: null,
         status: options.appendOutcome === "failed" && !replacementJobStarted ? "failed" : "completed"
-      }));
+      });
+      jobSnapshots.push(jobSnapshot);
+      return respond(jobSnapshot);
     }
-    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${currentJob}/result`) return respond(generationResultSchema.parse({
-      id: currentJob, campaignId: options.campaign ?? campaignId, expectedTurnNumber: acceptedExpectedTurn, action: acceptedAction,
-      requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: acceptedOperation,
-      replacementTurnId: replacementJobStarted ? "44444444-4444-4444-8444-444444444444" : null,
-      attempts: 1, resultTurnId: acceptedResultTurn, errorCode: null, errorMessage: null,
-      createdAt: timestamp, updatedAt: timestamp, status: "completed", turnNumber: acceptedExpectedTurn, inputMode: "action",
-      narration: "Accepted synthetic narration.", choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
-      acceptedAt: timestamp, chronicleRetrieval: null, modelMetadata: null, mechanics: null, stateSnapshot: {}, reportedCost: null
-    }));
+    if (request.method() === "GET" && path === `/api/v1/generation-jobs/${currentJob}/result`) {
+      const resultSnapshot = generationResultSchema.parse({
+        id: currentJob, campaignId: options.campaign ?? campaignId, expectedTurnNumber: acceptedExpectedTurn, action: acceptedAction,
+        requestedInputMode: "action", resolvedInputMode: "action", inputModeSource: "explicit", operationKind: acceptedOperation,
+        replacementTurnId: replacementJobStarted ? "44444444-4444-4444-8444-444444444444" : null,
+        attempts: 1, resultTurnId: acceptedResultTurn, errorCode: null, errorMessage: null,
+        createdAt: timestamp, updatedAt: timestamp, status: "completed", turnNumber: acceptedExpectedTurn, inputMode: "action",
+        narration: "Accepted synthetic narration.", choices: [], customActionSuggestion: "", imagePrompt: "", imageUrl: null,
+        acceptedAt: timestamp, chronicleRetrieval: null, modelMetadata: null, mechanics: null, stateSnapshot: {}, reportedCost: null
+      });
+      resultSnapshots.push(resultSnapshot);
+      return respond(resultSnapshot);
+    }
     if (request.method() === "POST") writes.push({ path, body: {} });
     return respond({});
   });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
   await page.route(`**/story/${options.campaign ?? campaignId}`, route => route.fulfill({ contentType: "text/html", body: html }));
-  return { payloads, writes, syncSnapshots, errors, releaseCompletion };
+  return { payloads, writes, syncSnapshots, jobSnapshots, resultSnapshots, errors, releaseCompletion };
+}
+
+function expectOrdinaryAppendIdentity(harness: Harness, action: string, status: "completed" | "failed") {
+  const post = harness.writes.find(write => write.path.endsWith("/generations"));
+  expect(post?.body).toMatchObject({ action, idempotencyKey: expect.any(String) });
+  const submittedCampaignId = post?.path.split("/")[4];
+  const expectedTurnNumber = Number(harness.payloads.syncStatus.activeTurnNumber) + 1;
+  expect(harness.jobSnapshots.at(-1)).toMatchObject({
+    id: jobId, campaignId: submittedCampaignId, expectedTurnNumber, action, operationKind: "append", status
+  });
+  if (status === "completed") {
+    expect(harness.resultSnapshots.at(-1)).toMatchObject({
+      id: jobId, campaignId: submittedCampaignId, expectedTurnNumber, turnNumber: expectedTurnNumber, action, status
+    });
+  }
+}
+
+function expectGenerationIdentity(harness: Harness, identity: {
+  id: string; campaignId: string; expectedTurnNumber: number; action: string;
+  operationKind: "append" | "replace_latest"; status: "completed" | "failed"
+}) {
+  expect(harness.jobSnapshots.at(-1)).toMatchObject(identity);
+  if (identity.status === "completed") {
+    const { operationKind: _operationKind, ...resultIdentity } = identity;
+    expect(harness.resultSnapshots.at(-1)).toMatchObject(resultIdentity);
+  }
 }
 
 async function gotoStory(page: Page, harness: Harness, campaign = campaignId) {
@@ -361,6 +413,7 @@ test("failed_storage_never_reports_saved_and_does_not_block_submission", async (
   expect(harness.writes[0]?.body.action).toBe("Keep this if storage lets me.");
   await expect(page.locator("#freeAction")).toHaveValue("Keep this if storage lets me.");
   await expect(page.locator("#autosaveStatus")).toHaveText("Draft not saved");
+  expectOrdinaryAppendIdentity(harness, "Keep this if storage lets me.", "completed");
   await page.locator("#btnNexusDashboard").click();
   await expect(page.locator("#actionDraftNavigationDialog")).toBeVisible();
   await page.locator("#actionDraftNavigationDialog button[value='stay']").click();
@@ -379,6 +432,7 @@ test("failed_storage_never_reports_saved_and_does_not_block_submission", async (
   await expect.poll(() => unavailable.writes.length).toBe(1);
   expect(unavailable.writes[0]?.body.action).toBe("Keep this without IndexedDB.");
   await expect(unavailablePage.locator("#freeAction")).toHaveValue("Keep this without IndexedDB.");
+  expectOrdinaryAppendIdentity(unavailable, "Keep this without IndexedDB.", "completed");
   expect(unavailable.errors).toEqual([]);
 });
 
@@ -414,6 +468,7 @@ test("acceptance_clears_matching_not_newer_draft", async ({ page }) => {
   await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
   await page.locator("#btnTakeAction").click();
   await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  expectOrdinaryAppendIdentity(harness, "A submitted action.", "completed");
   await expect.poll(() => readDraft(page)).toBeNull();
   expect(harness.writes).toHaveLength(1);
 });
@@ -426,6 +481,10 @@ test("active_job_completion_preserves_unowned_local_draft", async ({ page }) => 
   const submitted = await readDraft(page) as { text: string; draftRevision: string };
   await page.locator("#btnTakeAction").click();
   await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  expectGenerationIdentity(harness, {
+    id: activeJobId, campaignId, expectedTurnNumber: 2, action: "Another tab's action.",
+    operationKind: "append", status: "completed"
+  });
   await expect(page.locator("#actionDraftConflict")).toBeVisible();
   await mkdir(fix1EvidenceDirectory, { recursive: true });
   await page.screenshot({ path: `${fix1EvidenceDirectory}/active-conflict-preserves-local-draft.png`, fullPage: true });
@@ -450,6 +509,10 @@ test("same_text_ordinary_revision_survives_pending_opening_reload", async ({ pag
   await expect(page.locator("#freeAction")).toBeVisible();
   harness.releaseCompletion();
   await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  expectGenerationIdentity(harness, {
+    id: jobId, campaignId, expectedTurnNumber: 1, action: "Survey the empty platform.",
+    operationKind: "append", status: "completed"
+  });
   await expect(page.locator("#actionDraftConflict")).toBeVisible();
   await expect(page.locator("#restoreActionDraft")).toBeVisible();
   await mkdir(fix1EvidenceDirectory, { recursive: true });
@@ -469,6 +532,7 @@ test("failed_append_followed_by_replacement_preserves_ordinary_draft", async ({ 
   await page.locator("#btnTakeAction").click();
   await expect.poll(() => harness.writes.length).toBe(1);
   await expect(page.locator("#toast")).toContainText("Generation failed:");
+  expectOrdinaryAppendIdentity(harness, "My ordinary action.", "failed");
   await page.reload();
   expect(harness.errors, harness.errors.join("\n")).toEqual([]);
   await expect(page.locator("#storySyncStatus")).toHaveText("Story synced");
@@ -480,6 +544,10 @@ test("failed_append_followed_by_replacement_preserves_ordinary_draft", async ({ 
   await page.locator("#retryPromptEditor").fill("Replacement action.");
   await page.locator("#btnRetryPromptSubmit").click();
   await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  expectGenerationIdentity(harness, {
+    id: replacementJobId, campaignId, expectedTurnNumber: 1, action: "Replacement action.",
+    operationKind: "replace_latest", status: "completed"
+  });
   await expect(page.locator("#actionDraftConflict")).toBeVisible();
   await page.locator("#restoreActionDraft").click();
   await expect(page.locator("#freeAction")).toHaveValue("My ordinary action.");
@@ -599,6 +667,7 @@ test("retyped_same_text_new_revision_survives_acceptance", async ({ page }) => {
   expect(newer.draftRevision).not.toBe(submitted.draftRevision);
   harness.releaseCompletion();
   await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  expectOrdinaryAppendIdentity(harness, "A submitted action.", "completed");
   await expect.poll(() => readDraft(secondPage)).toMatchObject({ text: "A submitted action.", draftRevision: newer.draftRevision });
   await expect(page.locator("#actionDraftConflict")).toBeVisible();
 });
@@ -621,6 +690,7 @@ test("second_tab_edits_survive_first_tab_acceptance", async ({ page, context }) 
   expect(newer.draftRevision).not.toBe(submitted.draftRevision);
   first.releaseCompletion();
   await expect(page.getByText("Accepted synthetic narration.", { exact: true })).toBeVisible();
+  expectOrdinaryAppendIdentity(first, "The first tab action.", "completed");
   await expect.poll(() => readDraft(secondPage)).toMatchObject({ text: "A newer action in another tab.", draftRevision: newer.draftRevision });
   await expect(page.locator("#actionDraftConflict")).toBeVisible();
   await page.locator("#restoreActionDraft").click();
