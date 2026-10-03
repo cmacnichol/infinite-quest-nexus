@@ -455,8 +455,15 @@ window.addEventListener("pageshow", event => {
   if (!event.persisted || !activitySuspended || activityDestroyed) return;
   activitySuspended = false;
   // Revalidate session and campaign access before exposing the retained cache.
-  if (state.campaignId) void loadCampaign(state.campaignId, { autoScroll: false });
+  if (state.campaignId) void restorePersistedCampaign(state.campaignId);
 });
+async function restorePersistedCampaign(campaignId) {
+  const loading = loadCampaign(campaignId, { autoScroll: false });
+  const restoreScope = activityScope();
+  if (!await loading || !activityScopeCurrent(restoreScope)) return;
+  pollImageJobs();
+  await resumePendingGeneration();
+}
 
 // ── Onboarding ────────────────────────────────────────────────
 async function checkOnboarding() {

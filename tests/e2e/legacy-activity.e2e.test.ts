@@ -22,7 +22,7 @@ async function install(page: Page, options: { storageDenied?: boolean; review?: 
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error" && !/Failed to load resource|net::ERR_INTERNET_DISCONNECTED/u.test(message.text())) errors.push(message.text()); });
   let events = [event(3), event(2, { kind: "generation.retry_queued", status: "queued", attemptNumber: 2, severity: "info", diagnostic: null })];
-  let offlineFeed = false; let offlineApi = false; let unsupported = false; let malformed = false; let deny = false; let sessions = 0; let syncs = 0; let activityReads = 0; let hold = options.delaySession ?? false; let delayedActivity: Route | null = null; let holdActivity = false; let resetNext = false; let holdConfig = false; let delayedConfig: Route | null = null;
+  let offlineFeed = false; let offlineApi = false; let unsupported = false; let malformed = false; let deny = false; let sessions = 0; let syncs = 0; let activityReads = 0; let pending = false; let hold = options.delaySession ?? false; let delayedActivity: Route | null = null; let holdActivity = false; let resetNext = false; let holdConfig = false; let delayedConfig: Route | null = null;
   let releaseSession!: () => void; let sessionGate = new Promise<void>(resolve => { releaseSession = resolve; });
   if (options.storageDenied) await page.addInitScript(() => { Object.defineProperty(window, "indexedDB", { get() { throw new DOMException("Denied", "SecurityError"); } }); });
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
@@ -42,7 +42,7 @@ async function install(page: Page, options: { storageDenied?: boolean; review?: 
     if (path.endsWith("/sync-status")) {
       syncs++; if (deny) return send(route, { error: "not_found" }, 404);
       const selected = path.split("/")[4]!;
-      return send(route, { ...fixture.syncStatus, campaign: { ...fixture.syncStatus.campaign, id: selected, title: selected === campaignB ? "Second campaign" : "Fixture Story" }, generationRecovery: options.review ? recovery : null, turns: { ...fixture.turns, campaignId: selected } });
+      return send(route, { ...fixture.syncStatus, campaign: { ...fixture.syncStatus.campaign, id: selected, title: selected === campaignB ? "Second campaign" : "Fixture Story" }, pendingGeneration: pending && selected === campaignId ? { id: jobId, status: "generating", action: "Fixture pending action", expectedTurnNumber: 2, createdAt: timestamp, updatedAt: timestamp, operationKind: "append", replacementTurnId: null } : null, generationRecovery: options.review ? recovery : null, turns: { ...fixture.turns, campaignId: selected } });
     }
     if (path.endsWith("/activity")) {
       activityReads++;
@@ -69,7 +69,7 @@ async function install(page: Page, options: { storageDenied?: boolean; review?: 
     if (path.endsWith("/review")) return send(route, { error: "Review unavailable PRIVATE_CANARY" }, 503);
     return send(route, { error: "No fixture" }, 404);
   });
-  return { errors, writes, activityReads: () => activityReads, holdConfig: () => { holdConfig = true; }, delayedConfig: () => delayedConfig, releaseConfig: async () => { holdConfig = false; if (delayedConfig) await send(delayedConfig, { error: "PRIVATE_CANARY" }, 503); }, reset: () => { resetNext = true; }, offlineApi: (value: boolean) => { offlineApi = value; }, events: (value: ActivityEvent[]) => { events = value; }, offline: (value: boolean) => { offlineFeed = value; }, unsupported: (value = true) => { unsupported = value; }, malformed: () => { malformed = true; }, deny: () => { deny = true; }, sessions: () => sessions, syncs: () => syncs, holdSession: () => { hold = true; sessionGate = new Promise<void>(resolve => { releaseSession = resolve; }); }, releaseSession: () => { hold = false; releaseSession(); }, holdActivity: () => { holdActivity = true; }, delayed: () => delayedActivity, releaseActivity: async () => { holdActivity = false; if (delayedActivity) await send(delayedActivity, pageOf([event(99, { diagnostic: { code: "request_failed", message: ACTIVITY_DIAGNOSTIC_MESSAGES.request_failed, correlationId: "late:A" } })])); } };
+  return { errors, writes, pending: (value: boolean) => { pending = value; }, activityReads: () => activityReads, holdConfig: () => { holdConfig = true; }, delayedConfig: () => delayedConfig, releaseConfig: async () => { holdConfig = false; if (delayedConfig) await send(delayedConfig, { error: "PRIVATE_CANARY" }, 503); }, reset: () => { resetNext = true; }, offlineApi: (value: boolean) => { offlineApi = value; }, events: (value: ActivityEvent[]) => { events = value; }, offline: (value: boolean) => { offlineFeed = value; }, unsupported: (value = true) => { unsupported = value; }, malformed: () => { malformed = true; }, deny: () => { deny = true; }, sessions: () => sessions, syncs: () => syncs, holdSession: () => { hold = true; sessionGate = new Promise<void>(resolve => { releaseSession = resolve; }); }, releaseSession: () => { hold = false; releaseSession(); }, holdActivity: () => { holdActivity = true; }, delayed: () => delayedActivity, releaseActivity: async () => { holdActivity = false; if (delayedActivity) await send(delayedActivity, pageOf([event(99, { diagnostic: { code: "request_failed", message: ACTIVITY_DIAGNOSTIC_MESSAGES.request_failed, correlationId: "late:A" } })])); } };
 }
 async function open(page: Page) {
   await page.goto(`${origin}/story/${campaignId}`); await expect(page).toHaveTitle("Fixture Story — Infinite Quest");
@@ -330,3 +330,43 @@ test("native Back restores Activity when Chromium admits the document to BFCache
   const before = api.activityReads(); await refresh(page);
   await expect.poll(() => api.activityReads()).toBeGreaterThan(before); expect(api.errors).toEqual([]);
 });
+
+
+test("persisted restore resumes one pending watcher and reconciles completion without submitting", async ({ page }) => {
+  const api = await install(page); await open(page); api.pending(true);
+  const result = { ...fixture.turns.turns[0]!, campaignId, turnNumber: 2, resultTurnId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", narration: "The restored watcher reveals the accepted scene." };
+  await page.evaluate(({ jobId, result }) => {
+    const w = window as any; w.__resumeCalls = 0; w.__watchCalls = 0;
+    const completion = new Promise<void>(resolve => { w.__completeRestored = resolve; });
+    w.__workflow.resume = async () => { w.__resumeCalls++; return { jobId, async *watch() { w.__watchCalls++; await completion; yield { type: "settled", outcome: "completed", result }; } }; };
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  }, { jobId, result });
+  await expect.poll(() => page.evaluate(() => [(window as any).__resumeCalls, (window as any).__watchCalls])).toEqual([1, 1]);
+  await expect(page.locator("#btnUndo")).toBeDisabled();
+  api.pending(false);
+  await page.route(`**/api/v1/campaigns/${campaignId}/sync-status`, route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ ...fixture.syncStatus, campaign: { ...fixture.syncStatus.campaign, activeTurnNumber: 2 }, pendingGeneration: null, turns: { ...fixture.turns, turns: [...fixture.turns.turns, { ...result, id: result.resultTurnId }] } }) }));
+  await page.evaluate(() => (window as any).__completeRestored());
+  await expect(page.locator("#scene-2")).toContainText(result.narration);
+  await expect(page.locator("#btnUndo")).toBeEnabled();
+  await expect.poll(() => page.evaluate(() => (window as any).__state.pendingGeneration)).toBeNull();
+  expect(await page.evaluate(() => [(window as any).__resumeCalls, (window as any).__watchCalls])).toEqual([1, 1]);
+  expect(api.writes).toEqual([]); expect(api.errors).toEqual([]);
+});
+
+for (const safety of ["campaign switch", "access denial"] as const) {
+  test(`persisted pending restoration cannot attach after ${safety}`, async ({ page }) => {
+    const api = await install(page); await open(page); api.pending(true);
+    await page.evaluate(() => { const w = window as any; w.__resumeCalls = 0; w.__workflow.resume = async () => { w.__resumeCalls++; return null; }; });
+    if (safety === "campaign switch") api.holdSession(); else api.deny();
+    await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })); window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); });
+    if (safety === "campaign switch") {
+      await page.evaluate(id => { (window as any).__switchPromise = (window as any).__loadCampaign(id); }, campaignB);
+      api.releaseSession(); await page.evaluate(() => (window as any).__switchPromise);
+      await expect(page).toHaveTitle("Second campaign — Infinite Quest");
+    } else await expect(page.locator("body")).toContainText("Error loading campaign");
+    expect(await page.evaluate(() => (window as any).__resumeCalls)).toBe(0);
+    expect(api.writes).toEqual([]); expect(api.errors).toEqual([]);
+  });
+}
