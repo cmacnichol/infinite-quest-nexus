@@ -8,13 +8,10 @@ import {
   parseAuthoringCommandForJob,
   type AuthoringReview,
   type AuthoringApply,
-  type AuthoringApplyReceipt,
   normalizeAuthoringSubmitForAdmission,
   authoringKindSchema,
   authoringSubmitSchema,
   authoringTargetSchema,
-  type AuthoringExecutionSnapshot,
-  type AuthoringFailure,
   type AuthoringJobListItem,
   type AuthoringJobView,
   type AuthoringStageOutput,
@@ -25,8 +22,7 @@ import {
   sourceFactReviewSchema,
   persistedSourceFactReviewSchema,
   type SourceAuthoringInput,
-  type SourceFact,
-  type SourceFactReview
+  type SourceFact
 } from "../../contracts/src/source-authoring.js";
 import { createHash, randomUUID } from "node:crypto";
 import { canonicalizeWorldContent, playableCharacterSchema, type WorldContent } from "../../contracts/src/world-library.js";
@@ -35,8 +31,7 @@ import { createPostgresPreparedTextAttemptRepository } from "./prepared-text-att
 import type {
   AuthoringClaim,
   AuthoringExecutionRepository,
-  AuthoringTargetPort,
-  AuthoringWorldApplyPort
+  AuthoringTargetPort
 } from "../../application/src/authoring/ports.js";
 import { AuthoringRepositoryError } from "../../application/src/authoring/types.js";
 import { normalizeTextSelection, type TextModelSelection } from "../../contracts/src/provider-selection.js";
@@ -511,12 +506,6 @@ function canApply(job: Pick<JobRow, "kind" | "target" | "status" | "reviewedStag
   });
 }
 
-function listItem(job: JobRow, stages: StageRow[]): AuthoringJobListItem {
-  const view = jobView(job, stages);
-  const { request: _request, result: _result, reviewedContent: _reviewedContent, reviewedStageIds: _reviewedStageIds, ...item } = view;
-  return authoringJobListItemSchema.parse(item);
-}
-
 function decodeListCursor(cursor?: string): { createdAt: string; id: string } | null {
   if (!cursor) return null;
   try {
@@ -553,13 +542,6 @@ const STAGE_SELECT = `
   attempt_count AS "attemptCount", retry_count AS "retryCount",
   lease_token AS "leaseToken", lease_expires_at AS "leaseExpiresAt", output, failure,
   source_review_generation AS "sourceReviewGeneration"`;
-
-const STAGE_RETURNING = `
-  stages.id, stages.job_id AS "jobId", stages.owner_user_id AS "ownerUserId", stages.stage_key AS "stageKey",
-  stages.generation, stages.parent_generations AS "parentGenerations", stages.status,
-  stages.attempt_count AS "attemptCount", stages.retry_count AS "retryCount",
-  stages.lease_token AS "leaseToken", stages.lease_expires_at AS "leaseExpiresAt", stages.output, stages.failure,
-  stages.source_review_generation AS "sourceReviewGeneration"`;
 
 export function createPostgresAuthoringRepository(pool: DatabasePool): AuthoringExecutionRepository;
 export function createPostgresAuthoringRepository(
@@ -628,13 +610,6 @@ export function createPostgresAuthoringRepository(
       );
       if (matches.rowCount !== 1) throw new AuthoringRepositoryError("not_found");
     }
-  }
-
-  function claimParameters(claim: AuthoringClaim): unknown[] {
-    return [
-      claim.stageId, claim.jobId, claim.ownerUserId, claim.jobGeneration,
-      claim.stageGeneration, claim.leaseToken
-    ];
   }
 
   async function parentsAreValidated(client: DatabaseClient, jobId: string, rawParents: unknown): Promise<boolean> {

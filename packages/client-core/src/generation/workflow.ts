@@ -5,7 +5,6 @@ import {
   GenerationWorkflowProtocolError,
   type GenerationEvent,
   type GenerationRun,
-  type GenerationSubmissionInput,
   type GenerationWorkflow,
   type GenerationWorkflowDependencies
 } from "./types.js";

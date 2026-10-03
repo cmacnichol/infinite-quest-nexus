@@ -1,7 +1,6 @@
 import {
   appendExpectedTurnNumber,
   type CampaignStoreController,
-  type GenerationEvent,
   type GenerationProjectionSession,
   type GenerationRun,
   type GenerationWorkflow,

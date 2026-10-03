@@ -6,7 +6,6 @@ import {
 } from "../../../packages/contracts/src/generation.js";
 import type {
   IllustrationImageExecutionResult,
-  IllustrationImageProviderPort,
   IllustrationWorkerPorts
 } from "../../../packages/application/src/index.js";
 import type { PrivateIllustrationAssetPublicationCoordinator } from "../../../packages/application/src/illustration/private-illustration-asset-publication.js";
@@ -868,15 +867,4 @@ async function persistPendingPortImageJob(
     queuePosition: result.queuePosition,
     etaSeconds: result.etaSeconds
   });
-}
-
-function withoutTemporaryUrls(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
-  const sanitize = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(sanitize);
-    if (!value || typeof value !== "object") return value;
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !/(?:url|uri|authorization|token|secret)/i.test(key))
-      .map(([key, nested]) => [key, sanitize(nested)]));
-  };
-  return sanitize(metadata || {}) as Record<string, unknown>;
 }

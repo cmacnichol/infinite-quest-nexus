@@ -178,18 +178,12 @@ importers:
       '@sogni-ai/sogni-client':
         specifier: 5.23.0
         version: 5.23.0
-      '@types/archiver':
-        specifier: ^8.0.0
-        version: 8.0.0
       archiver:
         specifier: ^8.0.0
         version: 8.0.0
       fastify:
         specifier: ^5.12.1
         version: 5.12.1
-      jszip:
-        specifier: ^3.10.1
-        version: 3.10.1
       node-pg-migrate:
         specifier: 9.0.0
         version: 9.0.0(@types/pg@8.23.1)(pg@8.23.0)
@@ -227,6 +221,9 @@ importers:
       '@playwright/test':
         specifier: ^1.62.1
         version: 1.62.1
+      '@types/archiver':
+        specifier: ^8.0.0
+        version: 8.0.0
       '@types/node':
         specifier: ^26.4.0
         version: 26.4.0
@@ -239,6 +236,9 @@ importers:
       ajv:
         specifier: 8.20.0
         version: 8.20.0
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
       linkedom:
         specifier: 0.18.13
         version: 0.18.13

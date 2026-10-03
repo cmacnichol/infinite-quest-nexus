@@ -16,9 +16,7 @@ import {
 import type {
   GenerationExecutor,
   IllustrationGenerationTransactionPort,
-  MemoryGenerationAuthorityContext,
-  MemoryGenerationTransactionPort,
-  StreamingIllustrationConfig
+  MemoryGenerationTransactionPort
 } from "../../../packages/application/src/index.js";
 import {
   PUBLIC_GENERATION_FAILURE_CODE,
@@ -29,8 +27,7 @@ import {
 } from "../../../packages/contracts/src/generation.js";
 import {
   chronicleRetrievalAuditSchema,
-  type ChronicleRetrievalAudit,
-  type MemoryContextQuery
+  type ChronicleRetrievalAudit
 } from "../../../packages/contracts/src/memory.js";
 import {
   promptSnapshotSchema,
@@ -117,7 +114,6 @@ import {
   type ActivatedEvent,
   type ProviderRequest,
   type ProviderResult,
-  type TextProviderProfile,
   type BoundFrozenPresetProviderRequestBinding
 } from "../../../packages/story-engine/src/index.js";
 import type { RuntimeTextExecution } from "./provider-credential-transport-adapter.js";
@@ -132,7 +128,7 @@ import {
 import { logger } from "../../../packages/logger/src/index.js";
 import { providerPromptProtocolVersion } from "./provider-application-composition.js";
 import type { ResponseContractRuntimeProfile } from "./generation-response-contract.js";
-import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, responseContractInvocationLedgerLimitV2, responseContractOperationV2Schema, sceneCoverageReplayResultHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type FrozenResponseContractsVersioned, type QueuedResponsePolicy, type QueuedResponsePolicyVersioned, type ResponseContractOperation, type ResponseContractOperationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
+import { assertDirectResponseContractRouteBasisAuthority, bindFrozenResponseContractInvocationV2, queuedResponsePolicyHash, queuedResponsePolicyVersionedHash, responseContractInvocationLedgerLimitV2, responseContractOperationV2Schema, sceneCoverageReplayResultHash, type FrozenResponseContracts, type FrozenResponseContractsV2, type FrozenResponseContractsVersioned, type QueuedResponsePolicyVersioned, type ResponseContractOperation, type ResponseContractOperationV2 } from "../../../packages/contracts/src/generation-response-contract.js";
 import { preparedResponseContractSchema, preparedResponseContractV2Schema, type PreparedResponseContract, type ResponseInvocationKey, type ResponseInvocationKeyV2 } from "../../../packages/contracts/src/text-response-format.js";
 import { presetPromptInjectedRemotely, type TextExecutionPlan, type TextExecutionRouteBasis } from "../../../packages/contracts/src/text-execution-plan.js";
 import { deriveTextExecutionPlan } from "./provider-preset-resolution.js";

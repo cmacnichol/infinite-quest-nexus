@@ -37,7 +37,6 @@ import {
   type RuntimeTextExecution,
   type RuntimeProviderExecutionPort
 } from "./provider-credential-transport-adapter.js";
-import type { SourceAuthoringModelInventory } from "./source-authoring-budget.js";
 import type { ProviderModelInventoryPort } from "../../../packages/application/src/providers/ports.js";
 import {
   generateTemplateWorld,

@@ -6,8 +6,7 @@ import type {
   IllustrationImageArtifact,
   IllustrationImageExecutionResult,
   IllustrationImageProviderPort,
-  IllustrationPromptRefinementPort,
-  IllustrationTransactionContext
+  IllustrationPromptRefinementPort
 } from "../../../packages/application/src/index.js";
 import type { DatabasePool } from "../../../packages/database/src/pool.js";
 import {
@@ -364,8 +363,4 @@ export function createIllustrationArtifactDownloadAdapter(
       return { bytes: new Uint8Array(result.bytes), mimeType: result.mimeType };
     }
   };
-}
-
-function notFound(resource: string): Error & { statusCode: number } {
-  return Object.assign(new Error(`${resource} not found.`), { statusCode: 404 });
 }

@@ -5,7 +5,6 @@ import type { ProviderTransport, ProviderTransportProfile } from "./provider-tra
 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_PROMPT_LENGTH = 200_000;
-const MAX_CONFIG_DEPTH = 16;
 const MAX_MODELS = 32;
 const MAX_PROVIDER_ARRAY = 64;
 const CACHE_PARAMETERS = new Set(["cache_enabled", "cache_ttl_seconds"]);

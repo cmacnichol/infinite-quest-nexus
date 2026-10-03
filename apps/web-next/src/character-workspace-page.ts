@@ -18,8 +18,7 @@ import {
   editCharacterCandidate,
   setCharacterStage,
   validateCharacterStage,
-  type CharacterStage,
-  type CharacterWorkspaceState
+  type CharacterStage
 } from "./character-workspace-model";
 import {
   createCharacterWorkspaceSessionStore,

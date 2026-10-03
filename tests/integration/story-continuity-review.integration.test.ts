@@ -278,8 +278,10 @@ integration("T17 durable continuity review", () => {
     await saveStoryMemoryEnrollment(pool, { ownerUserId, campaignId: imported.campaignId }, { capability: "r3", reviewMode: mode }, { installedCapability: "r3", enforceEnabled: true });
     if (storyOnly) await pool.query("UPDATE campaigns SET turn_control_style='flexible_scene' WHERE id=$1", [imported.campaignId]);
     await prepareCampaign?.(imported.campaignId);
+    // This shared fixture covers historical v3/v4 jobs. Dedicated v5 fixtures
+    // below exercise history coverage and its frozen checkpoint semantics.
     const application = composeGeneration(pool, apiProviderGraph(pool, credentialSecret).generation, undefined,
-      { installedCapability: "r3", enforceEnabled: true, castContextEnabled });
+      { installedCapability: "r3", enforceEnabled: true, castContextEnabled, historyCoverageEnabled: false });
     const job = await application.enqueueAppend({ ownerUserId, campaignId: imported.campaignId }, generationRequestSchema.parse({ action, requestedInputMode: scene ? "scene" : "action", resolvedInputMode: scene ? "scene" : "action", inputModeSource: "explicit", providerProfileId: textProviderProfileId, idempotencyKey: randomUUID(), context: { budgetTokens: 32000, compression: "full", recentTurns: 8 } }));
     return { job, application, campaignId: imported.campaignId };
   }

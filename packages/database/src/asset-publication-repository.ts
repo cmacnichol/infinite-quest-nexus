@@ -7,7 +7,6 @@ import type {
   PrivateAssetPublicationIdentityPort,
   PrivateAssetPublicationFinalization,
   PrivateAssetPublicationResult,
-  PrivatePreparedAssetPublication,
   PrivatePreparedAssetPublicationArtifact
 } from "../../application/src/assets/private-asset-publication.js";
 import { validatePrivateAssetPublicationCommand } from "../../application/src/assets/private-asset-publication.js";

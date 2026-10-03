@@ -27,7 +27,6 @@ import { campaignCharacterProfileSchema, campaignCreateSchema, playableCharacter
 import { campaignTurnControlStyleSchema } from "./campaign-generation-policy.js";
 import { safeProviderProfileViewSchema } from "./provider-profile-view.js";
 
-const operationKindSchema = generationJobStatusSchema.shape.operationKind;
 const generationStatusSchema = generationJobStatusSchema.shape.status;
 const nullableObjectSchema = z.record(z.string(), z.unknown()).nullable();
 

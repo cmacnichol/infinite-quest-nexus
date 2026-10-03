@@ -363,10 +363,6 @@ async function responseContractState(
     const completedFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperation[]) =>
       typeof requestPayloadHash === "string" && entries.some((entry) => entry.status === "completed"
         && entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation));
-    const pendingFor = (requestPayloadHash: unknown, operations: readonly ResponseContractOperation[]) => typeof requestPayloadHash === "string" && entries.some((entry) =>
-      entry.requestPayloadHash === requestPayloadHash && operations.includes(entry.operation)
-        && (entry.status === "reserved" || entry.status === "dispatched")
-    );
     // New-mode checkpoint bodies are replay evidence, never independently
     // trusted snapshots. The ledger also proves the frozen selection/key.
     const primary = value.primaryResult;

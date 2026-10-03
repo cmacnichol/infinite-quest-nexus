@@ -1,6 +1,5 @@
 import type {
   GenerationRequest,
-  GenerationReviewDecisionRequest,
   GenerationReviewDetail,
   GenerationResult,
   GenerationRetryLatestRequest

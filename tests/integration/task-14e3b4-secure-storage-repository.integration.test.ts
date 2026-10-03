@@ -379,7 +379,10 @@ integration("Task 14e3b4 secure storage repository", () => {
   });
 
   it("keeps expired finalized staging fenced while its durable read lease is renewed", async () => {
-    const expiresAt = new Date(Date.now() + 2_000).toISOString();
+    const expiry = await pool.query<{ expires_at: Date }>(
+      "SELECT clock_timestamp() + interval '5 seconds' AS expires_at",
+    );
+    const expiresAt = expiry.rows[0]!.expires_at.toISOString();
     const fixture = await candidate("portable_staging", expiresAt);
     const issued = await withTransaction(
       pool,
@@ -398,7 +401,7 @@ integration("Task 14e3b4 secure storage repository", () => {
       { leaseOwner: "b4-active-stage-reader", leaseSeconds: 1 },
     );
     expect(rehydrated).not.toBeNull();
-    const renewed = await durable.journal.heartbeatRecoveryClaim(rehydrated!.claim, 3);
+    const renewed = await durable.journal.heartbeatRecoveryClaim(rehydrated!.claim, 60);
     expect(renewed).not.toBeNull();
 
     await waitForExpiry(expiresAt);
