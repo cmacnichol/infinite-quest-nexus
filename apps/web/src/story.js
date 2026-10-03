@@ -77,6 +77,7 @@ export function startStoryPlayer(composition) {
 
 let resolveInitialization;
 let rejectInitialization;
+let campaignLoadSequence = 0;
 const initialization = new Promise((resolve, reject) => {
   resolveInitialization = resolve;
   rejectInitialization = reject;
@@ -283,6 +284,37 @@ function setTurnHistoryLoadStatus(message, kind = "") {
   status.classList.toggle("error", kind === "error");
 }
 
+function showStoryLoadRecovery(error) {
+  const panel = $("storyLoadRecovery");
+  const title = $("storyLoadRecoveryTitle");
+  const message = $("storyLoadRecoveryMessage");
+  const retry = $("storyLoadRetry");
+  if (!panel || !title || !message || !retry) return;
+  const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : null;
+  if (statusCode === 404) {
+    title.textContent = "Campaign not found";
+    message.textContent = "This campaign could not be found. Return to Campaigns to choose an available story.";
+    retry.hidden = true;
+    retry.classList.add("hidden");
+  } else if (statusCode === 403) {
+    title.textContent = "Campaign access unavailable";
+    message.textContent = "You don't have access to this campaign. Return to Campaigns to choose a story available to you.";
+    retry.hidden = true;
+    retry.classList.add("hidden");
+  } else {
+    title.textContent = "Story unavailable";
+    message.textContent = "The story could not be loaded. Check your connection and try again.";
+    const retryable = statusCode === null || statusCode === 408 || statusCode === 425 || statusCode === 429 || statusCode >= 500;
+    retry.hidden = !retryable;
+    retry.classList.toggle("hidden", !retryable);
+  }
+  panel.classList.remove("hidden");
+}
+
+function clearStoryLoadRecovery() {
+  $("storyLoadRecovery")?.classList.add("hidden");
+}
+
 function ensureCompleteTurnHistory() {
   if (!state.historyNextCursor) return Promise.resolve(state.turns);
   if (completeHistoryLoad?.campaignId === state.campaignId
@@ -454,17 +486,27 @@ async function checkOnboarding() {
 
 // ── Campaign Loading ──────────────────────────────────────────
 async function loadCampaign(campaignId, options = {}) {
+  const loadSequence = ++campaignLoadSequence;
   const loadEpoch = ++storyTurnWindowEpoch;
   if (state.campaignId !== campaignId) {
     state.retainedAppendDraft = null;
     state.illustrationConfig = null;
     state.illustrationSegments = [];
     state.illustrationError = null;
+    state.campaign = null;
+    state.world = null;
+    state.playerConfig = null;
+    state.runtimeState = null;
+    state.campaignLoaded = false;
+    state.turns = [];
+    const storyArea = $("storyArea");
+    if (storyArea) storyArea.replaceChildren();
   }
   clearResponseEditSession();
   resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
   state.campaignLoaded = false;
+  clearStoryLoadRecovery();
   state.storyMemorySettings = null;
   renderStoryMemorySettings(null, "Loading the saved Story Memory level for this campaign.");
   completeHistoryLoad = null;
@@ -473,7 +515,7 @@ async function loadCampaign(campaignId, options = {}) {
   try {
     const syncData = await apiClient.generation.syncStatus(campaignId);
     const turnData = syncData.turns || await apiClient.campaigns.turns(campaignId);
-    if (state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch) return;
+    if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId || storyTurnWindowEpoch !== loadEpoch) return;
 
     setTurnHistoryLoadStatus("");
     state.campaign = syncData.campaign || syncData;
@@ -540,13 +582,35 @@ async function loadCampaign(campaignId, options = {}) {
       );
       if (state.generationRecovery.status === "failed") restoreRetainedAppendDraft();
     }
+    try {
+      localStorage.setItem("infiniteQuestLastCampaignId", campaignId);
+    } catch {
+      // The campaign remains usable when browser preference storage is unavailable.
+    }
     return true;
   } catch (err) {
-    toast(`Error loading campaign: ${err.message}`);
+    if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId) return false;
+    state.campaign = null;
+    state.world = null;
+    state.playerConfig = null;
+    state.runtimeState = null;
+    state.campaignLoaded = false;
+    state.turns = [];
+    state.pendingGeneration = null;
+    state.generationRecovery = null;
+    state.generationReview = null;
+    state.illustrationConfig = null;
+    state.illustrationSegments = [];
+    state.illustrationError = null;
+    const title = $("storyTitle");
+    if (title) title.textContent = "Story unavailable";
+    document.title = "Story unavailable — Infinite Quest";
+    renderAllScenes({ autoScroll: false });
+    showStoryLoadRecovery(err);
     recordActivity("error", "Campaign load failed", err.message);
     return false;
   } finally {
-    hideBusy();
+    if (campaignLoadSequence === loadSequence && state.campaignId === campaignId) hideBusy();
   }
 }
 
@@ -3445,19 +3509,17 @@ async function init() {
   }
   const match = window.location.pathname.match(/\/story\/([^/]+)/);
   if (match) {
-    state.campaignId = decodeURIComponent(match[1]);
+    const campaignId = decodeURIComponent(match[1]);
     const navStoryLink = $("navStoryLink");
-    if (navStoryLink) navStoryLink.href = `/story/${encodeURIComponent(state.campaignId)}`;
-    localStorage.setItem("infiniteQuestLastCampaignId", state.campaignId);
+    if (navStoryLink) navStoryLink.href = `/story/${encodeURIComponent(campaignId)}`;
+    await checkOnboarding();
+    if (!await loadCampaign(campaignId)) return;
   } else {
-    localStorage.removeItem("infiniteQuestLastCampaignId");
     await checkOnboarding();
     updateStatusBar();
     recordActivity("system", "Empty Story page opened", "Choose a world from the Nexus dashboard to begin a campaign.");
     return;
   }
-  await checkOnboarding();
-  if (!await loadCampaign(state.campaignId)) return;
   await pollImageJobs();
   const resumed = await resumePendingGeneration();
   if (!resumed && state.turns.length === 0 && !state.busy) {
@@ -3822,6 +3884,10 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnSkipGettingStartedToStory) btnSkipGettingStartedToStory.addEventListener("click", () => { const d = $("gettingStartedDialog"); if (d && d.close) d.close(); });
   const btnDiscardGenerationRecovery = $("btnDiscardGenerationRecovery");
   if (btnDiscardGenerationRecovery) btnDiscardGenerationRecovery.addEventListener("click", discardRecoveryJob);
+  const btnRetryStoryLoad = $("storyLoadRetry");
+  if (btnRetryStoryLoad) btnRetryStoryLoad.addEventListener("click", () => {
+    if (state.campaignId) void loadCampaign(state.campaignId);
+  });
   const btnContinueGeneration = $("btnContinueGeneration");
   if (btnContinueGeneration) btnContinueGeneration.addEventListener("click", () => monitorRecoveryJob(false));
   const btnRetryGeneration = $("btnRetryGeneration");

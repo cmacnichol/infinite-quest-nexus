@@ -27,6 +27,8 @@ export { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-ses
 export { createEditSession } from "@infinite-quest/client-core";
 export type { EditSession } from "@infinite-quest/client-core";
 export { buildCampaignCreateRequest, createCampaignCreationDraft } from "@infinite-quest/client-core";
+export { resolveResumeCampaign } from "@infinite-quest/client-core";
+export type { ResumeCampaign } from "@infinite-quest/client-core";
 export type {
   CampaignCreationDraft,
   CampaignCreationUserSettings,

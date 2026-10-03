@@ -3,6 +3,7 @@ import {
   createProviderPresetsApi,
   createEditSession,
   createSelectionEditorState,
+  resolveResumeCampaign,
   nativePresetSupport,
   reduceSelectionEditor,
   serializeSelectionEditorPatch
@@ -102,6 +103,9 @@ function savedTurnControlStyle(value, existingStyle) {
 }
 let worlds = [];
 let campaigns = [];
+let campaignsLoaded = false;
+let campaignsLoadError = false;
+let selectedCampaignIsExplicit = false;
 let selectedWorld = null;
 let managementWorldFilter = "all";
 let worldAuthorMode = "create";
@@ -493,16 +497,30 @@ function applyStoryProviderContextBudget() {
 }
 
 function updateStoryViewLink() {
-  if (!elements.storyViewLink) return;
-  const lastCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
-  let storyHref = "/story";
-  if (selectedCampaign) {
-    storyHref = "/story/" + encodeURIComponent(selectedCampaign.id);
-  } else if (lastCampaignId) {
-    storyHref = "/story/" + encodeURIComponent(lastCampaignId);
+  const resumeCampaign = campaignsLoaded
+    ? resolveResumeCampaign(
+      campaigns,
+      localStorage.getItem("infiniteQuestLastCampaignId"),
+      selectedCampaignIsExplicit ? selectedCampaign?.id : null
+    )
+    : null;
+  const hasResumeTarget = Boolean(resumeCampaign);
+  const storyHref = hasResumeTarget ? `/story/${encodeURIComponent(resumeCampaign.id)}` : "/nexus/#campaigns";
+  const label = hasResumeTarget
+    ? "Continue latest story "
+    : campaignsLoadError
+      ? "Retry campaign list "
+      : campaignsLoaded
+        ? "No active stories "
+        : "Loading campaigns ";
+  [elements.storyViewLink, elements.dashboardStoryLink].filter(Boolean).forEach((link) => {
+    link.href = storyHref;
+    link.setAttribute("aria-disabled", String(!hasResumeTarget));
+    link.tabIndex = hasResumeTarget ? 0 : -1;
+  });
+  if (elements.dashboardStoryLink?.firstChild?.nodeType === Node.TEXT_NODE) {
+    elements.dashboardStoryLink.firstChild.textContent = label;
   }
-  elements.storyViewLink.href = storyHref;
-  if (elements.dashboardStoryLink) elements.dashboardStoryLink.href = storyHref;
 }
 
 function applyManagementView() {
@@ -1782,14 +1800,35 @@ function createDashboardCampaignCard(campaign) {
   body.append(title, description, meta, cta);
   card.append(art, body);
   card.addEventListener("click", () => {
-    localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
     window.location.assign(`/story/${encodeURIComponent(campaign.id)}`);
   });
   return card;
 }
 
+function renderCampaignListLoadState() {
+  if (!elements.dashboardCampaigns) return;
+  elements.dashboardCampaigns.replaceChildren();
+  const message = document.createElement("p");
+  message.className = "carousel-empty";
+  message.textContent = campaignsLoadError
+    ? "Your campaigns could not be loaded. Check your connection and try again."
+    : "Loading your campaigns…";
+  elements.dashboardCampaigns.append(message);
+  if (!campaignsLoadError) return;
+  const retry = document.createElement("button");
+  retry.id = "campaignLoadRetry";
+  retry.type = "button";
+  retry.textContent = "Retry campaign list";
+  retry.addEventListener("click", () => { void loadCampaigns().catch((error) => setStatus(error.message || String(error), "error")); });
+  elements.dashboardCampaigns.append(retry);
+}
+
 function renderDashboardCampaigns() {
   if (!elements.dashboardCampaigns) return;
+  if (!campaignsLoaded) {
+    renderCampaignListLoadState();
+    return;
+  }
   const query = elements.campaignSearch.value.trim().toLocaleLowerCase();
   const matches = campaigns.filter((campaign) => [campaign.title, campaign.worldTitle, campaign.selectedCharacterName].join(" ").toLocaleLowerCase().includes(query));
   elements.dashboardCampaigns.replaceChildren();
@@ -3464,7 +3503,7 @@ async function createCampaignFromWorld() {
     elements.newCampaignTitle.value = "";
     if (elements.createCampaignDialog) elements.createCampaignDialog.close();
     try {
-      await loadCampaigns(campaign.id);
+      await loadCampaigns(campaign.id, { explicitPreselect: true });
       worldMessage(`Campaign created for ${campaign.selectedCharacterName || "the selected character"} from the selected immutable world version.`, "success");
     } catch (error) {
       worldMessage(`Campaign was created, but the list could not refresh: ${error.message || String(error)}. Use Refresh campaigns in Campaigns to see it.`, "error");
@@ -3488,9 +3527,25 @@ function openCreateCampaignDialog() {
   openManagedModal(elements.createCampaignDialog);
 }
 
-async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}) {
-  ({ campaigns } = await api("/api/v1/campaigns"));
+async function loadCampaigns(preselectId = "", { focusNoSelection = false, explicitPreselect = false } = {}) {
+  try {
+    ({ campaigns } = await api("/api/v1/campaigns"));
+  } catch (error) {
+    campaignsLoadError = !campaignsLoaded;
+    if (!campaignsLoaded) {
+      renderCampaignListLoadState();
+      updateStoryViewLink();
+    }
+    throw error;
+  }
+  campaignsLoaded = true;
+  campaignsLoadError = false;
+  const rememberedCampaignId = localStorage.getItem("infiniteQuestLastCampaignId");
+  if (rememberedCampaignId && !campaigns.some((campaign) => campaign.id === rememberedCampaignId && campaign.status === "active")) {
+    localStorage.removeItem("infiniteQuestLastCampaignId");
+  }
   renderDashboardCampaigns();
+  updateStoryViewLink();
   void loadDashboardStats();
   elements.campaignList.replaceChildren();
   if (!campaigns.length) {
@@ -3498,6 +3553,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     campaignSelectionRequest += 1;
     selectedCampaign = null;
+    selectedCampaignIsExplicit = false;
     updateStoryViewLink();
     clearCampaignEditorSelection({ focus: focusNoSelection });
     elements.illustrationSourcePolicy.value = "off";
@@ -3519,17 +3575,21 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
     elements.campaignList.append(button);
   }
   const target = campaigns.find((campaign) => campaign.id === preselectId) || (selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
-  if (target) await selectCampaign(target);
+  if (target) {
+    const preservesExplicitSelection = selectedCampaignIsExplicit && selectedCampaign?.id === target.id;
+    await selectCampaign(target, { explicit: explicitPreselect || preservesExplicitSelection });
+  }
   else {
     if (!(await canLeaveCampaignEditor(null))) return;
     campaignSelectionRequest += 1;
     selectedCampaign = null;
+    selectedCampaignIsExplicit = false;
     updateStoryViewLink();
     clearCampaignEditorSelection({ focus: focusNoSelection });
   }
 }
 
-async function selectCampaign(campaign) {
+async function selectCampaign(campaign, { explicit = true } = {}) {
   if (!(await canLeaveCampaignEditor(campaign.id))) return;
   elements.embeddingProgress.classList.add("hidden");
   const selectionRequest = ++campaignSelectionRequest;
@@ -3540,6 +3600,7 @@ async function selectCampaign(campaign) {
     activeTurnNumber: runtimeState.activeTurnNumber,
     stateRevision: runtimeState.revision
   };
+  selectedCampaignIsExplicit = explicit;
   campaign = selectedCampaign;
   void loadCampaignStoryMemory(campaign.id, selectionRequest);
   updateStoryViewLink();
@@ -3853,7 +3914,7 @@ async function commitCampaignTransfer(event) {
       })
     });
     elements.transferCampaignDialog.close();
-    await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId)]);
+    await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId, { explicitPreselect: true })]);
     campaignMessage("Transferred campaign created and selected. Review it before separately archiving the original campaign; the original remains unchanged.", "success");
   } catch (error) {
     elements.transferPreviewSummary.textContent = error.statusCode === 409
@@ -3896,6 +3957,7 @@ async function deleteSelectedCampaign() {
     });
     campaignSelectionRequest += 1;
     selectedCampaign = null;
+    selectedCampaignIsExplicit = false;
     updateStoryViewLink();
     await loadCampaigns("", { focusNoSelection: true });
     await loadWorlds(selectedWorld?.id || "");
@@ -5936,7 +5998,7 @@ async function importStoryObject(story, sourceName, requestOverrides = {}) {
   const duplicate = result.duplicate ? "The story was already imported; the existing campaign was selected." : "Import completed.";
   setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens. Use “Load story” in Campaigns to open the database-backed story.`, "success");
   await loadWorlds(result.worldId);
-  await loadCampaigns(result.campaignId);
+  await loadCampaigns(result.campaignId, { explicitPreselect: true });
 }
 
 function parseImportJson(sourceText) {
@@ -6430,7 +6492,7 @@ async function importStory() {
       }
       await loadWorlds(result.worldId);
       if (result.kind === "campaign") {
-        await loadCampaigns(result.campaignId);
+        await loadCampaigns(result.campaignId, { explicitPreselect: true });
         let imageMessage = "";
         if (elements.infiniteWorldsFinalImage.checked) {
           try {
@@ -6468,7 +6530,7 @@ async function importStory() {
         })
       });
       await loadWorlds(result.worldId);
-      await loadCampaigns(result.campaignId);
+      await loadCampaigns(result.campaignId, { explicitPreselect: true });
       const outcome = result.duplicate ? "The Campaign Archive was already imported; the existing campaign was selected." : "Campaign Archive imported.";
       setStatus(`${outcome} ${number(result.stats.turnCount)} turns, ${number(result.stats.memoryCount)} Chronicle memories, and ${number(result.stats.assetCount)} original images are available.`, "success");
       selectedImport = null;

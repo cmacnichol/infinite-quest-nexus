@@ -106,3 +106,5 @@ export type {
   CampaignCreationUserSettings,
   CampaignCreationWorld
 } from "./campaign-creation-draft.js";
+export { resolveResumeCampaign } from "./resume-campaign.js";
+export type { ResumeCampaign } from "./resume-campaign.js";
