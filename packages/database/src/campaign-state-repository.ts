@@ -1629,24 +1629,40 @@ function createPostgresCampaignSyncRepository(): CampaignSyncRepositoryPort {
            JOIN worlds w ON w.id = wv.world_id AND w.owner_user_id = c.owner_user_id
            LEFT JOIN campaign_state cs ON cs.campaign_id = c.id AND cs.owner_user_id = c.owner_user_id
            LEFT JOIN LATERAL (
+              WITH selected_job AS MATERIALIZED (
+                SELECT id, status, action, operation_kind, replacement_turn_id,
+                       expected_turn_number, created_at, updated_at, orchestration_private
+                  FROM generation_jobs
+                 WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
+                   AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')
+                 ORDER BY created_at DESC LIMIT 1
+              ), expanded_job AS MATERIALIZED (
+                SELECT selected_job.*, orchestration_private || '{}'::jsonb AS expanded_private
+                  FROM selected_job
+              )
               SELECT id, status, action, operation_kind, replacement_turn_id,
                      expected_turn_number, created_at, updated_at,
-                     ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat"
-               FROM generation_jobs
-              WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
-                AND status IN ('queued','replacement_queued','assessing','generating','validating','committing')
-              ORDER BY created_at DESC LIMIT 1
+                     ${generationResponseFormatProjection("expanded_private")} AS "responseFormat"
+                FROM expanded_job
            ) pending ON true
            LEFT JOIN LATERAL (
+              WITH selected_job AS MATERIALIZED (
+                SELECT id, status, operation_kind, expected_turn_number, attempts, error_code,
+                       result_turn_id, replacement_turn_id, recovery_metadata, orchestration_private
+                  FROM generation_jobs
+                 WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
+                   AND status IN ('recoverable','failed','completed')
+                 ORDER BY updated_at DESC, id DESC LIMIT 1
+              ), expanded_job AS MATERIALIZED (
+                SELECT selected_job.*, orchestration_private || '{}'::jsonb AS expanded_private
+                  FROM selected_job
+              )
               SELECT id, status, operation_kind, expected_turn_number, attempts, error_code,
-                    result_turn_id, replacement_turn_id, recovery_metadata,
-                    orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
-                     ${generationReviewSummaryProjection("orchestration_private")} AS "recoveryReviewSummary",
-                     ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat"
-              FROM generation_jobs
-              WHERE campaign_id = c.id AND owner_user_id = c.owner_user_id
-                AND status IN ('recoverable','failed','completed')
-              ORDER BY updated_at DESC, id DESC LIMIT 1
+                     result_turn_id, replacement_turn_id, recovery_metadata,
+                     expanded_private->'lastFailureDiagnostic' AS "failureDiagnostic",
+                     ${generationReviewSummaryProjection("expanded_private")} AS "recoveryReviewSummary",
+                     ${generationResponseFormatProjection("expanded_private")} AS "responseFormat"
+                FROM expanded_job
            ) recovery ON true
            LEFT JOIN LATERAL (
              SELECT id, turn_number FROM turns

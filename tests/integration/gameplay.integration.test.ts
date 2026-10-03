@@ -508,18 +508,20 @@ integration("gameplay: complete Story Engine & Story Player API integration", ()
       status: "completed",
       operationKind: "replace_latest",
       replacementTurnId,
-      resultTurnId: replacementResultTurnId
+      resultTurnId: replacementResultTurnId,
+      failureDiagnostic: null
     });
     const unchangedSyncResponse = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/sync-status?since=${initialSync.syncToken}` });
     expect(unchangedSyncResponse.statusCode).toBe(200);
     const unchangedSync = campaignSyncStatusSchema.parse(unchangedSyncResponse.json());
-    expect(unchangedSync).toMatchObject({ turnWindowMode: "unchanged", turns: null, campaign: { id: campaignId } });
+    expect(unchangedSync).toMatchObject({ turnWindowMode: "unchanged", turns: null, campaign: { id: campaignId }, generationRecovery: { failureDiagnostic: null } });
     const initialPayloadBytes = Buffer.byteLength(initialSyncResponse.body);
     const unchangedPayloadBytes = Buffer.byteLength(unchangedSyncResponse.body);
     // Measured against this deterministic 55-turn fixture with the current
     // synchronized campaign and Chronicle configuration contract. The bounded
-    // legacy response-format projection adds 287 bytes to both payloads.
-    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_753, unchangedPayloadBytes: 3_554 });
+    // legacy response-format projection adds 287 bytes to both payloads;
+    // the nullable safe failure diagnostic adds another 25 bytes to each.
+    expect({ initialPayloadBytes, unchangedPayloadBytes }).toEqual({ initialPayloadBytes: 19_778, unchangedPayloadBytes: 3_579 });
     expect(unchangedPayloadBytes).toBeLessThan(initialPayloadBytes);
 
     replies.push({ content: validStory("A replacement changes the current history boundary.") });

@@ -294,7 +294,7 @@ integration("generation job notification delivery", () => {
         if (property === "query") {
           return async (...argumentsList: Parameters<DatabasePool["query"]>) => {
             const statement = String(argumentsList[0]).replaceAll(/\s+/g, " ").trim();
-            if (statement.startsWith("SELECT id, campaign_id AS") && statement.includes("partial_output AS")) {
+            if (statement.includes('SELECT id, campaign_id AS "campaignId"') && statement.includes("partial_output AS")) {
               generationJobReads += 1;
             }
             return target.query(...argumentsList);

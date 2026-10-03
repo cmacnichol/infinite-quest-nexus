@@ -822,8 +822,19 @@ export function createPostgresGenerationCommandRepository(
     },
 
     async getJob(scope) {
+      // Expand larger stored evidence once, while avoiding an unnecessary copy of small private values.
       const result = await pool.query<JobRow>(
-        `SELECT id, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
+        `WITH expanded_job AS MATERIALIZED (
+           SELECT id, campaign_id, provider_profile_id, expected_turn_number, action, status, attempts,
+                  requested_input_mode, resolved_input_mode, input_mode_source, operation_kind,
+                  replacement_turn_id, base_turn_number, requested_model, provider_response_id,
+                  provider_finish_reason, result_turn_id, error_code, error_message, recovery_metadata,
+                  created_at, updated_at, completed_at, partial_output, generation_policy,
+                  CASE WHEN pg_column_size(orchestration_private) > 2048
+                    THEN orchestration_private || '{}'::jsonb ELSE orchestration_private END AS expanded_private
+             FROM generation_jobs WHERE id = $1 AND owner_user_id = $2
+         )
+         SELECT id, campaign_id AS "campaignId", provider_profile_id AS "providerProfileId",
                 expected_turn_number AS "expectedTurnNumber", action, status, attempts,
                 requested_input_mode AS "requestedInputMode", resolved_input_mode AS "resolvedInputMode",
                 input_mode_source AS "inputModeSource", operation_kind AS "operationKind",
@@ -831,13 +842,13 @@ export function createPostgresGenerationCommandRepository(
                 requested_model AS "requestedModel", provider_response_id AS "providerResponseId",
                 provider_finish_reason AS "providerFinishReason", result_turn_id AS "resultTurnId",
                 error_code AS "errorCode", error_message AS "errorMessage", recovery_metadata AS "recoveryMetadata",
-                orchestration_private->'lastFailureDiagnostic' AS "failureDiagnostic",
-                ${continuityReviewTechnicalDiagnosticProjection("orchestration_private")} AS "continuityReviewDiagnostic",
-                ${generationReviewSummaryProjection("orchestration_private")} AS "reviewSummary",
-                ${generationResponseFormatProjection("orchestration_private")} AS "responseFormat",
+                expanded_private->'lastFailureDiagnostic' AS "failureDiagnostic",
+                ${continuityReviewTechnicalDiagnosticProjection("expanded_private")} AS "continuityReviewDiagnostic",
+                ${generationReviewSummaryProjection("expanded_private")} AS "reviewSummary",
+                ${generationResponseFormatProjection("expanded_private")} AS "responseFormat",
                 created_at AS "createdAt", updated_at AS "updatedAt", completed_at AS "completedAt",
                 partial_output AS "partialOutput", generation_policy AS "generationPolicy"
-           FROM generation_jobs WHERE id = $1 AND owner_user_id = $2`,
+           FROM expanded_job`,
         [scope.jobId, scope.ownerUserId]
       );
       const row = result.rows[0];
