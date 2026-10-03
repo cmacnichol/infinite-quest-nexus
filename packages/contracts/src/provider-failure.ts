@@ -14,7 +14,13 @@ const publicFields = {
 };
 
 /** Closed public vocabulary; provider identity and account counters stay private. */
-export const providerFailureProjectionSchema = z.strictObject(publicFields);
+export const providerFailureProjectionSchema = z.strictObject(publicFields)
+  .refine((value) => (value.retryAfterMs === null) === (value.retryAt === null), {
+    message: "Retry delay and timestamp must both be present or both be null."
+  })
+  .refine((value) => utf8ByteLength(JSON.stringify(value)) <= 4096, {
+    message: "Provider failure projection exceeds its byte limit."
+  });
 export type ProviderFailureProjectionV1 = z.infer<typeof providerFailureProjectionSchema>;
 
 /** Bounded operator evidence, never a raw provider response. */
@@ -28,6 +34,13 @@ export const providerFailureEvidenceSchema = z.strictObject({
   successfulResponseStarted: z.boolean(),
   emittedOutput: z.boolean(),
   metadataStatus: z.enum(["recognized", "absent", "unrecognized", "malformed", "oversized"])
+}).refine((value) => {
+  if (value.retryAfterMs === null) return value.retryAt === null;
+  if (value.retryAt === null) return false;
+  const retryTime = Date.parse(value.observedAt) + value.retryAfterMs;
+  return Number.isFinite(retryTime) && value.retryAt === new Date(retryTime).toISOString();
+}, {
+  message: "Retry timestamp must be derived from observed time and retry delay."
 }).refine((value) => utf8ByteLength(JSON.stringify(value)) <= 4096, {
   message: "Provider failure evidence exceeds its byte limit."
 });

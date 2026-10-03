@@ -35,13 +35,26 @@ describe("bounded provider failure evidence", () => {
     expect(projectProviderFailureEvidence({ ...evidence, rateLimit: { limit: Number.MAX_SAFE_INTEGER + 1, remaining: 0, resetAt: null } })).toBeNull();
     expect(providerFailureProjectionSchema.safeParse({ ...projectProviderFailure(evidence), raw: "PRIVATE_CANARY" }).success).toBe(false);
   });
+  it("requires retry timestamps to match observed time plus delay, including nulls", () => {
+    expect(projectProviderFailureEvidence({ ...evidence, retryAfterMs: 0 })).toBeNull();
+    expect(projectProviderFailureEvidence({ ...evidence, retryAt: null })).toBeNull();
+    expect(projectProviderFailureEvidence({ ...evidence, retryAfterMs: null })).toBeNull();
+    expect(projectProviderFailureEvidence({ ...evidence, retryAfterMs: null, retryAt: null })).not.toBeNull();
+    expect(projectProviderFailureEvidence({ ...evidence, retryAfterMs: 0, retryAt: evidence.observedAt })).not.toBeNull();
+    expect(projectProviderFailure({ ...evidence, retryAfterMs: null })).toBeNull();
+  });
+  it("rejects oversized public timestamps directly and drops them from optional diagnostics", () => {
+    const oversized = { ...projectProviderFailure(evidence), retryAt: `2026-10-04T14:00:00.${"0".repeat(4096)}Z` };
+    expect(providerFailureProjectionSchema.safeParse(oversized).success).toBe(false);
+    expect(projectProviderFailure(oversized)).toBeNull();
+  });
   it("rejects unknown versions and vocabulary", () => {
     expect(projectProviderFailure({ ...evidence, version: 2 })).toBeNull();
     expect(projectProviderFailureEvidence({ ...evidence, upstreamCode: "PRIVATE_CANARY" })).toBeNull();
     expect(projectProviderFailure({ ...evidence, reason: "PRIVATE_CANARY" })).toBeNull();
   });
   it("accepts zero and 24 hours while rejecting overflow and unsafe numbers", () => {
-    expect(projectProviderFailureEvidence({ ...evidence, retryAfterMs: 0 })).not.toBeNull();
+    expect(projectProviderFailureEvidence({ ...evidence, retryAfterMs: 0, retryAt: evidence.observedAt })).not.toBeNull();
     for (const retryAfterMs of [-1, 86400001, Infinity, NaN, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       expect(projectProviderFailureEvidence({ ...evidence, retryAfterMs })).toBeNull();
     }

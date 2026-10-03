@@ -344,3 +344,10 @@ describe("provider failure public transport compatibility", () => {
     expect(result).toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
   });
 });
+
+it("drops oversized public provider evidence while preserving the fixed failure", () => {
+  const result = generationFailureDiagnosticProjectionSchema.parse({ code: "provider_request_timeout", message: "The provider request timed out.",
+    providerFailure: { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null, reason: "rate_limit", limitSource: "unknown",
+      retryAfterMs: 0, retryAt: `2026-10-03T14:00:00.${"0".repeat(4096)}Z` } });
+  expect(result).toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
+});
