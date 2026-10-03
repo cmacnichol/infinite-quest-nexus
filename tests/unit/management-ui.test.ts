@@ -52,6 +52,10 @@ describe("Nexus management UI contracts", () => {
     });
     const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "normalizedTurnControlStyle"], {
       elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
       activeCampaignSettingsPanel: "story",
       Option: function(label: string, value: string) {
         const option = document.createElement("option");
@@ -298,11 +302,19 @@ describe("Nexus management UI contracts", () => {
     const saveStart = managementScript.indexOf("async function saveSelectedCampaign");
     const saveEnd = managementScript.indexOf("\nasync function migrateSelectedCampaign", saveStart);
     const saveSource = managementScript.slice(saveStart, saveEnd);
-    expect(saveSource).toContain("title: elements.campaignTitle.value");
-    expect(saveSource).toContain("status: elements.campaignStatus.value");
-    expect(saveSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
-    expect(saveSource).toContain("turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle)");
-    expect(saveSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    const snapshotStart = managementScript.indexOf("function campaignSettingsSnapshot()");
+    const snapshotEnd = managementScript.indexOf("\nfunction ", snapshotStart + 1);
+    expect(snapshotStart).toBeGreaterThan(-1);
+    expect(snapshotEnd).toBeGreaterThan(snapshotStart);
+    const snapshotSource = managementScript.slice(snapshotStart, snapshotEnd);
+    expect(snapshotSource).toContain("title: elements.campaignTitle.value");
+    expect(snapshotSource).toContain("status: elements.campaignStatus.value");
+    expect(snapshotSource).toContain("textProviderProfileId: elements.campaignTextProvider.value || null");
+    expect(snapshotSource).toContain("turnControlStyle: elements.campaignTurnControlStyle.value");
+    expect(snapshotSource).toContain("storyLengthProfile: elements.campaignStoryLengthProfile.value");
+    expect(snapshotSource).toContain("storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)");
+    expect(saveSource).toContain("...snapshot");
+    expect(saveSource).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
     expect(saveSource).not.toContain("campaignWorldVersion");
   });
 
@@ -334,11 +346,16 @@ describe("Nexus management UI contracts", () => {
       elements,
       document,
       window: { matchMedia: () => ({ matches: false }) },
+      localStorage: { getItem: () => null, removeItem: vi.fn() },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
       campaignSelectionRequest: 0,
       activeCampaignSettingsPanel: "overview",
       campaigns: [{ id: "deleted-campaign" }],
       selectedCampaign: { id: "deleted-campaign" },
+      campaignSettingsSnapshot: () => ({}),
+      canLeaveCampaignEditor: async () => true,
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
       api: async () => ({ campaigns: [] }),
       renderDashboardCampaigns: () => undefined,
       loadDashboardStats: async () => undefined,
@@ -422,10 +439,16 @@ describe("Nexus management UI contracts", () => {
       window: { matchMedia: () => ({ matches: false }) },
       CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
       campaignSelectionRequest: 0,
+      worldSelectionIntentEpoch: 0,
       activeCampaignSettingsPanel: "overview",
       campaigns: [{ id: "deleted-campaign" }],
       selectedCampaign: { id: "deleted-campaign", title: "Deleted campaign" },
+      campaignSettingsSnapshot: () => ({}),
       selectedWorld: null,
+      localStorage: { getItem: () => null, removeItem: vi.fn() },
+      canLeaveCampaignEditor: async () => true,
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
       requestTypedDelete: async () => true,
       campaignStoryMemorySettings: null,
       renderCampaignStoryMemorySettings: () => undefined,
@@ -923,7 +946,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('value="extended">Extended — 1,200–2,000 words');
     expect(managementScript).toContain('storyLengthProfile: elements.campaignStoryLengthProfile.value');
     expect(managementScript).toContain('turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value)');
-    expect(managementScript).toContain('turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle)');
+    expect(managementScript).toContain("function campaignSettingsSnapshot()");
+    expect(managementScript).toContain("...snapshot");
+    expect(managementScript).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
     expect(managementScript).toContain('dataTransferView ? "data-transfer" : "worlds"');
     expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
@@ -966,20 +991,29 @@ describe("Nexus management UI contracts", () => {
   it("saves a stale legacy Auto settings value as Action through the campaign handler", async () => {
     const { document } = parseHTML(managementHtml);
     const api = vi.fn().mockResolvedValue({});
-    const loadCampaigns = vi.fn().mockResolvedValue(undefined);
     const campaignMessage = vi.fn();
     const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
-    elements.campaignTurnControlStyle = Object.assign(document.createElement("input"), { value: "flexible_auto" });
+    const campaignTurnControlStyle = document.createElement("select");
+    Object.defineProperty(campaignTurnControlStyle, "value", { value: "flexible_auto", writable: true, configurable: true });
+    elements.campaignTurnControlStyle = campaignTurnControlStyle;
+    const savedTurnControlStyle = managementFunction<(value: unknown, existingStyle: unknown) => string>("savedTurnControlStyle");
     const { saveSelectedCampaign } = managementFunctions<{
       normalizedTurnControlStyle: (value: unknown) => string;
       savedTurnControlStyle: (value: unknown, existingStyle: unknown) => string;
       saveSelectedCampaign: (event: { preventDefault: () => void }) => Promise<void>;
-    }>(["normalizedTurnControlStyle", "savedTurnControlStyle", "saveSelectedCampaign"], {
+    }>(["normalizedTurnControlStyle", "saveSelectedCampaign"], {
       elements,
       api,
+      campaignSaveInProgress: false,
+      campaignSelectionRequest: 0,
       selectedCampaign: { id: "campaign-1", turnControlStyle: "flexible_auto", activeTurnNumber: 4, stateRevision: 7 },
-      loadCampaigns,
-      campaignMessage
+      campaigns: [{ id: "campaign-1", turnControlStyle: "flexible_auto" }],
+      savedTurnControlStyle,
+      campaignSettingsSnapshot: () => ({ title: "Campaign", status: "active", textProviderProfileId: null, turnControlStyle: campaignTurnControlStyle.value, storyLengthProfile: "standard", storyContextBudgetTokens: 32000 }),
+      campaignEditGuard: { markSaved: () => undefined, isDirty: () => false },
+      renderCampaignSaveFeedback: () => undefined,
+      campaignMessage,
+      renderDashboardCampaigns: () => undefined
     });
 
     await saveSelectedCampaign({ preventDefault: vi.fn() });
@@ -990,7 +1024,7 @@ describe("Nexus management UI contracts", () => {
       expectedActiveTurnNumber: 4,
       expectedStateRevision: 7
     });
-    expect(loadCampaigns).toHaveBeenCalledWith("campaign-1");
+    expect(api).toHaveBeenCalledTimes(1);
   });
 
   it("keeps an action-only campaign locked while saving unrelated metadata", () => {
@@ -1022,7 +1056,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("Use “Load story” in Campaigns");
     expect(storyScript).toContain("async function resumePendingGeneration()");
     expect(storyScript).toContain("const resumed = await resumePendingGeneration();");
-    expect(storyScript).toContain("if (!resumed && state.turns.length === 0 && !state.busy)");
+    expect(storyScript).toContain('const needsExplicitRecoveryDecision = state.generationRecovery?.status === "recoverable"');
+    expect(storyScript).toContain('|| state.generationRecovery?.status === "failed";');
+    expect(storyScript).toContain("if (!resumed && !needsExplicitRecoveryDecision && state.turns.length === 0 && !state.busy)");
     expect(managementScript).toContain("function parseImportJson(sourceText)");
     expect(managementScript).not.toContain("window.prompt");
   });
@@ -1045,7 +1081,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("expectedStateRevision: transferPreview.expectedStateRevision");
     expect(managementScript).toContain("sourceFingerprint: transferPreview.sourceFingerprint");
     expect(managementScript).toContain("idempotencyKey: transferIdempotencyKey");
-    expect(managementScript).toContain("await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId)])");
+    expect(managementScript).toContain("const worldSelectionIntentEpochAtStart = worldSelectionIntentEpoch;");
+    expect(managementScript).toContain('loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpochAtStart })');
+    expect(managementScript).toContain('loadCampaigns(result.targetCampaignId, { explicitPreselect: true })');
     expect(managementScript).toContain("the original remains unchanged");
     expect(managementCss).toContain(".transfer-finding[data-severity=\"blocking\"]");
   });
@@ -1060,7 +1098,7 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("expectedVersionNumber: version.versionNumber");
     expect(managementScript).toContain("Remaining versions keep their existing numbers; gaps are not renumbered or reused.");
     expect(managementScript).toContain("error.details?.blockers");
-    expect(managementScript).toContain("await loadWorlds(worldId);");
+    expect(managementScript).toContain("await loadWorlds(worldId, { selectionIntentEpoch });");
     expect(managementScript).toContain("await loadCampaigns(selectedCampaignId);");
     expect(managementScript).toContain('elements.deleteWorldVersion.addEventListener("click", deleteSelectedWorldVersion);');
   });
@@ -1468,7 +1506,17 @@ describe("Nexus management UI contracts", () => {
     expect(sourceChange).toContain("const sourceRefreshSequence = beginCampaignImportRefresh();");
     expect(sourceChange.indexOf("beginCampaignImportRefresh()")).toBeLessThan(sourceChange.indexOf("previewImportFile(selectedFile)"));
     expect(managementScript).toContain("Campaign Archive imports require a .zip backup.");
-    expect(managementScript).toContain("clearCampaignArchivePreview();\n      throw new Error");
+    const importFileStart = managementScript.indexOf("async function previewImportFile(file)");
+    const importFileEnd = managementScript.indexOf("\nfunction clipboardGuidance", importFileStart);
+    expect(importFileStart).toBeGreaterThan(-1);
+    expect(importFileEnd).toBeGreaterThan(importFileStart);
+    const importFileSource = managementScript.slice(importFileStart, importFileEnd);
+    const invalidArchiveCondition = importFileSource.indexOf('if (archiveSource && !lowerName.endsWith(".zip"))');
+    expect(invalidArchiveCondition).toBeGreaterThan(-1);
+    const invalidArchiveClear = importFileSource.indexOf("clearCampaignArchivePreview();", invalidArchiveCondition);
+    const invalidArchiveThrow = importFileSource.indexOf('throw new Error("Campaign Archive imports require a .zip backup.")', invalidArchiveClear);
+    expect(invalidArchiveClear).toBeGreaterThan(-1);
+    expect(invalidArchiveThrow).toBeGreaterThan(invalidArchiveClear);
     expect(managementScript).toContain("handleCampaignImportRefreshError");
     const destinationChangeStart = managementScript.indexOf('elements.campaignImportDestination.addEventListener("change"');
     const destinationChangeEnd = managementScript.indexOf("\nelements.importBrowserState", destinationChangeStart);
