@@ -877,7 +877,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).not.toContain('async function enqueueGenerationSubmission(submission)');
     expect(storyScript).toContain('function updateGenerationProgress(job)');
     expect(storyScript).toContain('async function resumePendingGeneration()');
-    expect(storyScript).toContain('const run = await composition.workflow.resume(state.campaignId);');
+    expect(storyScript).toContain('const run = await composition.workflow.resume(resumeScope.campaignId);');
     expect(storyScript).toContain('The original turn was preserved.');
     expect(storyScript).toContain('class="replacement-pending-banner"');
   });
@@ -1252,7 +1252,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyScript).toContain('illustrationApi.regenerateSegmentImage(segmentId');
     expect(storyScript).toContain("const isCurrentTurn = Number(turn.turnNumber) === Number(state.campaign?.activeTurnNumber);");
     expect(storyHtml).toContain('id="imagePromptDialogTitle"');
-    expect(storyScript).toContain('async function pollIllustrationResolution(turnId)');
+    expect(storyScript).toContain('async function pollIllustrationResolution(turnId, observationScope = activityScope())');
     expect(storyScript).not.toContain("function installIllustrationSegmentObserver()");
     expect(storyScript).toContain("function segmentIllustrationMarkup(turn, turnIndex, segment, segmentCount)");
     expect(storyScript).toContain('class="segment-illustration-sticky"');

@@ -29,7 +29,7 @@ async function install(page: Page, options: { storageDenied?: boolean; review?: 
   await page.route(`${origin}/story/*`, route => route.fulfill({ contentType: "text/html", body: html }));
   await page.route("**/vendor/photoswipe/photoswipe.css", route => route.fulfill({ contentType: "text/css", body: "" }));
   await page.route("**/nexus/src/legacy-client-entry.ts", route => route.fulfill({ contentType: "application/javascript", body: `import {createStoryPlayerComposition} from '/nexus/src/composition.ts'; import {startStoryPlayer} from '/nexus/src/story.js'; const composition=createStoryPlayerComposition(); window.__activity=composition.activity; window.__workflow=composition.workflow; startStoryPlayer(composition);` }));
-  await page.route("**/nexus/src/story.js", async route => { const response = await route.fetch(); const source = await response.text(); await route.fulfill({ response, body: source.replace("return initialization;", "window.__loadCampaign = loadCampaign; window.__observeActivity = observeActivity; window.__observeGenerationRun = observeGenerationRun; window.__runGeneration = runGeneration; return initialization;") }); });
+  await page.route("**/nexus/src/story.js", async route => { const response = await route.fetch(); const source = await response.text(); await route.fulfill({ response, body: source.replace("return initialization;", "window.__loadCampaign = loadCampaign; window.__observeActivity = observeActivity; window.__observeGenerationRun = observeGenerationRun; window.__runGeneration = runGeneration; window.__resumePendingGeneration = resumePendingGeneration; window.__rematch = findAnotherLibraryMatch; window.__renderSceneImageJob = renderSceneImageJob; window.__state = state; window.__illustrationApi = illustrationApi; return initialization;") }); });
   const send = (route: Route, value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
   const review = { version: 1, reviewId: "77777777-7777-4777-8777-777777777777", revision: 1, state: "pending", stage: "continuity", candidateScope: "final", reasons: ["review_unavailable"], canKeep: true, canRetry: true };
   const recovery = { id: jobId, status: "recoverable", operationKind: "append", replacementTurnId: null, expectedTurnNumber: 2, attempts: 1, errorCode: "generation_failed", errorMessage: "Generation could not be completed.", diagnostic: { code: "context_evidence_omitted", operation: "story_generation", action: "adjust_context" }, resultTurnId: null, review };
@@ -210,4 +210,65 @@ test("a late campaign A illustration error cannot write diagnostics or state int
   await api.releaseConfig(); await expect(page).toHaveTitle("Second campaign \u2014 Infinite Quest");
   expect(await page.evaluate(() => (window as any).__activity.getState().observations.some((entry: any) => entry.kind === "browser.illustration_command_failed"))).toBe(false);
   await expect(page.locator("#activityLogDialog")).not.toContainText("PRIVATE_CANARY"); expect(api.errors).toEqual([]);
+});
+
+for (const outcome of ["resolve", "reject"] as const) {
+  test(`late ${outcome} of campaign A submission preserves campaign B generation`, async ({ page }) => {
+    const api = await install(page); await open(page);
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__workflow.submit = () => new Promise((resolve, reject) => { w.__resolveA = resolve; w.__rejectA = reject; });
+      w.__oldSubmission = w.__runGeneration("A private draft");
+    });
+    await page.evaluate(async id => { await (window as any).__loadCampaign(id); }, campaignB);
+    await page.evaluate(() => {
+      const w = window as any;
+      w.__workflow.submit = () => new Promise(resolve => { w.__resolveB = resolve; });
+      w.__newSubmission = w.__runGeneration("B current draft"); w.__bAbort = w.__state.abortController;
+    });
+    await page.evaluate(async ({ outcome, jobId }) => {
+      const w = window as any;
+      if (outcome === "reject") w.__rejectA(Object.assign(new Error("PRIVATE_A_FAILURE"), { pendingGeneration: { id: jobId, action: "A draft" } }));
+      else w.__resolveA({ jobId, async *watch() { throw new Error("stale watcher must not start"); } });
+      await w.__oldSubmission;
+    }, { outcome, jobId });
+    expect(await page.evaluate(() => { const w = window as any; return w.__state.abortController === w.__bAbort; })).toBe(true);
+    await expect(page.locator("#generationProgress")).not.toHaveClass(/hidden/u);
+    expect(await page.evaluate(id => (window as any).__state.pendingGeneration?.id === id, jobId)).toBe(false);
+    expect(await page.evaluate(() => (window as any).__activity.getState().observations.some((entry: any) => entry.kind === "browser.submission_failed"))).toBe(false);
+    await expect(page.locator("body")).not.toContainText("PRIVATE_A_FAILURE"); expect(api.errors).toEqual([]);
+  });
+}
+
+test("stale resume and rematch responses cannot start campaign B monitors", async ({ page }) => {
+  const api = await install(page); await open(page);
+  await page.evaluate(jobId => {
+    const w = window as any; w.__state.pendingGeneration = { id: jobId }; w.__watchCalls = 0; w.__resolutionCalls = 0;
+    w.__workflow.resume = () => new Promise(resolve => { w.__resumeRelease = () => resolve({ jobId, async *watch() { w.__watchCalls++; } }); });
+    w.__illustrationApi.rematch = () => new Promise(resolve => { w.__rematchRelease = resolve; });
+    w.__illustrationApi.resolution = async () => { w.__resolutionCalls++; return { status: "failed" }; };
+    w.__resumePromise = w.__resumePendingGeneration(); w.__rematchPromise = w.__rematch("A-turn");
+  }, jobId);
+  await page.evaluate(async id => { await (window as any).__loadCampaign(id); }, campaignB);
+  await page.evaluate(async () => { const w = window as any; w.__resumeRelease(); w.__rematchRelease(); await Promise.all([w.__resumePromise, w.__rematchPromise]); });
+  expect(await page.evaluate(() => [(window as any).__watchCalls, (window as any).__resolutionCalls])).toEqual([0, 0]);
+  expect(await page.evaluate(id => (window as any).__state.generationRun?.jobId === id, jobId)).toBe(false);
+  expect(await page.evaluate(() => (window as any).__activity.getState().observations.some((entry: any) => entry.turnId === "A-turn"))).toBe(false);
+  expect(api.errors).toEqual([]);
+});
+
+test("successful illustration retry renders queued job and resumes polling without false failure", async ({ page }) => {
+  const api = await install(page); await open(page); await page.keyboard.press("Escape");
+  await page.evaluate(jobId => {
+    const w = window as any; w.__retryCalls = 0; w.__pollCalls = 0; w.__state.illustrationConfig = { ...w.__state.illustrationConfig, enabled: true, sourcePolicy: "generated" };
+    const turn = w.__state.turns[w.__state.turns.length - 1]; w.__state.viewTurnNumber = turn.turnNumber; const failed = { id: jobId, turnId: turn.id || turn.turnId, status: "failed", errorMessage: "Illustration generation did not complete." };
+    w.__illustrationApi.retryImageJob = async () => { w.__retryCalls++; return { ...failed, status: "queued" }; };
+    w.__illustrationApi.imageJobs = async () => { w.__pollCalls++; return { jobs: [] }; };
+    document.getElementById("storyIllustrationPanel")!.classList.remove("hidden"); w.__renderSceneImageJob(failed);
+  }, jobId);
+  await page.getByRole("button", { name: "Retry illustration", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__pollCalls)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => (window as any).__retryCalls)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__activity.getState().observations.some((entry: any) => entry.kind === "browser.illustration_command_failed"))).toBe(false);
+  await expect(page.locator("body")).not.toContainText("Illustration retry failed"); expect(api.errors).toEqual([]);
 });

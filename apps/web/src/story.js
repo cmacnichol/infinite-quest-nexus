@@ -1446,7 +1446,9 @@ async function runGeneration(action, options = {}) {
         generationSubmissionInput(submission, request)
       );
     } catch (error) {
+      if (!activityScopeCurrent(submissionScope)) return;
       const conflict = await resumeActiveGenerationConflict(error, submissionCampaignId, composition.workflow);
+      if (!activityScopeCurrent(submissionScope)) return;
       if (!conflict) throw error;
       toast(conflict.message);
       void activity?.refresh();
@@ -1474,6 +1476,7 @@ async function runGeneration(action, options = {}) {
       : { id: run.jobId, action, operationKind, expectedTurnNumber };
     completeButLoading = await observeGenerationRun(run, attachedConflict ? (conflictPendingGeneration?.action || "") : action) === "result_unavailable";
   } catch (err) {
+    if (!activityScopeCurrent(submissionScope)) return;
     if (err.pendingGeneration) state.pendingGeneration = err.pendingGeneration;
     restoreGenerationDisplay();
     if (options.operationKind !== "replace_latest") restoreRetainedAppendDraft();
@@ -1489,10 +1492,12 @@ async function runGeneration(action, options = {}) {
       if (!submissionAccepted) observeActivity("browser.submission_failed", err, { route: "/api/v1/campaigns/:campaignId/generations" }, submissionScope);
     }
   } finally {
-    if (!completeButLoading) clearStreamingPreview();
-    if (progressEl) progressEl.classList.add("hidden");
-    hideBusy();
-    state.abortController = null;
+    if (activityScopeCurrent(submissionScope)) {
+      if (!completeButLoading) clearStreamingPreview();
+      if (progressEl) progressEl.classList.add("hidden");
+      hideBusy();
+      state.abortController = null;
+    }
   }
 }
 
@@ -2167,6 +2172,7 @@ function updateGenerationProgress(job) {
 }
 
 async function resumePendingGeneration() {
+  const resumeScope = activityScope();
   // Check sync-status for any in-flight generation jobs
   // A recoverable job is already rendered as an explicit recovery choice by
   // loadCampaign. Do not reattach to it during boot: doing so briefly marks
@@ -2174,7 +2180,8 @@ async function resumePendingGeneration() {
   if (!state.campaignId || !state.campaign || !state.pendingGeneration) return false;
   let completeButLoading = false;
   try {
-    const run = await composition.workflow.resume(state.campaignId);
+    const run = await composition.workflow.resume(resumeScope.campaignId);
+    if (!activityScopeCurrent(resumeScope)) return false;
     if (run) {
       state.generationRun = run;
       state.pendingGeneration = { id: run.jobId };
@@ -2187,12 +2194,14 @@ async function resumePendingGeneration() {
         completeButLoading = await observeGenerationRun(run, state.pendingGeneration.action || "") === "result_unavailable";
         return true;
       } catch (error) {
-        restoreGenerationDisplay();
+        if (activityScopeCurrent(resumeScope)) restoreGenerationDisplay();
         throw error;
       } finally {
-        if (!completeButLoading) clearStreamingPreview();
-        if (progressEl) progressEl.classList.add("hidden");
-        hideBusy();
+        if (activityScopeCurrent(resumeScope)) {
+          if (!completeButLoading) clearStreamingPreview();
+          if (progressEl) progressEl.classList.add("hidden");
+          hideBusy();
+        }
       }
     }
     clearPendingSubmission();
@@ -2534,10 +2543,12 @@ function renderSceneImageJob(job) {
       const observationScope = activityScope();
       retry.disabled = true;
       try {
-        await illustrationApi.retryImageJob(job.id);
+        const queued = await illustrationApi.retryImageJob(job.id);
+        if (!activityScopeCurrent(observationScope)) return;
         renderSceneImageJob(queued);
         pollImageJobs();
       } catch (error) {
+        if (!activityScopeCurrent(observationScope)) return;
         observeActivity("browser.illustration_command_failed", error, { jobId: job.id }, observationScope);
         toast(`Illustration retry failed: ${error.message}`);
         retry.disabled = false;
@@ -2690,9 +2701,9 @@ async function whyIllustration(turnId) {
   }
 }
 
-async function pollIllustrationResolution(turnId) {
-  const observationScope = activityScope();
+async function pollIllustrationResolution(turnId, observationScope = activityScope()) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (!activityScopeCurrent(observationScope)) return;
     const resolution = await illustrationApi.resolution(turnId);
     if (!activityScopeCurrent(observationScope)) return;
     if (resolution.status === "completed" && resolution.selectedAssetId) {
@@ -2708,15 +2719,16 @@ async function pollIllustrationResolution(turnId) {
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  toast("Image matching is still running.");
+  if (activityScopeCurrent(observationScope)) toast("Image matching is still running.");
 }
 
 async function findAnotherLibraryMatch(turnId) {
   const observationScope = activityScope();
   try {
     await illustrationApi.rematch(turnId);
+    if (!activityScopeCurrent(observationScope)) return;
     toast("Searching for another retained match.");
-    void pollIllustrationResolution(turnId).catch(error => observeActivity("browser.illustration_command_failed", error, { turnId }, observationScope));
+    void pollIllustrationResolution(turnId, observationScope).catch(error => observeActivity("browser.illustration_command_failed", error, { turnId }, observationScope));
   } catch (error) {
     if (!activityScopeCurrent(observationScope)) return;
     observeActivity("browser.illustration_command_failed", error, { turnId }, observationScope);
