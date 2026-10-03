@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
-const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T05-fix1");
+const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T05-fix2");
 const worldA = {
   id: "world-a",
   title: "World Alpha",
@@ -29,9 +29,19 @@ const versionGates = new Map<string, Promise<void>>();
 const worldListGates: Array<Promise<void>> = [];
 const worldPatchGates = new Map<string, Promise<void>>();
 const coverJobGates = new Map<string, Promise<void>>();
+const worldImportGates: Array<Promise<void>> = [];
 
-function fullWorld(summary: typeof worldA) {
-  const versionId = summary.id === "world-a" ? "world-a-v1" : "world-b-v1";
+function fullWorld(summary: {
+  id: string;
+  title: string;
+  status: string;
+  latestVersionId?: string | null;
+  latestVersionNumber?: number | null;
+  campaignCount: number;
+  updatedAt: string;
+  latestPreview: typeof worldA.latestPreview;
+}) {
+  const versionId = `${summary.id}-v1`;
   return {
     ...summary,
     imageUrl: summary.id === "world-a" ? "https://images.test/world-a-cover.png" : "https://images.test/world-b-cover.png",
@@ -72,6 +82,17 @@ async function fixtureRoute(route: Route) {
     body = { worlds: summaries() };
     const gate = worldListGates.shift();
     if (gate) await gate;
+  }
+  else if (path === "/worlds" && request.method() === "POST") {
+    const input = JSON.parse(request.postData() || "{}");
+    const id = "world-c";
+    const created = fullWorld({ ...worldB, id, title: input.title, latestVersionId: "", latestVersionNumber: null, status: "draft" });
+    created.versions = [];
+    created.latestVersionId = null;
+    created.latestVersionNumber = null;
+    created.draftContent.world.title = input.title;
+    worldDetails.set(id, created);
+    body = { id };
   }
   else if (path === "/campaigns" && request.method() === "GET") body = { campaigns: [] };
   else if (parts[0] === "worlds" && parts.length === 2 && request.method() === "GET") {
@@ -126,12 +147,35 @@ async function fixtureRoute(route: Route) {
     detail.latestVersionId = "world-a-v3";
     detail.latestVersionNumber = 3;
     body = { versionNumber: 3 };
+  } else if (parts[0] === "worlds" && parts[1] === "world-a" && parts[2] === "fork" && request.method() === "POST") {
+    const input = JSON.parse(request.postData() || "{}");
+    const id = "world-c";
+    const fork = fullWorld({ ...worldB, id, title: input.title, latestVersionId: "", latestVersionNumber: null, status: "draft" });
+    fork.versions = [];
+    fork.latestVersionId = null;
+    fork.latestVersionNumber = null;
+    fork.draftContent.world.title = input.title;
+    worldDetails.set(id, fork);
+    body = { worldId: id };
   } else if (parts[0] === "worlds" && parts[1] === "world-a" && parts[2] === "cover-asset" && request.method() === "PUT") {
     worldDetails.get("world-a")!.imageUrl = JSON.parse(request.postData() || "{}").assetId ? "https://images.test/replacement-cover.png" : null;
     body = { ok: true };
   } else if (parts[0] === "worlds" && parts.length === 2 && request.method() === "DELETE") {
     worldDetails.delete(parts[1]!);
     body = { deleted: true };
+  } else if (path === "/imports/world/preview" && request.method() === "POST") {
+    body = { duplicate: false, counts: { entities: 0, relationships: 0, triggers: 0 }, warnings: [] };
+  } else if (path === "/imports/world" && request.method() === "POST") {
+    const gate = worldImportGates.shift();
+    if (gate) await gate;
+    const id = "world-c";
+    const imported = fullWorld({ ...worldB, id, title: "World Gamma", latestVersionId: "", latestVersionNumber: null, status: "draft" });
+    imported.versions = [];
+    imported.latestVersionId = null;
+    imported.latestVersionNumber = null;
+    imported.draftContent.world.title = "World Gamma";
+    worldDetails.set(id, imported);
+    body = { worldId: id, duplicate: false };
   }
 
   await route.fulfill(json(body, status));
@@ -159,6 +203,7 @@ test.beforeEach(() => {
   worldListGates.length = 0;
   worldPatchGates.clear();
   coverJobGates.clear();
+  worldImportGates.length = 0;
   worldDetails.clear();
   worldDetails.set(worldA.id, fullWorld(worldA));
   worldDetails.set(worldB.id, fullWorld(worldB));
@@ -434,4 +479,86 @@ test("a_late_completed_cover_job_invalidates_its_world_cache_without_touching_th
   await expect(page.locator("#worldDetailsTitle")).toHaveText("World Beta");
   await expect(page.locator("#worldDetailsMedia")).toHaveCSS("background-image", /world-b-cover/u);
   await page.screenshot({ path: resolve(evidenceDirectory, "late-cover-job-invalidates-only-captured-world.png") });
+});
+
+test("creating_a_world_selects_its_returned_draft_instead_of_the_previous_world", async ({ page }) => {
+  await openWorldManagement(page);
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await page.locator("#newWorld").click();
+  await page.locator("#worldTitle").fill("World Gamma");
+  await page.locator("#saveWorldDraft").click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Gamma");
+  const createRequest = apiEvents.find((event) => event.method === "POST" && event.path === "/worlds");
+  expect(JSON.parse(createRequest?.body || "{}").content.world.title).toBe("World Gamma");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-c"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-a"]')).toHaveAttribute("aria-pressed", "false");
+  await page.screenshot({ path: resolve(evidenceDirectory, "create-selects-returned-world.png") });
+});
+
+test("forking_a_world_selects_its_returned_draft", async ({ page }) => {
+  await openWorldManagement(page);
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await page.locator("#forkWorldModalBtn").click();
+  await page.locator("#forkWorldTitle").fill("World Gamma Fork");
+  await page.locator("#confirmForkWorld").click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Gamma Fork");
+  const forkRequest = apiEvents.find((event) => event.method === "POST" && event.path === "/worlds/world-a/fork");
+  expect(JSON.parse(forkRequest?.body || "{}")).toMatchObject({ title: "World Gamma Fork", sourceWorldVersionId: "world-a-v1" });
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-c"]')).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: resolve(evidenceDirectory, "fork-selects-returned-world.png") });
+});
+
+test("portable_world_import_selects_its_returned_world", async ({ page }) => {
+  await openWorldManagement(page);
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await page.evaluate(() => { window.location.hash = "#imports"; });
+  await expect(page.locator("#imports")).toBeVisible();
+  await page.locator("#storyFile").setInputFiles({
+    name: "portable.world.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ format: "infinite-quest-world", formatVersion: 1, title: "World Gamma", content: {} }))
+  });
+  await expect(page.locator("#importStory")).toBeEnabled();
+  await page.locator("#importStory").click();
+  await expect.poll(() => apiEvents.some((event) => event.method === "POST" && event.path === "/imports/world" && event.status === 200)).toBe(true);
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Gamma");
+  const importRequest = apiEvents.find((event) => event.method === "POST" && event.path === "/imports/world");
+  expect(JSON.parse(importRequest?.body || "{}")).toMatchObject({ sourceName: "portable.world.json", worldExport: { format: "infinite-quest-world", title: "World Gamma" } });
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-c"]')).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: resolve(evidenceDirectory, "portable-import-selects-returned-world.png") });
+});
+
+test("a_later_world_selection_wins_over_a_delayed_portable_import_result", async ({ page }) => {
+  let releaseImport!: () => void;
+  const importGate = new Promise<void>((resolve) => { releaseImport = resolve; });
+  worldImportGates.push(importGate);
+  await openWorldManagement(page);
+  await page.locator('#worldManagementCarousel [data-world-id="world-a"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Alpha");
+  await page.evaluate(() => { window.location.hash = "#imports"; });
+  await expect(page.locator("#imports")).toBeVisible();
+  await page.locator("#storyFile").setInputFiles({
+    name: "portable.world.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ format: "infinite-quest-world", formatVersion: 1, title: "World Gamma", content: {} }))
+  });
+  await expect(page.locator("#importStory")).toBeEnabled();
+  const importRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/imports/world");
+  await page.locator("#importStory").click();
+  await importRequest;
+  await page.evaluate(() => { window.location.hash = "#world-library"; });
+  await expect(page.locator("#world-library")).toBeVisible();
+  await page.locator('#worldManagementCarousel [data-world-id="world-b"]').click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  const listsBeforeRelease = apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length;
+  releaseImport();
+  await expect.poll(() => apiEvents.some((event) => event.method === "POST" && event.path === "/imports/world" && event.status === 200)).toBe(true);
+  await expect.poll(() => apiEvents.filter((event) => event.method === "GET" && event.path === "/worlds").length).toBeGreaterThan(listsBeforeRelease);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.locator("#worldEditorTitle")).toHaveText("World Beta");
+  await expect(page.locator('#worldManagementCarousel [data-world-id="world-b"]')).toHaveAttribute("aria-pressed", "true");
+  await page.screenshot({ path: resolve(evidenceDirectory, "delayed-import-result-respects-later-selection.png") });
 });

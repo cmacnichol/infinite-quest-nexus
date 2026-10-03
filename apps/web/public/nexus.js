@@ -2050,7 +2050,7 @@ async function openWorldManagement(worldId) {
   dashboardWorldDetailsSelectionEpoch += 1;
   elements.worldDetailsDialog.close();
   if (window.location.hash !== "#world-library") window.location.hash = "#world-library";
-  await loadWorlds(worldId, { selectionIntentEpoch });
+  await loadWorlds(worldId, { selectionIntentEpoch, preferRequestedWorld: true });
 }
 
 async function openQuickCampaign() {
@@ -2599,7 +2599,9 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
     elements.worldCampaignReadiness.textContent = "Create a world before checking campaign readiness.";
     return;
   }
-  const targetId = worldSelectionId || preselectId || selectedWorld?.id;
+  const targetId = selectionOptions.preferRequestedWorld && preselectId
+    ? preselectId
+    : worldSelectionId || preselectId || selectedWorld?.id;
   if (targetId && worlds.some((world) => world.id === targetId)) await selectWorld(targetId, { ...selectionOptions, selectionIntentEpoch });
   else if (selectedWorld && !worlds.some((world) => world.id === selectedWorld.id)) {
     worldSelectionId = "";
@@ -2612,6 +2614,12 @@ async function loadWorlds(preselectId = "", selectionOptions = {}) {
     elements.worldSelectionPanel.classList.add("hidden");
     setWorldEditorDisabled(true);
   }
+}
+
+async function loadWorldResult(worldId, selectionIntentEpoch, selectionOptions = {}) {
+  invalidateDashboardWorldDetails(worldId);
+  if (selectionIntentEpoch === worldSelectionIntentEpoch) worldSelectionId = worldId;
+  await loadWorlds(worldId, { ...selectionOptions, selectionIntentEpoch, preferRequestedWorld: true });
 }
 
 async function selectWorld(worldId, selectionOptions = {}) {
@@ -2949,7 +2957,7 @@ async function chooseWorldCoverFromLibrary() {
   }, worldAuthorMode === "edit" && selectedWorld ? { worldId: selectedWorld.id } : {});
 }
 
-async function applyWorldCoverChoice(worldId) {
+async function applyWorldCoverChoice(worldId, selectionIntentEpoch) {
   const mode = document.querySelector('input[name="worldCoverMode"]:checked')?.value || "keep";
   if (mode === "keep") return "";
   if (mode === "library") {
@@ -2957,13 +2965,13 @@ async function applyWorldCoverChoice(worldId) {
     if (!assetId) throw new Error("Choose a retained image before saving the world.");
     await api(`/api/v1/worlds/${worldId}/cover-asset`, { method: "PUT", body: JSON.stringify({ assetId }) });
     invalidateDashboardWorldDetails(worldId);
-    await loadWorlds(worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     return " Retained cover attached.";
   }
   if (mode === "remove") {
     await api(`/api/v1/worlds/${worldId}/cover-asset`, { method: "PUT", body: JSON.stringify({ assetId: null }) });
     invalidateDashboardWorldDetails(worldId);
-    await loadWorlds(worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     return " Cover removed.";
   }
   const job = await api(`/api/v1/worlds/${worldId}/cover`, {
@@ -2995,6 +3003,7 @@ async function saveWorldDraft(event) {
   elements.saveWorldDraft.disabled = true;
   elements.cancelWorldAuthor.disabled = true;
   const mode = worldAuthorMode;
+  const selectionIntentEpoch = mode === "create" ? ++worldSelectionIntentEpoch : worldSelectionIntentEpoch;
   const committedAuthorSession = editDialogSessions.get(elements.worldAuthorDialog);
   const expectedRevision = selectedWorld?.draftRevision;
   const content = worldContentFromForm();
@@ -3012,12 +3021,16 @@ async function saveWorldDraft(event) {
         body: JSON.stringify({ expectedRevision, title, content })
       });
     }
-    invalidateDashboardWorldDetails(worldId);
-    await loadWorlds(worldId, { committedAuthorSession });
+    if (mode === "create") {
+      await loadWorldResult(worldId, selectionIntentEpoch, { committedAuthorSession });
+    } else {
+      invalidateDashboardWorldDetails(worldId);
+      await loadWorlds(worldId, { committedAuthorSession, selectionIntentEpoch });
+    }
     elements.worldAuthorDialog.close("saved");
     let coverMessage = "";
     try {
-      coverMessage = await applyWorldCoverChoice(worldId);
+      coverMessage = await applyWorldCoverChoice(worldId, selectionIntentEpoch);
     } catch (coverError) {
       worldMessage(`World ${mode === "create" ? "created" : "saved"}, but its cover could not be updated: ${coverError.message || String(coverError)}`, "error");
       return;
@@ -3295,6 +3308,7 @@ async function deleteCharacterFromModal() {
 async function publishSelectedWorld() {
   if (!selectedWorld) return;
   const worldId = selectedWorld.id;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
   const expectedRevision = selectedWorld.draftRevision;
   elements.publishWorld.disabled = true;
   worldMessage("Publishing immutable world version…");
@@ -3304,7 +3318,7 @@ async function publishSelectedWorld() {
       body: JSON.stringify({ expectedRevision, releaseNotes: elements.worldReleaseNotes.value })
     });
     invalidateDashboardWorldDetails(worldId);
-    await loadWorlds(selectedWorld?.id || worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     await loadCampaigns();
     worldMessage(`Version ${published.versionNumber} published. Existing campaigns remain pinned to their current versions.`, "success");
   } catch (error) {
@@ -3468,13 +3482,14 @@ async function forkSelectedWorld() {
     elements.forkWorldTitle.focus();
     return;
   }
+  const selectionIntentEpoch = ++worldSelectionIntentEpoch;
   try {
     const fork = await api(`/api/v1/worlds/${selectedWorld.id}/fork`, {
       method: "POST",
       body: JSON.stringify({ title, sourceWorldVersionId: selectedWorldVersionId() })
     });
     elements.forkWorldTitle.value = "";
-    await loadWorlds(fork.worldId);
+    await loadWorldResult(fork.worldId, selectionIntentEpoch);
     worldMessage("Fork created as an unpublished independent draft.", "success");
     if (elements.forkWorldDialog) elements.forkWorldDialog.close();
   } catch (error) {
@@ -3485,13 +3500,14 @@ async function forkSelectedWorld() {
 async function toggleWorldArchive() {
   if (!selectedWorld) return;
   const worldId = selectedWorld.id;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
   const nextStatus = selectedWorld.status === "archived"
     ? (selectedWorld.versions.length ? "active" : "draft")
     : "archived";
   try {
     await api(`/api/v1/worlds/${worldId}`, { method: "PATCH", body: JSON.stringify({ status: nextStatus }) });
     invalidateDashboardWorldDetails(worldId);
-    await loadWorlds(selectedWorld?.id || worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     worldMessage(nextStatus === "archived" ? "World archived. Existing campaigns remain available." : "World restored.", "success");
   } catch (error) {
     worldMessage(error.message || String(error), "error");
@@ -3508,6 +3524,7 @@ async function deleteSelectedWorld() {
   const expectedTitle = selectedWorld.title;
   const confirmed = await requestTypedDelete(expectedTitle, `This permanently deletes “${expectedTitle}”, its draft, and all published versions. This cannot be undone.`);
   if (!confirmed) return;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
   elements.deleteWorld.disabled = true;
   try {
     await api(`/api/v1/worlds/${worldId}`, {
@@ -3516,7 +3533,7 @@ async function deleteSelectedWorld() {
     });
     invalidateDashboardWorldDetails(worldId);
     if (selectedWorld?.id === worldId) selectedWorld = null;
-    await loadWorlds(selectedWorld?.id || "");
+    await loadWorlds("", { selectionIntentEpoch });
     worldMessage(`World “${expectedTitle}” was permanently deleted.`, "success");
   } catch (error) {
     worldMessage(error.message || String(error), "error");
@@ -3564,6 +3581,7 @@ async function deleteSelectedWorldVersion() {
   if (!confirmed) return;
 
   const worldId = selectedWorld.id;
+  const selectionIntentEpoch = worldSelectionIntentEpoch;
   const selectedCampaignId = selectedCampaign?.id || "";
   elements.deleteWorldVersion.disabled = true;
   worldMessage(`Deleting world version ${version.versionNumber}…`);
@@ -3573,7 +3591,7 @@ async function deleteSelectedWorldVersion() {
       body: JSON.stringify({ confirmation: "DELETE", expectedVersionNumber: version.versionNumber })
     });
     invalidateDashboardWorldDetails(worldId);
-    await loadWorlds(selectedWorld?.id || worldId);
+    await loadWorlds(worldId, { selectionIntentEpoch });
     await loadCampaigns(selectedCampaignId);
     worldMessage(`World version ${version.versionNumber} was permanently deleted. Remaining version numbers were unchanged.`, "success");
   } catch (error) {
@@ -4092,6 +4110,7 @@ async function commitCampaignTransfer(event) {
   event.preventDefault();
   if (!selectedCampaign || !transferPreview) return;
   const sourceCampaignId = selectedCampaign.id;
+  const worldSelectionIntentEpochAtStart = worldSelectionIntentEpoch;
   elements.confirmTransferCampaign.disabled = true;
   elements.cancelTransferCampaign.disabled = true;
   elements.transferPreviewSummary.textContent = "Creating the transferred campaign and rebuilding Chronicle…";
@@ -4109,7 +4128,10 @@ async function commitCampaignTransfer(event) {
       })
     });
     elements.transferCampaignDialog.close();
-    await Promise.all([loadWorlds(), loadCampaigns(result.targetCampaignId, { explicitPreselect: true })]);
+    await Promise.all([
+      loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpochAtStart }),
+      loadCampaigns(result.targetCampaignId, { explicitPreselect: true })
+    ]);
     campaignMessage("Transferred campaign created and selected. Review it before separately archiving the original campaign; the original remains unchanged.", "success");
   } catch (error) {
     elements.transferPreviewSummary.textContent = error.statusCode === 409
@@ -4142,6 +4164,7 @@ async function deleteSelectedCampaign() {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
   const expectedTitle = selectedCampaign.title;
+  const worldSelectionIntentEpochAtStart = worldSelectionIntentEpoch;
   const confirmed = await requestTypedDelete(expectedTitle, `This permanently deletes “${expectedTitle}”, its accepted turns, Chronicle memory, and generated asset records. This cannot be undone.`);
   if (!confirmed) return;
   elements.deleteCampaign.disabled = true;
@@ -4155,7 +4178,7 @@ async function deleteSelectedCampaign() {
     selectedCampaignIsExplicit = false;
     updateStoryViewLink();
     await loadCampaigns("", { focusNoSelection: true });
-    await loadWorlds(selectedWorld?.id || "");
+    await loadWorlds("", { selectionIntentEpoch: worldSelectionIntentEpochAtStart });
   } catch (error) {
     campaignMessage(error.message || String(error), "error");
     elements.deleteCampaign.disabled = !selectedCampaign;
@@ -6165,6 +6188,7 @@ async function loadLatestImageJob(monitor = false) {
 }
 
 async function importStoryObject(story, sourceName, requestOverrides = {}) {
+  const selectionIntentEpoch = ++worldSelectionIntentEpoch;
   const request = { sourceName, story, ...requestOverrides };
   const preview = await api("/api/v1/imports/legacy-story/preview", {
     method: "POST",
@@ -6201,8 +6225,7 @@ async function importStoryObject(story, sourceName, requestOverrides = {}) {
 
   const duplicate = result.duplicate ? "The story was already imported; the existing campaign was selected." : "Import completed.";
   setStatus(`${duplicate} ${result.stats.turnCount} turns and ${result.stats.memoryCount} memories are available. Complete history is approximately ${number(result.stats.estimatedHistoryTokens)} tokens. Use “Load story” in Campaigns to open the database-backed story.`, "success");
-  invalidateDashboardWorldDetails(result.worldId);
-  await loadWorlds(result.worldId);
+  await loadWorldResult(result.worldId, selectionIntentEpoch);
   await loadCampaigns(result.campaignId, { explicitPreselect: true });
 }
 
@@ -6659,6 +6682,9 @@ async function validateClipboardImport(event) {
 
 async function importStory() {
   if (!selectedImport) return;
+  const selectionIntentEpoch = ["infinite_worlds", "world", "campaign_archive"].includes(selectedImport.kind)
+    ? ++worldSelectionIntentEpoch
+    : null;
   elements.importStory.disabled = true;
   let progressTimer = null;
   try {
@@ -6689,15 +6715,13 @@ async function importStory() {
         elements.importProgressBar.value = 100;
         elements.importProgressPercent.textContent = "100%";
         elements.importProgressLabel.textContent = "World and character generation completed.";
-        invalidateDashboardWorldDetails(result.worldId);
-        await loadWorlds(result.worldId);
+        await loadWorldResult(result.worldId, selectionIntentEpoch);
         setStatus(result.duplicate
           ? "The Choose Your Own Adventure world was already imported; the existing record was loaded into the World Editor below."
           : "Choose Your Own Adventure story imported and converted into a new Story World with 3-4 playable characters. Review and edit any fields below before publishing or saving.", "success");
         return;
       }
-      invalidateDashboardWorldDetails(result.worldId);
-      await loadWorlds(result.worldId);
+      await loadWorldResult(result.worldId, selectionIntentEpoch);
       if (result.kind === "campaign") {
         await loadCampaigns(result.campaignId, { explicitPreselect: true });
         let imageMessage = "";
@@ -6725,8 +6749,7 @@ async function importStory() {
     } else if (selectedImport.kind === "world") {
       setStatus("Importing the validated portable world…");
       const result = await api("/api/v1/imports/world", { method: "POST", body: JSON.stringify(selectedImport.request) });
-      invalidateDashboardWorldDetails(result.worldId);
-      await loadWorlds(result.worldId);
+      await loadWorldResult(result.worldId, selectionIntentEpoch);
       setStatus(result.duplicate ? "The world was already imported; the existing World Library record was selected." : "World imported with an immutable version and editable draft.", "success");
     } else if (selectedImport.kind === "campaign_archive") {
       setStatus("Importing the validated Campaign Archive…");
@@ -6737,8 +6760,7 @@ async function importStory() {
           destination: selectedImport.destination
         })
       });
-      invalidateDashboardWorldDetails(result.worldId);
-      await loadWorlds(result.worldId);
+      await loadWorldResult(result.worldId, selectionIntentEpoch);
       await loadCampaigns(result.campaignId, { explicitPreselect: true });
       const outcome = result.duplicate ? "The Campaign Archive was already imported; the existing campaign was selected." : "Campaign Archive imported.";
       setStatus(`${outcome} ${number(result.stats.turnCount)} turns, ${number(result.stats.memoryCount)} Chronicle memories, and ${number(result.stats.assetCount)} original images are available.`, "success");
