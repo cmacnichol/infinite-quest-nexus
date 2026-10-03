@@ -23,6 +23,8 @@ export async function captureGenerationActivity(client: DatabaseClient, jobId: s
   const failure = projectGenerationFailureDiagnostic(currentFailureDiagnostic) ?? projectGenerationFailureDiagnostic({ version: 1, category: "unknown", code: row.error_code,
     phase: "activity", attemptNumber: row.attempts, occurredAt: row.occurred_at.toISOString() })
     ?? { code: "generation_failed" as const, message: ACTIVITY_DIAGNOSTIC_MESSAGES.generation_failed! };
+  // Activity has its own closed contract; provider evidence remains on the generation job.
+  const activityFailure = { code: failure.code, message: failure.message };
   for (const [ordinal, kind] of kinds.entries()) {
     await captureActivity(client, {
       scope: { ownerUserId, campaignId: row.campaign_id }, sourceId: jobId, revision: row.activity_revision, ordinal,
@@ -33,7 +35,7 @@ export async function captureGenerationActivity(client: DatabaseClient, jobId: s
           : ["generation.recoverable", "generation.review_required"].includes(kind) ? "warning" : "info",
         diagnostic: kind === "generation.review_required"
           ? { code: "review_required", message: ACTIVITY_DIAGNOSTIC_MESSAGES.review_required! }
-          : kind === "generation.failed" || kind === "generation.recoverable" ? failure : null }
+          : kind === "generation.failed" || kind === "generation.recoverable" ? activityFailure : null }
     });
   }
 }

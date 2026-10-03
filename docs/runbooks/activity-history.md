@@ -1,6 +1,6 @@
 # Story activity history operations
 
-The legacy Story player records safe operational transitions separately from accepted turns, campaign state, Chronicle and the existing private portable `activity_events` ledger. Database migration `0114_story_activity.sql` adds `story_activity_events`, `activity_event_outbox`, `campaign_activity_history` and source revision columns. Operational history is excluded from System and Campaign Archives; an imported campaign begins without operational history. A database backup may retain it.
+The legacy Story player records safe operational transitions separately from accepted turns, campaign state, Chronicle and the existing private portable `activity_events` ledger. Database migration `0115_story_activity.sql` adds `story_activity_events`, `activity_event_outbox`, `campaign_activity_history` and source revision columns. Operational history is excluded from System and Campaign Archives; an imported campaign begins without operational history. A database backup may retain it.
 
 Coverage begins with the first successful new capture for each campaign. There is no historical backfill. Old producers do not capture transitions, and an upgraded producer may first observe a terminal transition for a pre-existing job. Completeness begins only after all participating producers are upgraded. Activity cannot authorize retry, Keep, discard or acceptance; open current recovery options and re-read authoritative job state.
 

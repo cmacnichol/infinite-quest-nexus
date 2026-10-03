@@ -2,6 +2,24 @@
 
 Verified locally on 2026-10-03 in the isolated `codex/legacy-activity-plan` branch. No deployment or live-provider claim. The [runbook](../runbooks/activity-history.md) describes operations; the [architecture decision](../architecture/persistent-activity-history.md) records the transaction/publication/portability trade-offs. Later user instructions authorized implementation after the original planning handoff.
 
+## Rebase verification against main
+
+Rebased onto main `b38c17c5` (provider-failure diagnostics) on 2026-10-03. The conflict resolutions retain both contract exports and both migrations: main's `0114_provider_failure_diagnostics` followed by `0115_story_activity`. All affected migration watermark expectations and the activity runbook use that sequence. The commit range review found no lost feature commits or unrelated changes.
+
+The compatibility audit reproduced a transaction regression: the enlarged generation failure projection included `providerFailure`, which the closed Activity diagnostic schema rejected, rolling back `markFailed`. Activity now explicitly selects code/message while the generation job retains its private provider evidence. A real PostgreSQL regression first failed at that schema boundary, then passed while asserting terminal persistence, exact private evidence, safe Activity output, and retry/recoverable behavior without stale provider evidence. Final scoped review found no further actionable issues.
+
+Fresh checks after the compatibility fix:
+
+- Full unit suite: 376 files, 4,901 passed, 44 existing platform/feature skips, zero failures. Command: `corepack pnpm test:unit --exclude '**/.worktrees/**' --exclude '**/.codex/**'`.
+- Root `corepack pnpm check`, `corepack pnpm build`, and `corepack pnpm --filter @infinite-quest/docs build`: passed. Existing font/chunk-size advisories remain nonfatal. Nested commands use a task-local pinned pnpm 12.4.1 shim.
+- Activity and native IndexedDB Chromium suites: 34 passed, one conditional native BFCache admission skip, zero failures. Simulated persisted lifecycle, reload, scope fencing and monitor restoration checks pass.
+- Provider diagnostics/recovery/stream-loss Chromium selection: 5 passed, zero failures. It uses main's documented `NODE_OPTIONS=--import tsx` loader; the initial invocation without that loader failed collection and was rerun correctly. Both legacy and replacement Story compatibility paths are covered.
+- Full PostgreSQL matrix: all 128 files executed; initial run recorded 1,543 passed, 199 declared skips, one assertion failure and one zero-test collection failure. Activity-generation rerun passed 12/12; the unchanged secure-storage file rerun passed 10/10. Counting each case once using those full-file reruns gives 1,556 passed, 199 skipped and no remaining failed case. Skips cover unavailable Windows secure-filesystem/archive paths and explicit feature/benchmark gates; they are not passes.
+
+The database run uses a dedicated disposable PostgreSQL 18/pgvector container, sequential one-process-per-file execution and the standard per-file fresh-database/migration isolation. Only global provisioning is bypassed after explicitly provisioning that dedicated database; no shared development database is reset. One initial Activity-generation collection attempt coincided with a transient test-file rewrite; its subsequent unchanged full-file rerun passed all 12 cases. This collection failure is not counted as a test pass. The separate secure-storage read-lease case initially returned `archive_unavailable` during rehydration, then passed both a focused rerun and its full unchanged 10-case file. That test and its repository have no diff against main. A five-second fixture expiry window is a plausible timing cause, not a confirmed diagnosis; no storage fix or unconditional first-run-green claim is made.
+
+Desktop and mobile Activity error screenshots were inspected again. This rebase changes no layout; existing six screenshot artifacts are retained after restoring generated timestamp churn. Local documentation links and range whitespace checks pass. These local checks do not establish deployed behavior, live-provider quality, production restoration, sustained load, Windows secure ZIP round trips, or native Chromium BFCache admission. Earlier verification history below records implementation-stage runs and does not replace the fresh results above.
+
 ## Evidence and limits
 
 | Check | Result | Scope and limitations |

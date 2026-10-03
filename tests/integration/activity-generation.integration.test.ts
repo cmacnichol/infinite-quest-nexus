@@ -148,6 +148,41 @@ integration("Persistent generation activity", () => {
     expect(snapshot.diagnostic).toEqual({ code: "generation_failed", message: ACTIVITY_DIAGNOSTIC_MESSAGES.generation_failed });
     expect(JSON.stringify(snapshot)).not.toContain("PRIVATE-");
   });
+  it("captures provider failures without widening activity diagnostics or reusing evidence on recovery", async () => {
+    const imported = await campaign(), queued = await queue(imported.campaignId, "Inspect.");
+    const execution = createPostgresGenerationExecutionRepository(pool);
+    await execution.claimNext({ workerId: "provider-evidence", leaseSeconds: 30 });
+    const scope = { ownerUserId, jobId: queued.id, workerId: "provider-evidence" };
+    const observedAt = new Date().toISOString();
+    const providerFailure = {
+      version: 1 as const, source: "http_error" as const, observedAt,
+      httpStatus: 429, upstreamStatus: 429, reason: "rate_limit" as const,
+      limitSource: "upstream_provider" as const, upstreamCode: null, providerName: "PRIVATE-PROVIDER-CANARY",
+      retryAfterMs: 2000, retryAt: new Date(Date.parse(observedAt) + 2000).toISOString(), rateLimit: null,
+      successfulResponseStarted: false, emittedOutput: false, metadataStatus: "recognized" as const
+    };
+    const lastFailureDiagnostic = { version: 1 as const, category: "unknown" as const, code: "provider_rate_limited" as const,
+      phase: "generating", attemptNumber: 1, occurredAt: new Date().toISOString(), providerFailure };
+    expect(await execution.markFailed({ ...scope, errorCode: "generation_failed", errorMessage: "PRIVATE-ERROR-CANARY",
+      recoveryMetadata: {}, lastFailureDiagnostic })).toBe(true);
+    const read = async () => (await pool.query(`SELECT status, orchestration_private->'lastFailureDiagnostic' AS diagnostic,
+      (SELECT snapshot FROM activity_event_outbox WHERE source_id=$1 ORDER BY activity_revision DESC LIMIT 1) AS activity
+      FROM generation_jobs WHERE id=$1`, [queued.id])).rows[0];
+    let stored = await read();
+    expect(stored.status).toBe("failed");
+    expect(stored.diagnostic).toEqual(lastFailureDiagnostic);
+    expect(stored.activity.diagnostic).toEqual({ code: "provider_rate_limited", message: ACTIVITY_DIAGNOSTIC_MESSAGES.provider_rate_limited });
+    expect(JSON.stringify(stored.activity)).not.toContain("PRIVATE-");
+    await commands().retry({ ownerUserId, jobId: queued.id });
+    await execution.claimNext({ workerId: "provider-evidence", leaseSeconds: 30 });
+    expect(await execution.markRecoverable({ ...scope, errorCode: "provider_transport_error", errorMessage: "PRIVATE-RECOVERY-CANARY",
+      recoveryMetadata: {}, providerResponseId: null, providerFinishReason: null })).toBe(true);
+    stored = await read();
+    expect(stored.status).toBe("recoverable");
+    expect(stored.diagnostic).toEqual(lastFailureDiagnostic);
+    expect(stored.activity.diagnostic).toEqual({ code: "provider_transport_error", message: ACTIVITY_DIAGNOSTIC_MESSAGES.provider_transport_error });
+    expect(JSON.stringify(stored.activity)).not.toContain("PRIVATE-");
+  });
   it("staleWorkerCapturesNothing and foreign owners cannot capture", async () => {
     const imported = await campaign(), queued = await queue(imported.campaignId, "Inspect.");
     const execution = createPostgresGenerationExecutionRepository(pool);
