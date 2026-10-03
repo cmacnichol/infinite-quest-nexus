@@ -444,7 +444,7 @@ describe("createIllustrationWorkerStateMachine", () => {
     for (const statement of familyStatements.slice(1)) {
       expect(statement.text).toContain("owner_user_id");
       expect(statement.text).toContain("lease_owner");
-      expect(statement.text).toContain("lease_expires_at >= now()");
+      expect(statement.text).toContain("lease_expires_at > clock_timestamp()");
       expect(statement.values).toEqual(expect.arrayContaining(["job-1", "owner-1", "worker-1"]));
     }
     expect(familyStatements.map(({ text }) => text).join("\n")).not.toContain("error_code");

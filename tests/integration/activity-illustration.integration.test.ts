@@ -276,4 +276,43 @@ integration("Persistent illustration activity producers", () => {
     expect((await events(job.id)).map(row=>row.snapshot.kind)).toEqual(["image.queued","image.generating"]);
   });
 
+  it.each(["transition", "retry", "heartbeat"])("generic %s rejects lease expiration during a row-lock wait", async operation => {
+    const { job } = await setup();
+    const state = createIllustrationWorkerStateMachine(pool, lanes);
+    const claim = (await state.claimNextImageJob({ workerId: "blocked-activity", leaseSeconds: 60 }))!;
+    const blocker = await pool.connect();
+    let pending: Promise<boolean> | undefined;
+    let released = false;
+    try {
+      await blocker.query("BEGIN");
+      const lock = await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid FROM image_jobs WHERE id=$1 FOR UPDATE", [job.id]);
+      pending = operation === "transition"
+        ? state.transitionClaim(claim, { status: "failed", metadata: { code: "PRIVATE_LOCK_FAILURE", message: "PRIVATE_LOCK_BODY" } })
+        : operation === "retry"
+          ? state.scheduleRetry(claim, { code: "PRIVATE_LOCK_FAILURE", message: "PRIVATE_LOCK_BODY" })
+          : state.heartbeatClaim(claim);
+      // Observe the real database lock wait before expiring the lease. No JavaScript-clock window determines correctness.
+      let blocked: { xact_start: Date } | undefined;
+      for (let index = 0; index < 1000 && !blocked; index++) {
+        blocked = (await pool.query<{ xact_start: Date }>("SELECT xact_start FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock'", [lock.rows[0]!.pid])).rows[0];
+        if (!blocked) await pool.query("SELECT pg_sleep(0.01)");
+      }
+      expect(blocked).toBeDefined();
+      // The blocker chooses expiry after the operation's confirmed transaction start, then waits for DB time to cross it.
+      const expiry = await blocker.query<{ started_before_expiry: boolean }>("UPDATE image_jobs SET lease_expires_at=clock_timestamp()+interval '100 milliseconds' WHERE id=$1 RETURNING $2::timestamptz < lease_expires_at AS started_before_expiry", [job.id, blocked!.xact_start]);
+      expect(expiry.rows[0]!.started_before_expiry).toBe(true);
+      await blocker.query("SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM (lease_expires_at-clock_timestamp())))+0.01) FROM image_jobs WHERE id=$1", [job.id]);
+      expect((await blocker.query<{ expired: boolean }>("SELECT lease_expires_at < clock_timestamp() AS expired FROM image_jobs WHERE id=$1", [job.id])).rows[0]!.expired).toBe(true);
+      await blocker.query("COMMIT");
+      released = true;
+      expect(await pending).toBe(false);
+      expect((await pool.query("SELECT status,activity_revision::text,error_code,lease_owner FROM image_jobs WHERE id=$1", [job.id])).rows[0]).toEqual({ status: "generating", activity_revision: "2", error_code: null, lease_owner: "blocked-activity" });
+      expect((await events(job.id)).map(row => row.snapshot.kind)).toEqual(["image.queued", "image.generating"]);
+    } finally {
+      if (!released) await blocker.query("ROLLBACK");
+      blocker.release();
+      if (pending) await pending.catch(() => false);
+    }
+  });
+
 });

@@ -160,7 +160,7 @@ async function loadClaimed(
     `SELECT ${current.projection}
        FROM ${current.table}
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = $4
-        AND lease_expires_at >= now()`,
+        AND lease_expires_at > clock_timestamp()`,
     [scope.jobId, scope.ownerUserId, scope.workerId, current.activeStatus],
   );
   return claimed(result.rows[0], scope.family, scope);
@@ -173,9 +173,9 @@ async function heartbeat(
   const current = binding(scope.family);
   const result = await pool.query(
     `UPDATE ${current.table}
-        SET lease_expires_at = now() + ($4::text || ' seconds')::interval, updated_at = now()
+        SET lease_expires_at = clock_timestamp() + ($4::text || ' seconds')::interval, updated_at = clock_timestamp()
       WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = $5
-        AND lease_expires_at >= now()`,
+        AND lease_expires_at > clock_timestamp()`,
     [scope.jobId, scope.ownerUserId, scope.workerId, scope.leaseSeconds, current.activeStatus],
   );
   return result.rowCount === 1;
@@ -197,9 +197,9 @@ async function transition(
               ${transitionCompletionAssignment(scope.family)}
               lease_owner = CASE WHEN $6 THEN NULL ELSE lease_owner END,
               lease_expires_at = CASE WHEN $6 THEN NULL ELSE lease_expires_at END,
-              updated_at = now()
+              updated_at = clock_timestamp()
         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status = $7
-          AND lease_expires_at >= now()`,
+          AND lease_expires_at > clock_timestamp()`,
       [
         scope.jobId,
         scope.ownerUserId,
@@ -236,14 +236,14 @@ async function retry(
     const result = await client.query(
       `UPDATE ${current.table}
           SET status = 'queued',
-              next_attempt_at = COALESCE($4::timestamptz, now() + interval '15 seconds'),
+              next_attempt_at = COALESCE($4::timestamptz, clock_timestamp() + interval '15 seconds'),
               ${retryFailureAssignments(scope.family)}
               completed_at = NULL,
               lease_owner = NULL,
               lease_expires_at = NULL,
-              updated_at = now()
+              updated_at = clock_timestamp()
         WHERE id = $1 AND owner_user_id = $2 AND lease_owner = $3 AND status IN ($7, 'recoverable')
-          AND lease_expires_at >= now()`,
+          AND lease_expires_at > clock_timestamp()`,
       [scope.jobId, scope.ownerUserId, scope.workerId, next.retryAt ?? null, next.code, next.message, current.activeStatus],
     );
     if (result.rowCount === 1 && scope.family === "image") await captureImageActivity(client, scope.jobId, scope.ownerUserId, "image.retry_queued");
@@ -277,7 +277,7 @@ async function resolvePrompt(
   }>(
     `${source}
       WHERE jobs.id = $1 AND jobs.owner_user_id = $2 AND jobs.lease_owner = $3 AND jobs.status = $4
-        AND jobs.lease_expires_at >= now()`,
+        AND jobs.lease_expires_at > clock_timestamp()`,
     [scope.jobId, scope.ownerUserId, scope.workerId, current.activeStatus],
   );
   const row = result.rows[0];
