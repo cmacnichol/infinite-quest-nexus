@@ -334,7 +334,7 @@ integration("verified protected-fact authority", () => {
     await acceptedTurn(scope.campaignId, 7, { canonicalFacts: [], canonicalFactUpdates: [] });
     await acceptedTurn(scope.campaignId, 8, { canonicalFacts: [], canonicalFactUpdates: [] });
     await pool.query(`INSERT INTO campaign_state_edits(owner_user_id,campaign_id,revision,effective_turn_number,state_snapshot_private)
-      VALUES($1,$2,1,8,$3::jsonb)`, [ownerUserId, scope.campaignId, JSON.stringify({ continuitySummary: "", scratchpad: "", openThreads: [],
+      VALUES($1,$2,1,1,$3::jsonb)`, [ownerUserId, scope.campaignId, JSON.stringify({ continuitySummary: "", scratchpad: "", openThreads: [],
       canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] })]);
     const importedText = "The moon vault imported seal has no accepted source ID.";
     await pool.query("UPDATE campaign_state SET initial_state_snapshot=$2::jsonb WHERE campaign_id=$1",
@@ -366,7 +366,7 @@ integration("verified protected-fact authority", () => {
     await expect(pool.query("SELECT id,content,source_turn_id,source_state_edit_id,source_fact_index,valid_from_turn,valid_until_turn FROM campaign_canonical_facts WHERE campaign_id=$1 ORDER BY id", [scope.campaignId])).resolves.toMatchObject({ rows: before.rows });
 
     const composed = await planV5Request(scope, 11, "Recall every moon vault seal and its current condition.");
-    expect(composed.authority.authority.optionalFactFrontier).toMatchObject({ effectiveTurnNumber: 8, facts: [] });
+    expect(composed.authority.authority.optionalFactFrontier).toMatchObject({ effectiveTurnNumber: 1, facts: [] });
     const withheld = [corrected, badIndex, badText, inactive, future, missing, { id: foreign.id, content: foreign.content }];
     for (const fact of withheld) {
       expect(composed.retrieved.candidates.some((candidate) => candidate.id === fact.id)).toBe(false);
