@@ -1221,7 +1221,7 @@ describe("API server security and CORS headers", () => {
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
-        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+        if (query.includes("SELECT id, campaign_id AS \"campaignId\"")) {
           return {
             rows: [{
               id: jobId,
@@ -1325,7 +1325,7 @@ describe("API server security and CORS headers", () => {
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
-        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+        if (query.includes("SELECT id, campaign_id AS \"campaignId\"")) {
           throw Object.assign(new Error(sensitiveMessage), { code: unsafeCode });
         }
         throw new Error(`Unexpected query: ${query}`);
@@ -1370,7 +1370,7 @@ describe("API server security and CORS headers", () => {
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
-        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+        if (query.includes("SELECT id, campaign_id AS \"campaignId\"")) {
           closeStream?.();
           return {
             rows: [{

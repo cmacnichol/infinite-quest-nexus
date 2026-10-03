@@ -501,7 +501,7 @@ function mockPool(options: MockPoolOptions = {}): DatabasePool {
       }] };
     }
 
-    if (sql.startsWith("SELECT id, campaign_id AS") && sql.includes("partial_output AS")) {
+    if (sql.includes("SELECT id, campaign_id AS") && sql.includes("partial_output AS")) {
       if (options.missingJob) return { rows: [] };
       generationJobReads += 1;
       options.onGenerationJobRead?.();

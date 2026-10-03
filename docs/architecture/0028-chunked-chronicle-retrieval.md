@@ -139,6 +139,21 @@ provider, creation retains the retrieval preferences with embeddings disabled
 and defers indexing until configuration enables it. No provider request runs
 inside creation. Readiness checks and complete legacy fallback are unchanged.
 
+### Shadow execution placement (2026-10-03)
+
+Ordinary turn generation now runs only the configured production retrieval path.
+Explicit Chronicle context previews still honor the saved
+`retrieval_shadow_enabled` flag, run configured comparisons, and retain safe
+comparison telemetry. The generation candidate loader uses its existing
+internal `generationCandidates` distinction; no public setting or saved
+configuration changes.
+
+New world-campaign defaults, database defaults, existing campaign/import
+settings, chunk-index job scheduling, index authority, ranking, readiness
+checks, and complete legacy fallback remain unchanged. This clarification
+refines where diagnostics execute, rather than changing production selection
+or derived-index policy.
+
 ## Rollback
 
 Use the following configuration rollback. It leaves accepted turns, Chronicle

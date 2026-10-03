@@ -3,8 +3,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import * as memoryContracts from "../../packages/contracts/src/memory.js";
 import {
   createPostgresChronicleGenerationTransactionPort,
-  createPostgresChronicleQueryRepository
+  createPostgresChronicleQueryRepository,
+  type ChronicleGenerationTransactionDependencies
 } from "../../packages/database/src/chronicle-repository.js";
+import { loadPostgresChronicleGenerationCandidates } from "../../packages/database/src/chronicle-context-repository.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   createDatabasePool,
@@ -465,9 +467,11 @@ integration("Chronicle retrieval observability", () => {
     let remainingSuccessfulResolutions = Number.POSITIVE_INFINITY;
     let remainingSuccessfulEmbeddings = Number.POSITIVE_INFINITY;
     let diagnosticLoggerThrows = false;
-    const generation = createPostgresChronicleGenerationTransactionPort({
+    let resolutionCalls = 0;
+    const dependencies: ChronicleGenerationTransactionDependencies = {
       embeddings: {
         async resolve(database, request) {
+          resolutionCalls += 1;
           if (request.selectedProviderProfileId !== providerId) return { status: "unconfigured" as const, resolutionSource: "none" as const, resolvedRole: null };
           if (remainingSuccessfulResolutions <= 0) {
             await (database as { query(sql: string): Promise<unknown> }).query(`SELECT * FROM ${privateShadowFailure}`);
@@ -499,7 +503,8 @@ integration("Chronicle retrieval observability", () => {
           diagnostics.push(error);
         }
       }
-    });
+    };
+    const generation = createPostgresChronicleGenerationTransactionPort(dependencies);
     const scope = {
       ownerUserId,
       campaignId: current.campaignId,
@@ -511,6 +516,51 @@ integration("Chronicle retrieval observability", () => {
         recentTurns: 2
       }
     };
+
+    const generationScope = {
+      ownerUserId,
+      campaignId: current.campaignId,
+      worldVersionId: current.worldVersionId,
+      query: scope.request.query,
+      throughTurnNumber: 2
+    };
+    const prepareCandidates = async (shadowEnabled: boolean) => {
+      await pool.query("UPDATE campaign_memory_configs SET retrieval_shadow_enabled=$2 WHERE campaign_id=$1",
+        [current.campaignId, shadowEnabled]);
+      await pool.query("DELETE FROM chronicle_query_embedding_cache WHERE campaign_id=$1", [current.campaignId]);
+      resolutionCalls = 0;
+      embeddedQueries.length = 0;
+      diagnostics.length = 0;
+      const shadowSavepoints: string[] = [];
+      const result = await withTransaction(pool, async (database) => {
+        const query = vi.spyOn(database, "query");
+        try {
+          const candidates = await loadPostgresChronicleGenerationCandidates(database, generationScope, dependencies);
+          shadowSavepoints.push(...query.mock.calls.map(([sql]) => String(sql))
+            .filter((sql) => /^SAVEPOINT chronicle_retrieval_shadow_/.test(sql)));
+          return candidates;
+        } finally {
+          query.mockRestore();
+        }
+      });
+      return { result, resolutionCalls, embeddedQueries: [...embeddedQueries], shadowSavepoints,
+        diagnostics: [...diagnostics] };
+    };
+    const generationWithoutShadow = await prepareCandidates(false);
+    const generationWithShadow = await prepareCandidates(true);
+    expect(generationWithShadow.result).toEqual(generationWithoutShadow.result);
+    // This ready chunked fixture needs one production resolution; another is legacy comparison work.
+    expect(generationWithoutShadow.resolutionCalls).toBe(1);
+    expect(generationWithShadow.resolutionCalls).toBe(1);
+    expect(generationWithShadow.embeddedQueries).toEqual(generationWithoutShadow.embeddedQueries);
+    expect(generationWithShadow.shadowSavepoints).toEqual([]);
+    expect(generationWithShadow.diagnostics).toEqual([]);
+    expect((await pool.query("SELECT id FROM chronicle_retrieval_runs WHERE campaign_id=$1", [current.campaignId])).rows).toEqual([]);
+
+    await pool.query("UPDATE campaign_memory_configs SET retrieval_shadow_enabled=false WHERE campaign_id=$1", [current.campaignId]);
+    await pool.query("DELETE FROM chronicle_query_embedding_cache WHERE campaign_id=$1", [current.campaignId]);
+    embeddedQueries.length = 0;
+    diagnostics.length = 0;
 
     remainingSuccessfulResolutions = 1;
     const withoutShadow = await withTransaction(pool, (database) => generation.buildContextPreview(database, scope));
