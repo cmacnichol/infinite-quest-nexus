@@ -100,3 +100,9 @@ export type {
 export * from "./campaign-cast-editor.js";
 export { createEditSession } from "./edit-session.js";
 export type { EditSession } from "./edit-session.js";
+export { buildCampaignCreateRequest, createCampaignCreationDraft } from "./campaign-creation-draft.js";
+export type {
+  CampaignCreationDraft,
+  CampaignCreationUserSettings,
+  CampaignCreationWorld
+} from "./campaign-creation-draft.js";

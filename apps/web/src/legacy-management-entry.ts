@@ -24,3 +24,11 @@ export type {
   ProviderPresetsApi
 } from "@infinite-quest/client-web";
 export { bindEditDialogDismissal, requestEditDismissal } from "./legacy-edit-session.js";
+export { createEditSession } from "@infinite-quest/client-core";
+export type { EditSession } from "@infinite-quest/client-core";
+export { buildCampaignCreateRequest, createCampaignCreationDraft } from "@infinite-quest/client-core";
+export type {
+  CampaignCreationDraft,
+  CampaignCreationUserSettings,
+  CampaignCreationWorld
+} from "@infinite-quest/client-core";
