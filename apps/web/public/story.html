@@ -60,7 +60,8 @@
 
     <div class="nav-meta story-save-meta topbar-status" aria-label="Story status and user profile">
       <span class="status-dot" aria-hidden="true"></span>
-      <span class="pill" id="autosaveStatus">Autosaved</span>
+      <span class="pill" id="storySyncStatus" aria-live="polite">Story loading</span>
+      <span class="pill" id="autosaveStatus">No draft</span>
       <button id="btnOpenUserProfile" class="nav-profile-button" type="button" aria-label="User profile and settings" title="User profile and settings">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" /></svg>
       </button>
@@ -127,6 +128,14 @@
             <span id="turnInputHelp">Continue the story with dialogue, events, or a direction for the next scene.</span>
             <span id="turnInputCount">0 / 12,000</span>
           </div>
+          <section id="actionDraftConflict" class="story-load-recovery action-draft-conflict hidden" role="status" aria-live="polite">
+            <p id="actionDraftConflictMessage"></p>
+            <div class="row wrap">
+              <button id="restoreActionDraft" type="button" class="small ghost">Restore saved draft</button>
+              <button id="keepActionDraft" type="button" class="small ghost">Keep this draft</button>
+              <button id="discardActionDraft" type="button" class="small ghost">Discard saved draft</button>
+            </div>
+          </section>
           <div class="row wrap">
             <button id="btnTakeAction" class="primary">➜ Continue story</button>
             <button id="btnPrev">← Previous turn</button>
@@ -598,6 +607,19 @@
       <div class="row wrap dialog-actions">
         <button type="submit" value="keep" autofocus>Keep editing</button>
         <button type="submit" value="discard" class="primary">Discard changes</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="actionDraftNavigationDialog" class="world-gen-dialog app-dialog" aria-labelledby="actionDraftNavigationTitle">
+    <form method="dialog" class="world-gen-card">
+      <div>
+        <h3 id="actionDraftNavigationTitle">The action draft is not saved yet</h3>
+        <p class="mini">Stay on Story to keep editing, or leave and discard the unsaved action text.</p>
+      </div>
+      <div class="row wrap dialog-actions">
+        <button type="submit" value="stay" autofocus>Keep editing</button>
+        <button type="submit" value="discard" class="primary">Leave without saving</button>
       </div>
     </form>
   </dialog>

@@ -9,14 +9,17 @@ import {
   createNoopSessionPort,
   createNexusApiClient,
   createPendingSubmissionStore,
-  createFailedTurnPromptStore
+  createFailedTurnPromptStore,
+  createIndexedDbDraftDatabase,
+  createStoryActionDraftStore
 } from "@infinite-quest/client-web";
 import { createGenerationWorkflow, type Clock, type DelayScheduler, type GenerationWorkflow, type IdFactory, type PendingSubmissionStore, type SessionPort } from "@infinite-quest/client-core";
-import type { EventSourceFactory, FailedTurnPromptStore, NexusApiClient, StoryMemoryApi } from "@infinite-quest/client-web";
+import type { DraftDatabasePort, EventSourceFactory, FailedTurnPromptStore, NexusApiClient, StoryActionDraftStore, StoryMemoryApi } from "@infinite-quest/client-web";
 import { createLegacyIllustrationApi, type LegacyIllustrationApi } from "./legacy-illustration-api.js";
 
 export interface StoryPlayerComposition {
   readonly api: NexusApiClient;
+  readonly actionDrafts: StoryActionDraftStore;
   readonly clock: Clock;
   readonly delay: DelayScheduler;
   readonly idFactory: IdFactory;
@@ -32,6 +35,7 @@ export interface StoryPlayerComposition {
 export interface StoryPlayerEnvironment {
   readonly document: Document;
   readonly storage: Storage;
+  readonly draftDatabase?: DraftDatabasePort;
   readonly eventSourceFactory: EventSourceFactory | null;
   readonly random: () => number;
 }
@@ -44,6 +48,8 @@ export interface StoryPlayerCompositionFactories {
   readonly createIdFactory: typeof createBrowserIdFactory;
   readonly createApi: typeof createNexusApiClient;
   readonly createPendingSubmissions: typeof createPendingSubmissionStore;
+  readonly createDraftDatabase: typeof createIndexedDbDraftDatabase;
+  readonly createActionDrafts: typeof createStoryActionDraftStore;
   readonly createSource: typeof createBrowserGenerationSource;
   readonly createWorkflow: typeof createGenerationWorkflow;
   readonly createIllustrations: typeof createLegacyIllustrationApi;
@@ -58,6 +64,8 @@ const defaultFactories: StoryPlayerCompositionFactories = {
   createIdFactory: createBrowserIdFactory,
   createApi: createNexusApiClient,
   createPendingSubmissions: createPendingSubmissionStore,
+  createDraftDatabase: createIndexedDbDraftDatabase,
+  createActionDrafts: createStoryActionDraftStore,
   createSource: createBrowserGenerationSource,
   createWorkflow: createGenerationWorkflow,
   createIllustrations: createLegacyIllustrationApi,
@@ -84,6 +92,12 @@ export function createStoryPlayerComposition(
   const delay = factories.createDelay();
   const visibility = factories.createVisibility(environment.document);
   const idFactory = factories.createIdFactory();
+  const actionDraftDatabase = environment.draftDatabase ?? factories.createDraftDatabase();
+  const actionDrafts = factories.createActionDrafts(
+    actionDraftDatabase,
+    () => new Date(clock.now()),
+    () => idFactory.create()
+  );
   const api = factories.createApi({ basePath: "/api/v1", session });
   const pendingSubmissions = factories.createPendingSubmissions(environment.storage);
   const failedTurnPrompts = createFailedTurnPromptStore(environment.storage);
@@ -106,6 +120,7 @@ export function createStoryPlayerComposition(
 
   return {
     api,
+    actionDrafts,
     clock,
     delay,
     idFactory,

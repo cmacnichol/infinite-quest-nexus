@@ -12,6 +12,8 @@ describe("Story Player composition bootstrap", () => {
     const visibility = { current: vi.fn(), changes: vi.fn() };
     const idFactory = { create: vi.fn(() => "id-1") };
     const pendingSubmissions = { load: vi.fn(), save: vi.fn(), clear: vi.fn() };
+    const draftDatabase = { transaction: vi.fn() };
+    const actionDrafts = { read: vi.fn(), write: vi.fn(), removeIfRevision: vi.fn(), readExpiryNotice: vi.fn() };
     const api = { generation: {} };
     const source = { watch: vi.fn() };
     const workflow = { submit: vi.fn(), resume: vi.fn() };
@@ -24,6 +26,8 @@ describe("Story Player composition bootstrap", () => {
       createVisibility: vi.fn(() => visibility),
       createIdFactory: vi.fn(() => idFactory),
       createApi: vi.fn(() => api),
+      createDraftDatabase: vi.fn(),
+      createActionDrafts: vi.fn(() => actionDrafts),
       createPendingSubmissions: vi.fn(() => pendingSubmissions),
       createSource: vi.fn(() => source),
       createWorkflow: vi.fn(() => workflow),
@@ -34,6 +38,7 @@ describe("Story Player composition bootstrap", () => {
     const composition = createStoryPlayerComposition({
       document: {} as Document,
       storage: {} as Storage,
+      draftDatabase,
       eventSourceFactory: null,
       random: () => 0.5
     }, factories as never);
@@ -53,10 +58,13 @@ describe("Story Player composition bootstrap", () => {
       pendingSubmissions,
       source
     });
+    expect(factories.createDraftDatabase).not.toHaveBeenCalled();
+    expect(factories.createActionDrafts).toHaveBeenCalledWith(draftDatabase, expect.any(Function), expect.any(Function));
     expect(factories.createIllustrations).toHaveBeenCalledWith({ basePath: "/api/v1", session });
     expect(factories.createStoryMemory).toHaveBeenCalledWith({ basePath: "/api/v1", session });
-    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, api, workflow, illustrations, storyMemory });
-    Object.values(factories).forEach((factory) => expect(factory).toHaveBeenCalledOnce());
+    expect(composition).toMatchObject({ session, clock, delay, idFactory, pendingSubmissions, actionDrafts, api, workflow, illustrations, storyMemory });
+    Object.entries(factories).filter(([name]) => name !== "createDraftDatabase")
+      .forEach(([, factory]) => expect(factory).toHaveBeenCalledOnce());
   });
 
   it("creates one composition and invokes the initializer exactly once", () => {

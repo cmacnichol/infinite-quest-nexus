@@ -75,6 +75,22 @@ export function chronicleRetrievalHistoryMarkup(audit) {
 
 export function startStoryPlayer(composition) {
 
+let actionDraftLocalGeneration = 0;
+let actionDraftPersistedGeneration = -1;
+let actionDraftPersistedRevision = null;
+let actionDraftCurrent = null;
+let actionDraftSubmitted = null;
+let actionDraftConflict = null;
+let actionDraftSaving = false;
+let actionDraftScheduled = false;
+let actionDraftSaveFailed = false;
+let actionDraftClearPending = false;
+let actionDraftSaveTimer = null;
+let actionDraftSaveQueue = Promise.resolve();
+let actionDraftNavigationTarget = null;
+let actionDraftCurrentScopeKey = null;
+let actionDraftSessionEpoch = 0;
+
 let resolveInitialization;
 let rejectInitialization;
 let campaignLoadSequence = 0;
@@ -509,6 +525,7 @@ async function loadCampaign(campaignId, options = {}) {
   state.campaignId = campaignId;
   state.campaignLoaded = false;
   clearStoryLoadRecovery();
+  setStorySyncStatus("Story loading");
   state.storyMemorySettings = null;
   renderStoryMemorySettings(null, "Loading the saved Story Memory level for this campaign.");
   completeHistoryLoad = null;
@@ -564,6 +581,7 @@ async function loadCampaign(campaignId, options = {}) {
 
     recordActivity("system", "Campaign loaded", `${state.turns.length} turns loaded for "${name}".`);
     state.campaignLoaded = true;
+    setStorySyncStatus("Story synced");
     if (!state.pendingGeneration && (state.generationRecovery?.status === "recoverable" || state.generationRecovery?.status === "failed")) {
       const guidance = generationRecoveryGuidance(state.generationRecovery.diagnostic);
       const presentation = generationDiagnosticPresentation(state.generationRecovery.diagnostic);
@@ -584,6 +602,7 @@ async function loadCampaign(campaignId, options = {}) {
       );
       if (state.generationRecovery.status === "failed") restoreRetainedAppendDraft();
     }
+    await restoreActionDraftForCampaign(campaignId, loadSequence);
     try {
       localStorage.setItem("infiniteQuestLastCampaignId", campaignId);
     } catch {
@@ -604,6 +623,7 @@ async function loadCampaign(campaignId, options = {}) {
     state.illustrationConfig = null;
     state.illustrationSegments = [];
     state.illustrationError = null;
+    setStorySyncStatus("Story sync unavailable");
     const title = $("storyTitle");
     if (title) title.textContent = "Story unavailable";
     document.title = "Story unavailable — Infinite Quest";
@@ -1188,6 +1208,429 @@ function resetStoryLengthOverrideControls() {
   syncStoryLengthOverrideControls();
 }
 
+function actionDraftScope(campaignId = state.campaignId) {
+  const userId = state.user?.id;
+  if (typeof userId !== "string" || !campaignId) return null;
+  return { userId, campaignId };
+}
+
+function actionDraftScopeKey(scope) {
+  return scope ? `${scope.userId}:${scope.campaignId}` : null;
+}
+
+function actionDraftStatusText() {
+  if (actionDraftSaving || actionDraftScheduled) return "Draft saving";
+  if (actionDraftSaveFailed) return "Draft not saved";
+  if (actionDraftConflict) return "Draft not saved";
+  if (actionDraftCurrent && actionDraftPersistedRevision
+    && actionDraftPersistedGeneration === actionDraftLocalGeneration) return "Draft saved";
+  return "No draft";
+}
+
+function updateActionDraftStatus() {
+  const status = $("autosaveStatus");
+  if (status) status.textContent = actionDraftStatusText();
+}
+
+function setStorySyncStatus(value) {
+  const status = $("storySyncStatus");
+  if (status) status.textContent = value;
+}
+
+function actionDraftBase() {
+  const baseTurnNumber = Number(state.campaign?.activeTurnNumber || 0);
+  const baseTurn = state.turns.find((turn) => Number(turn.turnNumber) === baseTurnNumber);
+  return { baseTurnId: baseTurn?.id || null, baseTurnNumber };
+}
+
+function setActionDraftValue(text, options = {}) {
+  actionDraftLocalGeneration += 1;
+  actionDraftCurrent = {
+    text: String(text ?? ""),
+    inputMode: options.inputMode || state.turnInputMode,
+    ...actionDraftBase()
+  };
+  actionDraftClearPending = Boolean(options.clear);
+  actionDraftSaveFailed = false;
+  if (actionDraftConflict && !options.preserveConflict) actionDraftConflict = null;
+  if (actionDraftSaveTimer !== null) clearTimeout(actionDraftSaveTimer);
+  if (options.clear) {
+    actionDraftSaveTimer = null;
+    actionDraftScheduled = false;
+    updateActionDraftConflict();
+    updateActionDraftStatus();
+    void flushActionDraftWrites();
+    return;
+  }
+  actionDraftScheduled = true;
+  actionDraftSaveTimer = setTimeout(() => {
+    actionDraftSaveTimer = null;
+    actionDraftScheduled = false;
+    void flushActionDraftWrites();
+  }, 250);
+  updateActionDraftStatus();
+}
+
+function actionDraftRecord(snapshot, editGeneration, scope = actionDraftScope()) {
+  if (!scope) return null;
+  return {
+    scope,
+    editGeneration,
+    draft: {
+      schemaVersion: 1,
+      draftRevision: composition.idFactory.create(),
+      text: snapshot.text,
+      inputMode: snapshot.inputMode,
+      baseTurnId: snapshot.baseTurnId,
+      baseTurnNumber: snapshot.baseTurnNumber,
+      updatedAt: new Date(composition.clock.now()).toISOString()
+    }
+  };
+}
+
+function updateActionDraftConflict() {
+  const panel = $("actionDraftConflict");
+  const message = $("actionDraftConflictMessage");
+  const restore = $("restoreActionDraft");
+  const keep = $("keepActionDraft");
+  const discard = $("discardActionDraft");
+  if (!panel) return;
+  panel.classList.toggle("hidden", !actionDraftConflict);
+  if (!actionDraftConflict) return;
+  if (message) message.textContent = actionDraftConflict.message;
+  if (restore) restore.classList.toggle("hidden", !actionDraftConflict.draft);
+  if (keep) keep.classList.toggle("hidden", actionDraftConflict.kind !== "revision");
+  if (discard) discard.classList.toggle("hidden", actionDraftConflict.kind !== "base");
+}
+
+function presentActionDraftConflict(draft, kind, message) {
+  actionDraftConflict = { draft: draft || null, kind, message };
+  updateActionDraftConflict();
+  updateActionDraftStatus();
+}
+
+async function writeActionDraftGeneration(snapshot, editGeneration, expectedRevision = actionDraftPersistedRevision, scopeOverride = actionDraftScope()) {
+  const record = actionDraftRecord(snapshot, editGeneration, scopeOverride);
+  if (!record) return { outcome: "unavailable" };
+  const scopeKey = actionDraftScopeKey(record.scope);
+  const sessionEpoch = actionDraftSessionEpoch;
+  const result = await composition.actionDrafts.write(record.scope, record.draft, { expectedRevision });
+  if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return { outcome: "superseded" };
+  if (result.outcome === "saved") {
+    actionDraftPersistedRevision = result.currentRevision;
+    actionDraftPersistedGeneration = editGeneration;
+    actionDraftSaveFailed = false;
+    actionDraftClearPending = false;
+    actionDraftCurrentScopeKey = actionDraftScopeKey(record.scope);
+    if (actionDraftCurrent && actionDraftLocalGeneration === editGeneration) {
+      actionDraftCurrent = { ...snapshot };
+    }
+  } else if (result.outcome === "conflict") {
+    const currentDraft = await composition.actionDrafts.read(record.scope);
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return { outcome: "superseded" };
+    if (currentDraft) {
+      presentActionDraftConflict(currentDraft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+    } else {
+      presentActionDraftConflict(null, "revision", "This action draft changed in another tab. Keep editing and retry your save.");
+    }
+  } else {
+    actionDraftSaveFailed = true;
+  }
+  updateActionDraftStatus();
+  return result;
+}
+
+async function drainActionDraftWrites() {
+  let allSaved = true;
+  while (actionDraftPersistedGeneration < actionDraftLocalGeneration || actionDraftClearPending) {
+    const editGeneration = actionDraftLocalGeneration;
+    const scope = actionDraftScope();
+    const scopeKey = actionDraftScopeKey(scope);
+    const sessionEpoch = actionDraftSessionEpoch;
+    if (!scope) {
+      actionDraftSaveFailed = true;
+      updateActionDraftStatus();
+      return false;
+    }
+    if (actionDraftClearPending) {
+      if (!actionDraftPersistedRevision) {
+        actionDraftPersistedGeneration = editGeneration;
+        actionDraftClearPending = false;
+        actionDraftCurrent = null;
+        updateActionDraftStatus();
+        continue;
+      }
+      const removal = await composition.actionDrafts.removeIfRevision(scope, actionDraftPersistedRevision);
+      if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+      if (removal.outcome === "removed" || removal.outcome === "absent") {
+        actionDraftPersistedRevision = null;
+        actionDraftClearPending = false;
+        if (actionDraftLocalGeneration === editGeneration) {
+          actionDraftPersistedGeneration = editGeneration;
+          actionDraftCurrent = null;
+          actionDraftConflict = null;
+        } else {
+          actionDraftPersistedGeneration = -1;
+        }
+      } else if (removal.outcome === "conflict") {
+        const currentDraft = await composition.actionDrafts.read(scope);
+        if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+        presentActionDraftConflict(currentDraft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+        allSaved = false;
+        break;
+      } else {
+        actionDraftSaveFailed = true;
+        allSaved = false;
+        break;
+      }
+      updateActionDraftStatus();
+      continue;
+    }
+    const snapshot = actionDraftCurrent;
+    if (!snapshot) {
+      actionDraftPersistedGeneration = editGeneration;
+      continue;
+    }
+    const result = await writeActionDraftGeneration(snapshot, editGeneration, actionDraftPersistedRevision, scope);
+    if (result.outcome !== "saved") {
+      allSaved = false;
+      break;
+    }
+  }
+  return allSaved && !actionDraftSaveFailed && !actionDraftConflict;
+}
+
+function flushActionDraftWrites() {
+  if (actionDraftSaveTimer !== null) clearTimeout(actionDraftSaveTimer);
+  actionDraftSaveTimer = null;
+  actionDraftScheduled = false;
+  actionDraftSaving = true;
+  updateActionDraftStatus();
+  const write = actionDraftSaveQueue.then(() => drainActionDraftWrites(), () => drainActionDraftWrites());
+  actionDraftSaveQueue = write.catch(() => false);
+  return write.finally(() => {
+    actionDraftSaving = false;
+    updateActionDraftStatus();
+  });
+}
+
+function isActionDraftBaseCurrent(draft) {
+  const base = actionDraftBase();
+  return draft.baseTurnNumber === base.baseTurnNumber && draft.baseTurnId === base.baseTurnId;
+}
+
+async function restoreActionDraftForCampaign(campaignId, loadSequence) {
+  const scope = actionDraftScope(campaignId);
+  if (!scope) {
+    updateActionDraftStatus();
+    return;
+  }
+  const scopeKey = actionDraftScopeKey(scope);
+  if (actionDraftCurrentScopeKey !== scopeKey) {
+    actionDraftSessionEpoch += 1;
+    actionDraftLocalGeneration = 0;
+    actionDraftPersistedGeneration = -1;
+    actionDraftPersistedRevision = null;
+    actionDraftCurrent = null;
+    actionDraftSubmitted = null;
+    actionDraftConflict = null;
+    actionDraftSaveFailed = false;
+    actionDraftClearPending = false;
+    actionDraftCurrentScopeKey = scopeKey;
+  }
+  const startingGeneration = actionDraftLocalGeneration;
+  const sessionEpoch = actionDraftSessionEpoch;
+  const draft = await composition.actionDrafts.read(scope);
+  if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId
+    || sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return;
+  if (!draft) {
+    const hasExpiryNotice = await composition.actionDrafts.readExpiryNotice(scope);
+    if (campaignLoadSequence !== loadSequence || state.campaignId !== campaignId
+      || sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return;
+    if (hasExpiryNotice) {
+      recordActivity("system", "An older action draft expired", "It was removed after the local retention period.");
+    }
+    if (actionDraftLocalGeneration === startingGeneration) updateActionDraftStatus();
+    return;
+  }
+  actionDraftPersistedRevision = draft.draftRevision;
+  if (state.pendingGeneration || state.generationRecovery) {
+    const authoritativeAction = state.pendingGeneration?.action || state.generationRecovery?.action || state.retainedAppendDraft?.action;
+    if (authoritativeAction && draft.text === authoritativeAction && draft.baseTurnNumber + 1 === Number(state.pendingGeneration?.expectedTurnNumber || state.generationRecovery?.expectedTurnNumber)) {
+      actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
+      actionDraftPersistedGeneration = actionDraftLocalGeneration;
+      actionDraftSubmitted = {
+        campaignId, editGeneration: actionDraftLocalGeneration, persistedRevision: draft.draftRevision,
+        scopeKey, sessionEpoch
+      };
+    }
+    updateActionDraftStatus();
+    return;
+  }
+  if (actionDraftLocalGeneration !== startingGeneration || $("freeAction")?.value) {
+    updateActionDraftStatus();
+    return;
+  }
+  actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
+  actionDraftPersistedGeneration = actionDraftLocalGeneration;
+  if (!isActionDraftBaseCurrent(draft)) {
+    presentActionDraftConflict(draft, "base", "The story has moved on since this action draft was saved. Restore it or discard it.");
+    return;
+  }
+  const input = $("freeAction");
+  if (input) input.value = draft.text;
+  setTurnInputMode(draft.inputMode, { refreshPlaceholder: true });
+  resetChoiceSelectionFromDraft(draft.text);
+  updateTurnInputCharacterCount();
+  updateActionDraftStatus();
+}
+
+async function captureSubmittedActionDraft(action, details) {
+  const input = $("freeAction");
+  if (!details.actionDraftEligible || details.operationKind === "replace_latest" || !input || input.value.trim() !== action) return false;
+  const campaignId = state.campaignId;
+  const editGeneration = actionDraftLocalGeneration;
+  const sessionEpoch = actionDraftSessionEpoch;
+  const scopeKey = actionDraftCurrentScopeKey;
+  const saved = await flushActionDraftWrites();
+  if (!saved || campaignId !== state.campaignId || sessionEpoch !== actionDraftSessionEpoch
+    || scopeKey !== actionDraftCurrentScopeKey || editGeneration !== actionDraftLocalGeneration
+    || actionDraftPersistedGeneration !== editGeneration || !actionDraftPersistedRevision
+    || actionDraftCurrent?.text.trim() !== action) return false;
+  actionDraftSubmitted = { campaignId, editGeneration, persistedRevision: actionDraftPersistedRevision, scopeKey, sessionEpoch };
+  return true;
+}
+
+async function clearAcceptedActionDraft(result) {
+  const submitted = actionDraftSubmitted;
+  if (!submitted || submitted.campaignId !== result.campaignId
+    || submitted.sessionEpoch !== actionDraftSessionEpoch
+    || submitted.scopeKey !== actionDraftCurrentScopeKey
+    || submitted.editGeneration !== actionDraftLocalGeneration
+    || submitted.editGeneration !== actionDraftPersistedGeneration
+    || submitted.persistedRevision !== actionDraftPersistedRevision) return;
+  const scope = actionDraftScope(result.campaignId);
+  if (!scope) return;
+  const removal = await composition.actionDrafts.removeIfRevision(scope, submitted.persistedRevision);
+  if (submitted.sessionEpoch !== actionDraftSessionEpoch || submitted.scopeKey !== actionDraftCurrentScopeKey) return;
+  if (removal.outcome === "removed" || removal.outcome === "absent") {
+    const unchanged = submitted.editGeneration === actionDraftLocalGeneration
+      && submitted.persistedRevision === actionDraftPersistedRevision;
+    actionDraftPersistedRevision = null;
+    if (!unchanged) {
+      actionDraftPersistedGeneration = -1;
+      updateActionDraftStatus();
+      return;
+    }
+    actionDraftPersistedGeneration = actionDraftLocalGeneration;
+    actionDraftCurrent = null;
+    actionDraftSubmitted = null;
+    updateActionDraftStatus();
+  } else if (removal.outcome === "conflict") {
+    const currentDraft = await composition.actionDrafts.read(scope);
+    if (submitted.sessionEpoch !== actionDraftSessionEpoch || submitted.scopeKey !== actionDraftCurrentScopeKey) return;
+    presentActionDraftConflict(currentDraft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+  } else {
+    actionDraftSaveFailed = true;
+    updateActionDraftStatus();
+  }
+}
+
+async function reconcileActionDraftConflict(choice) {
+  const conflict = actionDraftConflict;
+  if (!conflict) return false;
+  const scope = actionDraftScope();
+  if (!scope) return false;
+  const scopeKey = actionDraftScopeKey(scope);
+  const sessionEpoch = actionDraftSessionEpoch;
+  if (choice === "restore" && conflict.draft) {
+    const draft = await composition.actionDrafts.read(scope);
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    if (!draft || draft.draftRevision !== conflict.draft.draftRevision) {
+      presentActionDraftConflict(draft, "revision", "This action draft changed in another tab. Choose which version to keep.");
+      return false;
+    }
+    actionDraftLocalGeneration += 1;
+    actionDraftCurrent = { text: draft.text, inputMode: draft.inputMode, baseTurnId: draft.baseTurnId, baseTurnNumber: draft.baseTurnNumber };
+    actionDraftPersistedGeneration = actionDraftLocalGeneration;
+    actionDraftPersistedRevision = draft.draftRevision;
+    actionDraftConflict = null;
+    setTurnInputMode(draft.inputMode, { refreshPlaceholder: true });
+    const input = $("freeAction");
+    if (input) input.value = draft.text;
+    resetChoiceSelectionFromDraft(draft.text);
+    updateTurnInputCharacterCount();
+    updateActionDraftConflict();
+    updateActionDraftStatus();
+    return true;
+  }
+  if (choice === "keep") {
+    const remote = await composition.actionDrafts.read(scope);
+    if (!remote || sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    const snapshot = actionDraftCurrent;
+    if (!snapshot) return false;
+    actionDraftConflict = null;
+    const result = await writeActionDraftGeneration(snapshot, actionDraftLocalGeneration, remote.draftRevision, scope);
+    if (result.outcome === "saved") {
+      updateActionDraftConflict();
+      return true;
+    }
+    return false;
+  }
+  if (choice === "discard" && conflict.kind === "base" && conflict.draft) {
+    const result = await composition.actionDrafts.removeIfRevision(scope, conflict.draft.draftRevision);
+    if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+    if (result.outcome === "removed" || result.outcome === "absent") {
+      actionDraftConflict = null;
+      actionDraftCurrent = null;
+      actionDraftPersistedRevision = null;
+      actionDraftPersistedGeneration = actionDraftLocalGeneration;
+      updateActionDraftConflict();
+      updateActionDraftStatus();
+      return true;
+    }
+    if (result.outcome === "conflict") {
+      const latest = await composition.actionDrafts.read(scope);
+      if (sessionEpoch !== actionDraftSessionEpoch || scopeKey !== actionDraftCurrentScopeKey) return false;
+      presentActionDraftConflict(latest, "revision", "This action draft changed in another tab. Choose which version to keep.");
+    }
+  }
+  return false;
+}
+
+function actionDraftNeedsNavigationGuard() {
+  return Boolean(actionDraftCurrent && (
+    actionDraftSaving
+    || actionDraftSaveFailed
+    || actionDraftConflict
+    || actionDraftPersistedGeneration !== actionDraftLocalGeneration
+  ));
+}
+
+function openActionDraftNavigationDialog(target) {
+  actionDraftNavigationTarget = target;
+  const dialog = $("actionDraftNavigationDialog");
+  if (dialog && !dialog.open && typeof dialog.showModal === "function") dialog.showModal();
+}
+
+async function discardActionDraftBeforeNavigation() {
+  const scope = actionDraftScope();
+  if (scope && actionDraftPersistedRevision && !actionDraftConflict) {
+    await composition.actionDrafts.removeIfRevision(scope, actionDraftPersistedRevision);
+  }
+  actionDraftLocalGeneration += 1;
+  actionDraftPersistedGeneration = actionDraftLocalGeneration;
+  actionDraftPersistedRevision = null;
+  actionDraftCurrent = null;
+  actionDraftSubmitted = null;
+  actionDraftSaveFailed = false;
+  actionDraftClearPending = false;
+  updateActionDraftStatus();
+  const target = actionDraftNavigationTarget;
+  actionDraftNavigationTarget = null;
+  if (target) window.location.assign(target);
+}
+
 function defaultTurnInputMode() {
   return turnInputModeForControlStyle(campaignTurnControlStyle());
 }
@@ -1248,6 +1691,7 @@ function setTurnInputMode(mode, options = {}) {
     lock.classList.toggle("hidden", canChoose || controlStyle === "flexible_scene");
     lock.textContent = controlStyle === "action_only" ? "This campaign accepts player actions." : "";
   }
+  if (options.persistDraft) setActionDraftValue(freeAction?.value || "", { inputMode: state.turnInputMode });
 }
 
 function syncTurnInputModeFromCampaign() {
@@ -1298,6 +1742,7 @@ function renderChoices(choices, customSuggestion, ownerKey) {
             }
             resetChoiceSelectionFromDraft(text);
             freeAction.value = text;
+            setActionDraftValue(text, { inputMode: state.turnInputMode });
             updateTurnInputCharacterCount();
           }
           state.nextTurnInputModeSource = "generated_choice";
@@ -1318,6 +1763,7 @@ function renderChoices(choices, customSuggestion, ownerKey) {
             state.choiceDraftSelection = result.selection;
             state.nextTurnInputModeSource = result.selection.selectedIndexes.length ? "generated_choice" : null;
             freeAction.value = result.text;
+            setActionDraftValue(result.text, { inputMode: state.turnInputMode });
             freeAction.focus();
             updateTurnInputCharacterCount();
             syncChoiceSelectionButtons(container);
@@ -1364,8 +1810,9 @@ async function submitResolvedTurn(action, details) {
     state.retainedAppendDraft = { campaignId: state.campaignId, expectedTurnNumber: appendExpectedTurnNumber(state.campaign), action, requestedInputMode: details.requestedInputMode };
   }
   const freeAction = $("freeAction");
-  if (freeAction) freeAction.value = "";
-  resetChoiceSelectionFromDraft("");
+  const submittedDraftSaved = await captureSubmittedActionDraft(action, details);
+  if (freeAction && submittedDraftSaved) freeAction.value = "";
+  if (submittedDraftSaved) resetChoiceSelectionFromDraft("");
   updateTurnInputCharacterCount();
   await runGeneration(action, details);
 }
@@ -1381,7 +1828,7 @@ async function submitAction(actionText, options = {}) {
   const requestedInputMode = campaignTurnControlStyle() === "flexible_action" ? state.turnInputMode : defaultTurnInputMode();
   const inputModeSource = options.inputModeSource || state.nextTurnInputModeSource || "explicit";
   state.nextTurnInputModeSource = null;
-  await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride });
+  await submitResolvedTurn(action, { requestedInputMode, resolvedInputMode: requestedInputMode, inputModeSource, storyLengthProfileOverride, actionDraftEligible: true });
 }
 
 // ── Generation Pipeline ───────────────────────────────────────
@@ -1938,6 +2385,8 @@ async function retryCompletedGenerationResult() {
 }
 
 async function finalizeCompletedGeneration(result) {
+  void clearAcceptedActionDraft(result);
+  if (state.campaignId === result.campaignId) setStorySyncStatus("Story syncing");
   const preserveViewport = Boolean($("streamingPreviewCard")) && !state.streamingAutoFollow;
   const viewport = preserveViewport
     ? { left: window.scrollX, top: window.scrollY }
@@ -1998,18 +2447,31 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
 }
 
 async function reconcileCompletedGeneration(result) {
+  const campaignId = result.campaignId;
+  const loadSequence = campaignLoadSequence;
+  const sessionEpoch = actionDraftSessionEpoch;
+  const userId = state.user?.id;
+  const isCurrent = () => state.campaignId === campaignId
+    && campaignLoadSequence === loadSequence
+    && actionDraftSessionEpoch === sessionEpoch
+    && state.user?.id === userId;
+  if (!isCurrent()) return;
   try {
-    const syncData = await apiClient.generation.syncStatus(state.campaignId);
+    const syncData = await apiClient.generation.syncStatus(campaignId);
+    if (!isCurrent()) return;
     state.campaign = syncData.campaign || syncData;
     state.world = syncData.world || state.campaign.world || null;
     state.playerConfig = syncData.playerConfig || state.campaign.playerConfig || null;
     state.pendingGeneration = syncData.pendingGeneration || null;
     syncTurnInputModeFromCampaign();
-    state.runtimeState = await apiClient.campaigns.state(state.campaignId);
+    state.runtimeState = await apiClient.campaigns.state(campaignId);
+    if (!isCurrent()) return;
     markEditStateStaleForCurrentRuntimeState(state.runtimeState);
     try {
-      state.illustrationConfig = await illustrationApi.config(state.campaignId);
-      const segmentData = await illustrationApi.segments(state.campaignId);
+      state.illustrationConfig = await illustrationApi.config(campaignId);
+      if (!isCurrent()) return;
+      const segmentData = await illustrationApi.segments(campaignId);
+      if (!isCurrent()) return;
       state.illustrationSegments = segmentData.segments || [];
       state.illustrationError = null;
     } catch (error) {
@@ -2023,7 +2485,9 @@ async function reconcileCompletedGeneration(result) {
     renderStoryIllustration();
     updateStatusBar();
     renderTurnInput();
+    setStorySyncStatus("Story synced");
   } catch (error) {
+    if (isCurrent()) setStorySyncStatus("Story sync delayed");
     recordActivity("error", "Completed turn reconciliation failed", error.message);
   }
 }
@@ -3574,6 +4038,29 @@ async function init() {
 
 // ── Boot Sequence ─────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
+  window.addEventListener("beforeunload", (event) => {
+    if (!actionDraftNeedsNavigationGuard()) return;
+    event.preventDefault();
+    event.returnValue = "";
+    void flushActionDraftWrites();
+  });
+  window.addEventListener("pagehide", () => { void flushActionDraftWrites(); });
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const anchor = event.target.closest("a[href]");
+    if (!anchor || anchor.hasAttribute("download") || anchor.target === "_blank") return;
+    const target = new URL(anchor.href, window.location.href);
+    if (target.origin !== window.location.origin || !actionDraftNeedsNavigationGuard()) return;
+    event.preventDefault();
+    void flushActionDraftWrites().then((saved) => {
+      if (saved) {
+        window.location.assign(target.href);
+      } else {
+        openActionDraftNavigationDialog(target.href);
+      }
+    });
+  }, true);
+
   // Core action buttons
   const btnTakeAction = $("btnTakeAction");
   if (btnTakeAction) btnTakeAction.addEventListener("click", () => {
@@ -3584,13 +4071,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const freeAction = $("freeAction");
   document.querySelectorAll("[data-turn-input-mode]").forEach((input) => {
     input.addEventListener("change", () => {
-      if (input.checked) setTurnInputMode(input.value, { refreshPlaceholder: true });
+      if (input.checked) setTurnInputMode(input.value, { refreshPlaceholder: true, persistDraft: true });
     });
   });
   if (freeAction) {
     freeAction.addEventListener("input", () => {
       forgetRetainedAppendDraft();
       resetChoiceSelectionFromDraft(freeAction.value);
+      setActionDraftValue(freeAction.value, { inputMode: state.turnInputMode });
       updateTurnInputCharacterCount();
     });
     freeAction.addEventListener("keydown", (e) => {
@@ -3602,9 +4090,18 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!freeAction || freeAction.disabled) return;
     forgetRetainedAppendDraft();
     freeAction.value = "";
+    setActionDraftValue("", { inputMode: state.turnInputMode, clear: true });
     resetChoiceSelectionFromDraft("");
     updateTurnInputCharacterCount();
     freeAction.focus();
+  });
+  $("restoreActionDraft")?.addEventListener("click", () => { void reconcileActionDraftConflict("restore"); });
+  $("keepActionDraft")?.addEventListener("click", () => { void reconcileActionDraftConflict("keep"); });
+  $("discardActionDraft")?.addEventListener("click", () => { void reconcileActionDraftConflict("discard"); });
+  const actionDraftNavigationDialog = $("actionDraftNavigationDialog");
+  actionDraftNavigationDialog?.addEventListener("close", () => {
+    if (actionDraftNavigationDialog.returnValue === "discard") void discardActionDraftBeforeNavigation();
+    else actionDraftNavigationTarget = null;
   });
 
   // History navigation
