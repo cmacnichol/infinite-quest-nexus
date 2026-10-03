@@ -189,6 +189,7 @@
           </div>
           <div class="campaign-editor-actions">
             <button id="saveCampaign" class="button secondary" type="submit" form="campaignForm" disabled>Save campaign</button>
+            <span id="campaignSaveStatus" class="status" data-state="saved" role="status" aria-live="polite">Campaign settings saved</span>
             <button id="loadCampaign" class="button primary" type="button" disabled>Load story</button>
           </div>
         </div>
@@ -259,8 +260,9 @@
                   </select>
                 </label>
                 <div class="campaign-review-settings"><label><input id="campaignContinuityReviewEnabled" type="checkbox" disabled> Enable continuity review</label>
-                <p class="field-note">Optional with Max memory. Disabled by default.</p></div>
+                <p class="field-note">Optional with Max memory. Disabled by default. Changes save immediately for future turns.</p></div>
         <p id="campaignStoryMemoryStatus" class="field-note" role="status" aria-live="polite">Loading the saved Story Memory level for this campaign.</p>
+        <p class="field-note">Story Memory saves immediately when changed and stays separate from campaign metadata.</p>
               </div>
             </section>
 
@@ -271,6 +273,7 @@
             <div>
               <p class="eyebrow">Optional output</p>
               <h3 id="campaignIllustrationTitle">Campaign illustrations</h3>
+              <p class="field-note">Illustration settings save with their own button and status; they do not affect campaign metadata.</p>
               <p>Configure independent image jobs that run only after a story turn is accepted.</p>
             </div>
           </div>
@@ -350,7 +353,7 @@
           <div class="campaign-settings-heading">
             <div>
               <h3 id="campaignContextTitle">Chronicle</h3>
-              <p>Monitor local memory health, preview story context, and manage optional Semantic Retrieval.</p>
+              <p>Monitor local memory health, preview story context, and manage optional Semantic Retrieval. Embedding settings save independently from campaign metadata.</p>
             </div>
           </div>
 
@@ -1244,10 +1247,11 @@
   <dialog id="discardChangesDialog" class="confirm-dialog" aria-labelledby="discardChangesTitle">
     <form method="dialog">
       <h2 id="discardChangesTitle">Discard unsaved changes?</h2>
-      <p>Your edits have not been saved. Keep editing or discard them and close this window.</p>
+      <p id="discardChangesMessage">Your edits have not been saved. Keep editing or discard them and close this window.</p>
       <div class="button-row confirm-actions">
-        <button class="button secondary" type="submit" value="keep" autofocus>Keep editing</button>
-        <button class="button danger" type="submit" value="discard">Discard changes</button>
+        <button class="button secondary" type="submit" value="keep" autofocus>Stay and keep editing</button>
+        <button id="saveCampaignEditsDecision" class="button primary" type="button" value="save" hidden>Save campaign</button>
+        <button class="button danger" type="submit" value="discard">Discard edits</button>
       </div>
     </form>
   </dialog>

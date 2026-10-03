@@ -1,6 +1,7 @@
 import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
 import {
   createProviderPresetsApi,
+  createEditSession,
   createSelectionEditorState,
   nativePresetSupport,
   reduceSelectionEditor,
@@ -26,6 +27,69 @@ let selectedCampaign = null;
 let campaignSelectionRequest = 0;
 let campaignStoryMemorySettings = null;
 const CAMPAIGN_SETTINGS_PANEL_IDS = Object.freeze(["overview", "story", "illustrations", "chronicle", "usage"]);
+let campaignSaveInProgress = false;
+let campaignLeavePromptOpen = false;
+let campaignLeavePrompt = null;
+
+function campaignSettingsSnapshot() {
+  return {
+    title: elements.campaignTitle.value,
+    status: elements.campaignStatus.value,
+    textProviderProfileId: elements.campaignTextProvider.value || null,
+    turnControlStyle: elements.campaignTurnControlStyle.value,
+    storyLengthProfile: elements.campaignStoryLengthProfile.value,
+    storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)
+  };
+}
+
+function createCampaignEditGuard(createEditSession, equal) {
+  let campaignId = null;
+  let loadEpoch = null;
+  let session = null;
+  const isCurrent = (getCurrentCampaignId, getCurrentEpoch) => getCurrentCampaignId() === campaignId && getCurrentEpoch() === loadEpoch;
+
+  return {
+    reset(nextCampaignId, nextLoadEpoch, initialSnapshot) {
+      campaignId = nextCampaignId;
+      loadEpoch = nextLoadEpoch;
+      session = createEditSession(initialSnapshot, equal);
+    },
+    isDirty(snapshot) {
+      return Boolean(session?.isDirty(snapshot));
+    },
+    markSaved(nextCampaignId, nextLoadEpoch, snapshot) {
+      if (!session || campaignId !== nextCampaignId || loadEpoch !== nextLoadEpoch) return false;
+      session.markSaved(snapshot);
+      return true;
+    },
+    async canLeave(nextCampaignId, { getCurrentCampaignId, getCurrentEpoch, getSnapshot, confirm, save, discard = () => {} }) {
+      if (!session) return true;
+      const dirty = session.isDirty(getSnapshot());
+      if (nextCampaignId === campaignId) return !dirty;
+      if (!dirty) return true;
+      const capturedCampaignId = campaignId;
+      const capturedEpoch = loadEpoch;
+      const stillCurrent = () => capturedCampaignId === campaignId && capturedEpoch === loadEpoch
+        && isCurrent(getCurrentCampaignId, getCurrentEpoch);
+      const decision = await confirm();
+      if (!stillCurrent() || decision === "stay") return false;
+      if (decision === "discard") {
+        await discard();
+        session.markSaved(getSnapshot());
+        return true;
+      }
+      if (decision !== "save") return false;
+      const snapshot = getSnapshot();
+      if (!(await save(snapshot)) || !stillCurrent()) return false;
+      return !session.isDirty(getSnapshot());
+    }
+  };
+}
+
+const campaignEditGuard = createCampaignEditGuard(
+  createEditSession,
+  (left, right) => JSON.stringify(left) === JSON.stringify(right)
+);
 let activeCampaignSettingsPanel = "overview";
 
 function normalizedTurnControlStyle(value) {
@@ -248,6 +312,8 @@ function syncCampaignSettingsRailOrientation(mediaQuery) {
 }
 
 function clearCampaignEditorSelection({ focus = false } = {}) {
+  campaignEditGuard.reset(null, campaignSelectionRequest, campaignSettingsSnapshot());
+  renderCampaignSaveFeedback("saved");
   setCampaignSettingsAvailability(false);
   campaignStoryMemorySettings = null;
   elements.memoryTitle.textContent = "Select a campaign";
@@ -3428,6 +3494,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
   void loadDashboardStats();
   elements.campaignList.replaceChildren();
   if (!campaigns.length) {
+    if (!(await canLeaveCampaignEditor(null))) return;
     elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     campaignSelectionRequest += 1;
     selectedCampaign = null;
@@ -3454,6 +3521,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
   const target = campaigns.find((campaign) => campaign.id === preselectId) || (selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
   if (target) await selectCampaign(target);
   else {
+    if (!(await canLeaveCampaignEditor(null))) return;
     campaignSelectionRequest += 1;
     selectedCampaign = null;
     updateStoryViewLink();
@@ -3462,6 +3530,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false } = {}
 }
 
 async function selectCampaign(campaign) {
+  if (!(await canLeaveCampaignEditor(campaign.id))) return;
   elements.embeddingProgress.classList.add("hidden");
   const selectionRequest = ++campaignSelectionRequest;
   const runtimeState = await api(`/api/v1/campaigns/${campaign.id}/state`);
@@ -3491,6 +3560,8 @@ async function selectCampaign(campaign) {
   elements.campaignTurnControlStyle.value = normalizedTurnControlStyle(campaign.turnControlStyle);
   elements.campaignStoryLengthProfile.value = campaign.storyLengthProfile || "standard";
   elements.campaignStoryContextBudgetTokens.value = String(campaign.storyContextBudgetTokens || 32_000);
+  campaignEditGuard.reset(campaign.id, selectionRequest, campaignSettingsSnapshot());
+  renderCampaignSaveFeedback("saved");
   applyStoryProviderContextBudget();
   populateEmbeddingProviderSelect();
   const world = await api(`/api/v1/worlds/${campaign.worldId}`);
@@ -3520,32 +3591,112 @@ async function selectCampaign(campaign) {
   await previewContext();
 }
 
-async function saveSelectedCampaign(event) {
-  event.preventDefault();
-  if (!selectedCampaign) return;
+async function saveSelectedCampaign(event = null, { snapshot = campaignSettingsSnapshot() } = {}) {
+  event?.preventDefault();
+  if (!selectedCampaign || campaignSaveInProgress) return false;
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
+  const campaign = selectedCampaign;
+  campaignSaveInProgress = true;
   elements.saveCampaign.disabled = true;
+  renderCampaignSaveFeedback("saving");
   try {
-    await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
+    const updatedCampaign = await api(`/api/v1/campaigns/${campaignId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        title: elements.campaignTitle.value,
-        status: elements.campaignStatus.value,
-        textProviderProfileId: elements.campaignTextProvider.value || null,
-        turnControlStyle: savedTurnControlStyle(elements.campaignTurnControlStyle.value, selectedCampaign.turnControlStyle),
-        expectedTurnControlStyle: selectedCampaign.turnControlStyle,
-        expectedActiveTurnNumber: selectedCampaign.activeTurnNumber,
-        expectedStateRevision: selectedCampaign.stateRevision,
-        storyLengthProfile: elements.campaignStoryLengthProfile.value,
-        storyContextBudgetTokens: Number(elements.campaignStoryContextBudgetTokens.value)
+        ...snapshot,
+        turnControlStyle: savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle),
+        expectedTurnControlStyle: campaign.turnControlStyle,
+        expectedActiveTurnNumber: campaign.activeTurnNumber,
+        expectedStateRevision: campaign.stateRevision
       })
     });
-    await loadCampaigns(selectedCampaign.id);
-    campaignMessage("Campaign metadata and Story Engine defaults saved. Accepted turns and Chronicle memory were unchanged.", "success");
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return false;
+    selectedCampaign = { ...campaign, ...updatedCampaign };
+    campaigns = campaigns.map((item) => item.id === campaignId ? selectedCampaign : item);
+    elements.memoryTitle.textContent = selectedCampaign.title;
+    elements.campaignEditorSummary.textContent = `${selectedCampaign.status} · ${selectedCampaign.worldTitle} v${selectedCampaign.worldVersionNumber}${selectedCampaign.selectedCharacterName ? ` · ${selectedCampaign.selectedCharacterName}` : ""}`;
+    const campaignButton = elements.campaignList.querySelector(`[data-campaign-id="${campaignId}"]`);
+    if (campaignButton) {
+      campaignButton.querySelector("strong").textContent = selectedCampaign.title;
+      const details = campaignButton.querySelector("span");
+      if (details) details.textContent = `${selectedCampaign.activeTurnNumber} accepted turns · ${selectedCampaign.worldTitle} v${selectedCampaign.worldVersionNumber}${selectedCampaign.selectedCharacterName ? ` · ${selectedCampaign.selectedCharacterName}` : ""}${selectedCampaign.worldUpdateAvailable ? " · update available" : ""}${selectedCampaign.status === "archived" ? " · archived" : ""}`;
+    }
+    renderDashboardCampaigns();
+    campaignEditGuard.markSaved(campaignId, selectionRequest, snapshot);
+    const editsRemain = campaignEditGuard.isDirty(campaignSettingsSnapshot());
+    renderCampaignSaveFeedback(editsRemain ? "unsaved" : "saved");
+    campaignMessage(editsRemain
+      ? "Submitted campaign settings saved. Newer edits remain unsaved. Story Memory, illustrations, and Semantic Retrieval save independently."
+      : "Campaign settings saved. Story Memory, illustrations, and Semantic Retrieval save independently.", "success");
+    return true;
   } catch (error) {
-    campaignMessage(error.message || String(error), "error");
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
+      renderCampaignSaveFeedback("error");
+      campaignMessage(error.message || String(error), "error");
+    }
+    return false;
   } finally {
+    campaignSaveInProgress = false;
     elements.saveCampaign.disabled = !selectedCampaign;
   }
+}
+
+function renderCampaignSaveFeedback(state) {
+  const labels = {
+    saved: "Campaign settings saved",
+    unsaved: "Campaign settings unsaved",
+    saving: "Saving campaign settings…",
+    error: "Campaign settings were not saved"
+  };
+  elements.campaignSaveStatus.dataset.state = state;
+  elements.campaignSaveStatus.textContent = labels[state] || labels.unsaved;
+}
+
+async function canLeaveCampaignEditor(nextCampaignId) {
+  const allowed = await campaignEditGuard.canLeave(nextCampaignId, {
+    getCurrentCampaignId: () => selectedCampaign?.id ?? null,
+    getCurrentEpoch: () => campaignSelectionRequest,
+    getSnapshot: campaignSettingsSnapshot,
+    confirm: confirmCampaignEditDisposition,
+    save: (snapshot) => saveSelectedCampaign(null, { snapshot }),
+    discard: restoreCampaignSettings
+  });
+  if (allowed && !campaignEditGuard.isDirty(campaignSettingsSnapshot())) renderCampaignSaveFeedback("saved");
+  return allowed;
+}
+
+function restoreCampaignSettings() {
+  if (!selectedCampaign) return;
+  elements.campaignTitle.value = selectedCampaign.title;
+  elements.campaignStatus.value = selectedCampaign.status;
+  elements.campaignTextProvider.value = selectedCampaign.textProviderProfileId || "";
+  elements.campaignTurnControlStyle.value = normalizedTurnControlStyle(selectedCampaign.turnControlStyle);
+  elements.campaignStoryLengthProfile.value = selectedCampaign.storyLengthProfile || "standard";
+  elements.campaignStoryContextBudgetTokens.value = String(selectedCampaign.storyContextBudgetTokens || 32_000);
+}
+
+function confirmCampaignEditDisposition() {
+  if (campaignLeavePromptOpen) return campaignLeavePrompt;
+  campaignLeavePromptOpen = true;
+elements.discardChangesTitle.textContent = "Campaign settings have changed";
+  elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Stay";
+  elements.discardChangesMessage.textContent = "Save these settings before leaving, discard the edits, or stay here and keep editing.";
+  elements.saveCampaignEditsDecision.hidden = false;
+  elements.discardChangesDialog.returnValue = "";
+  openManagedModal(elements.discardChangesDialog);
+  campaignLeavePrompt = new Promise((resolve) => {
+    elements.discardChangesDialog.addEventListener("close", () => {
+      elements.saveCampaignEditsDecision.hidden = true;
+      campaignLeavePromptOpen = false;
+      campaignLeavePrompt = null;
+      resolve(elements.discardChangesDialog.returnValue === "save" ? "save" : elements.discardChangesDialog.returnValue === "discard" ? "discard" : "stay");
+elements.discardChangesTitle.textContent = "Discard unsaved changes?";
+      elements.discardChangesDialog.querySelector('button[value="keep"]').textContent = "Keep editing";
+      elements.discardChangesMessage.textContent = "Your edits have not been saved. Keep editing or discard them and close this window.";
+    }, { once: true });
+  });
+  return campaignLeavePrompt;
 }
 
 async function migrateSelectedCampaign() {
@@ -3727,7 +3878,7 @@ async function exportSelectedCampaign() {
 }
 
 async function loadSelectedCampaign() {
-  if (!selectedCampaign) return;
+  if (!selectedCampaign || !(await canLeaveCampaignEditor(null))) return;
   window.location.assign("/story/" + encodeURIComponent(selectedCampaign.id));
 }
 
@@ -6661,6 +6812,11 @@ elements.archiveWorld.addEventListener("click", toggleWorldArchive);
 elements.deleteWorld.addEventListener("click", deleteSelectedWorld);
 elements.refreshCampaigns.addEventListener("click", () => loadCampaigns("", { focusNoSelection: true }).catch((error) => setStatus(error.message, "error")));
 elements.campaignForm.addEventListener("submit", saveSelectedCampaign);
+for (const control of [elements.campaignTitle, elements.campaignStatus, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens]) {
+  control.addEventListener("input", () => renderCampaignSaveFeedback(campaignEditGuard.isDirty(campaignSettingsSnapshot()) ? "unsaved" : "saved"));
+  control.addEventListener("change", () => renderCampaignSaveFeedback(campaignEditGuard.isDirty(campaignSettingsSnapshot()) ? "unsaved" : "saved"));
+}
+elements.saveCampaignEditsDecision.addEventListener("click", () => elements.discardChangesDialog.close("save"));
 elements.campaignContinuityReviewEnabled.addEventListener("change", () => { void saveCampaignStoryMemory(); });
 elements.campaignStoryMemoryLevel.addEventListener("change", () => { void saveCampaignStoryMemory(); });
 const campaignSettingsRailMediaQuery = window.matchMedia("(max-width: 820px)");
@@ -6708,6 +6864,22 @@ elements.cancelProviderEdit.addEventListener("click", () => {
 });
 elements.providerDialog.addEventListener("close", abortProviderPresetRequests);
 window.addEventListener("pagehide", abortProviderPresetRequests);
+window.addEventListener("beforeunload", (event) => {
+  if (!campaignEditGuard.isDirty(campaignSettingsSnapshot())) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
+document.addEventListener("click", (event) => {
+  const link = event.target.closest("a[href]");
+  if (!link || link.target === "_blank" || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const destination = new URL(link.href, window.location.href);
+  if (destination.href === window.location.href || destination.origin !== window.location.origin) return;
+  if (!campaignEditGuard.isDirty(campaignSettingsSnapshot())) return;
+  event.preventDefault();
+  void canLeaveCampaignEditor(null).then((allowed) => {
+    if (allowed) window.location.assign(destination.href);
+  });
+});
 
 // Setup tab behavior for world editor
 document.querySelectorAll(".tab-button").forEach(button => {
