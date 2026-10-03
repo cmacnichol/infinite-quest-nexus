@@ -111,3 +111,4 @@ export type {
   StoryActionDraftStore,
   WriteResult
 } from "./storage/story-action-drafts.js";
+export * from "./reader-history-api.js";

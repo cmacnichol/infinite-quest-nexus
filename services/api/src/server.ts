@@ -100,8 +100,10 @@ import { readTurnPage } from "../../../packages/database/src/play-loop-read-repo
 import { createWorldShareLinkService } from "../../../packages/database/src/world-share-repository.js";
 import { readReadableCampaignExport } from "../../../packages/database/src/readable-campaign-export-repository.js";
 import { createPostgresTurnCorrectionRepository } from "../../../packages/database/src/turn-correction-repository.js";
+import { createPostgresReaderHistoryRepository } from "../../../packages/database/src/reader-history-repository.js";
 import { renderReadableCampaignExport } from "../../../packages/story-engine/src/readable-campaign-export.js";
 import { createTurnCorrectionApplication, TurnCorrectionApplicationError } from "../../../packages/application/src/turn-corrections/index.js";
+import { createReaderHistoryApplication } from "../../../packages/application/src/reader-history/index.js";
 import { acceptedTurnCorrectionRequestSchema } from "../../../packages/contracts/src/turn-corrections.js";
 import { userProfileUpdateSchema } from "../../../packages/contracts/src/users.js";
 import { assetListQuerySchema, assetMetadataUpdateSchema } from "../../../packages/contracts/src/assets.js";
@@ -146,6 +148,7 @@ import { registerArchiveRoutes } from "./archive-routes.js";
 import { registerCampaignCastRoutes } from "./campaign-cast-routes.js";
 import type { CampaignCastApplication } from "../../../packages/application/src/campaign-cast/index.js";
 import { registerAuthoringRoutes } from "./authoring-routes.js";
+import { registerReaderHistoryRoutes } from "./reader-history-routes.js";
 import { acquireAdmission, releaseAdmission } from "./admission-service.js";
 import { createApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
 import type { ApiAssetComposition } from "../../runtime/src/api-asset-composition.js";
