@@ -13,6 +13,8 @@ import { parseCompleteGeneratedWorld } from "../../packages/domain/src/generated
 import { ProviderDestinationNotAllowedError } from "../../packages/security/src/provider-network-policy.js";
 import { ProviderResponseTooLargeError } from "../../packages/story-engine/src/provider-response.js";
 import { ProviderTransportError } from "../../packages/story-engine/src/providers.js";
+import { createPostgresCampaignAuthorityAdapters } from "../../packages/database/src/campaign-state-repository.js";
+import { runPostgresWorldCampaignCommandWithClient } from "../../packages/database/src/world-campaign-transaction.js";
 import { generationStreamSnapshotSchema } from "../../packages/contracts/src/generation.js";
 import {
   generatedWorldProviderError,
@@ -1150,7 +1152,7 @@ describe("API server security and CORS headers", () => {
   });
 
   it("cancels an active generation", async () => {
-    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const ownerUserId = "00000000-0000-4000-8000-000000000001";
     const jobId = "99999999-9999-4999-8999-999999999999";
     const cancelledJob = {
       id: jobId,
@@ -1161,12 +1163,27 @@ describe("API server security and CORS headers", () => {
     };
     const transactionControls: string[] = [];
     const mockClient = {
-      query: async (query: string) => {
+      query: async (queryInput: string, params: unknown[] = []) => {
+        const query = queryInput.replaceAll(/\s+/g, " ").trim();
         if (query === "BEGIN" || query === "COMMIT" || query === "ROLLBACK") {
           transactionControls.push(query);
           return { rows: [] };
         }
-        if (query.includes("UPDATE generation_jobs")) return { rows: [cancelledJob] };
+        if (query.startsWith("UPDATE generation_jobs SET status = 'cancelled'")) return { rows: [cancelledJob] };
+        if (query.startsWith("UPDATE generation_jobs SET activity_revision = activity_revision + 1")) {
+          expect(params).toEqual([jobId, ownerUserId]);
+          return { rows: [{ campaign_id: cancelledJob.campaignId, status: "cancelled", activity_revision: "1",
+            attempts: 1, expected_turn_number: 3, result_turn_id: null, error_code: null, occurred_at: new Date() }] };
+        }
+        if (query.startsWith("INSERT INTO activity_event_outbox(")) {
+          expect(params.slice(1, 3)).toEqual([ownerUserId, cancelledJob.campaignId]);
+          expect(JSON.parse(String(params[8]))).toMatchObject({ kind: "generation.cancelled", status: "cancelled", jobId });
+          return { rows: [{ event_id: params[0] }] };
+        }
+        if (query.startsWith("INSERT INTO campaign_activity_history(owner_user_id,campaign_id,captured_since)")) {
+          expect(params.slice(0, 2)).toEqual([ownerUserId, cancelledJob.campaignId]);
+          return { rows: [] };
+        }
         if (query.includes("UPDATE image_jobs")) return { rows: [] };
         if (query.includes("DELETE FROM asset_references")) return { rows: [] };
         if (query.includes("DELETE FROM turn_illustration_segment_assets")) return { rows: [] };
@@ -1211,6 +1228,85 @@ describe("API server security and CORS headers", () => {
     }
   });
 
+  it.each([1, 2, "malformed"])("publishes identical safe provider evidence across GET, SSE, and reload (version %s)", async (version) => {
+    const ownerUserId = "00000000-0000-0000-0000-000000000001";
+    const jobId = "11111111-1111-4111-8111-111111111111";
+    const campaignId = "22222222-2222-4222-8222-222222222222";
+    const foreignId = "33333333-3333-4333-8333-333333333333";
+    const canaries = ["PRIVATE_PROVIDER_CANARY", "PRIVATE_COUNTER_CANARY", "PRIVATE_BODY_CANARY", "PRIVATE_CREDENTIAL_CANARY"];
+    const providerFailure = { version, source: "http_error", observedAt: "2026-10-03T15:00:00.000Z",
+      httpStatus: 429, upstreamStatus: 429, reason: "rate_limit", limitSource: "upstream_provider",
+      retryAfterMs: 15000, retryAt: "2026-10-03T15:00:15.000Z", upstreamCode: "rate_limit_exceeded",
+      providerName: canaries[0], rateLimit: { limit: 10, remaining: 0, resetAt: null },
+      successfulResponseStarted: false, emittedOutput: false, metadataStatus: "recognized",
+      raw: canaries[2], credentials: canaries[3], privateCounters: canaries[1] };
+    const failureDiagnostic = { version: 1, category: "provider_rejection", code: "provider_rate_limited",
+      phase: "story_generation", attemptNumber: 1, occurredAt: "2026-10-03T15:00:00.000Z", providerFailure };
+    const job = { id: jobId, campaignId, providerProfileId: null, expectedTurnNumber: 2,
+      action: "Open the gate", status: "failed", attempts: 1, requestedInputMode: "action", resolvedInputMode: "action",
+      inputModeSource: "explicit", operationKind: "append", replacementTurnId: null, baseTurnNumber: null,
+      requestedModel: "fixture-model", providerResponseId: null, providerFinishReason: null, resultTurnId: null,
+      errorCode: "provider_rate_limited", errorMessage: canaries[2], recoveryMetadata: {}, failureDiagnostic,
+      createdAt: new Date(), updatedAt: new Date(), completedAt: new Date(), partialOutput: null };
+    const campaignRow = { id: campaignId, title: "Campaign", activeTurnNumber: 1,
+      worldVersionId: "44444444-4444-4444-8444-444444444444", storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32000, turnControlStyle: "flexible_action", updatedAt: new Date(),
+      selectedCharacterId: null, characterSnapshot: null, characterProfile: null, characterProfileRevision: 0,
+      status: "active", worldId: "55555555-5555-4555-8555-555555555555", worldTitle: "World", worldVersionNumber: 1,
+      worldContent: {}, legacySettings: {}, trackers: [], rpgStats: [], eventTriggers: [],
+      recoveryId: jobId, recoveryStatus: "failed", recoveryExpectedTurnNumber: 2, recoveryAttempts: 1,
+      recoveryOperationKind: "append", recoveryReplacementTurnId: null, recoveryResultTurnId: null,
+      recoveryResultIsRecent: false, recoveryErrorCode: "provider_rate_limited", recoveryMetadata: {}, recoveryFailureDiagnostic: failureDiagnostic };
+    const query = async (sql: string, params?: unknown[]) => {
+      if (sql.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
+      expect(params?.[1]).toBe(ownerUserId);
+      if (sql.includes('SELECT id, campaign_id AS "campaignId"')) {
+        expect(sql).toContain("WHERE id = $1 AND owner_user_id = $2");
+        return { rows: params?.[0] === jobId ? [job] : [] };
+      }
+      if (sql.includes("FROM campaigns c")) {
+        expect(sql).toContain("WHERE c.id = $1 AND c.owner_user_id = $2");
+        return { rows: params?.[0] === campaignId ? [campaignRow] : [] };
+      }
+      throw new Error("Unexpected provider evidence test query");
+    };
+    const pool = { query } as unknown as DatabasePool;
+    const adapters = createPostgresCampaignAuthorityAdapters(pool, { memory: {} as never, turnPages: {} as never });
+    const worldCampaign = testWorldCampaignApplication({
+      getCampaignSyncStatus: async (scope) => {
+        const source = await runPostgresWorldCampaignCommandWithClient({ query, release: () => undefined } as never,
+          (transaction) => adapters.sync.readCampaignSyncSnapshot(transaction, scope));
+        return { ...JSON.parse(JSON.stringify(source.projection)), syncToken: source.syncToken, turnWindowMode: "replace", turns: { campaignId: scope.campaignId, turns: [], nextCursor: null } };
+      }
+    });
+    const app = await buildServer(serverOptions({ config: makeConfig(), pool, worldCampaign }));
+    try {
+      const get = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}` });
+      const stream = await app.inject({ method: "GET", url: `/api/v1/generation-jobs/${jobId}/stream` });
+      const reload = await app.inject({ method: "GET", url: `/api/v1/campaigns/${campaignId}/sync-status` });
+      for (const response of [get, stream, reload]) {
+        expect(response.statusCode).toBe(200);
+        for (const canary of canaries) expect(response.body).not.toContain(canary);
+        expect(response.body).not.toContain("rateLimit");
+        expect(response.body).not.toContain("upstreamCode");
+      }
+      const live = JSON.parse(stream.body.trim().replace(/^data: /, ""));
+      expect(live.failureDiagnostic).toEqual(get.json().failureDiagnostic);
+      expect(reload.json().generationRecovery.failureDiagnostic).toEqual(get.json().failureDiagnostic);
+      expect(get.json().failureDiagnostic.message).toBe("The provider rate limit was reached. Wait before retrying.");
+      if (version === 1) expect(get.json().failureDiagnostic.providerFailure).toEqual({
+        version: 1, source: "http_error", httpStatus: 429, upstreamStatus: 429, reason: "rate_limit", limitSource: "upstream_provider",
+        retryAfterMs: 15000, retryAt: "2026-10-03T15:00:15.000Z"
+      });
+      else expect(get.json().failureDiagnostic).not.toHaveProperty("providerFailure");
+      for (const path of [`generation-jobs/${foreignId}`, `generation-jobs/${foreignId}/stream`, `campaigns/${foreignId}/sync-status`]) {
+        const denied = await app.inject({ method: "GET", url: `/api/v1/${path}` });
+        expect(denied.statusCode).toBe(404);
+        for (const canary of canaries) expect(denied.body).not.toContain(canary);
+      }
+    } finally { await app.close(); }
+  });
+
   it("closes a generation stream after cancelled status", async () => {
     const ownerUserId = "00000000-0000-0000-0000-000000000001";
     const jobId = "11111111-1111-4111-8111-111111111111";
@@ -1221,7 +1317,7 @@ describe("API server security and CORS headers", () => {
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
-        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+        if (query.includes("SELECT id, campaign_id AS \"campaignId\"")) {
           return {
             rows: [{
               id: jobId,
@@ -1325,7 +1421,7 @@ describe("API server security and CORS headers", () => {
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
-        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+        if (query.includes("SELECT id, campaign_id AS \"campaignId\"")) {
           throw Object.assign(new Error(sensitiveMessage), { code: unsafeCode });
         }
         throw new Error(`Unexpected query: ${query}`);
@@ -1370,7 +1466,7 @@ describe("API server security and CORS headers", () => {
     const mockPool = {
       query: async (query: string) => {
         if (query.startsWith("SELECT id FROM users")) return { rows: [{ id: ownerUserId }] };
-        if (query.startsWith("SELECT id, campaign_id AS \"campaignId\"")) {
+        if (query.includes("SELECT id, campaign_id AS \"campaignId\"")) {
           closeStream?.();
           return {
             rows: [{

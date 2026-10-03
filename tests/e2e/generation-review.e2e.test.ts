@@ -157,6 +157,7 @@ async function installReviewApi(page: Page, canKeep = true, decisionFails = fals
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method() !== "GET") writePaths.push(`${request.method()} ${path}`);
     const respond = (body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    if (request.method() === "GET" && path.endsWith("/activity")) return respond({ version: 1, events: [], nextBefore: null, nextAfter: null, hasMore: false, coverage: { capturedSince: null, retentionDays: 30, oldestAvailableSequence: null, latestPublishedSequence: "0", pendingPublication: false, incomplete: false, resetRequired: false } });
     if (request.method() === "GET" && path === "/api/v1/session") return respond(fixture.session);
     if (request.method() === "GET" && path === "/api/v1/meta") return respond({ application: { name: "Infinite Quest Nexus", version: "test", commit: null, builtAt: null }, capabilities: { systemArchive: false } });
     if (request.method() === "GET" && path === "/api/v1/providers") return respond({ providers: [{

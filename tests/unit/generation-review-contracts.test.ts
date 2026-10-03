@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   generationJobSnapshotSchema,
+  generationFailureDiagnosticProjectionSchema,
   generationReviewDecisionRequestSchema,
   generationReviewReasonCodeSchema,
   projectGenerationValidationIssues,
@@ -334,4 +335,19 @@ describe("generation review contracts", () => {
       story: { narration: "Mira waits at the quay.", choices: ["Wait", "Look", "Listen", "Leave"], custom_action_suggestion: "Wait", scratchpad: "Mira waits.", tracker_updates: [], image_prompt: "A quiet quay.", continuity_summary: "Mira waits at the quay.", canonical_facts: [], superseded_facts: [], canonical_fact_updates: [], open_threads: [] }
     }).success).toBe(false);
   });
+});
+
+describe("provider failure public transport compatibility", () => {
+  it("drops malformed nested evidence without dropping the enclosing snapshot failure", () => {
+    const result = generationFailureDiagnosticProjectionSchema.parse({ code: "provider_request_timeout",
+      message: "The provider request timed out.", providerFailure: { version: 99, raw: "PRIVATE_CANARY" } });
+    expect(result).toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
+  });
+});
+
+it("drops oversized public provider evidence while preserving the fixed failure", () => {
+  const result = generationFailureDiagnosticProjectionSchema.parse({ code: "provider_request_timeout", message: "The provider request timed out.",
+    providerFailure: { version: 1, source: "http_error", httpStatus: 429, upstreamStatus: null, reason: "rate_limit", limitSource: "unknown",
+      retryAfterMs: 0, retryAt: `2026-10-03T14:00:00.${"0".repeat(4096)}Z` } });
+  expect(result).toEqual({ code: "provider_request_timeout", message: "The provider request timed out." });
 });

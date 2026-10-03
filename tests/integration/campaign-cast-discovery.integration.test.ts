@@ -308,7 +308,12 @@ describe("durable cast discovery", () => {
       planProvenance: { planHash: f.execution.plan.planHash, preset: null },
       logicalReservation: { kind: "cast_discovery", ownerUserId, jobId: job.id, chunkOrdinal: job.chunkOrdinal, claimAttempt: job.attempt, leaseToken: job.leaseToken },
       attempts, prepareCandidate: () => ({ body: "{}", payloadHash: "a".repeat(64) }),
-      invoke: async () => { calls++; throw { routeFailureReason: "provider_unavailable" }; },
+      invoke: async () => { calls++; throw { routeFailureReason: "provider_unavailable", providerFailure: {
+        version: 1, source: "http_error", observedAt: "2026-10-03T12:00:00.000Z", httpStatus: 503,
+        upstreamStatus: null, reason: "provider_unavailable", limitSource: "unknown", upstreamCode: null,
+        providerName: null, retryAfterMs: null, retryAt: null, rateLimit: null,
+        successfulResponseStarted: false, emittedOutput: false, metadataStatus: "absent"
+      } }; },
       totalDeadlineMs: 30000, sleep: async () => undefined
     });
     await expect(execute(first)).rejects.toMatchObject({ code: "prepared_route_lease_lost" });
