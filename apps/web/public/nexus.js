@@ -3571,7 +3571,10 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
     const details = document.createElement("span");
     details.textContent = `${campaign.activeTurnNumber} accepted turns · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}${campaign.worldUpdateAvailable ? " · update available" : ""}${campaign.status === "archived" ? " · archived" : ""}`;
     button.append(title, details);
-    button.addEventListener("click", () => selectCampaign(campaign));
+    button.addEventListener("click", () => {
+      const currentCampaign = campaigns.find((item) => item.id === campaign.id);
+      if (currentCampaign) void selectCampaign(currentCampaign);
+    });
     elements.campaignList.append(button);
   }
   const target = campaigns.find((campaign) => campaign.id === preselectId) || (selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));

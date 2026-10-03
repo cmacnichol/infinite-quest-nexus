@@ -8,6 +8,7 @@ const campaignA = { id: "campaign-a", title: "Campaign Alpha", status: "active",
 const campaignB = { ...campaignA, id: "campaign-b", title: "Campaign Beta" };
 type ApiLogEntry = { method: string; path: string; status: number; requestBody: string | null; response: unknown };
 let apiLog: ApiLogEntry[] = [];
+let campaignRecords = new Map<string, typeof campaignA>();
 
 function response(body: unknown, status = 200) {
   return { status, contentType: "application/json", body: JSON.stringify(body) };
@@ -23,7 +24,7 @@ async function fixtureRoute(route: Route, controls: { patchGate?: Promise<void>;
   else if (path === "/session") body = { user: { id: "owner-synthetic", displayName: "Test owner", settings: { autoSubmitTurnChoices: true, continuousReading: false } } };
   else if (path === "/providers") body = { providers: [] };
   else if (path === "/worlds") body = { worlds: [] };
-  else if (path === "/campaigns" && request.method() === "GET") body = { campaigns: [campaignA, campaignB] };
+  else if (path === "/campaigns" && request.method() === "GET") body = { campaigns: [...campaignRecords.values()] };
   else if (/^\/campaigns\/campaign-[ab]\/state$/u.test(path)) body = { activeTurnNumber: 3, revision: 5 };
   else if (path === "/worlds/world-a") body = { ...campaignA, versions: [{ id: "version-a", versionNumber: 1 }] };
   else if (/^\/campaigns\/campaign-[ab]\/story-memory$/u.test(path) && request.method() === "GET") body = { level: "standard", reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"] };
@@ -40,7 +41,12 @@ async function fixtureRoute(route: Route, controls: { patchGate?: Promise<void>;
     if (controls.patchGate) await controls.patchGate;
     const input = JSON.parse(request.postData() || "{}");
     status = controls.patchStatus ?? 200;
-    body = status >= 400 ? { message: "Synthetic save failure" } : { ...campaignA, ...input, id: path.split("/")[2], imageProviderProfileId: null, updatedAt: "2026-10-03T12:00:00Z" };
+    if (status >= 400) body = { message: "Synthetic save failure" };
+    else {
+      const id = path.split("/")[2];
+      body = { ...campaignRecords.get(id), ...input, id, imageProviderProfileId: null, updatedAt: "2026-10-03T12:00:00Z" };
+      campaignRecords.set(id, body as typeof campaignA);
+    }
   } else if (/^\/campaigns\/campaign-[ab]\/memory\/embeddings\/status$/u.test(path)) body = { status: "idle" };
   apiLog.push({ method: request.method(), path, status, requestBody: request.postData() ?? null, response: body });
   await route.fulfill(response(body, status));
@@ -62,6 +68,7 @@ function saveEvidence(name: string) {
 
 test.beforeEach(() => {
   apiLog = [];
+  campaignRecords = new Map([[campaignA.id, structuredClone(campaignA)], [campaignB.id, structuredClone(campaignB)]]);
   mkdirSync(evidenceDirectory, { recursive: true });
 });
 test.afterEach(({}, testInfo) => saveEvidence(testInfo.title));
@@ -106,6 +113,32 @@ test("waits for explicit campaign save success before switching", async ({ page 
   expect(apiLog.find((entry) => entry.method === "PATCH")?.requestBody).toContain("Saved Alpha title");
 });
 
+test("saved campaign fields survive a selection cycle and later saves use the persisted baseline", async ({ page }) => {
+  await openWorkspace(page);
+  await page.locator("#campaignTitle").fill("Committed Alpha title");
+  await page.locator("#campaignTabStory").click();
+  await page.locator("#campaignStoryLengthProfile").selectOption("long");
+  await page.locator("#campaignStoryContextBudgetTokens").selectOption("64000");
+  await page.locator("#saveCampaign").click();
+  await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "saved");
+  await expect(page.locator("#campaignList [data-campaign-id=\"campaign-a\"] strong")).toHaveText("Committed Alpha title");
+  await page.locator("#campaignList [data-campaign-id=\"campaign-b\"]").click();
+  await expect(page.locator("#memoryTitle")).toHaveText("Campaign Beta");
+  await page.locator("#campaignList [data-campaign-id=\"campaign-a\"]").click();
+  await expect(page.locator("#campaignTitle")).toHaveValue("Committed Alpha title");
+  await expect(page.locator("#campaignStoryLengthProfile")).toHaveValue("long");
+  await expect(page.locator("#campaignStoryContextBudgetTokens")).toHaveValue("64000");
+  await page.screenshot({ path: resolve(evidenceDirectory, "campaign-edits-save-select-cycle.png") });
+  await page.locator("#campaignTabOverview").click();
+  await page.locator("#campaignTitle").fill("Second Alpha title");
+  await page.locator("#saveCampaign").click();
+  await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "saved");
+  const patches = apiLog.filter((entry) => entry.method === "PATCH");
+  expect(patches).toHaveLength(2);
+  expect(patches[0]?.requestBody).toContain("Committed Alpha title");
+  expect(patches[1]?.requestBody).toContain("Second Alpha title");
+  expect(campaignRecords.get("campaign-a")?.storyContextBudgetTokens).toBe(64000);
+});
 test("stays on the campaign and preserves fields after save failure", async ({ page }) => {
   await openWorkspace(page, { patchStatus: 500 });
   await page.locator("#campaignTitle").fill("Failed Alpha title");
@@ -159,7 +192,9 @@ test("link navigation offers Save, Discard, and Stay before leaving the campaign
   await expect(page).toHaveURL(/#dashboard$/u);
   await page.locator("#navSetup").click();
   await page.locator("#navCampaigns").click();
+  const campaignLoad = page.waitForResponse((response) => response.url().includes("/campaigns/campaign-a/memory/context-preview"));
   await page.locator('#campaignList [data-campaign-id="campaign-a"]').click();
+  await campaignLoad;
   await page.locator("#campaignTitle").fill("Saved Alpha title");
   await page.locator("#navDashboard").click();
   await page.locator("#saveCampaignEditsDecision").click();
