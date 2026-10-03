@@ -314,8 +314,10 @@ export function planGenerationPromptContext(
     if (!candidate.id || !candidate.content) return false;
     if (!layered) return true;
     const identity = candidate.kind === "canonical_fact" ? `fact:${candidate.id}` : candidate.turnId ? `turn:${candidate.turnId}` : `source:${candidate.id}`;
-    if ((candidate.turnId && candidate.turnId === context.baseIdentity.baseTurnId)
-      || (candidate.kind === "canonical_fact" && protectedFactIds.has(candidate.id)) || seen.has(identity)) {
+    if ((candidate.turnId && candidate.turnId === context.baseIdentity.baseTurnId
+      && (!historyCoverage || candidate.kind !== "canonical_fact"))
+      || (!historyCoverage && candidate.kind === "canonical_fact" && protectedFactIds.has(candidate.id))
+      || seen.has(identity)) {
       duplicateIds.push(candidate.id); return false;
     }
     seen.add(identity); return true;
@@ -637,10 +639,32 @@ export function planGenerationPromptContext(
     // Selected world records are pre-measured whole optional records. Remaining optional
     // capacity stays available to history; their reservation is not held back.
     const recentIds = new Set(selectedRecentBlocks.map((block) => block.id.slice("recent:".length)));
+    const selectedFactBlockIds = new Set(selectedFactBlocks.map((block) => block.id));
+    const selectedFactContentById = new Map<string, Set<string>>();
+    const addSelectedFactContent = (id: string, content: string) => {
+      const contents = selectedFactContentById.get(id) ?? new Set<string>();
+      contents.add(content);
+      selectedFactContentById.set(id, contents);
+    };
+    for (const fact of protectedFactRecords) {
+      if (selectedFactBlockIds.has(`protected-fact:${fact.id}`)) addSelectedFactContent(fact.id, fact.content);
+    }
+    for (const [index, fact] of currentFactRecords.entries()) {
+      if (typeof fact.id === "string" && selectedFactBlockIds.has(`current-fact:${index}`)) {
+        addSelectedFactContent(fact.id, fact.content);
+      }
+    }
     const historicalBlocks = blocks.filter((block) => {
       if (block.scope !== "chronicle") return false;
       const candidate = candidateById.get(block.id)!;
-      if (layered && candidate.turnId && recentIds.has(candidate.turnId)) { duplicateIds.push(candidate.id); return false; }
+      if (historyCoverage && candidate.kind === "canonical_fact"
+        && selectedFactContentById.get(candidate.id)?.has(candidate.content)) {
+        duplicateIds.push(candidate.id); return false;
+      }
+      if (layered && (!historyCoverage || candidate.kind !== "canonical_fact")
+        && candidate.turnId && recentIds.has(candidate.turnId)) {
+        duplicateIds.push(candidate.id); return false;
+      }
       return true;
     });
     if (!historyCoverage) {
