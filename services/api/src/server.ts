@@ -496,6 +496,13 @@ export async function buildServer({
   const turnCorrections = createTurnCorrectionApplication({
     corrections: createPostgresTurnCorrectionRepository(pool, { memory: memory.generation })
   });
+  const readerHistory = createReaderHistoryApplication({
+    turns: createPostgresReaderHistoryRepository(pool, {
+      turnReportedCosts: async (_client, ownerUserId, campaignId, turnIds) => new Map(await providers.application.getTurnCosts({
+        ownerUserId, campaignId, turnIds
+      }))
+    })
+  });
   const generationAdapter = createGenerationApplicationAdapter(generation);
   const worldCampaignAdapter = createWorldCampaignApplicationAdapter(worldCampaign);
   const resolveWorldCampaignOwnerScope = async () => worldCampaignAdapter.ownerScope(await initialOwnerId(pool));
@@ -632,6 +639,10 @@ export async function buildServer({
     memory: memory.generation,
     portable: apiPortable.portable,
     resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) }),
+  });
+  await app.register(registerReaderHistoryRoutes, {
+    application: readerHistory,
+    resolveOwner: async () => ({ ownerUserId: await initialOwnerId(pool) })
   });
   if (cast) await app.register(registerCampaignCastRoutes, {
     application: cast, enabled: config.castEditingEnabled === true,

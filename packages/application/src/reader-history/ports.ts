@@ -16,4 +16,3 @@ export interface ReaderHistoryApplication {
 export type ReaderHistoryApplicationDependencies = Readonly<{
   turns: ReaderHistoryRepositoryPort;
 }>;
-
