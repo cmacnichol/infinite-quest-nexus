@@ -80,13 +80,21 @@ describe("Nexus central dashboard", () => {
     expect(dashboardScript).toContain("openManagedModal(elements.worldDetailsDialog)");
   });
 
-  it("creates a basic campaign with system defaults and immediately opens the story", () => {
-    expect(dashboardHtml).toContain('id="quickCampaignName"');
-    expect(dashboardHtml).toContain('id="quickCampaignCharacter"');
-    expect(dashboardHtml).toContain('id="advancedCampaignCreation" href="#campaigns"');
-    expect(dashboardHtml).not.toMatch(/id="quickCampaign(?:StoryLength|TurnControl|Provider|Illustration)/);
-    expect(dashboardScript).toContain("body: JSON.stringify({ title, worldVersionId: dashboardWorld.latestVersionId, selectedCharacterId })");
-    expect(dashboardScript).toContain('window.location.assign(`/story/${encodeURIComponent(campaign.id)}`)');
+  it("routes dashboard and management campaign creation through the same saved-style dialog", () => {
+    expect(dashboardHtml).toContain('id="createCampaignDialog"');
+    expect(dashboardHtml).toContain('id="createCampaignWorldVersion"');
+    expect(dashboardHtml).toContain('id="newCampaignTitle"');
+    expect(dashboardHtml).toContain('id="newCampaignCharacter"');
+    expect(dashboardHtml).toContain('id="createCampaignAdvanced"');
+    expect(dashboardHtml).toContain('id="createAndStartCampaign"');
+    expect(dashboardHtml).toContain('id="confirmCreateCampaign"');
+    expect(dashboardHtml).not.toContain('id="quickCampaignDialog"');
+    expect(dashboardScript).toContain('campaignCreationEntryPoint = "dashboard";');
+    expect(dashboardScript).toContain('campaignCreationEntryPoint = "management";');
+    expect(dashboardScript).toContain("openCampaignCreation({");
+    expect(dashboardScript).toContain("buildCampaignCreateRequest(draft)");
+    expect(dashboardScript).toContain("userSettings: sessionUser?.settings");
+    expect(dashboardScript).toContain('window.location.assign(`/story/${encodeURIComponent(session.committedCampaignId)}`)');
   });
 
   it("resumes a selected campaign directly from its dashboard card", () => {

@@ -457,7 +457,13 @@ button.dashboard-card { width: 100%; padding: 0; cursor: pointer; font: inherit;
 .world-details-meta dt { color: var(--muted); font-size: .65rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .world-details-meta dd { margin: 4px 0 0; color: var(--text); font-size: .83rem; }
 .world-details-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: auto; padding-top: 8px; }
-.quick-campaign-dialog form { gap: 16px; }
+.campaign-creation-dialog { width: min(620px, calc(100% - 28px)); max-height: calc(100vh - 28px); overflow: auto; }
+.campaign-creation-dialog form { gap: 16px; }
+.campaign-create-version { margin: -4px 0 0; color: var(--muted); font-weight: 700; }
+.campaign-create-advanced { border-top: 1px solid var(--line); padding-top: 12px; }
+.campaign-create-advanced > summary { color: var(--purple); cursor: pointer; font-weight: 800; }
+.campaign-create-advanced > label { margin-top: 14px; }
+#openCommittedCampaign[hidden] { display: none; }
 .advanced-campaign-link { border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; background: #101522; color: var(--muted); font-size: .78rem; line-height: 1.45; }
 .advanced-campaign-link a { color: var(--purple); font-weight: 800; }
 .nexus-about-dialog { padding: 24px; }

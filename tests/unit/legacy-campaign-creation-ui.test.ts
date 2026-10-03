@@ -1,125 +1,155 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
+import { buildCampaignCreateRequest } from "../../packages/client-core/src/campaign-creation-draft.js";
 
 const html = readFileSync("apps/web/public/index.html", "utf8");
 const script = readFileSync("apps/web/public/nexus.js", "utf8");
+const campaignId = "00000000-0000-4000-8000-000000000001";
+const worldId = "00000000-0000-4000-8000-000000000002";
+const worldVersionId = "00000000-0000-4000-8000-000000000003";
 
-function campaignFunctions(bindings: Record<string, unknown>) {
-  const names = ["normalizedTurnControlStyle", "updateCampaignCreationAvailability", "setCreateCampaignStatus", "openCreateCampaignDialog", "createCampaignFromWorld"];
-  const sources = names.map((name) => {
+function createSubmitFunction(bindings: Record<string, unknown>) {
+  const source = ["setCampaignCreationFieldsDisabled", "createCampaignFromWorld"].map((name) => {
     const start = script.indexOf(`function ${name}(`);
     if (start < 0) throw new Error(`Missing ${name}`);
-    const definitionStart = script.slice(start - 6, start) === "async " ? start - 6 : start;
     const next = /\n(?:async )?function /.exec(script.slice(start + 1));
     if (!next) throw new Error(`Missing function boundary after ${name}`);
-    return script.slice(definitionStart, start + 1 + next.index);
-  });
-  return Function(...Object.keys(bindings), `let createCampaignSubmitting = false; let createCampaignCommitted = false; ${sources.join("\n")}; return { openCreateCampaignDialog, createCampaignFromWorld };`)(...Object.values(bindings)) as {
-    openCreateCampaignDialog: () => void;
-    createCampaignFromWorld: () => Promise<void>;
+    return script.slice(start, start + 1 + next.index);
+  }).join("\n").replace("function createCampaignFromWorld", "async function createCampaignFromWorld");
+  return Function(...Object.keys(bindings), `let createCampaignSubmitting = false; let createCampaignCommitted = false; ${source}; return createCampaignFromWorld;`)(...Object.values(bindings)) as (event: { submitter: HTMLElement }) => Promise<void>;
+}
+
+function formElements() {
+  const { document } = parseHTML(html);
+  const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLElement>;
+  (elements.newCampaignTitle as HTMLInputElement).value = "My Campaign";
+  (elements.newCampaignCharacter as HTMLSelectElement).innerHTML = '<option value="fixture-character">Hero</option>';
+  Object.defineProperty(elements.newCampaignCharacter, "value", { value: "fixture-character", writable: true, configurable: true });
+  Object.defineProperty(elements.newCampaignTurnControlStyle, "value", { value: "flexible_scene", writable: true, configurable: true });
+  const dialog = elements.createCampaignDialog as HTMLDialogElement & { close: () => void };
+  dialog.open = true;
+  dialog.close = vi.fn();
+  return { elements, dialog };
+}
+
+function submitEvent(elements: Record<string, HTMLElement>, intent: "create" | "start") {
+  return { submitter: { value: intent } as unknown as HTMLButtonElement };
+}
+
+function submitHarness(overrides: Record<string, unknown> = {}) {
+  const { elements, dialog } = formElements();
+  const session = {
+    worldId,
+    worldVersionId,
+    characters: [{ id: "fixture-character", name: "Hero" }],
+    draft: { worldId, worldVersionId, title: "", selectedCharacterId: "fixture-character", turnControlStyle: "flexible_action", startAfterCreate: true },
+    ready: true,
+    committedCampaignId: null as string | null
   };
+  const api = vi.fn().mockResolvedValue({ id: campaignId, selectedCharacterName: "Hero" });
+  const loadCampaigns = vi.fn().mockResolvedValue(undefined);
+  const setItem = vi.fn();
+  const assign = vi.fn();
+  const env = {
+    elements,
+    campaignCreationDialogSession: session,
+    campaignCreationSessionIsCurrent: () => true,
+    buildCampaignCreateRequest,
+    normalizedTurnControlStyle: (value: string) => value === "flexible_scene" ? "flexible_scene" : "flexible_action",
+    setCreateCampaignStatus(message = "") { elements.createCampaignStatus!.textContent = message; elements.createCampaignStatus!.hidden = !message; },
+    updateCampaignCreationDialogAvailability: vi.fn(),
+    refreshModalBaseline: vi.fn(),
+    api,
+    loadCampaigns,
+    worldMessage: vi.fn(),
+    localStorage: { setItem },
+    window: { location: { assign } },
+    ...overrides
+  };
+  return { create: createSubmitFunction(env), elements, dialog, session, api, loadCampaigns, setItem, assign };
 }
 
 describe("legacy campaign creation dialog", () => {
-  it("shows an API error locally, preserves the draft, blocks duplicate requests, and succeeds on retry", async () => {
-    const { document } = parseHTML(html);
-    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLElement>;
-    for (const select of document.querySelectorAll("select")) {
-      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
-    }
-    const dialog = elements.createCampaignDialog as HTMLElement & { close: () => void };
-    dialog.close = vi.fn();
-    const openManagedModal = vi.fn();
-    const worldMessage = vi.fn();
-    const loadCampaigns = vi.fn().mockResolvedValue(undefined);
-    let rejectFirst!: (error: Error) => void;
-    const first = new Promise((_, reject) => { rejectFirst = reject; });
-    const api = vi.fn().mockReturnValueOnce(first).mockResolvedValueOnce({ id: "campaign-1", selectedCharacterName: "Hero" });
-    const { openCreateCampaignDialog, createCampaignFromWorld } = campaignFunctions({
-      elements, api, loadCampaigns, worldMessage, openManagedModal,
-      selectedWorld: { id: "world-1" }, selectedWorldVersionId: () => "version-1",
-      worldVersionCampaignReady: true,
-      worldVersionCharacters: [{ id: "character-1" }]
-    });
+  it("preserves the selected character and Story Direction when the API rejects, then retries with the same fields", async () => {
+    const harness = submitHarness();
+    let rejectCreate!: (error: Error) => void;
+    harness.api.mockReturnValueOnce(new Promise((_, reject) => { rejectCreate = reject; }));
+    const event = submitEvent(harness.elements, "create");
 
-    openCreateCampaignDialog();
-    expect(elements.createCampaignStatus?.getAttribute("role")).toBe("alert");
-    expect(elements.createCampaignStatus?.hidden).toBe(true);
-    (elements.newCampaignTitle as HTMLInputElement).value = "My Campaign";
-    (elements.newCampaignTurnControlStyle as HTMLSelectElement).value = "flexible_scene";
-    const pending = createCampaignFromWorld();
-    await createCampaignFromWorld();
-    expect(api).toHaveBeenCalledTimes(1);
-    expect((elements.confirmCreateCampaign as HTMLButtonElement).disabled).toBe(true);
-    rejectFirst(new Error("Event rule 1 needs a valid effect. Correlation ID: test-123 <img src=x>"));
+    const pending = harness.create(event);
+    expect((harness.elements.newCampaignTitle as HTMLInputElement).disabled).toBe(true);
+    expect((harness.elements.newCampaignCharacter as HTMLSelectElement).disabled).toBe(true);
+    expect((harness.elements.newCampaignTurnControlStyle as HTMLSelectElement).disabled).toBe(true);
+    expect((harness.elements.cancelCreateCampaign as HTMLButtonElement).disabled).toBe(true);
+    rejectCreate(new Error("Campaign could not be created."));
     await pending;
+    expect(harness.elements.createCampaignStatus?.textContent).toContain("Campaign could not be created.");
+    expect((harness.elements.newCampaignTitle as HTMLInputElement).disabled).toBe(false);
+    expect((harness.elements.newCampaignCharacter as HTMLSelectElement).disabled).toBe(false);
+    expect((harness.elements.newCampaignTurnControlStyle as HTMLSelectElement).disabled).toBe(false);
+    expect((harness.elements.cancelCreateCampaign as HTMLButtonElement).disabled).toBe(false);
+    expect((harness.elements.newCampaignTitle as HTMLInputElement).value).toBe("My Campaign");
+    expect((harness.elements.newCampaignCharacter as HTMLSelectElement).value).toBe("fixture-character");
+    expect((harness.elements.newCampaignTurnControlStyle as HTMLSelectElement).value).toBe("flexible_scene");
 
-    expect(elements.createCampaignStatus?.textContent).toContain("Event rule 1 needs a valid effect.");
-    expect(elements.createCampaignStatus?.querySelector("img")).toBeNull();
-    expect(elements.createCampaignStatus?.hidden).toBe(false);
-    expect(dialog.close).not.toHaveBeenCalled();
-    expect((elements.newCampaignTitle as HTMLInputElement).value).toBe("My Campaign");
-    expect((elements.newCampaignTurnControlStyle as HTMLSelectElement).value).toBe("flexible_scene");
-    expect((elements.confirmCreateCampaign as HTMLButtonElement).disabled).toBe(false);
-
-    await createCampaignFromWorld();
-    expect(elements.createCampaignStatus?.hidden).toBe(true);
-    expect(api).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(api.mock.calls[1]![1].body)).toMatchObject({ title: "My Campaign", turnControlStyle: "flexible_scene", selectedCharacterId: "character-1" });
-    expect(loadCampaigns).toHaveBeenCalledWith("campaign-1");
-    expect(dialog.close).toHaveBeenCalledTimes(1);
+    await harness.create(event);
+    expect(JSON.parse(harness.api.mock.calls[1]![1].body)).toEqual({
+      worldVersionId,
+      title: "My Campaign",
+      selectedCharacterId: "fixture-character",
+      storyLengthProfile: "standard",
+      storyContextBudgetTokens: 32_000,
+      turnControlStyle: "flexible_scene"
+    });
+    expect(harness.loadCampaigns).toHaveBeenCalledWith(campaignId, { explicitPreselect: true });
   });
 
-  it("reports a committed campaign when list refresh fails without offering a creation retry", async () => {
-    const { document } = parseHTML(html);
-    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLElement>;
-    for (const select of document.querySelectorAll("select")) {
-      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
-    }
-    const dialog = elements.createCampaignDialog as HTMLElement & { close: () => void };
-    dialog.close = vi.fn();
-    const api = vi.fn().mockResolvedValue({ id: "campaign-1", selectedCharacterName: "Hero" });
-    const loadCampaigns = vi.fn().mockRejectedValue(new Error("Connection lost"));
-    const worldMessage = vi.fn();
-    const { openCreateCampaignDialog, createCampaignFromWorld } = campaignFunctions({
-      elements, api, loadCampaigns, worldMessage, openManagedModal: vi.fn(),
-      selectedWorld: { id: "world-1" }, selectedWorldVersionId: () => "version-1",
-      worldVersionCampaignReady: true, worldVersionCharacters: [{ id: "character-1" }]
-    });
+  it("records the committed ID before storage and refresh errors and never posts again", async () => {
+    const harness = submitHarness({ localStorage: { setItem: vi.fn(() => { throw new Error("Storage unavailable."); }) } });
+    harness.loadCampaigns.mockRejectedValue(new Error("Connection lost."));
 
-    openCreateCampaignDialog();
-    (elements.newCampaignTitle as HTMLInputElement).value = "My Campaign";
-    await createCampaignFromWorld();
-
-    expect(api).toHaveBeenCalledTimes(1);
-    expect(dialog.close).toHaveBeenCalledTimes(1);
-    expect((elements.newCampaignTitle as HTMLInputElement).value).toBe("");
-    expect(elements.createCampaignStatus!.hidden).toBe(true);
-    expect(worldMessage.mock.calls.some(([message, type]) => type === "error" && message.includes("Campaign was created") && message.includes("Refresh"))).toBe(true);
-    await createCampaignFromWorld();
-    expect(api).toHaveBeenCalledTimes(1);
+    await harness.create(submitEvent(harness.elements, "create"));
+    expect(harness.session.committedCampaignId).toBe(campaignId);
+    expect(harness.elements.openCommittedCampaign!.hidden).toBe(false);
+    expect(harness.elements.createCampaignStatus?.textContent).toContain("Campaign was created");
+    await harness.create(submitEvent(harness.elements, "create"));
+    expect(harness.api).toHaveBeenCalledTimes(1);
   });
 
-  it("clears a stale error when the dialog opens", () => {
-    const { document } = parseHTML(html);
-    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element])) as Record<string, HTMLElement>;
-    for (const select of document.querySelectorAll("select")) {
-      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
-    }
-    elements.createCampaignStatus!.textContent = "Previous failure";
-    elements.createCampaignStatus!.hidden = false;
-    const openManagedModal = vi.fn();
-    const { openCreateCampaignDialog } = campaignFunctions({
-      elements, openManagedModal, worldMessage: vi.fn(),
-      selectedWorld: { id: "world-1" }, selectedWorldVersionId: () => "version-1",
-      worldVersionCampaignReady: true, worldVersionCharacters: [{ id: "character-1" }]
-    });
+  it("opens the exact committed ID for Create and start without refreshing the list", async () => {
+    const harness = submitHarness();
 
-    openCreateCampaignDialog();
-    expect(elements.createCampaignStatus!.textContent).toBe("");
-    expect(elements.createCampaignStatus!.hidden).toBe(true);
-    expect(openManagedModal.mock.calls.length).toBe(1);
-    expect(openManagedModal.mock.calls[0]![0] === elements.createCampaignDialog).toBe(true);
+    await harness.create(submitEvent(harness.elements, "start"));
+
+    expect(harness.session.committedCampaignId).toBe(campaignId);
+    expect(harness.setItem).toHaveBeenCalledWith("infiniteQuestLastCampaignId", campaignId);
+    expect(harness.assign).toHaveBeenCalledWith(`/story/${encodeURIComponent(campaignId)}`);
+    expect(harness.loadCampaigns).not.toHaveBeenCalled();
+  });
+
+  it("keeps the committed campaign openable when start navigation throws", async () => {
+    const assign = vi.fn(() => { throw new Error("Navigation unavailable."); });
+    const harness = submitHarness({ window: { location: { assign } } });
+
+    await harness.create(submitEvent(harness.elements, "start"));
+
+    expect(harness.session.committedCampaignId).toBe(campaignId);
+    expect(harness.dialog.close).not.toHaveBeenCalled();
+    expect(harness.elements.openCommittedCampaign!.hidden).toBe(false);
+    expect(harness.elements.createCampaignStatus?.textContent).toContain("Campaign was created");
+    await harness.create(submitEvent(harness.elements, "create"));
+    expect(harness.api).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows separate Create only and Create and start intents in the shared dialog", () => {
+    const { document } = parseHTML(html);
+    const dialog = document.querySelector("#createCampaignDialog");
+
+    expect(dialog?.querySelector('[name="intent"][value="create"]')?.textContent).toBe("Create only");
+    expect(dialog?.querySelector('[name="intent"][value="start"]')?.textContent).toBe("Create and start");
+    expect(dialog?.querySelector('button[type="submit"]')?.getAttribute("value")).toBe("create");
+    expect(dialog?.querySelector("#createCampaignWorldVersion")).not.toBeNull();
+    expect(document.querySelector("#quickCampaignDialog")).toBeNull();
   });
 });

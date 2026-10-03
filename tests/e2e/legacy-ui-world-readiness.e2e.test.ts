@@ -4,8 +4,9 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const evidenceDirectory = resolve(".superpowers/sdd/legacy-ui-2026-10-03/evidence/T17");
-const versionOneId = "readiness-version-one";
-const worldId = "readiness-world";
+const versionOneId = "10000000-0000-4000-8000-000000000002";
+const versionTwoId = "10000000-0000-4000-8000-000000000003";
+const worldId = "10000000-0000-4000-8000-000000000001";
 const oldCharacter = { id: "fixture-character", name: "Mira Vale", characterText: "A patient guide.", profile: {}, rpgStats: [], defaultTriggers: [], source: {} };
 
 type Assessment = { ready: boolean; issues: Array<Record<string, unknown>> } | null;
@@ -105,7 +106,7 @@ async function installWorldApi(page: Page, options: ApiOptions = {}) {
     if (path === `/api/v1/worlds/${worldId}/publish` && method === "POST") {
       if (world) {
         const versionNumber = (world.versions?.at(-1)?.versionNumber || 0) + 1;
-        const version = { id: `readiness-version-${versionNumber}`, versionNumber, releaseNotes: body.releaseNotes || "", content: world.draftContent };
+        const version = { id: versionNumber === 2 ? versionTwoId : versionOneId, versionNumber, releaseNotes: body.releaseNotes || "", content: world.draftContent };
         world.versions.push(version);
         world.latestVersionId = version.id;
         world.latestVersionNumber = versionNumber;
@@ -376,18 +377,20 @@ test("publishing and creating a campaign remain explicit and preserve existing v
   await page.locator("#newCampaignTitle").fill("Explicit campaign action");
   expect(api.writes.some((write) => write.path === "/api/v1/campaigns" && write.method === "POST")).toBe(false);
   await page.locator("#cancelCreateCampaign").click();
+  await expect(page.locator("#discardChangesDialog")).toBeVisible();
+  await page.locator('#discardChangesDialog button[value="discard"]').click();
   await expect(page.locator("#createCampaignDialog")).toBeHidden();
   expect(api.campaignCreates).toEqual([]);
   expect(api.getWorld()?.campaigns[0].worldVersionId).toBe(versionOneId);
-  await page.locator("#worldVersionSelect").selectOption("readiness-version-2");
+  await page.locator("#worldVersionSelect").selectOption(versionTwoId);
   await expect(page.locator("#worldCampaignReadiness")).toContainText("Campaign-ready");
   await page.locator("#createCampaignModalBtn").click();
   await page.locator("#newCampaignTitle").fill("Explicit version two campaign");
-  await page.locator("#confirmCreateCampaign").click();
+  await page.getByRole("button", { name: "Create only" }).click();
   await expect(page.locator("#createCampaignDialog")).toBeHidden();
   await expect(page.locator("#worldStatus")).toContainText("Campaign created");
   expect(api.campaignCreates).toHaveLength(1);
-  expect(api.campaignCreates[0]).toMatchObject({ title: "Explicit version two campaign", worldVersionId: "readiness-version-2" });
+  expect(api.campaignCreates[0]).toMatchObject({ title: "Explicit version two campaign", worldVersionId: versionTwoId });
   expect(api.getWorld()?.campaigns[0].worldVersionId).toBe(versionOneId);
 });
 

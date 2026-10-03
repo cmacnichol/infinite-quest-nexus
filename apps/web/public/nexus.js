@@ -2,6 +2,8 @@ import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
 import {
   createProviderPresetsApi,
   createEditSession,
+  buildCampaignCreateRequest,
+  createCampaignCreationDraft,
   requestEditDismissal,
   bindEditDialogDismissal,
   createSelectionEditorState,
@@ -134,6 +136,9 @@ let worldVersionCharacters = [];
 let worldVersionCampaignReady = false;
 let createCampaignSubmitting = false;
 let createCampaignCommitted = false;
+let campaignCreationSessionEpoch = 0;
+let campaignCreationDialogSession = null;
+let campaignCreationEntryPoint = "management";
 let playableCharacterLoadSequence = 0;
 let editingCharacterId = "";
 let characterModalWorkingCharacter = null;
@@ -516,6 +521,7 @@ function clickedDialogBackdrop(dialog, event) {
 }
 
 function requestModalDismissal(dialog) {
+  if (dialog === elements.createCampaignDialog && createCampaignSubmitting) return;
   if ([elements.providerDialog, elements.worldAuthorDialog, elements.characterDialog].includes(dialog)) {
     dismissEditDialog(dialog);
     return;
@@ -2069,61 +2075,15 @@ async function openWorldManagement(worldId) {
 }
 
 async function openQuickCampaign() {
-  if (!dashboardWorld?.latestVersionId) return;
+  const world = dashboardWorld ? { ...dashboardWorld } : null;
+  if (!world?.latestVersionId) return;
   elements.worldDetailsDialog.close();
-  elements.quickCampaignWorld.textContent = `${dashboardWorld.title} · version ${dashboardWorld.latestVersionNumber}`;
-  elements.quickCampaignName.value = `${dashboardWorld.title} Adventure`;
-  elements.quickCampaignCharacter.replaceChildren(new Option("Loading characters…", ""));
-  elements.confirmQuickCampaign.disabled = true;
-  elements.quickCampaignStatus.className = "status hidden";
-  openManagedModal(elements.quickCampaignDialog);
-  try {
-    const result = await api(`/api/v1/world-versions/${dashboardWorld.latestVersionId}/playable-characters`);
-    const characters = Array.isArray(result.characters) ? result.characters : [];
-    elements.quickCampaignCharacter.replaceChildren();
-    if (!result.readiness?.ready || !characters.length) {
-      elements.quickCampaignCharacter.append(new Option("No playable characters available", ""));
-      elements.quickCampaignCharacterNote.textContent = result.readiness?.issues?.[0]?.message || "Publish this world with a playable character before creating a campaign.";
-      refreshModalBaseline(elements.quickCampaignDialog);
-      return;
-    }
-    if (characters.length > 1) elements.quickCampaignCharacter.append(new Option("Choose a character", ""));
-    characters.forEach((character) => elements.quickCampaignCharacter.append(new Option(character.name, character.id)));
-    if (characters.length === 1) elements.quickCampaignCharacter.value = characters[0].id;
-    elements.quickCampaignCharacterNote.textContent = characters.length === 1
-      ? `${characters[0].name} will be snapshotted into the campaign.`
-      : `Choose one of ${characters.length} published playable characters.`;
-    elements.confirmQuickCampaign.disabled = false;
-    refreshModalBaseline(elements.quickCampaignDialog);
-    elements.quickCampaignName.focus();
-  } catch (error) {
-    elements.quickCampaignStatus.textContent = error.message || String(error);
-    elements.quickCampaignStatus.className = "status error";
-    refreshModalBaseline(elements.quickCampaignDialog);
-  }
-}
-
-async function createQuickCampaign(event) {
-  event.preventDefault();
-  if (!dashboardWorld?.latestVersionId) return;
-  const title = elements.quickCampaignName.value.trim();
-  const selectedCharacterId = elements.quickCampaignCharacter.value;
-  if (!title || !selectedCharacterId) return;
-  elements.confirmQuickCampaign.disabled = true;
-  elements.quickCampaignStatus.textContent = "Creating your campaign and opening the first scene…";
-  elements.quickCampaignStatus.className = "status";
-  try {
-    const campaign = await api("/api/v1/campaigns", {
-      method: "POST",
-      body: JSON.stringify({ title, worldVersionId: dashboardWorld.latestVersionId, selectedCharacterId })
-    });
-    localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
-    window.location.assign(`/story/${encodeURIComponent(campaign.id)}`);
-  } catch (error) {
-    elements.confirmQuickCampaign.disabled = false;
-    elements.quickCampaignStatus.textContent = error.message || String(error);
-    elements.quickCampaignStatus.className = "status error";
-  }
+  campaignCreationEntryPoint = "dashboard";
+  openCampaignCreation({
+    worldId: world.id,
+    worldVersionId: world.latestVersionId,
+    initialDraft: { title: `${world.title} Adventure` }
+  });
 }
 
 function scrollCarousel(element, direction) {
@@ -3650,10 +3610,19 @@ function updateWorldVersionDeleteAvailability() {
 }
 
 function updateCampaignCreationAvailability() {
+  const session = campaignCreationDialogSession;
   const hasPublishedVersion = Boolean(selectedWorldVersionId());
   const hasRequiredSelection = worldVersionCharacters.length === 1 || Boolean(elements.newCampaignCharacter.value);
   elements.createCampaignModalBtn.disabled = !hasPublishedVersion || !worldVersionCampaignReady;
-  elements.confirmCreateCampaign.disabled = createCampaignSubmitting || !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;
+  const dialogReady = Boolean(session?.ready && session.characters?.some((character) => character.id === elements.newCampaignCharacter.value));
+  const scopeIsCurrent = Boolean(session && campaignCreationScopeIsCurrent(session));
+  const canSubmit = Boolean(session && scopeIsCurrent && dialogReady && elements.newCampaignTitle.value.trim() && !createCampaignSubmitting && !createCampaignCommitted);
+  elements.confirmCreateCampaign.disabled = !canSubmit;
+  elements.createAndStartCampaign.disabled = !canSubmit;
+  if (session && !scopeIsCurrent && !createCampaignCommitted) {
+    setCreateCampaignStatus("The selected world or version changed. Close this dialog and open campaign creation again.");
+  }
+  if (!session) elements.confirmCreateCampaign.disabled = !hasPublishedVersion || !worldVersionCampaignReady || !hasRequiredSelection;
 }
 
 function setCreateCampaignStatus(message = "") {
@@ -3684,8 +3653,10 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
     && worldVersionId === selectedWorldVersionId();
   worldVersionCharacters = [];
   worldVersionCampaignReady = false;
-  elements.newCampaignCharacter.replaceChildren(new Option(worldVersionId ? "Loading characters…" : "Publish a world version first", ""));
-  elements.newCampaignCharacter.disabled = true;
+  if (!elements.createCampaignDialog.open) {
+    elements.newCampaignCharacter.replaceChildren(new Option(worldVersionId ? "Loading characters…" : "Publish a world version first", ""));
+    elements.newCampaignCharacter.disabled = true;
+  }
   updateCampaignCreationAvailability();
   if (!worldVersionId) {
     setWorldCampaignReadiness("Publish a world version with at least one playable character before creating a campaign.");
@@ -3707,26 +3678,28 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
     const firstReadinessIssueMessage = typeof firstReadinessIssue === "string"
       ? firstReadinessIssue
       : String(firstReadinessIssue?.message || "").trim();
-    const options = [];
-    if (!worldVersionCharacters.length) options.push(new Option("No playable characters available", ""));
-    else if (worldVersionCharacters.length > 1) options.push(new Option("Choose a player character", ""));
-    for (const character of worldVersionCharacters) {
-      options.push(new Option(`${character.name} · ${character.rpgStatCount} stats · ${character.defaultTriggerCount} trackers`, character.id));
-    }
-    elements.newCampaignCharacter.replaceChildren(...options);
-    if (worldVersionCharacters.length === 1) elements.newCampaignCharacter.value = worldVersionCharacters[0].id;
-    elements.newCampaignCharacter.disabled = worldVersionCharacters.length < 2;
-    if (!worldVersionCampaignReady) {
-      const issue = firstReadinessIssueMessage || "Add at least one complete playable character.";
-      const message = `${issue} This world version is not campaign-ready; update the draft and publish a new version before creating a campaign.`;
-      elements.newCampaignCharacterNote.textContent = message;
-      setWorldCampaignReadiness(message, "error");
-    } else if (worldVersionCharacters.length > 1) {
-      elements.newCampaignCharacterNote.textContent = `Choose one of ${worldVersionCharacters.length} playable characters. The choice is snapshotted into the campaign.`;
-      setWorldCampaignReadiness(`Campaign-ready with ${worldVersionCharacters.length} playable characters. Choose one when creating a campaign.`, "success");
-    } else {
-      elements.newCampaignCharacterNote.textContent = "This world version has one playable character, which will be snapshotted automatically.";
-      setWorldCampaignReadiness("Campaign-ready with one playable character.", "success");
+    if (!elements.createCampaignDialog.open) {
+      const options = [];
+      if (!worldVersionCharacters.length) options.push(new Option("No playable characters available", ""));
+      else if (worldVersionCharacters.length > 1) options.push(new Option("Choose a player character", ""));
+      for (const character of worldVersionCharacters) {
+        options.push(new Option(`${character.name} · ${character.rpgStatCount} stats · ${character.defaultTriggerCount} trackers`, character.id));
+      }
+      elements.newCampaignCharacter.replaceChildren(...options);
+      if (worldVersionCharacters.length === 1) elements.newCampaignCharacter.value = worldVersionCharacters[0].id;
+      elements.newCampaignCharacter.disabled = worldVersionCharacters.length < 2;
+      if (!worldVersionCampaignReady) {
+        const issue = firstReadinessIssueMessage || "Add at least one complete playable character.";
+        const message = `${issue} This world version is not campaign-ready; update the draft and publish a new version before creating a campaign.`;
+        elements.newCampaignCharacterNote.textContent = message;
+        setWorldCampaignReadiness(message, "error");
+      } else if (worldVersionCharacters.length > 1) {
+        elements.newCampaignCharacterNote.textContent = `Choose one of ${worldVersionCharacters.length} playable characters. The choice is snapshotted into the campaign.`;
+        setWorldCampaignReadiness(`Campaign-ready with ${worldVersionCharacters.length} playable characters. Choose one when creating a campaign.`, "success");
+      } else {
+        elements.newCampaignCharacterNote.textContent = "This world version has one playable character, which will be snapshotted automatically.";
+        setWorldCampaignReadiness("Campaign-ready with one playable character.", "success");
+      }
     }
     updateCampaignCreationAvailability();
   } catch (error) {
@@ -3738,8 +3711,10 @@ async function loadWorldVersionPlayableCharacters(selection = {}) {
     renderWorldAuthorPublishedReadiness();
     worldVersionCharacters = [];
     worldVersionCampaignReady = false;
-    elements.newCampaignCharacter.replaceChildren(new Option("Characters unavailable", ""));
-    elements.newCampaignCharacterNote.textContent = error.message || String(error);
+    if (!elements.createCampaignDialog.open) {
+      elements.newCampaignCharacter.replaceChildren(new Option("Characters unavailable", ""));
+      elements.newCampaignCharacterNote.textContent = error.message || String(error);
+    }
     setWorldCampaignReadiness(`Campaign readiness could not be checked: ${elements.newCampaignCharacterNote.textContent}`, "error");
     updateCampaignCreationAvailability();
     worldMessage(elements.newCampaignCharacterNote.textContent, "error");
@@ -3942,14 +3917,139 @@ async function revokeSelectedWorldShare() {
   }
 }
 
-async function createCampaignFromWorld() {
-  if (createCampaignSubmitting || createCampaignCommitted) return;
-  setCreateCampaignStatus();
-  if (!selectedWorld || !selectedWorldVersionId()) return;
-  if (!worldVersionCampaignReady) {
-    setCreateCampaignStatus(elements.worldCampaignReadiness.textContent || "This world version is not campaign-ready.");
-    return;
+function campaignCreationScopeIsCurrent(session) {
+  if (session.entryPoint === "dashboard") {
+    return dashboardWorld?.id === session.worldId && dashboardWorld?.latestVersionId === session.worldVersionId;
   }
+  return selectedWorld?.id === session.worldId && selectedWorldVersionId() === session.worldVersionId;
+}
+
+function campaignCreationSessionIsCurrent(session) {
+  return campaignCreationDialogSession === session
+    && session.epoch === campaignCreationSessionEpoch
+    && elements.createCampaignDialog.open
+    && campaignCreationScopeIsCurrent(session);
+}
+
+function renderCampaignCreationVersion(session, versionNumber = null) {
+  const worldTitle = session.worldTitle || "Selected world";
+  const numberLabel = versionNumber || session.versionNumber;
+  elements.createCampaignWorldVersion.textContent = `${worldTitle} · Version ${numberLabel || "selected"} · Immutable version`;
+}
+
+function updateCampaignCreationDialogAvailability() {
+  const session = campaignCreationDialogSession;
+  const selectedCharacterId = elements.newCampaignCharacter.value;
+  const characterIsAvailable = Boolean(session?.characters?.some((character) => character.id === selectedCharacterId));
+  const canSubmit = Boolean(session && campaignCreationScopeIsCurrent(session) && session.ready && characterIsAvailable && elements.newCampaignTitle.value.trim()
+    && !createCampaignSubmitting && !createCampaignCommitted);
+  elements.confirmCreateCampaign.disabled = !canSubmit;
+  elements.createAndStartCampaign.disabled = !canSubmit;
+}
+
+function setCampaignCreationFieldsDisabled(disabled) {
+  elements.newCampaignTitle.disabled = disabled;
+  elements.newCampaignCharacter.disabled = disabled || !campaignCreationDialogSession?.ready;
+  elements.newCampaignTurnControlStyle.disabled = disabled;
+  elements.cancelCreateCampaign.disabled = disabled;
+  elements.createCampaignAdvanced.querySelector("summary").setAttribute("aria-disabled", String(disabled));
+}
+
+async function loadCampaignCreationCharacters(session) {
+  try {
+    const result = await api(`/api/v1/world-versions/${encodeURIComponent(session.worldVersionId)}/playable-characters`);
+    if (!campaignCreationSessionIsCurrent(session)) return;
+    const characters = Array.isArray(result.characters) ? result.characters.filter((character) =>
+      typeof character?.id === "string" && character.id.trim().length > 0 && character.id.trim().length <= 200
+      && typeof character?.name === "string") : [];
+    if (!result.readiness?.ready || !characters.length) {
+      const issue = result.readiness?.issues?.[0]?.message || "Publish this world version with a playable character before creating a campaign.";
+      setCreateCampaignStatus(issue);
+      session.ready = false;
+      updateCampaignCreationDialogAvailability();
+      return;
+    }
+    const draft = createCampaignCreationDraft({
+      world: { id: session.worldId, worldVersionId: session.worldVersionId, title: session.worldTitle, playableCharacters: characters },
+      userSettings: sessionUser?.settings
+    });
+    session.characters = characters;
+    session.draft = draft;
+    session.ready = true;
+    const options = characters.map((character) => new Option(character.name, character.id));
+    if (characters.length > 1) options.unshift(new Option("Choose a character", ""));
+    elements.newCampaignCharacter.replaceChildren(...options);
+    elements.newCampaignCharacter.disabled = createCampaignSubmitting || createCampaignCommitted;
+    const requestedCharacterId = session.initialDraft?.selectedCharacterId;
+    elements.newCampaignCharacter.value = characters.some((character) => character.id === requestedCharacterId)
+      ? requestedCharacterId
+      : characters.length === 1 ? characters[0].id : "";
+    draft.selectedCharacterId = elements.newCampaignCharacter.value || null;
+    elements.newCampaignCharacterNote.textContent = characters.length === 1
+      ? `${characters[0].name} will be snapshotted into the campaign.`
+      : `Choose one of ${characters.length} published playable characters. The selected character is snapshotted into this campaign.`;
+    if (elements.newCampaignTitle.value === session.initialTitle
+      && normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value) === session.initialTurnControlStyle) {
+      refreshModalBaseline(elements.createCampaignDialog);
+    }
+    updateCampaignCreationDialogAvailability();
+  } catch (error) {
+    if (!campaignCreationSessionIsCurrent(session)) return;
+    setCreateCampaignStatus(error.message || String(error));
+    elements.newCampaignCharacter.disabled = true;
+    session.ready = false;
+    updateCampaignCreationDialogAvailability();
+  }
+}
+
+function openCampaignCreation({ worldId, worldVersionId, initialDraft = null }) {
+  const entryPoint = campaignCreationEntryPoint;
+  const world = worlds.find((candidate) => candidate.id === worldId);
+  const detailTitle = selectedWorld?.id === worldId ? selectedWorld.title : dashboardWorld?.id === worldId ? dashboardWorld.title : world?.title;
+  const version = selectedWorld?.id === worldId ? selectedWorld.versions?.find((candidate) => candidate.id === worldVersionId)
+    : dashboardWorld?.id === worldId && dashboardWorld.latestVersionId === worldVersionId ? { versionNumber: dashboardWorld.latestVersionNumber } : null;
+  const title = typeof initialDraft?.title === "string" ? initialDraft.title : "";
+  const initialTurnControlStyle = normalizedTurnControlStyle(initialDraft?.turnControlStyle || sessionUser?.settings?.defaultTurnControlStyle);
+  const session = {
+    epoch: ++campaignCreationSessionEpoch,
+    worldId,
+    worldVersionId,
+    worldTitle: detailTitle || "Selected world",
+    versionNumber: version?.versionNumber || null,
+    entryPoint,
+    initialDraft,
+    initialTitle: title,
+    initialTurnControlStyle,
+    characters: [],
+    draft: null,
+    ready: false,
+    committedCampaignId: null
+  };
+  campaignCreationDialogSession = session;
+  createCampaignSubmitting = false;
+  createCampaignCommitted = false;
+  elements.createCampaignDialog.dataset.dismissMode = "confirm";
+  elements.newCampaignTitle.value = title;
+  setCampaignCreationFieldsDisabled(false);
+  elements.newCampaignCharacter.disabled = true;
+  elements.newCampaignCharacter.replaceChildren(new Option("Loading playable characters…", ""));
+  elements.newCampaignCharacter.value = "";
+  elements.newCampaignTurnControlStyle.value = initialTurnControlStyle;
+  elements.createCampaignAdvanced.open = false;
+  elements.openCommittedCampaign.hidden = true;
+  elements.openCommittedCampaign.disabled = false;
+  setCreateCampaignStatus();
+  renderCampaignCreationVersion(session);
+  updateCampaignCreationDialogAvailability();
+  openManagedModal(elements.createCampaignDialog);
+  elements.newCampaignTitle.focus();
+  void loadCampaignCreationCharacters(session);
+}
+
+async function createCampaignFromWorld(event) {
+  if (createCampaignSubmitting || createCampaignCommitted) return;
+  const session = campaignCreationDialogSession;
+  if (!session || !campaignCreationSessionIsCurrent(session) || !session.ready) return;
   const title = elements.newCampaignTitle.value.trim();
   if (!title) {
     setCreateCampaignStatus("Enter a title for the new campaign.");
@@ -3957,42 +4057,79 @@ async function createCampaignFromWorld() {
     return;
   }
   const selectedCharacterId = elements.newCampaignCharacter.value;
-  if (worldVersionCharacters.length > 1 && !selectedCharacterId) {
-    setCreateCampaignStatus("Choose a player character for the new campaign.");
+  if (!session.characters.some((character) => character.id === selectedCharacterId)) {
+    setCreateCampaignStatus("Choose a playable character from this published version.");
     elements.newCampaignCharacter.focus();
     return;
   }
+  const startAfterCreate = event?.submitter?.value === "start";
+  const draft = {
+    ...session.draft,
+    title,
+    selectedCharacterId,
+    turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value),
+    startAfterCreate
+  };
+  let request;
+  try {
+    request = buildCampaignCreateRequest(draft);
+  } catch (error) {
+    setCreateCampaignStatus(error.message || String(error));
+    return;
+  }
+  const body = JSON.stringify(request);
   createCampaignSubmitting = true;
-  updateCampaignCreationAvailability();
+  setCampaignCreationFieldsDisabled(true);
+  updateCampaignCreationDialogAvailability();
+  setCreateCampaignStatus("Creating campaign…");
   try {
     let campaign;
     try {
-      campaign = await api("/api/v1/campaigns", {
-        method: "POST",
-        body: JSON.stringify({
-          title,
-          worldVersionId: selectedWorldVersionId(),
-          turnControlStyle: normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value),
-          ...(selectedCharacterId ? { selectedCharacterId } : {})
-        })
-      });
+      campaign = await api("/api/v1/campaigns", { method: "POST", body });
     } catch (error) {
-      setCreateCampaignStatus(error.message || String(error));
-      worldMessage(error.message || String(error), "error");
+      if (campaignCreationDialogSession === session) setCreateCampaignStatus(error.message || String(error));
       return;
     }
+    session.committedCampaignId = campaign.id;
     createCampaignCommitted = true;
-    elements.newCampaignTitle.value = "";
-    if (elements.createCampaignDialog) elements.createCampaignDialog.close();
+    setCampaignCreationFieldsDisabled(true);
+    elements.cancelCreateCampaign.disabled = false;
+    refreshModalBaseline(elements.createCampaignDialog);
+    let persistenceWarning = "";
     try {
-      await loadCampaigns(campaign.id, { explicitPreselect: true });
-      worldMessage(`Campaign created for ${campaign.selectedCharacterName || "the selected character"} from the selected immutable world version.`, "success");
+      localStorage.setItem("infiniteQuestLastCampaignId", campaign.id);
     } catch (error) {
-      worldMessage(`Campaign was created, but the list could not refresh: ${error.message || String(error)}. Use Refresh campaigns in Campaigns to see it.`, "error");
+      persistenceWarning = ` The campaign is committed, but the remembered campaign could not be saved: ${error.message || String(error)}`;
+    }
+    if (startAfterCreate) {
+      try {
+        window.location.assign(`/story/${encodeURIComponent(session.committedCampaignId)}`);
+        elements.createCampaignDialog.close();
+      } catch (error) {
+        setCreateCampaignStatus(`Campaign was created, but the story could not be opened: ${error.message || String(error)}.${persistenceWarning}`);
+        elements.openCommittedCampaign.hidden = false;
+      }
+      return;
+    }
+    try {
+      await loadCampaigns(session.committedCampaignId, { explicitPreselect: true });
+      if (campaignCreationDialogSession === session) {
+        elements.createCampaignDialog.close();
+        worldMessage(`Campaign created for ${campaign.selectedCharacterName || "the selected character"} from the selected immutable world version.${persistenceWarning}`, "success");
+      }
+    } catch (error) {
+      if (campaignCreationDialogSession === session) {
+        setCreateCampaignStatus(`Campaign was created, but the campaign list could not refresh: ${error.message || String(error)}.${persistenceWarning} Open the story or return to Campaigns and refresh the list.`);
+        elements.openCommittedCampaign.hidden = false;
+      }
     }
   } finally {
-    createCampaignSubmitting = false;
-    updateCampaignCreationAvailability();
+    if (campaignCreationDialogSession === session) {
+      createCampaignSubmitting = false;
+      setCampaignCreationFieldsDisabled(createCampaignCommitted);
+      if (createCampaignCommitted) elements.cancelCreateCampaign.disabled = false;
+      updateCampaignCreationDialogAvailability();
+    }
   }
 }
 
@@ -4001,12 +4138,19 @@ function openCreateCampaignDialog() {
     worldMessage(elements.worldCampaignReadiness.textContent || "This world version is not campaign-ready.", "error");
     return;
   }
-  createCampaignCommitted = false;
-  setCreateCampaignStatus();
-  elements.newCampaignTitle.value = "";
-  elements.newCampaignCharacter.value = worldVersionCharacters.length === 1 ? worldVersionCharacters[0].id : "";
-  updateCampaignCreationAvailability();
-  openManagedModal(elements.createCampaignDialog);
+  campaignCreationEntryPoint = "management";
+  openCampaignCreation({ worldId: selectedWorld.id, worldVersionId: selectedWorldVersionId() });
+}
+
+function openCommittedCampaignStory() {
+  const campaignId = campaignCreationDialogSession?.committedCampaignId;
+  if (!campaignId) return;
+  try { localStorage.setItem("infiniteQuestLastCampaignId", campaignId); } catch { /* The committed campaign remains openable by its ID. */ }
+  try {
+    window.location.assign(`/story/${encodeURIComponent(campaignId)}`);
+  } catch (error) {
+    setCreateCampaignStatus(`Campaign was created, but the story could not be opened: ${error.message || String(error)}`);
+  }
 }
 
 async function loadCampaigns(preselectId = "", { focusNoSelection = false, explicitPreselect = false } = {}) {
@@ -7235,9 +7379,6 @@ elements.editWorldDetails?.addEventListener("click", (event) => {
   void openWorldManagement(dashboardWorld?.id).catch((error) => worldMessage(error.message || String(error), "error"));
 });
 elements.beginCampaignFromWorld?.addEventListener("click", openQuickCampaign);
-elements.cancelQuickCampaign?.addEventListener("click", () => elements.quickCampaignDialog.close());
-elements.quickCampaignForm?.addEventListener("submit", createQuickCampaign);
-elements.advancedCampaignCreation?.addEventListener("click", () => elements.quickCampaignDialog.close());
 elements.openNexusAbout?.addEventListener("click", () => openManagedModal(elements.nexusAboutDialog));
 elements.closeNexusAbout?.addEventListener("click", () => elements.nexusAboutDialog.close());
 elements.openNexusUserProfile?.addEventListener("click", openNexusUserProfile);
@@ -7373,8 +7514,30 @@ if (elements.forkWorldModalBtn) {
 }
 if (elements.createCampaignModalBtn) {
   elements.createCampaignModalBtn.addEventListener("click", openCreateCampaignDialog);
-  elements.cancelCreateCampaign.addEventListener("click", () => elements.createCampaignDialog.close());
-  elements.createCampaignForm.addEventListener("submit", (e) => { e.preventDefault(); createCampaignFromWorld(); });
+  elements.cancelCreateCampaign.addEventListener("click", () => requestModalDismissal(elements.createCampaignDialog));
+  elements.createCampaignDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    requestModalDismissal(elements.createCampaignDialog);
+  });
+  elements.createCampaignDialog.addEventListener("close", () => {
+    if (createCampaignSubmitting) return;
+    campaignCreationSessionEpoch += 1;
+    campaignCreationDialogSession = null;
+    createCampaignCommitted = false;
+  });
+  elements.openCommittedCampaign.addEventListener("click", openCommittedCampaignStory);
+  elements.newCampaignTitle.addEventListener("input", updateCampaignCreationDialogAvailability);
+  elements.newCampaignCharacter.addEventListener("change", () => {
+    if (campaignCreationDialogSession?.draft) campaignCreationDialogSession.draft.selectedCharacterId = elements.newCampaignCharacter.value || null;
+    updateCampaignCreationDialogAvailability();
+  });
+  elements.newCampaignTurnControlStyle.addEventListener("change", () => {
+    if (campaignCreationDialogSession?.draft) campaignCreationDialogSession.draft.turnControlStyle = normalizedTurnControlStyle(elements.newCampaignTurnControlStyle.value);
+  });
+  elements.createCampaignAdvanced.querySelector("summary").addEventListener("click", (event) => {
+    if (createCampaignSubmitting || createCampaignCommitted) event.preventDefault();
+  });
+  elements.createCampaignForm.addEventListener("submit", (event) => { event.preventDefault(); void createCampaignFromWorld(event); });
 }
 elements.exportWorld.addEventListener("click", exportSelectedWorld);
 elements.createWorldShare.addEventListener("click", createSelectedWorldShare);

@@ -699,19 +699,6 @@
     </div>
   </dialog>
 
-  <dialog id="quickCampaignDialog" class="confirm-dialog quick-campaign-dialog" aria-labelledby="quickCampaignTitle">
-    <form id="quickCampaignForm">
-      <p class="eyebrow">Begin a new story</p>
-      <h2 id="quickCampaignTitle">Create campaign</h2>
-      <p id="quickCampaignWorld" class="muted"></p>
-      <label>Campaign name<input id="quickCampaignName" maxlength="200" placeholder="Name this adventure" required></label>
-      <label>Play as<select id="quickCampaignCharacter" required><option value="">Loading characters…</option></select><span id="quickCampaignCharacterNote" class="field-note">Your selected character is snapshotted into this campaign.</span></label>
-      <p id="quickCampaignStatus" class="status hidden" role="status" aria-live="polite"></p>
-      <div class="advanced-campaign-link">Need more control? <a id="advancedCampaignCreation" href="#campaigns">Open Campaign Management</a> for provider, input, Chronicle, and illustration options.</div>
-      <div class="button-row confirm-actions"><button id="cancelQuickCampaign" class="button secondary" type="button">Cancel</button><button id="confirmQuickCampaign" class="button accent" type="submit">Create &amp; start story</button></div>
-    </form>
-  </dialog>
-
   <dialog id="nexusAboutDialog" class="confirm-dialog nexus-about-dialog" aria-labelledby="nexusAboutTitle">
     <div class="dialog-heading-row"><div><p class="eyebrow">About</p><h2 id="nexusAboutTitle">Infinite Quest Nexus</h2></div><button id="closeNexusAbout" class="icon-button" type="button" aria-label="Close About">×</button></div>
     <p>Infinite Quest Nexus is the home for reusable story worlds, persistent campaigns, and Chronicle memory. Infinite Quest is the focused player experience where those stories unfold.</p>
@@ -1208,25 +1195,32 @@
     </form>
   </dialog>
 
-  <dialog id="createCampaignDialog" class="confirm-dialog" aria-labelledby="createCampaignTitleLabel">
+  <dialog id="createCampaignDialog" class="confirm-dialog campaign-creation-dialog" aria-labelledby="createCampaignTitleLabel">
     <form id="createCampaignForm">
-      <h2 id="createCampaignTitleLabel">Create Campaign</h2>
+      <p class="eyebrow">New campaign</p>
+      <h2 id="createCampaignTitleLabel">Create campaign</h2>
+      <p id="createCampaignWorldVersion" class="campaign-create-version" aria-live="polite"></p>
       <label>New campaign title<input id="newCampaignTitle" maxlength="200" placeholder="Name a campaign for the selected version" required></label>
       <label>Campaign player character
         <select id="newCampaignCharacter"><option value="">Select a published world version</option></select>
         <span id="newCampaignCharacterNote" class="field-note">The selected character is snapshotted into the new campaign.</span>
       </label>
-      <label>Turn input style
-        <select id="newCampaignTurnControlStyle">
-          <option value="flexible_action" selected>Action</option>
-          <option value="flexible_scene">Story Direction</option>
-        </select>
-        <span class="field-note">Action preserves RPG mechanics. Story Direction continues the narrative from your directions and choices.</span>
-      </label>
+      <details id="createCampaignAdvanced" class="campaign-create-advanced">
+        <summary>Advanced settings</summary>
+        <label>Turn input style
+          <select id="newCampaignTurnControlStyle">
+            <option value="flexible_action">Action</option>
+            <option value="flexible_scene">Story Direction</option>
+          </select>
+          <span class="field-note">Action preserves RPG mechanics. Story Direction continues the narrative from your directions and choices.</span>
+        </label>
+      </details>
       <div id="createCampaignStatus" class="status error" role="alert" hidden></div>
+      <button id="openCommittedCampaign" class="button secondary" type="button" hidden>Open story</button>
       <div class="button-row confirm-actions">
         <button id="cancelCreateCampaign" class="button secondary" type="button">Cancel</button>
-        <button id="confirmCreateCampaign" class="button primary" type="submit">Create campaign</button>
+        <button id="confirmCreateCampaign" class="button primary" type="submit" name="intent" value="create">Create only</button>
+        <button id="createAndStartCampaign" class="button accent" type="submit" name="intent" value="start">Create and start</button>
       </div>
     </form>
   </dialog>
