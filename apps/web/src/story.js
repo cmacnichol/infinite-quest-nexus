@@ -4849,6 +4849,14 @@ document.addEventListener("DOMContentLoaded", () => {
   // updates must not recapture the viewport until they explicitly resume.
   document.addEventListener("wheel", noteReaderPositionIntent, { capture: true, passive: true });
   document.addEventListener("touchmove", noteReaderPositionIntent, { capture: true, passive: true });
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.isTrusted || event.button !== 0) return;
+    const root = document.documentElement;
+    if (window.innerWidth <= root.clientWidth) return;
+    const rootBounds = root.getBoundingClientRect();
+    const onVerticalScrollbar = event.clientX < rootBounds.left || event.clientX >= rootBounds.right;
+    if (onVerticalScrollbar) noteReaderPositionIntent(event);
+  }, { capture: true });
 
   window.addEventListener("wheel", pauseStreamingAutoFollow, { passive: true });
   window.addEventListener("touchmove", pauseStreamingAutoFollow, { passive: true });

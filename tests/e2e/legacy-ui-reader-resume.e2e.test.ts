@@ -1,12 +1,12 @@
-import { expect, test, type Page } from "@playwright/test";
-import { mkdir, readFile } from "node:fs/promises";
+import { chromium, expect, test, type Page } from "@playwright/test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 import { generationJobSnapshotSchema, generationResultSchema } from "../../packages/contracts/src/index.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const alternateTurnId = "99999999-9999-4999-8999-999999999999";
-const screenshotDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T11/screenshots";
+const screenshotDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T11-fix2/screenshots";
 
 declare global {
   interface Window {
@@ -540,53 +540,101 @@ test("a manual scroll cancels a pending exact-turn restore", async ({ page }) =>
   expect(instrumentation.requests.filter((request) => request.path.includes("/turns?before=")).length).toBe(0);
 });
 
-test("a native scrollbar drag cancels a pending exact-turn restore when the browser exposes one", async ({ page }) => {
+test("a native scrollbar drag cancels a pending exact-turn restore", async () => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
-  const latest = fixture.turns[316]!;
-  latest.narration = "A long accepted scene provides a real document scrollbar. ".repeat(130);
-  const instrumentation = await installLegacyUiFixture(page, fixture);
-  await seedReaderPosition(page, fixtureUserId(fixture), fixture.campaignId, fixture.turns[11]!);
-  await prepareStoryPage(page, fixture.campaignId);
+  fixture.turns[316]!.narration = "A long accepted scene provides a real document scrollbar. ".repeat(180);
+  const browser = await chromium.launch({ headless: true, ignoreDefaultArgs: ["--hide-scrollbars"] });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   let releaseLookup!: () => void;
   let markLookupStarted!: () => void;
   let markLookupFulfilled!: () => void;
   const lookupStarted = new Promise<void>((resolve) => { markLookupStarted = resolve; });
   const lookupFulfilled = new Promise<void>((resolve) => { markLookupFulfilled = resolve; });
   const lookupBlocked = new Promise<void>((resolve) => { releaseLookup = resolve; });
-  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/12`, async (route) => {
-    markLookupStarted();
-    await lookupBlocked;
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[11] }) });
-    markLookupFulfilled();
-  });
+  try {
+    const instrumentation = await installLegacyUiFixture(page, fixture);
+    await seedReaderPosition(page, fixtureUserId(fixture), fixture.campaignId, fixture.turns[11]!);
+    await prepareStoryPage(page, fixture.campaignId);
+    await page.addInitScript(() => {
+      const events: Array<{ type: string; x: number; y: number; target: string; trusted: boolean }> = [];
+      (window as Window & { __nativeScrollbarEvents?: typeof events }).__nativeScrollbarEvents = events;
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "pointermove", "mousemove"]) {
+        window.addEventListener(type, (event) => {
+          const mouseEvent = event as MouseEvent;
+          const target = event.target instanceof Element ? event.target.tagName : String(event.target);
+          events.push({ type, x: mouseEvent.clientX, y: mouseEvent.clientY, target, trusted: event.isTrusted });
+        }, true);
+      }
+    });
+    await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/12`, async (route) => {
+      markLookupStarted();
+      await lookupBlocked;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[11] }) });
+      markLookupFulfilled();
+    });
 
-  await page.goto(`${origin}/story/${fixture.campaignId}`);
-  await lookupStarted;
-  const metrics = await page.evaluate(() => ({
-    scrollHeight: document.documentElement.scrollHeight,
-    clientHeight: document.documentElement.clientHeight,
-    clientWidth: document.documentElement.clientWidth,
-    innerWidth: window.innerWidth,
-    scrollY: window.scrollY
-  }));
-  test.skip(metrics.scrollHeight <= metrics.clientHeight || metrics.clientWidth === metrics.innerWidth,
-    "This rendered browser does not expose a non-overlay native scrollbar to drag.");
-  const thumb = Math.max(18, metrics.clientHeight * metrics.clientHeight / metrics.scrollHeight);
-  const startY = (metrics.clientHeight - thumb) / 2;
-  const endY = Math.min(metrics.clientHeight - thumb / 2, startY + metrics.clientHeight * 0.35);
-  await page.mouse.move(metrics.innerWidth - 5, startY);
-  await page.mouse.down();
-  await page.mouse.move(metrics.innerWidth - 5, endY, { steps: 5 });
-  await page.mouse.up();
-  await expect.poll(() => page.evaluate(() => window.scrollY)).not.toBe(metrics.scrollY);
-  releaseLookup();
-  await lookupFulfilled;
-  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
-  await expect(page.locator("#scene-317")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Resume reading" })).toBeVisible();
-  expect(instrumentation.requests.filter((request) => request.path.includes("/turns?before=")).length).toBe(0);
+    await page.goto(`${origin}/story/${fixture.campaignId}`);
+    await lookupStarted;
+    await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
+    await page.evaluate(async () => { for (let frame = 0; frame < 8; frame++) await new Promise(requestAnimationFrame); });
+    const before = await page.evaluate(() => ({
+      scrollHeight: document.documentElement.scrollHeight,
+      clientHeight: document.documentElement.clientHeight,
+      clientWidth: document.documentElement.clientWidth,
+      innerWidth: window.innerWidth,
+      scrollY: window.scrollY
+    }));
+    expect(before.scrollHeight).toBeGreaterThan(before.clientHeight);
+    expect(before.clientWidth).toBeLessThan(before.innerWidth);
+    await mkdir(screenshotDirectory, { recursive: true });
+    await page.screenshot({ path: `${screenshotDirectory}/native-scrollbar-before.png`, fullPage: false });
+    const thumbHeight = Math.max(18, before.clientHeight * before.clientHeight / before.scrollHeight);
+    const thumbTop = before.scrollY / (before.scrollHeight - before.clientHeight) * (before.clientHeight - thumbHeight);
+    const startY = thumbTop + thumbHeight / 2;
+    const targetY = Math.min(before.clientHeight - thumbHeight / 2 - 5, startY + before.clientHeight * 0.35);
+    const x = before.clientWidth + (before.innerWidth - before.clientWidth) / 2;
+    await page.mouse.move(x, startY);
+    await page.mouse.down();
+    await page.mouse.move(x, targetY, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(() => page.evaluate(() => window.scrollY)).not.toBe(before.scrollY);
+    const afterDrag = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      turn: document.getElementById("readerTurnCount")?.textContent,
+      events: (window as Window & { __nativeScrollbarEvents?: Array<{ type: string; x: number; y: number; target: string; trusted: boolean }> }).__nativeScrollbarEvents
+    }));
+    await page.screenshot({ path: `${screenshotDirectory}/native-scrollbar-after-drag.png`, fullPage: false });
+    releaseLookup();
+    await lookupFulfilled;
+    await page.evaluate(async () => { for (let frame = 0; frame < 8; frame++) await new Promise(requestAnimationFrame); });
+    const afterLookup = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      turn: document.getElementById("readerTurnCount")?.textContent,
+      notice: document.getElementById("readerPositionNotice")?.textContent
+    }));
+    await page.screenshot({ path: `${screenshotDirectory}/native-scrollbar-after-lookup.png`, fullPage: false });
+    await writeFile(`${screenshotDirectory}/native-scrollbar-result.json`, JSON.stringify({
+      launch: { headless: true, ignoreDefaultArgs: ["--hide-scrollbars"] }, before, drag: { x, startY, targetY, thumbHeight, thumbTop }, afterDrag, afterLookup,
+      pageErrors, canonicalWrites: instrumentation.writes
+    }, null, 2));
+    const nativePointerDown = afterDrag.events?.find((event) => event.type === "pointerdown" && event.trusted);
+    expect(nativePointerDown).toBeDefined();
+    expect(nativePointerDown!.x).toBeGreaterThanOrEqual(before.clientWidth);
+    expect(afterLookup.turn).toBe("Turn 317 of 317");
+    expect(afterLookup.scrollY).toBeGreaterThan(1000);
+    expect(Math.abs(afterLookup.scrollY - afterDrag.scrollY)).toBeLessThan(100);
+    expect(afterLookup.notice).not.toContain("Resumed reading at Turn 12");
+    await expect(page.locator("#scene-317")).toBeVisible();
+    expect(pageErrors).toEqual([]);
+    expect(instrumentation.writes).toEqual([]);
+  } finally {
+    releaseLookup?.();
+    await browser.close();
+  }
 });
-
 test("a saved reader position does not take over an active generation", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
   const pending = quietLeafApiPayloads({ pendingGeneration: true }).syncStatus.pendingGeneration!;
