@@ -78,13 +78,21 @@ async function bootLegacyStory({
   vi.stubGlobal("Element", window.Element);
   vi.stubGlobal("HTMLElement", window.HTMLElement);
   vi.stubGlobal("HTMLInputElement", window.HTMLInputElement);
+  vi.stubGlobal("HTMLSelectElement", window.HTMLSelectElement);
+  vi.stubGlobal("HTMLButtonElement", window.HTMLButtonElement);
   vi.stubGlobal("localStorage", { getItem: () => null, removeItem: () => undefined, setItem: () => undefined });
   Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", { value: () => undefined, writable: true, configurable: true });
-  Object.defineProperty(document.getElementById("userProfileDefaultTurnControlStyle"), "value", {
-    value: "flexible_action",
-    writable: true,
-    configurable: true
-  });
+  const profileControlDefaults: Array<[string, string]> = [
+    ["#userProfileDefaultTurnControlStyle", "flexible_action"],
+    ["[data-reader-width]", "72"],
+    ["[data-reader-font-size]", "18"],
+    ["[data-reader-line-height]", "1.7"],
+    ["select[data-reader-theme]", "dark"]
+  ];
+  for (const [selector, value] of profileControlDefaults) {
+    const control = document.querySelector(selector);
+    if (control) Object.defineProperty(control, "value", { value, writable: true, configurable: true });
+  }
   const syncCampaign = syncStatus || vi.fn().mockResolvedValue({
     campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100, storyLengthProfile: "standard" },
     world: {},

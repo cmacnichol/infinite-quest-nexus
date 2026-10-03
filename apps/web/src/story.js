@@ -46,7 +46,9 @@ import {
   generationRecoveryGuidance,
   generationResponseFormatPresentation,
   generationReviewPresentation,
-  generationReviewTechnicalDiagnosticMessage
+  generationReviewTechnicalDiagnosticMessage,
+  DEFAULT_READER_PREFERENCES,
+  normalizeReaderPreferences
 } from "@infinite-quest/client-core";
 
 "use strict";
@@ -198,7 +200,8 @@ const state = {
     settings: {
       autoSubmitTurnChoices: true,
       continuousReading: false,
-      defaultTurnControlStyle: "flexible_action"
+      defaultTurnControlStyle: "flexible_action",
+      readerPreferences: DEFAULT_READER_PREFERENCES
     }
   }
 };
@@ -212,6 +215,9 @@ let nextEditStateSessionId = 0;
 let nextCharacterProfileEditSessionId = 0;
 let characterProfileEditRequestToken = 0;
 let nextResponseEditSessionId = 0;
+let userProfileSaving = false;
+let userProfilePersistedTurnControlStyle = null;
+let userProfileTurnControlStyleChanged = false;
 let generationReviewLoadEpoch = 0;
 let generationReviewLoadedKey = null;
 const COMPLETE_HISTORY_SUPERSEDED = "complete_history_superseded";
@@ -575,6 +581,10 @@ function clickedDialogBackdrop(dialog, event) {
 
 function requestModalDismissal(dialog) {
   if (dialog.id === "campaignCastDialog") { castPanel?.requestClose(); return; }
+  if (dialog.id === "userProfileDialog") {
+    if (!userProfileSaving) dialog.close();
+    return;
+  }
   requestDiscardChanges(dialog, () => dialog.close());
 }
 
@@ -3913,15 +3923,73 @@ function openUserProfile() {
   const cbSubmit = $("userProfileAutoSubmitChoices");
   const cbContinuous = $("userProfileContinuousReading");
   const defaultTurnStyle = $("userProfileDefaultTurnControlStyle");
+  userProfilePersistedTurnControlStyle = state.user?.settings?.defaultTurnControlStyle ?? null;
+  userProfileTurnControlStyleChanged = false;
   if (nameInput) nameInput.value = state.user?.displayName || "Initial Owner";
   if (cbSubmit) cbSubmit.checked = state.user?.settings?.autoSubmitTurnChoices !== false;
   if (cbContinuous) cbContinuous.checked = Boolean(state.user?.settings?.continuousReading);
   if (defaultTurnStyle) defaultTurnStyle.value = state.user?.settings?.defaultTurnControlStyle === "flexible_scene" ? "flexible_scene" : "flexible_action";
+  const readerPreferences = normalizeReaderPreferences(state.user?.settings?.readerPreferences);
+  setReaderPreferenceControls(readerPreferences);
+  applyReaderPreferences(readerPreferences);
+  const profileStatus = document.querySelector("[data-profile-status]");
+  if (profileStatus) profileStatus.textContent = "";
+  setUserProfileSaving(false);
   renderStoryMemorySettings(state.storyMemorySettings);
   openManagedModal(dlg);
 }
 
+function setReaderPreferenceControls(preferences) {
+  const controls = [
+    ["[data-reader-width]", String(preferences.widthCh)],
+    ["[data-reader-font-size]", String(preferences.fontSizePx)],
+    ["[data-reader-line-height]", String(preferences.lineHeight)],
+    ["select[data-reader-theme]", preferences.theme]
+  ];
+  for (const [selector, value] of controls) {
+    const control = document.querySelector(selector);
+    if (control) control.value = value;
+  }
+}
+
+function readerPreferencesFromControls() {
+  return normalizeReaderPreferences({
+    widthCh: Number(document.querySelector("[data-reader-width]")?.value),
+    fontSizePx: Number(document.querySelector("[data-reader-font-size]")?.value),
+    lineHeight: Number(document.querySelector("[data-reader-line-height]")?.value),
+    theme: document.querySelector("select[data-reader-theme]")?.value
+  });
+}
+
+function applyReaderPreferences(preferences) {
+  const storyContainer = $("storyContainer");
+  if (!storyContainer) return;
+  const normalized = normalizeReaderPreferences(preferences);
+  storyContainer.dataset.readerTheme = normalized.theme;
+  storyContainer.style.setProperty("--reader-width-ch", String(normalized.widthCh));
+  storyContainer.style.setProperty("--reader-font-size", `${normalized.fontSizePx}px`);
+  storyContainer.style.setProperty("--reader-line-height", String(normalized.lineHeight));
+}
+
+function setUserProfileSaving(saving) {
+  userProfileSaving = saving;
+  const dialog = $("userProfileDialog");
+  const controls = dialog?.querySelectorAll("#userProfileDisplayName, #userProfileAutoSubmitChoices, #userProfileContinuousReading, #userProfileDefaultTurnControlStyle, [data-reader-width], [data-reader-font-size], [data-reader-line-height], [data-reader-theme], [data-reader-preview], #btnSaveUserProfile, #btnCancelUserProfile, #btnCloseUserProfile");
+  controls?.forEach((control) => {
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLButtonElement) {
+      control.disabled = saving;
+    }
+  });
+  const save = $("btnSaveUserProfile");
+  if (save) save.textContent = saving ? "Saving…" : "Save Profile";
+}
+
+function previewReaderPreferences() {
+  applyReaderPreferences(readerPreferencesFromControls());
+}
+
 async function saveUserProfile() {
+  if (userProfileSaving) return;
   const nameInput = $("userProfileDisplayName");
   const cbSubmit = $("userProfileAutoSubmitChoices");
   const cbContinuous = $("userProfileContinuousReading");
@@ -3929,7 +3997,10 @@ async function saveUserProfile() {
   const displayName = nameInput ? nameInput.value.trim() : "";
   const autoSubmitTurnChoices = cbSubmit ? cbSubmit.checked : true;
   const continuousReading = cbContinuous ? cbContinuous.checked : false;
-  const defaultTurnControlStyle = defaultTurnStyle?.value === "flexible_scene" ? "flexible_scene" : "flexible_action";
+  const defaultTurnControlStyle = !userProfileTurnControlStyleChanged && userProfilePersistedTurnControlStyle === "action_only"
+    ? "action_only"
+    : defaultTurnStyle?.value === "flexible_scene" ? "flexible_scene" : "flexible_action";
+  const readerPreferences = readerPreferencesFromControls();
   const wasContinuousReading = Boolean(state.user?.settings?.continuousReading);
   let completeHistoryError = null;
 
@@ -3938,13 +4009,17 @@ async function saveUserProfile() {
     return;
   }
 
+  setUserProfileSaving(true);
+  const profileStatus = document.querySelector("[data-profile-status]");
+  if (profileStatus) profileStatus.textContent = "Saving profile…";
   try {
     const res = await apiClient.session.updateProfile({
       displayName,
       settings: {
         autoSubmitTurnChoices,
         continuousReading,
-        defaultTurnControlStyle
+        defaultTurnControlStyle,
+        readerPreferences
       }
     });
     if (res && res.user) {
@@ -3956,8 +4031,10 @@ async function saveUserProfile() {
         state.user.settings.autoSubmitTurnChoices = autoSubmitTurnChoices;
         state.user.settings.continuousReading = continuousReading;
         state.user.settings.defaultTurnControlStyle = defaultTurnControlStyle;
+        state.user.settings.readerPreferences = readerPreferences;
       }
     }
+    applyReaderPreferences(state.user?.settings?.readerPreferences ?? readerPreferences);
     if (!wasContinuousReading && continuousReading && state.historyNextCursor) {
       try {
         await ensureCompleteTurnHistory();
@@ -3974,7 +4051,10 @@ async function saveUserProfile() {
     if (dlg && dlg.close) dlg.close();
     if (!completeHistoryError) toast("Profile saved.", 2600);
   } catch (err) {
+    if (profileStatus) profileStatus.textContent = `Profile could not be saved: ${err.message || String(err)}`;
     toast("Failed to save profile: " + err.message, 3500);
+  } finally {
+    setUserProfileSaving(false);
   }
 }
 
@@ -4626,12 +4706,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const btnOpenUserProfile = $("btnOpenUserProfile");
   if (btnOpenUserProfile) btnOpenUserProfile.addEventListener("click", () => { closeNavigationMenus(); openUserProfile(); });
+  const userProfileDialog = $("userProfileDialog");
+  if (userProfileDialog) {
+    userProfileDialog.addEventListener("close", () => {
+      applyReaderPreferences(state.user?.settings?.readerPreferences);
+    });
+    userProfileDialog.addEventListener("cancel", (event) => {
+      if (userProfileSaving) event.preventDefault();
+    });
+  }
+  const readerPreview = document.querySelector("[data-reader-preview]");
+  if (readerPreview) readerPreview.addEventListener("click", previewReaderPreferences);
   const btnCloseUserProfile = $("btnCloseUserProfile");
   if (btnCloseUserProfile) btnCloseUserProfile.addEventListener("click", () => { const d = $("userProfileDialog"); if (d && d.close) d.close(); });
   const btnCancelUserProfile = $("btnCancelUserProfile");
   if (btnCancelUserProfile) btnCancelUserProfile.addEventListener("click", () => { const d = $("userProfileDialog"); if (d && d.close) d.close(); });
   const btnSaveUserProfile = $("btnSaveUserProfile");
   if (btnSaveUserProfile) btnSaveUserProfile.addEventListener("click", saveUserProfile);
+  const defaultTurnControlStyle = $("userProfileDefaultTurnControlStyle");
+  if (defaultTurnControlStyle) defaultTurnControlStyle.addEventListener("change", () => { userProfileTurnControlStyleChanged = true; });
   const storyMemoryLevel = $("storyMemoryLevel");
   $("storyContinuityReviewEnabled")?.addEventListener("change", () => { void saveStoryMemorySettings(); });
   if (storyMemoryLevel) storyMemoryLevel.addEventListener("change", () => { void saveStoryMemorySettings(); });
@@ -4854,8 +4947,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const root = document.documentElement;
     if (window.innerWidth <= root.clientWidth) return;
     const rootBounds = root.getBoundingClientRect();
-    const onVerticalScrollbar = event.clientX < rootBounds.left || event.clientX >= rootBounds.right;
-    if (onVerticalScrollbar) noteReaderPositionIntent(event);
+    const pointerOutsideRootGutter = event.clientX < rootBounds.left || event.clientX >= rootBounds.right;
+    if (pointerOutsideRootGutter) noteReaderPositionIntent(event);
   }, { capture: true });
 
   window.addEventListener("wheel", pauseStreamingAutoFollow, { passive: true });

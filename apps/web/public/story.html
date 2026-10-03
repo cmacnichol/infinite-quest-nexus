@@ -72,7 +72,7 @@
     <p id="storyNexusVersion" class="story-product-version hidden"></p>
 
     <main class="layout" id="appLayout">
-      <section id="storyContainer" class="panel story-shell">
+      <section id="storyContainer" class="panel story-shell" data-reader-theme="dark">
         <div class="story-top">
           <h2 id="storyTitle">No adventure yet</h2>
           <div class="statusbar">
@@ -591,6 +591,48 @@
           </label>
         </div>
       </div>
+      <div class="settings-section-card">
+        <div class="settings-section-header">
+          <span class="settings-section-title">Reading appearance</span>
+        </div>
+        <details class="reader-appearance" data-reading-appearance>
+          <summary>Adjust text and color</summary>
+          <div class="reader-appearance-fields">
+            <label><span>Reading width</span>
+              <select data-reader-width>
+                <option value="60">Narrow — 60 characters</option>
+                <option value="72">Comfortable — 72 characters</option>
+                <option value="84">Wide — 84 characters</option>
+              </select>
+            </label>
+            <label><span>Text size</span>
+              <select data-reader-font-size>
+                <option value="16">16 px</option>
+                <option value="18">18 px</option>
+                <option value="20">20 px</option>
+                <option value="22">22 px</option>
+              </select>
+            </label>
+            <label><span>Line spacing</span>
+              <select data-reader-line-height>
+                <option value="1.5">Compact — 1.5</option>
+                <option value="1.7">Comfortable — 1.7</option>
+                <option value="1.9">Relaxed — 1.9</option>
+              </select>
+            </label>
+            <label><span>Reader colors</span>
+              <select data-reader-theme>
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="sepia">Sepia</option>
+              </select>
+            </label>
+            <p class="mini">Preview applies to this reading area until you save or cancel.</p>
+            <button data-reader-preview type="button">Preview appearance</button>
+          </div>
+        </details>
+      </div>
+      <p class="profile-save-status mini" data-profile-status role="status" aria-live="polite"></p>
       <div class="settings-section-card">
         <div class="settings-section-header">
           <span class="settings-section-title">Current Campaign Memory</span>

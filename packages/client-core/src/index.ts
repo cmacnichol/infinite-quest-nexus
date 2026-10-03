@@ -108,3 +108,5 @@ export type {
 } from "./campaign-creation-draft.js";
 export { resolveResumeCampaign } from "./resume-campaign.js";
 export type { ResumeCampaign } from "./resume-campaign.js";
+export { DEFAULT_READER_PREFERENCES, normalizeReaderPreferences } from "./reader-preferences.js";
+export type { ReaderPreferences } from "./reader-preferences.js";

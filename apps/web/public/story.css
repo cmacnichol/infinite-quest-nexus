@@ -184,6 +184,84 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .clickable-pill:hover, .clickable-pill:focus-visible { border-color: var(--gold); background: rgba(255,255,255,.14); color: #fff; outline: none; }
 
 .story-area { padding: 20px; display: grid; gap: 18px; align-content: start; }
+#storyContainer .story-area { background: var(--reader-surface); color: var(--reader-text); }
+#storyContainer .story-reader-toolbar { background: var(--reader-surface); color: var(--reader-text); border-color: var(--reader-border); }
+#storyContainer .story-top { color: var(--reader-muted); background: var(--reader-surface); border-color: var(--reader-border); }
+#storyContainer .story-top h2 { color: var(--reader-emphasis); }
+#storyContainer .story-top .statusbar { color: var(--reader-muted); }
+#storyContainer .story-top .pill { color: var(--reader-muted); }
+#storyContainer .reader-turn-count { color: var(--reader-muted); }
+#storyContainer .previous-action-disclosure > summary { color: var(--reader-muted); }
+#storyContainer #turnInputModeField > legend,
+#storyContainer #turnInputModeLock { color: var(--reader-muted); }
+#storyContainer .story-area label,
+#storyContainer .input-action label,
+#storyContainer .story-area .turn-input-guidance,
+#storyContainer .story-area .turn-length-override { color: var(--reader-muted); }
+#storyContainer .story-area input,
+#storyContainer .story-area select,
+#storyContainer .story-area textarea,
+#storyContainer .input-action input,
+#storyContainer .input-action select,
+#storyContainer .input-action textarea {
+  color: var(--reader-control-text);
+  background: var(--reader-control-surface);
+  border-color: var(--reader-border);
+}
+#storyContainer .story-area input:focus-visible,
+#storyContainer .story-area select:focus-visible,
+#storyContainer .story-area textarea:focus-visible,
+#storyContainer .story-area button:focus-visible,
+#storyContainer .story-area a:focus-visible,
+#storyContainer .story-reader-toolbar button:focus-visible,
+#storyContainer .input-action button:focus-visible,
+#storyContainer .input-action input:focus-visible,
+#storyContainer .input-action select:focus-visible,
+#storyContainer .input-action textarea:focus-visible {
+  outline: 3px solid var(--reader-focus);
+  outline-offset: 2px;
+}
+#storyContainer .story-area button {
+  color: var(--reader-control-text);
+  background: var(--reader-control-surface);
+  border-color: var(--reader-border);
+}
+#storyContainer .story-reader-toolbar button,
+#storyContainer .input-action button {
+  color: var(--reader-control-text);
+  background: var(--reader-control-surface);
+  border-color: var(--reader-border);
+}
+#storyContainer .story-area button:hover:not(:disabled) {
+  color: var(--reader-link);
+  border-color: var(--reader-link);
+}
+#storyContainer .story-reader-toolbar button:hover:not(:disabled),
+#storyContainer .input-action button:hover:not(:disabled) {
+  color: var(--reader-link);
+  border-color: var(--reader-link);
+}
+#storyContainer .input-action .choice-mode-hint { color: var(--reader-link); }
+#storyContainer .story-area button:disabled {
+  opacity: 1;
+  color: var(--reader-disabled-text);
+  background: var(--reader-disabled-surface);
+}
+#storyContainer .story-reader-toolbar button:disabled,
+#storyContainer .input-action button:disabled {
+  opacity: 1;
+  color: var(--reader-disabled-text);
+  background: var(--reader-disabled-surface);
+}
+#storyContainer .story-area a { color: var(--reader-link); }
+#storyContainer .input-action { color: var(--reader-muted); background: var(--reader-surface); border-color: var(--reader-border); }
+#storyContainer .input-action label,
+#storyContainer .input-action .turn-input-guidance { color: var(--reader-muted); }
+#storyContainer .story-area .action-tag,
+#storyContainer .story-area .generation-recovery,
+#storyContainer .story-area .replacement-pending-banner { color: var(--reader-text); }
+#storyContainer .story-area .action-tag-event { color: var(--reader-link); }
+#storyContainer .story-area .input-action { background: var(--reader-surface); border-color: var(--reader-border); }
 .empty { min-height: 480px; display: grid; place-items: center; text-align: center; padding: 30px; color: var(--muted); border: 1px dashed rgba(255,255,255,.16); border-radius: 18px; background: rgba(255,255,255,.03); }
 
 .turn-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -205,10 +283,16 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 .scene { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; scroll-margin-top: 135px; }
 
-.narration { font-size: 1.03rem; line-height: 1.68; color: #fff; }
+.narration {
+  width: min(100%, calc(var(--reader-width-ch, 72) * 1ch));
+  margin-inline: auto;
+  font-size: var(--reader-font-size, 18px);
+  line-height: var(--reader-line-height, 1.7);
+  color: var(--reader-text, #fff);
+}
 .narration p { margin: 0 0 1em; }
-.narration em { color: #f3ddff; }
-.narration strong { color: var(--gold2); }
+.narration em { color: var(--reader-emphasis, #f3ddff); }
+.narration strong { color: var(--reader-strong, var(--gold2)); }
 
 .image-wrap { min-height: 260px; border-radius: 18px; overflow: hidden; border: 1px solid rgba(255,255,255,.12); background: radial-gradient(circle at 30% 20%, rgba(201,156,255,.1), rgba(0,0,0,.28)); display: grid; place-items: center; box-shadow: 0 18px 45px rgba(0,0,0,.26); position: sticky; top: 14px; }
 .image-wrap img { width: 100%; height: 100%; display: block; object-fit: cover; }
@@ -570,6 +654,21 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
   letter-spacing: 0.06em;
   color: var(--gold2);
 }
+.reader-appearance > summary {
+  width: fit-content;
+  min-height: 40px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  color: var(--text);
+  cursor: pointer;
+}
+.reader-appearance > summary:focus-visible,
+.reader-appearance-fields button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+.reader-appearance-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding-top: 12px; }
+.reader-appearance-fields .mini { grid-column: 1 / -1; margin: 0; }
+.reader-appearance-fields button { justify-self: start; }
+.profile-save-status { min-height: 1.2em; margin: 0 2px; color: var(--danger); }
 .settings-field {
   display: grid;
   gap: 6px;
@@ -584,6 +683,9 @@ dialog.getting-started-dialog { width: min(680px, calc(100vw - 28px)); }
 .settings-options-list {
   display: grid;
   gap: 10px;
+}
+@media (max-width: 620px) {
+  .reader-appearance-fields { grid-template-columns: minmax(0, 1fr); }
 }
 .settings-option-row {
   display: flex;
