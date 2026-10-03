@@ -122,6 +122,51 @@ for (const target of absentTargetCases) {
   });
 }
 
+test("missing_world_link_keeps_the_archive_failure_and_both_world_scopes_visible", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 0 });
+  const world = fixture.worlds[0]!;
+  const api = await installLegacyUiFixture(page, fixture, { failures: { [`PATCH /api/v1/worlds/${world.id}`]: 503 } });
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator(`#worldManagementCarousel [data-world-id="${world.id}"]`).click();
+  await expect(page.locator("#worldEditorTitle")).toHaveText(String(world.title));
+
+  await page.evaluate(id => { window.location.hash = `#world-library?worldId=${id}`; }, absentTargetCases[0]!.id);
+  await expect(page.locator("#worldStatus")).toContainText("not available in this library");
+  await page.locator("#worldSelectionPanel details summary").click();
+  await page.locator("#archiveWorld").click();
+
+  await expect.poll(() => api.writes.filter(write => write.method === "PATCH").length).toBe(1);
+  await expect(page.locator("#worldEditorTitle")).toHaveText(String(world.title));
+  await expect(page.locator(`#worldManagementCarousel [data-world-id="${world.id}"]`)).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#worldStatus")).toContainText("configured synthetic route failure");
+  await expect(page.locator("#worldStatus")).toContainText("not available in this library");
+  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/fix2-world-archive-error.png", fullPage: false });
+  expect(api.writes.filter(write => write.method === "PATCH")).toHaveLength(1);
+});
+
+test("missing_campaign_link_keeps_the_save_failure_and_both_campaign_scopes_visible", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
+  const campaign = fixture.campaigns[0]!;
+  const api = await installLegacyUiFixture(page, fixture, { failures: { [`PATCH /api/v1/campaigns/${campaign.id}`]: 503 } });
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator(`#campaignList [data-campaign-id="${campaign.id}"]`).click();
+  await expect(page.locator("#campaignTitle")).toHaveValue(String(campaign.title));
+
+  await page.evaluate(id => { window.location.hash = `#campaigns?campaignId=${id}`; }, absentTargetCases[0]!.id);
+  await expect(page.locator("#campaignStatusMessage")).toContainText("not available in this library");
+  await page.locator("#campaignTitle").fill("Changed campaign A title");
+  await page.locator("#saveCampaign").click();
+
+  await expect.poll(() => api.writes.filter(write => write.method === "PATCH").length).toBe(1);
+  await expect(page.locator("#campaignTitle")).toHaveValue("Changed campaign A title");
+  await expect(page.locator(`#campaignList [data-campaign-id="${campaign.id}"]`)).toHaveClass(/active/u);
+  await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
+  await expect(page.locator("#campaignStatusMessage")).toContainText("configured synthetic route failure");
+  await expect(page.locator("#campaignStatusMessage")).toContainText("not available in this library");
+  await page.screenshot({ path: ".superpowers/sdd/legacy-ui-2026-10-03/evidence/T21/fix2-campaign-save-error.png", fullPage: false });
+  expect(api.writes.filter(write => write.method === "PATCH")).toHaveLength(1);
+});
+
 test("dirty_back_navigation_stays", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
   const api = await installLegacyUiFixture(page, fixture);

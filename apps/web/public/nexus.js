@@ -651,6 +651,7 @@ const MANAGEMENT_ROUTE_NAMES = new Set(["#dashboard", "#world-library", "#campai
 const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 let managementNavigationIntent = 0;
 let managementSelectionErrorIntent = null;
+let managementSelectionErrorMessage = "";
 let acceptedManagementHash = window.location.hash || "#dashboard";
 let acceptedManagementRoute = null;
 let acceptedManagementHistoryIndex = Number.NaN;
@@ -720,6 +721,7 @@ function managementSelectionHash(view, kind, id) {
 
 function managementSelectionError(route, message) {
   managementSelectionErrorIntent = managementNavigationIntent;
+  managementSelectionErrorMessage = message;
   if (route.view === "worlds") {
     elements.worldStatus.textContent = message;
     elements.worldStatus.className = "status error";
@@ -885,6 +887,7 @@ async function acceptManagementRoute(hash, { source = "link", focus = true, dest
   if (intent !== managementNavigationIntent || acceptedManagementRoute !== previousRoute || acceptedManagementHash !== previousHash) return false;
 
   managementSelectionErrorIntent = null;
+  managementSelectionErrorMessage = "";
   if (source === "link") {
     if (hash !== previousHash) {
       acceptedManagementHistoryIndex = previousIndex + 1;
@@ -2395,13 +2398,26 @@ function scrollCarousel(element, direction) {
 }
 
 function worldMessage(message, type = "") {
-  if (managementSelectionErrorIsCurrent("worlds")) return;
+  if (managementSelectionErrorIsCurrent("worlds")) {
+    if (type === "error") {
+      elements.worldStatus.textContent = `${message} ${managementSelectionErrorMessage}`;
+      elements.worldStatus.className = "status error";
+    }
+    return;
+  }
   elements.worldStatus.textContent = message;
   elements.worldStatus.className = `status ${type}`.trim();
 }
 
 function campaignMessage(message, type = "") {
-  if (managementSelectionErrorIsCurrent("campaigns")) return;
+  if (managementSelectionErrorIsCurrent("campaigns")) {
+    if (type === "error") {
+      elements.campaignStatusMessage.textContent = `${message} ${managementSelectionErrorMessage}`;
+      elements.campaignStatusMessage.className = "status error";
+      elements.campaignStatusMessage.classList.remove("hidden");
+    }
+    return;
+  }
   elements.campaignStatusMessage.textContent = message;
   elements.campaignStatusMessage.className = `status ${type}`.trim();
   elements.campaignStatusMessage.classList.remove("hidden");
