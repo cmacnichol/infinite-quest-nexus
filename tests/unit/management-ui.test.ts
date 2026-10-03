@@ -17,6 +17,14 @@ function managementFunction<T extends (...args: never[]) => unknown>(name: strin
   return Function(`${managementScript.slice(start, end)}; return ${name};`)() as T;
 }
 
+function managementFunctionWithBindings<T extends (...args: never[]) => unknown>(name: string, bindings: Record<string, unknown>): T {
+  const start = managementScript.indexOf(`function ${name}(`);
+  const end = managementScript.indexOf("\nfunction ", start + 1);
+  if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
+  const bindingNames = Object.keys(bindings);
+  return Function(...bindingNames, `${managementScript.slice(start, end)}; return ${name};`)(...Object.values(bindings)) as T;
+}
+
 function managementFunctions<T extends Record<string, (...args: never[]) => unknown>>(names: string[], bindings: Record<string, unknown>): T {
   const sources = names.map((name) => {
     const start = managementScript.indexOf(`function ${name}(`);
@@ -45,13 +53,19 @@ describe("Nexus management UI contracts", () => {
     }
     let resolveOldWorld!: (world: unknown) => void;
     const oldWorld = new Promise((resolve) => { resolveOldWorld = resolve; });
+    const worldAId = "11111111-1111-4111-8111-111111111111";
+    const worldBId = "11111111-1111-4111-8111-111111111112";
+    const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+    const managementSelectionHash = managementFunctionWithBindings<(view: string, kind: string, id: string) => string>("managementSelectionHash", { UUID_ROUTE_PATTERN });
     const api = vi.fn(async (path: string) => {
       if (path.endsWith("/state")) return { activeTurnNumber: 1, revision: 2 };
-      if (path === "/api/v1/worlds/world-a") return oldWorld;
+      if (path === `/api/v1/worlds/${worldAId}`) return oldWorld;
       return { versions: [{ id: "version-b", versionNumber: 1 }] };
     });
     const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "normalizedTurnControlStyle"], {
       elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
+      UUID_ROUTE_PATTERN,
+      managementSelectionHash,
       canLeaveCampaignEditor: async () => true,
       campaignSettingsSnapshot: () => ({}),
       campaignEditGuard: { reset: () => undefined },
@@ -77,13 +91,14 @@ describe("Nexus management UI contracts", () => {
       previewContext: async () => undefined,
       loadCampaignStoryMemory: () => undefined
     });
-    const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: `world-${suffix}`, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
+    const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: suffix === "a" ? worldAId : worldBId, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
     const firstSelection = functions.selectCampaign(campaign("a"));
-    await vi.waitFor(() => expect(api).toHaveBeenCalledWith("/api/v1/worlds/world-a"));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/worlds/${worldAId}`));
     await functions.selectCampaign(campaign("b"));
     resolveOldWorld({ versions: [{ id: "version-a", versionNumber: 1 }] });
     await firstSelection;
     expect((elements.campaignTitle as HTMLInputElement).value).toBe("Campaign b");
+    expect((elements.campaignWorldLink as HTMLAnchorElement).getAttribute("href")).toBe(`#world-library?worldId=${worldBId}`);
     expect([...elements.campaignWorldVersion!.querySelectorAll("option")].map((option) => option.value)).toEqual(["version-b"]);
   });
 
@@ -96,7 +111,15 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain("World &amp; Campaign Archives");
     expect(managementHtml).toContain("Legacy &amp; External Imports");
     expect(managementHtml).toContain("Readable Story Exports");
-    expect(managementScript).toContain('hash === "#data-transfer" || hash === "#imports"');
+    const parseManagementRoute = managementFunctionWithBindings<((hash: string) => { view: string; routeName: string; selection: unknown; selectionError: string })>("parseManagementRoute", {
+      UUID_ROUTE_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+    });
+    const worldId = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF";
+    expect(parseManagementRoute(`#world-library?worldId=${worldId}`)).toMatchObject({
+      view: "worlds", routeName: "#world-library", selection: { kind: "world", id: worldId.toLowerCase() }, selectionError: ""
+    });
+    expect(parseManagementRoute("#imports")).toMatchObject({ view: "data-transfer", routeName: "#imports", selection: null, selectionError: "" });
+    expect(parseManagementRoute("#world-library?worldId=world-a")).toMatchObject({ view: "worlds", selection: null, selectionError: expect.stringContaining("valid world ID") });
     expect(managementScript).toContain("capabilities?.systemArchive === true");
     expect(managementScript).not.toContain("new JSZip");
     expect(managementHtml).not.toContain('/nexus/jszip.min.js');
@@ -976,7 +999,12 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).toContain("function campaignSettingsSnapshot()");
     expect(managementScript).toContain("...snapshot");
     expect(managementScript).toContain("savedTurnControlStyle(snapshot.turnControlStyle, campaign.turnControlStyle)");
-    expect(managementScript).toContain('dataTransferView ? "data-transfer" : "worlds"');
+    const applyViewStart = managementScript.indexOf("function applyManagementView(hash");
+    const applyViewEnd = managementScript.indexOf("\nfunction isManagementRouteHash", applyViewStart);
+    const applyViewSource = managementScript.slice(applyViewStart, applyViewEnd);
+    expect(applyViewSource).toContain("elements.providers.hidden = !providerView;");
+    expect(applyViewSource).toContain('elements["world-library"].hidden = route.view !== "worlds";');
+    expect(applyViewSource).toContain('elements["prompt-library"].hidden = !promptLibraryView;');
     expect(managementCss).toContain('body[data-management-view="dashboard"] .world-management');
     expect(managementCss).toContain('body[data-management-view="providers"] .world-management');
     expect(managementCss).toContain('body[data-management-view="worlds"] .provider-management');
@@ -1390,7 +1418,11 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml.indexOf('id="worldAuthorDialog"')).toBeGreaterThan(managementHtml.indexOf('id="worldSelectionPanel"'));
     expect(managementScript).toContain("function renderManagementWorlds()");
     expect(managementScript).toContain("function createManagementWorldCard(world)");
-    expect(managementScript).toContain('card.addEventListener("click", () => void selectWorld(world.id));');
+    const cardStart = managementScript.indexOf("function createManagementWorldCard(world)");
+    const cardEnd = managementScript.indexOf("\nfunction renderManagementWorlds()", cardStart);
+    const cardSource = managementScript.slice(cardStart, cardEnd);
+    expect(cardSource).toContain('acceptManagementRoute(managementSelectionHash("worlds", "world", world.id)');
+    expect(cardSource).toContain("UUID_ROUTE_PATTERN.test(String(world.id || \"\"))");
     expect(managementScript).toContain('openWorldAuthor("edit")');
   });
 

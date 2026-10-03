@@ -147,7 +147,7 @@ test("Enter uses the safe Create only default and leaves the user in management"
   await fillCampaignBasics(page);
   await page.locator("#newCampaignTitle").press("Enter");
   await expect(page.locator("#createCampaignDialog")).toBeHidden();
-  await expect(page).toHaveURL(/#world-library$/u);
+  await expect(page).toHaveURL(`${origin}/nexus/index.html#world-library?worldId=${String(api.fixture.worlds[0]?.id)}`);
   expect(api.creates).toHaveLength(1);
   expect(api.creates[0]).toMatchObject({ turnControlStyle: "flexible_scene" });
 });

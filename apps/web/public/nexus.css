@@ -35,6 +35,8 @@ p { color: var(--muted); line-height: 1.55; }
 .eyebrow { margin-bottom: 5px; color: var(--purple); font-size: .76rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
 .card { border: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 94%, transparent); border-radius: 18px; padding: 22px; box-shadow: 0 18px 60px #0005; }
 .provider-card, .world-library-card { margin-bottom: 18px; }
+#world-library[hidden], #campaigns[hidden] { display: none !important; }
+#managementHeader[hidden], .dashboard-home[hidden], .provider-management[hidden], .prompt-library-management[hidden], .data-transfer-management[hidden] { display: none !important; }
 body[data-management-view="dashboard"] .world-management,
 body[data-management-view="dashboard"] .provider-management,
 body[data-management-view="dashboard"] .prompt-library-management,

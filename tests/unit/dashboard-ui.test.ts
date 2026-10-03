@@ -8,7 +8,11 @@ const navigationCss = readFileSync("apps/web/public/navigation.css", "utf8");
 
 describe("Nexus central dashboard", () => {
   it("is the default view and exposes the universal navigation in product order", () => {
-    expect(dashboardScript).toContain('const hash = window.location.hash || "#dashboard";');
+    expect(dashboardScript).toContain("function parseManagementRoute(hash)");
+    expect(dashboardScript).toContain('MANAGEMENT_ROUTE_NAMES = new Set(["#dashboard", "#world-library", "#campaigns", "#providers", "#prompt-library", "#data-transfer", "#imports"])');
+    expect(dashboardScript).toContain("acceptedManagementHistoryIndex = previousIndex + 1;");
+    expect(dashboardScript).toContain("rollbackManagementHistory(destinationIndex)");
+    expect(dashboardHtml).toContain('id="campaignWorldLink"');
     expect(dashboardHtml.indexOf('id="navDashboard"')).toBeLessThan(dashboardHtml.indexOf('id="storyViewLink"'));
     expect(dashboardHtml).toContain('id="navSetup" class="nav-menu-trigger"');
     expect(dashboardHtml).toContain('class="nav-section-divider"');

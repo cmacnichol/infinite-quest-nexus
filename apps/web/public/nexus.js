@@ -343,6 +343,7 @@ function clearCampaignEditorSelection({ focus = false } = {}) {
   campaignStoryMemorySettings = null;
   elements.memoryTitle.textContent = "Select a campaign";
   elements.campaignEditorSummary.textContent = "";
+  elements.campaignWorldLink.hidden = true;
   elements.campaignStatusMessage.textContent = "";
   elements.campaignStatusMessage.className = "status hidden";
   renderCampaignStoryMemorySettings(null, { message: "Select a campaign to load its saved Story Memory level." });
@@ -645,39 +646,337 @@ function updateStoryViewLink() {
   }
 }
 
-function applyManagementView() {
-  const hash = window.location.hash || "#dashboard";
-  const dashboardView = hash === "#dashboard";
-  const providerView = hash === "#providers";
-  const promptLibraryView = hash === "#prompt-library";
-  const dataTransferView = hash === "#data-transfer" || hash === "#imports";
-  document.body.dataset.managementView = dashboardView ? "dashboard" : providerView ? "providers" : promptLibraryView ? "prompt-library" : dataTransferView ? "data-transfer" : "worlds";
-  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : dataTransferView ? "Data Transfer" : hash === "#campaigns" ? "Campaign Management" : "World Management";
+const MANAGEMENT_HISTORY_STATE_KEY = "__infiniteQuestNexusManagement";
+const MANAGEMENT_ROUTE_NAMES = new Set(["#dashboard", "#world-library", "#campaigns", "#providers", "#prompt-library", "#data-transfer", "#imports"]);
+const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+let managementNavigationIntent = 0;
+let acceptedManagementHash = window.location.hash || "#dashboard";
+let acceptedManagementRoute = null;
+let acceptedManagementHistoryIndex = Number.NaN;
+let managementRollback = null;
+let ignoredManagementHashChange = "";
+let acceptedManagementHistoryLength = window.history.length;
+let acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+let managementPendingHashEntries = 0;
+let initialWorldListReady = false;
+let initialCampaignListReady = false;
+
+function parseManagementRoute(hash) {
+  const question = hash.indexOf("?");
+  const routeName = (question < 0 ? hash : hash.slice(0, question)) || "#dashboard";
+  const view = routeName === "#dashboard" ? "dashboard"
+    : routeName === "#world-library" ? "worlds"
+      : routeName === "#campaigns" ? "campaigns"
+        : routeName === "#providers" ? "providers"
+          : routeName === "#prompt-library" ? "prompt-library"
+            : routeName === "#data-transfer" || routeName === "#imports" ? "data-transfer"
+              : "worlds";
+  const parameters = new URLSearchParams(question < 0 ? "" : hash.slice(question + 1));
+  const worldIds = parameters.getAll("worldId");
+  const campaignIds = parameters.getAll("campaignId");
+  let selection = null;
+  let selectionError = "";
+  if (worldIds.length || campaignIds.length) {
+    const worldSelection = worldIds.length === 1 && UUID_ROUTE_PATTERN.test(worldIds[0] || "");
+    const campaignSelection = campaignIds.length === 1 && UUID_ROUTE_PATTERN.test(campaignIds[0] || "");
+    if (worldIds.length && campaignIds.length) selectionError = "Choose one world or campaign link at a time.";
+    else if (worldIds.length && view !== "worlds") selectionError = "This link asks for a world, but it does not open the Worlds workspace.";
+    else if (campaignIds.length && view !== "campaigns") selectionError = "This link asks for a campaign, but it does not open the Campaigns workspace.";
+    else if (worldIds.length && !worldSelection) selectionError = "This world link does not contain a valid world ID.";
+    else if (campaignIds.length && !campaignSelection) selectionError = "This campaign link does not contain a valid campaign ID.";
+    else if (worldSelection) selection = { kind: "world", id: worldIds[0].toLowerCase() };
+    else if (campaignSelection) selection = { kind: "campaign", id: campaignIds[0].toLowerCase() };
+  }
+  return { view, routeName, selection, selectionError };
+}
+
+function managementHistoryState(index) {
+  const current = window.history.state;
+  const preserved = current && typeof current === "object" && !Array.isArray(current)
+    ? current
+    : current == null ? {} : { __infiniteQuestPreviousHistoryState: current };
+  return { ...preserved, [MANAGEMENT_HISTORY_STATE_KEY]: { index } };
+}
+
+function managementHistoryIndex(state = window.history.state) {
+  const index = state?.[MANAGEMENT_HISTORY_STATE_KEY]?.index;
+  return Number.isSafeInteger(index) && index >= 0 ? index : null;
+}
+
+function replaceManagementHistoryIndex(index) {
+  window.history.replaceState(managementHistoryState(index), "", window.location.href);
+}
+
+function managementRouteHref(hash) {
+  return `${window.location.pathname}${window.location.search}${hash}`;
+}
+
+function managementSelectionHash(view, kind, id) {
+  if (!UUID_ROUTE_PATTERN.test(String(id || ""))) return view === "worlds" ? "#world-library" : "#campaigns";
+  const parameter = kind === "world" ? "worldId" : "campaignId";
+  return `${view === "worlds" ? "#world-library" : "#campaigns"}?${parameter}=${encodeURIComponent(String(id).toLowerCase())}`;
+}
+
+function managementSelectionError(route, message) {
+  if (route.view === "worlds") {
+    elements.worldStatus.textContent = message;
+    elements.worldStatus.className = "status error";
+  } else if (route.view === "campaigns") {
+    campaignMessage(message, "error");
+  }
+}
+
+async function applyExplicitManagementSelection(route, intent) {
+  if (intent !== managementNavigationIntent || acceptedManagementRoute !== route) return;
+  if (route.selectionError) {
+    managementSelectionError(route, route.selectionError);
+    return;
+  }
+  if (!route.selection) return;
+  if (route.selection.kind === "world") {
+    if (!initialWorldListReady) return;
+    const target = worlds.find((world) => world.id === route.selection.id);
+    if (!target) {
+      managementSelectionError(route, `World ${route.selection.id} is not available in this library. Select an available world or check the link.`);
+      return;
+    }
+    const selectionIntentEpoch = ++worldSelectionIntentEpoch;
+    await selectWorld(target.id, { selectionIntentEpoch });
+    if (intent === managementNavigationIntent && acceptedManagementRoute === route && selectedWorld?.id === target.id) {
+      elements.worldStatus.className = "status";
+      if (elements.worldStatus.textContent.includes("link")) elements.worldStatus.textContent = "World content is stored in PostgreSQL, never embedded in this client.";
+    }
+    return;
+  }
+  if (!initialCampaignListReady) return;
+  const target = campaigns.find((campaign) => campaign.id === route.selection.id);
+  if (!target) {
+    managementSelectionError(route, `Campaign ${route.selection.id} is not available in this library. Select an available campaign or check the link.`);
+    return;
+  }
+  if (selectedCampaign?.id !== target.id) await selectCampaign(target);
+}
+
+function managementHeading(route) {
+  const headingId = route.view === "dashboard" ? "dashboardTitle"
+    : route.view === "worlds" ? "world-library-title"
+      : route.view === "campaigns" ? "memoryTitle"
+        : route.view === "providers" ? "provider-title"
+          : route.view === "prompt-library" ? "promptLibraryTitle"
+            : "dataTransferTitle";
+  const heading = document.getElementById(headingId);
+  if (heading && !heading.hasAttribute("tabindex")) heading.tabIndex = -1;
+  return heading;
+}
+
+function applyManagementView(hash, { focus = false } = {}) {
+  const route = parseManagementRoute(hash || "#dashboard");
+  const dashboardView = route.view === "dashboard";
+  const providerView = route.view === "providers";
+  const promptLibraryView = route.view === "prompt-library";
+  const dataTransferView = route.view === "data-transfer";
+  const campaignView = route.view === "campaigns";
+  document.body.dataset.managementView = route.view;
+  elements.managementHeader.hidden = dashboardView;
+  elements.dashboard.hidden = !dashboardView;
+  elements.providers.hidden = !providerView;
+  elements["world-library"].hidden = route.view !== "worlds";
+  elements.campaigns.hidden = !campaignView;
+  elements["prompt-library"].hidden = !promptLibraryView;
+  document.querySelectorAll(".data-transfer-management").forEach((section) => { section.hidden = !dataTransferView; });
+  elements.managementTitle.textContent = providerView ? "Provider Management" : promptLibraryView ? "Prompt Library" : dataTransferView ? "Data Transfer" : campaignView ? "Campaign Management" : "World Management";
   elements.managementDescription.textContent = providerView
     ? "Add and manage provider profiles independently for story text, image generation, and Chronicle embeddings."
     : promptLibraryView
       ? "Edit the application-owned instructions used for text and image generation. Changes apply to newly queued work."
       : dataTransferView
         ? "Move an owner library, world, campaign, external import, or readable story through its supported portable format."
-      : hash === "#campaigns"
-      ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
-      : "Author reusable versioned worlds, configure campaigns, and inspect the fiction-only memory selected for generation.";
+        : campaignView
+          ? "Configure campaigns, Chronicle memory, provider selection, illustrations, and world-version migrations."
+          : "Author reusable versioned worlds and keep each campaign pinned to its chosen immutable world version.";
   document.title = dashboardView ? "Infinite Quest Nexus" : `${elements.managementTitle.textContent} · Infinite Quest Nexus`;
 
   [elements.navDashboard, elements.navProviders, elements.navPromptLibrary, elements.navWorlds, elements.navCampaigns, elements.navDataTransfer].forEach((link) => link?.classList.remove("active"));
   if (dashboardView) elements.navDashboard?.classList.add("active");
   if (providerView) elements.navProviders?.classList.add("active");
   if (promptLibraryView) { elements.navPromptLibrary?.classList.add("active"); void loadPromptLibrary(); }
-  if (hash === "#world-library") elements.navWorlds?.classList.add("active");
-  if (hash === "#campaigns") elements.navCampaigns?.classList.add("active");
+  if (route.routeName === "#world-library") elements.navWorlds?.classList.add("active");
+  if (campaignView) elements.navCampaigns?.classList.add("active");
   if (dataTransferView) elements.navDataTransfer?.classList.add("active");
   elements.navSetup?.classList.toggle("active", !dashboardView);
-
   updateStoryViewLink();
+  if (focus && ![...document.querySelectorAll("dialog[open]")].length) managementHeading(route)?.focus({ preventScroll: true });
+  return route;
 }
 
-applyManagementView();
-window.addEventListener("hashchange", applyManagementView);
+function isManagementRouteHash(hash) {
+  const routeName = ((hash || "#dashboard").split("?", 1)[0]) || "#dashboard";
+  return MANAGEMENT_ROUTE_NAMES.has(routeName);
+}
+
+async function canLeaveManagementRoute(nextRoute) {
+  for (const dialog of [elements.providerDialog, elements.worldAuthorDialog, elements.characterDialog]) {
+    if (!dialog?.open) continue;
+    if (worldAuthorBusy || providerSaveBusy || characterModalBusy) return false;
+    await dismissEditDialog(dialog);
+    if (dialog.open) return false;
+  }
+  if (elements.createCampaignDialog?.open && (createCampaignSubmitting || createCampaignCommitted)) return false;
+  if (acceptedManagementRoute?.view === "campaigns"
+    && (nextRoute.view !== "campaigns" || (nextRoute.selection?.kind === "campaign" && nextRoute.selection.id !== selectedCampaign?.id))) {
+    if (!(await canLeaveCampaignEditor(nextRoute.view === "campaigns" ? nextRoute.selection?.id ?? null : null))) return false;
+  }
+  return true;
+}
+
+function rollbackManagementHistory(destinationIndex, fallbackDelta = 1) {
+  if (managementRollback) return;
+  const currentIndex = acceptedManagementHistoryIndex;
+  const delta = destinationIndex == null || destinationIndex === currentIndex
+    ? fallbackDelta
+    : currentIndex - destinationIndex;
+  if (!delta) return;
+  managementRollback = { hash: acceptedManagementHash, index: currentIndex, candidateHash: window.location.hash || "#dashboard" };
+  window.history.go(delta);
+}
+
+function finishManagementHistoryRollback() {
+  if (!managementRollback) return false;
+  const rollback = managementRollback;
+  managementRollback = null;
+  acceptedManagementHash = window.location.hash || "#dashboard";
+  acceptedManagementHistoryIndex = managementHistoryIndex() ?? rollback.index;
+  acceptedManagementHistoryLength = window.history.length;
+  acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  managementPendingHashEntries = 0;
+  ignoredManagementHashChange = acceptedManagementHash === rollback.candidateHash ? "" : acceptedManagementHash;
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash);
+  return true;
+}
+
+function restoreAcceptedManagementRouteInCurrentEntry() {
+  window.history.replaceState(managementHistoryState(acceptedManagementHistoryIndex), "", managementRouteHref(acceptedManagementHash));
+  acceptedManagementHistoryLength = window.history.length;
+  managementPendingHashEntries = 0;
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash);
+}
+
+async function acceptManagementRoute(hash, { source = "link", focus = true, destinationIndex = null } = {}) {
+  if (!isManagementRouteHash(hash)) return false;
+  const intent = ++managementNavigationIntent;
+  const nextRoute = parseManagementRoute(hash);
+  const previousHash = acceptedManagementHash;
+  const previousIndex = acceptedManagementHistoryIndex;
+  const previousRoute = acceptedManagementRoute;
+  if (!(await canLeaveManagementRoute(nextRoute))) {
+    if (intent === managementNavigationIntent && source === "popstate") rollbackManagementHistory(destinationIndex);
+    else if (intent === managementNavigationIntent && source === "hashchange") rollbackManagementHistory(destinationIndex, -1);
+    else if (intent === managementNavigationIntent && source === "unindexed") restoreAcceptedManagementRouteInCurrentEntry();
+    return false;
+  }
+  if (intent !== managementNavigationIntent || acceptedManagementRoute !== previousRoute || acceptedManagementHash !== previousHash) return false;
+
+  if (source === "link") {
+    if (hash !== previousHash) {
+      acceptedManagementHistoryIndex = previousIndex + 1;
+      window.history.pushState(managementHistoryState(acceptedManagementHistoryIndex), "", managementRouteHref(hash));
+      acceptedManagementHistoryLength = window.history.length;
+    }
+  } else if (source === "hashchange") {
+    acceptedManagementHistoryIndex = destinationIndex ?? previousIndex + 1;
+    if (managementHistoryIndex() !== acceptedManagementHistoryIndex) replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+    acceptedManagementHistoryLength = window.history.length;
+  } else if (source === "popstate") {
+    const poppedIndex = destinationIndex;
+    acceptedManagementHistoryIndex = poppedIndex == null ? Math.max(0, previousIndex - 1) : poppedIndex;
+    if (poppedIndex == null) replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+    acceptedManagementHistoryLength = window.history.length;
+  } else if (source === "unindexed") {
+    acceptedManagementHistoryIndex = previousIndex + 1;
+    replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+    acceptedManagementHistoryLength = window.history.length;
+  }
+
+  acceptedManagementHash = hash || "#dashboard";
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash, { focus });
+  acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  managementPendingHashEntries = 0;
+  closeNavigationMenus();
+  if (elements.worldDetailsDialog?.open) elements.worldDetailsDialog.close();
+  await applyExplicitManagementSelection(acceptedManagementRoute, intent);
+  return true;
+}
+
+function initializeManagementHistory() {
+  const existingIndex = managementHistoryIndex();
+  acceptedManagementHistoryIndex = existingIndex ?? 0;
+  if (existingIndex == null) replaceManagementHistoryIndex(acceptedManagementHistoryIndex);
+  acceptedManagementHistoryLength = window.history.length;
+  acceptedManagementNativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  acceptedManagementRoute = applyManagementView(acceptedManagementHash);
+}
+
+initializeManagementHistory();
+document.addEventListener("click", (event) => {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
+  if (!(anchor instanceof HTMLAnchorElement) || anchor.target || anchor.hasAttribute("download")) return;
+  const target = new URL(anchor.href, window.location.href);
+  if (target.origin !== window.location.origin || target.pathname !== window.location.pathname || target.search !== window.location.search || !isManagementRouteHash(target.hash)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void acceptManagementRoute(target.hash, { source: "link", focus: true });
+}, true);
+
+window.addEventListener("popstate", (event) => {
+  if (finishManagementHistoryRollback()) return;
+  const hash = window.location.hash || "#dashboard";
+  const destinationIndex = managementHistoryIndex(event.state);
+  if (!isManagementRouteHash(hash)) return;
+  ignoredManagementHashChange = hash;
+  setTimeout(() => { if (ignoredManagementHashChange === hash) ignoredManagementHashChange = ""; }, 0);
+  const historyLength = window.history.length;
+  const previousHistoryLength = acceptedManagementHistoryLength;
+  const nativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  const hasNativeHistoryIndex = nativeEntryIndex != null && acceptedManagementNativeEntryIndex != null;
+  const nativeEntryDelta = hasNativeHistoryIndex
+    ? nativeEntryIndex - acceptedManagementNativeEntryIndex
+    : null;
+  const directHashEntry = destinationIndex == null && (hasNativeHistoryIndex
+    ? nativeEntryDelta > 0
+    : historyLength > previousHistoryLength && event.state != null);
+  const unindexedRouteEntry = destinationIndex == null && !directHashEntry && !hasNativeHistoryIndex && hash !== acceptedManagementHash;
+  if (directHashEntry) {
+    managementPendingHashEntries = nativeEntryDelta != null
+      ? Math.max(1, nativeEntryDelta)
+      : Math.max(1, managementPendingHashEntries + Math.max(0, historyLength - previousHistoryLength));
+  } else managementPendingHashEntries = 0;
+  const observedIndex = directHashEntry ? acceptedManagementHistoryIndex + managementPendingHashEntries : destinationIndex;
+  if (directHashEntry) replaceManagementHistoryIndex(observedIndex);
+  acceptedManagementHistoryLength = historyLength;
+  void acceptManagementRoute(hash, {
+    source: directHashEntry ? "hashchange" : unindexedRouteEntry ? "unindexed" : "popstate",
+    focus: true,
+    destinationIndex: observedIndex
+  });
+});
+
+window.addEventListener("hashchange", () => {
+  const hash = window.location.hash || "#dashboard";
+  if (ignoredManagementHashChange === hash) {
+    ignoredManagementHashChange = "";
+    return;
+  }
+  if (!isManagementRouteHash(hash)) return;
+  const nativeEntryIndex = window.navigation?.currentEntry?.index ?? null;
+  const nativeEntryDelta = nativeEntryIndex != null && acceptedManagementNativeEntryIndex != null
+    ? nativeEntryIndex - acceptedManagementNativeEntryIndex
+    : null;
+  const source = nativeEntryDelta != null
+    ? nativeEntryDelta > 0 ? "hashchange" : "unindexed"
+    : window.history.length > acceptedManagementHistoryLength ? "hashchange" : "unindexed";
+  void acceptManagementRoute(hash, { source, focus: true });
+});
 
 async function api(path, options = {}) {
   const hasBody = options.body !== undefined && options.body !== null;
@@ -2061,17 +2360,13 @@ async function openWorldDetails(worldId) {
   elements.worldDetailsMedia.style.backgroundImage = "";
   applyArtwork(elements.worldDetailsMedia, preview);
   elements.beginCampaignFromWorld.disabled = !summary.latestVersionId;
-  elements.editWorldDetails.href = `#world-library`;
+  elements.editWorldDetails.href = managementSelectionHash("worlds", "world", summary.id);
   openManagedModal(elements.worldDetailsDialog);
 }
 
 async function openWorldManagement(worldId) {
   if (!worldId) return;
-  const selectionIntentEpoch = ++worldSelectionIntentEpoch;
-  dashboardWorldDetailsSelectionEpoch += 1;
-  elements.worldDetailsDialog.close();
-  if (window.location.hash !== "#world-library") window.location.hash = "#world-library";
-  await loadWorlds(worldId, { selectionIntentEpoch, preferRequestedWorld: true });
+  await acceptManagementRoute(managementSelectionHash("worlds", "world", worldId), { source: "link", focus: true });
 }
 
 async function openQuickCampaign() {
@@ -2548,7 +2843,11 @@ function createManagementWorldCard(world) {
   cta.append(ctaLabel, ctaArrow);
   body.append(title, description, meta, cta);
   card.append(art, body);
-  card.addEventListener("click", () => void selectWorld(world.id));
+  card.addEventListener("click", () => {
+    if (UUID_ROUTE_PATTERN.test(String(world.id || ""))) {
+      void acceptManagementRoute(managementSelectionHash("worlds", "world", world.id), { source: "link", focus: true });
+    } else void selectWorld(world.id);
+  });
   return card;
 }
 
@@ -4199,7 +4498,10 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
     button.append(title, details);
     button.addEventListener("click", () => {
       const currentCampaign = campaigns.find((item) => item.id === campaign.id);
-      if (currentCampaign) void selectCampaign(currentCampaign);
+      if (!currentCampaign) return;
+      if (UUID_ROUTE_PATTERN.test(String(currentCampaign.id || ""))) {
+        void acceptManagementRoute(managementSelectionHash("campaigns", "campaign", currentCampaign.id), { source: "link", focus: true });
+      } else void selectCampaign(currentCampaign);
     });
     elements.campaignList.append(button);
   }
@@ -4236,6 +4538,8 @@ async function selectCampaign(campaign, { explicit = true } = {}) {
   document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
   elements.memoryTitle.textContent = campaign.title;
   elements.campaignEditorSummary.textContent = `${campaign.status} · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}`;
+  elements.campaignWorldLink.hidden = !UUID_ROUTE_PATTERN.test(String(campaign.worldId || ""));
+  if (!elements.campaignWorldLink.hidden) elements.campaignWorldLink.href = managementSelectionHash("worlds", "world", campaign.worldId);
   setCampaignSettingsAvailability(true);
   elements.reindexMemory.disabled = false;
   elements.previewContext.disabled = false;
@@ -7771,5 +8075,22 @@ async function saveNexusUserProfile(event) {
 detectBrowserStory();
 loadSessionPreferences().catch(() => undefined);
 loadProviders().catch((error) => providerMessage(error.message || String(error), "error"));
-loadWorlds().catch((error) => worldMessage(error.message || String(error), "error"));
-loadCampaigns().catch((error) => setStatus(error.message || String(error), "error"));
+void loadWorlds().then(() => {
+  initialWorldListReady = true;
+  return applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+}).catch((error) => {
+  initialWorldListReady = true;
+  const route = acceptedManagementRoute;
+  if (route?.selection?.kind === "world") managementSelectionError(route, `Worlds could not be loaded to resolve this link. ${error.message || String(error)}`);
+  else worldMessage(error.message || String(error), "error");
+});
+const initialCampaignId = acceptedManagementRoute?.selection?.kind === "campaign" ? acceptedManagementRoute.selection.id : "";
+void loadCampaigns(initialCampaignId, { explicitPreselect: Boolean(initialCampaignId) }).then(() => {
+  initialCampaignListReady = true;
+  return applyExplicitManagementSelection(acceptedManagementRoute, managementNavigationIntent);
+}).catch((error) => {
+  initialCampaignListReady = true;
+  const route = acceptedManagementRoute;
+  if (route?.selection?.kind === "campaign") managementSelectionError(route, `Campaigns could not be loaded to resolve this link. ${error.message || String(error)}`);
+  else setStatus(error.message || String(error), "error");
+});
