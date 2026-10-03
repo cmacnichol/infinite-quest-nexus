@@ -78,6 +78,8 @@ export function startStoryPlayer(composition) {
 let resolveInitialization;
 let rejectInitialization;
 let campaignLoadSequence = 0;
+let campaignStartupReconciliation = null;
+let storyLoadRetryPromise = null;
 const initialization = new Promise((resolve, reject) => {
   resolveInitialization = resolve;
   rejectInitialization = reject;
@@ -3498,6 +3500,53 @@ function initializeNavigationMenus() {
 }
 
 // ── Initialization ────────────────────────────────────────────
+function reconcileCampaignStartup(campaignId) {
+  const loadSequence = campaignLoadSequence;
+  const current = () => campaignLoadSequence === loadSequence && state.campaignId === campaignId;
+  if (campaignStartupReconciliation?.campaignId === campaignId
+    && campaignStartupReconciliation.loadSequence === loadSequence) {
+    return campaignStartupReconciliation.promise;
+  }
+
+  const reconciliation = { campaignId, loadSequence, promise: null };
+  campaignStartupReconciliation = reconciliation;
+  reconciliation.promise = (async () => {
+    await pollImageJobs();
+    if (!current()) return false;
+    const resumed = await resumePendingGeneration();
+    if (!current()) return false;
+    const needsExplicitRecoveryDecision = state.generationRecovery?.status === "recoverable"
+      || state.generationRecovery?.status === "failed";
+    if (!resumed && !needsExplicitRecoveryDecision && state.turns.length === 0 && !state.busy) {
+      await startAdventure();
+    }
+    if (current()) pollImageJobs();
+    return current();
+  })();
+  return reconciliation.promise;
+}
+
+async function retryStoryCampaignLoad() {
+  if (storyLoadRetryPromise) return storyLoadRetryPromise;
+  const campaignId = state.campaignId;
+  if (!campaignId) return false;
+  const retryButton = $("storyLoadRetry");
+  if (retryButton) retryButton.disabled = true;
+  const retryPromise = (async () => {
+    const loaded = await loadCampaign(campaignId);
+    if (!loaded) return false;
+    await reconcileCampaignStartup(campaignId);
+    return true;
+  })();
+  storyLoadRetryPromise = retryPromise;
+  try {
+    return await retryPromise;
+  } finally {
+    if (storyLoadRetryPromise === retryPromise) storyLoadRetryPromise = null;
+    if (retryButton) retryButton.disabled = false;
+  }
+}
+
 async function init() {
   try {
     const sessionRes = await apiClient.session.get();
@@ -3514,18 +3563,13 @@ async function init() {
     if (navStoryLink) navStoryLink.href = `/story/${encodeURIComponent(campaignId)}`;
     await checkOnboarding();
     if (!await loadCampaign(campaignId)) return;
+    await reconcileCampaignStartup(campaignId);
   } else {
     await checkOnboarding();
     updateStatusBar();
     recordActivity("system", "Empty Story page opened", "Choose a world from the Nexus dashboard to begin a campaign.");
     return;
   }
-  await pollImageJobs();
-  const resumed = await resumePendingGeneration();
-  if (!resumed && state.turns.length === 0 && !state.busy) {
-    await startAdventure();
-  }
-  pollImageJobs();
 }
 
 // ── Boot Sequence ─────────────────────────────────────────────
@@ -3886,7 +3930,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnDiscardGenerationRecovery) btnDiscardGenerationRecovery.addEventListener("click", discardRecoveryJob);
   const btnRetryStoryLoad = $("storyLoadRetry");
   if (btnRetryStoryLoad) btnRetryStoryLoad.addEventListener("click", () => {
-    if (state.campaignId) void loadCampaign(state.campaignId);
+    void retryStoryCampaignLoad();
   });
   const btnContinueGeneration = $("btnContinueGeneration");
   if (btnContinueGeneration) btnContinueGeneration.addEventListener("click", () => monitorRecoveryJob(false));

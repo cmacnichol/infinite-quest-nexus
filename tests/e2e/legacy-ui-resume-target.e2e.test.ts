@@ -1,5 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { campaignSyncStatusSchema, generationJobSnapshotSchema, generationResultSchema, generationReviewDetailSchema } from "../../packages/contracts/src/index.js";
+import { quietLeafApiPayloads } from "../fixtures/quiet-leaf-payloads.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
 const campaignId = "11111111-1111-4111-8111-111111111111";
@@ -134,6 +136,200 @@ test("network failure keeps Story recovery visible and retries the scoped load",
   await expect.poll(() => api.syncRequests()).toBe(2);
   await expect(page.locator("#storyLoadRecovery")).toBeVisible();
   await expect(page.locator("#storyArea .turn")).toHaveCount(0);
+});
+
+test("successful Story retry resumes the pending generation and renders its accepted result without submitting another turn", async ({ page }) => {
+  const payloads = quietLeafApiPayloads({ pendingGeneration: true });
+  const pending = payloads.syncStatus.pendingGeneration!;
+  const turn = {
+    ...payloads.turns.turns[0]!,
+    id: "77777777-7777-4777-8777-777777777777",
+    turnNumber: 2,
+    narration: "The recovered fixture turn appears after retry without refreshing the page."
+  };
+  const completed = generationJobSnapshotSchema.parse({
+    ...pending,
+    campaignId: payloads.campaignId,
+    status: "completed",
+    attempts: 1,
+    resultTurnId: turn.id,
+    requestedInputMode: "action",
+    resolvedInputMode: "action",
+    inputModeSource: "explicit",
+    errorCode: null,
+    errorMessage: null,
+    partialNarration: null
+  });
+  const result = generationResultSchema.parse({
+    ...turn,
+    ...completed,
+    turnNumber: 2,
+    narration: turn.narration,
+    modelMetadata: null,
+    mechanics: null,
+    stateSnapshot: {},
+    reportedCost: null
+  });
+  const reads: string[] = [];
+  const writes: string[] = [];
+  const pageErrors: string[] = [];
+  let syncRequests = 0;
+  let jobPolls = 0;
+  let resultLoaded = false;
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.route("**/api/v1/**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const respond = (body: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+    if (request.method() !== "GET") {
+      writes.push(`${request.method()} ${path}`);
+      return route.abort();
+    }
+    reads.push(path);
+    if (path === "/api/v1/session") return respond(payloads.session);
+    if (path === "/api/v1/providers") return respond({ providers: [{ id: "88888888-8888-4888-8888-888888888888", name: "Fixture text", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true }] });
+    if (path.endsWith("/sync-status")) {
+      syncRequests += 1;
+      if (syncRequests === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({}) });
+      return respond(resultLoaded ? {
+        ...payloads.syncStatus,
+        pendingGeneration: null,
+        campaign: { ...payloads.syncStatus.campaign, activeTurnNumber: 2 },
+        turns: { ...payloads.turns, turns: [...payloads.turns.turns, turn] }
+      } : payloads.syncStatus);
+    }
+    if (path.endsWith("/turns")) return respond({ ...payloads.turns, turns: resultLoaded ? [...payloads.turns.turns, turn] : payloads.turns.turns });
+    if (path.endsWith("/state") || path.endsWith("/state/inspection")) return respond(payloads.runtimeState);
+    if (path.endsWith("/illustration-config")) return respond(payloads.illustrationConfig);
+    if (path.endsWith("/illustration-segments")) return respond(payloads.illustrationSegments);
+    if (path.endsWith("/image-jobs")) return respond({ jobs: [] });
+    if (path === `/api/v1/generation-jobs/${pending.id}/stream`) return route.fulfill({
+      contentType: "text/event-stream", body: 'data: {"invalid":true}\n\n'
+    });
+    if (path === `/api/v1/generation-jobs/${pending.id}`) {
+      jobPolls += 1;
+      return respond(jobPolls === 1 ? { invalid: true } : completed);
+    }
+    if (path === `/api/v1/generation-jobs/${pending.id}/result`) {
+      resultLoaded = true;
+      return respond(result);
+    }
+    return route.fulfill({ status: 404, contentType: "application/json", body: '{"error":"Unavailable in fixture"}' });
+  });
+  await installStoryDocument(page);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${origin}/story/${campaignId}`);
+
+  await expect(page.locator("#storyLoadRecovery")).toBeVisible();
+  await expect(page.locator("#storyLoadRetry")).toBeEnabled();
+  await page.locator("#storyLoadRetry").click();
+
+  await expect(page.getByText(turn.narration, { exact: true })).toBeVisible();
+  await expect(page.locator("#storyLoadRecovery")).toBeHidden();
+  await expect(page.locator("#freeAction")).toBeEnabled();
+  expect(syncRequests).toBeGreaterThanOrEqual(2);
+  expect(reads.filter(path => path === `/api/v1/generation-jobs/${pending.id}/stream`)).toHaveLength(1);
+  expect(reads).toContain(`/api/v1/generation-jobs/${pending.id}`);
+  expect(reads).toContain(`/api/v1/generation-jobs/${pending.id}/result`);
+  expect(reads).toContain(`/api/v1/campaigns/${campaignId}/image-jobs`);
+  expect(jobPolls).toBeGreaterThanOrEqual(2);
+  expect(writes).toEqual([]);
+  expect(pageErrors).toEqual([]);
+
+  await mkdir(screenshots, { recursive: true });
+  await page.screenshot({ path: `${screenshots}/t06-fix1-story-retry-resumed.png`, fullPage: true });
+});
+
+test("successful Story retry keeps an empty recoverable campaign at its explicit review choice", async ({ page }) => {
+  const payloads = quietLeafApiPayloads();
+  const jobId = "55555555-5555-4555-8555-555555555555";
+  const reviewId = "66666666-6666-4666-8666-666666666666";
+  const review = {
+    version: 1 as const, reviewId, revision: 1, state: "pending" as const,
+    stage: "continuity" as const, candidateScope: "final" as const,
+    reasons: ["narrative_conflict"] as const, canKeep: true, canRetry: true
+  };
+  const recovery = {
+    id: jobId, status: "recoverable" as const, operationKind: "append" as const,
+    replacementTurnId: null, expectedTurnNumber: 1, attempts: 1,
+    errorCode: "generation_failed", errorMessage: "Generation could not be completed.",
+    diagnostic: { code: "context_evidence_omitted" as const, operation: "story_generation" as const, action: "adjust_context" as const },
+    resultTurnId: null, review
+  };
+  const syncStatus = campaignSyncStatusSchema.parse({
+    ...payloads.syncStatus,
+    campaign: { ...payloads.syncStatus.campaign, activeTurnNumber: 0 },
+    activeTurnNumber: 0,
+    pendingGeneration: null,
+    generationRecovery: recovery,
+    turns: { campaignId, nextCursor: null, turns: [] }
+  });
+  const recoverySnapshot = generationJobSnapshotSchema.parse({
+    ...recovery, campaignId, action: "Begin the fixture story.", requestedInputMode: "action",
+    resolvedInputMode: "action", inputModeSource: "opening_action", partialNarration: null,
+    createdAt: "2026-10-03T12:00:00.000Z", updatedAt: "2026-10-03T12:00:00.000Z"
+  });
+  const reviewDetail = generationReviewDetailSchema.parse({
+    ...review,
+    narration: "A synthetic recovered candidate remains available for your review.",
+    choices: ["Keep the candidate", "Choose another direction"],
+    findings: [{ code: "narrative_conflict", message: "The candidate needs your review." }],
+    retryDescription: "Retry this generation stage.", retryFailure: null, omittedFindingCount: 0
+  });
+  const reads: string[] = [];
+  const writes: string[] = [];
+  let syncRequests = 0;
+  let releaseRetrySync!: () => void;
+  const retrySyncReleased = new Promise<void>(resolve => { releaseRetrySync = resolve; });
+  page.on("pageerror", error => writes.push(`pageerror ${error.message}`));
+  await page.route("**/api/v1/**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const respond = (body: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    if (request.method() !== "GET") {
+      writes.push(`${request.method()} ${path}`);
+      return route.abort();
+    }
+    reads.push(path);
+    if (path === "/api/v1/session") return respond(payloads.session);
+    if (path === "/api/v1/providers") return respond({ providers: [{ id: "88888888-8888-4888-8888-888888888888", name: "Fixture text", providerType: "openai_compatible", providerRole: "text", enabled: true, isDefault: true }] });
+    if (path.endsWith("/sync-status")) {
+      syncRequests += 1;
+      if (syncRequests === 1) return respond({}, 503);
+      if (syncRequests === 2) await retrySyncReleased;
+      return respond(syncStatus);
+    }
+    if (path.endsWith("/state") || path.endsWith("/state/inspection")) return respond({ ...payloads.runtimeState, activeTurnNumber: 0, viewedTurnNumber: null });
+    if (path.endsWith("/illustration-config")) return respond(payloads.illustrationConfig);
+    if (path.endsWith("/illustration-segments")) return respond(payloads.illustrationSegments);
+    if (path.endsWith("/image-jobs")) return respond({ jobs: [] });
+    if (path === `/api/v1/generation-jobs/${jobId}`) return respond(recoverySnapshot);
+    if (path === `/api/v1/generation-jobs/${jobId}/review`) return respond(reviewDetail);
+    return respond({});
+  });
+  await installStoryDocument(page);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${origin}/story/${campaignId}`);
+  await expect(page.locator("#storyLoadRecovery")).toBeVisible();
+  await page.locator("#storyLoadRetry").evaluate(button => {
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await expect.poll(() => syncRequests).toBe(2);
+  releaseRetrySync();
+
+  await expect(page.locator("#generationReviewPanel")).toBeVisible();
+  await expect(page.locator("#generationReviewHeading")).toContainText("needs your review");
+  await expect(page.locator("#btnKeepGenerationReview")).toBeVisible();
+  await expect(page.locator("#btnRetryGenerationReview")).toBeVisible();
+  expect(syncRequests).toBeGreaterThanOrEqual(2);
+  expect(reads).toContain(`/api/v1/generation-jobs/${jobId}/review`);
+  expect(reads).not.toContain(`/api/v1/generation-jobs/${jobId}/stream`);
+  expect(writes).toEqual([]);
+  await expect(page.locator("#storyArea .turn")).toHaveCount(0);
+
+  await mkdir(screenshots, { recursive: true });
+  await page.screenshot({ path: `${screenshots}/t06-fix1-story-retry-review-choice.png`, fullPage: true });
 });
 
 test("dashboard validates stale resume IDs and chooses the newest active campaign after the list loads", async ({ page }) => {
