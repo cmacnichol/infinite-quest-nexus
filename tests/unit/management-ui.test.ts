@@ -38,9 +38,12 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
   const resolvedBindings = {
     campaignSectionLoader: { setSelection: vi.fn(), invalidate: vi.fn() },
     loadCampaignSettingsSectionForPanel: vi.fn(),
+    setCampaignSettingsSectionContentVisibility: vi.fn(),
     setCampaignSettingsSectionControls: vi.fn(),
     setCampaignSettingsAvailability: vi.fn(),
     setCampaignSettingsPanel: vi.fn(),
+    CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+    campaignSettingsSectionLoadEpochs: new Map(),
     CAMPAIGN_SETTINGS_SELECTION_CONTROLS: [
       "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
       "campaignStoryContextBudgetTokens", "saveCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
@@ -136,6 +139,60 @@ describe("Nexus management UI contracts", () => {
     expect([...elements.campaignWorldVersion!.querySelectorAll("option")].map((option) => option.value)).toEqual(["version-b"]);
   });
 
+  it("restores the current campaign controls when the next campaign core read fails", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const campaignTitle = elements.campaignTitle as HTMLInputElement;
+    campaignTitle.value = "Campaign A remains selected";
+    campaignTitle.disabled = true;
+    const currentCampaign = { id: "campaign-a", title: "Campaign A" };
+    const setAvailability = vi.fn();
+    const selectCampaign = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>([
+      "selectCampaign",
+      "setCampaignSettingsSectionContentVisibility",
+      "normalizedTurnControlStyle"
+    ], {
+      elements,
+      document,
+      selectedCampaign: currentCampaign,
+      selectedCampaignIsExplicit: true,
+      campaignSelectionRequest: 2,
+      campaignCoreReady: true,
+      activeCampaignSettingsPanel: "chronicle",
+      campaignSectionLoader: { setSelection: vi.fn() },
+      api: async (path: string) => {
+        if (path.endsWith("/state")) throw new Error("Campaign B core state unavailable.");
+        throw new Error(`Unexpected core request: ${path}`);
+      },
+      setCampaignSettingsAvailability: setAvailability,
+      setCampaignSettingsPanel: vi.fn(),
+      managementSelectionErrorIsCurrent: () => false,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: vi.fn() },
+      renderCampaignSaveFeedback: vi.fn(),
+      updateStoryViewLink: vi.fn(),
+      applyStoryProviderContextBudget: vi.fn(),
+      populateEmbeddingProviderSelect: vi.fn(),
+      campaignMessage: vi.fn()
+    });
+
+    await expect(selectCampaign.selectCampaign({
+      id: "campaign-b",
+      title: "Campaign B",
+      status: "active",
+      worldId: "world-b",
+      worldVersionId: "version-b",
+      worldVersionNumber: 1,
+      turnControlStyle: "flexible_scene"
+    })).rejects.toThrow("Campaign B core state unavailable.");
+
+    expect(campaignTitle.value).toBe("Campaign A remains selected");
+    expect(campaignTitle.disabled).toBe(false);
+    expect(setAvailability).toHaveBeenCalledWith(true);
+    expect((elements.memoryTitle as HTMLElement).textContent).not.toBe("Campaign B");
+  });
+
   it("unifies portable formats under Data Transfer without breaking legacy import deep links", () => {
     expect(managementHtml).toContain('id="navDataTransfer" href="#data-transfer"');
     expect(managementHtml).toContain('<strong>Data Transfer</strong>');
@@ -185,7 +242,7 @@ describe("Nexus management UI contracts", () => {
       ["campaignTabIllustrations", "campaignPanelIllustrations"],
       ["campaignTabChronicle", "campaignPanelChronicle"],
       ["campaignTabUsage", "campaignPanelUsage"]
-    ];
+    ] as const;
 
     expect([...rail!.querySelectorAll("[role=tab]")].map((tab) => tab.id)).toEqual(expected.map(([tabId]) => tabId));
     for (const [tabId, panelId] of expected) {
@@ -194,6 +251,9 @@ describe("Nexus management UI contracts", () => {
       expect(tab?.getAttribute("aria-controls")).toBe(panelId);
       expect(panel?.getAttribute("role")).toBe("tabpanel");
       expect(panel?.getAttribute("aria-labelledby")).toBe(tabId);
+      if (panelId !== "campaignPanelOverview") {
+        expect(panel?.querySelector(`[data-campaign-section-body="${panelId.slice("campaignPanel".length).toLowerCase()}"]`)?.parentElement).toBe(panel);
+      }
     }
 
     expect(managementDocument.querySelector("#campaignTabOverview")?.getAttribute("aria-selected")).toBe("true");
@@ -201,6 +261,23 @@ describe("Nexus management UI contracts", () => {
     for (const panelId of expected.slice(1).map(([, panelId]) => panelId)) {
       expect(managementDocument.querySelector("#" + panelId)?.hasAttribute("hidden")).toBe(true);
     }
+  });
+
+  it("hides and restores only the owned section body while preserving conditional child visibility", () => {
+    const setSectionContentVisibility = managementFunctionWithBindings<(panelId: string, visible: boolean) => void>("setCampaignSettingsSectionContentVisibility", {
+      document: managementDocument
+    });
+    const body = managementDocument.querySelector<HTMLElement>('[data-campaign-section-body="usage"]')!;
+    const conditionalCostSection = managementDocument.querySelector<HTMLElement>("#campaignCostSection")!;
+    expect(managementCss).toContain(".campaign-settings-content [data-campaign-section-body].hidden { display: none !important; }");
+    expect(conditionalCostSection.classList.contains("hidden")).toBe(true);
+
+    setSectionContentVisibility("usage", false);
+    expect(body.classList.contains("hidden")).toBe(true);
+    setSectionContentVisibility("usage", true);
+
+    expect(body.classList.contains("hidden")).toBe(false);
+    expect(conditionalCostSection.classList.contains("hidden")).toBe(true);
   });
 
   it("loads only core campaign dependencies during Overview selection", async () => {
@@ -227,7 +304,7 @@ describe("Nexus management UI contracts", () => {
     const managementSelectionErrorIsCurrent = () => false;
     const functions = managementFunctions<{
       selectCampaign: (campaign: Record<string, unknown>) => Promise<void>;
-    }>(["selectCampaign", "normalizedTurnControlStyle"], {
+    }>(["selectCampaign", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
       elements,
       document,
       api,
@@ -294,6 +371,133 @@ describe("Nexus management UI contracts", () => {
     expect(loadIllustrationConfig).not.toHaveBeenCalled();
     expect(loadLatestImageJob).not.toHaveBeenCalled();
     expect(previewContext).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["chronicle", "campaignContextSection"],
+    ["illustrations", "campaignIllustrationSection"]
+  ] as const)("hides previously rendered %s data after a new campaign core selection", async (panelId, sectionId) => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    for (const select of document.querySelectorAll("select")) {
+      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
+    }
+    const previousCampaignId = "11111111-1111-4111-8111-111111111111";
+    const nextCampaignId = "11111111-1111-4111-8111-111111111112";
+    const worldId = "22222222-2222-4222-8222-222222222222";
+    const versionId = "33333333-3333-4333-8333-333333333333";
+    const previousSection = document.querySelector(`[data-campaign-section-body="${panelId}"]`) as HTMLElement;
+    previousSection.classList.remove("hidden");
+    const api = vi.fn(async (path: string) => {
+      if (path.endsWith("/state")) return { activeTurnNumber: 1, revision: 1 };
+      if (path === `/api/v1/worlds/${worldId}`) return { versions: [{ id: versionId, versionNumber: 1 }] };
+      throw new Error(`Unexpected core request: ${path}`);
+    });
+    const functions = managementFunctions<{
+      selectCampaign: (campaign: Record<string, unknown>) => Promise<void>;
+    }>(["selectCampaign", "setCampaignSettingsSectionContentVisibility", "normalizedTurnControlStyle"], {
+      elements,
+      document,
+      api,
+      selectedCampaign: { id: previousCampaignId, title: "Previously loaded campaign" },
+      selectedCampaignIsExplicit: true,
+      campaignSelectionRequest: 4,
+      campaignCoreReady: true,
+      activeCampaignSettingsPanel: panelId,
+      CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
+      campaignSectionLoader: { setSelection: vi.fn() },
+      dashboardWorkflowErrors: new Map(),
+      UUID_ROUTE_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu,
+      managementSelectionHash: (_view: string, _kind: string, id: string) => `#world-library?worldId=${id}`,
+      managementSelectionErrorIsCurrent: () => false,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
+      Option: function(label: string, value: string) {
+        const option = document.createElement("option");
+        option.textContent = label;
+        option.value = value;
+        return option;
+      },
+      updateStoryViewLink: () => undefined,
+      applyStoryProviderContextBudget: () => undefined,
+      populateEmbeddingProviderSelect: () => undefined,
+      campaignMessage: () => undefined,
+      setCampaignSettingsAvailability: () => undefined,
+      setCampaignSettingsPanel: () => undefined
+    });
+
+    await functions.selectCampaign({
+      id: nextCampaignId,
+      title: "New campaign",
+      status: "active",
+      worldId,
+      worldTitle: "Fixture World",
+      worldVersionId: versionId,
+      worldVersionNumber: 1,
+      turnControlStyle: "flexible_scene"
+    });
+
+    expect((elements.campaignTitle as HTMLInputElement).value).toBe("New campaign");
+    expect(previousSection.classList.contains("hidden")).toBe(true);
+  });
+
+  it("does not reveal section content when a completed load belongs to the prior selection", async () => {
+    const pendingLoad = deferred<void>();
+    const selectedCampaign = { id: "campaign-a" };
+    const setContentVisibility = vi.fn();
+    const setFeedback = vi.fn();
+    const elements = Object.fromEntries([...managementDocument.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const loadCampaignSettingsSectionForPanel = managementFunctionWithBindings<(panelId: string) => void>("loadCampaignSettingsSectionForPanel", {
+      CAMPAIGN_SETTINGS_SECTIONS: { chronicle: "chronicle" },
+      CAMPAIGN_SETTINGS_SECTION_LABELS: { chronicle: "Chronicle" },
+      campaignSelectionRequest: 7,
+      selectedCampaign,
+      campaignCoreReady: true,
+      campaignSettingsSectionLoadEpochs: new Map(),
+      elements,
+      campaignSectionLoader: { loadSection: () => pendingLoad.promise },
+      setCampaignSettingsSectionContentVisibility: setContentVisibility,
+      setCampaignSettingsSectionFeedback: setFeedback
+    });
+
+    loadCampaignSettingsSectionForPanel("chronicle");
+    selectedCampaign.id = "campaign-b";
+    pendingLoad.resolve();
+    await Promise.resolve();
+
+    expect(setContentVisibility).not.toHaveBeenCalled();
+    expect(setFeedback).toHaveBeenCalledTimes(1);
+    expect(setFeedback).toHaveBeenCalledWith("chronicle", "loading", "Loading Chronicle…", 7, "campaign-a");
+  });
+
+  it("reveals coalesced section content only for the latest panel-load epoch", async () => {
+    const pendingLoad = deferred<void>();
+    const setContentVisibility = vi.fn();
+    const setFeedback = vi.fn();
+    const loadCampaignSettingsSectionForPanel = managementFunctionWithBindings<(panelId: string) => void>("loadCampaignSettingsSectionForPanel", {
+      CAMPAIGN_SETTINGS_SECTIONS: { chronicle: "chronicle" },
+      CAMPAIGN_SETTINGS_SECTION_LABELS: { chronicle: "Chronicle" },
+      campaignSelectionRequest: 7,
+      selectedCampaign: { id: "campaign-a" },
+      campaignCoreReady: true,
+      campaignSettingsSectionLoadEpochs: new Map(),
+      elements: Object.fromEntries([...managementDocument.querySelectorAll("[id]")].map((element) => [element.id, element])),
+      campaignSectionLoader: { loadSection: () => pendingLoad.promise },
+      setCampaignSettingsSectionContentVisibility: setContentVisibility,
+      setCampaignSettingsSectionFeedback: setFeedback
+    });
+
+    loadCampaignSettingsSectionForPanel("chronicle");
+    loadCampaignSettingsSectionForPanel("chronicle");
+    pendingLoad.resolve();
+    await Promise.resolve();
+
+    expect(setContentVisibility).toHaveBeenCalledTimes(1);
+    expect(setContentVisibility).toHaveBeenCalledWith("chronicle", true);
+    expect(setFeedback).toHaveBeenCalledTimes(3);
+    expect(setFeedback).toHaveBeenLastCalledWith("chronicle", "success", "", 7, "campaign-a");
   });
 
   it.each(["late success", "late failure"] as const)("does not apply a %s Story Memory read after a successful save invalidates it", async (lateOutcome) => {

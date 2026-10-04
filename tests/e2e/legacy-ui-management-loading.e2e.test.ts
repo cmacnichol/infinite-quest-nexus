@@ -1,8 +1,11 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 import type { LegacyUiFixture, LegacyUiRouteInstrumentation } from "./helpers/legacy-ui-fixtures.types.js";
 
 const origin = `http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}`;
+const t26EvidenceDirectory = ".superpowers/sdd/legacy-ui-2026-10-03/evidence";
 const optionalSectionReads = [
   "story-memory",
   "memory/metrics",
@@ -77,6 +80,56 @@ async function gateGetPath(page: Page, path: string) {
 
 function storyMemoryResponse(level: string) {
   return { level, reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"] };
+}
+
+function chronicleMetricsResponse(memoryCount: number) {
+  return {
+    turns: 1,
+    estimatedCompleteHistoryTokens: 120,
+    memoryCount,
+    embeddedMemories: 0,
+    semanticHealth: { indexedMemories: 0, jobStatus: "idle" }
+  };
+}
+
+function embeddingConfigResponse(documentPrefix: string) {
+  return {
+    enabled: false,
+    retrievalImplementation: "legacy_hybrid",
+    retrievalShadowEnabled: false,
+    model: null,
+    documentPrefix,
+    queryPrefix: `${documentPrefix} query`,
+    batchSize: 1
+  };
+}
+
+function illustrationConfigResponse(segmentWordCount: number) {
+  return {
+    enabled: true,
+    sourcePolicy: "library_only",
+    matchingScope: "world",
+    confidenceProfile: "balanced",
+    repetitionWindow: 5,
+    providerProfileId: null,
+    model: `synthetic-model-${segmentWordCount}`,
+    size: "1024x1024",
+    aspectRatio: "1:1",
+    quality: "auto",
+    outputFormat: "png",
+    maxAttempts: 3,
+    segmentWordCount,
+    imagesPerSegment: 1,
+    segmentPromptMode: "direct",
+    refinementPrompt: "Synthetic UI regression prompt.",
+    defaultRefinementPrompt: "Synthetic UI regression prompt.",
+    updatedAt: "2026-10-03T12:00:00.000Z"
+  };
+}
+
+async function captureT26Screenshot(page: Page, filename: string) {
+  mkdirSync(t26EvidenceDirectory, { recursive: true });
+  await page.screenshot({ path: join(t26EvidenceDirectory, filename), fullPage: false });
 }
 
 async function campaignSectionRoute(page: Page, id: string, suffix: string, handler: (route: Route) => Promise<void>) {
@@ -183,14 +236,18 @@ test("overview_remains_usable_while_opened_chronicle_reads_and_preview_are_block
   const id = campaignId(fixture);
   const metricsGate = await gateGetPath(page, pathFor(id, "memory/metrics"));
   const previewGate = await gateGetPath(page, pathFor(id, "memory/context-preview"));
+  await page.setViewportSize({ width: 1280, height: 800 });
 
   try {
     await page.goto(`${origin}/nexus/index.html#campaigns`);
     await selectCampaign(page, fixture);
+    await captureT26Screenshot(page, "T26-overview-first-1280x800.png");
     await page.locator("#campaignTabChronicle").click();
     await metricsGate.started;
     await page.locator("#previewContext").click();
     await previewGate.started;
+    await page.setViewportSize({ width: 390, height: 844 });
+    await captureT26Screenshot(page, "T26-chronicle-pending-390x844.png");
 
     await page.locator("#campaignTabOverview").click();
     await page.locator("#campaignTitle").fill("Saved while Chronicle is pending");
@@ -288,6 +345,118 @@ test("late_story_memory_error_from_campaign_a_does_not_replace_campaign_b_feedba
     expect(bReads).toBe(1);
   } finally {
     releaseA.resolve(undefined);
+  }
+});
+
+test("hides_chronicle_a_while_chronicle_b_fails_then_reveals_only_b_after_retry", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  await installLegacyUiFixture(page, fixture);
+  const idA = campaignId(fixture, 0);
+  const idB = campaignId(fixture, 1);
+  const bMetricsStarted = deferred<void>();
+  const releaseFirstBMetrics = deferred<void>();
+  let aMetricsReads = 0;
+  let bMetricsAttempts = 0;
+  const chronicleBody = page.locator('#campaignPanelChronicle [data-campaign-section-body="chronicle"]');
+
+  await campaignSectionRoute(page, idA, "memory/metrics", async (route) => {
+    aMetricsReads += 1;
+    await route.fulfill({ json: chronicleMetricsResponse(17) });
+  });
+  await campaignSectionRoute(page, idA, "memory/embedding-config", async (route) => {
+    await route.fulfill({ json: embeddingConfigResponse("A-private-document-prefix") });
+  });
+  await campaignSectionRoute(page, idB, "memory/metrics", async (route) => {
+    bMetricsAttempts += 1;
+    if (bMetricsAttempts === 1) {
+      bMetricsStarted.resolve(undefined);
+      await releaseFirstBMetrics.promise;
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic B Chronicle failure" }) });
+      return;
+    }
+    await route.fulfill({ json: chronicleMetricsResponse(29) });
+  });
+  await campaignSectionRoute(page, idB, "memory/embedding-config", async (route) => {
+    await route.fulfill({ json: embeddingConfigResponse("B-current-document-prefix") });
+  });
+
+  try {
+    await page.goto(`${origin}/nexus/index.html#campaigns`);
+    await selectCampaign(page, fixture, 0);
+    await page.locator("#campaignTabChronicle").click();
+    await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("A-private-document-prefix");
+    await expect(chronicleBody).toBeVisible();
+
+    await page.locator(`#campaignList [data-campaign-id="${idB}"]`).click();
+    await bMetricsStarted.promise;
+    await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
+    await expect(chronicleBody).toBeHidden();
+    await expect(page.locator("#campaignPanelChronicle [data-campaign-section-feedback]")).toContainText("Loading Chronicle");
+
+    releaseFirstBMetrics.resolve(undefined);
+    await expect(page.locator("#campaignPanelChronicle [data-campaign-section-feedback]")).toContainText("Chronicle could not be loaded");
+    await expect(chronicleBody).toBeHidden();
+    await page.locator('#campaignPanelChronicle [data-action="retry-campaign-section"]').click();
+    await expect(chronicleBody).toBeVisible();
+    await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("B-current-document-prefix");
+    await expect(page.locator("#memoryMetrics")).toContainText("29");
+    await expect(page.locator("#embeddingDocumentPrefix")).not.toHaveValue("A-private-document-prefix");
+    expect(aMetricsReads).toBe(1);
+    expect(bMetricsAttempts).toBe(2);
+  } finally {
+    releaseFirstBMetrics.resolve(undefined);
+  }
+});
+
+test("hides_illustration_a_while_illustrations_b_fails_then_reveals_only_b_after_retry", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  await installLegacyUiFixture(page, fixture);
+  const idA = campaignId(fixture, 0);
+  const idB = campaignId(fixture, 1);
+  const bConfigStarted = deferred<void>();
+  const releaseFirstBConfig = deferred<void>();
+  let aConfigReads = 0;
+  let bConfigAttempts = 0;
+  const illustrationsBody = page.locator('#campaignPanelIllustrations [data-campaign-section-body="illustrations"]');
+
+  await campaignSectionRoute(page, idA, "illustration-config", async (route) => {
+    aConfigReads += 1;
+    await route.fulfill({ json: illustrationConfigResponse(321) });
+  });
+  await campaignSectionRoute(page, idB, "illustration-config", async (route) => {
+    bConfigAttempts += 1;
+    if (bConfigAttempts === 1) {
+      bConfigStarted.resolve(undefined);
+      await releaseFirstBConfig.promise;
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Synthetic B illustration failure" }) });
+      return;
+    }
+    await route.fulfill({ json: illustrationConfigResponse(654) });
+  });
+
+  try {
+    await page.goto(`${origin}/nexus/index.html#campaigns`);
+    await selectCampaign(page, fixture, 0);
+    await page.locator("#campaignTabIllustrations").click();
+    await expect(page.locator("#illustrationSegmentWordCount")).toHaveValue("321");
+    await expect(illustrationsBody).toBeVisible();
+
+    await page.locator(`#campaignList [data-campaign-id="${idB}"]`).click();
+    await bConfigStarted.promise;
+    await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
+    await expect(illustrationsBody).toBeHidden();
+    await expect(page.locator("#campaignPanelIllustrations [data-campaign-section-feedback]")).toContainText("Loading Illustrations");
+
+    releaseFirstBConfig.resolve(undefined);
+    await expect(page.locator("#campaignPanelIllustrations [data-campaign-section-feedback]")).toContainText("Illustrations could not be loaded");
+    await expect(illustrationsBody).toBeHidden();
+    await page.locator('#campaignPanelIllustrations [data-action="retry-campaign-section"]').click();
+    await expect(illustrationsBody).toBeVisible();
+    await expect(page.locator("#illustrationSegmentWordCount")).toHaveValue("654");
+    expect(aConfigReads).toBe(1);
+    expect(bConfigAttempts).toBe(2);
+  } finally {
+    releaseFirstBConfig.resolve(undefined);
   }
 });
 

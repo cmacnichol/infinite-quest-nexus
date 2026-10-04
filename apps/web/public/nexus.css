@@ -424,6 +424,7 @@ code { color: var(--gold); }
 .campaign-settings-rail > .button { margin: auto 14px 14px; }
 .campaign-settings-content { min-width: 0; padding: 22px; background: var(--panel); }
 .campaign-settings-content > [role="tabpanel"][hidden] { display: none; }
+.campaign-settings-content [data-campaign-section-body].hidden { display: none !important; }
 .turns-stat { --stat-glow: #f1bd62; }
 .cost-stat { --stat-glow: #6fe0a6; }
 .activity-stat { --stat-glow: #e274a4; }

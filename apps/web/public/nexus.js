@@ -39,6 +39,7 @@ let selectedCampaign = null;
 let campaignSelectionRequest = 0;
 let campaignStoryMemorySettings = null;
 const CAMPAIGN_SETTINGS_PANEL_IDS = Object.freeze(["overview", "story", "illustrations", "chronicle", "usage"]);
+const campaignSettingsSectionLoadEpochs = new Map();
 let campaignSaveInProgress = false;
 let campaignLeavePromptOpen = false;
 let campaignLeavePrompt = null;
@@ -329,6 +330,19 @@ function setCampaignSettingsSectionFeedback(panelId, status, message, selectionR
   }
 }
 
+function setCampaignSettingsSectionContentVisibility(panelId, visible) {
+  const body = document.querySelector(`[data-campaign-section-body="${panelId}"]`);
+  if (!body) return;
+  if (visible) {
+    if (body.dataset.selectionHidden !== "true") return;
+    body.classList.remove("hidden");
+    delete body.dataset.selectionHidden;
+  } else if (!body.classList.contains("hidden")) {
+    body.dataset.selectionHidden = "true";
+    body.classList.add("hidden");
+  }
+}
+
 function setCampaignSettingsSectionControls(section, disabled) {
   const availabilityManaged = section === "illustrations"
     ? new Set(["campaignImageProvider", "discoverIllustrationModels", "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "previewIllustrationBackfill", "previewIllustrationRebuild"])
@@ -347,6 +361,8 @@ function loadCampaignSettingsSectionForPanel(panelId) {
   const campaignId = selectedCampaign?.id;
   const selectionRequest = campaignSelectionRequest;
   if (!section || !campaignId || !campaignCoreReady) return;
+  const sectionLoadEpoch = (campaignSettingsSectionLoadEpochs.get(panelId) || 0) + 1;
+  campaignSettingsSectionLoadEpochs.set(panelId, sectionLoadEpoch);
   if (section === "chronicle") {
     elements.budgetTokens.disabled = false;
     elements.compression.disabled = false;
@@ -355,9 +371,13 @@ function loadCampaignSettingsSectionForPanel(panelId) {
   }
   setCampaignSettingsSectionFeedback(panelId, "loading", `Loading ${CAMPAIGN_SETTINGS_SECTION_LABELS[section]}…`, selectionRequest, campaignId);
   void campaignSectionLoader.loadSection(section).then(() => {
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId
+      || campaignSettingsSectionLoadEpochs.get(panelId) !== sectionLoadEpoch) return;
+    setCampaignSettingsSectionContentVisibility(panelId, true);
     setCampaignSettingsSectionFeedback(panelId, "success", "", selectionRequest, campaignId);
   }).catch((error) => {
-    if (error?.name === "AbortError") return;
+    if (error?.name === "AbortError" || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId
+      || campaignSettingsSectionLoadEpochs.get(panelId) !== sectionLoadEpoch) return;
     setCampaignSettingsSectionFeedback(
       panelId,
       "error",
@@ -5096,6 +5116,7 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
 
 async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedbackForCampaignId = "" } = {}) {
   if (!(await canLeaveCampaignEditor(campaign.id))) return;
+  const previousCampaignId = selectedCampaign?.id;
   elements.embeddingProgress.classList.add("hidden");
   const selectionRequest = ++campaignSelectionRequest;
   const previousPanel = activeCampaignSettingsPanel;
@@ -5119,6 +5140,12 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   } catch (error) {
     if (selectionRequest === campaignSelectionRequest && selectedCampaign) {
       campaignSectionLoader.setSelection(selectedCampaign.id, selectionRequest);
+      CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = false; });
+      setCampaignSettingsSectionControls("illustrations", true);
+      setCampaignSettingsSectionControls("chronicle", true);
+      elements.budgetTokens.disabled = true;
+      elements.compression.disabled = true;
+      elements.memoryQuery.disabled = true;
       campaignCoreReady = true;
       setCampaignSettingsAvailability(true);
       setCampaignSettingsPanel(previousPanel);
@@ -5133,6 +5160,11 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   };
   selectedCampaignIsExplicit = explicit;
   campaign = selectedCampaign;
+  if (previousCampaignId && previousCampaignId !== campaign.id) {
+    for (const panelId of CAMPAIGN_SETTINGS_PANEL_IDS) {
+      if (panelId !== "overview") setCampaignSettingsSectionContentVisibility(panelId, false);
+    }
+  }
   campaignStoryMemorySettings = null;
   renderCampaignStoryMemorySettings(null, { message: "Open Story Behavior to load the saved Story Memory level for this campaign." });
   updateStoryViewLink();
@@ -5162,7 +5194,6 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   renderCampaignSaveFeedback("saved");
   applyStoryProviderContextBudget();
   populateEmbeddingProviderSelect();
-  const world = await api(`/api/v1/worlds/${campaign.worldId}`);
   if (selectionRequest !== campaignSelectionRequest) return;
   CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = false; });
   setCampaignSettingsSectionControls("illustrations", true);
@@ -5171,13 +5202,27 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   elements.compression.disabled = true;
   elements.memoryQuery.disabled = true;
   elements.campaignWorldVersion.replaceChildren();
-  for (const version of [...world.versions].reverse()) {
-    elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
+  let world = null;
+  let worldDetailsError = "";
+  try {
+    world = await api(`/api/v1/worlds/${campaign.worldId}`);
+  } catch (error) {
+    worldDetailsError = error?.message || String(error);
   }
-  elements.campaignWorldVersion.value = campaign.worldVersionId;
-  elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
+  if (selectionRequest !== campaignSelectionRequest) return;
+  if (world) {
+    for (const version of [...world.versions].reverse()) {
+      elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
+    }
+    elements.campaignWorldVersion.value = campaign.worldVersionId;
+  } else {
+    elements.campaignWorldVersion.append(new Option("World details unavailable", ""));
+    elements.campaignWorldVersion.disabled = true;
+  }
+  elements.migrateCampaign.disabled = !world || !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
   if (!managementSelectionErrorIsCurrent("campaigns") && preserveWorkflowFeedbackForCampaignId !== campaign.id) {
-    if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
+    if (worldDetailsError) campaignMessage(`Campaign selected, but its world details could not be loaded: ${worldDetailsError}`, "error");
+    else if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
     else {
       const hasPendingListReadFailure = dashboardWorkflowErrors.has("campaigns");
       campaignMessage("");

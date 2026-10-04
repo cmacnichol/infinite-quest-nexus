@@ -255,6 +255,7 @@
             </section>
 
             <section id="campaignPanelStory" role="tabpanel" aria-labelledby="campaignTabStory" data-campaign-settings-content="story" hidden>
+              <div data-campaign-section-body="story">
               <div class="campaign-panel-fields campaign-controls">
                 <label>Text provider profile<select id="campaignTextProvider" form="campaignForm" disabled><option value="">Use default text provider</option></select></label>
                 <label title="Action preserves RPG mechanics. Story Direction continues the narrative without turn classification.">
@@ -297,10 +298,12 @@
         <p id="campaignStoryMemoryStatus" class="field-note" role="status" aria-live="polite">Loading the saved Story Memory level for this campaign.</p>
         <p class="field-note">Story Memory saves immediately when changed and stays separate from campaign metadata.</p>
               </div>
+              </div>
             </section>
 
             <section id="campaignPanelIllustrations" role="tabpanel" aria-labelledby="campaignTabIllustrations" data-campaign-settings-content="illustrations" hidden>
 
+        <div data-campaign-section-body="illustrations">
         <section id="campaignIllustrationSection" class="campaign-settings-section illustration-settings-section" aria-labelledby="campaignIllustrationTitle">
           <div class="campaign-settings-heading">
             <div>
@@ -378,10 +381,12 @@
           </div>
           <div id="illustrationStatus" class="status">Illustrations are optional child jobs. Image failures never roll back or rerun an accepted story turn.</div>
         </section>
+        </div>
             </section>
 
             <section id="campaignPanelChronicle" role="tabpanel" aria-labelledby="campaignTabChronicle" data-campaign-settings-content="chronicle" hidden>
 
+        <div data-campaign-section-body="chronicle">
         <section id="campaignContextSection" class="campaign-settings-section chronicle-settings-section" aria-labelledby="campaignContextTitle">
           <div class="campaign-settings-heading">
             <div>
@@ -506,9 +511,11 @@
           </div>
         </section>
         </section>
+        </div>
             </section>
 
             <section id="campaignPanelUsage" role="tabpanel" aria-labelledby="campaignTabUsage" data-campaign-settings-content="usage" hidden>
+              <div data-campaign-section-body="usage">
               <section id="campaignCostSection" class="campaign-settings-section campaign-cost-section hidden" aria-labelledby="campaignCostTitle">
                 <div class="campaign-settings-heading">
                   <div>
@@ -520,6 +527,7 @@
                 <div id="campaignCostMetrics" class="cost-metrics" aria-live="polite"></div>
               </section>
               <button id="deleteCampaign" class="button danger" type="button" disabled>Delete campaign</button>
+              </div>
             </section>
           </div>
         </div>
