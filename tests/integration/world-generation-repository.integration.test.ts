@@ -14,7 +14,7 @@ import type {
   PlayableCharacterGenerationRequest,
   WorldGenerationPreviewRequest
 } from "../../packages/contracts/src/world-library.js";
-import { userProfileUpdateSchema } from "../../packages/contracts/src/users.js";
+import { DEFAULT_READER_PREFERENCES, userProfileUpdateSchema } from "../../packages/contracts/src/users.js";
 import { migrateDatabase } from "../../packages/database/src/migrate.js";
 import {
   createDatabasePool,
@@ -145,8 +145,18 @@ integration("world generation supporting PostgreSQL adapters", () => {
         autoSubmitTurnChoices: true,
         continuousReading: true,
         defaultTurnControlStyle: "flexible_action",
+        readerPreferences: DEFAULT_READER_PREFERENCES,
         retainedPreference: "keep"
       }
+    });
+    const persisted = await pool.query<{ settings: Record<string, unknown> }>(
+      "SELECT settings FROM users WHERE id = $1",
+      [sessionOwnerUserId],
+    );
+    expect(persisted.rows[0]!.settings).not.toHaveProperty("readerPreferences");
+    expect(persisted.rows[0]!.settings).toMatchObject({
+      continuousReading: true,
+      retainedPreference: "keep"
     });
     await expect(transactions.read((transaction) => repository.getSessionProfile(
       transaction,
