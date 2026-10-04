@@ -51,6 +51,8 @@ env $(node scripts/build-metadata.mjs | xargs) docker compose build infiniteques
 
 Do not deploy an image with `dirty: true` to production; treat it as a local/diagnostic build only.
 
+The root `pnpm build` command builds both Vite clients, then runs `pnpm precompress:web-assets`. That final step uses Node's built-in zlib to create beneficial gzip and Brotli siblings for allowlisted HTML, JavaScript, CSS, and SVG files under only `apps/web/dist` and `apps/web-next/dist`. It always creates both encodings for the legacy `index.html`, legacy `story.html`, and replacement `index.html` entry points. It fails the build if an entry is missing, a public root is invalid, or a symlink appears in either public root. Keep the producer after both client builds so Vite has finished clearing and writing the dist directories before variants are created. The API serves these siblings only through `/nexus/`, `/story`, and `/app/`; direct `.br` and `.gz` URLs are denied, stable files retain revalidation, and range requests use identity bytes. API JSON, SSE, PhotoSwipe, and System Archive downloads are outside static compression.
+
 ### Durable AI authoring rollout and rollback
 
 `AI_AUTHORING_JOBS_ENABLED` is a compatible API-and-worker capability gate and defaults to `false`. Deploy the API and worker binaries that understand the durable authoring tables before setting it to `true`, and pass the same value to both Swarm roles. The client must use the capability returned by the API and retain its synchronous compatibility flow when durable authoring is unavailable; do not infer availability from a browser build or environment value.

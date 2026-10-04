@@ -8,7 +8,8 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "pnpm --filter @infinite-quest/contracts check && pnpm --filter @infinite-quest/application check && pnpm --filter @infinite-quest/client-core check && pnpm --filter @infinite-quest/client-web check && tsc -p tsconfig.build.json && pnpm build:web:legacy && pnpm build:web:next",
+    "build": "pnpm --filter @infinite-quest/contracts check && pnpm --filter @infinite-quest/application check && pnpm --filter @infinite-quest/client-core check && pnpm --filter @infinite-quest/client-web check && tsc -p tsconfig.build.json && pnpm build:web:legacy && pnpm build:web:next && pnpm precompress:web-assets",
+    "precompress:web-assets": "node scripts/precompress-web-assets.mjs",
     "build:web:legacy": "pnpm --filter @infinite-quest/web-legacy build",
     "build:web:next": "pnpm --filter @infinite-quest/web-next build",
     "check": "pnpm check:repository && pnpm --filter @infinite-quest/contracts check && pnpm --filter @infinite-quest/application check && pnpm --filter @infinite-quest/client-core check && pnpm --filter @infinite-quest/client-web check && pnpm check:web && tsc -p tsconfig.json --noEmit && node --check apps/web/src/nexus.js && node --check apps/web/src/story.js",

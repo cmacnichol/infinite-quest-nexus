@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
-import { readFile } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import fastifyMultipart from "@fastify/multipart";
 import { z } from "zod";
@@ -205,14 +205,221 @@ const worldShareTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
 const VITE_HASHED_STATIC_ASSET_PATTERN = /(?:^|[\\/])assets[\\/][^\\/]+-[A-Za-z0-9_-]{8,}\.[^\\/]+$/u;
 let lastWorldGenerationProgressCleanupAt = 0;
 
-function setStaticCacheHeader(reply: { header(name: string, value: string): unknown }, filePath: string): void {
-  const isHtml = filePath.toLowerCase().endsWith(".html");
+type StaticConditionalName = "if-match" | "if-unmodified-since" | "if-none-match" | "if-modified-since";
+type StaticRequestHeaders = Partial<Record<StaticConditionalName, string>>;
+type StaticFileValidator = Readonly<{ etag: string; modifiedAtMs: number }>;
+type StaticRequestState = {
+  readonly validators: Map<string, StaticFileValidator>;
+  readonly conditionalHeaders: StaticRequestHeaders;
+  selectedValidator?: StaticFileValidator;
+};
+
+const staticRequestStateByRequest = new WeakMap<FastifyRequest, StaticRequestState>();
+const staticValidatorCache = new Map<string, Readonly<{ signature: string; validator: StaticFileValidator }>>();
+const staticConditionalNames: readonly StaticConditionalName[] = [
+  "if-match",
+  "if-unmodified-since",
+  "if-none-match",
+  "if-modified-since"
+];
+
+function staticPathKey(filePath: string): string {
+  const normalizedPath = resolve(filePath);
+  return process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
+}
+
+function isPathWithin(rootPath: string, filePath: string): boolean {
+  const relativePath = relative(rootPath, filePath);
+  return relativePath === "" || (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+}
+
+function staticFileTarget(
+  requestUrl: string,
+  config: RuntimeConfig
+): Readonly<{ rootPath: string; relativePath: string }> | undefined {
+  const rawPath = requestUrl.split(/[?#]/u, 1)[0] ?? "";
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(rawPath);
+  } catch {
+    return undefined;
+  }
+
+  if (pathname.startsWith("/nexus/")) {
+    const relativePath = pathname.slice("/nexus/".length);
+    return { rootPath: config.legacyWebRoot, relativePath: relativePath === "" || relativePath.endsWith("/") ? `${relativePath}index.html` : relativePath };
+  }
+  if (pathname === "/story" || (/^\/story\/[^/]+$/u.test(pathname) && !pathname.endsWith("/"))) {
+    return { rootPath: config.legacyWebRoot, relativePath: "story.html" };
+  }
+  if (pathname.startsWith("/app/")) {
+    if (isSafeAppNavigation(requestUrl)) return { rootPath: config.nextWebRoot, relativePath: "index.html" };
+    const relativePath = pathname.slice("/app/".length);
+    if (relativePath.split("/").some((segment) => segment === ".." || segment === ".")) return undefined;
+    return { rootPath: config.nextWebRoot, relativePath: relativePath === "" || relativePath.endsWith("/") ? `${relativePath}index.html` : relativePath };
+  }
+  return undefined;
+}
+
+function requestHeaderValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value.join(", ") : value;
+}
+
+function setRequestHeader(
+  request: FastifyRequest,
+  name: StaticConditionalName | "accept-encoding" | "range" | "if-range",
+  value: string | undefined
+): void {
+  if (value === undefined) {
+    delete request.headers[name];
+    delete request.raw.headers[name];
+    return;
+  }
+  request.headers[name] = value;
+  request.raw.headers[name] = value;
+}
+
+async function readStaticValidator(rootPath: string, filePath: string): Promise<StaticFileValidator | undefined> {
+  try {
+    const [realRoot, realFilePath] = await Promise.all([realpath(rootPath), realpath(filePath)]);
+    if (!isPathWithin(realRoot, realFilePath)) return undefined;
+    const fileStat = await stat(realFilePath);
+    if (!fileStat.isFile()) return undefined;
+    const signature = `${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}:${fileStat.ino}`;
+    const key = staticPathKey(realFilePath);
+    const cached = staticValidatorCache.get(key);
+    if (cached?.signature === signature) return cached.validator;
+    const digest = createHash("sha256").update(await readFile(realFilePath)).digest("hex");
+    const validator = { etag: `"sha256-${digest}"`, modifiedAtMs: Math.floor(fileStat.mtimeMs / 1_000) * 1_000 };
+    staticValidatorCache.set(key, { signature, validator });
+    return validator;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function entityTagList(value: string): string[] {
+  const tags: string[] = [];
+  let token = "";
+  let quoted = false;
+  for (const character of value) {
+    if (character === '"') quoted = !quoted;
+    if (character === "," && !quoted) {
+      if (token.trim()) tags.push(token.trim());
+      token = "";
+    } else {
+      token += character;
+    }
+  }
+  if (token.trim()) tags.push(token.trim());
+  return tags;
+}
+
+function weakEntityTag(value: string): string {
+  return value.startsWith("W/") ? value.slice(2) : value;
+}
+
+function staticConditionalStatus(request: FastifyRequest, state: StaticRequestState): 304 | 412 | undefined {
+  const validator = state.selectedValidator;
+  if (!validator) return undefined;
+  const lastModified = validator.modifiedAtMs;
+  const ifMatch = state.conditionalHeaders["if-match"];
+  const ifUnmodifiedSince = state.conditionalHeaders["if-unmodified-since"];
+  const ifNoneMatch = state.conditionalHeaders["if-none-match"];
+  const ifModifiedSince = state.conditionalHeaders["if-modified-since"];
+
+  if (ifMatch !== undefined) {
+    const tags = entityTagList(ifMatch);
+    if (!tags.includes("*") && !tags.some((tag) => !tag.startsWith("W/") && tag === validator.etag)) return 412;
+  } else if (ifUnmodifiedSince !== undefined) {
+    const date = Date.parse(ifUnmodifiedSince);
+    if (!Number.isNaN(date) && lastModified > date) return 412;
+  }
+
+  const requestCacheControl = requestHeaderValue(request.headers["cache-control"]);
+  if (ifNoneMatch !== undefined) {
+    if (requestCacheControl?.toLowerCase().includes("no-cache")) return undefined;
+    const tags = entityTagList(ifNoneMatch);
+    if (tags.includes("*") || tags.some((tag) => weakEntityTag(tag) === validator.etag)) return 304;
+    return undefined;
+  }
+  if (ifModifiedSince !== undefined && !requestCacheControl?.toLowerCase().includes("no-cache")) {
+    const date = Date.parse(ifModifiedSince);
+    if (!Number.isNaN(date) && lastModified <= date) return 304;
+  }
+  return undefined;
+}
+
+function ifRangeMatches(value: string, validator: StaticFileValidator): boolean {
+  if (value.includes('"')) return !value.startsWith("W/") && value === validator.etag;
+  const date = Date.parse(value);
+  return !Number.isNaN(date) && validator.modifiedAtMs <= date;
+}
+
+async function prepareStaticRequest(request: FastifyRequest, config: RuntimeConfig): Promise<void> {
+  const target = staticFileTarget(request.url, config);
+  if (!target || /\.(?:br|gz|deflate)$/iu.test(target.relativePath)) return;
+  const rootPath = resolve(target.rootPath);
+  const identityPath = resolve(rootPath, target.relativePath);
+  if (!isPathWithin(rootPath, identityPath)) return;
+
+  const validators = new Map<string, StaticFileValidator>();
+  const identityValidator = await readStaticValidator(rootPath, identityPath);
+  if (identityValidator) validators.set(staticPathKey(identityPath), identityValidator);
+  for (const suffix of [".br", ".gz", ".deflate"] as const) {
+    const variantPath = `${identityPath}${suffix}`;
+    const validator = await readStaticValidator(rootPath, variantPath);
+    if (validator) validators.set(staticPathKey(variantPath), validator);
+  }
+  if (validators.size === 0) return;
+
+  const conditionalHeaders = Object.fromEntries(staticConditionalNames.flatMap((name) => {
+    const value = requestHeaderValue(request.headers[name]);
+    return value === undefined ? [] : [[name, value]];
+  })) as StaticRequestHeaders;
+  const state: StaticRequestState = { validators, conditionalHeaders };
+  staticRequestStateByRequest.set(request, state);
+  for (const name of staticConditionalNames) setRequestHeader(request, name, undefined);
+
+  const range = requestHeaderValue(request.headers.range);
+  if (range !== undefined) {
+    setRequestHeader(request, "accept-encoding", "identity");
+    const ifRange = requestHeaderValue(request.headers["if-range"]);
+    setRequestHeader(request, "if-range", undefined);
+    const identity = validators.get(staticPathKey(identityPath));
+    // Preconditions precede Range, including when the requested bytes do not exist.
+    if (identity) {
+      state.selectedValidator = identity;
+      if (staticConditionalStatus(request, state) !== undefined) {
+        setRequestHeader(request, "range", undefined);
+      }
+    }
+    if (ifRange !== undefined && (!identity || !ifRangeMatches(ifRange, identity))) {
+      setRequestHeader(request, "range", undefined);
+    }
+  } else {
+    setRequestHeader(request, "if-range", undefined);
+  }
+}
+
+function setStaticCacheHeader(reply: FastifyReply, filePath: string): void {
+  const logicalFilePath = filePath.replace(/\.(?:br|gz|deflate)$/iu, "");
+  const isHtml = logicalFilePath.toLowerCase().endsWith(".html");
   reply.header(
     "Cache-Control",
-    !isHtml && VITE_HASHED_STATIC_ASSET_PATTERN.test(filePath)
+    !isHtml && VITE_HASHED_STATIC_ASSET_PATTERN.test(logicalFilePath)
       ? "public, max-age=31536000, immutable"
       : "no-cache"
   );
+  const state = staticRequestStateByRequest.get(reply.request);
+  const validator = state?.validators.get(staticPathKey(filePath));
+  if (state && validator) {
+    state.selectedValidator = validator;
+    reply.header("ETag", validator.etag);
+  }
 }
 
 function assetStableReplayKey(route: string, value: unknown): ReturnType<typeof toAssetServerStableReplayKey> {
@@ -665,13 +872,6 @@ export async function buildServer({
     });
   }
   await app.register(fastifyStatic, {
-    root: config.legacyWebRoot,
-    prefix: "/nexus/",
-    index: ["index.html"],
-    decorateReply: true,
-    setHeaders: setStaticCacheHeader
-  });
-  await app.register(fastifyStatic, {
     root: resolve(process.cwd(), "node_modules/photoswipe/dist"),
     prefix: "/vendor/photoswipe/",
     decorateReply: false,
@@ -683,45 +883,63 @@ export async function buildServer({
   app.get("/index.html", async (_request, reply) => reply.redirect("/nexus/", 308));
   app.get("/app", async (_request, reply) => reply.redirect("/app/", 308));
 
-  // Story Player — clean URL for campaign gameplay
-  const storyHtml = async () => {
-    return readFile(resolve(config.legacyWebRoot, "story.html"), "utf8");
-  };
-  let storyHtmlCache: string | null = null;
-  const cachedStoryHtml = async () => {
-    storyHtmlCache ??= await storyHtml();
-    return storyHtmlCache;
-  };
-  app.get("/story", async (_request, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-cache").send(await cachedStoryHtml()));
-  app.get("/story/:campaignId", async (_request, reply) => reply.type("text/html; charset=utf-8").header("cache-control", "no-cache").send(await cachedStoryHtml()));
-  let nextHtmlCache: string | null = null;
-  const cachedNextHtml = async () => {
-    nextHtmlCache ??= await readFile(resolve(config.nextWebRoot, "index.html"), "utf8");
-    return nextHtmlCache;
-  };
-  await app.register(async (appScope) => {
-    appScope.setNotFoundHandler(async (request, reply) => {
-      if (request.method === "GET" && isSafeAppNavigation(request.url)) {
-        return reply
-          .type("text/html; charset=utf-8")
-          .header("cache-control", "no-cache")
-          .send(await cachedNextHtml());
-      }
-      const { method, url } = request.raw;
-      return reply.code(404).send({
-        message: `Route ${method}:${url} not found`,
-        error: "Not Found",
-        statusCode: 404
-      });
+  await app.register(async (staticGroup) => {
+    staticGroup.addHook("onRequest", async (request) => {
+      await prepareStaticRequest(request, config);
     });
-    await appScope.register(fastifyStatic, {
-      root: config.nextWebRoot,
-      prefix: "/",
+    staticGroup.addHook("onSend", async (request, reply, payload) => {
+      const state = staticRequestStateByRequest.get(request);
+      const conditionalStatus = state ? staticConditionalStatus(request, state) : undefined;
+      if (conditionalStatus === undefined) return payload;
+      if (payload && typeof payload === "object" && "destroy" in payload && typeof payload.destroy === "function") {
+        payload.destroy();
+      }
+      reply.code(conditionalStatus);
+      reply.removeHeader("content-length");
+      reply.removeHeader("content-range");
+      reply.removeHeader("transfer-encoding");
+      return null;
+    });
+
+    await staticGroup.register(fastifyStatic, {
+      root: config.legacyWebRoot,
+      prefix: "/nexus/",
       index: ["index.html"],
-      decorateReply: false,
+      decorateReply: true,
+      preCompressed: true,
+      etag: false,
+      allowedPath: (pathname) => !/\.(?:br|gz|deflate)$/iu.test(pathname),
       setHeaders: setStaticCacheHeader
     });
-  }, { prefix: "/app" });
+
+    // Story Player — clean URL for campaign gameplay.
+    staticGroup.get("/story", async (_request, reply) => reply.sendFile("story.html", config.legacyWebRoot));
+    staticGroup.get("/story/:campaignId", async (_request, reply) => reply.sendFile("story.html", config.legacyWebRoot));
+
+    await staticGroup.register(async (appScope) => {
+      appScope.setNotFoundHandler(async (request, reply) => {
+        if ((request.method === "GET" || request.method === "HEAD") && isSafeAppNavigation(request.url)) {
+          return reply.sendFile("index.html", config.nextWebRoot);
+        }
+        const { method, url } = request.raw;
+        return reply.code(404).send({
+          message: `Route ${method}:${url} not found`,
+          error: "Not Found",
+          statusCode: 404
+        });
+      });
+      await appScope.register(fastifyStatic, {
+        root: config.nextWebRoot,
+        prefix: "/",
+        index: ["index.html"],
+        decorateReply: false,
+        preCompressed: true,
+        etag: false,
+        allowedPath: (pathname) => !/\.(?:br|gz|deflate)$/iu.test(pathname),
+        setHeaders: setStaticCacheHeader
+      });
+    }, { prefix: "/app" });
+  });
   app.get("/health/live", async () => ({ status: "ok", role: config.role }));
   app.get("/health/ready", async (_request, reply) => {
     try {
