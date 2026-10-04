@@ -76,7 +76,7 @@ async function installProviderApi(page: Page) {
 test("Nexus defaults absent policy to Required while saving explicit compatibility choices", async ({ page }) => {
   const api = await installProviderApi(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#providers");
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
   await page.getByRole("button", { name: "Edit" }).click();
   await expect(page.locator("#providerResponseFormatPolicy")).toHaveValue("required");
   await page.locator("#providerForm").evaluate((form: HTMLFormElement) => form.requestSubmit());
@@ -113,7 +113,7 @@ test("Nexus defaults absent policy to Required while saving explicit compatibili
 
 test("Nexus fences saved-profile and cached-picker capability evidence after relevant edits", async ({ page }) => {
   const api = await installProviderApi(page);
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#providers");
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
   await page.getByRole("button", { name: "Edit" }).click();
   await page.locator("#refreshProviderModels").click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("Verified schema coverage");
@@ -134,7 +134,7 @@ test("Nexus fences saved-profile and cached-picker capability evidence after rel
 test("Nexus displays only server capability state and hides policy controls for illustrations", async ({ page }) => {
   const api = await installProviderApi(page);
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#providers");
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
   await page.getByRole("button", { name: "Edit" }).click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("unknown");
   await expect(page.locator("#providerResponseFormatCapability")).not.toContainText("bounded-digest");
@@ -147,7 +147,7 @@ test("Nexus displays only server capability state and hides policy controls for 
 
 test("Nexus fences discovery to the current model configuration and presents finite server statuses", async ({ page }) => {
   const api = await installProviderApi(page);
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#providers");
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#providers`);
   await page.getByRole("button", { name: "Edit" }).click();
   await page.locator("#refreshProviderModels").click();
   await expect(page.locator("#providerResponseFormatCapability")).toContainText("Verified schema coverage");

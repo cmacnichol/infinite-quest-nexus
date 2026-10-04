@@ -104,7 +104,7 @@ async function installApi(page: Page) {
 test("legacy Nexus persists Story Memory, retains a failed draft, and fences a stale campaign response", async ({ page }) => {
   const api = await installApi(page);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto("http://127.0.0.1:43173/nexus/index.html#campaigns");
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#campaigns`);
   await page.locator(`#campaignList [data-campaign-id="${campaignAId}"]`).click();
   await api.waitForDelayedRequest();
   await page.locator(`#campaignList [data-campaign-id="${campaignBId}"]`).click();
@@ -142,7 +142,7 @@ test("legacy Story settings loads and persists the saved Story Memory level on m
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
   await page.route(`**/story/${campaignBId}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`http://127.0.0.1:43173/story/${campaignBId}`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/story/${campaignBId}`);
   await expect(page.locator("#storyTitle")).toHaveText("Selected campaign");
   await expect.poll(() => api.memoryGets()).toBe(1);
   await expect.poll(() => api.memoryResponses()).toBe(1);

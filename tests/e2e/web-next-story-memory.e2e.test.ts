@@ -3,7 +3,7 @@ import { installStoryApi } from "../fixtures/quiet-leaf-api.js";
 
 type MemoryLevel = "off" | "standard" | "enhanced" | "max";
 
-test.use({ baseURL: process.env.STORY_MEMORY_TEST_BASE_URL ?? "http://127.0.0.1:43174" });
+test.use({ baseURL: process.env.STORY_MEMORY_TEST_BASE_URL ?? `http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}` });
 
 test("campaign editor and Story Campaign Tools save and reload the same memory setting", async ({ page }, testInfo) => {
   const api = await installStoryApi(page);

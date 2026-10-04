@@ -70,7 +70,7 @@ async function installApi(page: Page) {
 
 test("new Campaign State saves individual facts and retains the draft on conflict", async ({ page }) => {
   const api = await installApi(page);
-  await page.goto(`http://127.0.0.1:43174/app/campaigns/${campaignId}/state`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/campaigns/${campaignId}/state`);
   await page.locator("[data-scratchpad]").fill("The keeper remembers the visitor.");
   await page.locator("[data-continuity-summary]").fill("The corrected current harbor.");
   await page.locator("[data-thread-content]").fill("Find the repaired chart.");
@@ -112,7 +112,7 @@ test("new Campaign State saves individual facts and retains the draft on conflic
 
 test("new Story editor targets current state while reading an earlier turn", async ({ page }) => {
   const api = await installApi(page);
-  await page.goto(`http://127.0.0.1:43174/app/story/${campaignId}?turn=1`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_WEB_NEXT_PORT ?? "43174"}/app/story/${campaignId}?turn=1`);
   await expect(page.locator("[data-page=story-player]")).toHaveAttribute("aria-busy", "false");
   await page.getByText("Campaign Tools", { exact: true }).click();
   await page.locator("[data-tool-action=edit-campaign-state]").click();
@@ -154,7 +154,7 @@ test("legacy Story saves current continuity with retained fact IDs", async ({ pa
   // Production serves the built entry at this URL; Vite smoke testing uses its source entry.
   const html = (await readFile("apps/web/public/story.html", "utf8")).replace("/nexus/legacy-client.js", "/nexus/src/legacy-client-entry.ts");
   await page.route(`**/story/${campaignId}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
-  await page.goto(`http://127.0.0.1:43173/story/${campaignId}`);
+  await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/story/${campaignId}`);
   await expect(page.locator("#storyTitle")).toHaveText(campaign.title);
   await page.getByRole("button", { name: "Setup", exact: true }).click();
   await expect(page.locator("#storySetupMenu")).toBeVisible();
