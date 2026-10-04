@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
+import { createLegacySectionLoader } from "../../apps/web/src/legacy-section-loader.js";
 
 const storyHtml = readFileSync("apps/web/public/story.html", "utf8");
 const storyScript = readFileSync("apps/web/src/story.js", "utf8");
@@ -34,8 +35,36 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
     if (start < 0 || end < 0) throw new Error(`Unable to locate management function ${name}.`);
     return managementScript.slice(definitionStart, end);
   });
-  const bindingNames = Object.keys(bindings);
-  return Function(...bindingNames, `${sources.join("\n")}; return { ${names.join(", ")} };`)(...Object.values(bindings)) as T;
+  const resolvedBindings = {
+    campaignSectionLoader: { setSelection: vi.fn(), invalidate: vi.fn() },
+    loadCampaignSettingsSectionForPanel: vi.fn(),
+    setCampaignSettingsSectionControls: vi.fn(),
+    setCampaignSettingsAvailability: vi.fn(),
+    setCampaignSettingsPanel: vi.fn(),
+    CAMPAIGN_SETTINGS_SELECTION_CONTROLS: [
+      "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
+      "campaignStoryContextBudgetTokens", "saveCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
+      "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio", "illustrationQuality",
+      "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope", "illustrationConfidenceProfile", "illustrationRepetitionWindow",
+      "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "embeddingEnabled",
+      "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider", "discoverEmbeddingModels", "embeddingModel",
+      "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "budgetTokens", "compression", "memoryQuery"
+    ],
+    renderCampaignStoryMemorySettings: vi.fn(),
+    ...bindings
+  };
+  const bindingNames = Object.keys(resolvedBindings);
+  return Function(...bindingNames, `${sources.join("\n")}; return { ${names.join(", ")} };`)(...Object.values(resolvedBindings)) as T;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("Nexus management UI contracts", () => {
@@ -172,6 +201,166 @@ describe("Nexus management UI contracts", () => {
     for (const panelId of expected.slice(1).map(([, panelId]) => panelId)) {
       expect(managementDocument.querySelector("#" + panelId)?.hasAttribute("hidden")).toBe(true);
     }
+  });
+
+  it("loads only core campaign dependencies during Overview selection", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    for (const select of document.querySelectorAll("select")) {
+      Object.defineProperty(select, "value", { value: "", writable: true, configurable: true });
+    }
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const worldId = "22222222-2222-4222-8222-222222222222";
+    const versionId = "33333333-3333-4333-8333-333333333333";
+    const api = vi.fn(async (path: string) => {
+      if (path === `/api/v1/campaigns/${campaignId}/state`) return { activeTurnNumber: 4, revision: 9 };
+      if (path === `/api/v1/worlds/${worldId}`) return { versions: [{ id: versionId, versionNumber: 1 }] };
+      throw new Error(`Unexpected core request: ${path}`);
+    });
+    const loadCampaignStoryMemory = vi.fn();
+    const refreshCampaignMemoryMetrics = vi.fn(async () => ({}));
+    const refreshCampaignCostSummary = vi.fn(async () => undefined);
+    const loadEmbeddingConfig = vi.fn(async () => undefined);
+    const loadIllustrationConfig = vi.fn(async () => undefined);
+    const loadLatestImageJob = vi.fn(async () => undefined);
+    const previewContext = vi.fn(async () => undefined);
+    const managementSelectionErrorIsCurrent = () => false;
+    const functions = managementFunctions<{
+      selectCampaign: (campaign: Record<string, unknown>) => Promise<void>;
+    }>(["selectCampaign", "normalizedTurnControlStyle"], {
+      elements,
+      document,
+      api,
+      selectedCampaign: null,
+      selectedCampaignIsExplicit: false,
+      campaignSelectionRequest: 0,
+      campaignCoreReady: false,
+      activeCampaignSettingsPanel: "overview",
+      campaignSectionLoader: { setSelection: vi.fn() },
+      dashboardWorkflowErrors: new Map(),
+      UUID_ROUTE_PATTERN: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu,
+      managementSelectionHash: (_view: string, _kind: string, id: string) => `#world-library?worldId=${id}`,
+      managementSelectionErrorIsCurrent,
+      canLeaveCampaignEditor: async () => true,
+      campaignSettingsSnapshot: () => ({}),
+      campaignEditGuard: { reset: () => undefined },
+      renderCampaignSaveFeedback: () => undefined,
+      Option: function(label: string, value: string) {
+        const option = document.createElement("option");
+        option.textContent = label;
+        option.value = value;
+        return option;
+      },
+      loadCampaignStoryMemory,
+      updateStoryViewLink: () => undefined,
+      applyStoryProviderContextBudget: () => undefined,
+      populateEmbeddingProviderSelect: () => undefined,
+      campaignMessage: () => undefined,
+      refreshCampaignMemoryMetrics,
+      refreshCampaignCostSummary,
+      loadEmbeddingConfig,
+      loadIllustrationConfig,
+      loadLatestImageJob,
+      previewContext
+    });
+
+    await functions.selectCampaign({
+      id: campaignId,
+      title: "Core-ready campaign",
+      status: "active",
+      worldId,
+      worldTitle: "Fixture World",
+      worldVersionId: versionId,
+      worldVersionNumber: 1,
+      textProviderProfileId: "44444444-4444-4444-8444-444444444444",
+      turnControlStyle: "flexible_scene",
+      storyLengthProfile: "extended",
+      storyContextBudgetTokens: 64_000
+    });
+
+    expect(api.mock.calls.map(([path]) => path)).toEqual([
+      `/api/v1/campaigns/${campaignId}/state`,
+      `/api/v1/worlds/${worldId}`
+    ]);
+    expect((elements.campaignTitle as HTMLInputElement).value).toBe("Core-ready campaign");
+    expect((elements.campaignTextProvider as HTMLSelectElement).value).toBe("44444444-4444-4444-8444-444444444444");
+    expect((elements.campaignTurnControlStyle as HTMLSelectElement).value).toBe("flexible_scene");
+    expect((elements.campaignStoryLengthProfile as HTMLSelectElement).value).toBe("extended");
+    expect((elements.campaignStoryContextBudgetTokens as HTMLInputElement).value).toBe("64000");
+    expect(loadCampaignStoryMemory).not.toHaveBeenCalled();
+    expect(refreshCampaignMemoryMetrics).not.toHaveBeenCalled();
+    expect(refreshCampaignCostSummary).not.toHaveBeenCalled();
+    expect(loadEmbeddingConfig).not.toHaveBeenCalled();
+    expect(loadIllustrationConfig).not.toHaveBeenCalled();
+    expect(loadLatestImageJob).not.toHaveBeenCalled();
+    expect(previewContext).not.toHaveBeenCalled();
+  });
+
+  it.each(["late success", "late failure"] as const)("does not apply a %s Story Memory read after a successful save invalidates it", async (lateOutcome) => {
+    const { document } = parseHTML(managementHtml);
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const oldSettings = { level: "standard", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const savedSettings = { level: "enhanced", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const staleSettings = { level: "max", reviewMode: "enforce", availableLevels: ["off", "standard", "enhanced", "max"] };
+    const oldRead = deferred<typeof staleSettings>();
+    const pendingSave = deferred<typeof savedSettings>();
+    const elements = {
+      campaignStoryMemoryLevel: { value: "enhanced" },
+      campaignContinuityReviewEnabled: { checked: false }
+    };
+    const renderCampaignStoryMemorySettings = vi.fn((settings: typeof oldSettings | null, options?: { draftLevel?: string }) => {
+      if (settings) elements.campaignStoryMemoryLevel.value = options?.draftLevel || settings.level;
+    });
+    const api = vi.fn(async (_path: string, options?: { method?: string }) => options?.method === "PUT" ? pendingSave.promise : oldRead.promise);
+    type Functions = {
+      loadCampaignStoryMemory: (id: string, epoch: number, signal: AbortSignal) => Promise<unknown>;
+      saveCampaignStoryMemory: () => Promise<void>;
+      campaignSettingsSectionFeedback: (panelId: string) => HTMLElement | null;
+      setCampaignSettingsSectionFeedback: (panelId: string, status: string, message: string, epoch: number, id: string) => void;
+    };
+    let functions: Functions;
+    const campaignSectionLoader = createLegacySectionLoader({
+      loadSection: ({ signal }) => functions.loadCampaignStoryMemory(campaignId, 1, signal)
+    });
+    functions = managementFunctions<Functions>(["loadCampaignStoryMemory", "saveCampaignStoryMemory", "campaignSettingsSectionFeedback", "setCampaignSettingsSectionFeedback"], {
+      campaignSelectionRequest: 1,
+      selectedCampaign: { id: campaignId },
+      document,
+      campaignStoryMemorySettings: oldSettings,
+      campaignSectionLoader,
+      STORY_MEMORY_LEVELS: ["off", "standard", "enhanced", "max"],
+      elements,
+      api,
+      readCampaignStoryMemorySettings: (settings: typeof oldSettings) => settings,
+      renderCampaignStoryMemorySettings,
+      campaignMessage: vi.fn()
+    });
+    campaignSectionLoader.setSelection(campaignId, 1);
+
+    functions.setCampaignSettingsSectionFeedback("story", "loading", "Loading Story behavior…", 1, campaignId);
+    const saving = functions.saveCampaignStoryMemory();
+    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(1));
+    expect(api).toHaveBeenCalledWith(`/api/v1/campaigns/${campaignId}/story-memory`, expect.objectContaining({ method: "PUT" }));
+    const sectionRead = campaignSectionLoader.loadSection("story").catch((error: unknown) => error);
+    await vi.waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+    pendingSave.resolve(savedSettings);
+    await saving;
+    expect(renderCampaignStoryMemorySettings).toHaveBeenCalledWith(savedSettings);
+    const sectionFeedback = functions.campaignSettingsSectionFeedback("story");
+    expect(sectionFeedback?.className).toBe("status hidden");
+    expect(sectionFeedback?.textContent).toBe("");
+
+    if (lateOutcome === "late success") oldRead.resolve(staleSettings);
+    else oldRead.reject(new Error("stale read failed after save"));
+    await oldRead.promise.catch(() => undefined);
+    await Promise.resolve();
+    await sectionRead;
+
+    expect(renderCampaignStoryMemorySettings).not.toHaveBeenCalledWith(staleSettings);
+    expect(renderCampaignStoryMemorySettings).toHaveBeenLastCalledWith(savedSettings);
+    expect(elements.campaignStoryMemoryLevel.value).toBe("enhanced");
+    expect(sectionFeedback?.className).toBe("status hidden");
+    expect(sectionFeedback?.textContent).toBe("");
   });
 
   it("keeps campaign feedback visible when a non-Overview panel is active", () => {
@@ -1228,9 +1417,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="embeddingProgress" class="embedding-progress hidden"');
     expect(managementHtml).toContain('id="embeddingProgressBar"');
     expect(managementHtml).toContain('id="budgetTokensSource"');
-    expect(managementScript).toContain("async function monitorEmbeddingJob(jobId, campaignId, monitorState)");
+    expect(managementScript).toContain("async function monitorEmbeddingJob(jobId, campaignId, monitorState, selectionRequest)");
     expect(managementScript).toContain("renderEmbeddingJobProgress(job)");
-    expect(managementScript).toContain("await refreshCampaignMemoryMetrics()");
+    expect(managementScript).toContain("await refreshCampaignMemoryMetrics(selectionRequest)");
     expect(managementScript).toContain("function applyStoryProviderContextBudget()");
     expect(managementScript).toContain("textProvider?.contextWindowTokens");
     expect(managementScript).toContain("text provider's available input space");
@@ -1238,13 +1427,36 @@ describe("Nexus management UI contracts", () => {
     expect(managementScript).not.toContain("modelContextTokens - 512");
   });
 
-  it("keeps semantic indexing monitors campaign-scoped across campaign switches", () => {
-    expect(managementScript).toContain("const embeddingJobMonitors = new Map();");
-    expect(managementScript).toContain("if (embeddingJobMonitors.get(campaignId) !== monitorState) return null;");
-    expect(managementScript).toContain("if (selectedCampaign?.id === campaignId) renderEmbeddingJobProgress(job);");
-    expect(managementScript).toContain("if (selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);");
-    expect(managementScript).toContain("if (selectedCampaign?.id !== campaignId) return job;");
-    expect(managementScript).not.toContain("sequence !== embeddingJobPollSequence || selectedCampaign?.id !== campaignId");
+  it("keeps semantic indexing monitors isolated across same-campaign selection epochs", async () => {
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const api = vi.fn(async () => ({ status: "completed", progress: { totalParents: 4, processedParents: 4 } }));
+    const renderEmbeddingJobProgress = vi.fn();
+    const refreshCampaignMemoryMetrics = vi.fn(async () => null);
+    const embeddingJobMonitors = new Map();
+    const functions = managementFunctions<{
+      ensureEmbeddingJobProgress: (jobId: string, id: string, selectionRequest: number) => Promise<unknown>;
+    }>(["monitorEmbeddingJob", "ensureEmbeddingJobProgress"], {
+      api,
+      embeddingJobMonitors,
+      campaignSelectionRequest: 2,
+      selectedCampaign: { id: campaignId },
+      renderEmbeddingJobProgress,
+      refreshCampaignMemoryMetrics,
+      embeddingPollDelay: async () => undefined,
+      elements: { embeddingStatus: { className: "status", textContent: "" } }
+    });
+
+    const staleEpoch = functions.ensureEmbeddingJobProgress("job-1", campaignId, 1);
+    expect(embeddingJobMonitors.has(`${campaignId}:1`)).toBe(true);
+    const currentEpoch = functions.ensureEmbeddingJobProgress("job-2", campaignId, 2);
+    expect(embeddingJobMonitors.has(`${campaignId}:2`)).toBe(true);
+    await expect(staleEpoch).resolves.toBeNull();
+    await currentEpoch;
+
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(renderEmbeddingJobProgress).toHaveBeenCalledTimes(1);
+    expect(refreshCampaignMemoryMetrics).toHaveBeenCalledWith(2);
+    expect(embeddingJobMonitors.size).toBe(0);
   });
 
   it("exposes the shared Semantic Retrieval contract and safe health projection", () => {
@@ -1401,13 +1613,45 @@ describe("Nexus management UI contracts", () => {
     expect(storyScript).toContain("formatReportedCost(turn.reportedCost)");
     expect(managementHtml).toContain('id="campaignCostSection"');
     expect(managementHtml).toContain('id="campaignCostMetrics"');
-    expect(managementScript).toContain("async function refreshCampaignCostSummary()");
+    expect(managementScript).toContain("async function refreshCampaignCostSummary(");
     expect(managementScript).toContain("/cost-summary");
     expect(managementScript).toContain("No provider-reported cost data");
     expect(managementScript).toContain("text generation");
     expect(managementScript).toContain("image generation");
     expect(managementScript).toContain("function modelPricingLabel(model)");
     expect(managementHtml).not.toMatch(/cost tracking page/i);
+  });
+
+  it("ignores a cost summary that completes after its captured section request is aborted", async () => {
+    const { document } = parseHTML(managementHtml);
+    const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+    const request = deferred<{ hasReportedCosts: boolean; totals: Array<{ amount: string; currency: string }> }>();
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const api = vi.fn(() => request.promise);
+    const functions = managementFunctions<{
+      refreshCampaignCostSummary: (selectionEpoch: number, signal: AbortSignal) => Promise<unknown>;
+    }>(["refreshCampaignCostSummary", "appendCostMetric"], {
+      selectedCampaign: { id: campaignId },
+      campaignSelectionRequest: 9,
+      elements,
+      api,
+      document,
+      number: String,
+      money: (amount: string, currency: string) => `${currency} ${amount}`
+    });
+    const signalController = new AbortController();
+    const costSection = elements.campaignCostSection as HTMLElement;
+    const costMetrics = elements.campaignCostMetrics as HTMLElement;
+    costSection.classList.add("hidden");
+    const loading = functions.refreshCampaignCostSummary(9, signalController.signal);
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/campaigns/${campaignId}/cost-summary`, { signal: signalController.signal }));
+
+    signalController.abort();
+    request.resolve({ hasReportedCosts: true, totals: [{ amount: "10.00", currency: "USD" }] });
+    await loading;
+
+    expect(costSection.classList.contains("hidden")).toBe(true);
+    expect(costMetrics.childElementCount).toBe(0);
   });
 
   it("uses one world authoring modal and defers durable covers until the draft is saved", () => {

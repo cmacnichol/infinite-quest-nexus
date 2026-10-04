@@ -2,6 +2,7 @@ import { createImageLibraryBrowser } from "/nexus/image-library-browser.js";
 import {
   createProviderPresetsApi,
   createEditSession,
+  createLegacySectionLoader,
   buildCampaignCreateRequest,
   createCampaignCreationDraft,
   requestEditDismissal,
@@ -17,6 +18,9 @@ import {
 } from "/nexus/legacy-management.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map((element) => [element.id, element]));
+const campaignSectionLoader = createLegacySectionLoader({
+  loadSection: (request) => loadCampaignSettingsSectionData(request)
+});
 const assetLibraryBrowser = createImageLibraryBrowser({
   dialog: elements.assetLibraryDialog,
   grid: elements.assetLibraryGrid,
@@ -99,6 +103,43 @@ const campaignEditGuard = createCampaignEditGuard(
   (left, right) => JSON.stringify(left) === JSON.stringify(right)
 );
 let activeCampaignSettingsPanel = "overview";
+const CAMPAIGN_SETTINGS_SECTIONS = Object.freeze({
+  overview: null,
+  story: "story",
+  illustrations: "illustrations",
+  chronicle: "chronicle",
+  usage: "usage"
+});
+const CAMPAIGN_SETTINGS_SECTION_LABELS = Object.freeze({
+  story: "Story behavior",
+  illustrations: "Illustrations",
+  chronicle: "Chronicle",
+  usage: "Usage"
+});
+const CAMPAIGN_SETTINGS_SECTION_CONTROLS = Object.freeze({
+  illustrations: [
+    "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio",
+    "illustrationQuality", "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope",
+    "illustrationConfidenceProfile", "illustrationRepetitionWindow", "illustrationSegmentWordCount", "illustrationImagesPerSegment",
+    "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "previewIllustrationBackfill", "previewIllustrationRebuild",
+    "saveIllustrationConfig", "discoverIllustrationModels"
+  ],
+  chronicle: [
+    "embeddingEnabled", "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider",
+    "discoverEmbeddingModels", "embeddingModel", "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize",
+    "saveEmbeddingConfig", "reindexEmbeddings", "reindexMemory"
+  ]
+});
+const CAMPAIGN_SETTINGS_SELECTION_CONTROLS = Object.freeze([
+  "campaignTitle", "campaignStatus", "campaignWorldVersion", "campaignTextProvider", "campaignTurnControlStyle", "campaignStoryLengthProfile",
+  "campaignStoryContextBudgetTokens", "saveCampaign", "transferCampaign", "editCampaignCharacter", "loadCampaign", "exportCampaign", "deleteCampaign",
+  "illustrationSourcePolicy", "campaignImageProvider", "illustrationModel", "illustrationSize", "illustrationAspectRatio", "illustrationQuality",
+  "illustrationOutputFormat", "illustrationMaxAttempts", "illustrationMatchingScope", "illustrationConfidenceProfile", "illustrationRepetitionWindow",
+  "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "embeddingEnabled",
+  "embeddingRetrievalImplementation", "embeddingRetrievalShadowEnabled", "embeddingProvider", "discoverEmbeddingModels", "embeddingModel",
+  "embeddingDocumentPrefix", "embeddingQueryPrefix", "embeddingBatchSize", "budgetTokens", "compression", "memoryQuery"
+]);
+let campaignCoreReady = false;
 
 function normalizedTurnControlStyle(value) {
   return value === "flexible_scene" ? "flexible_scene" : "flexible_action";
@@ -249,6 +290,82 @@ function setCampaignSettingsPanel(panelId, { focus = false } = {}) {
     const activeTab = elements.campaignSettingsRail.querySelector('[aria-selected="true"]');
     activeTab?.scrollIntoView({ block: "nearest", inline: "center" });
   }
+  void loadCampaignSettingsSectionForPanel(panelId);
+}
+
+function campaignSettingsSectionFeedback(panelId) {
+  const panel = document.querySelector(`[data-campaign-settings-content="${panelId}"]`);
+  if (!panel) return null;
+  let feedback = panel.querySelector("[data-campaign-section-feedback]");
+  if (!feedback) {
+    feedback = document.createElement("div");
+    feedback.className = "status hidden";
+    feedback.dataset.campaignSectionFeedback = panelId;
+    feedback.setAttribute("role", "status");
+    feedback.setAttribute("aria-live", "polite");
+    panel.prepend(feedback);
+  }
+  return feedback;
+}
+
+function setCampaignSettingsSectionFeedback(panelId, status, message, selectionRequest, campaignId) {
+  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const feedback = campaignSettingsSectionFeedback(panelId);
+  if (!feedback) return;
+  feedback.replaceChildren();
+  feedback.className = status === "error" ? "status error" : status === "loading" ? "status" : "status hidden";
+  if (!message) return;
+  const text = document.createElement("span");
+  text.textContent = message;
+  feedback.append(text);
+  if (status === "error") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "button secondary inline-action";
+    retry.dataset.action = "retry-campaign-section";
+    retry.textContent = `Retry ${CAMPAIGN_SETTINGS_SECTION_LABELS[panelId]}`;
+    retry.addEventListener("click", () => { void loadCampaignSettingsSectionForPanel(panelId); });
+    feedback.append(retry);
+  }
+}
+
+function setCampaignSettingsSectionControls(section, disabled) {
+  const availabilityManaged = section === "illustrations"
+    ? new Set(["campaignImageProvider", "discoverIllustrationModels", "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "previewIllustrationBackfill", "previewIllustrationRebuild"])
+    : section === "chronicle"
+      ? new Set(["discoverEmbeddingModels", "embeddingModel", "reindexEmbeddings"])
+      : new Set();
+  for (const id of CAMPAIGN_SETTINGS_SECTION_CONTROLS[section] || []) {
+    if (!disabled && availabilityManaged.has(id)) continue;
+    const control = elements[id];
+    if (control) control.disabled = disabled;
+  }
+}
+
+function loadCampaignSettingsSectionForPanel(panelId) {
+  const section = CAMPAIGN_SETTINGS_SECTIONS[panelId];
+  const campaignId = selectedCampaign?.id;
+  const selectionRequest = campaignSelectionRequest;
+  if (!section || !campaignId || !campaignCoreReady) return;
+  if (section === "chronicle") {
+    elements.budgetTokens.disabled = false;
+    elements.compression.disabled = false;
+    elements.memoryQuery.disabled = false;
+    elements.previewContext.disabled = false;
+  }
+  setCampaignSettingsSectionFeedback(panelId, "loading", `Loading ${CAMPAIGN_SETTINGS_SECTION_LABELS[section]}…`, selectionRequest, campaignId);
+  void campaignSectionLoader.loadSection(section).then(() => {
+    setCampaignSettingsSectionFeedback(panelId, "success", "", selectionRequest, campaignId);
+  }).catch((error) => {
+    if (error?.name === "AbortError") return;
+    setCampaignSettingsSectionFeedback(
+      panelId,
+      "error",
+      `${CAMPAIGN_SETTINGS_SECTION_LABELS[section]} could not be loaded: ${error?.message || String(error)}`,
+      selectionRequest,
+      campaignId
+    );
+  });
 }
 
 function handleCampaignSettingsRailKeydown(event) {
@@ -311,18 +428,65 @@ function renderCampaignStoryMemorySettings(settings, { draftLevel = null, messag
   status.className = "field-note";
 }
 
-async function loadCampaignStoryMemory(campaignId, selectionRequest) {
+async function loadCampaignStoryMemory(campaignId, selectionRequest, signal) {
+  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return null;
   campaignStoryMemorySettings = null;
   renderCampaignStoryMemorySettings(null, { message: "Loading the saved Story Memory level for this campaign." });
   try {
-    const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`));
-    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    const settings = readCampaignStoryMemorySettings(await api(`/api/v1/campaigns/${campaignId}/story-memory`, { signal }));
+    if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     campaignStoryMemorySettings = settings;
     renderCampaignStoryMemorySettings(settings);
+    return settings;
   } catch (error) {
-    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     renderCampaignStoryMemorySettings(null, { message: `Story Memory settings are unavailable: ${error.message || String(error)}` });
+    throw error;
   }
+}
+
+function campaignSectionRequestIsCurrent(request) {
+  return campaignCoreReady
+    && !request.signal.aborted
+    && request.selectionEpoch === campaignSelectionRequest
+    && selectedCampaign?.id === request.campaignId;
+}
+
+async function loadCampaignSettingsSectionData(request) {
+  if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+  const { campaignId, selectionEpoch, section, signal } = request;
+  if (section === "story") {
+    const settings = await loadCampaignStoryMemory(campaignId, selectionEpoch, signal);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    return settings;
+  }
+  if (section === "illustrations") {
+    await Promise.all([
+      loadIllustrationConfig(selectionEpoch, signal),
+      loadLatestImageJob(false, selectionEpoch, signal)
+    ]);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    setCampaignSettingsSectionControls(section, false);
+    return true;
+  }
+  if (section === "chronicle") {
+    const [metrics] = await Promise.all([
+      refreshCampaignMemoryMetrics(selectionEpoch, signal),
+      loadEmbeddingConfig(selectionEpoch, signal)
+    ]);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    setCampaignSettingsSectionControls(section, false);
+    if (["queued", "running"].includes(metrics?.semanticHealth?.jobStatus) && metrics.semanticHealth.jobId) {
+      void resumeEmbeddingJobProgress(metrics.semanticHealth.jobId, campaignId, selectionEpoch);
+    }
+    return metrics;
+  }
+  if (section === "usage") {
+    const summary = await refreshCampaignCostSummary(selectionEpoch, signal);
+    if (!campaignSectionRequestIsCurrent(request)) throw new DOMException("The campaign selection changed.", "AbortError");
+    return summary;
+  }
+  throw new Error(`Unknown campaign settings section: ${section}`);
 }
 
 async function saveCampaignStoryMemory() {
@@ -339,6 +503,8 @@ async function saveCampaignStoryMemory() {
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     campaignStoryMemorySettings = settings;
     renderCampaignStoryMemorySettings(settings);
+    campaignSectionLoader.invalidate("story");
+    setCampaignSettingsSectionFeedback("story", "success", "", selectionRequest, campaignId);
     campaignMessage("Story Memory level saved for future turns. Existing and in-flight turns keep their frozen policy.", "success");
   } catch (error) {
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
@@ -354,6 +520,8 @@ function syncCampaignSettingsRailOrientation(mediaQuery) {
 }
 
 function clearCampaignEditorSelection({ focus = false } = {}) {
+  campaignCoreReady = false;
+  campaignSectionLoader.setSelection("", campaignSelectionRequest);
   campaignEditGuard.reset(null, campaignSelectionRequest, campaignSettingsSnapshot());
   renderCampaignSaveFeedback("saved");
   setCampaignSettingsAvailability(false);
@@ -4930,7 +5098,33 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   if (!(await canLeaveCampaignEditor(campaign.id))) return;
   elements.embeddingProgress.classList.add("hidden");
   const selectionRequest = ++campaignSelectionRequest;
-  const runtimeState = await api(`/api/v1/campaigns/${campaign.id}/state`);
+  const previousPanel = activeCampaignSettingsPanel;
+  campaignCoreReady = false;
+  elements.campaignSettingsRail.querySelectorAll("[role=tab]").forEach((tab) => { tab.disabled = true; });
+  CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = true; });
+  setCampaignSettingsSectionControls("illustrations", true);
+  setCampaignSettingsSectionControls("chronicle", true);
+  elements.budgetTokens.disabled = true;
+  elements.compression.disabled = true;
+  elements.memoryQuery.disabled = true;
+  elements.previewContext.disabled = true;
+  document.querySelectorAll("[data-campaign-section-feedback]").forEach((feedback) => {
+    feedback.replaceChildren();
+    feedback.className = "status hidden";
+  });
+  campaignSectionLoader.setSelection(campaign.id, selectionRequest);
+  let runtimeState;
+  try {
+    runtimeState = await api(`/api/v1/campaigns/${campaign.id}/state`);
+  } catch (error) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign) {
+      campaignSectionLoader.setSelection(selectedCampaign.id, selectionRequest);
+      campaignCoreReady = true;
+      setCampaignSettingsAvailability(true);
+      setCampaignSettingsPanel(previousPanel);
+    }
+    throw error;
+  }
   if (selectionRequest !== campaignSelectionRequest) return;
   selectedCampaign = {
     ...campaign,
@@ -4939,7 +5133,8 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   };
   selectedCampaignIsExplicit = explicit;
   campaign = selectedCampaign;
-  void loadCampaignStoryMemory(campaign.id, selectionRequest);
+  campaignStoryMemorySettings = null;
+  renderCampaignStoryMemorySettings(null, { message: "Open Story Behavior to load the saved Story Memory level for this campaign." });
   updateStoryViewLink();
   elements.campaignList.querySelectorAll(".campaign-button").forEach((button) => {
     const active = button.dataset.campaignId === campaign.id;
@@ -4950,15 +5145,14 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   elements.campaignEditorSummary.textContent = `${campaign.status} · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}`;
   elements.campaignWorldLink.hidden = !UUID_ROUTE_PATTERN.test(String(campaign.worldId || ""));
   if (!elements.campaignWorldLink.hidden) elements.campaignWorldLink.href = managementSelectionHash("worlds", "world", campaign.worldId);
-  setCampaignSettingsAvailability(true);
-  elements.reindexMemory.disabled = false;
-  elements.previewContext.disabled = false;
-  elements.saveEmbeddingConfig.disabled = false;
+  elements.campaignCostSection.classList.add("hidden");
+  elements.saveEmbeddingConfig.disabled = true;
+  elements.reindexMemory.disabled = true;
+  elements.previewContext.disabled = true;
   elements.reindexEmbeddings.disabled = true;
-  elements.saveIllustrationConfig.disabled = false;
+  elements.saveIllustrationConfig.disabled = true;
   elements.campaignTitle.value = campaign.title;
   elements.campaignStatus.value = campaign.status;
-  [elements.campaignTitle, elements.campaignStatus, elements.campaignWorldVersion, elements.campaignTextProvider, elements.campaignTurnControlStyle, elements.campaignStoryLengthProfile, elements.campaignStoryContextBudgetTokens, elements.saveCampaign, elements.transferCampaign, elements.editCampaignCharacter, elements.loadCampaign, elements.exportCampaign, elements.deleteCampaign, elements.illustrationSourcePolicy, elements.campaignImageProvider, elements.illustrationModel, elements.illustrationSize, elements.illustrationAspectRatio, elements.illustrationQuality, elements.illustrationOutputFormat, elements.illustrationMaxAttempts, elements.illustrationMatchingScope, elements.illustrationConfidenceProfile, elements.illustrationRepetitionWindow, elements.illustrationSegmentWordCount, elements.illustrationImagesPerSegment, elements.illustrationSegmentPromptMode, elements.openIllustrationPromptEditor, elements.embeddingEnabled, elements.embeddingRetrievalImplementation, elements.embeddingRetrievalShadowEnabled, elements.embeddingProvider, elements.discoverEmbeddingModels, elements.embeddingModel, elements.embeddingDocumentPrefix, elements.embeddingQueryPrefix, elements.embeddingBatchSize, elements.budgetTokens, elements.compression, elements.memoryQuery].forEach((element) => { element.disabled = false; });
   elements.campaignTextProvider.value = campaign.textProviderProfileId || "";
   elements.campaignImageProvider.value = campaign.imageProviderProfileId || "";
   elements.campaignTurnControlStyle.value = normalizedTurnControlStyle(campaign.turnControlStyle);
@@ -4970,12 +5164,17 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   populateEmbeddingProviderSelect();
   const world = await api(`/api/v1/worlds/${campaign.worldId}`);
   if (selectionRequest !== campaignSelectionRequest) return;
+  CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = false; });
+  setCampaignSettingsSectionControls("illustrations", true);
+  setCampaignSettingsSectionControls("chronicle", true);
+  elements.budgetTokens.disabled = true;
+  elements.compression.disabled = true;
+  elements.memoryQuery.disabled = true;
   elements.campaignWorldVersion.replaceChildren();
   for (const version of [...world.versions].reverse()) {
     elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
   }
   elements.campaignWorldVersion.value = campaign.worldVersionId;
-  setCampaignSettingsPanel(activeCampaignSettingsPanel);
   elements.migrateCampaign.disabled = !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
   if (!managementSelectionErrorIsCurrent("campaigns") && preserveWorkflowFeedbackForCampaignId !== campaign.id) {
     if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
@@ -4985,20 +5184,10 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
       if (!hasPendingListReadFailure) elements.campaignStatusMessage.classList.add("hidden");
     }
   }
-  const metrics = await refreshCampaignMemoryMetrics();
-  if (selectionRequest !== campaignSelectionRequest) return;
-  await refreshCampaignCostSummary();
-  if (selectionRequest !== campaignSelectionRequest) return;
-  await loadEmbeddingConfig();
-  if (selectionRequest !== campaignSelectionRequest) return;
-  if (["queued", "running"].includes(metrics?.semanticHealth?.jobStatus) && metrics.semanticHealth.jobId) {
-    void resumeEmbeddingJobProgress(metrics.semanticHealth.jobId, campaign.id);
-  }
-  await loadIllustrationConfig();
-  if (selectionRequest !== campaignSelectionRequest) return;
-  await loadLatestImageJob(false);
-  if (selectionRequest !== campaignSelectionRequest) return;
-  await previewContext();
+  campaignSectionLoader.setSelection(campaign.id, selectionRequest);
+  campaignCoreReady = true;
+  setCampaignSettingsAvailability(true);
+  setCampaignSettingsPanel(previousPanel);
 }
 
 async function saveSelectedCampaign(event = null, { snapshot = campaignSettingsSnapshot() } = {}) {
@@ -5433,11 +5622,11 @@ function renderSemanticMemoryHealth(health) {
   }));
 }
 
-async function refreshCampaignMemoryMetrics() {
+async function refreshCampaignMemoryMetrics(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return null;
   const campaignId = selectedCampaign.id;
-  const metrics = await api(`/api/v1/campaigns/${campaignId}/memory/metrics`);
-  if (selectedCampaign?.id !== campaignId) return null;
+  const metrics = await api(`/api/v1/campaigns/${campaignId}/memory/metrics`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return null;
   elements.memoryMetrics.innerHTML = [
     [number(metrics.turns), "accepted turns"],
     [number(metrics.estimatedCompleteHistoryTokens), "complete-history tokens"],
@@ -5459,14 +5648,14 @@ function appendCostMetric(value, label) {
   elements.campaignCostMetrics.append(metric);
 }
 
-async function refreshCampaignCostSummary() {
+async function refreshCampaignCostSummary(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) {
     elements.campaignCostSection.classList.add("hidden");
     return null;
   }
   const campaignId = selectedCampaign.id;
-  const summary = await api(`/api/v1/campaigns/${campaignId}/cost-summary`);
-  if (selectedCampaign?.id !== campaignId) return null;
+  const summary = await api(`/api/v1/campaigns/${campaignId}/cost-summary`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return null;
   elements.campaignCostSection.classList.remove("hidden");
   elements.campaignCostMetrics.replaceChildren();
   if (!summary.hasReportedCosts || !Array.isArray(summary.totals) || !summary.totals.length) {
@@ -5485,12 +5674,11 @@ async function refreshCampaignCostSummary() {
   return summary;
 }
 
-async function loadEmbeddingConfig() {
+async function loadEmbeddingConfig(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
-  const selectionRequest = campaignSelectionRequest;
-  const config = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`);
-  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const config = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   embeddingConfig = config;
   discoveredEmbeddingModels = [];
   elements.embeddingEnabled.checked = embeddingConfig.enabled;
@@ -5510,14 +5698,14 @@ async function loadEmbeddingConfig() {
   elements.embeddingStatus.textContent = embeddingConfig.enabled
     ? `Semantic Retrieval is enabled with ${fallbackLabel || "the selected provider"} and ${embeddingConfig.model}. Effective task prefixes: document “${embeddingConfig.effectiveDocumentPrefix || "none"}”, query “${embeddingConfig.effectiveQueryPrefix || "none"}”. New accepted memories are indexed by a durable worker job.`
     : `Semantic Retrieval is off for this campaign. Chronicle local memory remains available when semantic retrieval is off.`;
+  return embeddingConfig;
 }
 
-async function loadIllustrationConfig() {
+async function loadIllustrationConfig(selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
-  const selectionRequest = campaignSelectionRequest;
-  const config = await api(`/api/v1/campaigns/${campaignId}/illustration-config`);
-  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const config = await api(`/api/v1/campaigns/${campaignId}/illustration-config`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   illustrationConfig = config;
   elements.illustrationSourcePolicy.value = illustrationConfig.sourcePolicy || (illustrationConfig.enabled ? "generate_only" : "off");
   elements.illustrationMatchingScope.value = illustrationConfig.matchingScope || "world";
@@ -5552,6 +5740,7 @@ async function loadIllustrationConfig() {
       : provider
         ? `${policy === "library_then_generate" ? "Try the library first, then generate" : "Generate"} with ${illustrationConfig.model}. Endpoint health: ${providers.find((item) => item.id === illustrationConfig.providerProfileId)?.healthStatus || "unknown"}.`
         : "The saved policy requires fallback generation, but no enabled image provider is currently available. Story generation remains unaffected.";
+  return illustrationConfig;
 }
 
 function illustrationPolicyUsesLibrary(policy = elements.illustrationSourcePolicy.value) {
@@ -7084,21 +7273,22 @@ function embeddingPollDelay(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-async function monitorEmbeddingJob(jobId, campaignId, monitorState) {
+async function monitorEmbeddingJob(jobId, campaignId, monitorState, selectionRequest) {
+  const monitorKey = `${campaignId}:${selectionRequest}`;
+  const isCurrent = () => selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId;
   for (let poll = 0; poll < 1200; poll += 1) {
-    if (embeddingJobMonitors.get(campaignId) !== monitorState) return null;
+    if (embeddingJobMonitors.get(monitorKey) !== monitorState || !isCurrent()) return null;
     const job = await api(`/api/v1/jobs/${jobId}`);
+    if (embeddingJobMonitors.get(monitorKey) !== monitorState || !isCurrent()) return null;
     monitorState.latestJob = job;
-    if (selectedCampaign?.id === campaignId) renderEmbeddingJobProgress(job);
+    renderEmbeddingJobProgress(job);
     if (["completed", "failed"].includes(job.status)) {
-      if (selectedCampaign?.id === campaignId) {
-        await refreshCampaignMemoryMetrics();
-        if (selectedCampaign?.id !== campaignId) return job;
-        elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
-        elements.embeddingStatus.textContent = job.status === "completed"
-          ? "Semantic Retrieval indexing completed. Current compatible vector coverage is shown above."
-          : `${job.errorMessage || "Semantic Retrieval indexing failed."} Chronicle local memory remains available when semantic retrieval is off or unavailable.`;
-      }
+      await refreshCampaignMemoryMetrics(selectionRequest);
+      if (!isCurrent()) return job;
+      elements.embeddingStatus.className = `status ${job.status === "completed" ? "success" : "error"}`;
+      elements.embeddingStatus.textContent = job.status === "completed"
+        ? "Semantic Retrieval indexing completed. Current compatible vector coverage is shown above."
+        : `${job.errorMessage || "Semantic Retrieval indexing failed."} Chronicle local memory remains available when semantic retrieval is off or unavailable.`;
       return job;
     }
     await embeddingPollDelay(1000);
@@ -7106,35 +7296,36 @@ async function monitorEmbeddingJob(jobId, campaignId, monitorState) {
   throw new Error("Semantic indexing is still running, but live progress monitoring timed out. Refresh the campaign to resume monitoring.");
 }
 
-function ensureEmbeddingJobProgress(jobId, campaignId) {
-  const existing = embeddingJobMonitors.get(campaignId);
+function ensureEmbeddingJobProgress(jobId, campaignId, selectionRequest = campaignSelectionRequest) {
+  const monitorKey = `${campaignId}:${selectionRequest}`;
+  const existing = embeddingJobMonitors.get(monitorKey);
   if (existing?.jobId === jobId) {
-    if (selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId && existing.latestJob) renderEmbeddingJobProgress(existing.latestJob);
     return existing.promise;
   }
   const monitorState = { jobId, latestJob: null, promise: null };
   monitorState.promise = Promise.resolve()
-    .then(() => monitorEmbeddingJob(jobId, campaignId, monitorState))
+    .then(() => monitorEmbeddingJob(jobId, campaignId, monitorState, selectionRequest))
     .finally(() => {
-      if (embeddingJobMonitors.get(campaignId) === monitorState) embeddingJobMonitors.delete(campaignId);
+      if (embeddingJobMonitors.get(monitorKey) === monitorState) embeddingJobMonitors.delete(monitorKey);
     });
-  embeddingJobMonitors.set(campaignId, monitorState);
+  embeddingJobMonitors.set(monitorKey, monitorState);
   return monitorState.promise;
 }
 
-async function resumeEmbeddingJobProgress(jobId, campaignId) {
+async function resumeEmbeddingJobProgress(jobId, campaignId, selectionRequest = campaignSelectionRequest) {
   elements.saveEmbeddingConfig.disabled = true;
   elements.reindexEmbeddings.disabled = true;
   elements.saveEmbeddingConfig.classList.add("busy");
   try {
-    await ensureEmbeddingJobProgress(jobId, campaignId);
+    await ensureEmbeddingJobProgress(jobId, campaignId, selectionRequest);
   } catch (error) {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.saveEmbeddingConfig.disabled = false;
       elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
       elements.saveEmbeddingConfig.classList.remove("busy");
@@ -7147,6 +7338,7 @@ async function saveEmbeddingConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
   elements.saveEmbeddingConfig.disabled = true;
   elements.saveEmbeddingConfig.classList.add("busy");
   elements.saveEmbeddingConfig.textContent = "Saving…";
@@ -7157,7 +7349,7 @@ async function saveEmbeddingConfig(event) {
     if (elements.embeddingEnabled.checked && !elements.embeddingProvider.value) {
       throw new Error("Choose an eligible embedding provider before enabling Semantic Retrieval.");
     }
-    const saved = await api(`/api/v1/campaigns/${selectedCampaign.id}/memory/embedding-config`, {
+    const saved = await api(`/api/v1/campaigns/${campaignId}/memory/embedding-config`, {
       method: "PUT",
       body: JSON.stringify(embeddingConfigPayload({
         enabled: elements.embeddingEnabled.checked,
@@ -7170,26 +7362,30 @@ async function saveEmbeddingConfig(event) {
         retrievalShadowEnabled: elements.embeddingRetrievalShadowEnabled.checked
       }))
     });
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     embeddingConfig = saved;
+    campaignSectionLoader.invalidate("chronicle");
+    setCampaignSettingsSectionFeedback("chronicle", "success", "", selectionRequest, campaignId);
     elements.embeddingRetrievalImplementation.value = saved.retrievalImplementation;
     elements.embeddingRetrievalShadowEnabled.checked = saved.retrievalShadowEnabled;
     if (saved.enabled && !saved.jobId) throw new Error("Semantic Retrieval was enabled, but the indexing job was not created.");
     if (saved.enabled && saved.jobId) {
       elements.embeddingStatus.textContent = `Semantic Retrieval indexing queued as durable job ${saved.jobId}. Live progress will remain here until it completes or fails.`;
-      await ensureEmbeddingJobProgress(saved.jobId, campaignId);
+      await ensureEmbeddingJobProgress(saved.jobId, campaignId, selectionRequest);
     } else {
       elements.embeddingProgress.classList.add("hidden");
-      await refreshCampaignMemoryMetrics();
+      await refreshCampaignMemoryMetrics(selectionRequest);
+      if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
       elements.embeddingStatus.className = "status success";
       elements.embeddingStatus.textContent = "Semantic Retrieval disabled. Chronicle local lexical retrieval remains available; retained legacy embeddings remain available for rollback.";
     }
   } catch (error) {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.saveEmbeddingConfig.disabled = false;
       elements.saveEmbeddingConfig.classList.remove("busy");
       elements.saveEmbeddingConfig.textContent = "Save & index";
@@ -7201,6 +7397,7 @@ async function saveEmbeddingConfig(event) {
 async function reindexSemanticRetrieval() {
   if (!selectedCampaign || !embeddingConfig?.enabled) return;
   const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
   elements.reindexEmbeddings.disabled = true;
   elements.saveEmbeddingConfig.disabled = true;
   elements.embeddingStatus.className = "status";
@@ -7210,16 +7407,17 @@ async function reindexSemanticRetrieval() {
       method: "POST",
       body: "{}"
     });
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
     if (!queued.jobId) throw new Error("The Semantic Retrieval reindex did not return a job identifier.");
     elements.embeddingStatus.textContent = `Semantic Retrieval reindex job ${queued.jobId} queued.`;
-    await ensureEmbeddingJobProgress(queued.jobId, campaignId);
+    await ensureEmbeddingJobProgress(queued.jobId, campaignId, selectionRequest);
   } catch (error) {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.embeddingStatus.className = "status error";
       elements.embeddingStatus.textContent = error.message || String(error);
     }
   } finally {
-    if (selectedCampaign?.id === campaignId) {
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
       elements.reindexEmbeddings.disabled = !embeddingConfig?.enabled;
       elements.saveEmbeddingConfig.disabled = false;
     }
@@ -7270,6 +7468,8 @@ async function discoverIllustrationModels() {
 async function saveIllustrationConfig(event) {
   event.preventDefault();
   if (!selectedCampaign) return;
+  const campaignId = selectedCampaign.id;
+  const selectionRequest = campaignSelectionRequest;
   const provider = effectiveCampaignProvider("image");
   const sourcePolicy = elements.illustrationSourcePolicy.value;
   if (illustrationPolicyUsesProvider(sourcePolicy) && !provider) {
@@ -7291,13 +7491,14 @@ async function saveIllustrationConfig(event) {
   elements.illustrationStatus.textContent = "Saving independent illustration configuration…";
   try {
     if (illustrationPolicyUsesProvider(sourcePolicy)) {
-      const updatedCampaign = await api(`/api/v1/campaigns/${selectedCampaign.id}`, {
+      const updatedCampaign = await api(`/api/v1/campaigns/${campaignId}`, {
         method: "PATCH",
         body: JSON.stringify({ imageProviderProfileId: elements.campaignImageProvider.value || null })
       });
+      if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
       selectedCampaign = { ...selectedCampaign, ...updatedCampaign };
     }
-    illustrationConfig = await api(`/api/v1/campaigns/${selectedCampaign.id}/illustration-config`, {
+    const savedConfig = await api(`/api/v1/campaigns/${campaignId}/illustration-config`, {
       method: "PUT",
       body: JSON.stringify({
         sourcePolicy,
@@ -7317,6 +7518,10 @@ async function saveIllustrationConfig(event) {
         refinementPrompt: illustrationRefinementPromptValue
       })
     });
+    if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+    illustrationConfig = savedConfig;
+    campaignSectionLoader.invalidate("illustrations");
+    setCampaignSettingsSectionFeedback("illustrations", "success", "", selectionRequest, campaignId);
     defaultIllustrationRefinementPrompt = illustrationConfig.defaultRefinementPrompt || defaultIllustrationRefinementPrompt;
     illustrationRefinementPromptValue = illustrationConfig.refinementPrompt || defaultIllustrationRefinementPrompt;
     elements.illustrationStatus.className = "status success";
@@ -7328,10 +7533,14 @@ async function saveIllustrationConfig(event) {
           ? "Library-first matching enabled with provider fallback after a durable no-match."
           : "Generate-only illustration jobs enabled.";
   } catch (error) {
-    elements.illustrationStatus.className = "status error";
-    elements.illustrationStatus.textContent = error.message || String(error);
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
+      elements.illustrationStatus.className = "status error";
+      elements.illustrationStatus.textContent = error.message || String(error);
+    }
   } finally {
-    elements.saveIllustrationConfig.disabled = !selectedCampaign;
+    if (selectionRequest === campaignSelectionRequest && selectedCampaign?.id === campaignId) {
+      elements.saveIllustrationConfig.disabled = !selectedCampaign;
+    }
   }
 }
 
@@ -7441,12 +7650,11 @@ async function monitorImageJob(jobId) {
   }
 }
 
-async function loadLatestImageJob(monitor = false) {
+async function loadLatestImageJob(monitor = false, selectionRequest = campaignSelectionRequest, signal) {
   if (!selectedCampaign) return;
   const campaignId = selectedCampaign.id;
-  const selectionRequest = campaignSelectionRequest;
-  const { jobs } = await api(`/api/v1/campaigns/${campaignId}/image-jobs`);
-  if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
+  const { jobs } = await api(`/api/v1/campaigns/${campaignId}/image-jobs`, { signal });
+  if (signal?.aborted || selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return;
   const job = jobs[0];
   if (!job) return;
   renderImageJobStatus(job);
