@@ -112,3 +112,12 @@ export { DEFAULT_READER_PREFERENCES, normalizeReaderPreferences } from "./reader
 export type { ReaderPreferences } from "./reader-preferences.js";
 export { filterSortCampaigns, filterSortWorlds } from "./management-collections.js";
 export type { CampaignCollectionOptions, WorldCollectionOptions } from "./management-collections.js";
+export { providerReadinessForRole } from "./provider-readiness.js";
+export type {
+  ProviderInventoryObservation,
+  ProviderInventoryStatus,
+  ProviderReadinessResult,
+  ProviderReadinessRole,
+  ProviderReadinessState,
+  ProviderReadinessCapabilityState
+} from "./provider-readiness.js";
