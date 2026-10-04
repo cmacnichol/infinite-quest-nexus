@@ -47,9 +47,17 @@ type JourneyApi = {
   readonly writes: WriteRecord[];
   readonly campaignCreates: Array<{ readonly id: string; readonly body: Record<string, unknown> }>;
   readonly generationCreates: Array<{ readonly campaignId: string; readonly body: Record<string, unknown> }>;
+  readonly imageFailureReads: Array<{ readonly path: string; readonly status: number }>;
+  readonly privateStateReads: string[];
+  readonly privateStateCanaryResponses: Array<{ readonly campaignId: string; readonly scratchpad: string }>;
+  readonly sceneWindowCaptures: Array<{
+    readonly request: { readonly anchorTurnNumber: number; readonly anchorTurnId: string; readonly direction: "older" | "newer"; readonly neighborLimit: number; readonly historyToken: string | null };
+    readonly response: ReturnType<typeof readerSceneWindowResponseSchema.parse>;
+  }>;
   readonly world: () => JourneyWorld | null;
   readonly campaign: (campaignId: string) => JourneyCampaign | undefined;
   readonly seedAcceptedTurn: (campaignId: string, turnNumber: number, narration: string) => void;
+  readonly setPrivateStateCanary: (campaignId: string, canary: string) => void;
   readonly delayNextCampaignCreate: (gate: Promise<void>) => void;
   readonly delayNextGeneration: (gate: Promise<void>) => void;
 };
@@ -73,7 +81,15 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
   const writes: WriteRecord[] = [];
   const campaignCreates: Array<{ id: string; body: Record<string, unknown> }> = [];
   const generationCreates: Array<{ campaignId: string; body: Record<string, unknown> }> = [];
+  const imageFailureReads: Array<{ path: string; status: number }> = [];
+  const privateStateReads: string[] = [];
+  const privateStateCanaryResponses: Array<{ campaignId: string; scratchpad: string }> = [];
+  const sceneWindowCaptures: Array<{
+    request: { anchorTurnNumber: number; anchorTurnId: string; direction: "older" | "newer"; neighborLimit: number; historyToken: string | null };
+    response: ReturnType<typeof readerSceneWindowResponseSchema.parse>;
+  }> = [];
   const campaigns = new Map<string, JourneyCampaign>();
+  const privateStateCanaries = new Map<string, string>();
   const jobs = new Map<string, {
     readonly campaignId: string;
     readonly action: string;
@@ -315,7 +331,42 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
         return respond({ campaignId, turns: allTurns.slice(-50), nextCursor: null });
       }
       if ((resource === "state" || resource === "state/inspection") && method === "GET") {
-        return respond({ ...basePayloads.runtimeState, campaignId, activeTurnNumber: campaign.turns.length, viewedTurnNumber: campaign.turns.length });
+        privateStateReads.push(campaignId);
+        const privateScratchpad = privateStateCanaries.get(campaignId);
+        if (privateScratchpad !== undefined) privateStateCanaryResponses.push({ campaignId, scratchpad: privateScratchpad });
+        return respond({
+          ...basePayloads.runtimeState,
+          campaignId,
+          activeTurnNumber: campaign.turns.length,
+          viewedTurnNumber: campaign.turns.length,
+          ...(privateScratchpad !== undefined ? { scratchpad: privateScratchpad } : {})
+        });
+      }
+      if (resource === "reader/scene-window" && method === "GET") {
+        const direction = url.searchParams.get("direction");
+        if (direction !== "older" && direction !== "newer") return respond({ error: "invalid_request" }, 400);
+        const anchorTurnNumber = Number(url.searchParams.get("anchorTurnNumber"));
+        const anchorTurnId = url.searchParams.get("anchorTurnId") ?? "";
+        const neighborLimit = Number(url.searchParams.get("neighborLimit") ?? 9);
+        const historyToken = url.searchParams.get("historyToken");
+        const anchorIndex = campaign.turns.findIndex(turn => Number(turn.turnNumber) === anchorTurnNumber && turn.id === anchorTurnId);
+        if (anchorIndex < 0) return respond({ error: "not_found" }, 404);
+        const boundedLimit = Math.min(9, Math.max(1, neighborLimit));
+        const start = direction === "older" ? Math.max(0, anchorIndex - boundedLimit) : anchorIndex;
+        const end = direction === "older" ? anchorIndex + 1 : Math.min(campaign.turns.length, anchorIndex + boundedLimit + 1);
+        const response = readerSceneWindowResponseSchema.parse({
+          campaignId,
+          anchor: { turnNumber: anchorTurnNumber, id: anchorTurnId },
+          direction,
+          turns: campaign.turns.slice(start, end),
+          hasMore: direction === "older" ? start > 0 : end < campaign.turns.length,
+          historyToken: "t35-synthetic-bounded-window-token"
+        });
+        sceneWindowCaptures.push({
+          request: { anchorTurnNumber, anchorTurnId, direction, neighborLimit, historyToken },
+          response
+        });
+        return respond(response);
       }
       if (resource === "story-memory" && method === "GET") return respond({ level: "off", reviewMode: "off", availableLevels: ["off"] });
       if (resource === "character-profile" && method === "GET") return respond({ campaignId, revision: 1, name: "Mira Vale", profile: {}, storedProfile: null, inheritedFromSnapshot: false, legacyCharacterText: "", rpgStats: [], defaultTriggers: [] });
@@ -323,11 +374,17 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
         return respond(options.imageFailure ? { ...basePayloads.illustrationConfig, enabled: true, sourcePolicy: "generate" } : basePayloads.illustrationConfig);
       }
       if (resource === "illustration-segments" && method === "GET") {
-        if (options.imageFailure && campaign.turns.length > 0) return respond({ error: "Synthetic image service failure." }, 503);
+        if (options.imageFailure && campaign.turns.length > 0) {
+          imageFailureReads.push({ path: `/api/v1/campaigns/${campaignId}/${resource}`, status: 503 });
+          return respond({ error: "Synthetic image service failure." }, 503);
+        }
         return respond(basePayloads.illustrationSegments);
       }
       if (resource === "image-jobs" && method === "GET") {
-        if (options.imageFailure && campaign.turns.length > 0) return respond({ error: "Synthetic image service failure." }, 503);
+        if (options.imageFailure && campaign.turns.length > 0) {
+          imageFailureReads.push({ path: `/api/v1/campaigns/${campaignId}/${resource}`, status: 503 });
+          return respond({ error: "Synthetic image service failure." }, 503);
+        }
         return respond({ jobs: [] });
       }
       if (resource === "reader/history" && method === "GET") {
@@ -379,6 +436,10 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
     writes,
     campaignCreates,
     generationCreates,
+    imageFailureReads,
+    privateStateReads,
+    privateStateCanaryResponses,
+    sceneWindowCaptures,
     world: () => world,
     campaign: campaignId => campaigns.get(campaignId),
     seedAcceptedTurn(campaignId, turnNumber, narration) {
@@ -386,6 +447,10 @@ async function installJourneyApi(page: Page, options: { readonly imageFailure?: 
       if (!campaign) throw new Error(`Unknown synthetic campaign ${campaignId}`);
       campaign.turns.push({ ...turnTemplate, id: `40000000-0000-4000-8000-${turnNumber.toString(16).padStart(12, "0")}`, turnNumber, narration });
       campaign.turns.sort((left, right) => Number(left.turnNumber) - Number(right.turnNumber));
+    },
+    setPrivateStateCanary(campaignId, canary) {
+      if (!campaigns.has(campaignId)) throw new Error(`Unknown synthetic campaign ${campaignId}`);
+      privateStateCanaries.set(campaignId, canary);
     },
     delayNextCampaignCreate(gate) { nextCampaignCreateGate = gate; },
     delayNextGeneration(gate) { nextGenerationGate = gate; }
@@ -434,25 +499,57 @@ async function startJourneyCampaign(page: Page, api: JourneyApi, title: string):
   return campaignId;
 }
 
-async function fillAndSubmitAction(page: Page, action: string): Promise<void> {
+async function fillAndSubmitAction(page: Page, api: JourneyApi, campaignId: string, action: string): Promise<void> {
+  const priorTurns = api.campaign(campaignId)?.turns ?? [];
+  const priorIds = new Set(priorTurns.map(turn => String(turn.id)));
+  const expectedTurnNumber = priorTurns.reduce((latest, turn) => Math.max(latest, Number(turn.turnNumber)), 0) + 1;
   await page.locator("#freeAction").fill(action);
   await page.locator("#btnTakeAction").click();
-  const expectedTurnNumber = await page.locator("#storyArea .scene[data-turn-number]").count() + 1;
+  await expect.poll(() => api.campaign(campaignId)?.turns.some(turn =>
+    Number(turn.turnNumber) === expectedTurnNumber
+      && !priorIds.has(String(turn.id))
+      && String(turn.narration).includes(`Synthetic accepted scene ${expectedTurnNumber}.`)
+  ) ?? false).toBe(true);
   await expect(page.locator(`#scene-${expectedTurnNumber} .scene-narration`)).toContainText(`Synthetic accepted scene ${expectedTurnNumber}.`);
   await expect(page.locator("#storySyncStatus")).toContainText("Story synced");
 }
 
-test("whole_journey_no_lost_draft: new world, character, publish, campaign, accepted turn, reload, history and resume", async ({ page }) => {
+async function readSavedReaderPosition(page: Page, userId: string, campaignId: string): Promise<{ readonly turnId: string; readonly turnNumber: number } | null> {
+  return page.evaluate(async ({ storageKey }) => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("infiniteQuest-reader-positions-v1", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const record = await new Promise<{ position?: { turnId?: unknown; turnNumber?: unknown } } | undefined>((resolve, reject) => {
+      const request = database.transaction("positions", "readonly").objectStore("positions").get(storageKey);
+      request.onsuccess = () => resolve(request.result as { position?: { turnId?: unknown; turnNumber?: unknown } } | undefined);
+      request.onerror = () => reject(request.error);
+    });
+    database.close();
+    const turnId = record?.position?.turnId;
+    const turnNumber = record?.position?.turnNumber;
+    return typeof turnId === "string" && typeof turnNumber === "number" ? { turnId, turnNumber } : null;
+  }, { storageKey: `${userId}:${campaignId}` });
+}
+
+test("whole_journey_no_lost_draft: new world, character, publish, campaign, reload, older history and latest resume", async ({ page }) => {
   const api = await installJourneyApi(page);
   await createAndPublishJourneyWorld(page);
   const campaignId = await startJourneyCampaign(page, api, "T35 First Campaign");
 
-  await fillAndSubmitAction(page, "Look for the quiet platform signal.");
+  await fillAndSubmitAction(page, api, campaignId, "Look for the quiet platform signal.");
+  await fillAndSubmitAction(page, api, campaignId, "Follow the marked path to the signal.");
+  const acceptedTurns = api.campaign(campaignId)?.turns ?? [];
+  expect(acceptedTurns.map(turn => Number(turn.turnNumber))).toEqual([1, 2]);
+  const latestTurnId = String(acceptedTurns[1]?.id ?? "");
+  expect(latestTurnId).not.toBe("");
   await page.locator("#freeAction").fill("Keep this next action for after the history check.");
   await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
   await page.reload();
   await expect(page.locator("#freeAction")).toHaveValue("Keep this next action for after the history check.");
-  await expect(page.locator("#scene-1 .scene-narration")).toContainText("Synthetic accepted scene 1.");
+  await expect(page.locator("#scene-2 .scene-narration")).toContainText("Synthetic accepted scene 2.");
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 2 of 2");
 
   await page.locator("[data-story-reader-toolbar]").getByRole("button", { name: "History" }).click();
   const firstTurn = page.locator('#turnHistoryModalList .history-card[data-turn-number="1"]');
@@ -460,17 +557,26 @@ test("whole_journey_no_lost_draft: new world, character, publish, campaign, acce
   await firstTurn.click();
   await expect(firstTurn).toHaveAttribute("aria-pressed", "true");
   await page.locator("#btnTurnHistoryJump").click();
-  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 1 of 1");
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 1 of 2");
   await expect(page.locator("#freeAction")).toHaveValue("Keep this next action for after the history check.");
-  expect(api.generationCreates).toHaveLength(1);
+  await page.locator("[data-story-reader-toolbar]").getByRole("button", { name: "History" }).click();
+  await page.locator("#btnTurnHistoryJumpLatest").click();
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 2 of 2");
+  await expect(page.locator("#scene-2 .scene-narration")).toContainText("Synthetic accepted scene 2.");
+  await expect(page.locator("#freeAction")).toHaveValue("Keep this next action for after the history check.");
+  await expect.poll(() => readSavedReaderPosition(page, String((api.fixture.session.user as Record<string, unknown>).id), campaignId))
+    .toEqual({ turnId: latestTurnId, turnNumber: 2 });
+  expect(api.generationCreates).toHaveLength(2);
   expect(api.campaign(campaignId)?.worldVersionId).toBe(versionOneId);
 });
 
 test("existing_campaign_version_unchanged: publishing edits creates a new pin without migrating current campaigns", async ({ page }) => {
   const api = await installJourneyApi(page);
   await createAndPublishJourneyWorld(page, "T35 Versioned World");
+  const firstPublishedContent = structuredClone(api.world()?.versions[0]?.content);
   await createJourneyCampaign(page, "Pinned Version One");
   const oldCampaignId = api.campaignCreates.at(-1)?.id;
+  expect(api.campaignCreates[0]?.body.worldVersionId).toBe(versionOneId);
   expect(api.campaign(oldCampaignId ?? "")?.worldVersionId).toBe(versionOneId);
 
   await page.locator("#editWorldDraft").click();
@@ -480,11 +586,20 @@ test("existing_campaign_version_unchanged: publishing edits creates a new pin wi
   await page.locator("#publishWorld").click();
   await expect(page.locator("#worldStatus")).toContainText("Version 2 published");
   expect(api.campaign(oldCampaignId ?? "")?.worldVersionId).toBe(versionOneId);
+  expect(api.world()?.versions[0]?.content).toEqual(firstPublishedContent);
+  expect((api.world()?.versions[1]?.content.world as Record<string, unknown> | undefined)?.title)
+    .toBe("T35 Versioned World Revised");
 
   await createJourneyCampaign(page, "Explicit Version Two Campaign");
   const newCampaignId = api.campaignCreates.at(-1)?.id;
+  expect(api.campaignCreates[1]?.body.worldVersionId).toBe(versionTwoId);
   expect(api.campaign(newCampaignId ?? "")?.worldVersionId).toBe(versionTwoId);
   expect(api.campaign(oldCampaignId ?? "")?.worldVersionNumber).toBe(1);
+
+  if (!oldCampaignId) throw new Error("The first synthetic campaign was not created.");
+  await page.goto(`${legacyOrigin}/story/${oldCampaignId}`);
+  await page.locator("#btnOpenWorldSetup").click();
+  await expect(page.locator("#setupWorldVersion")).toHaveText("T35 Versioned World v1");
 });
 
 test("duplicate_create_and_generation_guard: a held submit produces one campaign and one generation", async ({ page }) => {
@@ -519,7 +634,7 @@ test("duplicate_create_and_generation_guard: a held submit produces one campaign
   expect(api.generationCreates[0]?.body).toMatchObject({ action: "Submit this accepted action once.", idempotencyKey: expect.any(String) });
 });
 
-test("cross_campaign_private_canaries_absent: another campaign's synthetic scene and draft remain scoped", async ({ page }) => {
+test("cross_campaign_public_scenes_and_private_state_stay_scoped: public scenes and private state remain correctly scoped", async ({ page }) => {
   const api = await installJourneyApi(page);
   await createAndPublishJourneyWorld(page);
   const firstCampaignId = await startJourneyCampaign(page, api, "Private Scope A");
@@ -528,21 +643,28 @@ test("cross_campaign_private_canaries_absent: another campaign's synthetic scene
   await createJourneyCampaign(page, "Private Scope B");
   const secondCampaignId = api.campaignCreates.at(-1)?.id;
   if (!secondCampaignId) throw new Error("Second synthetic campaign was not created.");
-  const privateCanary = "PRIVATE_T35_CAMPAIGN_B_CANARY";
-  api.seedAcceptedTurn(secondCampaignId, 1, privateCanary);
+  const publicCanary = "T35_SYNTHETIC_PUBLIC_CAMPAIGN_B_SCENE";
+  const privateCanary = "T35_SYNTHETIC_PRIVATE_CAMPAIGN_B_SCRATCHPAD";
+  api.seedAcceptedTurn(secondCampaignId, 1, publicCanary);
+  api.setPrivateStateCanary(secondCampaignId, privateCanary);
 
   await page.goto(`${legacyOrigin}/story/${firstCampaignId}`);
   await page.locator("#freeAction").fill("Draft belonging only to campaign A.");
   await expect(page.locator("#autosaveStatus")).toHaveText("Draft saved");
+  await expect(page.locator("body")).not.toContainText(publicCanary);
   await expect(page.locator("body")).not.toContainText(privateCanary);
 
   await page.goto(`${legacyOrigin}/story/${secondCampaignId}`);
-  await expect(page.locator("#scene-1 .scene-narration")).toContainText(privateCanary);
+  await expect(page.locator("#scene-1 .scene-narration")).toContainText(publicCanary);
+  await expect(page.locator("body")).not.toContainText(privateCanary);
   await expect(page.locator("#freeAction")).toHaveValue("");
   await expect(page.locator("body")).not.toContainText("Draft belonging only to campaign A.");
+  await expect.poll(() => api.privateStateReads.includes(secondCampaignId)).toBe(true);
+  expect(api.privateStateCanaryResponses).toContainEqual({ campaignId: secondCampaignId, scratchpad: privateCanary });
 
   await page.goto(`${legacyOrigin}/story/${firstCampaignId}`);
   await expect(page.locator("#freeAction")).toHaveValue("Draft belonging only to campaign A.");
+  await expect(page.locator("body")).not.toContainText(privateCanary);
   expect(api.campaign(firstCampaignId)?.turns).toEqual([]);
 });
 
@@ -553,10 +675,18 @@ test("image_failure_independent: unavailable image reads do not remove an accept
   await page.locator("#freeAction").fill("Continue even when an optional image service is unavailable.");
   await page.locator("#btnTakeAction").click();
   await expect(page.locator("#scene-1 .scene-narration")).toContainText("Synthetic accepted scene 1.");
+  await expect.poll(() => api.imageFailureReads.some(read =>
+    read.path.startsWith(`/api/v1/campaigns/${api.campaignCreates[0]!.id}/`)
+      && ["illustration-segments", "image-jobs"].some(resource => read.path.endsWith(`/${resource}`))
+      && read.status === 503
+  )).toBe(true);
+  await expect(page.locator("#storyIllustrationPanel [role=status]")).toContainText("Illustration status could not be loaded");
+  await expect(page.locator('#storyIllustrationPanel [data-action="refresh-illustrations"]')).toBeVisible();
   expect(api.campaignCreates).toHaveLength(1);
   expect(api.generationCreates).toHaveLength(1);
   await expect(page.locator("#storySyncStatus")).toContainText("Story synced");
   expect(api.campaign(api.campaignCreates[0]!.id)?.turns).toHaveLength(1);
+  expect(api.writes.some(write => write.path.endsWith("/state") || write.path.endsWith("/illustration-segments") || write.path.endsWith("/image-jobs"))).toBe(false);
 });
 
 test("existing_routes_and_contracts_compatible: /nexus, /story and /app read the same accepted fixture", async ({ page }) => {
@@ -604,7 +734,7 @@ test("advanced_experience_edit_and_save: mechanics edits persist in a saved draf
   expect(api.writes.filter(write => write.method === "PUT" && write.path === `/api/v1/worlds/${worldId}/draft`)).toHaveLength(1);
 });
 
-test("performance_budgets_met_or_audited_exception: reader scene and request bounds hold for 0, 1, 50, 317 and 2000 turns", async ({ browser }) => {
+test("explicit_reader_window_bounds: startup and older-scene paging stay bounded for 0, 1, 50, 317 and 2000 turns", async ({ browser }) => {
   for (const turnCount of [0, 1, 50, 317, 2000]) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
@@ -615,6 +745,10 @@ test("performance_budgets_met_or_audited_exception: reader scene and request bou
     fixtureUser.settings = { ...settings, continuousReading: true };
     const instrumentation = await installLegacyUiFixture(page, fixture);
     const requests: Array<{ method: string; path: string; url: string }> = [];
+    const sceneWindowResponses: Array<{
+      readonly request: { readonly anchorTurnNumber: number; readonly anchorTurnId: string; readonly direction: "older" | "newer"; readonly neighborLimit: number };
+      readonly response: ReturnType<typeof readerSceneWindowResponseSchema.parse>;
+    }> = [];
     page.on("request", request => {
       const url = new URL(request.url());
       requests.push({ method: request.method(), path: url.pathname, url: request.url() });
@@ -629,20 +763,26 @@ test("performance_budgets_met_or_audited_exception: reader scene and request bou
       const direction = url.searchParams.get("direction");
       if (direction !== "older" && direction !== "newer") return route.fulfill({ status: 400, json: { error: "invalid_request" } });
       const anchorTurnNumber = Number(url.searchParams.get("anchorTurnNumber"));
-      const anchorTurnId = url.searchParams.get("anchorTurnId");
+      const anchorTurnId = url.searchParams.get("anchorTurnId") ?? "";
       const anchorIndex = fixture.turns.findIndex(turn => Number(turn.turnNumber) === anchorTurnNumber && turn.id === anchorTurnId);
       if (anchorIndex < 0) return route.fulfill({ status: 404, json: { error: "not_found" } });
-      const limit = Math.min(9, Math.max(1, Number(url.searchParams.get("neighborLimit") ?? 9)));
+      const requestedLimit = Number(url.searchParams.get("neighborLimit") ?? 9);
+      const limit = Math.min(9, Math.max(1, requestedLimit));
       const start = direction === "older" ? Math.max(0, anchorIndex - limit) : anchorIndex;
       const end = direction === "older" ? anchorIndex + 1 : Math.min(fixture.turns.length, anchorIndex + limit + 1);
-      return route.fulfill({ json: readerSceneWindowResponseSchema.parse({
+      const response = readerSceneWindowResponseSchema.parse({
         campaignId: fixture.campaignId,
         anchor: { turnNumber: anchorTurnNumber, id: anchorTurnId },
         direction,
         turns: fixture.turns.slice(start, end),
         hasMore: direction === "older" ? start > 0 : end < fixture.turns.length,
         historyToken: "t35-synthetic-bounded-window-token"
-      }) });
+      });
+      sceneWindowResponses.push({
+        request: { anchorTurnNumber, anchorTurnId, direction, neighborLimit: requestedLimit },
+        response
+      });
+      return route.fulfill({ json: response });
     });
 
     try {
@@ -655,6 +795,33 @@ test("performance_budgets_met_or_audited_exception: reader scene and request bou
       }
       const renderedScenes = await page.locator("#storyArea .scene[data-turn-number]").count();
       expect(renderedScenes, `rendered scene bound for ${turnCount} accepted turns`).toBeLessThanOrEqual(10);
+      expect(sceneWindowResponses, `startup must not fetch a scene group for ${turnCount} turns`).toHaveLength(0);
+      if (turnCount > 1) {
+        const olderScenes = page.getByRole("button", { name: "Load older scenes" });
+        await expect(olderScenes).toBeEnabled();
+        await olderScenes.click();
+        await expect.poll(() => sceneWindowResponses.length).toBe(1);
+        const capture = sceneWindowResponses[0]!;
+        expect(capture.request.direction).toBe("older");
+        expect(capture.request.neighborLimit).toBeGreaterThanOrEqual(1);
+        expect(capture.request.neighborLimit).toBeLessThanOrEqual(9);
+        expect(capture.response.anchor).toEqual({
+          turnNumber: capture.request.anchorTurnNumber,
+          id: capture.request.anchorTurnId
+        });
+        expect(fixture.turns.some(turn => Number(turn.turnNumber) === capture.request.anchorTurnNumber && turn.id === capture.request.anchorTurnId)).toBe(true);
+        expect(capture.response.turns.length).toBeLessThanOrEqual(10);
+        expect(capture.response.turns.at(-1)).toMatchObject(capture.response.anchor);
+        expect(capture.response.hasMore).toBe(true);
+        expect(sceneWindowResponses).toHaveLength(1);
+        await expect.poll(() => page.locator("#storyArea .scene[data-turn-number]").evaluateAll(scenes =>
+          scenes.map(scene => Number((scene as HTMLElement).dataset.turnNumber))
+        )).toEqual(capture.response.turns.map(turn => Number(turn.turnNumber)));
+        await expect(page.locator("#storyArea .scene[data-turn-number]")).toHaveCount(capture.response.turns.length);
+        expect(await page.locator("#storyArea .scene[data-turn-number]").count()).toBeLessThanOrEqual(10);
+      } else {
+        expect(sceneWindowResponses, `no scene paging request is possible for ${turnCount} turns`).toHaveLength(0);
+      }
       const cursorReads = requests.filter(request => {
         const url = new URL(request.url);
         return request.method === "GET"
