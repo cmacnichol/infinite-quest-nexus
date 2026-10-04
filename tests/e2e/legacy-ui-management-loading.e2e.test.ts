@@ -460,6 +460,73 @@ test("hides_illustration_a_while_illustrations_b_fails_then_reveals_only_b_after
   }
 });
 
+test("keeps_advanced_values_hidden_across_empty_selection_before_loading_campaign_b", async ({ page }) => {
+  const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 2 });
+  await installLegacyUiFixture(page, fixture);
+  const idA = campaignId(fixture, 0);
+  const idB = campaignId(fixture, 1);
+  const chronicleBody = page.locator('#campaignPanelChronicle [data-campaign-section-body="chronicle"]');
+  const bMetricsStarted = deferred<void>();
+  const releaseBMetrics = deferred<void>();
+  let listReads = 0;
+  await page.route("**/api/v1/campaigns", async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    listReads += 1;
+    if (listReads === 2) {
+      await route.fulfill({ json: { campaigns: [] } });
+      return;
+    }
+    if (listReads === 3) {
+      await route.fulfill({ json: { campaigns: [campaign(fixture, 1)] } });
+      return;
+    }
+    await route.fallback();
+  });
+  await campaignSectionRoute(page, idA, "memory/metrics", async (route) => {
+    await route.fulfill({ json: chronicleMetricsResponse(17) });
+  });
+  await campaignSectionRoute(page, idA, "memory/embedding-config", async (route) => {
+    await route.fulfill({ json: embeddingConfigResponse("A-private-document-prefix") });
+  });
+  await campaignSectionRoute(page, idB, "memory/metrics", async (route) => {
+    bMetricsStarted.resolve(undefined);
+    await releaseBMetrics.promise;
+    await route.fulfill({ json: chronicleMetricsResponse(29) });
+  });
+  await campaignSectionRoute(page, idB, "memory/embedding-config", async (route) => {
+    await route.fulfill({ json: embeddingConfigResponse("B-current-document-prefix") });
+  });
+
+  try {
+    await page.goto(`${origin}/nexus/index.html#campaigns`);
+    await selectCampaign(page, fixture, 0);
+    await page.locator("#campaignTabChronicle").click();
+    await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("A-private-document-prefix");
+    await expect(chronicleBody).toBeVisible();
+
+    await page.locator("#refreshCampaigns").click();
+    await expect(page.locator("#memoryTitle")).toHaveText("Select a campaign");
+    await expect(chronicleBody).toBeHidden();
+
+    await page.locator("#refreshCampaigns").click();
+    await expect(page.locator("#memoryTitle")).toHaveText(String(campaign(fixture, 1).title));
+    await expect(chronicleBody).toBeHidden();
+    await page.locator("#campaignTabChronicle").click();
+    await bMetricsStarted.promise;
+    await expect(chronicleBody).toBeHidden();
+    await expect(page.locator("#campaignPanelChronicle [data-campaign-section-feedback]")).toContainText("Loading Chronicle");
+    await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("A-private-document-prefix");
+
+    releaseBMetrics.resolve(undefined);
+    await expect(chronicleBody).toBeVisible();
+    await expect(page.locator("#embeddingDocumentPrefix")).toHaveValue("B-current-document-prefix");
+    await expect(page.locator("#memoryMetrics")).toContainText("29");
+    expect(listReads).toBe(3);
+  } finally {
+    releaseBMetrics.resolve(undefined);
+  }
+});
+
 test("successful_story_memory_save_invalidates_only_its_section", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
   const api = await installLegacyUiFixture(page, fixture);

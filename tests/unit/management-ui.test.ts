@@ -41,6 +41,7 @@ function managementFunctions<T extends Record<string, (...args: never[]) => unkn
     setCampaignSettingsSectionContentVisibility: vi.fn(),
     setCampaignSettingsSectionControls: vi.fn(),
     setCampaignSettingsAvailability: vi.fn(),
+    updateCampaignMigrationAvailability: vi.fn(),
     setCampaignSettingsPanel: vi.fn(),
     CAMPAIGN_SETTINGS_PANEL_IDS: ["overview", "story", "illustrations", "chronicle", "usage"],
     campaignSettingsSectionLoadEpochs: new Map(),
@@ -85,6 +86,8 @@ describe("Nexus management UI contracts", () => {
     }
     let resolveOldWorld!: (world: unknown) => void;
     const oldWorld = new Promise((resolve) => { resolveOldWorld = resolve; });
+    let resolveCurrentWorld!: (world: unknown) => void;
+    const currentWorld = new Promise((resolve) => { resolveCurrentWorld = resolve; });
     const worldAId = "11111111-1111-4111-8111-111111111111";
     const worldBId = "11111111-1111-4111-8111-111111111112";
     const UUID_ROUTE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -95,7 +98,7 @@ describe("Nexus management UI contracts", () => {
     const api = vi.fn(async (path: string) => {
       if (path.endsWith("/state")) return { activeTurnNumber: 1, revision: 2 };
       if (path === `/api/v1/worlds/${worldAId}`) return oldWorld;
-      return { versions: [{ id: "version-b", versionNumber: 1 }] };
+      return currentWorld;
     });
     const functions = managementFunctions<{ selectCampaign: (campaign: Record<string, unknown>) => Promise<void> }>(["selectCampaign", "normalizedTurnControlStyle"], {
       elements, document, api, selectedCampaign: null, campaignSelectionRequest: 0,
@@ -131,9 +134,15 @@ describe("Nexus management UI contracts", () => {
     const campaign = (suffix: string) => ({ id: `campaign-${suffix}`, title: `Campaign ${suffix}`, status: "active", worldId: suffix === "a" ? worldAId : worldBId, worldVersionId: `version-${suffix}`, worldVersionNumber: 1, turnControlStyle: "flexible_scene" });
     const firstSelection = functions.selectCampaign(campaign("a"));
     await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/worlds/${worldAId}`));
-    await functions.selectCampaign(campaign("b"));
+    const currentSelection = functions.selectCampaign(campaign("b"));
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith(`/api/v1/worlds/${worldBId}`));
+    expect((elements.campaignWorldVersion as HTMLSelectElement).disabled).toBe(true);
+    expect((elements.migrateCampaign as HTMLButtonElement).disabled).toBe(true);
     resolveOldWorld({ versions: [{ id: "version-a", versionNumber: 1 }] });
     await firstSelection;
+    expect((elements.campaignWorldVersion as HTMLSelectElement).disabled).toBe(true);
+    resolveCurrentWorld({ versions: [{ id: "version-b", versionNumber: 2 }] });
+    await currentSelection;
     expect((elements.campaignTitle as HTMLInputElement).value).toBe("Campaign b");
     expect((elements.campaignWorldLink as HTMLAnchorElement).getAttribute("href")).toBe(`#world-library?worldId=${worldBId}`);
     expect([...elements.campaignWorldVersion!.querySelectorAll("option")].map((option) => option.value)).toEqual(["version-b"]);
@@ -769,6 +778,7 @@ describe("Nexus management UI contracts", () => {
     }>([
       "setCampaignSettingsPanel",
       "setCampaignSettingsAvailability",
+      "setCampaignSettingsSectionContentVisibility",
       "clearCampaignEditorSelection",
       "loadCampaigns"
     ], {
@@ -817,6 +827,8 @@ describe("Nexus management UI contracts", () => {
     const campaignTabOverview = requiredElement<HTMLButtonElement>("campaignTabOverview");
     const campaignPanelOverview = requiredElement<HTMLElement>("campaignPanelOverview");
     const campaignPanelChronicle = requiredElement<HTMLElement>("campaignPanelChronicle");
+    const advancedBodies = [...document.querySelectorAll<HTMLElement>("[data-campaign-section-body]")]
+      .filter((body) => body.dataset.campaignSectionBody !== "overview");
     const campaignStatusMessage = requiredElement<HTMLElement>("campaignStatusMessage");
     const refreshCampaigns = requiredElement<HTMLButtonElement>("refreshCampaigns");
     let focusedControlId = "";
@@ -825,6 +837,7 @@ describe("Nexus management UI contracts", () => {
     campaignEditorSummary.textContent = "active · Stale World v4 · Mira";
     campaignStatusMessage.textContent = "Stale campaign feedback";
     campaignStatusMessage.classList.remove("hidden");
+    for (const body of advancedBodies) body.classList.remove("hidden");
     functions.setCampaignSettingsPanel("chronicle");
 
     await functions.loadCampaigns("", { focusNoSelection: true });
@@ -837,6 +850,8 @@ describe("Nexus management UI contracts", () => {
     expect(campaignTabOverview.getAttribute("aria-selected")).toBe("true");
     expect(campaignPanelOverview.hidden).toBe(false);
     expect(campaignPanelChronicle.hidden).toBe(true);
+    expect(advancedBodies.every((body) => body.classList.contains("hidden"))).toBe(true);
+    expect(advancedBodies.every((body) => body.dataset.selectionHidden === "true")).toBe(true);
     expect(campaignStatusMessage.textContent).toBe("");
     expect(campaignStatusMessage.classList.contains("hidden")).toBe(true);
     expect(focusedControlId).toBe("refreshCampaigns");
@@ -2250,6 +2265,35 @@ function transferVersionsHarness(details: (worldId: string) => Promise<Record<st
 }
 
 describe("campaign migration and transfer detail intent", () => {
+  it("enables migration only for a loaded, valid newer world version", () => {
+    const versionSelect = {
+      disabled: false,
+      value: "version-one",
+      options: [{ value: "version-one" }, { value: "version-two" }],
+      selectedOptions: [{ dataset: { versionNumber: "1" } }]
+    };
+    const migrateButton = { disabled: false };
+    const elements = { campaignWorldVersion: versionSelect, migrateCampaign: migrateButton };
+    const updateAvailability = managementFunctionWithBindings<() => void>("updateCampaignMigrationAvailability", {
+      elements,
+      selectedCampaign: { worldVersionId: "version-one", worldVersionNumber: 1 }
+    });
+
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(true);
+    versionSelect.value = "version-two";
+    versionSelect.selectedOptions = [{ dataset: { versionNumber: "2" } }];
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(false);
+    versionSelect.options = [{ value: "version-two" }];
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(true);
+    versionSelect.options = [{ value: "version-one" }, { value: "version-two" }];
+    versionSelect.disabled = true;
+    updateAvailability();
+    expect(migrateButton.disabled).toBe(true);
+  });
+
   const worldA = { id: "world-a", versions: [
     { id: "version-one", versionNumber: 1 },
     { id: "version-two", versionNumber: 2 },

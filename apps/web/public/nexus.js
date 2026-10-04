@@ -343,6 +343,18 @@ function setCampaignSettingsSectionContentVisibility(panelId, visible) {
   }
 }
 
+function updateCampaignMigrationAvailability() {
+  const targetVersion = Number(elements.campaignWorldVersion.selectedOptions[0]?.dataset.versionNumber);
+  const currentVersionIsAvailable = Boolean(selectedCampaign
+    && [...elements.campaignWorldVersion.options].some((option) => option.value === selectedCampaign.worldVersionId));
+  elements.migrateCampaign.disabled = !selectedCampaign
+    || elements.campaignWorldVersion.disabled
+    || !currentVersionIsAvailable
+    || elements.campaignWorldVersion.value === selectedCampaign.worldVersionId
+    || !Number.isSafeInteger(targetVersion)
+    || targetVersion <= selectedCampaign.worldVersionNumber;
+}
+
 function setCampaignSettingsSectionControls(section, disabled) {
   const availabilityManaged = section === "illustrations"
     ? new Set(["campaignImageProvider", "discoverIllustrationModels", "illustrationSegmentWordCount", "illustrationImagesPerSegment", "illustrationSegmentPromptMode", "openIllustrationPromptEditor", "previewIllustrationBackfill", "previewIllustrationRebuild"])
@@ -542,6 +554,9 @@ function syncCampaignSettingsRailOrientation(mediaQuery) {
 function clearCampaignEditorSelection({ focus = false } = {}) {
   campaignCoreReady = false;
   campaignSectionLoader.setSelection("", campaignSelectionRequest);
+  for (const panelId of CAMPAIGN_SETTINGS_PANEL_IDS) {
+    if (panelId !== "overview") setCampaignSettingsSectionContentVisibility(panelId, false);
+  }
   campaignEditGuard.reset(null, campaignSelectionRequest, campaignSettingsSnapshot());
   renderCampaignSaveFeedback("saved");
   setCampaignSettingsAvailability(false);
@@ -5121,6 +5136,7 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   const selectionRequest = ++campaignSelectionRequest;
   const previousPanel = activeCampaignSettingsPanel;
   campaignCoreReady = false;
+  elements.migrateCampaign.disabled = true;
   elements.campaignSettingsRail.querySelectorAll("[role=tab]").forEach((tab) => { tab.disabled = true; });
   CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = true; });
   setCampaignSettingsSectionControls("illustrations", true);
@@ -5141,6 +5157,7 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
     if (selectionRequest === campaignSelectionRequest && selectedCampaign) {
       campaignSectionLoader.setSelection(selectedCampaign.id, selectionRequest);
       CAMPAIGN_SETTINGS_SELECTION_CONTROLS.forEach((id) => { if (elements[id]) elements[id].disabled = false; });
+      updateCampaignMigrationAvailability();
       setCampaignSettingsSectionControls("illustrations", true);
       setCampaignSettingsSectionControls("chronicle", true);
       elements.budgetTokens.disabled = true;
@@ -5202,6 +5219,7 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   elements.compression.disabled = true;
   elements.memoryQuery.disabled = true;
   elements.campaignWorldVersion.replaceChildren();
+  elements.campaignWorldVersion.disabled = true;
   let world = null;
   let worldDetailsError = "";
   try {
@@ -5212,14 +5230,17 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   if (selectionRequest !== campaignSelectionRequest) return;
   if (world) {
     for (const version of [...world.versions].reverse()) {
-      elements.campaignWorldVersion.append(new Option(`Version ${version.versionNumber}`, version.id));
+      const option = new Option(`Version ${version.versionNumber}`, version.id);
+      option.dataset.versionNumber = String(version.versionNumber);
+      elements.campaignWorldVersion.append(option);
     }
     elements.campaignWorldVersion.value = campaign.worldVersionId;
+    elements.campaignWorldVersion.disabled = false;
   } else {
     elements.campaignWorldVersion.append(new Option("World details unavailable", ""));
     elements.campaignWorldVersion.disabled = true;
   }
-  elements.migrateCampaign.disabled = !world || !world.versions.some((version) => version.versionNumber > campaign.worldVersionNumber);
+  updateCampaignMigrationAvailability();
   if (!managementSelectionErrorIsCurrent("campaigns") && preserveWorkflowFeedbackForCampaignId !== campaign.id) {
     if (worldDetailsError) campaignMessage(`Campaign selected, but its world details could not be loaded: ${worldDetailsError}`, "error");
     else if (campaign.worldUpdateAvailable) campaignMessage(`This campaign is pinned to version ${campaign.worldVersionNumber}; version ${campaign.latestWorldVersionNumber} is available. Migration is explicit and does not rewrite accepted turns.`);
@@ -8723,7 +8744,7 @@ elements.exportCampaign.addEventListener("click", exportSelectedCampaign);
 elements.loadCampaign.addEventListener("click", loadSelectedCampaign);
 elements.deleteCampaign.addEventListener("click", deleteSelectedCampaign);
 elements.campaignWorldVersion.addEventListener("change", () => {
-  elements.migrateCampaign.disabled = !selectedCampaign || elements.campaignWorldVersion.value === selectedCampaign.worldVersionId;
+  updateCampaignMigrationAvailability();
 });
 elements.contextForm.addEventListener("submit", previewContext);
 elements.reindexMemory.addEventListener("click", rebuildMemory);
