@@ -242,9 +242,9 @@ test("a_failed_section_read_can_be_retried_by_reopening_its_tab", async ({ page 
   await expect(page.locator("#campaignStatusMessage")).not.toContainText("Synthetic Story Memory read failure");
 });
 
-test("story_memory_reload_failure_after_save_keeps_private_details_hidden_and_retries", async ({ page }) => {
+test("story_memory_reload_failure_after_save_keeps_private_details_hidden_and_retries", async ({ page }, testInfo) => {
   const fixture = legacyUiFixture({ turnCount: 1, worldCount: 1, campaignCount: 1 });
-  const api = await installLegacyUiFixture(page, fixture);
+  await installLegacyUiFixture(page, fixture);
   const path = pathFor(campaignId(fixture), "story-memory");
   let storyReads = 0;
   let storyWrites = 0;
@@ -291,13 +291,17 @@ test("story_memory_reload_failure_after_save_keeps_private_details_hidden_and_re
   const visibleText = await page.locator("body").evaluate((element) => (element as HTMLElement).innerText);
   expect(visibleText).not.toContain("PRIVATE_STORY_MEMORY_BODY_CANARY");
   expect(storyReads).toBe(2);
-  expect(reads(api, path)).toHaveLength(2);
+  const safeErrorScreenshot = testInfo.outputPath("story-memory-safe-error.png");
+  await page.screenshot({ path: safeErrorScreenshot, fullPage: true });
+  await testInfo.attach("story-memory-safe-error", { path: safeErrorScreenshot, contentType: "image/png" });
 
   await page.locator('#campaignPanelStory [data-action="retry-campaign-section"]').click();
   await expect(status).toContainText("Saved level: standard");
   await expect(page.locator("#campaignStoryMemoryLevel")).toBeEnabled();
   expect(storyReads).toBe(3);
-  expect(reads(api, path)).toHaveLength(3);
+  const recoveredScreenshot = testInfo.outputPath("story-memory-recovered.png");
+  await page.screenshot({ path: recoveredScreenshot, fullPage: true });
+  await testInfo.attach("story-memory-recovered", { path: recoveredScreenshot, contentType: "image/png" });
 });
 
 test("overview_remains_usable_while_opened_chronicle_reads_and_preview_are_blocked", async ({ page }) => {
