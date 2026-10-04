@@ -195,6 +195,19 @@ describe("campaign tracker identity-aware updates", () => {
     ]);
   });
 
+  it("routes a competing ID/display-name collision by display name", () => {
+    expect(applyCampaignTrackerUpdates(
+      [
+        { id: "Location", name: "Place", value: "Other", rules: "Other rules" },
+        { id: "location", name: "Location", value: "Harbor", rules: "Track the current place." }
+      ],
+      [{ name: "Location", value: "Gate" }]
+    )).toEqual([
+      { id: "Location", name: "Place", value: "Other", rules: "Other rules" },
+      { id: "location", name: "Location", value: "Gate", rules: "Track the current place." }
+    ]);
+  });
+
   it("uses the legacy ID/name tie-break for a duplicate pair", () => {
     expect(applyCampaignTrackerUpdates(
       [
@@ -223,7 +236,6 @@ describe("campaign tracker identity-aware updates", () => {
       expect((error as Error).message).not.toContain("new");
     }
   });
-
 
   it("does not route a name-only update to an ID when no display name matches", () => {
     expect(applyCampaignTrackerUpdates(
@@ -341,6 +353,22 @@ describe("campaign tracker identity-aware updates", () => {
       .toBe("Pier");
     expect(applyCampaignTrackerUpdates(original, [{ id: "location", currentValue: "Gate" }])[0]?.value)
       .toBe("Gate");
+  });
+
+  it("prefers canonical update fields over legacy aliases", () => {
+    expect(applyCampaignTrackerUpdates(
+      [{ id: "location", name: "Location", value: "Harbor", rules: "Current rule" }],
+      [{
+        name: "Location", label: "Alias name", title: "Alias title",
+        value: "Canonical value", currentValue: "Alias value",
+        rules: "Canonical rule", updateRules: "Alias rule"
+      }]
+    )).toEqual([{
+      id: "location",
+      name: "Location",
+      value: "Canonical value",
+      rules: "Canonical rule"
+    }]);
   });
 
   it("keeps metadata-only updates inert and materializes only tracker fields", () => {
