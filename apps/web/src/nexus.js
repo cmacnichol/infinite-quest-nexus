@@ -6028,7 +6028,7 @@ function renderProviderReadiness() {
   for (const role of ["text", "image", "embedding"]) {
     const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
     if (!card) continue;
-    const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now());
+    const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now(), Date.parse);
     card.dataset.readinessState = readiness.state;
     card.querySelector("[data-readiness-health]").textContent = readiness.health.replaceAll("-", " ");
     card.querySelector("[data-readiness-inventory]").textContent = readiness.inventory.replaceAll("-", " ");
@@ -6050,7 +6050,7 @@ function renderProviderReadiness() {
 
 async function refreshProviderReadinessInventory(role) {
   const card = elements.providers.querySelector(`[data-provider-readiness="${role}"]`);
-  const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now());
+  const readiness = providerReadinessForRole(role, providers, providerInventoryObservations, Date.now(), Date.parse);
   const profile = providers.find((item) => item.id === readiness.profileId);
   if (!card || !profile) return;
   const identity = {

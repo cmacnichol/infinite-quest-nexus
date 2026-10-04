@@ -1,5 +1,5 @@
 import { CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY, safeProviderProfileViewSchema, type SafeProviderProfileView } from "@infinite-quest/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { providerReadinessForRole, type ProviderInventoryObservation } from "../../../packages/client-core/src/provider-readiness.js";
 
 const now = Date.parse("2026-10-03T12:00:00.000Z");
@@ -24,7 +24,7 @@ function inventory(overrides: Partial<ProviderInventoryObservation> = {}): Provi
   return { profileId: textProfileId, role: "text", providerType: "openrouter", baseUrl: "https://text.example.test/v1", modelId: "vendor/story-model", status: "available", modelIds: ["vendor/story-model"], checkedAt: "2026-10-03T11:30:00.000Z", ...overrides };
 }
 
-const assess = (candidate = profile(), evidence: readonly ProviderInventoryObservation[] = [inventory()]) => providerReadinessForRole("text", [candidate], evidence, now);
+const assess = (candidate = profile(), evidence: readonly ProviderInventoryObservation[] = [inventory()]) => providerReadinessForRole("text", [candidate], evidence, now, Date.parse);
 
 describe("provider readiness", () => {
   it("reports ready only from healthy, selected-model inventory and current exact schema evidence", () => {
@@ -33,7 +33,7 @@ describe("provider readiness", () => {
   });
 
   it("keeps unconfigured roles independent", () => {
-    expect(providerReadinessForRole("image", [profile()], [], now)).toMatchObject({ state: "not-configured", health: "not-configured", inventory: "not-configured", capability: "not-applicable" });
+    expect(providerReadinessForRole("image", [profile()], [], now, Date.parse)).toMatchObject({ state: "not-configured", health: "not-configured", inventory: "not-configured", capability: "not-applicable" });
   });
 
   it.each([
@@ -78,18 +78,18 @@ describe("provider readiness", () => {
     const embedding = profile({ id: "33333333-3333-4333-8333-333333333333", name: "Synthetic embedding", providerRole: "embedding", defaultModel: "vendor/embedding-model", textSelection: { kind: "model", modelId: "vendor/embedding-model" }, responseFormatCapability: undefined, configuration: {} });
     const imageInventory: ProviderInventoryObservation = { profileId: image.id, role: "image", providerType: image.providerType, baseUrl: image.baseUrl, modelId: image.defaultModel, status: "available", modelIds: [image.defaultModel], checkedAt: "2026-10-03T11:30:00.000Z" };
     const embeddingInventory: ProviderInventoryObservation = { profileId: embedding.id, role: "embedding", providerType: embedding.providerType, baseUrl: embedding.baseUrl, modelId: embedding.defaultModel, status: "available", modelIds: [embedding.defaultModel], checkedAt: "2026-10-03T11:30:00.000Z" };
-    expect(providerReadinessForRole("image", [profile(), image], [inventory(), imageInventory], now)).toMatchObject({ state: "ready", capability: "not-applicable" });
-    expect(providerReadinessForRole("embedding", [profile(), embedding], [inventory(), embeddingInventory], now)).toMatchObject({ state: "ready", capability: "not-applicable" });
-    expect(providerReadinessForRole("text", [profile()], [inventory()], now)).toMatchObject({ state: "ready", capability: "verified" });
-    expect(providerReadinessForRole("image", [profile(), { ...image, healthStatus: "unavailable" }], [inventory(), imageInventory], now).state).toBe("unavailable");
+    expect(providerReadinessForRole("image", [profile(), image], [inventory(), imageInventory], now, Date.parse)).toMatchObject({ state: "ready", capability: "not-applicable" });
+    expect(providerReadinessForRole("embedding", [profile(), embedding], [inventory(), embeddingInventory], now, Date.parse)).toMatchObject({ state: "ready", capability: "not-applicable" });
+    expect(providerReadinessForRole("text", [profile()], [inventory()], now, Date.parse)).toMatchObject({ state: "ready", capability: "verified" });
+    expect(providerReadinessForRole("image", [profile(), { ...image, healthStatus: "unavailable" }], [inventory(), imageInventory], now, Date.parse).state).toBe("unavailable");
   });
 
   it("uses an enabled non-default profile when the default is disabled and rejects only-disabled roles", () => {
     const disabledDefault = profile({ enabled: false });
     const alternate = profile({ id: "44444444-4444-4444-8444-444444444444", name: "Alternate text", isDefault: false, defaultModel: "vendor/alternate-model", textSelection: { kind: "model", modelId: "vendor/alternate-model" }, responseFormatCapability: { ...storyCapability, model: "vendor/alternate-model" } });
     const alternateInventory = inventory({ profileId: alternate.id, modelId: alternate.defaultModel, modelIds: [alternate.defaultModel] });
-    expect(providerReadinessForRole("text", [disabledDefault, alternate], [inventory(), alternateInventory], now)).toMatchObject({ state: "ready", profileId: alternate.id });
-    expect(providerReadinessForRole("text", [disabledDefault], [inventory()], now)).toMatchObject({ state: "unavailable", profileId: disabledDefault.id });
+    expect(providerReadinessForRole("text", [disabledDefault, alternate], [inventory(), alternateInventory], now, Date.parse)).toMatchObject({ state: "ready", profileId: alternate.id });
+    expect(providerReadinessForRole("text", [disabledDefault], [inventory()], now, Date.parse)).toMatchObject({ state: "unavailable", profileId: disabledDefault.id });
   });
   it("classifies a contract-valid advertised-at but unverified story capability as not ready", () => {
     const capability = { ...storyCapability, operations: [{ ...storyOperation, status: "unknown" as const, verifiedAt: null, expiresAt: null }] };
@@ -106,11 +106,34 @@ describe("provider readiness", () => {
   });
 
   it("rejects future evidence clocks", () => {
-    expect(providerReadinessForRole("text", [profile()], [inventory({ checkedAt: "2026-10-04T11:00:00.000Z" })], now)).toMatchObject({ state: "unavailable", inventory: "unavailable" });
-    expect(providerReadinessForRole("text", [profile()], [inventory()], Number.NaN).state).toBe("unavailable");
+    expect(providerReadinessForRole("text", [profile()], [inventory({ checkedAt: "2026-10-04T11:00:00.000Z" })], now, Date.parse)).toMatchObject({ state: "unavailable", inventory: "unavailable" });
+    expect(providerReadinessForRole("text", [profile()], [inventory()], Number.NaN, Date.parse).state).toBe("unavailable");
   });
   it("requires current model inventory evidence and exposes an actual pending check", () => {
     expect(assess(profile(), []).inventory).toBe("unknown");
     expect(assess(profile(), [inventory({ status: "checking", checkedAt: null, modelIds: [] })]).state).toBe("checking");
+  });
+  it("uses the supplied parser for each observation and verified capability timestamp", () => {
+    const candidate = profile();
+    const observation = inventory();
+    const parser = vi.fn((value: string) => Date.parse(value));
+    expect(providerReadinessForRole("text", [candidate], [observation], now, parser).state).toBe("ready");
+    expect(parser.mock.calls.map(([value]) => value)).toEqual([
+      candidate.lastHealthCheckAt,
+      observation.checkedAt,
+      storyOperation.verifiedAt,
+      storyOperation.expiresAt
+    ]);
+    parser.mockClear();
+    const advertised = profile({ responseFormatCapability: { ...storyCapability, operations: [{ ...storyOperation, status: "unknown", verifiedAt: null, expiresAt: null }] } });
+    expect(providerReadinessForRole("text", [advertised], [observation], now, parser).capability).toBe("advertised");
+    expect(parser).toHaveBeenCalledWith(storyCapability.advertisedAt);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])("rejects nonfinite parser results (%s) without marking a role ready", (invalid) => {
+    const parser = () => invalid;
+    expect(providerReadinessForRole("text", [profile()], [inventory()], now, parser)).toMatchObject({
+      state: "unavailable", health: "unknown", inventory: "unavailable", capability: "malformed"
+    });
   });
 });

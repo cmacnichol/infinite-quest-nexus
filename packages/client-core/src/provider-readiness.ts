@@ -1,6 +1,8 @@
 import type { SafeProviderProfileView } from "@infinite-quest/contracts";
 import { CURRENT_STORY_RESPONSE_FORMAT_CAPABILITY_IDENTITY } from "@infinite-quest/contracts";
 
+export type ProviderTimestampParser = (value: string) => number;
+
 export type ProviderReadinessRole = "text" | "image" | "embedding";
 export type ProviderInventoryStatus = "unknown" | "checking" | "available" | "unavailable";
 
@@ -27,13 +29,13 @@ export interface ProviderReadinessResult {
   readonly capability: ProviderReadinessCapabilityState;
 }
 
-function validTimestamp(value: unknown): number | null {
+function validTimestamp(value: unknown, parseTimestamp: ProviderTimestampParser): number | null {
   if (typeof value !== "string") return null;
-  const timestamp = Date.parse(value);
+  const timestamp = parseTimestamp(value);
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function capabilityState(profile: SafeProviderProfileView, now: number): ProviderReadinessCapabilityState {
+function capabilityState(profile: SafeProviderProfileView, now: number, parseTimestamp: ProviderTimestampParser): ProviderReadinessCapabilityState {
   if (profile.providerRole !== "text") return "not-applicable";
   const capability: unknown = profile.responseFormatCapability;
   if (capability === undefined || capability === null) return "unknown";
@@ -50,12 +52,12 @@ function capabilityState(profile: SafeProviderProfileView, now: number): Provide
   if (exact.status === "advertised") return "malformed";
   if (exact.status === "unsupported") return "unsupported";
   if (exact.status === "unknown") {
-    const advertisedAt = validTimestamp(value.advertisedAt);
+    const advertisedAt = validTimestamp(value.advertisedAt, parseTimestamp);
     return advertisedAt !== null && advertisedAt <= now ? "advertised" : "unknown";
   }
   if (exact.status !== "verified") return "unknown";
-  const verifiedAt = validTimestamp(exact.verifiedAt);
-  const expiresAt = validTimestamp(exact.expiresAt);
+  const verifiedAt = validTimestamp(exact.verifiedAt, parseTimestamp);
+  const expiresAt = validTimestamp(exact.expiresAt, parseTimestamp);
   if (verifiedAt === null || expiresAt === null) return "malformed";
   if (verifiedAt > now || expiresAt <= verifiedAt) return "malformed";
   if (!Number.isFinite(now)) return "malformed";
@@ -80,7 +82,8 @@ export function providerReadinessForRole(
   role: ProviderReadinessRole,
   profiles: readonly SafeProviderProfileView[],
   inventories: readonly ProviderInventoryObservation[],
-  now: number
+  now: number,
+  parseTimestamp: ProviderTimestampParser
 ): ProviderReadinessResult {
   if (!Number.isFinite(now)) return { role, state: "unavailable", profileId: null, health: "unknown", inventory: "unknown", capability: role === "text" ? "unknown" : "not-applicable" };
   const configured = profiles.filter((profile) => profile.providerRole === role);
@@ -88,7 +91,8 @@ export function providerReadinessForRole(
   const profile = configured.find((candidate) => candidate.enabled && candidate.isDefault) || configured.find((candidate) => candidate.enabled);
   if (!profile) return { role, state: "unavailable", profileId: configured[0]?.id ?? null, health: "unavailable", inventory: "unavailable", capability: role === "text" ? "unknown" : "not-applicable" };
 
-  const health = profile.healthStatus === "healthy" && validTimestamp(profile.lastHealthCheckAt) !== null && validTimestamp(profile.lastHealthCheckAt)! <= now
+  const healthCheckedAt = profile.healthStatus === "healthy" ? validTimestamp(profile.lastHealthCheckAt, parseTimestamp) : null;
+  const health = profile.healthStatus === "healthy" && healthCheckedAt !== null && healthCheckedAt <= now
     ? "healthy"
     : profile.healthStatus === "unavailable" || profile.healthStatus === "degraded" ? "unavailable" : "unknown";
   const inventory = matchingInventory(profile, inventories);
@@ -97,10 +101,10 @@ export function providerReadinessForRole(
   else if (inventory?.status === "checking") inventoryState = "checking";
   else if (inventory?.status === "unavailable") inventoryState = "unavailable";
   else if (inventory?.status === "available") {
-    const checkedAt = validTimestamp(inventory.checkedAt);
+    const checkedAt = validTimestamp(inventory.checkedAt, parseTimestamp);
     inventoryState = checkedAt !== null && checkedAt <= now && inventory.modelIds.includes(profile.defaultModel) ? "available" : "unavailable";
   }
-  const capability = capabilityState(profile, now);
+  const capability = capabilityState(profile, now, parseTimestamp);
   const capabilityReady = role !== "text" || capability === "verified";
   const allReady = health === "healthy" && inventoryState === "available" && capabilityReady;
   const hasFailure = health === "unavailable" || inventoryState === "unavailable" || (role === "text" && ["advertised", "expired", "malformed", "identity-mismatch", "unsupported"].includes(capability));
