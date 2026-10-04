@@ -402,6 +402,23 @@ button.history-card:hover, button.history-card:focus-visible, .history-card[role
 .history-preview-heading h4 { margin: 0; color: var(--gold2); }
 .history-preview-turn { pointer-events: none; }
 .history-preview-turn .history-card { cursor: default; }
+.turn-history-tools { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(240px, 1fr); gap: 14px; margin: 0 0 14px; padding: 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 14px; background: rgba(255,255,255,.035); }
+.turn-history-tools [hidden] { display: none !important; }
+.turn-history-search, .turn-history-jump { display: grid; align-content: start; gap: 7px; min-width: 0; }
+.turn-history-search label, .turn-history-jump label { color: var(--muted); font-size: .82rem; font-weight: 800; }
+.turn-history-search-controls, .turn-history-jump-controls { align-items: stretch; }
+.turn-history-search-controls input { flex: 1 1 220px; min-width: 0; }
+.turn-history-jump-controls input { flex: 1 1 90px; min-width: 0; }
+.turn-history-search-status, .turn-history-jump-status { min-height: 1.2em; margin: 0; color: var(--dim); }
+.turn-history-search-status[data-state="loading"] { color: var(--gold2); }
+.turn-history-search-status[data-state="error"], .turn-history-search-status[data-state="invalid"], .turn-history-jump-status[data-state="error"], .turn-history-jump-status[data-state="invalid"] { color: var(--danger); }
+.turn-history-search-status[data-state="results"], .turn-history-jump-status[data-state="success"] { color: var(--ok); }
+.turn-history-search-results { margin-top: 4px; }
+.history-search-result { display: grid; gap: 4px; width: 100%; text-align: left; }
+.history-search-result-title { color: var(--gold2); font-weight: 800; }
+.history-search-result-excerpt { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-search-result-date { color: var(--muted); font-size: .76rem; }
+.turn-history-search-actions { min-height: 1px; }
 .track-card h4, .history-card h4 { margin: 0; font-size: .95rem; color: #fff; }
 .track-card p, .history-card p { margin: 0; color: var(--dim); font-size: .86rem; line-height: 1.45; }
 .history-entry { display: grid; gap: 8px; }
@@ -427,6 +444,7 @@ button.history-card:hover, button.history-card:focus-visible, .history-card[role
 .state-inspector-pre { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); line-height: 1.5; }
 @media (max-width: 820px) { .runtime-tracker-card { grid-template-columns: 1fr; } }
 @media (max-width: 390px) { .turn-chronicle-audit > div { grid-template-columns: 1fr; gap: 1px; } }
+@media (max-width: 640px) { .turn-history-tools { grid-template-columns: minmax(0, 1fr); } }
 
 details { border: 1px solid rgba(255,255,255,.12); border-radius: 15px; background: rgba(255,255,255,.04); overflow: hidden; }
 summary { cursor: pointer; padding: 12px; color: var(--muted); font-weight: 700; }

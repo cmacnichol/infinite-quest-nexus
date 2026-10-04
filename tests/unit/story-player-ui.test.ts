@@ -36,6 +36,7 @@ async function bootLegacyStory({
     campaignId,
     turn: makeTurns(turnNumber, turnNumber)[0]
   })),
+  searchReaderHistory = vi.fn(async () => ({ campaignId: "campaign-1", items: [], nextCursor: null })),
   getTurnCorrection = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
   correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
   illustrationConfig = { enabled: false, sourcePolicy: "off" },
@@ -57,6 +58,7 @@ async function bootLegacyStory({
   rewindCampaign?: ReturnType<typeof vi.fn>;
   fetchCampaignState?: ReturnType<typeof vi.fn>;
   getReaderHistoryTurn?: ReturnType<typeof vi.fn>;
+  searchReaderHistory?: ReturnType<typeof vi.fn>;
   getTurnCorrection?: ReturnType<typeof vi.fn>;
   correctTurnNarration?: ReturnType<typeof vi.fn>;
   illustrationConfig?: Record<string, unknown>;
@@ -133,7 +135,7 @@ async function bootLegacyStory({
       segments: loadIllustrationSegments ?? (async () => ({ segments: illustrationSegments })),
       imageJobs: async () => ({ jobs: [] })
     },
-    readerHistory: { getTurn: getReaderHistoryTurn },
+    readerHistory: { getTurn: getReaderHistoryTurn, searchHistory: searchReaderHistory },
     workflow,
     ...(failedTurnPrompts ? { failedTurnPrompts } : {}),
     pendingSubmissions: { clear: () => undefined },
@@ -148,6 +150,8 @@ async function bootLegacyStory({
     fetchTurns,
     fetchCampaignState,
     rewindCampaign,
+    getReaderHistoryTurn,
+    searchReaderHistory,
     updateCampaignState,
     getTurnCorrection,
     correctTurnNarration
@@ -199,6 +203,314 @@ function deferred<T>() {
 }
 
 describe("story-player: new Story Player UI contracts & gameplay logic", () => {
+  it("provides accessible campaign-search and exact-jump controls inside History", () => {
+    const { document } = parseHTML(storyHtml);
+    expect(document.querySelector("#turnHistorySearch")?.getAttribute("type")).toBe("search");
+    expect(document.querySelector("#turnHistorySearchStatus")?.getAttribute("aria-live")).toBe("polite");
+    expect(document.querySelector("#turnHistorySearchResults")).not.toBeNull();
+    expect(document.querySelector("#turnHistoryJumpNumber")?.getAttribute("inputmode")).toBe("numeric");
+    expect(document.querySelector("#btnTurnHistoryJumpExact")).not.toBeNull();
+  });
+
+  it("debounces campaign search through readerHistory and renders excerpts as literal text", async () => {
+    const excerpt = '<img src=x onerror="window.__searchCanary=true">';
+    const searchReaderHistory = vi.fn().mockResolvedValue({
+      campaignId: "campaign-1",
+      items: [{
+        id: "11111111-1111-4111-8111-111111111111",
+        turnNumber: 12,
+        acceptedAt: "2026-10-03T12:34:56.000Z",
+        excerpt
+      }],
+      nextCursor: null
+    });
+    const getReaderHistoryTurn = vi.fn(async (campaignId: string, turnNumber: number) => ({
+      campaignId,
+      turn: { ...makeTurns(turnNumber, turnNumber)[0], id: "11111111-1111-4111-8111-111111111111" }
+    }));
+    try {
+      const { document, window, fetchCampaignState } = await bootLegacyStory({
+        turns: makeTurns(268, 317),
+        getReaderHistoryTurn,
+        searchReaderHistory
+      });
+      const stateReadsBeforeSearch = fetchCampaignState.mock.calls.length;
+      vi.useFakeTimers();
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const search = document.getElementById("turnHistorySearch") as HTMLInputElement | null;
+      expect(search).not.toBeNull();
+      search!.value = "  platform   phrase  ";
+      search!.dispatchEvent(new window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(249);
+      expect(searchReaderHistory).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.resolve();
+
+      expect(searchReaderHistory).toHaveBeenCalledTimes(1);
+      expect(searchReaderHistory.mock.calls[0]?.[0]).toBe("campaign-1");
+      expect(searchReaderHistory.mock.calls[0]?.[1]).toMatchObject({ q: "platform   phrase", limit: 50 });
+      const result = document.querySelector<HTMLButtonElement>('#turnHistorySearchResults [data-history-turn-number="12"]');
+      expect(result?.textContent).toContain(excerpt);
+      expect(result?.querySelector("img,script,[onerror]")).toBeNull();
+      expect(fetchCampaignState).toHaveBeenCalledTimes(stateReadsBeforeSearch);
+      expect(getReaderHistoryTurn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("replaces the visible search page when More is requested", async () => {
+    const searchReaderHistory = vi.fn()
+      .mockResolvedValueOnce({
+        campaignId: "campaign-1",
+        items: [{ id: "11111111-1111-4111-8111-111111111111", turnNumber: 12, acceptedAt: "2026-10-03T12:34:56.000Z", excerpt: "first page" }],
+        nextCursor: "opaque-next-page"
+      })
+      .mockResolvedValueOnce({
+        campaignId: "campaign-1",
+        items: [{ id: "22222222-2222-4222-8222-222222222222", turnNumber: 99, acceptedAt: "2026-10-03T12:35:56.000Z", excerpt: "second page" }],
+        nextCursor: null
+      });
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(268, 317), searchReaderHistory });
+      vi.useFakeTimers();
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const search = document.getElementById("turnHistorySearch") as HTMLInputElement;
+      search.value = "remembered phrase";
+      search.dispatchEvent(new window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+      expect(document.querySelector('#turnHistorySearchResults [data-history-turn-number="12"]')).not.toBeNull();
+
+      document.getElementById("btnTurnHistorySearchMore")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await Promise.resolve();
+
+      expect(searchReaderHistory).toHaveBeenCalledTimes(2);
+      expect(searchReaderHistory.mock.calls[1]?.[1]).toMatchObject({ q: "remembered phrase", before: "opaque-next-page", limit: 50 });
+      expect(document.querySelector('#turnHistorySearchResults [data-history-turn-number="12"]')).toBeNull();
+      expect(document.querySelector('#turnHistorySearchResults [data-history-turn-number="99"]')).not.toBeNull();
+      expect(document.querySelectorAll("#turnHistorySearchResults [data-history-turn-number]")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses one exact reader lookup and makes no request for invalid or out-of-range jump text", async () => {
+    const getReaderHistoryTurn = vi.fn(async (campaignId: string, turnNumber: number) => ({
+      campaignId,
+      turn: { ...makeTurns(turnNumber, turnNumber)[0], id: "44444444-4444-4444-8444-444444444444" }
+    }));
+    try {
+      const { document, window, fetchCampaignState } = await bootLegacyStory({
+        turns: makeTurns(268, 317),
+        getReaderHistoryTurn
+      });
+      const stateReadsBefore = fetchCampaignState.mock.calls.length;
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const jump = document.getElementById("turnHistoryJumpNumber") as HTMLInputElement;
+      for (const value of ["", "0", "1.5", "318", "9".repeat(100)]) {
+        jump.value = value;
+        document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+        await Promise.resolve();
+      }
+      expect(getReaderHistoryTurn).not.toHaveBeenCalled();
+
+      jump.value = "40";
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await Promise.resolve();
+
+      expect(getReaderHistoryTurn).toHaveBeenCalledTimes(1);
+      expect(getReaderHistoryTurn.mock.calls[0]).toEqual(["campaign-1", 40, expect.any(AbortSignal)]);
+      expect(fetchCampaignState).toHaveBeenCalledTimes(stateReadsBefore);
+      expect(document.getElementById("turnHistoryDialog")?.hasAttribute("open")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("ignores an abort-insensitive result after History closes and the same query is reopened", async () => {
+    const oldResponse = deferred<{ campaignId: string; items: Array<Record<string, unknown>>; nextCursor: null }>();
+    const searchReaderHistory = vi.fn()
+      .mockReturnValueOnce(oldResponse.promise)
+      .mockResolvedValueOnce({
+        campaignId: "campaign-1",
+        items: [{ id: "99999999-9999-4999-8999-999999999999", turnNumber: 99, acceptedAt: "2026-10-03T12:34:56.000Z", excerpt: "new reopened result" }],
+        nextCursor: null
+      });
+    try {
+      const { document, window } = await bootLegacyStory({ turns: makeTurns(268, 317), searchReaderHistory });
+      vi.useFakeTimers();
+      const open = () => document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      open();
+      const search = document.getElementById("turnHistorySearch") as HTMLInputElement;
+      search.value = "same query";
+      search.dispatchEvent(new window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(searchReaderHistory).toHaveBeenCalledTimes(1);
+
+      document.getElementById("btnTurnHistoryDone")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("turnHistoryDialog")?.dispatchEvent(new window.Event("close"));
+      open();
+      const reopenedSearch = document.getElementById("turnHistorySearch") as HTMLInputElement;
+      reopenedSearch.value = "same query";
+      reopenedSearch.dispatchEvent(new window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+      expect(searchReaderHistory).toHaveBeenCalledTimes(2);
+
+      oldResponse.resolve({
+        campaignId: "campaign-1",
+        items: [{ id: "11111111-1111-4111-8111-111111111111", turnNumber: 12, acceptedAt: "2026-10-03T12:34:56.000Z", excerpt: "stale closed result" }],
+        nextCursor: null
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(document.querySelector('#turnHistorySearchResults [data-history-turn-number="99"]')).not.toBeNull();
+      expect(document.querySelector('#turnHistorySearchResults [data-history-turn-number="12"]')).toBeNull();
+      expect(document.getElementById("turnHistorySearchStatus")?.getAttribute("data-state")).toBe("results");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(["success", "error"] as const)("ignores a stale result-selection %s after More replaces its page", async (outcome) => {
+    const exactLookup = deferred<{ campaignId: string; turn: Record<string, unknown> }>();
+    const searchReaderHistory = vi.fn()
+      .mockResolvedValueOnce({
+        campaignId: "campaign-1",
+        items: [{ id: "11111111-1111-4111-8111-111111111111", turnNumber: 12, acceptedAt: "2026-10-03T12:34:56.000Z", excerpt: "first page" }],
+        nextCursor: "opaque-next-page"
+      })
+      .mockResolvedValueOnce({
+        campaignId: "campaign-1",
+        items: [{ id: "99999999-9999-4999-8999-999999999999", turnNumber: 99, acceptedAt: "2026-10-03T12:35:56.000Z", excerpt: "replacement page" }],
+        nextCursor: null
+      });
+    const getReaderHistoryTurn = vi.fn(() => exactLookup.promise);
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(268, 317),
+        searchReaderHistory,
+        getReaderHistoryTurn
+      });
+      vi.useFakeTimers();
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const search = document.getElementById("turnHistorySearch") as HTMLInputElement;
+      search.value = "remembered phrase";
+      search.dispatchEvent(new window.Event("input", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+      document.querySelector<HTMLButtonElement>('#turnHistorySearchResults [data-history-turn-number="12"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(getReaderHistoryTurn).toHaveBeenCalledTimes(1);
+
+      document.getElementById("btnTurnHistorySearchMore")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await Promise.resolve();
+      expect(document.querySelector('#turnHistorySearchResults [data-history-turn-number="99"]')).not.toBeNull();
+      if (outcome === "success") {
+        exactLookup.resolve({
+          campaignId: "campaign-1",
+          turn: { ...makeTurns(12, 12)[0], id: "11111111-1111-4111-8111-111111111111" }
+        });
+      } else {
+        exactLookup.reject(new Error("private obsolete lookup detail"));
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 317 of 317");
+      expect(document.getElementById("turnHistoryDialog")?.hasAttribute("open")).toBe(true);
+      expect(document.querySelector('#turnHistorySearchResults [data-history-turn-number="99"]')).not.toBeNull();
+      expect(document.getElementById("turnHistorySearchStatus")?.getAttribute("data-state")).toBe("results");
+      expect(document.getElementById("turnHistorySearchStatus")?.textContent).not.toContain("private");
+      expect(document.getElementById("turnHistoryJumpStatus")?.getAttribute("data-state")).not.toBe("error");
+      expect(document.getElementById("turnHistoryJumpStatus")?.textContent).not.toContain("private");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("allows a validated local latest turn beyond a stale campaign count in an exact jump", async () => {
+    const getReaderHistoryTurn = vi.fn(async (campaignId: string, turnNumber: number) => ({
+      campaignId,
+      turn: { ...makeTurns(turnNumber, turnNumber)[0], id: `turn-${turnNumber}` }
+    }));
+    const syncStatus = vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 6, storyLengthProfile: "standard" },
+      world: {},
+      turns: { campaignId: "campaign-1", turns: makeTurns(1, 7), nextCursor: null }
+    });
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(1, 7),
+        syncStatus,
+        getReaderHistoryTurn
+      });
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const jump = document.getElementById("turnHistoryJumpNumber") as HTMLInputElement;
+      jump.value = "7";
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await Promise.resolve();
+      expect(getReaderHistoryTurn).toHaveBeenCalledTimes(1);
+      expect(getReaderHistoryTurn.mock.calls[0]?.[1]).toBe(7);
+
+      jump.value = "8";
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await Promise.resolve();
+      expect(getReaderHistoryTurn).toHaveBeenCalledTimes(1);
+      expect(document.getElementById("turnHistoryJumpStatus")?.getAttribute("data-state")).toBe("invalid");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([4, 317])("does not use a retired History window to extend a reloaded campaign range to %s", async (targetTurnNumber) => {
+    const getReaderHistoryTurn = vi.fn(async (campaignId: string, turnNumber: number) => ({
+      campaignId,
+      turn: { ...makeTurns(turnNumber, turnNumber)[0], id: `turn-${turnNumber}` }
+    }));
+    const syncStatus = vi.fn()
+      .mockResolvedValueOnce({
+        campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 317, storyLengthProfile: "standard" },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: makeTurns(268, 317), nextCursor: "before-268" }
+      })
+      .mockResolvedValueOnce({
+        campaign: { id: "campaign-1", title: "Short campaign", activeTurnNumber: 3, storyLengthProfile: "standard" },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: makeTurns(1, 3), nextCursor: null }
+      });
+    const rewindCampaign = vi.fn().mockResolvedValue({});
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeTurns(268, 317),
+        syncStatus,
+        rewindCampaign,
+        getReaderHistoryTurn
+      });
+      vi.stubGlobal("confirm", () => true);
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 3 of 3"));
+
+      const jump = document.getElementById("turnHistoryJumpNumber") as HTMLInputElement;
+      jump.value = String(targetTurnNumber);
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await Promise.resolve();
+
+      expect(getReaderHistoryTurn).not.toHaveBeenCalled();
+      expect(document.getElementById("turnHistoryJumpStatus")?.getAttribute("data-state")).toBe("invalid");
+      expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 3 of 3");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retains the refresh control when configuration fails but segment polling succeeds", async () => {
     try {
       const { document } = await bootLegacyStory({turns:makeTurns(1,1),loadIllustrationConfig:async()=>{throw new Error('offline');}});

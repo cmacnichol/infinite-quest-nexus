@@ -53,6 +53,11 @@ import {
   generationResponseFormatPresentation,
   generationReviewPresentation,
   generationReviewTechnicalDiagnosticMessage,
+  beginStoryHistorySearch,
+  beginStoryHistorySearchPage,
+  createStoryHistorySearchState,
+  settleStoryHistorySearch,
+  validateStoryHistoryJumpTarget,
   DEFAULT_READER_PREFERENCES,
   normalizeReaderPreferences
 } from "@infinite-quest/client-core";
@@ -146,6 +151,7 @@ const sanitizeNarration = (text) => {
 // ── Constants ──────────────────────────────────────────────────
 const IMAGE_POLL_MS = 5000;
 const TOAST_DURATION = 3500;
+const STORY_HISTORY_SEARCH_DEBOUNCE_MS = 250;
 
 // ── State ──────────────────────────────────────────────────────
 const state = {
@@ -207,6 +213,8 @@ const state = {
   historyLocalEnd: null,
   historyPageRequestId: 0,
   historyInspectionRequestId: 0,
+  historySearch: createStoryHistorySearchState(),
+  historySearchJumpRequestId: 0,
   user: {
     id: null,
     systemKey: null,
@@ -225,6 +233,10 @@ let discardModalTarget = null;
 let discardModalAction = null;
 let completeHistoryLoad = null;
 let historyPageLoad = null;
+let historySearchDebounceTimer = null;
+let historySearchAbortController = null;
+let historySearchJumpAbortController = null;
+let historySearchJumpSearchIdentity = null;
 let storyTurnWindowEpoch = 0;
 let nextEditStateSessionId = 0;
 let nextCharacterProfileEditSessionId = 0;
@@ -251,6 +263,7 @@ function publishStoryTurnWindow(turns, nextCursor, options = {}) {
   state.turns = turns;
   state.historyNextCursor = nextCursor || null;
   storyTurnWindowEpoch += 1;
+  resetStoryHistorySearchForCurrentScope();
   if (completeHistoryLoad !== options.completeHistoryRequest) {
     completeHistoryLoad = null;
     setTurnHistoryLoadStatus("");
@@ -574,12 +587,14 @@ function restoreReaderSceneOffset(turnNumber, offsetRatio) {
 }
 
 function modalFormSnapshot(dialog) {
-  return [...dialog.querySelectorAll("input, select, textarea")].map((control) => {
-    if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
-      return `${control.id}:${control.checked}`;
-    }
-    return `${control.id}:${control.value}`;
-  }).join("\u001f");
+  return [...dialog.querySelectorAll("input, select, textarea")]
+    .filter((control) => !control.closest(".turn-history-tools"))
+    .map((control) => {
+      if (control instanceof HTMLInputElement && ["checkbox", "radio"].includes(control.type)) {
+        return `${control.id}:${control.checked}`;
+      }
+      return `${control.id}:${control.value}`;
+    }).join("\u001f");
 }
 
 function openManagedModal(dialog) {
@@ -897,6 +912,7 @@ async function loadCampaign(campaignId, options = {}) {
   clearResponseEditSession();
   resetGenerationStateForCampaignLoad();
   state.campaignId = campaignId;
+  resetStoryHistorySearchForCurrentScope();
   state.campaignLoaded = false;
   clearStoryLoadRecovery();
   setStorySyncStatus("Story loading");
@@ -4081,7 +4097,293 @@ async function openTurnHistoryModal() {
     initializeStoryHistoryWindow();
   }
   renderStoryHistoryWindow();
+  renderStoryHistorySearch();
   revealSelectedHistoryCard();
+}
+
+function storyHistorySearchScope() {
+  return { campaignId: state.campaignId || "", loadEpoch: storyTurnWindowEpoch };
+}
+
+function cancelStoryHistorySearchWork() {
+  if (historySearchDebounceTimer !== null) clearTimeout(historySearchDebounceTimer);
+  historySearchDebounceTimer = null;
+  if (historySearchAbortController) historySearchAbortController.abort();
+  historySearchAbortController = null;
+  if (historySearchJumpAbortController) historySearchJumpAbortController.abort();
+  historySearchJumpAbortController = null;
+  historySearchJumpSearchIdentity = null;
+  state.historySearchJumpRequestId += 1;
+}
+
+function resetStoryHistorySearchForCurrentScope() {
+  cancelStoryHistorySearchWork();
+  state.historySearch = beginStoryHistorySearch(state.historySearch, storyHistorySearchScope(), "").state;
+  const input = $("turnHistorySearch");
+  if (input) input.value = "";
+  const jumpStatus = $("turnHistoryJumpStatus");
+  if (jumpStatus) {
+    jumpStatus.dataset.state = "idle";
+    jumpStatus.textContent = "";
+  }
+  renderStoryHistorySearch();
+}
+
+function storyHistorySearchRequestIsCurrent(request) {
+  return state.historySearch.activeRequest === request
+    && state.campaignId === request.campaignId
+    && storyTurnWindowEpoch === request.loadEpoch;
+}
+
+function storyHistorySearchStatusText(searchState) {
+  if (searchState.status === "invalid") return "Search text must be 200 characters or fewer.";
+  if (searchState.status === "loading") return "Searching accepted history…";
+  if (searchState.status === "empty") return "No matching turns.";
+  if (searchState.status === "results") {
+    const count = searchState.items.length;
+    return `Showing ${count} matching ${count === 1 ? "turn" : "turns"}.`;
+  }
+  if (searchState.status === "error") {
+    if (searchState.errorKind === "conflict") return "History changed while searching. Retry from the newest history.";
+    if (searchState.errorKind === "scope" || searchState.errorKind === "protocol") {
+      return "Search results could not be verified. Please retry.";
+    }
+    return "Search could not be completed. Please retry.";
+  }
+  return "Search accepted turns in this campaign.";
+}
+
+function renderStoryHistorySearch() {
+  const searchState = state.historySearch;
+  const searchInput = $("turnHistorySearch");
+  const status = $("turnHistorySearchStatus");
+  const results = $("turnHistorySearchResults");
+  const moreButton = $("btnTurnHistorySearchMore");
+  const retryButton = $("btnTurnHistorySearchRetry");
+  const clearButton = $("btnTurnHistorySearchClear");
+  const browsePanel = $("turnHistoryBrowsePanel");
+  const selectionActions = document.querySelector(".history-selection-actions");
+  const searching = Boolean(searchState.query);
+
+  if (browsePanel) browsePanel.classList.toggle("hidden", searching);
+  if (selectionActions) selectionActions.classList.toggle("hidden", searching);
+  if (searchInput && searchInput.value.trim() !== searchState.query && searchState.status !== "loading") {
+    searchInput.value = searchState.query;
+  }
+  if (status) {
+    status.dataset.state = searchState.status;
+    status.textContent = storyHistorySearchStatusText(searchState);
+  }
+  if (clearButton) clearButton.disabled = !searchInput?.value;
+  if (results) {
+    results.replaceChildren();
+    results.hidden = searchState.items.length === 0;
+    for (const item of searchState.items) {
+      const row = document.createElement("div");
+      row.setAttribute("role", "listitem");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "small history-search-result";
+      button.dataset.historyTurnNumber = String(item.turnNumber);
+      const title = document.createElement("span");
+      title.className = "history-search-result-title";
+      title.textContent = `Turn ${item.turnNumber}`;
+      const excerpt = document.createElement("span");
+      excerpt.className = "history-search-result-excerpt";
+      excerpt.textContent = item.excerpt;
+      button.append(title, excerpt);
+      const acceptedAtTimestamp = Date.parse(item.acceptedAt);
+      if (Number.isFinite(acceptedAtTimestamp)) {
+        const date = document.createElement("time");
+        date.className = "history-search-result-date";
+        date.dateTime = item.acceptedAt;
+        date.textContent = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+          .format(new Date(acceptedAtTimestamp));
+        button.appendChild(date);
+      }
+      const resultQueryEpoch = searchState.queryEpoch;
+      const resultRequestId = searchState.nextRequestId;
+      button.addEventListener("click", () => {
+        void loadSearchedHistoryTurn(item.turnNumber, item.id, resultQueryEpoch, resultRequestId);
+      });
+      row.appendChild(button);
+      results.appendChild(row);
+    }
+  }
+  if (moreButton) {
+    moreButton.hidden = searchState.status !== "results" || !searchState.nextCursor;
+    moreButton.disabled = searchState.status === "loading";
+  }
+  if (retryButton) retryButton.hidden = searchState.status !== "error";
+}
+
+async function loadStoryHistorySearchPage(request) {
+  if (!storyHistorySearchRequestIsCurrent(request)) return;
+  const controller = new AbortController();
+  historySearchAbortController = controller;
+  try {
+    const response = await readerHistoryApi.searchHistory(request.campaignId, {
+      q: request.query,
+      limit: STORY_HISTORY_PAGE_LIMIT,
+      ...(request.before === null ? {} : { before: request.before })
+    }, controller.signal);
+    if (!storyHistorySearchRequestIsCurrent(request)) return;
+    state.historySearch = settleStoryHistorySearch(state.historySearch, request, { type: "success", response });
+  } catch (error) {
+    if (!storyHistorySearchRequestIsCurrent(request)) return;
+    state.historySearch = settleStoryHistorySearch(state.historySearch, request, {
+      type: historyPageConflict(error) ? "conflict" : "request-error"
+    });
+  } finally {
+    if (historySearchAbortController === controller) historySearchAbortController = null;
+  }
+  renderStoryHistorySearch();
+}
+
+function handleStoryHistorySearchInput() {
+  const searchInput = $("turnHistorySearch");
+  if (!searchInput || !state.campaignId) return;
+  if (historySearchDebounceTimer !== null) clearTimeout(historySearchDebounceTimer);
+  historySearchDebounceTimer = null;
+  if (historySearchAbortController) historySearchAbortController.abort();
+  historySearchAbortController = null;
+  const transition = beginStoryHistorySearch(state.historySearch, storyHistorySearchScope(), searchInput.value);
+  state.historySearch = transition.state;
+  invalidateStaleStoryHistorySearchSelection();
+  renderStoryHistorySearch();
+  if (!transition.request) return;
+  const request = transition.request;
+  historySearchDebounceTimer = setTimeout(() => {
+    historySearchDebounceTimer = null;
+    void loadStoryHistorySearchPage(request);
+  }, STORY_HISTORY_SEARCH_DEBOUNCE_MS);
+}
+
+function requestStoryHistorySearchPage(action) {
+  if (historySearchDebounceTimer !== null) clearTimeout(historySearchDebounceTimer);
+  historySearchDebounceTimer = null;
+  if (historySearchAbortController) historySearchAbortController.abort();
+  historySearchAbortController = null;
+  const transition = beginStoryHistorySearchPage(state.historySearch, action);
+  state.historySearch = transition.state;
+  invalidateStaleStoryHistorySearchSelection();
+  renderStoryHistorySearch();
+  if (transition.request) void loadStoryHistorySearchPage(transition.request);
+}
+
+function invalidateStaleStoryHistorySearchSelection() {
+  const identity = historySearchJumpSearchIdentity;
+  if (!identity || (identity.queryEpoch === state.historySearch.queryEpoch
+    && identity.requestId === state.historySearch.nextRequestId)) return;
+  state.historySearchJumpRequestId += 1;
+  if (historySearchJumpAbortController) historySearchJumpAbortController.abort();
+  historySearchJumpAbortController = null;
+  historySearchJumpSearchIdentity = null;
+  setStoryHistoryJumpStatus("idle", "");
+}
+
+function setStoryHistoryJumpStatus(stateName, message) {
+  const status = $("turnHistoryJumpStatus");
+  if (!status) return;
+  status.dataset.state = stateName;
+  status.textContent = message;
+}
+
+function knownStoryHistoryTurn(turnNumber) {
+  const cachedTurns = (state.historyWindow?.cachedPages || []).flatMap(page => page.turns);
+  const candidates = [...(state.historyResidentRows || []), ...state.turns, ...cachedTurns, state.historyWindow?.selectedPreview]
+    .filter(Boolean);
+  return candidates.find(turn => Number(turn.turnNumber) === turnNumber) || null;
+}
+
+async function loadSearchedHistoryTurn(turnNumber, expectedTurnId, queryEpoch, requestId) {
+  await loadExactHistoryTurn(turnNumber, { expectedTurnId, queryEpoch, expectedSearchRequestId: requestId });
+}
+
+async function jumpToExactHistoryTurn() {
+  const input = $("turnHistoryJumpNumber");
+  if (!input || !state.campaignId) return;
+  const latestTurnNumber = latestTurnNumberFromStory();
+  const target = validateStoryHistoryJumpTarget(input.value, latestTurnNumber);
+  if (!target.valid) {
+    setStoryHistoryJumpStatus("invalid", target.reason === "out-of-range"
+      ? `Enter a turn from 1 to ${latestTurnNumber}.`
+      : "Enter a positive whole turn number.");
+    return;
+  }
+  await loadExactHistoryTurn(target.turnNumber, { queryEpoch: state.historySearch.queryEpoch });
+}
+
+function latestTurnNumberFromStory() {
+  const historyWindowIsCurrent = state.historyWindowCampaignId === state.campaignId
+    && state.historyWindowEpoch === storyTurnWindowEpoch;
+  const localAcceptedTurns = [
+    ...(state.turns || []),
+    ...(historyWindowIsCurrent ? state.historyResidentRows || [] : []),
+    ...(historyWindowIsCurrent ? state.historyWindow?.cachedPages || [] : []).flatMap(page => page.turns),
+    ...(historyWindowIsCurrent ? [state.historyWindow?.selectedPreview, state.historySelectedPreview] : [])
+  ].filter(Boolean);
+  const knownTurnNumbers = localAcceptedTurns
+    .map(turn => Number(turn.turnNumber))
+    .filter(turnNumber => Number.isSafeInteger(turnNumber) && turnNumber > 0);
+  const campaignLatest = Number(state.campaign?.activeTurnNumber);
+  if (Number.isSafeInteger(campaignLatest) && campaignLatest > 0) knownTurnNumbers.push(campaignLatest);
+  return Math.max(0, ...knownTurnNumbers);
+}
+
+async function loadExactHistoryTurn(turnNumber, {
+  expectedTurnId = null,
+  queryEpoch = state.historySearch.queryEpoch,
+  expectedSearchRequestId = null
+} = {}) {
+  const campaignId = state.campaignId;
+  if (!campaignId) return;
+  if (historySearchJumpAbortController) historySearchJumpAbortController.abort();
+  const controller = new AbortController();
+  historySearchJumpAbortController = controller;
+  historySearchJumpSearchIdentity = expectedSearchRequestId === null
+    ? null
+    : { queryEpoch, requestId: expectedSearchRequestId };
+  const requestId = ++state.historySearchJumpRequestId;
+  const loadEpoch = storyTurnWindowEpoch;
+  setStoryHistoryJumpStatus("loading", `Loading Turn ${turnNumber}…`);
+  const isCurrent = () => requestId === state.historySearchJumpRequestId
+    && state.campaignId === campaignId
+    && storyTurnWindowEpoch === loadEpoch
+    && (expectedSearchRequestId === null || (state.historySearch.queryEpoch === queryEpoch
+      && state.historySearch.nextRequestId === expectedSearchRequestId));
+  try {
+    const response = await readerHistoryApi.getTurn(campaignId, turnNumber, controller.signal);
+    if (!isCurrent()) return;
+    const turn = response?.turn;
+    if (response?.campaignId !== campaignId || Number(turn?.turnNumber) !== turnNumber
+      || typeof turn?.id !== "string" || (expectedTurnId && turn.id !== expectedTurnId)) {
+      setStoryHistoryJumpStatus("error", "That turn changed or could not be verified. Your current scene is unchanged.");
+      return;
+    }
+    const known = knownStoryHistoryTurn(turnNumber);
+    if (known && (known.id || known.turnId) !== turn.id) {
+      setStoryHistoryJumpStatus("error", "That turn changed or could not be verified. Your current scene is unchanged.");
+      return;
+    }
+    if (!state.historyWindow || state.historyWindowCampaignId !== campaignId || state.historyWindowEpoch !== loadEpoch) {
+      initializeStoryHistoryWindow();
+    }
+    state.historyWindow = selectStoryHistoryPreview(state.historyWindow, turn);
+    state.historySelectedPreview = turn;
+    state.historySelectedTurnNumber = turnNumber;
+    renderStoryHistoryWindow();
+    jumpToSelectedHistoryTurn();
+    setStoryHistoryJumpStatus("success", `Opened Turn ${turnNumber}.`);
+  } catch {
+    if (!isCurrent()) return;
+    setStoryHistoryJumpStatus("error", "Could not open that turn. Your current scene is unchanged. Please retry.");
+  } finally {
+    if (historySearchJumpAbortController === controller) {
+      historySearchJumpAbortController = null;
+      historySearchJumpSearchIdentity = null;
+    }
+  }
 }
 
 function initializeStoryHistoryWindow(options = {}) {
@@ -5138,6 +5440,32 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnCloseTurnHistory) btnCloseTurnHistory.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
   const btnTurnHistoryDone = $("btnTurnHistoryDone");
   if (btnTurnHistoryDone) btnTurnHistoryDone.addEventListener("click", () => { const d = $("turnHistoryDialog"); if (d && d.close) d.close(); });
+  const turnHistoryDialog = $("turnHistoryDialog");
+  if (turnHistoryDialog) turnHistoryDialog.addEventListener("close", () => {
+    cancelStoryHistorySearchWork();
+    state.historySearch = beginStoryHistorySearch(state.historySearch, storyHistorySearchScope(), "").state;
+    const searchInput = $("turnHistorySearch");
+    if (searchInput) searchInput.value = "";
+    setStoryHistoryJumpStatus("idle", "");
+    renderStoryHistorySearch();
+  });
+  $("turnHistorySearch")?.addEventListener("input", handleStoryHistorySearchInput);
+  $("btnTurnHistorySearchClear")?.addEventListener("click", () => {
+    const input = $("turnHistorySearch");
+    if (!input) return;
+    input.value = "";
+    handleStoryHistorySearchInput();
+    input.focus();
+  });
+  $("btnTurnHistorySearchMore")?.addEventListener("click", () => requestStoryHistorySearchPage("more"));
+  $("btnTurnHistorySearchRetry")?.addEventListener("click", () => requestStoryHistorySearchPage("retry"));
+  $("btnTurnHistoryJumpExact")?.addEventListener("click", () => { void jumpToExactHistoryTurn(); });
+  $("turnHistoryJumpNumber")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void jumpToExactHistoryTurn();
+    }
+  });
   const btnTurnHistoryInspect = $("btnTurnHistoryInspect");
   if (btnTurnHistoryInspect) btnTurnHistoryInspect.addEventListener("click", () => {
     if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);

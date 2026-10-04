@@ -448,22 +448,47 @@
       </div>
       <div class="dialog-scroll">
         <p id="turnHistoryLoadStatus" class="turn-history-load-status mini hidden" role="status" aria-live="polite"></p>
-        <div class="row wrap history-page-actions" aria-label="History pages">
-          <button id="btnTurnHistoryNewer" type="button" class="small ghost" disabled>Newer history page</button>
-          <button id="btnTurnHistoryOlder" type="button" class="small ghost" disabled>Older history page</button>
-        </div>
-        <section id="turnHistorySelectedPreview" class="history-selected-preview hidden" aria-label="Selected turn preview">
-          <div class="row wrap history-preview-heading">
-            <h4>Selected turn preview</h4>
-            <div class="row wrap">
-              <button id="btnTurnHistoryPreviousTurn" class="small ghost" type="button">Previous turn</button>
-              <button id="btnTurnHistoryNextTurn" class="small ghost" type="button">Next turn</button>
+        <section class="turn-history-tools" aria-label="Find a turn">
+          <div class="turn-history-search">
+            <label for="turnHistorySearch">Search all accepted turns</label>
+            <div class="row wrap turn-history-search-controls">
+              <input id="turnHistorySearch" type="search" autocomplete="off" aria-describedby="turnHistorySearchStatus" placeholder="Find a phrase in this campaign…">
+              <button id="btnTurnHistorySearchClear" class="small ghost" type="button">Clear search</button>
+            </div>
+            <p id="turnHistorySearchStatus" class="turn-history-search-status mini" role="status" aria-live="polite" data-state="idle">Search accepted turns in this campaign.</p>
+            <div id="turnHistorySearchResults" class="stack turn-history-search-results" role="list" aria-label="Search results" hidden></div>
+            <div class="row wrap turn-history-search-actions">
+              <button id="btnTurnHistorySearchMore" class="small ghost" type="button" hidden>More results</button>
+              <button id="btnTurnHistorySearchRetry" class="small ghost" type="button" hidden>Retry search</button>
             </div>
           </div>
-          <div id="turnHistoryPreviewCard"></div>
+          <div class="turn-history-jump">
+            <label for="turnHistoryJumpNumber">Jump to a turn</label>
+            <div class="row wrap turn-history-jump-controls">
+              <input id="turnHistoryJumpNumber" type="text" inputmode="numeric" autocomplete="off" aria-describedby="turnHistoryJumpStatus" placeholder="Turn number">
+              <button id="btnTurnHistoryJumpExact" class="small accent" type="button">Go to turn</button>
+            </div>
+            <p id="turnHistoryJumpStatus" class="turn-history-jump-status mini" role="status" aria-live="polite" data-state="idle"></p>
+          </div>
         </section>
-        <div id="turnHistoryModalList" class="stack"></div>
-        <div id="turnHistoryStatePanel" class="track-card turn-history-state-panel hidden"></div>
+        <div id="turnHistoryBrowsePanel">
+          <div class="row wrap history-page-actions" aria-label="History pages">
+            <button id="btnTurnHistoryNewer" type="button" class="small ghost" disabled>Newer history page</button>
+            <button id="btnTurnHistoryOlder" type="button" class="small ghost" disabled>Older history page</button>
+          </div>
+          <section id="turnHistorySelectedPreview" class="history-selected-preview hidden" aria-label="Selected turn preview">
+            <div class="row wrap history-preview-heading">
+              <h4>Selected turn preview</h4>
+              <div class="row wrap">
+                <button id="btnTurnHistoryPreviousTurn" class="small ghost" type="button">Previous turn</button>
+                <button id="btnTurnHistoryNextTurn" class="small ghost" type="button">Next turn</button>
+              </div>
+            </div>
+            <div id="turnHistoryPreviewCard"></div>
+          </section>
+          <div id="turnHistoryModalList" class="stack"></div>
+          <div id="turnHistoryStatePanel" class="track-card turn-history-state-panel hidden"></div>
+        </div>
       </div>
       <div class="row wrap dialog-actions history-dialog-actions">
         <div class="row wrap history-selection-actions">
