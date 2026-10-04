@@ -58,6 +58,14 @@
       </div>
 
       <div id="dashboardWorkflowStatus" class="status error hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+      <section class="dashboard-collection dashboard-recent-campaigns" aria-labelledby="campaignSelectionTitle">
+        <div class="collection-heading">
+          <div><p class="eyebrow">Continue your story</p><h2 id="campaignSelectionTitle">Recent adventures</h2><p>Your latest active campaigns are ready when you are.</p></div>
+          <a href="#campaigns">View all campaigns <span aria-hidden="true">→</span></a>
+        </div>
+        <div id="dashboardCampaigns" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your campaigns…</p></div>
+      </section>
+
       <section class="dashboard-stats" aria-labelledby="dashboardStatsTitle">
         <div class="stats-heading">
           <div><p class="eyebrow">Nexus at a glance</p><h2 id="dashboardStatsTitle">Your living library</h2></div>
@@ -84,17 +92,6 @@
         <div id="dashboardWorlds" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your worlds…</p></div>
       </section>
 
-      <section class="dashboard-collection" aria-labelledby="campaignSelectionTitle">
-        <div class="collection-heading">
-          <div><p class="eyebrow">Campaigns</p><h2 id="campaignSelectionTitle">Resume an adventure</h2><p>Your accepted turns and current state are waiting exactly where you left them.</p></div>
-          <a href="#campaigns">Manage campaigns <span aria-hidden="true">→</span></a>
-        </div>
-        <div class="carousel-toolbar">
-          <label class="carousel-search"><span class="sr-only">Search campaigns</span><span aria-hidden="true">⌕</span><input id="campaignSearch" type="search" placeholder="Search campaigns, worlds, or characters"></label>
-          <div class="carousel-buttons"><button id="campaignCarouselPrev" type="button" aria-label="Previous campaigns">←</button><button id="campaignCarouselNext" type="button" aria-label="Next campaigns">→</button></div>
-        </div>
-        <div id="dashboardCampaigns" class="card-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading your campaigns…</p></div>
-      </section>
     </section>
 
     <section id="providers" class="card provider-card anchor-section provider-management" aria-labelledby="provider-title">
@@ -129,11 +126,13 @@
         <div id="managementWorldFilters" class="world-filter-chips" aria-label="Filter worlds by status">
           <button class="active" type="button" data-world-filter="all" aria-pressed="true">All</button>
           <button type="button" data-world-filter="draft" aria-pressed="false">Draft</button>
-          <button type="button" data-world-filter="published" aria-pressed="false">Published</button>
+          <button type="button" data-world-filter="active" aria-pressed="false">Active</button>
           <button type="button" data-world-filter="archived" aria-pressed="false">Archived</button>
         </div>
         <div class="carousel-buttons"><button id="managementWorldPrev" type="button" aria-label="Previous worlds">←</button><button id="managementWorldNext" type="button" aria-label="Next worlds">→</button></div>
+        <label class="collection-select management-world-sort">Sort worlds<select id="managementWorldSort"><option value="updated-desc">Recently updated</option><option value="title">Title</option></select></label>
       </div>
+      <p id="managementWorldResults" class="collection-results" role="status" aria-live="polite" aria-atomic="true"></p>
       <div id="worldManagementCarousel" class="card-carousel management-world-carousel" tabindex="0" aria-live="polite"><p class="carousel-empty">Loading worlds…</p></div>
       <section id="worldSelectionPanel" class="selected-world-panel hidden" aria-labelledby="worldEditorTitle">
         <div class="selected-world-heading">
@@ -178,6 +177,12 @@
           </div>
           <button id="refreshCampaigns" class="icon-button" type="button" aria-label="Refresh campaigns">↻</button>
         </div>
+        <div class="management-collection-controls" aria-label="Campaign collection controls">
+          <label class="collection-search"><span class="sr-only">Search campaigns</span><input id="managementCampaignSearch" type="search" placeholder="Search campaigns, worlds, or characters"></label>
+          <label class="collection-select">Status<select id="managementCampaignStatus"><option value="active">Active</option><option value="archived">Archived</option><option value="all">All campaigns</option></select></label>
+          <label class="collection-select">Sort<select id="managementCampaignSort"><option value="updated-desc">Recently updated</option><option value="title">Title</option></select></label>
+        </div>
+        <p id="managementCampaignResults" class="collection-results" role="status" aria-live="polite" aria-atomic="true"></p>
         <div id="campaignList" class="campaign-list"><p class="muted">Loading campaigns…</p></div>
       </aside>
 

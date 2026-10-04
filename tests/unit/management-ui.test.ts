@@ -392,6 +392,7 @@ describe("Nexus management UI contracts", () => {
       canLeaveCampaignEditor: async () => true,
       campaignEditGuard: { reset: () => undefined },
       renderCampaignSaveFeedback: () => undefined,
+      renderManagementCampaigns: () => undefined,
       api: async () => ({ campaigns: [] }),
       renderDashboardCampaigns: () => undefined,
       loadDashboardStats: async () => undefined,
@@ -498,11 +499,13 @@ describe("Nexus management UI contracts", () => {
       clearDashboardWorkflowError: () => undefined,
       clearWorkflowReadFailure: () => undefined,
       renderCampaignStoryMemorySettings: () => undefined,
+      dashboardWorkflowErrors: new Map(),
       api: async (path: string, options?: { method?: string }) => {
         if (options?.method === "DELETE") return {};
         if (path === "/api/v1/campaigns") return { campaigns: [] };
         throw new Error(`Unexpected request: ${path}`);
       },
+      renderManagementCampaigns: () => undefined,
       renderDashboardCampaigns: () => undefined,
       loadDashboardStats: async () => undefined,
       updateStoryViewLink: () => undefined,
@@ -1091,6 +1094,7 @@ describe("Nexus management UI contracts", () => {
       campaignEditGuard: { markSaved: () => undefined, isDirty: () => false },
       renderCampaignSaveFeedback: () => undefined,
       campaignMessage,
+      renderManagementCampaigns: () => undefined,
       renderDashboardCampaigns: () => undefined
     });
 
@@ -1440,9 +1444,9 @@ describe("Nexus management UI contracts", () => {
     expect(managementHtml).toContain('id="editWorldDraft"');
     expect(managementHtml.indexOf('id="worldAuthorDialog"')).toBeGreaterThan(managementHtml.indexOf('id="worldSelectionPanel"'));
     expect(managementScript).toContain("function renderManagementWorlds()");
-    expect(managementScript).toContain("function createManagementWorldCard(world)");
-    const cardStart = managementScript.indexOf("function createManagementWorldCard(world)");
-    const cardEnd = managementScript.indexOf("\nfunction renderManagementWorlds()", cardStart);
+    expect(managementScript).toContain("function createManagementWorldCard(world, card = null)");
+    const cardStart = managementScript.indexOf("function createManagementWorldCard(world, card = null)");
+    const cardEnd = managementScript.indexOf("\nfunction clearWorldCollectionFilters()", cardStart);
     const cardSource = managementScript.slice(cardStart, cardEnd);
     expect(cardSource).toContain('acceptManagementRoute(managementSelectionHash("worlds", "world", world.id)');
     expect(cardSource).toContain("UUID_ROUTE_PATTERN.test(String(world.id || \"\"))");

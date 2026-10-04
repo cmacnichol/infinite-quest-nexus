@@ -28,6 +28,8 @@ export { createEditSession } from "@infinite-quest/client-core";
 export type { EditSession } from "@infinite-quest/client-core";
 export { buildCampaignCreateRequest, createCampaignCreationDraft } from "@infinite-quest/client-core";
 export { resolveResumeCampaign } from "@infinite-quest/client-core";
+export { filterSortCampaigns, filterSortWorlds } from "@infinite-quest/client-core";
+export type { CampaignCollectionOptions, WorldCollectionOptions } from "@infinite-quest/client-core";
 export type { ResumeCampaign } from "@infinite-quest/client-core";
 export type {
   CampaignCreationDraft,

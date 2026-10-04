@@ -62,11 +62,27 @@ describe("Nexus central dashboard", () => {
     expect(dashboardScript).toContain('return { total: "Not reported", providers: "Local and unsupported fees are not estimated" };');
   });
 
-  it("provides searchable, accessible world and campaign carousels with image-ready cards", () => {
+  it("puts recent campaigns first and keeps every collection searchable and filterable", () => {
     expect(dashboardHtml).toContain('id="worldSearch" type="search"');
-    expect(dashboardHtml).toContain('id="campaignSearch" type="search"');
+    expect(dashboardHtml).toContain('id="managementCampaignSearch" type="search"');
+    expect(dashboardHtml).toContain('id="managementCampaignStatus"');
+    expect(dashboardHtml).toContain('id="managementCampaignSort"');
+    expect(dashboardHtml).toContain('id="managementWorldSort"');
+    expect(dashboardHtml).toContain('id="managementCampaignResults"');
+    expect(dashboardHtml).toContain('id="managementWorldResults"');
+    expect(dashboardHtml).toContain('class="collection-results" role="status" aria-live="polite" aria-atomic="true"');
+    expect(dashboardHtml).toContain('data-world-filter="active" aria-pressed="false">Active</button>');
+    expect(dashboardHtml.indexOf("dashboard-recent-campaigns")).toBeLessThan(dashboardHtml.indexOf('aria-labelledby="browseWorldsTitle"'));
+    expect(dashboardHtml).not.toContain('id="campaignSearch"');
+    expect(dashboardScript).toContain("function reconcileKeyedCollection(container, records, keyAttribute, createNode, updateNode)");
+    expect(dashboardScript).toContain("setTimeout(renderManagementCampaigns, 250)");
+    expect(dashboardScript).toContain("setTimeout(renderManagementWorlds, 250)");
+    expect(dashboardScript).toContain('status: "active", sort: "updated-desc" }).slice(0, 5)');
+    expect(dashboardScript).toContain("filterSortCampaigns(campaigns, { query, status: managementCampaignStatus, sort: managementCampaignSort })");
+    expect(dashboardScript).toContain("filterSortWorlds(worlds, { query, status: managementWorldFilter, sort: managementWorldSort })");
+    expect(dashboardScript).toContain('collectionClearButton("campaign", clearCampaignCollectionFilters)');
+    expect(dashboardScript).toContain('collectionClearButton("world", clearWorldCollectionFilters)');
     expect(dashboardHtml).toContain('id="worldCarouselPrev"');
-    expect(dashboardHtml).toContain('id="campaignCarouselNext"');
     expect(dashboardScript).toContain("function renderDashboardWorlds()");
     expect(dashboardScript).toContain("function renderDashboardCampaigns()");
     expect(dashboardScript).toContain("function applyArtwork(element, record)");
@@ -101,8 +117,9 @@ describe("Nexus central dashboard", () => {
     expect(dashboardScript).toContain('window.location.assign(`/story/${encodeURIComponent(session.committedCampaignId)}`)');
   });
 
-  it("resumes a selected campaign directly from its dashboard card", () => {
-    expect(dashboardScript).toContain("function createDashboardCampaignCard(campaign)");
+  it("keeps resume precedence in the established resolver and opens recent cards by ID", () => {
+    expect(dashboardScript).toContain("function createDashboardCampaignCard(campaign, card = null)");
+    expect(dashboardScript).toContain("resolveResumeCampaign(");
     expect(dashboardScript).toContain('localStorage.setItem("infiniteQuestLastCampaignId", campaign.id)');
     expect(dashboardScript).toContain('window.location.assign(`/story/${encodeURIComponent(campaign.id)}`)');
   });

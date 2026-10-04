@@ -7,6 +7,8 @@ import {
   requestEditDismissal,
   bindEditDialogDismissal,
   createSelectionEditorState,
+  filterSortCampaigns,
+  filterSortWorlds,
   resolveResumeCampaign,
   nativePresetSupport,
   reduceSelectionEditor,
@@ -116,6 +118,12 @@ let worldSelectionId = "";
 let worldSelectionEpoch = 0;
 let worldSelectionIntentEpoch = 0;
 let managementWorldFilter = "all";
+let managementCampaignStatus = "active";
+let managementCampaignSort = "updated-desc";
+let managementWorldSort = "updated-desc";
+let dashboardWorldSearchTimer = 0;
+let managementCampaignSearchTimer = 0;
+let managementWorldSearchTimer = 0;
 let worldAuthorMode = "create";
 let worldAuthorWorkingContent = null;
 let worldAuthorSelectedCover = null;
@@ -2161,6 +2169,38 @@ function applyArtwork(element, record) {
   element.classList.add("has-image");
 }
 
+function reconcileKeyedCollection(container, records, keyAttribute, createNode, updateNode) {
+  const selector = `:scope > [data-${keyAttribute}]`;
+  const existing = new Map([...container.querySelectorAll(selector)].map((node) => [node.dataset[keyAttribute.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())], node]));
+  const retained = new Set();
+  const nodes = records.map((record) => {
+    const key = String(record.id);
+    const current = existing.get(key);
+    if (!current) return createNode(record);
+    retained.add(current);
+    updateNode(current, record);
+    return current;
+  });
+  const desired = new Set(nodes);
+  for (const node of existing.values()) if (!retained.has(node)) node.remove();
+  for (const child of [...container.children]) if (!desired.has(child)) child.remove();
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    const current = container.children[index];
+    if (current !== node) container.insertBefore(node, current || null);
+  }
+}
+
+function collectionClearButton(label, clear) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button secondary compact-button collection-clear";
+  button.textContent = "Clear filters";
+  button.setAttribute("aria-label", `Clear ${label} search and filters`);
+  button.addEventListener("click", clear);
+  return button;
+}
+
 function worldPreview(world, detail = dashboardWorldDetails.get(world.id)) {
   const content = world?.latestPreview || detail?.latestPreview || detail?.draftContent?.world || {};
   return {
@@ -2172,9 +2212,10 @@ function worldPreview(world, detail = dashboardWorldDetails.get(world.id)) {
   };
 }
 
-function createDashboardWorldCard(world) {
+function createDashboardWorldCard(world, card = null) {
   const preview = worldPreview(world);
-  const card = document.createElement("button");
+  const isNew = !card;
+  card ||= document.createElement("button");
   card.type = "button";
   card.className = "dashboard-card world-card";
   card.dataset.worldId = world.id;
@@ -2210,27 +2251,27 @@ function createDashboardWorldCard(world) {
   ctaArrow.textContent = "→";
   cta.append(ctaLabel, ctaArrow);
   body.append(title, description, meta, cta);
-  card.append(art, body);
-  card.addEventListener("click", () => openWorldDetails(world.id));
+  card.replaceChildren(art, body);
+  if (isNew) card.addEventListener("click", () => openWorldDetails(world.id));
   return card;
 }
 
 function renderDashboardWorlds() {
   if (!elements.dashboardWorlds) return;
-  const query = elements.worldSearch.value.trim().toLocaleLowerCase();
-  const available = worlds.filter((world) => world.status !== "archived" && world.latestVersionId).filter((world) => {
-    const preview = worldPreview(world);
-    return [world.title, preview.genre, preview.tone, preview.description].join(" ").toLocaleLowerCase().includes(query);
+  const available = filterSortWorlds(worlds.filter((world) => world.status !== "archived" && world.latestVersionId), {
+    query: elements.worldSearch?.value ?? "",
+    status: "all",
+    sort: "updated-desc"
   });
-  elements.dashboardWorlds.replaceChildren();
   if (!available.length) {
+    elements.dashboardWorlds.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "carousel-empty";
-    empty.textContent = query ? "No worlds match that search." : "No published worlds are available yet. Open World Management to prepare one.";
+    empty.textContent = elements.worldSearch?.value.trim() ? "No worlds match that search." : "No published worlds are available yet. Open World Management to prepare one.";
     elements.dashboardWorlds.append(empty);
     return;
   }
-  available.forEach((world) => elements.dashboardWorlds.append(createDashboardWorldCard(world)));
+  reconcileKeyedCollection(elements.dashboardWorlds, available, "world-id", createDashboardWorldCard, (card, world) => createDashboardWorldCard(world, card));
 }
 
 async function hydrateDashboardWorlds() {
@@ -2266,8 +2307,9 @@ function invalidateDashboardWorldDetails(worldId) {
   dashboardWorldDetailRequestEpochs.set(worldId, (dashboardWorldDetailRequestEpochs.get(worldId) || 0) + 1);
 }
 
-function createDashboardCampaignCard(campaign) {
-  const card = document.createElement("button");
+function createDashboardCampaignCard(campaign, card = null) {
+  const isNew = !card;
+  card ||= document.createElement("button");
   card.type = "button";
   card.className = "dashboard-card campaign-card";
   card.dataset.campaignId = campaign.id;
@@ -2305,8 +2347,8 @@ function createDashboardCampaignCard(campaign) {
   ctaArrow.textContent = "→";
   cta.append(ctaLabel, ctaArrow);
   body.append(title, description, meta, cta);
-  card.append(art, body);
-  card.addEventListener("click", () => {
+  card.replaceChildren(art, body);
+  if (isNew) card.addEventListener("click", () => {
     window.location.assign(`/story/${encodeURIComponent(campaign.id)}`);
   });
   return card;
@@ -2336,17 +2378,68 @@ function renderDashboardCampaigns() {
     renderCampaignListLoadState();
     return;
   }
-  const query = elements.campaignSearch.value.trim().toLocaleLowerCase();
-  const matches = campaigns.filter((campaign) => [campaign.title, campaign.worldTitle, campaign.selectedCharacterName].join(" ").toLocaleLowerCase().includes(query));
-  elements.dashboardCampaigns.replaceChildren();
+  const matches = filterSortCampaigns(campaigns, { status: "active", sort: "updated-desc" }).slice(0, 5);
   if (!matches.length) {
+    elements.dashboardCampaigns.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "carousel-empty";
-    empty.textContent = query ? "No campaigns match that search." : "No campaigns yet. Choose an available world to begin one.";
+    empty.textContent = campaigns.some((campaign) => campaign.status === "archived")
+      ? "No active campaigns. Archived campaigns remain available in Campaign Management."
+      : "No campaigns yet. Choose an available world to begin one.";
     elements.dashboardCampaigns.append(empty);
     return;
   }
-  matches.forEach((campaign) => elements.dashboardCampaigns.append(createDashboardCampaignCard(campaign)));
+  reconcileKeyedCollection(elements.dashboardCampaigns, matches, "campaign-id", createDashboardCampaignCard, (card, campaign) => createDashboardCampaignCard(campaign, card));
+}
+
+function createManagementCampaignButton(campaign, button = null) {
+  const isNew = !button;
+  button ||= document.createElement("button");
+  button.className = `campaign-button${selectedCampaign?.id === campaign.id ? " active" : ""}`;
+  button.type = "button";
+  button.dataset.campaignId = campaign.id;
+  button.setAttribute("aria-pressed", String(selectedCampaign?.id === campaign.id));
+  const title = document.createElement("strong");
+  title.textContent = campaign.title;
+  const details = document.createElement("span");
+  details.textContent = `${campaign.activeTurnNumber} accepted turns · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}${campaign.worldUpdateAvailable ? " · update available" : ""}${campaign.status === "archived" ? " · archived" : ""}`;
+  button.replaceChildren(title, details);
+  if (isNew) button.addEventListener("click", () => {
+    const currentCampaign = campaigns.find((item) => item.id === button.dataset.campaignId);
+    if (!currentCampaign) return;
+    if (UUID_ROUTE_PATTERN.test(String(currentCampaign.id || ""))) {
+      void acceptManagementRoute(managementSelectionHash("campaigns", "campaign", currentCampaign.id), { source: "link", focus: true });
+    } else void selectCampaign(currentCampaign);
+  });
+  return button;
+}
+
+function clearCampaignCollectionFilters() {
+  window.clearTimeout(managementCampaignSearchTimer);
+  elements.managementCampaignSearch.value = "";
+  elements.managementCampaignStatus.value = "active";
+  elements.managementCampaignSort.value = "updated-desc";
+  managementCampaignStatus = "active";
+  managementCampaignSort = "updated-desc";
+  renderManagementCampaigns();
+  elements.managementCampaignSearch.focus();
+}
+
+function renderManagementCampaigns() {
+  if (!campaignsLoaded) return;
+  const query = elements.managementCampaignSearch?.value ?? "";
+  const matches = filterSortCampaigns(campaigns, { query, status: managementCampaignStatus, sort: managementCampaignSort });
+  const resultCount = elements.managementCampaignResults;
+  if (resultCount) resultCount.textContent = `Showing ${matches.length} of ${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`;
+  if (!matches.length) {
+    elements.campaignList.replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "muted collection-empty";
+    empty.textContent = campaigns.length ? "No campaigns match this search and filter." : "No database-backed campaigns yet.";
+    elements.campaignList.append(empty, collectionClearButton("campaign", clearCampaignCollectionFilters));
+    return;
+  }
+  reconcileKeyedCollection(elements.campaignList, matches, "campaign-id", createManagementCampaignButton, (button, campaign) => createManagementCampaignButton(campaign, button));
 }
 
 function dashboardReportedCost(costs) {
@@ -3046,17 +3139,10 @@ function managementWorldPreview(world) {
   return world?.draftPreview || world?.latestPreview || {};
 }
 
-function managementWorldMatchesFilter(world) {
-  if (managementWorldFilter === "archived") return world.status === "archived";
-  if (world.status === "archived") return managementWorldFilter === "all";
-  if (managementWorldFilter === "draft") return !world.latestVersionId;
-  if (managementWorldFilter === "published") return Boolean(world.latestVersionId);
-  return true;
-}
-
-function createManagementWorldCard(world) {
+function createManagementWorldCard(world, card = null) {
   const preview = managementWorldPreview(world);
-  const card = document.createElement("button");
+  const isNew = !card;
+  card ||= document.createElement("button");
   card.type = "button";
   card.className = `dashboard-card world-card management-world-card${selectedWorld?.id === world.id ? " selected" : ""}`;
   card.dataset.worldId = world.id;
@@ -3096,8 +3182,8 @@ function createManagementWorldCard(world) {
   ctaArrow.textContent = "→";
   cta.append(ctaLabel, ctaArrow);
   body.append(title, description, meta, cta);
-  card.append(art, body);
-  card.addEventListener("click", () => {
+  card.replaceChildren(art, body);
+  if (isNew) card.addEventListener("click", () => {
     if (UUID_ROUTE_PATTERN.test(String(world.id || ""))) {
       void acceptManagementRoute(managementSelectionHash("worlds", "world", world.id), { source: "link", focus: true });
     } else void selectWorld(world.id);
@@ -3105,24 +3191,34 @@ function createManagementWorldCard(world) {
   return card;
 }
 
-function renderManagementWorlds() {
-  const query = elements.managementWorldSearch.value.trim().toLocaleLowerCase();
-  const matches = worlds.filter(managementWorldMatchesFilter).filter((world) => {
-    const preview = managementWorldPreview(world);
-    return [world.title, preview.genre, preview.tone, preview.premise, preview.backgroundStory]
-      .join(" ")
-      .toLocaleLowerCase()
-      .includes(query);
+function clearWorldCollectionFilters() {
+  window.clearTimeout(managementWorldSearchTimer);
+  elements.managementWorldSearch.value = "";
+  elements.managementWorldSort.value = "updated-desc";
+  managementWorldFilter = "all";
+  managementWorldSort = "updated-desc";
+  elements.managementWorldFilters.querySelectorAll("[data-world-filter]").forEach((button) => {
+    const active = button.dataset.worldFilter === "all";
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   });
-  elements.worldManagementCarousel.replaceChildren();
+  renderManagementWorlds();
+  elements.managementWorldSearch.focus();
+}
+
+function renderManagementWorlds() {
+  const query = elements.managementWorldSearch?.value ?? "";
+  const matches = filterSortWorlds(worlds, { query, status: managementWorldFilter, sort: managementWorldSort });
+  if (elements.managementWorldResults) elements.managementWorldResults.textContent = `Showing ${matches.length} of ${worlds.length} world${worlds.length === 1 ? "" : "s"}`;
   if (!matches.length) {
+    elements.worldManagementCarousel.replaceChildren();
     const empty = document.createElement("p");
     empty.className = "carousel-empty";
-    empty.textContent = query ? "No worlds match that search and filter." : "No worlds match this status filter.";
-    elements.worldManagementCarousel.append(empty);
+    empty.textContent = worlds.length ? "No worlds match this search and filter." : "No worlds are available yet.";
+    elements.worldManagementCarousel.append(empty, collectionClearButton("world", clearWorldCollectionFilters));
     return;
   }
-  matches.forEach((world) => elements.worldManagementCarousel.append(createManagementWorldCard(world)));
+  reconcileKeyedCollection(elements.worldManagementCarousel, matches, "world-id", createManagementWorldCard, (card, world) => createManagementWorldCard(world, card));
 }
 
 async function loadWorlds(preselectId = "", selectionOptions = {}) {
@@ -4743,10 +4839,9 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
   void loadDashboardStats();
   if ((selectionRequest !== null && selectionRequest !== campaignSelectionRequest)
     || (navigationIntent !== null && navigationIntent !== managementNavigationIntent)) return;
-  elements.campaignList.replaceChildren();
+  renderManagementCampaigns();
   if (!campaigns.length) {
     if (!(await canLeaveCampaignEditor(null))) return;
-    elements.campaignList.innerHTML = '<p class="muted">No database-backed campaigns yet.</p>';
     campaignSelectionRequest += 1;
     selectedCampaign = null;
     selectedCampaignIsExplicit = false;
@@ -4756,25 +4851,6 @@ async function loadCampaigns(preselectId = "", { focusNoSelection = false, expli
     renderIllustrationSettingsVisibility();
     elements.campaignCostSection.classList.add("hidden");
     return;
-  }
-  for (const campaign of campaigns) {
-    const button = document.createElement("button");
-    button.className = "campaign-button";
-    button.type = "button";
-    button.dataset.campaignId = campaign.id;
-    const title = document.createElement("strong");
-    title.textContent = campaign.title;
-    const details = document.createElement("span");
-    details.textContent = `${campaign.activeTurnNumber} accepted turns · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}${campaign.worldUpdateAvailable ? " · update available" : ""}${campaign.status === "archived" ? " · archived" : ""}`;
-    button.append(title, details);
-    button.addEventListener("click", () => {
-      const currentCampaign = campaigns.find((item) => item.id === campaign.id);
-      if (!currentCampaign) return;
-      if (UUID_ROUTE_PATTERN.test(String(currentCampaign.id || ""))) {
-        void acceptManagementRoute(managementSelectionHash("campaigns", "campaign", currentCampaign.id), { source: "link", focus: true });
-      } else void selectCampaign(currentCampaign);
-    });
-    elements.campaignList.append(button);
   }
   const target = campaigns.find((campaign) => campaign.id === preselectId)
     || (!explicitPreselect && selectedCampaign && campaigns.find((campaign) => campaign.id === selectedCampaign.id));
@@ -4810,7 +4886,11 @@ async function selectCampaign(campaign, { explicit = true, preserveWorkflowFeedb
   campaign = selectedCampaign;
   void loadCampaignStoryMemory(campaign.id, selectionRequest);
   updateStoryViewLink();
-  document.querySelectorAll(".campaign-button").forEach((button) => button.classList.toggle("active", button.dataset.campaignId === campaign.id));
+  elements.campaignList.querySelectorAll(".campaign-button").forEach((button) => {
+    const active = button.dataset.campaignId === campaign.id;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
   elements.memoryTitle.textContent = campaign.title;
   elements.campaignEditorSummary.textContent = `${campaign.status} · ${campaign.worldTitle} v${campaign.worldVersionNumber}${campaign.selectedCharacterName ? ` · ${campaign.selectedCharacterName}` : ""}`;
   elements.campaignWorldLink.hidden = !UUID_ROUTE_PATTERN.test(String(campaign.worldId || ""));
@@ -4889,6 +4969,7 @@ async function saveSelectedCampaign(event = null, { snapshot = campaignSettingsS
     if (selectionRequest !== campaignSelectionRequest || selectedCampaign?.id !== campaignId) return false;
     selectedCampaign = { ...campaign, ...updatedCampaign };
     campaigns = campaigns.map((item) => item.id === campaignId ? selectedCampaign : item);
+    renderManagementCampaigns();
     elements.memoryTitle.textContent = selectedCampaign.title;
     elements.campaignEditorSummary.textContent = `${selectedCampaign.status} · ${selectedCampaign.worldTitle} v${selectedCampaign.worldVersionNumber}${selectedCampaign.selectedCharacterName ? ` · ${selectedCampaign.selectedCharacterName}` : ""}`;
     const campaignButton = elements.campaignList.querySelector(`[data-campaign-id="${campaignId}"]`);
@@ -7960,12 +8041,12 @@ elements.previewCampaignArchiveAgain.addEventListener("click", () => {
     setStatus(error.message || String(error), "error");
   });
 });
-elements.worldSearch?.addEventListener("input", renderDashboardWorlds);
-elements.campaignSearch?.addEventListener("input", renderDashboardCampaigns);
+elements.worldSearch?.addEventListener("input", () => {
+  window.clearTimeout(dashboardWorldSearchTimer);
+  dashboardWorldSearchTimer = window.setTimeout(renderDashboardWorlds, 250);
+});
 elements.worldCarouselPrev?.addEventListener("click", () => scrollCarousel(elements.dashboardWorlds, -1));
 elements.worldCarouselNext?.addEventListener("click", () => scrollCarousel(elements.dashboardWorlds, 1));
-elements.campaignCarouselPrev?.addEventListener("click", () => scrollCarousel(elements.dashboardCampaigns, -1));
-elements.campaignCarouselNext?.addEventListener("click", () => scrollCarousel(elements.dashboardCampaigns, 1));
 elements.closeWorldDetails?.addEventListener("click", () => elements.worldDetailsDialog.close());
 elements.editWorldDetails?.addEventListener("click", (event) => {
   event.preventDefault();
@@ -8033,7 +8114,26 @@ elements.generateWorldPreview.addEventListener("click", generateWorldFromPrompt)
 elements.cancelWorldAuthor.addEventListener("click", () => requestModalDismissal(elements.worldAuthorDialog));
 elements.chooseWorldCover.addEventListener("click", chooseWorldCoverFromLibrary);
 document.querySelectorAll('input[name="worldCoverMode"]').forEach((control) => control.addEventListener("change", updateWorldCoverChoice));
-elements.managementWorldSearch.addEventListener("input", renderManagementWorlds);
+elements.managementCampaignSearch.addEventListener("input", () => {
+  window.clearTimeout(managementCampaignSearchTimer);
+  managementCampaignSearchTimer = window.setTimeout(renderManagementCampaigns, 250);
+});
+elements.managementCampaignStatus.addEventListener("change", () => {
+  managementCampaignStatus = elements.managementCampaignStatus.value;
+  renderManagementCampaigns();
+});
+elements.managementCampaignSort.addEventListener("change", () => {
+  managementCampaignSort = elements.managementCampaignSort.value;
+  renderManagementCampaigns();
+});
+elements.managementWorldSearch.addEventListener("input", () => {
+  window.clearTimeout(managementWorldSearchTimer);
+  managementWorldSearchTimer = window.setTimeout(renderManagementWorlds, 250);
+});
+elements.managementWorldSort.addEventListener("change", () => {
+  managementWorldSort = elements.managementWorldSort.value;
+  renderManagementWorlds();
+});
 elements.managementWorldFilters.addEventListener("click", (event) => {
   const button = event.target.closest("[data-world-filter]");
   if (!button) return;
