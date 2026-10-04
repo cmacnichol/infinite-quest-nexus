@@ -24,6 +24,29 @@ const responseFormatCapability: NonNullable<SafeProviderProfileView["responseFor
 };
 
 type Provider = SafeProviderProfileView;
+function requiredItem<T>(items: readonly T[], index: number): T {
+  const item = items[index];
+  if (item === undefined) throw new Error(`Expected item at index ${index}.`);
+  return item;
+}
+
+function verifiedStoryCapability(verifiedAt: string, expiresAt: string): NonNullable<Provider["responseFormatCapability"]> {
+  const storyOperation = responseFormatCapability.operations.find(operation => operation.operation === "story");
+  if (!storyOperation?.schemaVersion || !storyOperation.schemaHash) throw new Error("Synthetic story capability fixture is incomplete.");
+  return {
+    ...responseFormatCapability,
+    operations: [{
+      operation: "story",
+      streaming: false,
+      status: "verified",
+      reason: null,
+      schemaVersion: storyOperation.schemaVersion,
+      schemaHash: storyOperation.schemaHash,
+      verifiedAt,
+      expiresAt
+    }]
+  };
+}
 const unexpectedRequestsByPage = new WeakMap<Page, string[]>();
 const runtimeErrorsByPage = new WeakMap<Page, string[]>();
 
@@ -160,14 +183,19 @@ async function installProviderApi(page: Page, options: { providers?: Provider[];
     }
     const modelsMatch = path.match(/^\/api\/v1\/providers\/([^/]+)\/models$/u);
     if (modelsMatch && method === "GET") {
+      const profileId = modelsMatch[1];
+      if (!profileId) {
+        unexpectedRequests.push(`${method} ${path} did not include a profile ID`);
+        return route.abort();
+      }
       inventoryCalls += 1;
       if (options.failFirstInventory && inventoryCalls === 1) return send({ code: "provider_unavailable", message: "Synthetic model inventory unavailable." }, 503);
-      const profile = providers.find(item => item.id === modelsMatch[1]);
+      const profile = providers.find(item => item.id === profileId);
       const modelIds = options.inventoryModelIds ?? (profile?.defaultModel ? [profile.defaultModel] : []);
-      inventoryResponses.push({ profileId: modelsMatch[1], modelIds });
+      inventoryResponses.push({ profileId, modelIds });
       modelListCalls += 1;
       if (options.holdFirstModelListResponse && modelListCalls === 1) await firstModelListResponseGate;
-      completedInventoryResponses.push({ profileId: modelsMatch[1], modelIds });
+      completedInventoryResponses.push({ profileId, modelIds });
       return send({ models: modelIds.map(id => ({ id, displayName: "Synthetic inventory model", loaded: true, instanceId: id, contextLength: 65536 })) });
     }
     const presetListMatch = path.match(/^\/api\/v1\/providers\/([^/]+)\/presets$/u);
@@ -218,10 +246,10 @@ test("provider profiles keep endpoint credentials scoped to their selected role"
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(2);
 
-  expect(api.writes[0].body).toMatchObject({ providerRole: "text", baseUrl: "https://text-role.example.test/v1", apiKey: "synthetic-text-secret" });
-  expect(api.writes[1].body).toMatchObject({ providerRole: "image", baseUrl: "https://image-role.example.test/v1", apiKey: "synthetic-image-secret" });
-  expect(api.writes[0].body.apiKey).not.toBe(api.writes[1].body.apiKey);
-  expect(api.writes[1].body.baseUrl).not.toBe(api.writes[0].body.baseUrl);
+  expect(requiredItem(api.writes, 0).body).toMatchObject({ providerRole: "text", baseUrl: "https://text-role.example.test/v1", apiKey: "synthetic-text-secret" });
+  expect(requiredItem(api.writes, 1).body).toMatchObject({ providerRole: "image", baseUrl: "https://image-role.example.test/v1", apiKey: "synthetic-image-secret" });
+  expect(requiredItem(api.writes, 0).body.apiKey).not.toBe(requiredItem(api.writes, 1).body.apiKey);
+  expect(requiredItem(api.writes, 1).body.baseUrl).not.toBe(requiredItem(api.writes, 0).body.baseUrl);
   expect(api.requests.some(({ path }) => /generations|\/turns(?:\/|$)/.test(path))).toBe(false);
 });
 
@@ -250,15 +278,12 @@ test("explicit model inventory retry preserves the unsaved provider draft", asyn
   await expect(page.locator("#providerModelPickerStatus")).toContainText("1 model entry found");
   await expect(page.locator("#providerDefaultModel")).toHaveValue("vendor/discovered-story");
   expect(api.getInventoryCalls()).toBe(2);
-  expect(api.discoveries[1]).toMatchObject({ providerRole: "text", baseUrl: "https://draft.example.test/v1", apiKey: "synthetic-retry-secret" });
+  expect(requiredItem(api.discoveries, 1)).toMatchObject({ providerRole: "text", baseUrl: "https://draft.example.test/v1", apiKey: "synthetic-retry-secret" });
   expect(api.writes).toHaveLength(0);
 });
 
 test("role readiness uses explicit inventory checks and preserves independent provider setup", async ({ page }) => {
-  const verifiedCapability = {
-    ...responseFormatCapability,
-    operations: [{ ...responseFormatCapability.operations[0], status: "verified" as const, reason: null, verifiedAt: now, expiresAt: "2026-10-04T12:00:00.000Z" }]
-  };
+  const verifiedCapability = verifiedStoryCapability(now, "2026-10-04T12:00:00.000Z");
   const api = await installProviderApi(page, { providers: [providerFixture({ responseFormatCapability: verifiedCapability })], failFirstInventory: true });
   await page.clock.install({ time: new Date(now) });
   await page.goto(`${origin}/nexus/index.html#providers`);
@@ -308,7 +333,7 @@ test("text profile setup succeeds while illustration provider is absent", async 
   await selectDiscoveredModel(page, /Synthetic story model/);
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(1);
-  expect(api.writes[0].body).toMatchObject({ providerRole: "text", baseUrl: "https://text-only.example.test/v1", apiKey: "synthetic-text-only-secret" });
+  expect(requiredItem(api.writes, 0).body).toMatchObject({ providerRole: "text", baseUrl: "https://text-only.example.test/v1", apiKey: "synthetic-text-only-secret" });
   expect(api.providers.some(({ providerRole }) => providerRole === "image")).toBe(false);
   expect(api.requests.some(({ path }) => /generations|\/turns(?:\/|$)/.test(path))).toBe(false);
 });
@@ -335,8 +360,8 @@ test("Model-mode Advanced structured settings are visible by keyboard and round-
   await page.locator("#providerOverrideTemperature").fill("0.27");
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(1);
-  expect(api.writes[0].method).toBe("PATCH");
-  expect(api.writes[0].body).toMatchObject({
+  expect(requiredItem(api.writes, 0).method).toBe("PATCH");
+  expect(requiredItem(api.writes, 0).body).toMatchObject({
     contextWindowTokens: "57344",
     maxOutputTokens: "6144",
     temperature: "0.55",
@@ -395,9 +420,10 @@ test("stale inventory results cannot lock or overwrite readiness after the profi
     await expect(retryProfiles).toBeVisible();
 
     const profileIndex = api.providers.findIndex(item => item.id === textProfileId);
-    expect(profileIndex).toBeGreaterThanOrEqual(0);
+    if (profileIndex < 0) throw new Error("Synthetic text profile is missing.");
+    const currentTextProfile = requiredItem(api.providers, profileIndex);
     api.providers[profileIndex] = safeProviderProfileViewSchema.parse({
-      ...api.providers[profileIndex],
+      ...currentTextProfile,
       defaultModel: "vendor/story-model-v2",
       textSelection: { kind: "model", modelId: "vendor/story-model-v2" }
     });
@@ -438,10 +464,7 @@ test("unknown structured-output capability remains not ready", async ({ page }) 
 });
 
 test("expired schema capability stays not ready for a healthy text provider", async ({ page }) => {
-  const expiredCapability = {
-    ...responseFormatCapability,
-    operations: [{ ...responseFormatCapability.operations[0], status: "verified" as const, reason: null, verifiedAt: "2026-10-01T12:00:00.000Z", expiresAt: "2026-10-02T12:00:00.000Z" }]
-  };
+  const expiredCapability = verifiedStoryCapability("2026-10-01T12:00:00.000Z", "2026-10-02T12:00:00.000Z");
   const provider = providerFixture({ responseFormatCapability: expiredCapability });
   expect(provider.healthStatus).toBe("healthy");
   const api = await installProviderApi(page, { providers: [provider] });
@@ -451,6 +474,49 @@ test("expired schema capability stays not ready for a healthy text provider", as
   await expect(capability).not.toContainText("verified");
   await expect(capability).not.toContainText("ready");
   expect(api.getInventoryCalls()).toBe(0);
+});
+test("preset Advanced override edits are saved and Inherit clears the saved override", async ({ page }) => {
+  const text = providerFixture({
+    configuration: {
+      textResponseFormatPolicy: "auto",
+      textExecutionOverrides: { parameters: { temperature: 0.31, max_tokens: 1800 }, conservativeContextWindowTokens: 24000 }
+    },
+    textSelection: { kind: "openrouter_preset", slug: "nexus-story" },
+    defaultModel: "@preset/nexus-story"
+  });
+  const api = await installProviderApi(page, { providers: [text] });
+  await page.goto(`${origin}/nexus/index.html#providers`);
+  await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
+  const advanced = page.locator("#providerAdvancedSettings");
+  await advanced.locator("summary").click();
+  const overrideMode = page.locator("#providerTextOverrideMode");
+  await expect(overrideMode).toBeVisible();
+  await overrideMode.selectOption("explicit");
+  const temperature = page.locator("#providerOverrideTemperature");
+  await expect(temperature).toBeVisible();
+  await expect(temperature).toHaveValue("0.31");
+  await temperature.fill("0.47");
+  await page.locator("#saveProvider").click();
+  await expect.poll(() => api.writes.length).toBe(1);
+  expect(requiredItem(api.writes, 0).method).toBe("PATCH");
+  expect(requiredItem(api.writes, 0).body.configuration).toMatchObject({
+    textResponseFormatPolicy: "auto",
+    textExecutionOverrides: { parameters: { temperature: 0.47, max_tokens: 1800 }, conservativeContextWindowTokens: 24000 }
+  });
+
+  await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).first().click();
+  await page.locator("#providerAdvancedSettings").locator("summary").click();
+  await expect(page.locator("#providerOverrideTemperature")).toHaveValue("0.47");
+  await page.locator("#providerTextOverrideMode").selectOption("inherit");
+  await page.locator("#saveProvider").click();
+  await expect.poll(() => api.writes.length).toBe(2);
+  expect(requiredItem(api.writes, 1).method).toBe("PATCH");
+  expect(requiredItem(api.writes, 1).body.configuration).toMatchObject({
+    textResponseFormatPolicy: "auto",
+    textExecutionOverrides: null
+  });
+  expect(requiredItem(api.providers, 0).configuration).not.toHaveProperty("textExecutionOverrides");
+  expect(api.requests.some(({ path }) => /generations|\/turns(?:\/|$)/.test(path))).toBe(false);
 });
 test("provider tuning stays advanced and round-trips text and Sogni profile values", async ({ page }) => {
   const text = providerFixture({
@@ -483,7 +549,7 @@ test("provider tuning stays advanced and round-trips text and Sogni profile valu
   await page.locator("#providerTemperature").fill("0.45");
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(1);
-  expect(api.writes[0].body).toMatchObject({
+  expect(requiredItem(api.writes, 0).body).toMatchObject({
     contextWindowTokens: "49152",
     maxOutputTokens: "3072",
     temperature: "0.45",
@@ -517,7 +583,7 @@ test("provider tuning stays advanced and round-trips text and Sogni profile valu
   await expect(page.locator("#providerSogniScheduler")).toHaveValue("karras");
   await page.locator("#saveProvider").click();
   await expect.poll(() => api.writes.length).toBe(2);
-  expect(api.writes[1].body.configuration).toMatchObject(sogni.configuration);
+  expect(requiredItem(api.writes, 1).body.configuration).toMatchObject(sogni.configuration);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).last().click();
   await expect(page.locator("#providerSogniWidth")).toHaveValue("1536");
   await expect(page.locator("#providerSogniHeight")).toHaveValue("1024");
@@ -547,7 +613,7 @@ test("a committed profile remains saved when refreshing the provider list fails"
   expect(committedMessage.match(/Committed before list failure was saved\./g)).toHaveLength(1);
   expect(committedMessage.match(/The provider list could not be refreshed\./g)).toHaveLength(1);
   expect(api.writes).toHaveLength(1);
-  expect(api.writes[0].body.apiKey).toBe("synthetic-committed-secret");
+  expect(requiredItem(api.writes, 0).body.apiKey).toBe("synthetic-committed-secret");
   await page.getByRole("button", { name: "Retry provider profiles" }).click();
   await expect(page.locator("#providerProfileList")).toContainText("Committed before list failure");
   expect(api.writes).toHaveLength(1);

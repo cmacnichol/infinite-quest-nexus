@@ -884,93 +884,93 @@
         <summary>Advanced model and provider settings</summary>
         <div class="provider-advanced-fields">
           <div class="provider-advanced-model-fields">
-          <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
-            <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
-            <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
-          </label>
-          <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
-          <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
-          <label id="providerResponseFormatPolicyField" class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
-            <select id="providerResponseFormatPolicy" aria-describedby="providerResponseFormatPolicyNote">
-              <option value="legacy">Legacy JSON</option>
-              <option value="auto">Use schema when verified</option>
-              <option value="required">Require verified schema</option>
-            </select>
-            <span id="providerResponseFormatPolicyNote" class="field-note">Required blocks a new job before dispatch when server verification is unavailable. Changes apply to future jobs; pending jobs retain their frozen configuration and may require a compatible profile to resume.</span>
-          </label>
-          <div id="providerResponseFormatCapability" class="text-model-setting field-note" aria-live="polite">Schema compatibility is unknown until the server returns a capability summary.</div>
-          <section id="providerPresetDetail" class="provider-preset-detail text-model-setting hidden" aria-live="polite">
-            <h3>Structured Outputs · Trusted preset</h3>
-            <p>Nexus requests the complete operation schema without a local model capability gate. A provider schema rejection is surfaced without a standard-JSON retry.</p>
-            <dl>
-              <div><dt>Standard prompt</dt><dd id="providerPresetPrompt">Choose a preset to inspect its standard prompt.</dd></div>
-              <div><dt>Version</dt><dd id="providerPresetVersion">Unknown</dd></div>
-              <div><dt>Ordered models</dt><dd id="providerPresetModels">Unknown</dd></div>
-              <div><dt>Provider policy</dt><dd id="providerPresetPolicy">Unknown</dd></div>
-              <div><dt>Configured and effective limits</dt><dd id="providerPresetLimits">Unknown</dd></div>
-              <div><dt>Preset parameters</dt><dd id="providerPresetParameters">Inherited</dd></div>
-            </dl>
-          </section>
-          <section id="providerTextOverrides" class="provider-text-overrides text-model-setting hidden" aria-labelledby="providerTextOverridesTitle">
-            <div class="field-label-row"><strong id="providerTextOverridesTitle">Request overrides</strong></div>
-            <label>Override behavior<select id="providerTextOverrideMode"><option value="preserve">Keep saved setting</option><option value="inherit">Inherit selected preset/model</option><option value="explicit">Use explicit overrides</option></select></label>
-            <div id="providerTextOverrideFields" class="provider-text-override-fields hidden">
-              <label>Temperature<input id="providerOverrideTemperature" type="number" min="0" max="2" step="0.01" placeholder="Inherit"></label>
-              <label>Top P<input id="providerOverrideTopP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
-              <label>Top K<input id="providerOverrideTopK" type="number" min="0" step="1" placeholder="Inherit"></label>
-              <label>Frequency penalty<input id="providerOverrideFrequencyPenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
-              <label>Presence penalty<input id="providerOverridePresencePenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
-              <label>Repetition penalty<input id="providerOverrideRepetitionPenalty" type="number" min="0.01" step="0.01" placeholder="Inherit"></label>
-              <label>Min P<input id="providerOverrideMinP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
-              <label>Top A<input id="providerOverrideTopA" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
-              <label>Seed<input id="providerOverrideSeed" type="number" min="0" step="1" placeholder="Inherit"></label>
-              <label>Max tokens<input id="providerOverrideMaxTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
-              <label>Max completion tokens<input id="providerOverrideMaxCompletionTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
-              <label>Conservative context window<input id="providerOverrideContextTokens" type="number" min="1" max="4000000" step="1" placeholder="Inherit"></label>
-            </div>
-            <p class="field-note">Inheritance uses the selected preset or model profile. Clear restores inheritance; normal profile defaults are kept separate.</p>
-          </section>
-          </div>
-      <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">
-        <legend>Sogni illustration defaults</legend>
-        <p class="fieldset-note">These non-secret defaults are stored with this profile. Model discovery may not list every image model, so the model picker also accepts a manual model ID.</p>
-        <div class="fieldset-content">
-          <label>Images per job
-            <select id="providerSogniImageCount"><option value="1">1 image</option><option value="2">2 images</option></select>
-          </label>
-          <label>Default width<input id="providerSogniWidth" type="number" min="256" max="8192" step="8" value="1280"></label>
-          <label>Default height<input id="providerSogniHeight" type="number" min="256" max="8192" step="8" value="720"></label>
-          <label>Aspect ratio<input id="providerSogniAspectRatio" maxlength="10" value="16:9" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
-          <label>Output format
-            <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option id="providerSogniWebpFormat" value="webp">WebP</option></select>
-          </label>
-          <label>Quality
-            <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
-          </label>
-          <div id="providerSogniSdkSettings" class="fieldset-content hidden" aria-hidden="true">
-            <label title="Fast uses high-end GPU workers for quicker generation at a higher cost. Relaxed uses Mac workers for slower generation at a lower cost.">Worker type
-              <select id="providerSogniNetwork" aria-describedby="providerSogniWorkerTypeNote"><option value="fast" title="High-end GPU workers that generate images faster at a higher cost.">Fast GPU workers</option><option value="relaxed" title="Mac workers that generate images more slowly at a lower cost.">Relaxed Mac workers</option></select>
-              <span id="providerSogniWorkerTypeNote" class="field-note">Fast uses high-end GPU workers for quicker image generation at a higher cost.</span>
+            <label class="text-model-setting" title="Maximum combined prompt and response capacity. Selecting a discovered model applies the endpoint-advertised value automatically.">Context window
+              <input id="providerContextTokens" type="number" min="1024" max="4000000" value="32768" aria-describedby="providerContextSource">
+              <span id="providerContextSource" class="field-note">Editable until model discovery supplies a context length.</span>
             </label>
-            <label>Token type<select id="providerSogniTokenType"><option value="auto">Automatic</option><option value="sogni">SOGNI</option><option value="spark">Spark</option></select></label>
-            <label>Content filter<select id="providerSogniContentFilter"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
-            <label>Size preset<select id="providerSogniSizePreset"><option value="custom">Custom dimensions</option></select></label>
-            <label>Steps<input id="providerSogniSteps" type="number" min="1" max="500" placeholder="Model default"></label>
-            <label>Guidance<input id="providerSogniGuidance" type="number" min="0" max="100" step="0.1" placeholder="Model default"></label>
-            <label>Fixed seed<input id="providerSogniSeed" type="number" min="0" max="4294967295" placeholder="Random"></label>
-            <label>Sampler<select id="providerSogniSampler"><option value="">Model default</option></select></label>
-            <label>Scheduler<select id="providerSogniScheduler"><option value="">Model default</option></select></label>
-            <label>Preview count<input id="providerSogniPreviewCount" type="number" min="0" max="10" value="0"></label>
+            <label class="text-model-setting" title="Maximum tokens the provider may generate in one response. This must leave enough context capacity for the prompt.">Maximum output<input id="providerOutputTokens" type="number" min="128" max="262144" value="4096"></label>
+            <label class="text-model-setting" title="Controls output randomness: lower values are more deterministic; higher values are more varied.">Temperature<input id="providerTemperature" type="number" min="0" max="2" step="0.05" value="0.8"></label>
+            <label id="providerResponseFormatPolicyField" class="text-model-setting" title="Selects the response format for future text jobs. Nexus verifies schema compatibility on the server before dispatch.">Structured output
+              <select id="providerResponseFormatPolicy" aria-describedby="providerResponseFormatPolicyNote">
+                <option value="legacy">Legacy JSON</option>
+                <option value="auto">Use schema when verified</option>
+                <option value="required">Require verified schema</option>
+              </select>
+              <span id="providerResponseFormatPolicyNote" class="field-note">Required blocks a new job before dispatch when server verification is unavailable. Changes apply to future jobs; pending jobs retain their frozen configuration and may require a compatible profile to resume.</span>
+            </label>
+            <div id="providerResponseFormatCapability" class="text-model-setting field-note" aria-live="polite">Schema compatibility is unknown until the server returns a capability summary.</div>
+            <section id="providerPresetDetail" class="provider-preset-detail text-model-setting hidden" aria-live="polite">
+              <h3>Structured Outputs · Trusted preset</h3>
+              <p>Nexus requests the complete operation schema without a local model capability gate. A provider schema rejection is surfaced without a standard-JSON retry.</p>
+              <dl>
+                <div><dt>Standard prompt</dt><dd id="providerPresetPrompt">Choose a preset to inspect its standard prompt.</dd></div>
+                <div><dt>Version</dt><dd id="providerPresetVersion">Unknown</dd></div>
+                <div><dt>Ordered models</dt><dd id="providerPresetModels">Unknown</dd></div>
+                <div><dt>Provider policy</dt><dd id="providerPresetPolicy">Unknown</dd></div>
+                <div><dt>Configured and effective limits</dt><dd id="providerPresetLimits">Unknown</dd></div>
+                <div><dt>Preset parameters</dt><dd id="providerPresetParameters">Inherited</dd></div>
+              </dl>
+            </section>
+            <section id="providerTextOverrides" class="provider-text-overrides text-model-setting hidden" aria-labelledby="providerTextOverridesTitle">
+              <div class="field-label-row"><strong id="providerTextOverridesTitle">Request overrides</strong></div>
+              <label>Override behavior<select id="providerTextOverrideMode"><option value="preserve">Keep saved setting</option><option value="inherit">Inherit selected preset/model</option><option value="explicit">Use explicit overrides</option></select></label>
+              <div id="providerTextOverrideFields" class="provider-text-override-fields hidden">
+                <label>Temperature<input id="providerOverrideTemperature" type="number" min="0" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Top P<input id="providerOverrideTopP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Top K<input id="providerOverrideTopK" type="number" min="0" step="1" placeholder="Inherit"></label>
+                <label>Frequency penalty<input id="providerOverrideFrequencyPenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Presence penalty<input id="providerOverridePresencePenalty" type="number" min="-2" max="2" step="0.01" placeholder="Inherit"></label>
+                <label>Repetition penalty<input id="providerOverrideRepetitionPenalty" type="number" min="0.01" step="0.01" placeholder="Inherit"></label>
+                <label>Min P<input id="providerOverrideMinP" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Top A<input id="providerOverrideTopA" type="number" min="0" max="1" step="0.01" placeholder="Inherit"></label>
+                <label>Seed<input id="providerOverrideSeed" type="number" min="0" step="1" placeholder="Inherit"></label>
+                <label>Max tokens<input id="providerOverrideMaxTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+                <label>Max completion tokens<input id="providerOverrideMaxCompletionTokens" type="number" min="1" step="1" placeholder="Inherit"></label>
+                <label>Conservative context window<input id="providerOverrideContextTokens" type="number" min="1" max="4000000" step="1" placeholder="Inherit"></label>
+              </div>
+              <p class="field-note">Inheritance uses the selected preset or model profile. Clear restores inheritance; normal profile defaults are kept separate.</p>
+            </section>
           </div>
-          <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
-          <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
-          <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
-          <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
-          <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
-        </div>
-        <p id="providerSogniRestNote" class="fieldset-note">This Creative Workflow provider does not support NSFW content or disabling Sogni’s content filtering.</p>
-        <p id="providerSogniSdkNote" class="fieldset-note hidden">The SDK provider defaults content filtering to enabled. Disabling it maps explicitly to Sogni’s <code>disableNSFWFilter</code> project option.</p>
-      </fieldset>
+          <fieldset id="providerSogniSettings" class="hidden" aria-hidden="true">
+            <legend>Sogni illustration defaults</legend>
+            <p class="fieldset-note">These non-secret defaults are stored with this profile. Model discovery may not list every image model, so the model picker also accepts a manual model ID.</p>
+            <div class="fieldset-content">
+              <label>Images per job
+                <select id="providerSogniImageCount"><option value="1">1 image</option><option value="2">2 images</option></select>
+              </label>
+              <label>Default width<input id="providerSogniWidth" type="number" min="256" max="8192" step="8" value="1280"></label>
+              <label>Default height<input id="providerSogniHeight" type="number" min="256" max="8192" step="8" value="720"></label>
+              <label>Aspect ratio<input id="providerSogniAspectRatio" maxlength="10" value="16:9" pattern="[0-9]{1,3}:[0-9]{1,3}"></label>
+              <label>Output format
+                <select id="providerSogniOutputFormat"><option value="png">PNG</option><option value="jpeg">JPEG</option><option id="providerSogniWebpFormat" value="webp">WebP</option></select>
+              </label>
+              <label>Quality
+                <select id="providerSogniQuality"><option value="auto">Automatic</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
+              </label>
+              <div id="providerSogniSdkSettings" class="fieldset-content hidden" aria-hidden="true">
+                <label title="Fast uses high-end GPU workers for quicker generation at a higher cost. Relaxed uses Mac workers for slower generation at a lower cost.">Worker type
+                  <select id="providerSogniNetwork" aria-describedby="providerSogniWorkerTypeNote"><option value="fast" title="High-end GPU workers that generate images faster at a higher cost.">Fast GPU workers</option><option value="relaxed" title="Mac workers that generate images more slowly at a lower cost.">Relaxed Mac workers</option></select>
+                  <span id="providerSogniWorkerTypeNote" class="field-note">Fast uses high-end GPU workers for quicker image generation at a higher cost.</span>
+                </label>
+                <label>Token type<select id="providerSogniTokenType"><option value="auto">Automatic</option><option value="sogni">SOGNI</option><option value="spark">Spark</option></select></label>
+                <label>Content filter<select id="providerSogniContentFilter"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+                <label>Size preset<select id="providerSogniSizePreset"><option value="custom">Custom dimensions</option></select></label>
+                <label>Steps<input id="providerSogniSteps" type="number" min="1" max="500" placeholder="Model default"></label>
+                <label>Guidance<input id="providerSogniGuidance" type="number" min="0" max="100" step="0.1" placeholder="Model default"></label>
+                <label>Fixed seed<input id="providerSogniSeed" type="number" min="0" max="4294967295" placeholder="Random"></label>
+                <label>Sampler<select id="providerSogniSampler"><option value="">Model default</option></select></label>
+                <label>Scheduler<select id="providerSogniScheduler"><option value="">Model default</option></select></label>
+                <label>Preview count<input id="providerSogniPreviewCount" type="number" min="0" max="10" value="0"></label>
+              </div>
+              <label>Initial poll interval (seconds)<input id="providerSogniPollIntervalSeconds" type="number" min="1" max="30" step="1" value="2"></label>
+              <label>Maximum poll interval (seconds)<input id="providerSogniMaximumPollIntervalSeconds" type="number" min="1" max="30" step="1" value="10"></label>
+              <label>Generation timeout (seconds)<input id="providerSogniGenerationTimeoutSeconds" type="number" min="30" max="600" step="5" value="180"></label>
+              <label>Submission attempts<input id="providerSogniMaximumAttempts" type="number" min="1" max="5" step="1" value="3"></label>
+              <label class="toggle-field"><input id="providerSogniModelDiscoveryEnabled" type="checkbox" checked> Attempt model discovery</label>
+            </div>
+            <p id="providerSogniRestNote" class="fieldset-note">This Creative Workflow provider does not support NSFW content or disabling Sogni’s content filtering.</p>
+            <p id="providerSogniSdkNote" class="fieldset-note hidden">The SDK provider defaults content filtering to enabled. Disabling it maps explicitly to Sogni’s <code>disableNSFWFilter</code> project option.</p>
+          </fieldset>
           <label title="Maximum wall-clock time Nexus waits for one provider HTTP request, including response headers and body. Increase this for slower local generation.">
             Request timeout (minutes)
             <input id="providerRequestTimeoutMinutes" type="number" min="0.1" max="60" step="0.1" value="5" required>

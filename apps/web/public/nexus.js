@@ -6256,10 +6256,7 @@ function providerConfigurationFromForm(existingConfig = {}) {
     configuration.textResponseFormatPolicy = presetMode && hasSavedFormatPolicy
       ? existingConfig.textResponseFormatPolicy
       : patch.configuration.textResponseFormatPolicy;
-    const hasSavedOverrides = Object.prototype.hasOwnProperty.call(existingConfig, "textExecutionOverrides");
-    if (presetMode && hasSavedOverrides) {
-      configuration.textExecutionOverrides = existingConfig.textExecutionOverrides;
-    } else if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
+    if (Object.prototype.hasOwnProperty.call(patch.configuration, "textExecutionOverrides")) {
       configuration.textExecutionOverrides = patch.configuration.textExecutionOverrides;
     }
     return configuration;

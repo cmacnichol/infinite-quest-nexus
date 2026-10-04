@@ -82,7 +82,8 @@ body:not([data-management-view="dashboard"]) .dashboard-home { display: none; }
 .provider-readiness[data-readiness-state="ready"] .provider-readiness-state { color: var(--success); }
 .provider-readiness[data-readiness-state="unavailable"] .provider-readiness-state { color: var(--gold); }
 .provider-readiness button { margin-top: 4px; }
-.provider-readiness [hidden] { display: none !important; }.provider-profile-list { display: grid; gap: 9px; margin-top: 18px; }
+.provider-readiness [hidden] { display: none !important; }
+.provider-profile-list { display: grid; gap: 9px; margin-top: 18px; }
 .provider-profile { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; border: 1px solid var(--line); border-radius: 12px; padding: 13px; background: #101522; }
 .provider-profile strong, .provider-profile span { display: block; }
 .provider-profile span { color: var(--muted); margin-top: 4px; font-size: .8rem; }
