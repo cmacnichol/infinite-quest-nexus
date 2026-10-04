@@ -761,8 +761,8 @@ async function restoreSavedReaderPosition(position, scope, loadSequence, positio
     renderAllScenes({ autoScroll: false });
     updateStatusBar();
     readerPositionChoicePending = false;
-    restoreReaderSceneOffset(position.turnNumber, position.offsetRatio);
     showReaderPositionNotice(`Resumed reading at Turn ${position.turnNumber}. Use Jump to latest to catch up.`);
+    restoreReaderSceneOffset(position.turnNumber, position.offsetRatio);
     scheduleReaderPositionSave();
   } catch {
     if (isCurrent()) fallBackFromReaderPosition("That saved turn could not be opened. Showing the latest accepted turn.");
@@ -870,11 +870,16 @@ function noteReaderPositionIntent(event) {
 function restoreReaderSceneOffset(turnNumber, offsetRatio) {
   const scene = document.getElementById(`scene-${turnNumber}`);
   if (!scene) return;
-  const inset = readerStickyInset();
-  const rect = scene.getBoundingClientRect();
-  const availableScroll = Math.max(0, rect.height - (window.innerHeight - inset));
-  const top = rect.top + window.scrollY + Math.max(0, Math.min(1, offsetRatio)) * availableScroll - inset;
-  window.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+  const ratio = Math.max(0, Math.min(1, offsetRatio));
+  // Scrolling can move the toolbar from its normal position to its sticky inset.
+  // Recalculate synchronously so later reader intent cannot be overwritten.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const inset = readerStickyInset();
+    const rect = scene.getBoundingClientRect();
+    const availableScroll = Math.max(0, rect.height - (window.innerHeight - inset));
+    const top = rect.top + window.scrollY + ratio * availableScroll - inset;
+    window.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+  }
 }
 
 function modalFormSnapshot(dialog) {
@@ -3241,7 +3246,7 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
   const preview = $("streamingPreviewCard");
   if (!preview || !result.resultTurnId) return false;
 
-  const completedTurn = { ...result, id: result.resultTurnId };
+  const completedTurn = { ...result, id: result.resultTurnId, imageUrl: result.imageUrl ?? null };
   const wasContinuous = Boolean(state.user?.settings?.continuousReading);
   const acceptedTurns = state.turns
     .filter((turn) => turn.id !== result.resultTurnId && Number(turn.turnNumber) !== Number(result.turnNumber))

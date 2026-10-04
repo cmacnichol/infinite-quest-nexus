@@ -266,7 +266,7 @@ for (const turnCount of [317, 2000]) {
   });
 }
 
-test("a saved Turn 12 stays bounded until an explicit scene group and survives mode switches", async ({ page }) => {
+test("a saved Turn 12 stays bounded until an explicit scene group and survives mode switches", async ({ page }, testInfo) => {
   const sourceFixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
   sourceFixture.turns[11] = { ...sourceFixture.turns[11]!, narration: "Saved reading position. ".repeat(130) };
   const fixture = withContinuousReading(sourceFixture);
@@ -285,6 +285,20 @@ test("a saved Turn 12 stays bounded until an explicit scene group and survives m
       json: { user: { ...profileUser, displayName: body.displayName, settings: body.settings } }
     });
   });
+  await page.addInitScript(() => {
+    const originalScrollTo = window.scrollTo;
+    const records: unknown[] = [];
+    Object.defineProperty(window, "__t16PositionTrace", { value: records });
+    window.scrollTo = ((...args: unknown[]) => {
+      const scene = document.getElementById("scene-12")?.getBoundingClientRect();
+      const toolbar = document.querySelector("[data-story-reader-toolbar]")?.getBoundingClientRect();
+      const nav = document.querySelector(".universal-nav")?.getBoundingClientRect();
+      records.push({ args, scene: scene?.toJSON(), toolbar: toolbar?.toJSON(), nav: nav?.toJSON(),
+        innerHeight: window.innerHeight, scrollY: window.scrollY,
+        maxScroll: document.documentElement.scrollHeight - window.innerHeight });
+      Reflect.apply(originalScrollTo, window, args);
+    }) as typeof window.scrollTo;
+  });
   await seedReaderPosition(page, fixture, fixture.turns[11]!);
   await prepareStoryPage(page, fixture.campaignId);
 
@@ -292,6 +306,19 @@ test("a saved Turn 12 stays bounded until an explicit scene group and survives m
   await expect(page.locator("#readerPositionNotice")).toContainText("Resumed reading at Turn 12");
   await expect(page.locator("#scene-12")).toBeVisible();
   await expect.poll(() => requests.filter(request => request.pathname === exactTurnPath(fixture.campaignId, 12)).length).toBe(1);
+  const positionGeometry = await page.locator("#scene-12").evaluate(scene => {
+    const rect = scene.getBoundingClientRect();
+    const toolbar = document.querySelector("[data-story-reader-toolbar]")?.getBoundingClientRect();
+    const nav = document.querySelector(".universal-nav")?.getBoundingClientRect();
+    const inset = Math.max(nav?.height ?? 0, toolbar?.bottom ?? 0);
+    return { scene: rect.toJSON(), toolbar: toolbar?.toJSON(), nav: nav?.toJSON(), inset,
+      innerHeight: window.innerHeight, scrollY: window.scrollY,
+      maxScroll: document.documentElement.scrollHeight - window.innerHeight,
+      expectedScroll: rect.top + window.scrollY + 0.5 * Math.max(0, rect.height - (window.innerHeight - inset)) - inset, trace: (window as Window & { __t16PositionTrace?: unknown[] }).__t16PositionTrace };
+  });
+  await testInfo.attach("saved-reader-position-geometry", {
+    body: Buffer.from(JSON.stringify(positionGeometry, null, 2)), contentType: "application/json"
+  });
   const initialOffset = await sceneOffsetRatio(page, 12);
   expect(initialOffset).toBeCloseTo(0.5, 1);
   expect(await renderedSceneTurns(page)).toHaveLength(1);
@@ -452,7 +479,7 @@ test("an accepted replacement updates one visible keyed scene without duplicatin
   const beforeReplacement = await renderedSceneTurns(page);
   expect(beforeReplacement.length).toBeLessThanOrEqual(10);
   expect(beforeReplacement).toContain(317);
-  await page.locator("#scene-317 .story-more > summary").click();
+  await page.locator(".story-more > summary").click();
   await page.locator("#btnRetry").click();
   await page.locator("#retryPromptEditor").fill("Replacement action.");
   await page.locator("#btnRetryPromptSubmit").click();

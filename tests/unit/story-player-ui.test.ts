@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { generationResultSchema } from "../../packages/contracts/src/index.js";
 import { parseHTML } from "linkedom";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -3362,7 +3363,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       let active: Element = older;
       Object.defineProperty(document, "activeElement", { get: () => active, configurable: true });
       const originalMatches = older.matches.bind(older);
-      older.matches = (selector: string) => selector === ":focus-visible" || originalMatches(selector);
+      Object.defineProperty(older, "matches", { configurable: true, value: (selector: string) => selector === ":focus-visible" || originalMatches(selector) });
       const focus = vi.fn(() => { active = retry; });
       retry.focus = focus;
 
@@ -3403,9 +3404,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       let active: Element = older;
       Object.defineProperty(document, "activeElement", { get: () => active, configurable: true });
       const originalOlderMatches = older.matches.bind(older);
-      older.matches = (selector: string) => selector === ":focus-visible" || originalOlderMatches(selector);
+      Object.defineProperty(older, "matches", { configurable: true, value: (selector: string) => selector === ":focus-visible" || originalOlderMatches(selector) });
       const originalRetryMatches = retry.matches.bind(retry);
-      retry.matches = (selector: string) => selector === ":focus-visible" || originalRetryMatches(selector);
+      Object.defineProperty(retry, "matches", { configurable: true, value: (selector: string) => selector === ":focus-visible" || originalRetryMatches(selector) });
       const focus = vi.fn(() => { active = retry; });
       retry.focus = focus;
 
@@ -3729,4 +3730,58 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyCss).toContain('@keyframes spin {');
     expect(storyCss).toContain('@keyframes shimmer {');
   });
+});
+
+it("restores the scene ratio after the toolbar reaches its sticky inset", () => {
+  const start = storyScript.indexOf("function restoreReaderSceneOffset(");
+  const end = storyScript.indexOf("\nfunction modalFormSnapshot", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  let scrollY = 0;
+  const fakeWindow = { innerHeight: 720, get scrollY() { return scrollY; },
+    scrollTo: vi.fn(({ top }: { top: number }) => { scrollY = top; }) };
+  const fakeScene = { getBoundingClientRect: () => ({ top: 500 - scrollY, height: 2000 }) };
+  const inset = () => scrollY === 0 ? 290 : 171;
+  const restore = new Function("document", "window", "readerStickyInset",
+    `${storyScript.slice(start, end)}; return restoreReaderSceneOffset;`)(
+      { getElementById: () => fakeScene }, fakeWindow, inset
+    ) as (turnNumber: number, ratio: number) => void;
+  restore(12, 0.5);
+  const actualRatio = (scrollY + inset() - 500) / (2000 - (720 - inset()));
+  expect(actualRatio).toBeCloseTo(0.5, 5);
+});
+
+it("installs a schema-validated generation result without an image URL in continuous scenes", async () => {
+  const result = generationResultSchema.parse({
+    id: "55555555-5555-4555-8555-555555555555", status: "completed", campaignId: T16_CAMPAIGN_ID,
+    expectedTurnNumber: 101, resultTurnId: "99999999-9999-4999-8999-999999999998",
+    errorCode: null, errorMessage: null, turnNumber: 101, action: "Inspect the ruins",
+    inputMode: "action", inputModeSource: "explicit", narration: "Accepted narration without an image.",
+    choices: [], customActionSuggestion: "", imagePrompt: "", chronicleRetrieval: null,
+    modelMetadata: null, mechanics: null, acceptedAt: "2026-10-03T12:00:00.000Z", stateSnapshot: {}, reportedCost: null
+  });
+  expect(result).not.toHaveProperty("imageUrl");
+  const turns = makeAcceptedTurns(91, 100);
+  const workflow = { resume: async () => null, submit: vi.fn().mockResolvedValue({
+    jobId: result.id, async *watch() { yield { type: "settled", outcome: "completed", result }; }
+  }) };
+  try {
+    const { document, window } = await bootLegacyStory({
+      turns, continuousReading: true, workflow, pathname: `/story/${T16_CAMPAIGN_ID}`,
+      syncStatus: vi.fn().mockResolvedValue({ campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+        world: {}, turns: { campaignId: T16_CAMPAIGN_ID, turns, nextCursor: null } })
+    });
+    const action = document.getElementById("freeAction") as HTMLTextAreaElement;
+    action.value = result.action;
+    document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    await vi.waitFor(() => expect(workflow.submit).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(Boolean(document.getElementById("scene-101"))
+      || (document.getElementById("toast")?.textContent || "").includes("Generation failed")).toBe(true), { timeout: 2000 });
+    expect(document.getElementById("toast")?.textContent).not.toContain("Generation failed");
+    expect(document.getElementById("scene-101")?.textContent).toContain(result.narration);
+    expect(document.querySelectorAll(".scene[data-turn-number]").length).toBeLessThanOrEqual(10);
+    expect(document.querySelectorAll("#scene-100")).toHaveLength(1);
+    expect(document.getElementById("scene-101")?.dataset.turnId).toBe(result.resultTurnId);
+    expect(document.getElementById("toast")?.textContent).not.toContain("Generation failed");
+  } finally { vi.unstubAllGlobals(); }
 });
