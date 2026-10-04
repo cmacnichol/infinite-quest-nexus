@@ -135,7 +135,7 @@ test("search finds an unloaded old turn in a 317-turn campaign and safely render
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
   await expect(page.locator("#turnHistoryDialog")).not.toHaveAttribute("open", "");
   expect(ledgerPageRequests(requests, fixture.campaignId)).toHaveLength(0);
-  await expect(page.locator("#turnPill")).toBeFocused();
+  await expect(page.locator("#btnReaderHistory")).toBeFocused();
 });
 
 test("search on a 2000-turn campaign renders at most one 50-result page", async ({ page }) => {
@@ -418,6 +418,10 @@ test("selecting a result does not inspect state; Inspect stays explicit and keyb
     contentType: "application/json",
     json: { campaignId: fixture.campaignId, items: [historyItem(fixture.turns[11]!)], nextCursor: null }
   }));
+  await page.route(`**${exactTurnPath(fixture.campaignId, 12)}`, route => route.fulfill({
+    contentType: "application/json",
+    json: { campaignId: fixture.campaignId, turn: fixture.turns[11] }
+  }));
   await prepareStoryPage(page, fixture.campaignId);
   await page.goto(`${origin}/story/${fixture.campaignId}`);
   await expect(page.locator("#storySyncStatus")).toContainText("Story synced");
@@ -436,7 +440,7 @@ test("selecting a result does not inspect state; Inspect stays explicit and keyb
   await expect(page.locator("#turnHistoryStatePanel")).toBeVisible();
   await page.locator("#btnTurnHistoryDone").click();
   await expect(page.locator("#turnHistoryDialog")).not.toHaveAttribute("open", "");
-  await expect(page.locator("#turnPill")).toBeFocused();
+  await expect(page.locator("#btnReaderHistory")).toBeFocused();
 });
 
 test("a same-number replacement UUID cannot install a stale search summary", async ({ page }) => {
@@ -466,7 +470,7 @@ test("a same-number replacement UUID cannot install a stale search summary", asy
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
   await expect(page.locator("#freeAction")).toHaveValue("Draft stays on a stale result.");
   await expect(page.locator("#turnHistoryDialog")).toHaveAttribute("open", "");
-  await expect(page.locator(historyControls.searchStatus)).toHaveAttribute("data-state", "error");
+  await expect(page.locator("#turnHistoryJumpStatus")).toHaveAttribute("data-state", "error");
   expect(requests.filter(request => request.pathname.endsWith("/state/inspection"))).toHaveLength(0);
   expect(ledgerPageRequests(requests, fixture.campaignId)).toHaveLength(0);
 });

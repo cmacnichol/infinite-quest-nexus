@@ -511,6 +511,44 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
+  it("accepts the current same-number UUID after reload when retired history rows still exist", async () => {
+    const oldTurns = makeTurns(1, 5);
+    const currentTurns = makeTurns(1, 4).map(turn => turn.turnNumber === 4
+      ? { ...turn, id: "new-turn-4", narration: "Current regenerated fourth turn" }
+      : turn);
+    const syncStatus = vi.fn()
+      .mockResolvedValueOnce({
+        campaign: { id: "campaign-1", title: "Before", activeTurnNumber: 5, storyLengthProfile: "standard" },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: oldTurns, nextCursor: null }
+      })
+      .mockResolvedValueOnce({
+        campaign: { id: "campaign-1", title: "After", activeTurnNumber: 4, storyLengthProfile: "standard" },
+        world: {},
+        turns: { campaignId: "campaign-1", turns: currentTurns, nextCursor: null }
+      });
+    const getReaderHistoryTurn = vi.fn(async () => ({ campaignId: "campaign-1", turn: currentTurns[3] }));
+    try {
+      const { document, window } = await bootLegacyStory({ turns: oldTurns, syncStatus, getReaderHistoryTurn });
+      vi.stubGlobal("confirm", () => true);
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 4 of 4"));
+
+      const jump = document.getElementById("turnHistoryJumpNumber") as HTMLInputElement;
+      jump.value = "4";
+      document.getElementById("btnTurnHistoryJumpExact")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(getReaderHistoryTurn).toHaveBeenCalledTimes(1));
+      await Promise.resolve();
+
+      expect(getReaderHistoryTurn).toHaveBeenCalledWith("campaign-1", 4, expect.any(AbortSignal));
+      expect(document.getElementById("turnHistoryJumpStatus")?.getAttribute("data-state")).toBe("success");
+      expect(document.getElementById("readerTurnCount")?.textContent).toContain("Turn 4 of 4");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retains the refresh control when configuration fails but segment polling succeeds", async () => {
     try {
       const { document } = await bootLegacyStory({turns:makeTurns(1,1),loadIllustrationConfig:async()=>{throw new Error('offline');}});

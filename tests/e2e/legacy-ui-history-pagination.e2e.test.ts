@@ -62,14 +62,15 @@ async function selectedHistoryCardGeometry(page: Page, turnNumber: number): Prom
   return page.evaluate((selectedTurnNumber) => {
     const scroller = document.querySelector<HTMLElement>("#turnHistoryDialog .dialog-scroll");
     const card = document.querySelector<HTMLElement>(`#turnHistoryDialog .history-card[aria-pressed="true"][data-turn-number="${selectedTurnNumber}"]`);
-    if (!scroller || !card) throw new Error(`Missing History scroller or selected Turn ${selectedTurnNumber}.`);
+    const entry = card?.closest<HTMLElement>(".history-entry");
+    if (!scroller || !card || !entry) throw new Error(`Missing History scroller or selected Turn ${selectedTurnNumber}.`);
     const scrollerRect = scroller.getBoundingClientRect();
-    const cardRect = card.getBoundingClientRect();
+    const entryRect = entry.getBoundingClientRect();
     const viewportTop = scrollerRect.top + scroller.clientTop;
     const viewportBottom = viewportTop + scroller.clientHeight;
     return {
       turnNumber: Number(card.dataset.turnNumber),
-      fullyVisible: cardRect.top >= viewportTop && cardRect.bottom <= viewportBottom,
+      fullyVisible: entryRect.top >= viewportTop && entryRect.bottom <= viewportBottom,
       scrollTop: scroller.scrollTop,
       clientHeight: scroller.clientHeight,
       scrollHeight: scroller.scrollHeight

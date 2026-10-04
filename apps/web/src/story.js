@@ -4290,9 +4290,14 @@ function setStoryHistoryJumpStatus(stateName, message) {
 }
 
 function knownStoryHistoryTurn(turnNumber) {
-  const cachedTurns = (state.historyWindow?.cachedPages || []).flatMap(page => page.turns);
-  const candidates = [...(state.historyResidentRows || []), ...state.turns, ...cachedTurns, state.historyWindow?.selectedPreview]
-    .filter(Boolean);
+  const historyWindowIsCurrent = state.historyWindowCampaignId === state.campaignId
+    && state.historyWindowEpoch === storyTurnWindowEpoch;
+  const candidates = [...state.turns];
+  if (historyWindowIsCurrent) {
+    const cachedTurns = (state.historyWindow?.cachedPages || []).flatMap(page => page.turns);
+    candidates.push(...(state.historyResidentRows || []), ...cachedTurns);
+    if (state.historyWindow?.selectedPreview) candidates.push(state.historyWindow.selectedPreview);
+  }
   return candidates.find(turn => Number(turn.turnNumber) === turnNumber) || null;
 }
 
@@ -4540,7 +4545,8 @@ function renderStoryHistoryWindow() {
 
 function revealSelectedHistoryCard() {
   const scroller = $("turnHistoryDialog")?.querySelector(".dialog-scroll");
-  const selected = scroller?.querySelector('.history-card[aria-pressed="true"]');
+  const selectedCard = scroller?.querySelector('.history-card[aria-pressed="true"]');
+  const selected = selectedCard?.closest(".history-entry") || selectedCard;
   if (!scroller || !selected) return;
   const viewport = scroller.getBoundingClientRect();
   const card = selected.getBoundingClientRect();
