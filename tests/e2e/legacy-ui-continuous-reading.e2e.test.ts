@@ -237,7 +237,7 @@ async function saveContinuousPreference(page: Page, value: boolean): Promise<voi
 }
 
 for (const turnCount of [317, 2000]) {
-  test(`continuous startup stays bounded without walking ${turnCount} turns`, async ({ page }) => {
+  test(`continuous startup stays bounded without walking ${turnCount} turns`, async ({ page }, testInfo) => {
     const fixture = withContinuousReading(legacyUiFixture({ turnCount, worldCount: 1, campaignCount: 1 }));
     const requests = watchRequests(page);
     await installLegacyUiFixture(page, fixture);
@@ -252,6 +252,17 @@ for (const turnCount of [317, 2000]) {
     expect(new Set(scenes).size).toBe(scenes.length);
     expect(cursorRequests(requests, fixture.campaignId)).toHaveLength(0);
     await expect(page.locator(`#scene-${turnCount}`)).toBeVisible();
+    if (turnCount === 317) {
+      const desktopPath = testInfo.outputPath("t16-continuous-startup-desktop-317.png");
+      await page.screenshot({ path: desktopPath });
+      await testInfo.attach("continuous-startup-desktop-317", { path: desktopPath, contentType: "image/png" });
+
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(page.locator("#scene-317")).toBeVisible();
+      const narrowPath = testInfo.outputPath("t16-continuous-startup-narrow-390.png");
+      await page.screenshot({ path: narrowPath });
+      await testInfo.attach("continuous-startup-narrow-390", { path: narrowPath, contentType: "image/png" });
+    }
   });
 }
 

@@ -334,6 +334,7 @@ async function executeContinuousReaderRequest(request, anchor, interactionEpoch,
       return true;
     }
     syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
     return false;
   } catch (error) {
     if (!continuousReaderRequestIsCurrent(request, interactionEpoch)) return false;
@@ -408,6 +409,7 @@ async function retryContinuousReaderGroup() {
       return executeContinuousReaderRequest(refreshed.request, anchor, interactionEpoch, restoreKeyboardFocus);
     }
     syncContinuousReaderControls();
+    restoreContinuousReaderKeyboardFocus(restoreKeyboardFocus);
     return false;
   } catch {
     if (state.continuousReader?.pendingRequest !== refresh || readerPositionInteractionEpoch !== interactionEpoch

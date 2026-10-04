@@ -3343,6 +3343,89 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
+  it("restores keyboard focus to Retry when a schema-valid scene response fails its request stamp", async () => {
+    const held = deferred<unknown>();
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow: vi.fn(() => held.promise)
+      });
+      const older = document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')!;
+      const retry = document.querySelector<HTMLButtonElement>('[data-continuous-reader-retry]')!;
+      let active: Element = older;
+      Object.defineProperty(document, "activeElement", { get: () => active, configurable: true });
+      const originalMatches = older.matches.bind(older);
+      older.matches = (selector: string) => selector === ":focus-visible" || originalMatches(selector);
+      const focus = vi.fn(() => { active = retry; });
+      retry.focus = focus;
+
+      older.dispatchEvent(new window.Event("click", { bubbles: true }));
+      held.resolve(sceneWindowResponse("newer", 91, 100, 91));
+      await vi.waitFor(() => expect(document.getElementById("continuousReaderStatus")?.textContent).not.toBe("Loading scene group…"));
+
+      expect(retry.hidden).toBe(false);
+      expect(document.getElementById("scene-100")).not.toBeNull();
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(active).toBe(retry);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("restores keyboard focus to Retry after an exact-anchor refresh response fails protocol validation", async () => {
+    const getSceneWindow = vi.fn().mockRejectedValueOnce({ statusCode: 409, domainCode: "reader_anchor_changed" });
+    const getReaderHistoryTurn = vi.fn(async () => ({
+      campaignId: T16_CAMPAIGN_ID,
+      turn: makeAcceptedTurns(90, 90)[0]
+    }));
+    try {
+      const { document, window } = await bootLegacyStory({
+        turns: makeAcceptedTurns(51, 100),
+        pathname: `/story/${T16_CAMPAIGN_ID}`,
+        continuousReading: true,
+        syncStatus: vi.fn().mockResolvedValue({
+          campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 100 },
+          world: {},
+          turns: { campaignId: T16_CAMPAIGN_ID, turns: makeAcceptedTurns(51, 100), nextCursor: null }
+        }),
+        getSceneWindow,
+        getReaderHistoryTurn
+      });
+      const older = document.querySelector<HTMLButtonElement>('[data-continuous-reader-direction="older"]')!;
+      const retry = document.querySelector<HTMLButtonElement>('[data-continuous-reader-retry]')!;
+      let active: Element = older;
+      Object.defineProperty(document, "activeElement", { get: () => active, configurable: true });
+      const originalOlderMatches = older.matches.bind(older);
+      older.matches = (selector: string) => selector === ":focus-visible" || originalOlderMatches(selector);
+      const originalRetryMatches = retry.matches.bind(retry);
+      retry.matches = (selector: string) => selector === ":focus-visible" || originalRetryMatches(selector);
+      const focus = vi.fn(() => { active = retry; });
+      retry.focus = focus;
+
+      older.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(retry.hidden).toBe(false));
+      focus.mockClear();
+      retry.dispatchEvent(new window.Event("click", { bubbles: true }));
+      active = document.body;
+      await vi.waitFor(() => expect(getReaderHistoryTurn).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(document.getElementById("continuousReaderStatus")?.textContent).toContain("Couldn't use this scene group"));
+
+      expect(retry.hidden).toBe(false);
+      expect(document.getElementById("scene-100")).not.toBeNull();
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(active).toBe(retry);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("opens Print synchronously and writes only complete story markup after history loads", async () => {
     let resolvePage!: (page: Record<string, unknown>) => void;
     const fetchTurns = vi.fn(() => new Promise((resolve) => { resolvePage = resolve; }));
