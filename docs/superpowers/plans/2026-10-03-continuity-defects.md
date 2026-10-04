@@ -48,11 +48,11 @@ The documents were prepared in the managed worktree:
 
 It was created at the audited revision with a detached HEAD and then moved, still detached, onto `origin/main` at `1374688c`. If implementation is authorized, create or select an appropriate `codex/` branch in this worktree before committing. Do not reset the main checkout. If `origin/main` moves again before implementation starts, rebase first and re-check the target files listed below.
 
-- [ ] Confirm revision, worktree status, applicable instructions, and whether another task has changed any target files.
-- [ ] Restore only the pinned locked dependencies if needed; use `--frozen-lockfile`.
-- [ ] Establish an executable baseline for affected suites. Do not relabel the prior audit's unit run as a new-worktree run.
-- [ ] Resolve the isolated PostgreSQL prerequisite without deleting shared volumes or changing production credentials. The audit's test setup failed with password authentication for `infinitequest_test`. Use a dedicated disposable test environment; never print its credentials.
-- [ ] Read the existing planner, history-protected-fact, tracker normalization, generation, and nested-tracker review tests before editing.
+- [x] Confirm revision, worktree status, applicable instructions, and whether another task has changed any target files.
+- [x] Restore only the pinned locked dependencies if needed; use `--frozen-lockfile`.
+- [x] Establish an executable baseline for affected suites. Do not relabel the prior audit's unit run as a new-worktree run.
+- [x] Resolve the isolated PostgreSQL prerequisite without deleting shared volumes or changing production credentials. The audit's test setup failed with password authentication for `infinitequest_test`. Use a dedicated disposable test environment; never print its credentials.
+- [x] Read the existing planner, history-protected-fact, tracker normalization, generation, and nested-tracker review tests before editing.
 
 The initial two workstreams can be implemented independently. Land them as separate reviewed commits where practical. Commit instructions below apply only after implementation is authorized.
 
@@ -87,16 +87,16 @@ Scope note: the early filter (`generation-context-planner.ts`, the `candidates` 
 
 Preserve non-history protocol behavior except where a new test proves the same selection/identity defect. Do not change quotas, rank fusion, canonical fact source loading, or supersession rules.
 
-- [ ] Add `retains a retrieved fact omitted from protected allocation`: construct the synthetic 41-fact case, an 8,000-token campaign limit, a 7,900-token writer input limit, and a high-ranked older gate/key fact. Assert the fact is not selected as protected, is selected as Chronicle, and appears once in the final provider user payload.
-- [ ] Add a control with that older fact absent only from the protected source pool. Assert both final payloads retain its retrieved evidence.
-- [ ] Add `deduplicates a fact actually sent as protected authority`: sufficient budget, same fact in both sources, exactly one final representation.
-- [ ] Add `does not discard an omitted canonical fact solely because its turn is recent`: cover latest-turn and selected-predecessor sources, keeping real narration duplicates suppressed.
-- [ ] Add cases for empty selected fact set, all facts fitting, no Chronicle candidates, stable ordering, and a non-history frozen policy.
-- [ ] Run the focused planner test and confirm the new recall assertion fails on the baseline because the older candidate disappears. A fixture setup failure is not the expected red result.
-- [ ] Implement selection-aware filtering in the planner. Verify the reachable non-history excerpt retry with captured serialized requests; separately label history-coverage v5 coverage as early excerpt selection, without introducing a new v5 retry behavior.
-- [ ] Assert `duplicate_source` applies only to a fact represented elsewhere; budget omissions retain `context_limit` or `request_limit`. Final manifest and sent-ID extraction must agree with the wire payload.
-- [ ] Run the focused tests and existing planner boundary suites. Confirm no quota or unrelated serialization changes.
-- [ ] Review the scoped diff and commit as `Fix Chronicle fact deduplication after context selection`.
+- [x] Add `retains a retrieved fact omitted from protected allocation`: construct the synthetic 41-fact case, an 8,000-token campaign limit, a 7,900-token writer input limit, and a high-ranked older gate/key fact. Assert the fact is not selected as protected, is selected as Chronicle, and appears once in the final provider user payload.
+- [x] Add a control with that older fact absent only from the protected source pool. Assert both final payloads retain its retrieved evidence.
+- [x] Add `deduplicates a fact actually sent as protected authority`: sufficient budget, same fact in both sources, exactly one final representation.
+- [x] Add `does not discard an omitted canonical fact solely because its turn is recent`: cover latest-turn and selected-predecessor sources, keeping real narration duplicates suppressed.
+- [x] Add cases for empty selected fact set, all facts fitting, no Chronicle candidates, stable ordering, and a non-history frozen policy.
+- [x] Run the focused planner test and confirm the new recall assertion fails on the baseline because the older candidate disappears. A fixture setup failure is not the expected red result.
+- [x] Implement selection-aware filtering in the planner. Verify the reachable non-history excerpt retry with captured serialized requests; separately label history-coverage v5 coverage as early excerpt selection, without introducing a new v5 retry behavior.
+- [x] Assert `duplicate_source` applies only to a fact represented elsewhere; budget omissions retain `context_limit` or `request_limit`. Final manifest and sent-ID extraction must agree with the wire payload.
+- [x] Run the focused tests and existing planner boundary suites. Confirm no quota or unrelated serialization changes.
+- [x] Review the scoped diff and commit as `Fix Chronicle fact deduplication after context selection`.
 
 **Commands**
 ```sh
@@ -121,15 +121,15 @@ Expected: all executed cases pass, including previously failing recall cases; ex
 - Capture the actual provider request and use existing sent-fact-ID/evidence-manifest assertions.
 - No new retrieval API or database schema.
 
-- [ ] Seed an owned campaign with an older verified fact and enough newer facts to omit it from protected allocation.
-- [ ] Enqueue a direction that retrieves the older fact. Assert that reservation excludes only actually selected facts and that the final writer request contains the older fact once.
-- [ ] Exercise chunked retrieval when ready and lexical fallback when embeddings/indexing are unavailable. Use existing deterministic provider fixtures; do not contact a live endpoint.
-- [ ] Repeat with a tighter reviewer window than writer window and review enabled. Assert both serialized request estimates plus safety allowances stay within their independent limits; no truncation of fact text.
-- [ ] Add a successful structured supersession of the transmitted older fact. Assert its ID was sent, the accepted fact lifecycle changes once, and the next request sees the new current fact. Reject a control supersession ID that was not sent.
-- [ ] Include a foreign-campaign canary, a future fact, an inactive fact, a source-invalid fact, and an explicit empty correction. Assert none can be revived by the relaxed candidate filter.
-- [ ] Verify the source arrays, accepted snapshots, and stored fact text were not mutated by planning.
-- [ ] Run each affected integration file in a fresh Vitest process using the dedicated integration configuration.
-- [ ] Review test realism and commit as `Cover retrieved fact recall through generation and replay`.
+- [x] Seed an owned campaign with an older verified fact and enough newer facts to omit it from protected allocation.
+- [x] Enqueue a direction that retrieves the older fact. Assert that reservation excludes only actually selected facts and that the final writer request contains the older fact once.
+- [x] Exercise chunked retrieval when ready and lexical fallback when embeddings/indexing are unavailable. Use existing deterministic provider fixtures; do not contact a live endpoint.
+- [x] Repeat with a tighter reviewer window than writer window and review enabled. Assert both serialized request estimates plus safety allowances stay within their independent limits; no truncation of fact text.
+- [x] Add a successful structured supersession of the transmitted older fact. Assert its ID was sent, the accepted fact lifecycle changes once, and the next request sees the new current fact. Reject a control supersession ID that was not sent.
+- [x] Include a foreign-campaign canary, a future fact, an inactive fact, a source-invalid fact, and an explicit empty correction. Assert none can be revived by the relaxed candidate filter.
+- [x] Verify the source arrays, accepted snapshots, and stored fact text were not mutated by planning.
+- [x] Run each affected integration file in a fresh Vitest process using the dedicated integration configuration.
+- [x] Review test realism and commit as `Cover retrieved fact recall through generation and replay`.
 
 **Command pattern**
 ```sh
@@ -185,16 +185,16 @@ Use exact trimmed names, case-sensitive. Do not introduce fuzzy matching, locale
 
 Resolve against the evolving materialized array, so a second name-only update can find a tracker created earlier in the same batch.
 
-- [ ] Add the exact Location regression from audit A2. Expected result: one tracker, ID `location`, value `Northern gate`, original rules preserved.
-- [ ] Add each resolution-policy row as an explicit unit case, including an existing ID equal to a different tracker's display name. After an explicit rename creates duplicate names, test a subsequent name-only update both with a qualifying ID/name tie-break and without one; only the latter throws ambiguous_name.
-- [ ] Add the legacy duplicate regression: current `[{id:"location",name:"Location",value:"Harbor",rules:"Track the current place."},{id:"Location",name:"Location",value:"Northern gate",rules:""}]` plus update `{name:"Location",value:"Lighthouse"}`. Expected: still two trackers; `Location` now has value `Lighthouse`; `location` is unchanged; no error. Add a control where neither duplicate's ID equals the name; expect `ambiguous_name`.
-- [ ] Add alias-only updates against an existing tracker (`{name:"Location",currentValue:"Gate"}`, `{label:"Location",updateRules:"New rule"}`, `{title:"Location",value:"Pier"}`). Each must apply. Also add `{id:"location",currentValue:"Gate"}`. This isolates the alias defect: on the baseline merge, the existing `value` shadows `currentValue`, leaving `Harbor`.
-- [ ] Assert deterministic output, unchanged inputs, aliases, explicit clearing, and cap behavior.
-- [ ] Run tests and confirm the baseline lacks the safe merge behavior.
-- [ ] Implement the helper using the existing normalizer for materialized shape and deterministic IDs.
-- [ ] Keep identity resolution separate from fiction/mechanics sanitization; this function does not authorize exposing private tracker content.
-- [ ] Run all tracker normalization and state-editor unit coverage.
-- [ ] Review and commit as `Resolve campaign tracker updates by stable identity`.
+- [x] Add the exact Location regression from audit A2. Expected result: one tracker, ID `location`, value `Northern gate`, original rules preserved.
+- [x] Add each resolution-policy row as an explicit unit case, including an existing ID equal to a different tracker's display name. After an explicit rename creates duplicate names, test a subsequent name-only update both with a qualifying ID/name tie-break and without one; only the latter throws ambiguous_name.
+- [x] Add the legacy duplicate regression: current `[{id:"location",name:"Location",value:"Harbor",rules:"Track the current place."},{id:"Location",name:"Location",value:"Northern gate",rules:""}]` plus update `{name:"Location",value:"Lighthouse"}`. Expected: still two trackers; `Location` now has value `Lighthouse`; `location` is unchanged; no error. Add a control where neither duplicate's ID equals the name; expect `ambiguous_name`.
+- [x] Add alias-only updates against an existing tracker (`{name:"Location",currentValue:"Gate"}`, `{label:"Location",updateRules:"New rule"}`, `{title:"Location",value:"Pier"}`). Each must apply. Also add `{id:"location",currentValue:"Gate"}`. This isolates the alias defect: on the baseline merge, the existing `value` shadows `currentValue`, leaving `Harbor`.
+- [x] Assert deterministic output, unchanged inputs, aliases, explicit clearing, and cap behavior.
+- [x] Run tests and confirm the baseline lacks the safe merge behavior.
+- [x] Implement the helper using the existing normalizer for materialized shape and deterministic IDs.
+- [x] Keep identity resolution separate from fiction/mechanics sanitization; this function does not authorize exposing private tracker content.
+- [x] Run all tracker normalization and state-editor unit coverage.
+- [x] Review and commit as `Resolve campaign tracker updates by stable identity`.
 
 **Commands**
 ```sh
@@ -226,17 +226,17 @@ Expected: tracker normalization, state contracts, and both state-editor suites p
 
 The repository owns the authoritative decision. An optional earlier pure check is not a substitute for repeating it against the commit transaction's base.
 
-- [ ] Add an append integration case that starts with an explicit tracker ID and accepts a name-only update. Assert one row in both current state and the accepted snapshot, with original rules preserved.
-- [ ] Add replacement coverage proving the update is applied to the saved pre-turn base and failure preserves the previously accepted turn.
-- [ ] Add an ambiguous-name case. Assert no new accepted turn, no changed campaign state/facts/memory, no image dispatch caused by acceptance, and a recoverable job with a safe message.
-- [ ] In the Activity integration suite, exercise the same recoverable tracker failure through the production mutation path. Assert event kind `generation.recoverable`, status `recoverable`, and the exact generic diagnostic code/message above. Assert the job retains its specific recovery diagnostic, while the Activity payload contains no tracker names, values, nested private fields, or raw error text.
-- [ ] Add explicit-ID success despite duplicate display names and conflicting unknown-ID rejection.
-- [ ] Add a legacy-duplicate append case: seed campaign state with the `location`/`Location` pair and accept a name-only update. Assert the turn is accepted, the `Location`-ID tracker changes, and the tracker count stays at two.
-- [ ] Assert the public generation job projection and SSE/polling schemas accept the new safe error and expose no private names, values, or nested fields. Only extend a finite diagnostic enum if the existing projection requires it; retain generic privacy guarantees.
-- [ ] Cover a stale/expired lease when attempting to mark recoverable; the stale worker must not overwrite the new claimant's state.
-- [ ] Wire Task 3's helper at the commit boundary and the typed catch in the executor.
-- [ ] Run affected PostgreSQL files independently and the diagnostic/adapter unit suites.
-- [ ] Review and commit as `Apply identity-safe tracker updates at turn acceptance`.
+- [x] Add an append integration case that starts with an explicit tracker ID and accepts a name-only update. Assert one row in both current state and the accepted snapshot, with original rules preserved.
+- [x] Add replacement coverage proving the update is applied to the saved pre-turn base and failure preserves the previously accepted turn.
+- [x] Add an ambiguous-name case. Assert no new accepted turn, no changed campaign state/facts/memory, no image dispatch caused by acceptance, and a recoverable job with a safe message.
+- [ ] In the Activity integration suite, exercise the same recoverable tracker failure through the production mutation path. Assert event kind `generation.recoverable`, status `recoverable`, and the exact generic diagnostic code/message above. Assert the job retains its specific recovery diagnostic, while the Activity payload contains no tracker names, values, nested private fields, or raw error text. **Deferred P3:** the existing assertion does not seed tracker-value canaries; final Sol review approved the implementation and left this test-strengthening advisory nonblocking.
+- [x] Add explicit-ID success despite duplicate display names and conflicting unknown-ID rejection.
+- [x] Add a legacy-duplicate append case: seed campaign state with the `location`/`Location` pair and accept a name-only update. Assert the turn is accepted, the `Location`-ID tracker changes, and the tracker count stays at two.
+- [x] Assert the public generation job projection and SSE/polling schemas accept the new safe error and expose no private names, values, or nested fields. Only extend a finite diagnostic enum if the existing projection requires it; retain generic privacy guarantees.
+- [x] Cover a stale/expired lease when attempting to mark recoverable; the stale worker must not overwrite the new claimant's state.
+- [x] Wire Task 3's helper at the commit boundary and the typed catch in the executor.
+- [x] Run affected PostgreSQL files independently and the diagnostic/adapter unit suites.
+- [x] Review and commit as `Apply identity-safe tracker updates at turn acceptance`.
 
 ### Task 5 Preserve saved review evidence and next-turn continuity
 
@@ -252,16 +252,16 @@ The repository owns the authoritative decision. An optional earlier pure check i
 - Preserve `acceptedTrackerUpdateEvidence`, retained primary output, review candidate identity, Keep receipt, and checkpoint bindings.
 - Materialize only the accepted state's tracker projection through Task 3.
 
-- [ ] Extend the existing nested-tracker/format-repair/reclaimed-review case with an existing stable ID and a name-only value update.
-- [ ] Assert raw primary output, nested tracker fields, candidate hash, producing-request hash, and review receipt remain unchanged by projection.
-- [ ] Verify explicit Keep commits the retained candidate with no additional primary or continuity-repair request.
-- [ ] Reclaim after a saved candidate/Keep receipt and prove exactly one accepted turn and exactly one logical tracker update.
-- [ ] For an initially unique tracker, verify the next actual story request's fiction-safe current-tracker projection includes that tracker once under its stable ID with the updated value and no stale value. Assert private nested and foreign-campaign canaries are absent from the full request; historical narration need not lose older mentions.
-- [ ] Separately replay the legacy Location pair after the Lighthouse update from Task 3. Assert accepted state and the next request's fiction-safe current trackers retain exactly two entries: ID `location` with value `Harbor` and original rules, and ID `Location` with value `Lighthouse`. Assert the prior `Northern gate` value is absent from that current-tracker projection, no third tracker is created, and private nested/foreign-campaign canaries remain absent. Do not require historical mentions to disappear or suppress the retained sibling's older value. This verifies compatibility, not resolution of the pre-existing contradiction.
-- [ ] Exercise Action and Story Direction. Story Direction must preserve RPG/event state while applying valid fiction-tracker updates.
-- [ ] Render the new recoverable tracker-identity diagnostic in both Story surfaces, verify that the `repair_authority` recovery offers discard and never retry, and capture screenshots using the existing browser-test artifact convention.
-- [ ] Run focused PostgreSQL and browser cases. Mocked browser cases establish presentation only; record them separately from the real commit tests.
-- [ ] Review and commit as `Verify tracker identity across review recovery and replay`.
+- [x] Extend the existing nested-tracker/format-repair/reclaimed-review case with an existing stable ID and a name-only value update.
+- [x] Assert raw primary output, nested tracker fields, candidate hash, producing-request hash, and review receipt remain unchanged by projection.
+- [x] Verify explicit Keep commits the retained candidate with no additional primary or continuity-repair request.
+- [x] Reclaim after a saved candidate/Keep receipt and prove exactly one accepted turn and exactly one logical tracker update.
+- [x] For an initially unique tracker, verify the next actual story request's fiction-safe current-tracker projection includes that tracker once under its stable ID with the updated value and no stale value. Assert private nested and foreign-campaign canaries are absent from the full request; historical narration need not lose older mentions.
+- [x] Separately replay the legacy Location pair after the Lighthouse update from Task 3. Assert accepted state and the next request's fiction-safe current trackers retain exactly two entries: ID `location` with value `Harbor` and original rules, and ID `Location` with value `Lighthouse`. Assert the prior `Northern gate` value is absent from that current-tracker projection, no third tracker is created, and private nested/foreign-campaign canaries remain absent. Do not require historical mentions to disappear or suppress the retained sibling's older value. This verifies compatibility, not resolution of the pre-existing contradiction.
+- [x] Exercise Action and Story Direction. Story Direction must preserve RPG/event state while applying valid fiction-tracker updates.
+- [x] Render the new recoverable tracker-identity diagnostic in both Story surfaces, verify that the `repair_authority` recovery offers discard and never retry, and capture screenshots using the existing browser-test artifact convention.
+- [x] Run focused PostgreSQL and browser cases. Mocked browser cases establish presentation only; record them separately from the real commit tests.
+- [x] Review and commit as `Verify tracker identity across review recovery and replay`.
 
 **Browser command**
 ```sh
@@ -277,15 +277,15 @@ Expected: both surfaces render the fixed safe message and recovery behavior with
 - Add fresh implementation verification notes under `docs/review/`; preserve the original audit record as historical evidence.
 - If implementation changes documented behavior, update only the relevant current workflow documentation.
 
-- [ ] Review every changed file's associated tests and the complete diff for unrelated behavior.
-- [ ] Run the full unit suite with nested worktree exclusions.
-- [ ] Run the full isolated PostgreSQL integration runner after focused cases pass.
-- [ ] Run the repository check and build scripts using the pinned package manager.
-- [ ] Run the focused browser diagnostics on both supported clients and retain screenshots.
-- [ ] Check repository data-safety and `git diff --check`.
-- [ ] Verify no prompt/schema/protocol/dependency/migration change slipped into the repair. The only permitted contracts diff is the single `diagnosticActionByCode` entry.
-- [ ] Review privacy, scope isolation, stale-authority checks, candidate preservation, and request-budget behavior together.
-- [ ] Record exact passed/failed/skipped counts and reasons. A blocked PostgreSQL or browser gate remains blocked; it is not satisfied by unit tests.
+- [x] Review every changed file's associated tests and the complete diff for unrelated behavior.
+- [x] Run the full unit suite with nested worktree exclusions.
+- [x] Run the full isolated PostgreSQL integration runner after focused cases pass.
+- [x] Run the repository check and build scripts using the pinned package manager.
+- [x] Run the focused browser diagnostics on both supported clients and retain screenshots.
+- [x] Check repository data-safety and `git diff --check`.
+- [x] Verify no prompt/schema/protocol/dependency/migration change slipped into the repair. The only permitted contracts diff is the single `diagnosticActionByCode` entry.
+- [x] Review privacy, scope isolation, stale-authority checks, candidate preservation, and request-budget behavior together.
+- [x] Record exact passed/failed/skipped counts and reasons. A blocked PostgreSQL or browser gate remains blocked; it is not satisfied by unit tests.
 - [ ] If publishing is subsequently authorized, describe the concrete before/after behaviors, independent commits, validation, and rollout limitations.
 
 **Final commands**
