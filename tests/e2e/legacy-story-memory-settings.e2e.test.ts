@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { storyMemorySettingsUpdateSchema } from "../../packages/contracts/src/story-memory-policy.js";
 
 const screenshots = ".superpowers/sdd/nexus-story-continuity-implementation-plan-2026-09-16/story-memory-screenshots";
 const worldId = "33333333-3333-4333-8333-333333333333";
@@ -30,7 +31,7 @@ async function installApi(page: Page) {
     [campaignAId, { level: "standard", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] }],
     [campaignBId, { level: "max", reviewMode: "enforce", availableLevels: ["off", "standard", "enhanced", "max"] }]
   ]);
-  const writes: Array<{ campaignId: string; level: string }> = [];
+  const writes: Array<{ campaignId: string; level: string; continuityReviewEnabled: boolean }> = [];
   let memoryGets = 0;
   let memoryResponses = 0;
   let rejectNextSave = false;
@@ -53,14 +54,14 @@ async function installApi(page: Page) {
         return;
       }
       if (request.method() === "PUT") {
-        const level = request.postDataJSON().level as string;
-        writes.push({ campaignId, level });
+        const update = storyMemorySettingsUpdateSchema.parse(request.postDataJSON());
+        writes.push({ campaignId, ...update });
         if (rejectNextSave) {
           rejectNextSave = false;
           return send(route, { error: "Synthetic Story Memory save failure." }, 503);
         }
         const current = settings.get(campaignId)!;
-        const saved = { ...current, level, reviewMode: level === "max" ? "enforce" : level === "off" ? "off" : "observe" };
+        const saved = { ...current, level: update.level, reviewMode: update.continuityReviewEnabled ? "enforce" : "off" };
         settings.set(campaignId, saved);
         return send(route, saved);
       }
@@ -106,13 +107,16 @@ test("legacy Nexus persists Story Memory, retains a failed draft, and fences a s
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`http://127.0.0.1:${process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173"}/nexus/index.html#campaigns`);
   await page.locator(`#campaignList [data-campaign-id="${campaignAId}"]`).click();
+  await expect(page.locator("#campaignTabStory")).toBeEnabled();
+  await page.locator("#campaignTabStory").click();
   await api.waitForDelayedRequest();
   await page.locator(`#campaignList [data-campaign-id="${campaignBId}"]`).click();
+  await expect(page.locator("#campaignTabStory")).toBeEnabled();
+  await page.locator("#campaignTabStory").click();
   await expect(page.locator("#campaignStoryMemoryLevel")).toHaveValue("max");
   await api.resolveDelayedRequest();
   await expect(page.locator("#campaignStoryMemoryLevel")).toHaveValue("max");
   await expect(page.locator("#campaignStoryMemoryStatus")).toContainText("repairs eligible issues");
-  await page.locator("#campaignTabStory").click();
 
   api.rejectNextSave();
   await page.locator("#campaignStoryMemoryLevel").selectOption("standard");
@@ -122,19 +126,43 @@ test("legacy Nexus persists Story Memory, retains a failed draft, and fences a s
 
   await page.locator("#campaignStoryMemoryLevel").selectOption("enhanced");
   await expect.poll(() => api.writes.length).toBe(2);
-  expect(api.writes[1]).toEqual({ campaignId: campaignBId, level: "enhanced" });
+  expect(api.writes[1]).toEqual({ campaignId: campaignBId, level: "enhanced", continuityReviewEnabled: false });
   await expect(page.locator("#campaignStoryMemoryLevel")).toHaveValue("enhanced");
   await page.screenshot({ path: `${screenshots}/nexus-desktop.png`, fullPage: true });
 
   await page.reload();
   await page.locator(`#campaignList [data-campaign-id="${campaignBId}"]`).click();
+  await expect(page.locator("#campaignTabStory")).toBeEnabled();
+  await page.locator("#campaignTabStory").click();
   await expect(page.locator("#campaignStoryMemoryLevel")).toHaveValue("enhanced");
   api.setSettings(campaignBId, { level: "max", reviewMode: "observe", availableLevels: ["off", "standard", "enhanced", "max"] });
   await page.reload();
   await page.locator(`#campaignList [data-campaign-id="${campaignBId}"]`).click();
+  await expect(page.locator("#campaignTabStory")).toBeEnabled();
   await page.locator("#campaignTabStory").click();
   await expect(page.locator("#campaignStoryMemoryLevel")).toHaveValue("max");
   await expect(page.locator("#campaignStoryMemoryStatus")).toContainText("observe mode");
+
+  api.setSettings(campaignBId, { level: "max", reviewMode: "off", availableLevels: ["off", "standard", "enhanced", "max"] });
+  await page.reload();
+  await page.locator(`#campaignList [data-campaign-id="${campaignBId}"]`).click();
+  await expect(page.locator("#campaignTabStory")).toBeEnabled();
+  await page.locator("#campaignTabStory").click();
+  const continuityReview = page.locator("#campaignContinuityReviewEnabled");
+  await expect(continuityReview).toBeEnabled();
+  await expect(continuityReview).not.toBeChecked();
+  await continuityReview.check();
+  await expect.poll(() => api.writes.length).toBe(3);
+  expect(api.writes[2]).toEqual({ campaignId: campaignBId, level: "max", continuityReviewEnabled: true });
+  await expect(continuityReview).toBeChecked();
+  await expect(page.locator("#campaignStoryMemoryStatus")).toContainText("repairs eligible issues");
+  expect(api.settings.get(campaignBId)).toMatchObject({ level: "max", reviewMode: "enforce" });
+
+  await page.reload();
+  await page.locator(`#campaignList [data-campaign-id="${campaignBId}"]`).click();
+  await expect(page.locator("#campaignTabStory")).toBeEnabled();
+  await page.locator("#campaignTabStory").click();
+  await expect(page.locator("#campaignContinuityReviewEnabled")).toBeChecked();
 });
 
 test("legacy Story settings loads and persists the saved Story Memory level on mobile", async ({ page }) => {
@@ -153,7 +181,7 @@ test("legacy Story settings loads and persists the saved Story Memory level on m
   await page.screenshot({ path: `${screenshots}/story-mobile-max-enforce.png`, fullPage: true });
   await page.locator("#storyMemoryLevel").selectOption("off");
   await expect.poll(() => api.writes.length).toBe(1);
-  expect(api.writes[0]).toEqual({ campaignId: campaignBId, level: "off" });
+  expect(api.writes[0]).toEqual({ campaignId: campaignBId, level: "off", continuityReviewEnabled: false });
   await page.screenshot({ path: `${screenshots}/story-mobile-off-saved.png`, fullPage: true });
   await page.reload();
   await page.locator("#btnOpenUserProfile").click();

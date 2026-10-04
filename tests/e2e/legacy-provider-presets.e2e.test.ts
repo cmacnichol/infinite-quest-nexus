@@ -84,6 +84,12 @@ async function installSettingsApi(page: Page, { nativeSupport = true, metadataGa
   return { provider, providers, writes };
 }
 
+async function openProviderAdvancedSettings(page: Page) {
+  const advanced = page.locator("#providerAdvancedSettings");
+  await advanced.locator(":scope > summary").click();
+  await expect(advanced).toHaveAttribute("open", "");
+}
+
 test("provider settings save and reopen a trusted native preset through the typed API contract", async ({ page }) => {
   const runtimeErrors: string[] = [];
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
@@ -97,6 +103,7 @@ test("provider settings save and reopen a trusted native preset through the type
   expect(runtimeErrors).toEqual([]);
   await expect(page.locator("#providerProfileList")).toContainText("OpenRouter text");
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
+  await openProviderAdvancedSettings(page);
 
   await expect(page.getByRole("radio", { name: "Model", exact: true })).toBeChecked();
   await expect(page.locator("#providerResponseFormatPolicy")).toHaveValue("required");
@@ -152,6 +159,7 @@ test("provider settings save and reopen a trusted native preset through the type
   });
 
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
+  await openProviderAdvancedSettings(page);
   await expect(page.getByRole("radio", { name: "Preset", exact: true })).toBeChecked();
   await expect(page.locator("#providerModelSelectionField")).toBeHidden();
   await expect(page.getByRole("combobox", { name: "Preset", exact: true })).toHaveValue("nexus-story");
@@ -259,6 +267,7 @@ test("settings show bounded preset field diagnostics without remote private text
   }));
   await page.goto(`${origin}/nexus/index.html#providers`);
   await page.locator("#providerProfileList").getByRole("button", { name: "Edit" }).click();
+  await openProviderAdvancedSettings(page);
   await page.getByRole("radio", { name: "Preset", exact: true }).check();
   await page.getByRole("combobox", { name: "Preset", exact: true }).selectOption("nexus-story");
   await expect(page.locator("#providerPresetPrompt")).toContainText("preset_config_unsupported: stop");

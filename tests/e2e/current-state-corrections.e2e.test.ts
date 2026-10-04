@@ -164,10 +164,10 @@ test("legacy Story saves current continuity with retained fact IDs", async ({ pa
   await page.locator("#editStateContinuitySummary").fill("The corrected current harbor.");
   await page.getByRole("textbox", { name: "Open thread", exact: true }).fill("Repair the silver bell.");
   await page.getByRole("textbox", { name: "Canonical fact", exact: true }).fill("The bell is silver.");
-  await page.getByRole("button", { name: "Scratchpad", exact: true }).click();
+  await page.locator("#editStateTabs").getByRole("tab", { name: "Scratchpad", exact: true }).click();
   await expect(page.locator("#discardChangesDialog")).not.toBeVisible();
   await page.locator("#scratchpadEditor").fill("The visitor has returned.");
-  await page.getByRole("button", { name: "Current State", exact: true }).click();
+  await page.locator("#editStateTabs").getByRole("tab", { name: "Current State", exact: true }).click();
   await expect(page.locator("#discardChangesDialog")).not.toBeVisible();
   await page.screenshot({ path: "test-results/current-state-story-legacy.png", fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });

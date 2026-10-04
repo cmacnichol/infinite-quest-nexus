@@ -1,5 +1,6 @@
 import { expect, test, type Route } from "@playwright/test";
 import { installStoryApi } from "../fixtures/quiet-leaf-api.js";
+import { storyMemorySettingsUpdateSchema } from "../../packages/contracts/src/story-memory-policy.js";
 
 type MemoryLevel = "off" | "standard" | "enhanced" | "max";
 
@@ -8,17 +9,21 @@ test.use({ baseURL: process.env.STORY_MEMORY_TEST_BASE_URL ?? `http://127.0.0.1:
 test("campaign editor and Story Campaign Tools save and reload the same memory setting", async ({ page }, testInfo) => {
   const api = await installStoryApi(page);
   let level: MemoryLevel = "enhanced";
+  let continuityReviewEnabled = false;
+  const writes: Array<{ level: MemoryLevel; continuityReviewEnabled: boolean }> = [];
   const availableLevels: readonly MemoryLevel[] = ["off", "standard", "enhanced", "max"];
   await page.route(`**/api/v1/campaigns/${api.campaignId}/story-memory`, async (route: Route) => {
     if (route.request().method() === "GET") {
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ level, reviewMode: level === "max" ? "enforce" : "off", availableLevels }) });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ level, reviewMode: continuityReviewEnabled ? "enforce" : "off", availableLevels }) });
       return;
     }
     if (route.request().method() === "PUT") {
-      const body = JSON.parse(route.request().postData() ?? "{}") as { level?: MemoryLevel };
-      if (!body.level || !availableLevels.includes(body.level)) throw new Error("Story memory PUT omitted an available level.");
+      const body = storyMemorySettingsUpdateSchema.parse(JSON.parse(route.request().postData() ?? "{}"));
+      if (!availableLevels.includes(body.level)) throw new Error("Story memory PUT omitted an available level.");
       level = body.level;
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ level, reviewMode: level === "max" ? "enforce" : "off", availableLevels }) });
+      continuityReviewEnabled = body.continuityReviewEnabled;
+      writes.push(body);
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ level, reviewMode: continuityReviewEnabled ? "enforce" : "off", availableLevels }) });
       return;
     }
     await route.abort("blockedbyclient");
@@ -30,13 +35,18 @@ test("campaign editor and Story Campaign Tools save and reload the same memory s
   await expect(editor).toBeVisible();
   await expect(editor.locator("select[name='storyMemoryLevel']")).toHaveValue("enhanced");
   await editor.locator("select[name='storyMemoryLevel']").selectOption("max");
+  await editor.locator("input[name='continuityReviewEnabled']").check();
   await editor.getByRole("button", { name: "Save memory level" }).click();
   await expect(page.locator("#campaign-message")).toContainText("Campaign memory level saved.");
-  await expect(editor).toContainText("Max reviews continuity, attempts a repair, and blocks unresolved conflicts.");
+  await expect(editor.locator("[data-story-memory-guidance]")).toHaveText("Continuity review checks each new draft before acceptance. It adds a model request and may pause a turn for your decision.");
+  expect(writes).toEqual([{ level: "max", continuityReviewEnabled: true }]);
+  await expect(editor.locator("input[name='continuityReviewEnabled']")).toBeChecked();
   await page.screenshot({ path: `${testInfo.outputPath("story-memory-editor-desktop.png")}`, fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${testInfo.outputPath("story-memory-editor-mobile.png")}`, fullPage: true });
 
+  await page.goto(`/app/campaigns/${api.campaignId}/overview`);
+  await expect(page.locator("#memory-settings-form input[name='continuityReviewEnabled']")).toBeChecked();
   await page.goto(`/app/story/${api.campaignId}`);
   await expect(page.locator("[data-story-composer]")).toBeVisible();
   const draft = page.locator("[data-story-draft]");

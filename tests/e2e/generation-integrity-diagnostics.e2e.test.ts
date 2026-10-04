@@ -306,7 +306,11 @@ test("Prompt Library previews current cast settings and unresolved direct-model 
   });
 
   await page.goto(`${legacyOrigin}/nexus/index.html#prompt-library`);
+  await expect(page.locator('#managementInteractiveRoot:not([inert])[aria-busy="false"]')).toBeVisible();
+  await expect(page.locator("#promptLibraryScope")).toBeVisible();
+  await expect(page.locator(`#campaignList [data-campaign-id="${campaign.campaignId}"]`)).toHaveCount(1);
   await page.locator("#promptLibraryScope").selectOption("campaign");
+  await expect(page.locator(`#promptLibraryCampaign option[value="${campaign.campaignId}"]`)).toHaveCount(1);
   await page.locator("#promptLibraryCampaign").selectOption(campaign.campaignId);
   await page.getByRole("button", { name: "Preview full request", exact: true }).click();
   const preview = page.locator("#promptLibraryPreviewContent");
