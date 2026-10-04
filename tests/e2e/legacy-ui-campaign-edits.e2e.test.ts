@@ -147,7 +147,8 @@ test("stays on the campaign and preserves fields after save failure", async ({ p
   await expect(page.locator("#campaignTitle")).toHaveValue("Failed Alpha title");
   await expect(page.locator("#memoryTitle")).toHaveText("Campaign Alpha");
   await expect(page.locator("#campaignSaveStatus")).toHaveAttribute("data-state", "error");
-  await expect(page.locator("#campaignStatusMessage")).toContainText("Synthetic save failure");
+  await expect(page.locator("#campaignStatusMessage")).toHaveText("Campaign settings could not be saved.");
+  await expect(page.locator("#campaignStatusMessage")).not.toContainText("Synthetic save failure");
 });
 
 test("late save completion cannot overwrite a campaign selected after Discard", async ({ page }) => {
@@ -192,7 +193,7 @@ test("link navigation offers Save, Discard, and Stay before leaving the campaign
   await expect(page).toHaveURL(/#dashboard$/u);
   await page.locator("#navSetup").click();
   await page.locator("#navCampaigns").click();
-  const campaignLoad = page.waitForResponse((response) => response.url().includes("/campaigns/campaign-a/memory/context-preview"));
+  const campaignLoad = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/campaigns/campaign-a/state");
   await page.locator('#campaignList [data-campaign-id="campaign-a"]').click();
   await campaignLoad;
   await page.locator("#campaignTitle").fill("Saved Alpha title");
