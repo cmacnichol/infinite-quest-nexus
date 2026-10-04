@@ -474,22 +474,49 @@ test("restores an accepted turn outside the recent window once and explains a re
   expect(desktopLookupCount()).toBe(2);
 });
 
-test("a pinned resumed turn disables Previous and Next catches up to latest", async ({ page }) => {
+test("a pinned resumed turn supports exact adjacent History lookups", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });
   await installLegacyUiFixture(page, fixture);
   await seedReaderPosition(page, fixtureUserId(fixture), fixture.campaignId, fixture.turns[11]!);
   await prepareStoryPage(page, fixture.campaignId);
   const lookupCount = await installExactTurnRoute(page, fixture, () => fixture.turns[11]!);
+  const adjacentLookups = new Map<number, number>();
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/13`, async route => {
+    adjacentLookups.set(13, (adjacentLookups.get(13) ?? 0) + 1);
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[12] }) });
+  });
+  await page.route(`**/api/v1/campaigns/${fixture.campaignId}/reader/turns/11`, async route => {
+    adjacentLookups.set(11, (adjacentLookups.get(11) ?? 0) + 1);
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ campaignId: fixture.campaignId, turn: fixture.turns[10] }) });
+  });
 
   await page.goto(`${origin}/story/${fixture.campaignId}`);
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
   await expect(page.locator("#scene-12")).toBeVisible();
+  await page.locator("[data-story-reader-toolbar]").getByRole("button", { name: "History" }).click();
+  await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 12");
+  await expect(page.locator("#btnTurnHistoryPreviousTurn")).toBeEnabled();
+  await expect(page.locator("#btnTurnHistoryNextTurn")).toBeEnabled();
+
+  await page.locator("#btnTurnHistoryNextTurn").click();
+  await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 13");
+  expect(adjacentLookups.get(13)).toBe(1);
+  await page.locator("#btnTurnHistoryPreviousTurn").click();
+  await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 12");
+  expect(lookupCount()).toBe(2);
+  await page.locator("#btnTurnHistoryPreviousTurn").click();
+  await expect(page.locator("#turnHistoryPreviewCard .history-card")).toContainText("Turn 11");
+  expect(adjacentLookups.get(11)).toBe(1);
+  expect(await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count()).toBeLessThanOrEqual(50);
+
+  await page.locator("#btnTurnHistoryDone").click();
+  await expect(page.locator("#readerTurnCount")).toHaveText("Turn 12 of 317");
   await expect(page.locator("#btnPrev")).toBeDisabled();
   await expect(page.locator("#btnNext")).toBeEnabled();
   await page.locator("#btnNext").click();
   await expect(page.locator("#readerTurnCount")).toHaveText("Turn 317 of 317");
   await expect(page.locator("#scene-317")).toBeVisible();
-  expect(lookupCount()).toBe(1);
+  expect(lookupCount()).toBe(2);
 });
 test("a manual scroll cancels a pending exact-turn restore", async ({ page }) => {
   const fixture = legacyUiFixture({ turnCount: 317, worldCount: 1, campaignCount: 1 });

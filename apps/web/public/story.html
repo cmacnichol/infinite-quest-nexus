@@ -448,6 +448,20 @@
       </div>
       <div class="dialog-scroll">
         <p id="turnHistoryLoadStatus" class="turn-history-load-status mini hidden" role="status" aria-live="polite"></p>
+        <div class="row wrap history-page-actions" aria-label="History pages">
+          <button id="btnTurnHistoryNewer" type="button" class="small ghost" disabled>Newer history page</button>
+          <button id="btnTurnHistoryOlder" type="button" class="small ghost" disabled>Older history page</button>
+        </div>
+        <section id="turnHistorySelectedPreview" class="history-selected-preview hidden" aria-label="Selected turn preview">
+          <div class="row wrap history-preview-heading">
+            <h4>Selected turn preview</h4>
+            <div class="row wrap">
+              <button id="btnTurnHistoryPreviousTurn" class="small ghost" type="button">Previous turn</button>
+              <button id="btnTurnHistoryNextTurn" class="small ghost" type="button">Next turn</button>
+            </div>
+          </div>
+          <div id="turnHistoryPreviewCard"></div>
+        </section>
         <div id="turnHistoryModalList" class="stack"></div>
         <div id="turnHistoryStatePanel" class="track-card turn-history-state-panel hidden"></div>
       </div>

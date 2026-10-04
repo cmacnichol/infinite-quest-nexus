@@ -396,10 +396,17 @@ button.history-card:hover, button.history-card:focus-visible, .history-card[role
 .turn-history-load-status { margin: 0 0 10px; color: var(--dim); }
 .turn-history-load-status.loading { color: var(--gold2); }
 .turn-history-load-status.error { color: var(--danger); }
+.history-page-actions { justify-content: space-between; margin: 0 0 10px; }
+.history-selected-preview { display: grid; gap: 8px; margin: 0 0 12px; padding: 10px; border: 1px solid rgba(241,194,50,.34); border-radius: 14px; background: rgba(241,194,50,.045); }
+.history-preview-heading { justify-content: space-between; align-items: center; }
+.history-preview-heading h4 { margin: 0; color: var(--gold2); }
+.history-preview-turn { pointer-events: none; }
+.history-preview-turn .history-card { cursor: default; }
 .track-card h4, .history-card h4 { margin: 0; font-size: .95rem; color: #fff; }
 .track-card p, .history-card p { margin: 0; color: var(--dim); font-size: .86rem; line-height: 1.45; }
+.history-entry { display: grid; gap: 8px; }
 .history-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.history-card-heading h4 { min-width: 0; overflow-wrap: anywhere; }
+.history-card-title { min-width: 0; overflow-wrap: anywhere; }
 .turn-history-prompt-label { color: var(--muted); font-size: .78rem; }
 .turn-history-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
 .turn-chronicle-audit { display: grid; gap: 6px; min-width: 0; margin: 2px 0 0; color: var(--dim); font-size: .78rem; line-height: 1.4; }

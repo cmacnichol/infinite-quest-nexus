@@ -2,12 +2,18 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
+import {
+  isQualifyingNativeLongTask,
+  nativeLongTaskCoversInterval,
+  type InducedTaskInterval,
+  type NativeLongTaskEntry
+} from "./helpers/legacy-ui-long-tasks.js";
 
 declare global {
   interface Window {
-    __legacyUiLongTasks?: number[];
-    __legacyUiLifecycleLongTasks?: Array<{ durationMs: number; startTime: number }>;
-    __legacyUiInducedLongTaskStartedAt?: number;
+    __legacyUiLongTasks?: NativeLongTaskEntry[];
+    __legacyUiLifecycleLongTasks?: NativeLongTaskEntry[];
+    __legacyUiInducedLongTaskInterval?: InducedTaskInterval;
     __legacyUiNativeLongTaskSupported?: boolean;
     __legacyUiDelayedResult?: { status: number; body: unknown };
   }
@@ -62,13 +68,16 @@ test("legacy dashboard and Story baseline records requests, zero writes, history
     if (new URL(request.url()).origin !== origin && request.url().startsWith("http")) externalRequests.push(request.url());
   });
   await page.addInitScript(() => {
-    const target = window as typeof window & { __legacyUiLongTasks?: number[] };
+    const target = window as typeof window & { __legacyUiLongTasks?: NativeLongTaskEntry[] };
     target.__legacyUiLongTasks = [];
     if ("PerformanceObserver" in window) {
       try {
         target.__legacyUiNativeLongTaskSupported = PerformanceObserver.supportedEntryTypes.includes("longtask");
         new PerformanceObserver(list => {
-          for (const entry of list.getEntries()) target.__legacyUiLongTasks?.push(entry.duration);
+          for (const entry of list.getEntries()) {
+            const nativeEntry = { durationMs: entry.duration, startTime: entry.startTime };
+            target.__legacyUiLongTasks?.push(nativeEntry);
+          }
         }).observe({ type: "longtask", buffered: true });
       } catch { /* Long task timing is optional in unsupported browser builds. */ }
     }
@@ -103,20 +112,59 @@ test("legacy dashboard and Story baseline records requests, zero writes, history
   const storyDomNodes = await page.locator("body *").count();
   await captureDesktopAndMobile(page, testInfo, "story-reader");
 
+  const historyEndpoint = `/api/v1/campaigns/${fixture.campaignId}/turns`;
+  const historyOpenRequestIndex = instrumentation.requests.length;
   const historyOpenStarted = performance.now();
   await page.locator("#turnPill").click();
   await expect(page.locator("#turnHistoryDialog")).toBeVisible();
-  await expect(page.locator("#turnHistoryModalList .history-card")).toHaveCount(317);
+  await expect.poll(() => page.locator("#turnHistoryModalList .history-card").count()).toBeLessThanOrEqual(50);
+  await expect(page.locator("#turnHistoryModalList .history-card").first()).toBeVisible();
   const historyOpenMs = performance.now() - historyOpenStarted;
-  await expect(page.locator("#turnHistoryDialog")).toBeVisible();
+  const historyOpenRequests = instrumentation.requests.slice(historyOpenRequestIndex);
+  const historyOpenResponseBytes = historyOpenRequests.reduce((sum, request) => sum + request.responseBytes, 0);
+  expect(historyOpenRequests.filter(request => request.path === historyEndpoint)).toHaveLength(0);
+  const historyOpenTurnCardCount = await page.locator("#turnHistoryModalList .history-card").count();
   const historyDomNodes = await page.locator("body *").count();
   await captureDesktopAndMobile(page, testInfo, "story-history");
+
+  const historyPagingRequestIndex = instrumentation.requests.length;
+  const historyPagingStarted = performance.now();
+  const older = page.locator("#btnTurnHistoryOlder");
+  const maxOlderClicks = Math.ceil(fixture.turnCount / 49) + 2;
+  let olderClicks = 0;
+  while (!(await page.locator('#turnHistoryModalList [data-turn-number="1"]').count())) {
+    expect(olderClicks).toBeLessThan(maxOlderClicks);
+    await expect(older).toBeEnabled();
+    const previousPage = await page.locator("#turnHistoryModalList .history-card").evaluateAll(cards =>
+      cards.map(card => Number((card as HTMLElement).dataset.turnNumber))
+    );
+    const priorHistoryRequestCount = instrumentation.requests.filter(request => request.path === historyEndpoint).length;
+    await older.click();
+    await expect.poll(() => instrumentation.requests.filter(request => request.path === historyEndpoint).length)
+      .toBeGreaterThan(priorHistoryRequestCount);
+    const pendingRequest = instrumentation.requests.filter(request => request.path === historyEndpoint).at(-1)!;
+    expect(pendingRequest.configuredDelayMs).toBe(0);
+    await page.waitForFunction(previous => JSON.stringify(Array.from(document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card"))
+      .map(card => Number(card.dataset.turnNumber))) !== JSON.stringify(previous), previousPage, { timeout: 10_000 });
+    olderClicks += 1;
+    expect(await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count()).toBeLessThanOrEqual(50);
+  }
+  await expect(page.locator('#turnHistoryModalList [data-turn-number="1"]')).toBeVisible();
+  await expect(older).toBeDisabled();
+  const historyPagingMs = performance.now() - historyPagingStarted;
+  const historyPagingRequests = instrumentation.requests.slice(historyPagingRequestIndex);
+  const historyPagingTurnRequests = historyPagingRequests.filter(request => request.path === historyEndpoint);
+  const historyPagingResponseBytes = historyPagingRequests.reduce((sum, request) => sum + request.responseBytes, 0);
+  expect(historyPagingTurnRequests.length).toBeGreaterThan(0);
+  await captureDesktopAndMobile(page, testInfo, "story-history-turn-1");
+
   const navigationStarted = performance.now();
-  await page.locator("#turnHistoryModalList .history-card").first().click();
+  await page.locator('#turnHistoryModalList [data-turn-number="1"]').click();
   await page.locator("#btnTurnHistoryJump").click();
   await expect(page.locator("#viewPill")).toContainText("1");
   const historyNavigationMs = performance.now() - navigationStarted;
-  longTasks.push(...await page.evaluate(() => (window as typeof window & { __legacyUiLongTasks?: number[] }).__legacyUiLongTasks ?? []));
+  const observedLongTasks = await page.evaluate(() => (window as typeof window & { __legacyUiLongTasks?: NativeLongTaskEntry[] }).__legacyUiLongTasks ?? []);
+  longTasks.push(...observedLongTasks.filter(isQualifyingNativeLongTask).map(entry => entry.durationMs));
 
   expect(instrumentation.writes).toEqual([]);
   expect(instrumentation.requests.length).toBeGreaterThan(0);
@@ -128,8 +176,15 @@ test("legacy dashboard and Story baseline records requests, zero writes, history
     fixture: { turnCount: 317, worldCount: 3, campaignCount: 2 },
     requests: instrumentation.requests,
     writes: instrumentation.writes.length,
-    domCounts: { dashboard: dashboardDomNodes, story: storyDomNodes, history: historyDomNodes },
+    domCounts: { dashboard: dashboardDomNodes, story: storyDomNodes, historyAtOpen: historyDomNodes, initialHistoryCards: historyOpenTurnCardCount },
     historyOpenMs,
+    historyOpenRequestCount: historyOpenRequests.length,
+    historyOpenResponseBytes,
+    explicitHistoryPagingMs: historyPagingMs,
+    explicitHistoryPagingClicks: olderClicks,
+    explicitHistoryPagingRequestCount: historyPagingRequests.length,
+    explicitHistoryPagingTurnRequestCount: historyPagingTurnRequests.length,
+    explicitHistoryPagingResponseBytes: historyPagingResponseBytes,
     historyNavigationMs,
     longTasks,
     nativeLongTaskSupported: await page.evaluate(() => (window as typeof window & { __legacyUiNativeLongTaskSupported?: boolean }).__legacyUiNativeLongTaskSupported ?? false),
@@ -140,6 +195,8 @@ test("legacy dashboard and Story baseline records requests, zero writes, history
   expect(storyDomNodes).toBeGreaterThan(0);
   expect(historyDomNodes).toBeGreaterThan(0);
   expect(Number.isFinite(historyOpenMs)).toBe(true);
+  expect(historyOpenTurnCardCount).toBeLessThanOrEqual(50);
+  expect(historyPagingMs).toBeGreaterThanOrEqual(0);
 });
 
 test("route instrumentation holds delays, applies method-specific failures, and captures writes", async ({ page }) => {
@@ -193,7 +250,8 @@ test("long-task measurements are collected before each document is replaced", as
     if ("PerformanceObserver" in window) {
       new PerformanceObserver(list => {
         for (const entry of list.getEntries()) {
-          window.__legacyUiLifecycleLongTasks?.push({ durationMs: entry.duration, startTime: entry.startTime });
+          const nativeEntry = { durationMs: entry.duration, startTime: entry.startTime };
+          window.__legacyUiLifecycleLongTasks?.push(nativeEntry);
         }
       }).observe({ type: "longtask", buffered: true });
     }
@@ -201,6 +259,7 @@ test("long-task measurements are collected before each document is replaced", as
   const collected: Array<{ phase: string; durationMs: number; startTime: number | null }> = [];
   const syntheticFallbackPhases: string[] = [];
   const nativeSupportByPhase: Record<string, boolean> = {};
+  const inducedIntervals: Record<string, InducedTaskInterval> = {};
   const collectBeforeReplacement = async (phase: string) => {
     const nativeSupported = await page.evaluate(() => "PerformanceObserver" in window
       && PerformanceObserver.supportedEntryTypes.includes("longtask"));
@@ -208,30 +267,36 @@ test("long-task measurements are collected before each document is replaced", as
     await page.evaluate(() => { window.__legacyUiLifecycleLongTasks = []; });
     await page.evaluate(() => new Promise<void>(resolve => {
       setTimeout(() => {
-        window.__legacyUiInducedLongTaskStartedAt = performance.now();
         const startedAt = performance.now();
+        window.__legacyUiInducedLongTaskInterval = { startTime: startedAt, endTime: startedAt };
         while (performance.now() - startedAt < 70) { /* Induce one measurable timer-task long task. */ }
+        window.__legacyUiInducedLongTaskInterval = {
+          startTime: startedAt,
+          endTime: performance.now()
+        };
         resolve();
       }, 0);
     }));
-    const inducedStartedAt = await page.evaluate(() => window.__legacyUiInducedLongTaskStartedAt ?? null);
+    const inducedInterval = await page.evaluate(() => window.__legacyUiInducedLongTaskInterval ?? null);
+    if (inducedInterval) inducedIntervals[phase] = inducedInterval;
     if (nativeSupported) {
-      expect(inducedStartedAt).not.toBeNull();
-      const taskStartedAt = inducedStartedAt ?? 0;
-      await page.waitForFunction(startedAt => window.__legacyUiLifecycleLongTasks?.some(entry => entry.durationMs >= 50
-        && entry.startTime >= startedAt && entry.startTime <= startedAt + 20) ?? false, taskStartedAt, { timeout: 2_000 });
+      expect(inducedInterval).not.toBeNull();
+      await expect.poll(async () => {
+        const entries = await page.evaluate(() => window.__legacyUiLifecycleLongTasks ?? []);
+        return entries.some(entry => nativeLongTaskCoversInterval(entry, inducedInterval!));
+      }, { timeout: 2_000 }).toBe(true);
     }
-    const durations = await page.evaluate(() => {
-      const result = [...(window.__legacyUiLifecycleLongTasks ?? [])];
+    const { entries: durations, interval } = await page.evaluate(() => {
+      const entries = [...(window.__legacyUiLifecycleLongTasks ?? [])];
       window.__legacyUiLifecycleLongTasks = [];
-      return result;
+      return { entries, interval: window.__legacyUiInducedLongTaskInterval ?? null };
     });
     if (!nativeSupported) {
       syntheticFallbackPhases.push(phase);
       durations.push({ durationMs: 71, startTime: -1 });
     } else {
-      const taskStartedAt = inducedStartedAt ?? 0;
-      expect(durations.some(entry => entry.durationMs >= 50 && entry.startTime >= taskStartedAt && entry.startTime <= taskStartedAt + 20)).toBe(true);
+      expect(interval).not.toBeNull();
+      expect(durations.some(entry => nativeLongTaskCoversInterval(entry, interval!))).toBe(true);
     }
     collected.push(...durations.map(entry => ({ phase, durationMs: entry.durationMs, startTime: entry.startTime < 0 ? null : entry.startTime })));
   };
@@ -248,6 +313,7 @@ test("long-task measurements are collected before each document is replaced", as
     source: "bounded native observer polling after an induced task when supported; deterministic synthetic entries only for unsupported documents",
     nativeSupportByPhase,
     syntheticFallbackPhases,
+    inducedIntervals,
     entries: collected
   };
   const lifecyclePath = testInfo.outputPath("long-task-lifecycle.json");

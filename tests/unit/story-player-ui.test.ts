@@ -32,6 +32,10 @@ async function bootLegacyStory({
   updateProfile,
   rewindCampaign = vi.fn().mockResolvedValue({}),
   fetchCampaignState = vi.fn().mockResolvedValue({ activeTurnNumber: 100 }),
+  getReaderHistoryTurn = vi.fn(async (campaignId: string, turnNumber: number) => ({
+    campaignId,
+    turn: makeTurns(turnNumber, turnNumber)[0]
+  })),
   getTurnCorrection = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
   correctTurnNarration = vi.fn().mockResolvedValue({ effectiveNarration: "", correctionRevision: 0 }),
   illustrationConfig = { enabled: false, sourcePolicy: "off" },
@@ -52,6 +56,7 @@ async function bootLegacyStory({
   updateProfile?: ReturnType<typeof vi.fn>;
   rewindCampaign?: ReturnType<typeof vi.fn>;
   fetchCampaignState?: ReturnType<typeof vi.fn>;
+  getReaderHistoryTurn?: ReturnType<typeof vi.fn>;
   getTurnCorrection?: ReturnType<typeof vi.fn>;
   correctTurnNarration?: ReturnType<typeof vi.fn>;
   illustrationConfig?: Record<string, unknown>;
@@ -105,7 +110,9 @@ async function bootLegacyStory({
   const initialized = (storyModule.startStoryPlayer as (composition: unknown) => Promise<void>)({
     api: {
       session: {
-        get: async () => ({ user: { settings: { continuousReading, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_action" } } }),
+        get: async () => ({ user: {
+          settings: { continuousReading, autoSubmitTurnChoices: false, defaultTurnControlStyle: "flexible_action" }
+        } }),
         updateProfile: saveProfile
       },
       providers: { list: async () => ({ providers: [{ providerRole: "text" }] }) },
@@ -126,6 +133,7 @@ async function bootLegacyStory({
       segments: loadIllustrationSegments ?? (async () => ({ segments: illustrationSegments })),
       imageJobs: async () => ({ jobs: [] })
     },
+    readerHistory: { getTurn: getReaderHistoryTurn },
     workflow,
     ...(failedTurnPrompts ? { failedTurnPrompts } : {}),
     pendingSubmissions: { clear: () => undefined },
@@ -1305,19 +1313,18 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     expect(storyHtml).toContain('id="btnTurnHistoryBranch"');
     expect(storyHtml).toContain('class="row wrap dialog-actions history-dialog-actions"');
     expect(storyScript).toContain('state.historySelectedTurnNumber = null;');
-    expect(storyScript).toContain('const currentTurnNumber = currentViewTurnNumber();');
-    expect(storyScript).toContain('const selectedTurnNumber = Number.isInteger(state.historySelectedTurnNumber)');
-    expect(storyScript).toContain('selectHistoryTurn(selectedTurnNumber);');
-    expect(storyScript).toContain('card.setAttribute("role", "button");');
-    expect(storyScript).toContain('card.setAttribute("tabindex", "0");');
-    expect(storyScript).toContain('card.setAttribute("aria-pressed", "false");');
-    expect(storyScript).toContain('if (event.key === "Enter" || event.key === " ")');
+    expect(storyHtml).toContain('id="btnTurnHistoryOlder"');
+    expect(storyHtml).toContain('id="btnTurnHistoryNewer"');
+    expect(storyHtml).toContain('id="btnTurnHistoryPreviousTurn"');
+    expect(storyScript).toContain('card.type = "button";');
+    expect(storyScript).toContain('card.setAttribute("aria-pressed", String(selected));');
+    expect(storyScript).toContain('card.addEventListener("click", () => selectHistoryTurn(Number(turn.turnNumber)));');
     expect(storyScript).toContain('card.classList.toggle("selected", selected);');
-    expect(storyScript).toContain('if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);');
+    expect(storyScript).toContain('if (btnTurnHistoryInspect) btnTurnHistoryInspect.addEventListener("click"');
     expect(storyScript).toContain('inspectBtn.disabled = !hasSelection;');
     expect(storyScript).toContain('jumpBtn.disabled = !hasSelection;');
     expect(storyScript).toContain('branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber);');
-    expect(storyScript).toContain('navigateToTurn(state.historySelectedTurnNumber);');
+    expect(storyScript).toContain('navigateToTurn(turnNumber);');
     expect(storyScript).toContain('promptBranchOrReset(state.historySelectedTurnNumber);');
     expect(storyCss).toContain('.history-card.selected, .history-card[aria-pressed="true"]');
   });
@@ -1997,10 +2004,10 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("shows the recorded Story Engine prompt interpretation on every turn-history card", () => {
-    expect(storyScript).toContain('const inputMode = t.inputMode === "scene" ? "scene" : "action";');
+    expect(storyScript).toContain('const inputMode = turn.inputMode === "scene" ? "scene" : "action";');
     expect(storyScript).toContain('const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";');
-    expect(storyScript).toContain('class="turn-input-mode-pill ${inputMode}"');
-    expect(storyScript).toContain('aria-label="Prompt interpretation: ${inputModeLabel}"');
+    expect(storyScript).toContain('pill.className = `turn-input-mode-pill ${inputMode}`;');
+    expect(storyScript).toContain('pill.setAttribute("aria-label", `Prompt interpretation: ${inputModeLabel}`);');
     expect(storyCss).toContain('.turn-input-mode-pill {');
     expect(storyCss).toContain('.turn-input-mode-pill.scene {');
   });
@@ -2047,7 +2054,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       const dialog = document.getElementById("turnHistoryDialog");
       const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
-      const audits = document.querySelectorAll('dl[aria-label="Chronicle retrieval"]');
+      const audits = document.querySelectorAll('#turnHistoryModalList details dl[aria-label="Chronicle retrieval"]');
 
       expect(dialog?.hasAttribute("open")).toBe(true);
       expect(audits).toHaveLength(2);
@@ -2055,12 +2062,21 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(audits[1]?.textContent).toContain("Unknown — this turn predates retrieval auditing or came from an import without audit metadata.");
       expect(cards).toHaveLength(2);
       expect(cards[1]?.getAttribute("aria-pressed")).toBe("true");
+      expect(cards[0]?.parentElement?.tagName).toBe("ARTICLE");
+      expect(cards[0]?.parentElement?.querySelector("details")).not.toBeNull();
+      expect(cards[0]?.parentElement?.querySelector("details")?.parentElement).toBe(cards[0]?.parentElement);
+      expect(Array.from(cards[0]?.children ?? []).every((child) => child.tagName === "SPAN")).toBe(true);
+      expect(cards[0]?.querySelector("details, summary, div, p, h1, h2, h3, h4, ul, ol")).toBeNull();
       const enter = new window.Event("keydown", { bubbles: true, cancelable: true });
       Object.defineProperty(enter, "key", { value: "Enter" });
       cards[0]?.dispatchEvent(enter);
+      cards[0]?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(cards[0]?.getAttribute("aria-pressed")).toBe("true");
       expect(cards[1]?.getAttribute("aria-pressed")).toBe("false");
-      expect(enter.defaultPrevented).toBe(true);
+      expect(cards[0]?.tagName).toBe("BUTTON");
+      const summary = cards[0]?.parentElement?.querySelector("summary");
+      summary?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      expect(cards[0]?.getAttribute("aria-pressed")).toBe("true");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2109,7 +2125,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     }
   });
 
-  it("loads every older page when Turn History opens and preserves absolute selection", async () => {
+  it("opens on the loaded recent page and fetches one older page only when requested", async () => {
     const fetchTurns = vi.fn().mockResolvedValue({
       campaignId: "campaign-1",
       turns: makeTurns(1, 50),
@@ -2123,16 +2139,26 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       });
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
 
       const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
-      expect(fetchTurns).toHaveBeenCalledTimes(1);
-      expect(fetchTurns).toHaveBeenCalledWith("campaign-1", { before: "before-51", limit: 200 });
-      expect(cards).toHaveLength(100);
-      expect(cards[0]?.textContent).toContain("Turn 1");
-      expect(cards[99]?.textContent).toContain("Turn 100");
-      expect(cards[99]?.getAttribute("aria-pressed")).toBe("true");
-      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("All 100 turns loaded");
+      expect(fetchTurns).not.toHaveBeenCalled();
+      expect(cards).toHaveLength(50);
+      expect(cards[0]?.textContent).toContain("Turn 51");
+      expect(cards[49]?.textContent).toContain("Turn 100");
+
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("Showing turns"));
+      const olderCards = document.querySelectorAll<HTMLElement>("#turnHistoryDialog .history-card");
+      const pageCards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
+      const previewCard = document.querySelector<HTMLElement>("#turnHistoryPreviewCard .history-card");
+      expect(fetchTurns).toHaveBeenCalledWith("campaign-1", { before: "before-51", limit: 50 });
+      expect(olderCards).toHaveLength(50);
+      expect(pageCards).toHaveLength(49);
+      expect(pageCards[0]?.textContent).toContain("Turn 2");
+      expect(previewCard?.textContent).toContain("Turn 1");
+      expect(olderCards[49]?.textContent).toContain("Turn 50");
+      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("Showing turns 2–50");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2174,11 +2200,13 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       const pill = document.getElementById("turnPill");
       pill?.dispatchEvent(new window.Event("click", { bubbles: true }));
       pill?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(fetchTurns).toHaveBeenCalledTimes(1);
-      rejectPage(new Error("older page unavailable"));
+      rejectPage(new Error("PRIVATE_HISTORY_ROUTE_CANARY older page unavailable"));
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(50);
-      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("older page unavailable");
+      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("Could not load older history page.");
+      expect(document.getElementById("turnHistoryLoadStatus")?.textContent).not.toContain("PRIVATE_HISTORY_ROUTE_CANARY");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2211,6 +2239,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       vi.stubGlobal("confirm", () => true);
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -2219,6 +2248,8 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       resolveOldPage({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
 
       const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
       expect(cards).toHaveLength(50);
@@ -2229,15 +2260,16 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toBe("");
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(fetchTurns).toHaveBeenCalledTimes(2);
-      expect(fetchTurns).toHaveBeenLastCalledWith("campaign-1", { before: "before-52", limit: 200 });
-      resolveNewPage({ campaignId: "campaign-1", turns: makeTurns(1, 51), nextCursor: null });
+      expect(fetchTurns).toHaveBeenLastCalledWith("campaign-1", { before: "before-52", limit: 50 });
+      resolveNewPage({ campaignId: "campaign-1", turns: makeTurns(2, 51), nextCursor: null });
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
       const completeCards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
-      expect(completeCards).toHaveLength(101);
-      expect(completeCards[0]?.textContent).toContain("Turn 1");
-      expect(completeCards[100]?.textContent).toContain("Turn 101");
+      expect(completeCards).toHaveLength(49);
+      expect(completeCards[0]?.textContent).toContain("Turn 3");
+      expect(completeCards[48]?.textContent).toContain("Turn 51");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2273,6 +2305,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       });
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(fetchTurns).toHaveBeenCalledTimes(1);
 
       const action = document.getElementById("freeAction") as HTMLTextAreaElement;
@@ -2287,8 +2320,9 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
-      expect(cards).toHaveLength(51);
-      expect(cards[50]?.textContent).toContain("Turn 101");
+      expect(cards).toHaveLength(50);
+      expect(cards[0]?.textContent).toContain("Turn 52");
+      expect(cards[49]?.textContent).toContain("Turn 101");
       expect(document.getElementById("turnHistoryLoadStatus")?.classList.contains("hidden")).toBe(true);
     } finally {
       vi.unstubAllGlobals();
@@ -2321,6 +2355,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       document.getElementById("btnUndo")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(fetchTurns).toHaveBeenCalledTimes(1);
 
       resolveReload({
@@ -2335,6 +2370,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       resolveOldPage({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
+      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
 
       const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
       expect(cards).toHaveLength(50);
@@ -2345,12 +2381,18 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(document.getElementById("toast")?.textContent).not.toContain("Could not load complete history");
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(fetchTurns).toHaveBeenCalledTimes(2);
-      expect(fetchTurns).toHaveBeenLastCalledWith("campaign-1", { before: "before-52", limit: 200 });
-      resolveNewPage({ campaignId: "campaign-1", turns: makeTurns(1, 51), nextCursor: null });
+      expect(fetchTurns).toHaveBeenLastCalledWith("campaign-1", { before: "before-52", limit: 50 });
+      resolveNewPage({ campaignId: "campaign-1", turns: makeTurns(2, 51), nextCursor: null });
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(101);
+      const pageCards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
+      const previewCard = document.querySelector<HTMLElement>("#turnHistoryPreviewCard .history-card");
+      expect(pageCards).toHaveLength(49);
+      expect(pageCards[0]?.textContent).toContain("Turn 3");
+      expect(pageCards[48]?.textContent).toContain("Turn 51");
+      expect(pageCards.length + Number(Boolean(previewCard))).toBeLessThanOrEqual(50);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2360,7 +2402,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     let resolveObsoletePage!: (page: Record<string, unknown>) => void;
     const fetchTurns = vi.fn()
       .mockImplementationOnce(() => new Promise((resolve) => { resolveObsoletePage = resolve; }))
-      .mockResolvedValueOnce({ campaignId: "campaign-1", turns: makeTurns(1, 51), nextCursor: null });
+      .mockResolvedValueOnce({ campaignId: "campaign-1", turns: makeTurns(2, 51), nextCursor: "before-2" });
     const syncStatus = vi.fn()
       .mockResolvedValueOnce({
         campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 100 },
@@ -2401,20 +2443,21 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnTurnHistoryOlder")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       expect(fetchTurns).toHaveBeenCalledTimes(2);
-      expect(fetchTurns).toHaveBeenLastCalledWith("campaign-1", { before: "before-52", limit: 200 });
+      expect(fetchTurns).toHaveBeenLastCalledWith("campaign-1", { before: "before-52", limit: 50 });
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
       const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
-      expect(cards).toHaveLength(101);
-      expect(cards[0]?.textContent).toContain("Turn 1");
-      expect(cards[100]?.textContent).toContain("Turn 101");
+      expect(cards).toHaveLength(49);
+      expect(cards[0]?.textContent).toContain("Turn 3");
+      expect(cards[48]?.textContent).toContain("Turn 51");
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("retries complete History after a failed page walk", async () => {
+  it("retries complete history only after continuous reading is explicitly re-enabled", async () => {
     const fetchTurns = vi.fn()
       .mockRejectedValueOnce(new Error("first page failed"))
       .mockResolvedValueOnce({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
@@ -2422,27 +2465,37 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       const { document, window } = await bootLegacyStory({
         turns: makeTurns(51, 100),
         nextCursor: "before-51",
+        continuousReading: true,
         fetchTurns
       });
 
+      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+      await new Promise((resolve) => setTimeout(resolve, 0));
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
-      await vi.waitFor(() => expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(50), { timeout: 5_000 });
-      await vi.waitFor(() => expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("first page failed"), { timeout: 5_000 });
+      expect(fetchTurns).toHaveBeenCalledTimes(1);
+      expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(50);
 
-      document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      document.getElementById("btnOpenUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const continuousReading = document.getElementById("userProfileContinuousReading") as HTMLInputElement;
+      continuousReading.checked = false;
+      document.getElementById("btnSaveUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      document.getElementById("btnOpenUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+      const reenabledContinuousReading = document.getElementById("userProfileContinuousReading") as HTMLInputElement;
+      reenabledContinuousReading.checked = true;
+      document.getElementById("btnSaveUserProfile")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(2), { timeout: 5_000 });
-      await vi.waitFor(() => expect(document.querySelectorAll("#turnHistoryModalList .history-card")).toHaveLength(100), { timeout: 5_000 });
-      const cards = document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card");
-      expect(cards).toHaveLength(100);
-      expect(cards[0]?.textContent).toContain("Turn 1");
-      expect(cards[99]?.textContent).toContain("Turn 100");
+      await vi.waitFor(() => expect(document.querySelectorAll("#storyContainer .scene")).toHaveLength(100), { timeout: 5_000 });
+      const scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
+      expect(scenes[0]?.id).toBe("scene-1");
+      expect(scenes[99]?.id).toBe("scene-100");
       expect(document.getElementById("turnHistoryLoadStatus")?.textContent).toContain("All 100 turns loaded");
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("refreshes enabled continuous reading after History retries an initial load failure", async () => {
+  it("keeps History bounded after continuous-reading's initial complete-load failure", async () => {
     const fetchTurns = vi.fn()
       .mockRejectedValueOnce(new Error("initial continuous history failed"))
       .mockResolvedValueOnce({ campaignId: "campaign-1", turns: makeTurns(1, 50), nextCursor: null });
@@ -2459,15 +2512,17 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
       expect(scenes[0]?.id).toBe("scene-51");
       expect(scenes[49]?.id).toBe("scene-100");
 
+      await vi.waitFor(() => expect(fetchTurns).toHaveBeenCalledTimes(1), { timeout: 5_000 });
       document.getElementById("turnPill")?.dispatchEvent(new window.Event("click", { bubbles: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       scenes = document.querySelectorAll<HTMLElement>("#storyContainer .scene");
-      expect(fetchTurns).toHaveBeenCalledTimes(2);
-      expect(scenes).toHaveLength(100);
-      expect(scenes[0]?.id).toBe("scene-1");
-      expect(scenes[99]?.id).toBe("scene-100");
+      expect(fetchTurns).toHaveBeenCalledTimes(1);
+      expect(scenes).toHaveLength(50);
+      expect(scenes[0]?.id).toBe("scene-51");
+      expect(scenes[49]?.id).toBe("scene-100");
+      expect(document.querySelectorAll<HTMLElement>("#turnHistoryModalList .history-card")).toHaveLength(50);
     } finally {
       vi.unstubAllGlobals();
     }

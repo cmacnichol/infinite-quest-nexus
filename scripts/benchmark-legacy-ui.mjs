@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { chromium } from "@playwright/test";
 import { installLegacyUiFixture, legacyUiFixture } from "../tests/e2e/helpers/legacy-ui-fixtures.ts";
+import { isQualifyingNativeLongTask } from "../tests/e2e/helpers/legacy-ui-long-tasks.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.PLAYWRIGHT_LEGACY_PORT ?? "43173");
@@ -56,19 +57,9 @@ async function waitForPendingRequest(requests, path) {
   throw new Error(`Expected delayed mock request was not observed: ${path}`);
 }
 
-async function waitForHistoryCards(page, requests, instrumentation, campaignId, count) {
-  const endpoint = `/api/v1/campaigns/${campaignId}/turns`;
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (await page.locator("#turnHistoryModalList .history-card").count() === count) return;
-    const pending = requests.find(request => request.path === endpoint && request.finishedAt === undefined);
-    if (pending) {
-      if (pending.configuredDelayMs !== 20) throw new Error(`Unexpected configured history delay: ${JSON.stringify(pending)}`);
-      instrumentation.releaseDelayedRoute();
-    }
-    await sleep(5);
-  }
-  throw new Error(`History did not render ${count} cards within ten seconds.`);
+async function waitForHistoryPageChange(page, previousPage) {
+  await page.waitForFunction(previous => JSON.stringify(Array.from(document.querySelectorAll("#turnHistoryModalList .history-card"))
+    .map(card => Number(card.dataset.turnNumber))) !== JSON.stringify(previous), previousPage, { timeout: 10_000 });
 }
 
 async function waitForAssetReads(pendingReads, failures) {
@@ -83,7 +74,7 @@ async function collectDocumentLongTasks(page, phase, phases) {
     window.__legacyUiLongTasks = [];
     return entries;
   });
-  phases[phase].push(...durationsMs);
+  phases[phase].push(...durationsMs.filter(isQualifyingNativeLongTask).map(entry => entry.durationMs));
 }
 
 function percentile(values, percentileValue) {
@@ -159,7 +150,7 @@ try {
       if ("PerformanceObserver" in window) {
         try {
           new PerformanceObserver(list => {
-            for (const entry of list.getEntries()) window.__legacyUiLongTasks?.push(entry.duration);
+            for (const entry of list.getEntries()) window.__legacyUiLongTasks?.push({ durationMs: entry.duration, startTime: entry.startTime });
           }).observe({ type: "longtask", buffered: true });
         } catch { /* Long task entries are optional in Chromium builds. */ }
       }
@@ -187,26 +178,63 @@ try {
     const dashboardAssetBytes = staticAssetEvidence.slice(0, dashboardAssetEvidenceCount).reduce((sum, entry) => sum + (entry.bytes ?? 0), 0);
     const coldAssetBytes = staticAssetEvidence.slice(dashboardAssetEvidenceCount, coldAssetEvidenceCount).reduce((sum, entry) => sum + (entry.bytes ?? 0), dashboardAssetBytes);
     await collectDocumentLongTasks(page, "story", longTasksByPhase);
-    const started = performance.now();
-    const historyClick = page.locator("#turnPill").click();
+    const historyEndpoint = `/api/v1/campaigns/${fixture.campaignId}/turns`;
+    const historyOpenRequestIndex = instrumentation.requests.length;
+    const historyOpenStarted = performance.now();
+    await page.locator("#turnPill").click();
     await page.locator("#turnHistoryDialog").waitFor({ state: "visible" });
-    const delayedTurnRequest = await waitForPendingRequest(instrumentation.requests, `/api/v1/campaigns/${fixture.campaignId}/turns`);
-    if (delayedTurnRequest.configuredDelayMs !== 20 || delayedTurnRequest.finishedAt !== undefined) {
-      throw new Error(`Configured delay was not held: ${JSON.stringify(delayedTurnRequest)}`);
+    await page.locator("#turnHistoryModalList .history-card").first().waitFor({ state: "visible" });
+    const historyOpenMs = performance.now() - historyOpenStarted;
+    const historyOpenRequests = instrumentation.requests.slice(historyOpenRequestIndex);
+    const historyOpenResponseBytes = historyOpenRequests.reduce((sum, request) => sum + request.responseBytes, 0);
+    if (historyOpenRequests.some(request => request.path === historyEndpoint)) {
+      throw new Error(`Opening bounded History unexpectedly fetched a page: ${JSON.stringify(historyOpenRequests)}`);
     }
-    await waitForHistoryCards(page, instrumentation.requests, instrumentation, fixture.campaignId, 317);
-    const historyOpenMs = performance.now() - started;
-    await historyClick;
+    const historyOpenCardCount = await page.locator("#turnHistoryModalList .history-card").count();
+    if (historyOpenCardCount > 50) throw new Error(`History opened with ${historyOpenCardCount} cards.`);
     const historyDomNodes = await page.locator("body *").count();
     await collectDocumentLongTasks(page, "history", longTasksByPhase);
     await waitForRequestsToSettle(instrumentation.requests);
     await waitForAssetReads(pendingAssetReads, assetReadFailures);
+
+    const historyPagingRequestIndex = instrumentation.requests.length;
+    const historyPagingStarted = performance.now();
+    const older = page.locator("#btnTurnHistoryOlder");
+    const maxOlderClicks = Math.ceil(fixtureCounts.turnCount / 49) + 2;
+    let olderClicks = 0;
+    while (!(await page.locator('#turnHistoryModalList [data-turn-number="1"]').count())) {
+      if (olderClicks >= maxOlderClicks) throw new Error(`Turn 1 did not become visible within ${maxOlderClicks} Older clicks.`);
+      if (!(await older.isEnabled())) throw new Error("Older paging ended before Turn 1 became visible.");
+      const previousPage = await page.locator("#turnHistoryModalList .history-card").evaluateAll(cards =>
+        cards.map(card => Number(card.dataset.turnNumber))
+      );
+      await older.click();
+      const delayedTurnRequest = await waitForPendingRequest(instrumentation.requests, historyEndpoint);
+      if (delayedTurnRequest.configuredDelayMs !== 20 || delayedTurnRequest.finishedAt !== undefined) {
+        throw new Error(`Configured explicit-page delay was not held: ${JSON.stringify(delayedTurnRequest)}`);
+      }
+      instrumentation.releaseDelayedRoute();
+      await waitForHistoryPageChange(page, previousPage);
+      olderClicks += 1;
+      const visibleCards = await page.locator("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").count();
+      if (visibleCards > 50) throw new Error(`Explicit history paging rendered ${visibleCards} cards.`);
+    }
+    await page.locator('#turnHistoryModalList [data-turn-number="1"]').waitFor({ state: "visible" });
+    if (await older.isEnabled()) throw new Error("Older remained enabled after Turn 1 became visible.");
+    const historyPagingMs = performance.now() - historyPagingStarted;
+    const historyPagingRequests = instrumentation.requests.slice(historyPagingRequestIndex);
+    const historyPagingTurnRequests = historyPagingRequests.filter(request => request.path === historyEndpoint);
+    const historyPagingResponseBytes = historyPagingRequests.reduce((sum, request) => sum + request.responseBytes, 0);
+    if (historyPagingTurnRequests.length === 0) throw new Error("Explicit Older paging made no history requests.");
+    await waitForRequestsToSettle(instrumentation.requests);
+    await waitForAssetReads(pendingAssetReads, assetReadFailures);
+
     const navigationStarted = performance.now();
-    await page.locator("#turnHistoryModalList .history-card").first().click();
+    await page.locator('#turnHistoryModalList [data-turn-number="1"]').click();
     await page.locator("#btnTurnHistoryJump").click();
     await page.locator("#turnHistoryDialog").waitFor({ state: "hidden" });
     const historyNavigationMs = performance.now() - navigationStarted;
-    const delayedTurnRequests = instrumentation.requests.filter(request => request.path === `/api/v1/campaigns/${fixture.campaignId}/turns`);
+    const delayedTurnRequests = instrumentation.requests.filter(request => request.path === historyEndpoint);
     await waitForRequestsToSettle(instrumentation.requests);
     const requestCount = instrumentation.requests.length;
     const apiResponseBytes = instrumentation.requests.reduce((sum, request) => sum + request.responseBytes, 0);
@@ -220,6 +248,14 @@ try {
     await collectDocumentLongTasks(page, "warmReload", longTasksByPhase);
     const record = {
       historyOpenMs,
+      historyOpenRequestCount: historyOpenRequests.length,
+      historyOpenCardCount,
+      historyOpenResponseBytes,
+      historyPagingMs,
+      historyPagingClicks: olderClicks,
+      historyPagingRequestCount: historyPagingRequests.length,
+      historyPagingTurnRequestCount: historyPagingTurnRequests.length,
+      historyPagingResponseBytes,
       historyNavigationMs,
       dashboardDomNodes,
       storyDomNodes,

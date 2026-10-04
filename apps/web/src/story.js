@@ -42,6 +42,12 @@ import {
 import {
   createCampaignContinuityDraft,
   formatChronicleRetrievalAudit,
+  STORY_HISTORY_PAGE_LIMIT,
+  createStoryHistoryWindow,
+  installStoryHistoryWindowPage,
+  selectStoryHistoryPreview,
+  storyHistoryPageRequest,
+  storyHistoryVisibleTurns,
   generationDiagnosticPresentation,
   generationRecoveryGuidance,
   generationResponseFormatPresentation,
@@ -192,6 +198,14 @@ const state = {
   choiceDraftOwnerKey: null,
   choiceDraftSelection: createChoiceDraftSelection(),
   historySelectedTurnNumber: null,
+  historyWindow: null,
+  historyWindowCampaignId: null,
+  historyWindowEpoch: null,
+  historySelectedPreview: null,
+  historyResidentRows: null,
+  historyLocalCompleteRows: null,
+  historyLocalEnd: null,
+  historyPageRequestId: 0,
   historyInspectionRequestId: 0,
   user: {
     id: null,
@@ -210,6 +224,7 @@ const modalBaselines = new WeakMap();
 let discardModalTarget = null;
 let discardModalAction = null;
 let completeHistoryLoad = null;
+let historyPageLoad = null;
 let storyTurnWindowEpoch = 0;
 let nextEditStateSessionId = 0;
 let nextCharacterProfileEditSessionId = 0;
@@ -3272,7 +3287,8 @@ function promptBranchOrReset(turnNumber) {
   const dlg = $("branchStoryDialog");
   if (!dlg) return;
   const targetTurnNumber = Number(turnNumber);
-  if (!targetTurnNumber || turnIndexForNumber(state.turns, targetTurnNumber) < 0) return;
+  const isSelectedPreview = Number(state.historyWindow?.selectedPreview?.turnNumber) === targetTurnNumber;
+  if (!targetTurnNumber || (turnIndexForNumber(state.turns, targetTurnNumber) < 0 && !isSelectedPreview)) return;
   const msg = $("branchStoryMessage");
   if (msg) msg.textContent = `You selected Turn ${targetTurnNumber} (of ${state.campaign?.activeTurnNumber || 0}). Choose what should happen to later turns before continuing.`;
   dlg._targetTurnNumber = targetTurnNumber;
@@ -4061,90 +4077,195 @@ async function saveUserProfile() {
 async function openTurnHistoryModal() {
   const dialog = $("turnHistoryDialog");
   openManagedModal(dialog);
-  populateHistoryContainer($("turnHistoryModalList"));
-  if (!state.historyNextCursor) {
-    setTurnHistoryLoadStatus(`All ${state.turns.length} turns loaded.`);
-    return;
+  if (state.historyWindowCampaignId !== state.campaignId || state.historyWindowEpoch !== storyTurnWindowEpoch) {
+    initializeStoryHistoryWindow();
   }
-  setTurnHistoryLoadStatus(`Loading earlier turns… ${state.turns.length} loaded`, "loading");
-  try {
-    await ensureCompleteTurnHistory();
-    populateHistoryContainer($("turnHistoryModalList"));
-  } catch (error) {
-    if (isCompleteHistorySuperseded(error)) {
-      populateHistoryContainer($("turnHistoryModalList"));
-      return;
-    }
-    setTurnHistoryLoadStatus(`Could not load complete history: ${error.message}`, "error");
-    toast(`Could not load complete history: ${error.message}`);
-  }
+  renderStoryHistoryWindow();
 }
 
-function populateHistoryContainer(container) {
+function initializeStoryHistoryWindow(options = {}) {
+  const residentRows = options.residentRows || state.turns || [];
+  const recentTurns = options.turns || residentRows.slice(-STORY_HISTORY_PAGE_LIMIT);
+  const selectionNumber = currentViewTurnNumber();
+  const sameCampaignWindow = state.historyWindowCampaignId === state.campaignId;
+  const retainedSelection = sameCampaignWindow
+    ? state.historySelectedPreview
+      || residentRows.find((turn) => Number(turn.turnNumber) === state.historySelectedTurnNumber)
+    : null;
+  const selectedPreview = options.clearPreview ? null : (state.readerPinnedTurn
+    || retainedSelection
+    || residentRows.find((turn) => Number(turn.turnNumber) === selectionNumber)
+    || null);
+  state.historyResidentRows = residentRows;
+  state.historyWindow = createStoryHistoryWindow({
+    page: {
+      source: "server",
+      requestCursor: null,
+      nextCursor: options.nextCursor === undefined ? state.historyNextCursor : options.nextCursor,
+      turns: recentTurns
+    },
+    selectedPreview,
+    residentRange: residentRows.length
+      ? { firstTurnNumber: Number(residentRows[0]?.turnNumber), lastTurnNumber: Number(residentRows.at(-1)?.turnNumber) }
+      : null
+  });
+  state.historyWindowCampaignId = state.campaignId;
+  state.historyWindowEpoch = storyTurnWindowEpoch;
+  state.historySelectedPreview = selectedPreview;
+  const visible = storyHistoryVisibleTurns(state.historyWindow);
+  const initialSelection = selectedPreview?.turnNumber
+    ?? (visible.pageTurns.some((turn) => Number(turn.turnNumber) === currentViewTurnNumber())
+      ? currentViewTurnNumber()
+      : visible.pageTurns.at(-1)?.turnNumber);
+  state.historySelectedTurnNumber = Number.isInteger(initialSelection) ? initialSelection : null;
+}
+
+function historyWindowContainsTurn(turnNumber) {
+  if (!state.historyWindow) return false;
+  const visible = storyHistoryVisibleTurns(state.historyWindow);
+  return visible.pageTurns.some((turn) => Number(turn.turnNumber) === turnNumber)
+    || Number(visible.selectedPreview?.turnNumber) === turnNumber;
+}
+
+function historyCard(turn, { selected = false, preview = false } = {}) {
+  const entry = document.createElement("article");
+  entry.className = "history-entry";
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = `history-card${preview ? " history-preview-turn" : ""}`;
+  card.dataset.turnNumber = String(turn.turnNumber);
+  card.setAttribute("aria-pressed", String(selected));
+  card.classList.toggle("selected", selected);
+  const heading = document.createElement("span");
+  heading.className = "history-card-heading";
+  const title = document.createElement("span");
+  title.className = "history-card-title";
+  title.textContent = `${Number(turn.turnNumber) === currentViewTurnNumber() ? "◆ " : ""}Turn ${turn.turnNumber}`;
+  heading.appendChild(title);
+  const inputMode = turn.inputMode === "scene" ? "scene" : "action";
+  const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
+  const pill = document.createElement("span");
+  pill.className = `turn-input-mode-pill ${inputMode}`;
+  pill.textContent = inputModeLabel;
+  pill.setAttribute("aria-label", `Prompt interpretation: ${inputModeLabel}`);
+  heading.appendChild(pill);
+  const excerpt = document.createElement("span");
+  const excerptSource = String(turn.action || turn.narration || turn.effectiveNarration || "");
+  excerpt.className = turn.action ? "turn-history-prompt" : "";
+  excerpt.textContent = `${excerptSource.slice(0, 240)}${excerptSource.length > 240 ? "…" : ""}`;
+  card.append(heading, excerpt);
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "Retrieval details";
+  details.append(summary);
+  const audit = document.createElement("div");
+  audit.innerHTML = chronicleRetrievalHistoryMarkup(turn.chronicleRetrieval);
+  details.appendChild(audit);
+  if (!preview) card.addEventListener("click", () => selectHistoryTurn(Number(turn.turnNumber)));
+  entry.append(card, details);
+  return entry;
+}
+
+function renderStoryHistoryWindow() {
+  const container = $("turnHistoryModalList");
   if (!container) return;
-  container.innerHTML = "";
-  if (state.turns.length === 0) {
-    state.historySelectedTurnNumber = null;
-    container.innerHTML = `<p class="dim mini">No turns recorded yet.</p>`;
-    const panel = $("turnHistoryStatePanel");
-    if (panel) {
-      panel.classList.add("hidden");
-      panel.innerHTML = "";
+  container.replaceChildren();
+  const previewSection = $("turnHistorySelectedPreview");
+  const previewContainer = $("turnHistoryPreviewCard");
+  const statePanel = $("turnHistoryStatePanel");
+  if (state.historyWindowCampaignId !== state.campaignId || state.historyWindowEpoch !== storyTurnWindowEpoch) {
+    initializeStoryHistoryWindow();
+  }
+  if (!state.historyWindow || !state.historyWindowCampaignId) return;
+  const visible = storyHistoryVisibleTurns(state.historyWindow);
+  state.historySelectedPreview = visible.selectedPreview;
+  if (previewSection) previewSection.classList.toggle("hidden", !visible.selectedPreview);
+  if (previewContainer) {
+    previewContainer.replaceChildren();
+    if (visible.selectedPreview) {
+      previewContainer.appendChild(historyCard(visible.selectedPreview, {
+        selected: Number(visible.selectedPreview.turnNumber) === state.historySelectedTurnNumber,
+        preview: true
+      }));
     }
+  }
+  for (const turn of visible.pageTurns) {
+    container.appendChild(historyCard(turn, { selected: Number(turn.turnNumber) === state.historySelectedTurnNumber }));
+  }
+  const older = $("btnTurnHistoryOlder");
+  const newer = $("btnTurnHistoryNewer");
+  if (older) older.disabled = !storyHistoryPageRequest(state.historyWindow, "older") || Boolean(historyPageLoad);
+  if (newer) newer.disabled = !storyHistoryPageRequest(state.historyWindow, "newer") || Boolean(historyPageLoad);
+  const previous = $("btnTurnHistoryPreviousTurn");
+  const next = $("btnTurnHistoryNextTurn");
+  if (previous) previous.disabled = !visible.selectedPreview || Number(visible.selectedPreview.turnNumber) <= 1 || Boolean(historyPageLoad);
+  if (next) next.disabled = !visible.selectedPreview
+    || Number(visible.selectedPreview.turnNumber) >= Number(state.campaign?.activeTurnNumber || latestTurnNumber(state.turns))
+    || Boolean(historyPageLoad);
+  if (visible.pageTurns.length + Number(Boolean(visible.selectedPreview)) > STORY_HISTORY_PAGE_LIMIT) {
+    throw new Error("Story history rendered more than 50 cards.");
+  }
+  if (!visible.pageTurns.length && !visible.selectedPreview) {
+    state.historySelectedTurnNumber = null;
+    const empty = document.createElement("p");
+    empty.className = "dim mini";
+    empty.textContent = "No turns recorded yet.";
+    container.appendChild(empty);
+    if (statePanel) { statePanel.classList.add("hidden"); statePanel.replaceChildren(); }
     updateHistorySelectionActions();
     return;
   }
-  const currentTurnNumber = currentViewTurnNumber();
-  state.turns.forEach((t) => {
-    const card = document.createElement("div");
-    card.className = "history-card";
-    card.dataset.turnNumber = String(t.turnNumber);
-    card.setAttribute("role", "button");
-    card.setAttribute("tabindex", "0");
-    card.setAttribute("aria-pressed", "false");
-    const preview = (t.narration || "").slice(0, 140) + ((t.narration || "").length > 140 ? "…" : "");
-    const inputMode = t.inputMode === "scene" ? "scene" : "action";
-    const inputModeLabel = inputMode === "scene" ? "Scene direction" : "Action";
-    card.innerHTML = `
-      <div class="history-card-heading">
-        <h4>${t.turnNumber === currentTurnNumber ? "◆ " : ""}Turn ${t.turnNumber}${t.action ? `: ${escapeHtml(t.action.slice(0, 60))}` : (t.turnNumber === 1 ? ": Adventure Begin" : "")}</h4>
-        <span class="turn-input-mode-pill ${inputMode}" title="Story Engine interpreted this prompt as ${inputModeLabel}" aria-label="Prompt interpretation: ${inputModeLabel}">${inputModeLabel}</span>
-      </div>
-      ${t.action ? `<div><strong class="turn-history-prompt-label">Prompt</strong><p class="turn-history-prompt">${escapeHtml(t.action)}</p></div>` : ""}
-      <p>${escapeHtml(preview)}</p>
-      ${chronicleRetrievalHistoryMarkup(t.chronicleRetrieval)}
-    `;
-    card.addEventListener("click", () => selectHistoryTurn(t.turnNumber));
-    card.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        selectHistoryTurn(t.turnNumber);
-      }
-    });
-    container.appendChild(card);
-  });
-  const selectedTurnNumber = Number.isInteger(state.historySelectedTurnNumber)
-    && turnIndexForNumber(state.turns, state.historySelectedTurnNumber) >= 0
-    ? state.historySelectedTurnNumber
-    : currentTurnNumber;
-  selectHistoryTurn(selectedTurnNumber);
+  if (!historyWindowContainsTurn(state.historySelectedTurnNumber)) {
+    state.historySelectedTurnNumber = visible.selectedPreview?.turnNumber ?? visible.pageTurns.at(-1)?.turnNumber ?? null;
+    if (state.historySelectedTurnNumber !== null) state.historyWindow = selectStoryHistoryPreview(state.historyWindow, visible.pageTurns.find((turn) => turn.turnNumber === state.historySelectedTurnNumber) ?? visible.selectedPreview);
+  }
+  updateHistorySelectionActions();
 }
 
 function selectHistoryTurn(turnNumber) {
-  if (!Number.isInteger(turnNumber) || turnIndexForNumber(state.turns, turnNumber) < 0) return;
+  if (!Number.isInteger(turnNumber) || !historyWindowContainsTurn(turnNumber)) return;
   state.historySelectedTurnNumber = turnNumber;
-  document.querySelectorAll("#turnHistoryModalList .history-card").forEach(card => {
+  const selectedTurn = [...(state.historyWindow?.cachedPages || []).flatMap((page) => page.turns), state.historyWindow?.selectedPreview]
+    .find((turn) => Number(turn?.turnNumber) === turnNumber) || null;
+  state.historyWindow = selectStoryHistoryPreview(state.historyWindow, selectedTurn);
+  document.querySelectorAll("#turnHistoryModalList .history-card, #turnHistoryPreviewCard .history-card").forEach(card => {
     const selected = Number(card.dataset.turnNumber) === turnNumber;
     card.classList.toggle("selected", selected);
     card.setAttribute("aria-pressed", String(selected));
   });
+  const panel = $("turnHistoryStatePanel");
+  if (panel) { panel.classList.add("hidden"); panel.replaceChildren(); }
+  state.historyInspectionRequestId += 1;
+  renderStoryHistoryWindow();
   updateHistorySelectionActions();
-  if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);
+}
+
+function jumpToSelectedHistoryTurn() {
+  const turnNumber = state.historySelectedTurnNumber;
+  if (!Number.isInteger(turnNumber) || !historyWindowContainsTurn(turnNumber)) return;
+  if (turnIndexForNumber(state.turns, turnNumber) >= 0) {
+    navigateToTurn(turnNumber);
+  } else {
+    const selectedTurn = state.historyWindow?.selectedPreview;
+    if (!selectedTurn || Number(selectedTurn.turnNumber) !== turnNumber) return;
+    readerPositionInteractionEpoch += 1;
+    readerPositionChoicePending = false;
+    state.readerPinnedTurn = selectedTurn;
+    hideReaderResumePrompt();
+    clearResponseEditSession();
+    state.viewTurnNumber = turnNumber;
+    renderAllScenes({ autoScroll: false });
+    updateStatusBar();
+    scrollToView();
+    scheduleReaderPositionSave();
+  }
+  const dialog = $("turnHistoryDialog");
+  if (dialog?.close) dialog.close();
 }
 
 function updateHistorySelectionActions() {
   const hasSelection = Number.isInteger(state.historySelectedTurnNumber)
-    && turnIndexForNumber(state.turns, state.historySelectedTurnNumber) >= 0;
+    && historyWindowContainsTurn(state.historySelectedTurnNumber);
   const inspectBtn = $("btnTurnHistoryInspect");
   const jumpBtn = $("btnTurnHistoryJump");
   const branchBtn = $("btnTurnHistoryBranch");
@@ -4153,6 +4274,180 @@ function updateHistorySelectionActions() {
   if (branchBtn) {
     branchBtn.disabled = !hasSelection;
     branchBtn.classList.toggle("hidden", !hasSelection || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber);
+  }
+}
+
+function historyPageConflict(error) {
+  return Number(error?.statusCode ?? error?.status) === 409 || error?.code === "cursor_conflict";
+}
+
+async function refreshHistoryAfterCursorConflict(campaignId, epoch) {
+  const page = await apiClient.campaigns.turns(campaignId, { limit: STORY_HISTORY_PAGE_LIMIT });
+  if (state.campaignId !== campaignId || storyTurnWindowEpoch !== epoch) return false;
+  if (page.campaignId !== campaignId) throw new Error(`Story history page belongs to ${page.campaignId}.`);
+  const latestTurns = mergeStoryTurnPages([], page.turns || []);
+  state.historySelectedTurnNumber = null;
+  state.historySelectedPreview = null;
+  initializeStoryHistoryWindow({
+    turns: latestTurns,
+    residentRows: latestTurns,
+    nextCursor: page.nextCursor || null,
+    clearPreview: true
+  });
+  setTurnHistoryLoadStatus("History changed. The latest accepted turns are shown; continue paging from this reset window.", "error");
+  return true;
+}
+
+async function changeStoryHistoryPage(direction) {
+  if (!state.historyWindow || historyPageLoad) return;
+  if (state.historyWindowCampaignId !== state.campaignId || state.historyWindowEpoch !== storyTurnWindowEpoch) {
+    initializeStoryHistoryWindow();
+  }
+  let workingWindow = state.historyWindow;
+  const request = storyHistoryPageRequest(workingWindow, direction);
+  if (!request) return;
+  const campaignId = state.campaignId;
+  const epoch = storyTurnWindowEpoch;
+  const requestId = ++state.historyPageRequestId;
+  const isCurrent = () => requestId === state.historyPageRequestId
+    && state.campaignId === campaignId
+    && storyTurnWindowEpoch === epoch
+    && state.historyWindow === workingWindow;
+
+  if (!request.requiresFetch) {
+    state.historyWindow = installStoryHistoryWindowPage(workingWindow, request, null);
+    const visible = storyHistoryVisibleTurns(state.historyWindow);
+    setTurnHistoryLoadStatus(visible.pageTurns.length
+      ? `Showing turns ${visible.firstTurnNumber}–${visible.lastTurnNumber}.`
+      : "No turns are available in this history window.");
+    renderStoryHistoryWindow();
+    return;
+  }
+
+  if (!workingWindow.pending) {
+    workingWindow = installStoryHistoryWindowPage(workingWindow, request, null);
+    state.historyWindow = workingWindow;
+  }
+  setTurnHistoryLoadStatus(`Loading ${direction} history page…`, "loading");
+  const operation = (async () => {
+    try {
+      const attemptedSources = new Set();
+      const maximumSources = 4;
+      let sourceCount = 0;
+      while (workingWindow.pending && sourceCount < maximumSources) {
+        const sourceRequest = storyHistoryPageRequest(workingWindow, direction);
+        if (!sourceRequest?.requiresFetch) throw new Error("History reconstruction stopped before the requested window was complete.");
+        const sourceKey = sourceRequest.source === "resident"
+          ? `resident:${sourceRequest.targetStartTurnNumber}:${sourceRequest.targetEndTurnNumber}`
+          : `server:${sourceRequest.requestCursor}`;
+        if (attemptedSources.has(sourceKey)) throw new Error("History reconstruction repeated a source without progress.");
+        attemptedSources.add(sourceKey);
+
+        const knownTurns = [
+          ...(state.historyResidentRows || []),
+          ...workingWindow.cachedPages.flatMap((cached) => cached.turns)
+        ];
+        let page;
+        if (sourceRequest.source === "resident") {
+          const turns = (state.historyResidentRows || []).filter((turn) => Number(turn.turnNumber) >= sourceRequest.targetStartTurnNumber
+            && Number(turn.turnNumber) <= sourceRequest.targetEndTurnNumber);
+          const expected = sourceRequest.targetEndTurnNumber - sourceRequest.targetStartTurnNumber + 1;
+          if (turns.length !== expected) throw new Error("Loaded history has a missing turn at the page boundary.");
+          mergeStoryTurnPages(knownTurns, turns);
+          page = { source: "resident", requestCursor: null, nextCursor: null, turns };
+        } else {
+          const response = await apiClient.campaigns.turns(campaignId, {
+            before: sourceRequest.requestCursor,
+            limit: STORY_HISTORY_PAGE_LIMIT
+          });
+          if (!isCurrent()) return;
+          if (response.campaignId !== campaignId) throw new Error("Story history response belongs to a different campaign.");
+          mergeStoryTurnPages(knownTurns, response.turns || []);
+          page = {
+            source: "server",
+            requestCursor: sourceRequest.requestCursor,
+            nextCursor: response.nextCursor || null,
+            turns: response.turns || []
+          };
+        }
+        if (!isCurrent()) return;
+        workingWindow = installStoryHistoryWindowPage(workingWindow, sourceRequest, page);
+        state.historyWindow = workingWindow;
+        sourceCount += 1;
+      }
+      if (workingWindow.pending) throw new Error("History reconstruction exceeded its bounded source count.");
+      if (!isCurrent()) return;
+      const visible = storyHistoryVisibleTurns(state.historyWindow);
+      setTurnHistoryLoadStatus(visible.pageTurns.length
+        ? `Showing turns ${visible.firstTurnNumber}–${visible.lastTurnNumber}.`
+        : "No turns are available in this history window.");
+      renderStoryHistoryWindow();
+    } catch (error) {
+      if (!isCurrent()) return;
+      if (historyPageConflict(error)) {
+        try {
+          await refreshHistoryAfterCursorConflict(campaignId, epoch);
+        } catch {
+          setTurnHistoryLoadStatus("History changed, but the latest page could not be loaded. Please retry.", "error");
+        }
+      } else {
+        setTurnHistoryLoadStatus(`Could not load ${direction} history page. Please retry.`, "error");
+      }
+      renderStoryHistoryWindow();
+    }
+  })();
+  historyPageLoad = operation;
+  renderStoryHistoryWindow();
+  try {
+    await operation;
+  } finally {
+    if (historyPageLoad === operation) historyPageLoad = null;
+    renderStoryHistoryWindow();
+  }
+}
+
+async function moveSelectedHistoryPreview(offset) {
+  const preview = state.historyWindow && storyHistoryVisibleTurns(state.historyWindow).selectedPreview;
+  if (!preview || historyPageLoad) return;
+  const turnNumber = Number(preview.turnNumber) + offset;
+  const latest = Number(state.campaign?.activeTurnNumber || latestTurnNumber(state.turns));
+  if (!Number.isInteger(turnNumber) || turnNumber < 1 || turnNumber > latest) return;
+  const campaignId = state.campaignId;
+  const epoch = storyTurnWindowEpoch;
+  const capturedWindow = state.historyWindow;
+  const requestId = ++state.historyPageRequestId;
+  setTurnHistoryLoadStatus(`Loading Turn ${turnNumber}…`, "loading");
+  const operation = (async () => {
+    try {
+      const response = await readerHistoryApi.getTurn(campaignId, turnNumber);
+      if (requestId !== state.historyPageRequestId || state.campaignId !== campaignId
+        || storyTurnWindowEpoch !== epoch || state.historyWindow !== capturedWindow) return;
+      const turn = response?.turn;
+      if (response?.campaignId !== campaignId || Number(turn?.turnNumber) !== turnNumber || !turn?.id) {
+        throw new Error(`Turn ${turnNumber} is no longer available in this campaign.`);
+      }
+      const known = [
+        ...(state.historyResidentRows || []),
+        ...(capturedWindow.cachedPages || []).flatMap((cached) => cached.turns)
+      ].find((candidate) => Number(candidate.turnNumber) === turnNumber);
+      if (known && (known.id || known.turnId) !== turn.id) throw new Error(`Turn ${turnNumber} has changed since this history window was opened.`);
+      state.historyWindow = selectStoryHistoryPreview(capturedWindow, turn);
+      state.historySelectedTurnNumber = turnNumber;
+      setTurnHistoryLoadStatus(`Selected Turn ${turnNumber}.`);
+      renderStoryHistoryWindow();
+    } catch (error) {
+      if (requestId !== state.historyPageRequestId || state.campaignId !== campaignId
+        || storyTurnWindowEpoch !== epoch || state.historyWindow !== capturedWindow) return;
+      setTurnHistoryLoadStatus("Could not load adjacent turn. Please retry.", "error");
+    }
+  })();
+  historyPageLoad = operation;
+  renderStoryHistoryWindow();
+  try {
+    await operation;
+  } finally {
+    if (historyPageLoad === operation) historyPageLoad = null;
+    renderStoryHistoryWindow();
   }
 }
 
@@ -4819,16 +5114,19 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnTurnHistoryInspect) btnTurnHistoryInspect.addEventListener("click", () => {
     if (state.historySelectedTurnNumber) inspectTurnState(state.historySelectedTurnNumber);
   });
+  $("btnTurnHistoryOlder")?.addEventListener("click", () => { void changeStoryHistoryPage("older"); });
+  $("btnTurnHistoryNewer")?.addEventListener("click", () => { void changeStoryHistoryPage("newer"); });
+  $("btnTurnHistoryPreviousTurn")?.addEventListener("click", () => { void moveSelectedHistoryPreview(-1); });
+  $("btnTurnHistoryNextTurn")?.addEventListener("click", () => { void moveSelectedHistoryPreview(1); });
   const btnTurnHistoryJump = $("btnTurnHistoryJump");
   if (btnTurnHistoryJump) btnTurnHistoryJump.addEventListener("click", () => {
-    if (!Number.isInteger(state.historySelectedTurnNumber)) return;
-    navigateToTurn(state.historySelectedTurnNumber);
-    const d = $("turnHistoryDialog");
-    if (d && d.close) d.close();
+    jumpToSelectedHistoryTurn();
   });
   const btnTurnHistoryBranch = $("btnTurnHistoryBranch");
   if (btnTurnHistoryBranch) btnTurnHistoryBranch.addEventListener("click", () => {
-    if (!Number.isInteger(state.historySelectedTurnNumber) || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber) return;
+    if (!Number.isInteger(state.historySelectedTurnNumber)
+      || !historyWindowContainsTurn(state.historySelectedTurnNumber)
+      || state.historySelectedTurnNumber >= state.campaign?.activeTurnNumber) return;
     const d = $("turnHistoryDialog");
     if (d && d.close) d.close();
     promptBranchOrReset(state.historySelectedTurnNumber);
