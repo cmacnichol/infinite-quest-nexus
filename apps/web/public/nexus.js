@@ -2201,6 +2201,16 @@ function collectionClearButton(label, clear) {
   return button;
 }
 
+function collectionEmptyState(message, label, clear) {
+  const state = document.createElement("div");
+  state.className = "collection-empty-state";
+  const description = document.createElement("p");
+  description.className = "muted collection-empty";
+  description.textContent = message;
+  state.append(description, collectionClearButton(label, clear));
+  return state;
+}
+
 function worldPreview(world, detail = dashboardWorldDetails.get(world.id)) {
   const content = world?.latestPreview || detail?.latestPreview || detail?.draftContent?.world || {};
   return {
@@ -2433,10 +2443,8 @@ function renderManagementCampaigns() {
   if (resultCount) resultCount.textContent = `Showing ${matches.length} of ${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`;
   if (!matches.length) {
     elements.campaignList.replaceChildren();
-    const empty = document.createElement("p");
-    empty.className = "muted collection-empty";
-    empty.textContent = campaigns.length ? "No campaigns match this search and filter." : "No database-backed campaigns yet.";
-    elements.campaignList.append(empty, collectionClearButton("campaign", clearCampaignCollectionFilters));
+    const message = campaigns.length ? "No campaigns match this search and filter." : "No database-backed campaigns yet.";
+    elements.campaignList.append(collectionEmptyState(message, "campaign", clearCampaignCollectionFilters));
     return;
   }
   reconcileKeyedCollection(elements.campaignList, matches, "campaign-id", createManagementCampaignButton, (button, campaign) => createManagementCampaignButton(campaign, button));
@@ -3212,10 +3220,8 @@ function renderManagementWorlds() {
   if (elements.managementWorldResults) elements.managementWorldResults.textContent = `Showing ${matches.length} of ${worlds.length} world${worlds.length === 1 ? "" : "s"}`;
   if (!matches.length) {
     elements.worldManagementCarousel.replaceChildren();
-    const empty = document.createElement("p");
-    empty.className = "carousel-empty";
-    empty.textContent = worlds.length ? "No worlds match this search and filter." : "No worlds are available yet.";
-    elements.worldManagementCarousel.append(empty, collectionClearButton("world", clearWorldCollectionFilters));
+    const message = worlds.length ? "No worlds match this search and filter." : "No worlds are available yet.";
+    elements.worldManagementCarousel.append(collectionEmptyState(message, "world", clearWorldCollectionFilters));
     return;
   }
   reconcileKeyedCollection(elements.worldManagementCarousel, matches, "world-id", createManagementWorldCard, (card, world) => createManagementWorldCard(world, card));

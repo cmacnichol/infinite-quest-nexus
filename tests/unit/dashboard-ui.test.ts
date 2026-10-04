@@ -80,8 +80,8 @@ describe("Nexus central dashboard", () => {
     expect(dashboardScript).toContain('status: "active", sort: "updated-desc" }).slice(0, 5)');
     expect(dashboardScript).toContain("filterSortCampaigns(campaigns, { query, status: managementCampaignStatus, sort: managementCampaignSort })");
     expect(dashboardScript).toContain("filterSortWorlds(worlds, { query, status: managementWorldFilter, sort: managementWorldSort })");
-    expect(dashboardScript).toContain('collectionClearButton("campaign", clearCampaignCollectionFilters)');
-    expect(dashboardScript).toContain('collectionClearButton("world", clearWorldCollectionFilters)');
+    expect(dashboardScript).toContain('collectionEmptyState(message, "campaign", clearCampaignCollectionFilters)');
+    expect(dashboardScript).toContain('collectionEmptyState(message, "world", clearWorldCollectionFilters)');
     expect(dashboardHtml).toContain('id="worldCarouselPrev"');
     expect(dashboardScript).toContain("function renderDashboardWorlds()");
     expect(dashboardScript).toContain("function renderDashboardCampaigns()");

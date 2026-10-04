@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { installLegacyUiFixture, legacyUiFixture } from "./helpers/legacy-ui-fixtures.js";
 import type { LegacyUiRequestRecord } from "./helpers/legacy-ui-fixtures.types.js";
 
@@ -28,6 +29,30 @@ function collectionsFixture() {
 
 function worldDetailRequests(requests: ReadonlyArray<LegacyUiRequestRecord>) {
   return requests.filter((request) => request.method === "GET" && /^\/api\/v1\/worlds\/[0-9a-f-]+$/iu.test(request.path));
+}
+
+async function collectionElementVisibility(page: Page, collectionSelector: string, targetSelector: string) {
+  return page.locator(collectionSelector).evaluate((collection, { collectionSelector, targetSelector }) => {
+    if (!(collection instanceof HTMLElement)) throw new Error(`Missing collection ${collectionSelector}`);
+    const target = collection.querySelector(targetSelector);
+    if (!(target instanceof HTMLElement)) throw new Error(`Missing collection element ${targetSelector}`);
+    collection.scrollLeft = 0;
+    const clip = collection.getBoundingClientRect();
+    const bounds = target.getBoundingClientRect();
+    const clipLeft = clip.left + collection.clientLeft;
+    const clipTop = clip.top + collection.clientTop;
+    const clipRight = clipLeft + collection.clientWidth;
+    const clipBottom = clipTop + collection.clientHeight;
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    return {
+      scrollLeft: collection.scrollLeft,
+      clip: { left: clipLeft, right: clipRight, top: clipTop, bottom: clipBottom },
+      bounds: { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom },
+      withinCollectionClip: bounds.left >= clipLeft && bounds.right <= clipRight && bounds.top >= clipTop && bounds.bottom <= clipBottom,
+      withinViewport: bounds.left >= 0 && bounds.right <= viewportWidth && bounds.top >= 0 && bounds.bottom <= viewportHeight
+    };
+  }, { collectionSelector, targetSelector });
 }
 
 test("archived_excluded_from_default_resume_and_recent_panel_is_compact", async ({ page }) => {
@@ -100,6 +125,45 @@ test("search_and_status_combine_and_no_results_has_clear_filters", async ({ page
   await expect(page.locator("#managementCampaignSearch")).toHaveValue("");
   await expect(page.locator("#managementCampaignStatus")).toHaveValue("active");
   await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
+});
+
+test("narrow_empty_states_keep_messages_and_keyboard_clear_inside_the_collection", async ({ page }) => {
+  const fixture = collectionsFixture();
+  const api = await installLegacyUiFixture(page, fixture);
+  await mkdir(evidenceDirectory, { recursive: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator("#managementWorldSearch").fill("no synthetic world matches");
+  await expect(page.locator("#managementWorldResults")).toHaveText("Showing 0 of 39 worlds");
+  const worldMessage = await collectionElementVisibility(page, "#worldManagementCarousel", ".collection-empty");
+  const worldClear = await collectionElementVisibility(page, "#worldManagementCarousel", ".collection-clear");
+  await page.screenshot({ path: join(evidenceDirectory, "narrow-empty-worlds-fixed.png"), fullPage: false });
+
+  await page.goto(`${origin}/nexus/index.html#campaigns`);
+  await page.locator("#managementCampaignSearch").fill("no synthetic campaign matches");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 0 of 59 campaigns");
+  const campaignMessage = await collectionElementVisibility(page, "#campaignList", ".collection-empty");
+  const campaignClear = await collectionElementVisibility(page, "#campaignList", ".collection-clear");
+  await page.screenshot({ path: join(evidenceDirectory, "narrow-empty-campaigns-fixed.png"), fullPage: false });
+  console.log(JSON.stringify({ viewport: 390, world: { message: worldMessage, clear: worldClear }, campaign: { message: campaignMessage, clear: campaignClear } }));
+  expect(worldMessage).toMatchObject({ scrollLeft: 0, withinCollectionClip: true, withinViewport: true });
+  expect(worldClear).toMatchObject({ scrollLeft: 0, withinCollectionClip: true, withinViewport: true });
+  expect(campaignMessage).toMatchObject({ scrollLeft: 0, withinCollectionClip: true, withinViewport: true });
+  expect(campaignClear).toMatchObject({ scrollLeft: 0, withinCollectionClip: true, withinViewport: true });
+  await page.locator("#campaignList .collection-clear").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#managementCampaignSearch")).toHaveValue("");
+  await expect(page.locator("#managementCampaignStatus")).toHaveValue("active");
+  await expect(page.locator("#managementCampaignResults")).toHaveText("Showing 58 of 59 campaigns");
+
+  await page.goto(`${origin}/nexus/index.html#world-library`);
+  await page.locator("#worldManagementCarousel .collection-clear").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#managementWorldSearch")).toHaveValue("");
+  await expect(page.locator("#managementWorldFilters [data-world-filter='all']")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#managementWorldResults")).toHaveText("Showing 39 of 39 worlds");
+  expect(api.requests.filter((request) => !["GET", "HEAD"].includes(request.method))).toHaveLength(0);
 });
 
 test("keyboard_selection_persists_through_collection_rerenders", async ({ page }) => {
