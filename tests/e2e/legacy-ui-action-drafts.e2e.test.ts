@@ -539,6 +539,7 @@ test("failed_append_followed_by_replacement_preserves_ordinary_draft", async ({ 
   expect((harness.syncSnapshots.at(-1) as { generationRecovery?: unknown })?.generationRecovery).not.toBeNull();
   await expect(page.locator("#generationRecoveryPanel")).toBeVisible();
   await expect(page.locator("#freeAction")).toHaveValue("My ordinary action.");
+  await page.locator(".story-more > summary").click();
   await page.locator("#btnRetry").click();
   await expect(page.locator("#retryPromptDialog")).toBeVisible();
   await page.locator("#retryPromptEditor").fill("Replacement action.");

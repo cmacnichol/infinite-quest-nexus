@@ -467,6 +467,7 @@ const state = {
   illustrationConfig: null,
   illustrationSegments: [],
   illustrationError: null,
+  illustrationLoading: false,
   readerPinnedTurn: null,
   continuousReader: null,
   readerResumePosition: null,
@@ -1180,10 +1181,50 @@ async function checkOnboarding() {
 }
 
 // ── Campaign Loading ──────────────────────────────────────────
+let readerIllustrationRequestSequence = 0;
+
+async function loadReaderIllustrations(campaignId, loadEpoch) {
+  const windowEpoch = storyTurnWindowEpoch;
+  const requestSequence = ++readerIllustrationRequestSequence;
+  const current = () => state.campaignId === campaignId
+    && campaignLoadSequence === loadEpoch
+    && storyTurnWindowEpoch === windowEpoch
+    && readerIllustrationRequestSequence === requestSequence;
+  if (!current()) return false;
+  state.illustrationLoading = true;
+  renderStoryIllustration();
+  let loaded = false;
+  try {
+    const [config, segmentData] = await Promise.all([
+      illustrationApi.config(campaignId), illustrationApi.segments(campaignId)
+    ]);
+    if (!current()) return false;
+    state.illustrationConfig = config;
+    state.illustrationSegments = segmentData.segments || [];
+    state.illustrationError = null;
+    loaded = true;
+  } catch (error) {
+    if (!current()) return false;
+    state.illustrationError = illustrationLoadError(error);
+  } finally {
+    if (current()) {
+      state.illustrationLoading = false;
+      renderStoryIllustration();
+    }
+  }
+  if (loaded && current() && illustrationsEnabled()) void pollImageJobs({ initialSegments: state.illustrationSegments });
+  return loaded;
+}
+
 async function loadCampaign(campaignId, options = {}) {
   const loadSequence = ++campaignLoadSequence;
   const loadEpoch = ++storyTurnWindowEpoch;
   const positionInteractionEpoch = readerPositionInteractionEpoch;
+  readerIllustrationRequestSequence += 1;
+  state.illustrationLoading = false;
+  state.imagePollEpoch += 1;
+  if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
+  state.imagePollTimer = null;
 
   continuousReaderAbortController?.abort();
   continuousReaderAbortController = null;
@@ -1237,16 +1278,13 @@ async function loadCampaign(campaignId, options = {}) {
 
     publishStoryTurnWindow(turnData.turns || [], turnData.nextCursor || null);
     void loadStoryMemorySettings(campaignId, storyTurnWindowEpoch);
-    state.runtimeState = await apiClient.campaigns.state(campaignId);
-    markEditStateStaleForCurrentRuntimeState(state.runtimeState);
-    try {
-      state.illustrationConfig = await illustrationApi.config(campaignId);
-      const segmentData = await illustrationApi.segments(campaignId);
-      state.illustrationSegments = segmentData.segments || [];
-      state.illustrationError = null;
-    } catch (error) {
-      state.illustrationError = illustrationLoadError(error);
-    }
+    const coreWindowEpoch = storyTurnWindowEpoch;
+    const current = () => campaignLoadSequence === loadSequence && state.campaignId === campaignId
+      && storyTurnWindowEpoch === coreWindowEpoch;
+    const runtimeState = await apiClient.campaigns.state(campaignId);
+    if (!current()) return false;
+    state.runtimeState = runtimeState;
+    markEditStateStaleForCurrentRuntimeState(runtimeState);
 
     // Set title
     const titleEl = $("storyTitle");
@@ -1277,6 +1315,7 @@ async function loadCampaign(campaignId, options = {}) {
         presentation
       );
       await loadGenerationReview();
+      if (!current()) return false;
       showGenerationRecovery(
         state.generationRecovery.id,
         state.generationReview?.summary ? "This turn needs your review" : (guidance?.message || "This durable generation needs your direction."),
@@ -1287,6 +1326,8 @@ async function loadCampaign(campaignId, options = {}) {
       if (state.generationRecovery.status === "failed") restoreRetainedAppendDraft();
     }
     await restoreActionDraftForCampaign(campaignId, loadSequence);
+    if (!current()) return false;
+    void loadReaderIllustrations(campaignId, loadSequence);
     try {
       localStorage.setItem("infiniteQuestLastCampaignId", campaignId);
     } catch {
@@ -1740,6 +1781,7 @@ function renderStoryIllustration() {
   const turn = state.turns[turnIndex];
   const visible = (illustrationsEnabled() || state.illustrationError) && !state.generationDisplayActive && Boolean(turn);
   if (!layout || !panel || !content) return;
+  panel.setAttribute("aria-busy", String(state.illustrationLoading));
 
   const inlineContents = [...document.querySelectorAll(".segment-illustration-content[data-segment-id]")];
   inlineContents.forEach((segmentContent) => {
@@ -1773,8 +1815,8 @@ function renderStoryIllustration() {
   if (turnLabel) turnLabel.textContent = `Turn ${turn.turnNumber}`;
   const turnId = turn.id || turn.turnId || "";
   const segments = illustrationSegmentsForTurn(turnId);
-  const statusMarkup = `${state.illustrationError ? `<p role="status">${escapeHtml(state.illustrationError)}</p>` : ""}
-    <button class="small ghost" type="button" data-action="refresh-illustrations">Refresh illustrations</button>`;
+  const statusMarkup = `${state.illustrationLoading ? `<p role="status">Loading optional illustrations…</p>` : state.illustrationError ? `<p role="status">${escapeHtml(state.illustrationError)}</p>` : ""}
+    <button class="small ghost" type="button" data-action="refresh-illustrations"${state.illustrationLoading ? " disabled" : ""}>Refresh illustrations</button>`;
   if (segments.length) {
     const narrationIsStale = !segmentProseMatchesNarration(segments, turn.narration);
     content.innerHTML = `${statusMarkup}${narrationIsStale
@@ -2876,14 +2918,14 @@ function clearStreamingPreview() {
   state.streamingExpectedScrollY = null;
 }
 
-function beginGenerationDisplay(action) {
+function beginGenerationDisplay(action, { preserveAcceptedScene = false } = {}) {
   clearResponseEditSession();
   state.cancellationConfirmed = false;
   state.generationDisplayActive = true;
   state.generationDisplayAction = action || "";
   renderTurnInput();
   const container = $("storyArea");
-  if (container) container.replaceChildren();
+  if (container && !preserveAcceptedScene) container.replaceChildren();
   renderStoryIllustration();
   renderStreamingPreview("", state.generationDisplayAction);
 }
@@ -3270,12 +3312,14 @@ function replaceStreamingPreviewWithAcceptedTurn(result, preserveViewport) {
     preview.remove();
     renderAllScenes({ autoScroll: false });
   } else {
+    for (const scene of $("storyArea")?.querySelectorAll(".scene[data-turn-number]") || []) scene.remove();
     preview.replaceWith(renderScene(completedTurn, completedTurnIndex));
   }
   state.streamingAutoFollow = true;
   state.streamingExpectedScrollY = null;
   renderStoryIllustration();
   renderTurnInput();
+  updateStatusBar();
   if (!preserveViewport) {
     const acceptedScene = $("scene-" + completedTurn.turnNumber);
     if (acceptedScene) scrollSceneIntoView(acceptedScene);
@@ -3287,10 +3331,12 @@ async function reconcileCompletedGeneration(result) {
   const campaignId = result.campaignId;
   const loadSequence = campaignLoadSequence;
   const sessionEpoch = actionDraftSessionEpoch;
+  const windowEpoch = storyTurnWindowEpoch;
   const userId = state.user?.id;
   const isCurrent = () => state.campaignId === campaignId
     && campaignLoadSequence === loadSequence
     && actionDraftSessionEpoch === sessionEpoch
+    && storyTurnWindowEpoch === windowEpoch
     && state.user?.id === userId;
   if (!isCurrent()) return;
   try {
@@ -3302,19 +3348,10 @@ async function reconcileCompletedGeneration(result) {
     state.pendingGeneration = syncData.pendingGeneration || null;
     state.generationRecovery = syncData.generationRecovery || null;
     syncTurnInputModeFromCampaign();
-    state.runtimeState = await apiClient.campaigns.state(campaignId);
+    const runtimeState = await apiClient.campaigns.state(campaignId);
     if (!isCurrent()) return;
-    markEditStateStaleForCurrentRuntimeState(state.runtimeState);
-    try {
-      state.illustrationConfig = await illustrationApi.config(campaignId);
-      if (!isCurrent()) return;
-      const segmentData = await illustrationApi.segments(campaignId);
-      if (!isCurrent()) return;
-      state.illustrationSegments = segmentData.segments || [];
-      state.illustrationError = null;
-    } catch (error) {
-      state.illustrationError = illustrationLoadError(error);
-    }
+    state.runtimeState = runtimeState;
+    markEditStateStaleForCurrentRuntimeState(runtimeState);
 
     const titleEl = $("storyTitle");
     const name = state.campaign.title || state.world?.title || "Untitled Campaign";
@@ -3324,8 +3361,10 @@ async function reconcileCompletedGeneration(result) {
     updateStatusBar();
     renderTurnInput();
     setStorySyncStatus("Story synced");
+    void loadReaderIllustrations(campaignId, loadSequence);
   } catch (error) {
-    if (isCurrent()) setStorySyncStatus("Story sync delayed");
+    if (!isCurrent()) return;
+    setStorySyncStatus("Story sync delayed");
     recordActivity("error", "Completed turn reconciliation failed", error.message);
   }
 }
@@ -3465,10 +3504,10 @@ async function resumePendingGeneration() {
     const run = await composition.workflow.resume(state.campaignId);
     if (run) {
       state.generationRun = run;
-      state.pendingGeneration = { id: run.jobId };
+      state.pendingGeneration = { ...state.pendingGeneration, id: run.jobId };
       showBusy("Resuming pending generation…");
       recordActivity("system", "Resuming pending generation", `jobId=${run.jobId}`);
-      beginGenerationDisplay(state.pendingGeneration.action || "");
+      beginGenerationDisplay(state.pendingGeneration.action || "", { preserveAcceptedScene: true });
       const progressEl = $("generationProgress");
       if (progressEl) progressEl.classList.remove("hidden");
       try {
@@ -3696,26 +3735,19 @@ function illustrationLoadError(error) {
 }
 
 async function refreshIllustrations() {
-  const campaignId = state.campaignId;
-  try {
-    const config = await illustrationApi.config(campaignId);
-    if (state.campaignId !== campaignId) return;
-    state.illustrationConfig = config;
-    await pollImageJobs();
-  } catch (error) {
-    if (state.campaignId !== campaignId) return;
-    state.illustrationError = illustrationLoadError(error);
-    renderStoryIllustration();
-  }
+  if (!state.campaignId) return;
+  await loadReaderIllustrations(state.campaignId, campaignLoadSequence);
 }
 
-function pollImageJobs() {
+function pollImageJobs({ initialSegments = null } = {}) {
   if (state.imagePollTimer) clearTimeout(state.imagePollTimer);
   if (!state.campaignId) return;
   const campaignId = state.campaignId;
   const epoch = ++state.imagePollEpoch;
+  const loadSequence = campaignLoadSequence;
   let failures = 0;
-  const current = () => state.campaignId === campaignId && state.imagePollEpoch === epoch;
+  const current = () => state.campaignId === campaignId && state.imagePollEpoch === epoch
+    && campaignLoadSequence === loadSequence;
 
   const poll = async () => {
     if (!current()) return;
@@ -3727,7 +3759,10 @@ function pollImageJobs() {
       }
       const data = await illustrationApi.imageJobs(campaignId);
       const jobs = data.jobs || data || [];
-      const segmentData = await illustrationApi.segments(campaignId);
+      const segmentData = initialSegments === null
+        ? await illustrationApi.segments(campaignId)
+        : { segments: initialSegments };
+      initialSegments = null;
       if (!current()) return;
       failures = 0;
       state.illustrationError = null;
@@ -5542,7 +5577,6 @@ function reconcileCampaignStartup(campaignId) {
   const reconciliation = { campaignId, loadSequence, promise: null };
   campaignStartupReconciliation = reconciliation;
   reconciliation.promise = (async () => {
-    await pollImageJobs();
     if (!current()) return false;
     const resumed = await resumePendingGeneration();
     if (!current()) return false;
@@ -5551,7 +5585,6 @@ function reconcileCampaignStartup(campaignId) {
     if (!resumed && !needsExplicitRecoveryDecision && state.turns.length === 0 && !state.busy) {
       await startAdventure();
     }
-    if (current()) pollImageJobs();
     return current();
   })();
   return reconciliation.promise;

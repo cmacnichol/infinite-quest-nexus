@@ -824,6 +824,35 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it("keeps accepted narration and the composer lock while reconnecting a pending generation", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const workflow = {
+      resume: vi.fn(async () => ({ jobId: "pending-reader", async *watch() {
+        await gate;
+        yield { type: "settled", outcome: "discarded", error: new Error("fixture discarded") };
+      } })),
+      submit: vi.fn()
+    };
+    const boot = bootLegacyStory({ turns: makeTurns(1, 1), workflow, syncStatus: vi.fn().mockResolvedValue({
+      campaign: { id: "campaign-1", title: "Long campaign", activeTurnNumber: 1, storyLengthProfile: "standard" },
+      world: {}, turns: { campaignId: "campaign-1", turns: makeTurns(1, 1), nextCursor: null },
+      pendingGeneration: { id: "pending-reader", action: "Wait for the keeper.", operationKind: "append", expectedTurnNumber: 2 }
+    }) });
+    try {
+      await vi.waitFor(() => expect(document.getElementById("streamingPreviewCard")).not.toBeNull());
+      expect(document.querySelector("#scene-1 .scene-narration")?.textContent).toBeTruthy();
+      expect((document.getElementById("freeAction") as HTMLTextAreaElement).disabled).toBe(true);
+      expect((document.getElementById("btnTakeAction") as HTMLButtonElement).disabled).toBe(true);
+      expect(workflow.submit).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await boot;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("keeps a rejected local append out of an already-active generation's retained prompt", async () => {
     const saved: unknown[] = [];
     let watchFinished!: () => void;
@@ -1502,7 +1531,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("hides ordinary turn input during generation while retaining a saved review's controls", () => {
-    expect(storyScript).toContain("function beginGenerationDisplay(action)");
+    expect(storyScript).toContain("function beginGenerationDisplay(action, { preserveAcceptedScene = false } = {})");
     expect(storyScript).toContain("function restoreGenerationDisplay()");
     expect(storyScript).toContain("function commitGenerationDisplay(removeStreamingPreview = true)");
     expect(storyScript).toContain("function renderTurnInput()");
@@ -1713,7 +1742,7 @@ describe("story-player: new Story Player UI contracts & gameplay logic", () => {
   });
 
   it("manages the enabled illustration rail, prompt editing, polling, and generation activity", () => {
-    expect(storyScript).toContain('function pollImageJobs()');
+    expect(storyScript).toContain('function pollImageJobs({ initialSegments = null } = {})');
     expect(storyScript).toContain('function renderSceneImageJob(job)');
     expect(storyScript).toContain('function recordImageJobActivity(job, options = {})');
     expect(storyScript).toContain('recordActivity("success", "Illustration generated"');
@@ -3784,4 +3813,114 @@ it("installs a schema-validated generation result without an image URL in contin
     expect(document.getElementById("scene-101")?.dataset.turnId).toBe(result.resultTurnId);
     expect(document.getElementById("toast")?.textContent).not.toContain("Generation failed");
   } finally { vi.unstubAllGlobals(); }
+});
+
+it("makes accepted narration readable while optional image configuration stays pending", async () => {
+  const held = deferred<unknown>();
+  const loadIllustrationConfig = vi.fn(() => held.promise);
+  const loading = bootLegacyStory({ turns: makeTurns(1, 1), loadIllustrationConfig });
+  try {
+    await vi.waitFor(() => expect(loadIllustrationConfig).toHaveBeenCalled());
+    expect(document.getElementById("scene-1")?.textContent || "").toContain("Narration 1");
+    expect(document.getElementById("storyTitle")?.textContent).toBe("Long campaign");
+  } finally {
+    held.resolve({ enabled: false, sourcePolicy: "off" });
+    await loading;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each(["success", "failure"] as const)("discards a late optional image %s after a same-document campaign reload", async outcome => {
+  const held = deferred<unknown>();
+  const loadIllustrationConfig = vi.fn().mockImplementationOnce(() => held.promise)
+    .mockResolvedValue({ enabled: false, sourcePolicy: "off" });
+  const turns = makeTurns(1, 1);
+  const syncStatus = vi.fn().mockResolvedValueOnce({ campaign: { id: "campaign-1", title: "Old image scope", activeTurnNumber: 1 },
+    world: {}, turns: { campaignId: "campaign-1", turns, nextCursor: null } })
+    .mockResolvedValue({ campaign: { id: "campaign-1", title: "Current image scope", activeTurnNumber: 1 },
+      world: {}, turns: { campaignId: "campaign-1", turns, nextCursor: null } });
+  const loading = bootLegacyStory({ turns, loadIllustrationConfig, syncStatus });
+  try {
+    await vi.waitFor(() => expect(loadIllustrationConfig).toHaveBeenCalledTimes(1));
+    document.getElementById("storyLoadRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    await vi.waitFor(() => expect(document.getElementById("storyTitle")?.textContent).toBe("Current image scope"));
+    await vi.waitFor(() => expect(document.getElementById("storyIllustrationPanel")?.classList.contains("hidden")).toBe(true));
+    if (outcome === "success") held.resolve({ enabled: true, sourcePolicy: "generate_only" });
+    else held.reject(new Error("Retired image response"));
+    await loading;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.getElementById("storyTitle")?.textContent).toBe("Current image scope");
+    expect(document.getElementById("storyIllustrationPanel")?.classList.contains("hidden")).toBe(true);
+  } finally {
+    held.resolve({ enabled: false, sourcePolicy: "off" });
+    await loading;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each(["success", "failure"] as const)("ignores retired required runtime %s after a newer load opens the current editor", async outcome => {
+  const held = deferred<Record<string, unknown>>();
+  const currentState = { campaignId: "campaign-1", activeTurnNumber: 1, viewedTurnNumber: 1, isCurrent: true,
+    revision: 2, continuitySummary: "Current summary.", scratchpad: "Current notes.",
+    openThreads: [], canonicalFacts: [], trackers: [], rpgStats: [], eventTriggers: [], pendingEventTriggers: [] };
+  const fetchCampaignState = vi.fn().mockImplementationOnce(() => held.promise).mockResolvedValue(currentState);
+  const turns = makeTurns(1, 1);
+  const syncStatus = vi.fn().mockResolvedValue({ campaign: { id: "campaign-1", title: "Current runtime scope", activeTurnNumber: 1 },
+    world: {}, turns: { campaignId: "campaign-1", turns, nextCursor: null } });
+  const loading = bootLegacyStory({ turns, fetchCampaignState, syncStatus });
+  try {
+    await vi.waitFor(() => expect(fetchCampaignState).toHaveBeenCalledTimes(1));
+    document.getElementById("storyLoadRetry")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    await vi.waitFor(() => expect(document.getElementById("storySyncStatus")?.textContent).toBe("Story synced"));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    document.getElementById("btnOpenEditState")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    await vi.waitFor(() => expect(document.getElementById("editStateDialog")?.hasAttribute("open")).toBe(true));
+    expect(document.getElementById("editStateMeta")?.textContent).toContain("revision 2");
+    if (outcome === "success") held.resolve({ ...currentState, revision: 999 });
+    else held.reject(new Error("Retired runtime failure"));
+    await loading;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(document.getElementById("editStateMeta")?.textContent).not.toContain("Reload before saving");
+    expect(document.getElementById("editStateMeta")?.textContent).toContain("revision 2");
+    expect(document.getElementById("storySyncStatus")?.textContent).toBe("Story synced");
+  } finally {
+    held.resolve(currentState);
+    await loading;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    vi.unstubAllGlobals();
+  }
+});
+
+it("updates the accepted reader count before required sync reconciliation settles", async () => {
+  const held = deferred<unknown>();
+  const turns = makeAcceptedTurns(1, 6);
+  const result = generationResultSchema.parse({
+    id: "55555555-5555-4555-8555-555555555555", status: "completed", campaignId: T16_CAMPAIGN_ID,
+    expectedTurnNumber: 7, resultTurnId: "99999999-9999-4999-8999-999999999997",
+    errorCode: null, errorMessage: null, turnNumber: 7, action: "Meet the keeper.",
+    inputMode: "action", inputModeSource: "explicit", narration: "The keeper opens the lantern room.",
+    choices: [], customActionSuggestion: "", imagePrompt: "", chronicleRetrieval: null,
+    modelMetadata: null, mechanics: null, acceptedAt: "2026-10-03T12:00:00.000Z", stateSnapshot: {}, reportedCost: null
+  });
+  const snapshot = { campaign: { id: T16_CAMPAIGN_ID, title: "Long campaign", activeTurnNumber: 6 },
+    world: {}, turns: { campaignId: T16_CAMPAIGN_ID, turns, nextCursor: null } };
+  const syncStatus = vi.fn().mockResolvedValueOnce(snapshot).mockImplementation(() => held.promise);
+  const workflow = { resume: async () => null, submit: vi.fn().mockResolvedValue({
+    jobId: result.id, async *watch() { yield { type: "settled", outcome: "completed", result }; }
+  }) };
+  try {
+    const { document, window } = await bootLegacyStory({ turns, workflow, syncStatus, pathname: `/story/${T16_CAMPAIGN_ID}` });
+    (document.getElementById("freeAction") as HTMLTextAreaElement).value = result.action;
+    document.getElementById("btnTakeAction")?.dispatchEvent(new window.Event("click", { bubbles: true }));
+    await vi.waitFor(() => expect(syncStatus).toHaveBeenCalledTimes(2));
+    expect(document.getElementById("scene-7")?.textContent).toContain(result.narration);
+    expect(document.getElementById("readerTurnCount")?.textContent).toBe("Turn 7 of 7");
+    expect(document.querySelectorAll("#storyArea .scene[data-turn-number]")).toHaveLength(1);
+  } finally {
+    held.resolve(snapshot);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    vi.unstubAllGlobals();
+  }
 });
